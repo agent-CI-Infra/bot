@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'events', offset = 0, repositories = [], accounts = [], renderVersion = 0;
-const titles = { events: 'Webhook 投递', tasks:'检视与开发任务', environments: '项目环境', repositories: '仓库', models: '模型', accounts: '机器人账号', users: '用户' };
+const titles = { events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', environments: '项目环境（虚拟电脑）', repositories: '仓库', models: '模型', accounts: '机器人账号', users: '用户' };
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
@@ -37,54 +37,58 @@ async function start() {
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
   await render();
 }
+// Review and development are separate pages over the same task API.
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'environments', 'reviews', 'developments'];
 async function render() {
-  const request=++renderVersion;
+  const request=++renderVersion, taskTab = !!taskKinds[tab];
   $('message').textContent = ''; $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  $('add').hidden = ['events','environments','tasks'].includes(tab) || me.role !== 'super_admin' && tab !== 'models';
-  $('filters').hidden = !['events','environments','tasks'].includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin'; $('paging').hidden = !['events','tasks'].includes(tab);
+  $('add').hidden = listTabs.includes(tab) || me.role !== 'super_admin' && tab !== 'models';
+  $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin'; $('paging').hidden = tab === 'environments' || !listTabs.includes(tab);
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
   if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
   if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
   $('rows').replaceChildren();$('rows').dataset.view=tab;$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');
-  let result;try{result=await api(`/api/${tab}${['events','environments','tasks'].includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
-  if(request!==renderVersion)return;const rows=result[tab];
+  if (taskTab) params.set('kind', taskKinds[tab]);
+  let result;try{result=await api(`/api/${taskTab ? 'tasks' : tab}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
+  if(request!==renderVersion)return;const rows=result[taskTab ? 'tasks' : tab];
   $('rows').replaceChildren(); $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : `${rows.length} 条记录`;
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');
-    const name = row.full_name || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
+    const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : row.full_name || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
     content.append(element('strong', name));
     const detail = tab === 'events' ? `${timestamp(row.received_at)} · 仓库 ${row.repository_id || '未关联'} · ${row.delivery_id}`
-      : tab === 'tasks' ? `仓库 ID ${row.repository_id} · ${row.head_sha ? row.head_sha.slice(0,12) : '等待材料'}${row.error_code ? ' · '+row.error_code : ''}`
-      : tab === 'environments' ? `仓库 ID ${row.repository_id} · generation ${row.generation || '待创建'} · ${row.enabled ? '已启用' : '已停用'}${row.operation_pending ? ' · 操作结果待确认' : ''}${row.error ? ' · ' + row.error : ''}`
+      : taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+row.error_code : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
+      : tab === 'environments' ? `仓库 ID ${row.repository_id} · generation ${row.generation || '待创建'} · ${row.enabled ? '已启用' : '已停用'}${row.current_task_id ? ` · 正在执行 ${kindLabels[row.current_task_kind] || row.current_task_kind} #${row.current_task_number}` : ' · 空闲'}${row.operation_pending ? ' · 操作结果待确认' : ''}${row.error ? ' · ' + row.error : ''}`
       : tab === 'models' ? `${row.api_url} · ${row.repository_id ? '仓库 ' + row.repository_id : '部署共享模型'}`
       : tab === 'accounts' ? `${row.type === 'github_app' ? 'GitHub App · App ID '+row.app_id : '机器人账号'}`
       : tab === 'users' ? `${row.role === 'super_admin' ? '超级管理员' : '项目管理员'} · ID ${row.id}` : `仓库 ID ${row.id} · 组织 ID ${row.owner_id}`;
     content.append(element('p', detail)); line.append(content);
-    if(['events','tasks','environments'].includes(tab))status.append(state(tab === 'environments' ? row.state : row.status));
+    if(listTabs.includes(tab))status.append(state(tab === 'environments' ? row.state : row.status));
     if(tab==='events'&&row.duplicate)status.append(element('span','重复','status'));
     if(['models','accounts'].includes(tab)){const configured=tab==='models'?row.key_configured:row.credentials_configured;status.append(element('span',configured?'凭据已配置':'凭据已撤销','status status-'+(configured?'success':'warning')));}
     if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
     if(tab==='accounts'&&row.endpoints.length){const endpoints=element('details',''),summary=element('summary',`${row.endpoints.length} 个 Webhook 入口`);endpoints.append(summary);row.endpoints.forEach(e=>endpoints.append(element('code',e.webhook_path)));content.append(endpoints);}
-    if(tab==='tasks'&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
+    if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').textContent = JSON.stringify(await api('/api/events/' + row.id), null, 2); $('detail').showModal(); } catch (err) { error(err); }
       }); const actions=element('div','','actions');actions.append(button);line.append(actions);
     }
-    if(tab==='tasks'){
-      const actions=element('div','','actions'),detail=element('button','结果与日志','quiet');
-      detail.addEventListener('click',async()=>{try{const [result,logs]=await Promise.all([api('/api/tasks/'+row.id),api('/api/tasks/'+row.id+'/logs')]);$('detail-title').textContent='任务结果与日志';$('detail-body').textContent=JSON.stringify({...result,...logs},null,2);$('detail').showModal();}catch(err){error(err);}});actions.append(detail);
+    if(taskTab){
+      const actions=element('div','','actions'),detail=element('button','查看过程','quiet');
+      detail.addEventListener('click',()=>openTask(row.id).catch(error));actions.append(detail);
       if(['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','retry_wait','needs_replan'].includes(row.status)){
         const retry=element('button','重试','quiet');retry.addEventListener('click',async()=>{retry.disabled=true;try{await api('/api/tasks/'+row.id+'/retry','POST',{});await render();}catch(err){error(err);retry.disabled=false;}});actions.append(retry);
       }line.append(actions);
     }
     if (tab === 'environments') {
-      const actions = element('div', '', 'actions');
+      const actions = element('div', '', 'actions'), open = element('button', '查看虚拟电脑', 'quiet');
+      open.addEventListener('click', () => openEnvironment(row.repository_id).catch(error)); actions.append(open);
       for (const [action, caption] of [['start','启动'],['stop','停止'],['reset','重置']]) {
         const button = element('button', caption, 'quiet');
         button.disabled = !!row.operation_pending || !row.generation || ['provisioning','recovering','resetting','busy'].includes(row.state) || action === 'start' && ['ready','reset_failed'].includes(row.state) || action === 'stop' && row.state === 'stopped';
@@ -139,4 +143,4 @@ $('refresh').addEventListener('click', () => start().catch(error));
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
 start().catch(error);
-setInterval(()=>{if(me&&tab==='tasks'&&!$('detail').open)render().catch(error);},5000);
+setInterval(()=>{if(me&&['reviews','developments','environments'].includes(tab)&&!document.querySelector('dialog[open]'))render().catch(error);},5000);

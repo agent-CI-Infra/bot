@@ -18,6 +18,11 @@ export class Redactor {
   }
   contains(value: Buffer): boolean { return [...this.values].some(secret => value.includes(Buffer.from(secret))); }
 }
+// Keeps the head and tail of long text so a stored log entry stays valid, bounded JSON.
+export const clip = (value: unknown, limit = 8000): string => {
+  const text = typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value);
+  return text.length <= limit ? text : text.slice(0, limit * 0.6) + `\n[… ${text.length - limit} characters omitted …]\n` + text.slice(-limit * 0.4);
+};
 export function safePath(path: unknown): string {
   if (typeof path !== 'string' || !path || path.length > 1024 || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(p => !p || p === '..' || p === '.' || p.toLowerCase() === '.git')) return stop('unsafe_repository_path');
   return path;

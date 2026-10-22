@@ -53,7 +53,8 @@ export function createControlPlane(options: Options) {
   const admin = createServer(wrap(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
-    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
+      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
       res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` }); res.end(bytes); return;

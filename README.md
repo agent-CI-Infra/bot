@@ -35,7 +35,7 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 
 账号凭据、入口签名材料和模型 Key 用 AES-256-GCM 加密，密文绑定记录 ID。读取和写入响应均只返回是否已配置，不返回明文或密文。更新时留空或仅空白的凭据保持原值；撤销使用专用动作，不能靠提交空字符串撤销。模型 PATCH 必须带读取到的 `version`，旧版本返回 409。撤销账号凭据不会连带撤销入口签名；要禁用入口需单独撤销该入口。
 
-浏览器管理入口支持初始化、登录、投递列表与详情、项目环境列表和启动／停止／重置、检视／开发任务的状态／结果／日志／重试，以及账号／仓库／模型／用户新增。授权分配调整、策略更新、凭据轮换及撤销通过下列管理 API 完成；这些操作尚未提供完整表单。投递页支持仓库、账号和组织 ID 过滤及分页；项目管理员不显示账号管理入口。
+浏览器管理入口支持初始化、登录、投递列表与详情、项目环境（虚拟电脑）列表与详情及启动／停止／重置，检视和开发两个独立任务页，以及账号／仓库／模型／用户新增。任务详情按时间线展示 Agent 工作过程：工作区准备、每一步模型思考与工具选择、读写的文件、在项目容器中执行的命令及退出码和输出、GitHub 发布和故障；运行中每 2 秒刷新。任务详情旁显示所用的虚拟电脑，即该仓库的长期项目容器：容器、代次、资源与网络限制，并可直接启停或重置。虚拟电脑详情列出卷、网络、镜像、正在执行的任务、最近任务和最近执行的命令。授权分配调整、策略更新、凭据轮换及撤销通过下列管理 API 完成；这些操作尚未提供完整表单。投递页支持仓库、账号和组织 ID 过滤及分页；项目管理员不显示账号管理入口。
 
 ## 接口
 
@@ -53,13 +53,13 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
 | `/api/repositories`、`/api/repositories/:id` | GET / POST、GET | 范围内列表／详情；创建仅超级管理员，字段 `id,full_name,owner_id,account_id` |
 | `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions,review_label`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；`review_label` 为可选标签名（最多 50 字符），留空不打标签 |
-| `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库 |
+| `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库。列表带当前执行任务；详情另含 manager 给出的容器／卷／网络／镜像／资源限制、当前任务、最近 20 个任务和最近 30 条命令 |
 | `/api/environments/:id/start`、`/stop`、`/reset` | POST | 仓库管理员操作；字段 `operation_id,generation`，操作 ID 为 48 位随机十六进制；重试必须复用同一 ID |
 | `/api/environments/:id/delete` | POST | 仅超级管理员，另需 `confirm:true`；删除容器／网络，保留卷 |
 | `/api/models`、`/api/models/:id` | GET / POST、GET / PATCH | 范围内模型，字段 `repository_id,api_url,api_key,model_name`；PATCH 带 `version` |
 | `/api/models/:id/projects`、`/api/models/:id/credentials/revoke` | PUT、POST | 超级管理员分配共享模型；有权编辑者撤销模型 Key |
 | `/api/events`、`/api/events/:id` | GET | 范围内投递列表／正文和响应；列表可筛选 `repository_id,account_id,owner_id,event,status,delivery_id,limit,offset` |
-| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和日志；支持仓库／账号／组织过滤及分页，不返回认领令牌或模型会话 |
+| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
 | `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
 | `/hooks/github/:account/:endpoint` | POST | 仅 Webhook 端口，按已登记入口验签和归档 |
@@ -125,4 +125,4 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 `npm run test:agent` 使用假 GitHub、假模型和真实项目容器验收完整旅程，包括 Issue 到 bot PR、草稿忽略、COMMENT 行内评论、别人 PR 不推送、bot PR 跟进、重复投递／未知响应对账、测试失败、tree 不一致、配置故障、manager 中断恢复、凭据隔离及任务页面角色范围。浏览器使用 lockfile 中的 Playwright。测试端口 18891–18894，与部署和人类试用数据隔离，结束后清理测试容器、网络和卷；产物放 `.tmp/review-dev/`。
 
-尚未接入完整安装列表同步、Git smart HTTP／完整历史传输、子模块／LFS 和长命令跨重启续跑。项目当前没有外网出口，因此需要下载依赖或访问外部测试地址的任务会显示实际失败，受控依赖出口和更多开发工具链仍需后续配置。任务页面支持检视与开发结果，策略编辑和部分授权管理继续通过已有管理 API 完成。没有聊天、图形桌面、浏览器接管或远程桌面能力。
+尚未接入完整安装列表同步、Git smart HTTP／完整历史传输、子模块／LFS 和长命令跨重启续跑。项目当前没有外网出口，因此需要下载依赖或访问外部测试地址的任务会显示实际失败，受控依赖出口和更多开发工具链仍需后续配置。命令输出在命令结束后出现，不是逐行流式。策略编辑和部分授权管理继续通过已有管理 API 完成。没有聊天、图形桌面、浏览器接管或远程桌面能力。
