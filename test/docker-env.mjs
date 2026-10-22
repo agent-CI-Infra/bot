@@ -153,14 +153,17 @@ try {
   try {
     const page=await browser.newPage({viewport:{width:1365,height:900}}); const errors=[];page.on('pageerror',e=>errors.push(e.message));
     await page.goto(base); await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
-    await page.getByRole('button',{name:'项目环境',exact:true}).click();await page.locator('#rows .row').nth(1).waitFor();
+    await page.getByRole('button',{name:'项目',exact:true}).click();await page.locator('#rows .row').nth(1).waitFor();
     assert.equal(await page.locator('#rows .row').count(),2);await page.screenshot({path:'.tmp/project-env/admin-desktop.png',fullPage:true});
     await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();
-    await page.getByRole('button',{name:'项目环境',exact:true}).click();await page.locator('#rows .row').first().waitFor();assert.equal(await page.locator('#rows .row').count(),1);
+    await page.getByRole('button',{name:'项目',exact:true}).click();await page.locator('#rows .row').first().waitFor();assert.equal(await page.locator('#rows .row').count(),1);
     assert.ok((await page.locator('#rows').innerText()).includes('project-101'));assert.ok(!(await page.locator('#rows').innerText()).includes('project-202'));
-    await page.getByRole('button',{name:'停止',exact:true}).click();await page.locator('#rows .row .status',{hasText:'已停止'}).waitFor();
-    await page.getByRole('button',{name:'启动',exact:true}).click();await page.locator('#rows .row .status',{hasText:'就绪'}).waitFor();
-    page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'重置',exact:true}).click();await page.getByText(/generation 3/).waitFor();
+    // The project page's machine section carries the computer's lifecycle actions.
+    await page.locator('#rows .row').first().getByRole('button',{name:'打开',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'机器配置',exact:true}).click();
+    const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),6);
+    await machine.getByRole('button',{name:'停止',exact:true}).click();await machine.locator('.status',{hasText:'已停止'}).waitFor();
+    await machine.getByRole('button',{name:'启动',exact:true}).click();await machine.locator('.status',{hasText:'就绪'}).waitFor();
+    page.once('dialog',dialog=>dialog.accept());await machine.getByRole('button',{name:'重置',exact:true}).click();await machine.getByText('g3',{exact:true}).waitFor();
     await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/project-env/project-mobile.png',fullPage:true});
     assert.deepEqual(errors,[]);passed('desktop and mobile environment page obey administrator scope');
   } finally {await browser.close();}

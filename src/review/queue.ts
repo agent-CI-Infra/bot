@@ -20,8 +20,10 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
   }
   if (!policy?.enabled || !policy.review_enabled) return 0;
-  if (event === 'issues' && action === 'opened' && object && !object.pull_request) return enqueue(store, repositoryId, 'review.issue', number, null, payload, delivery) ? 1 : 0;
-  if (event === 'pull_request' && ['opened','ready_for_review','synchronize'].includes(String(action)) && object && object.draft !== true && object.state !== 'closed') {
+  // Each trigger can be turned off per repository; drafts and closed pull requests are never reviewed.
+  if (event === 'issues' && action === 'opened' && object && !object.pull_request) return policy.review_issues && enqueue(store, repositoryId, 'review.issue', number, null, payload, delivery) ? 1 : 0;
+  const prTrigger = action === 'synchronize' ? policy.review_pr_updates : ['opened','ready_for_review'].includes(String(action)) && policy.review_pull_requests;
+  if (event === 'pull_request' && prTrigger && object && object.draft !== true && object.state !== 'closed') {
     const head = object.head as Json | undefined;
     return enqueue(store, repositoryId, 'review.pr', number, String(head?.sha || ''), payload, delivery) ? 1 : 0;
   }

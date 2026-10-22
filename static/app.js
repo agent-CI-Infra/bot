@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
-let me, setup = false, tab = 'events', offset = 0, repositories = [], accounts = [], renderVersion = 0;
-const titles = { events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', environments: '项目环境（虚拟电脑）', repositories: '仓库', models: '模型', accounts: '机器人账号', users: '用户' };
+let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0;
+const titles = { projects: '项目', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
@@ -35,17 +35,27 @@ async function start() {
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
-  await render();
+  await route();
 }
 // Review and development are separate pages over the same task API.
-const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'environments', 'reviews', 'developments','external'];
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'reviews', 'developments', 'external'];
+// A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
+async function route() {
+  const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
+  if (target) tab = 'projects';
+  page.hidden = !target; list.hidden = !!target;
+  document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
+  if (target) { $('message').textContent = ''; await renderProject(target); } else await render();
+}
+window.addEventListener('hashchange', () => { if (me) route().catch(error); });
 async function render() {
   const request=++renderVersion, taskTab = !!taskKinds[tab];
   $('message').textContent = ''; $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  $('add').hidden = listTabs.includes(tab) || me.role !== 'super_admin' && tab !== 'models';
-  $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = ['environments','external'].includes(tab) || !listTabs.includes(tab);
-  $('rows').hidden=tab==='external';$('external-panel').hidden=tab!=='external';$('sync').hidden=tab!=='repositories'||me.role!=='super_admin';
+  $('add').hidden = listTabs.includes(tab) || me.role !== 'super_admin';
+  $('add').textContent = tab === 'projects' ? '手动登记仓库' : '新增';
+  $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
+  $('rows').hidden=tab==='external';$('external-panel').hidden=tab!=='external';$('sync').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
@@ -55,10 +65,11 @@ async function render() {
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.
-  const installedView = tab === 'repositories' && me.role === 'super_admin'; $('sync').hidden = !installedView;
-  let result;try{result=await api(installedView ? '/api/installations' : `/api/${taskTab ? 'tasks' : tab}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
-  if(request!==renderVersion)return;const rows=result[taskTab ? 'tasks' : tab];
-  $('rows').replaceChildren(); $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : `${rows.length} 条记录`;
+  const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView;
+  const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
+  let result;try{result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
+  if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
+  $('rows').replaceChildren(); $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目` : `${rows.length} 条记录`;
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');
@@ -66,22 +77,21 @@ async function render() {
     content.append(element('strong', name));
     const detail = tab === 'events' ? `${timestamp(row.received_at)} · 仓库 ${row.repository_id || '未关联'} · ${row.delivery_id}`
       : taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+row.error_code : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
-      : tab === 'environments' ? `仓库 ID ${row.repository_id} · generation ${row.generation || '待创建'} · ${row.enabled ? '已启用' : '已停用'}${row.current_task_id ? ` · 正在执行 ${kindLabels[row.current_task_kind] || row.current_task_kind} #${row.current_task_number}` : ' · 空闲'}${row.operation_pending ? ' · 操作结果待确认' : ''}${row.error ? ' · ' + row.error : ''}`
-      : tab === 'models' ? `${row.api_url} · ${row.repository_id ? '仓库 ' + row.repository_id : '部署共享模型'}`
       : tab === 'accounts' ? `${row.type === 'github_app' ? 'GitHub App · App ID '+row.app_id : '机器人账号'}`
       : tab === 'users' ? `${row.role === 'super_admin' ? '超级管理员' : '项目管理员'} · ID ${row.id}`
-      : installedView ? installedDetail(row) : `仓库 ID ${row.id} · 组织 ID ${row.owner_id}`;
+      : installedView ? installedDetail(row) : `仓库 ID ${row.id} · 检视${row.review_enabled ? '开' : '关'} · 开发${row.development_enabled ? '开' : '关'}${row.model_id ? '' : ' · 未选模型'}`;
     content.append(element('p', detail)); line.append(content);
-    if(listTabs.includes(tab))status.append(state(tab === 'environments' ? row.state : row.status));
+    if(listTabs.includes(tab))status.append(state(row.status));
     if(tab==='events'&&row.duplicate)status.append(element('span','重复','status'));
-    if(['models','accounts'].includes(tab)){const configured=tab==='models'?row.key_configured:row.credentials_configured;status.append(element('span',configured?'凭据已配置':'凭据已撤销','status status-'+(configured?'success':'warning')));}
+    if(tab==='accounts')status.append(element('span',row.credentials_configured?'凭据已配置':'凭据已撤销','status status-'+(row.credentials_configured?'success':'warning')));
     if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
     if(installedView)status.append(...installedBadges(row));
+    else if(tab==='projects')status.append(!row.enabled?badge('已禁用','warning'):row.review_enabled?badge('工作中','success'):badge('未开检视','warning'));
     if(tab==='accounts'&&row.endpoints.length){const endpoints=element('details',''),summary=element('summary',`${row.endpoints.length} 个 Webhook 入口`);endpoints.append(summary);row.endpoints.forEach(e=>endpoints.append(element('code',e.webhook_path)));content.append(endpoints);}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
     if(installedView){const actions=installedActions(row,()=>start());if(actions.childElementCount)line.append(actions);}
-    else if(tab==='repositories'){const actions=element('div','','actions');actions.append(button('设置',()=>openSettings(row.id,()=>render()).catch(error)));line.append(actions);}
+    else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('打开',()=>openProject(row.id)));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').textContent = JSON.stringify(await api('/api/events/' + row.id), null, 2); $('detail').showModal(); } catch (err) { error(err); }
@@ -94,33 +104,16 @@ async function render() {
         const retry=element('button','重试','quiet');retry.addEventListener('click',async()=>{retry.disabled=true;try{await api('/api/tasks/'+row.id+'/retry','POST',{});await render();}catch(err){error(err);retry.disabled=false;}});actions.append(retry);
       }line.append(actions);
     }
-    if (tab === 'environments') {
-      const actions = element('div', '', 'actions'), open = element('button', '查看虚拟电脑', 'quiet');
-      open.addEventListener('click', () => openEnvironment(row.repository_id).catch(error)); actions.append(open);
-      for (const [action, caption] of [['start','启动'],['stop','停止'],['reset','重置']]) {
-        const button = element('button', caption, 'quiet');
-        button.disabled = !!row.operation_pending || !row.generation || ['provisioning','recovering','resetting','busy'].includes(row.state) || action === 'start' && ['ready','reset_failed'].includes(row.state) || action === 'stop' && row.state === 'stopped';
-        button.addEventListener('click', async () => {
-          if (action === 'reset' && !confirm(`重置 ${row.full_name}？旧工作卷会保留，新环境从空工作卷开始。`)) return;
-          actions.querySelectorAll('button').forEach(b => b.disabled = true); $('message').textContent = `${caption}环境中，请稍候…`;
-          const operation = [...crypto.getRandomValues(new Uint8Array(24))].map(n => n.toString(16).padStart(2,'0')).join('');
-          try { await api(`/api/environments/${row.repository_id}/${action}`, 'POST', { operation_id: operation, generation: row.generation }); await render(); }
-          catch (err) { await render(); error(err); }
-        }); actions.append(button);
-      }
-      line.append(actions);
-    }
     line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));$('rows').append(line);
   });
 }
 const forms = {
   accounts: [['name', '账号名称'], ['type', '账号类型', [['bot_account', '机器人账号'], ['github_app', 'GitHub App']]], ['app_id', 'App ID（仅 GitHub App）'], ['private_key', 'App 私钥（仅 GitHub App）', 'textarea'], ['token', '机器人 Token（仅机器人账号）', 'password'], ['webhook_secret', 'Webhook 签名凭据', 'password']],
-  repositories: [['id', 'GitHub 仓库 ID'], ['full_name', '仓库 owner/repo'], ['owner_id', '组织或所有者 ID'], ['account_id', '关联账号', () => accounts.map(a => [a.id, a.name])]],
-  models: [['repository_id', '所属仓库', () => [...(me.role === 'super_admin' ? [['', '部署共享模型']] : []), ...repositories.map(r => [r.id, r.full_name])]], ['api_url', '接口 URL'], ['model_name', '模型名'], ['api_key', 'API Key', 'password']],
+  projects: [['id', 'GitHub 仓库 ID'], ['full_name', '仓库 owner/repo'], ['owner_id', '组织或所有者 ID'], ['account_id', '关联账号', () => accounts.map(a => [a.id, a.name])]],
   users: [['username', '用户名'], ['password', '初始密码（至少 12 位）', 'password'], ['role', '角色', [['project_admin', '项目管理员'], ['super_admin', '超级管理员']]], ['repository_ids', '分配仓库 ID（逗号分隔，可留空）']]
 };
 $('add').addEventListener('click', () => {
-  $('editor-title').textContent = '新增' + titles[tab]; $('editor-fields').replaceChildren(); $('editor-error').textContent = '';
+  $('editor-title').textContent = tab === 'projects' ? '手动登记仓库' : '新增' + titles[tab]; $('editor-fields').replaceChildren(); $('editor-error').textContent = '';
   for (const [name, title, kind] of forms[tab]) {
     const label = element('label', title), choices = typeof kind === 'function' ? kind() : kind;
     const input = document.createElement(Array.isArray(choices) ? 'select' : kind === 'textarea' ? 'textarea' : 'input'); input.name = name;
@@ -134,10 +127,9 @@ $('add').addEventListener('click', () => {
 $('editor-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, data = Object.fromEntries(new FormData(form));
   if (tab === 'accounts') { if (data.type === 'github_app') delete data.token; else { delete data.private_key; delete data.app_id; } }
-  if (tab === 'models' && !data.repository_id) data.repository_id = null;
   if (tab === 'users') data.repository_ids = data.repository_ids.split(',').map(s => s.trim()).filter(Boolean);
   const submit = form.querySelector('[type=submit]'); submit.disabled = true;
-  try { await api('/api/' + tab, 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
+  try { await api('/api/' + (tab === 'projects' ? 'repositories' : tab), 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
 });
 $('cancel').addEventListener('click', () => { $('editor').close(); $('editor-form').reset(); });
 $('close-detail').addEventListener('click', () => $('detail').close());
@@ -145,8 +137,9 @@ $('access-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, button = $('access-submit'); button.disabled = true;
   try { await api(setup ? '/api/setup' : '/api/auth/login', 'POST', Object.fromEntries(new FormData(form))); form.reset(); await start(); } catch (err) { error(err); } finally { button.disabled = false; }
 });
-$('logout').addEventListener('click', async () => { try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; tab = 'events'; repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').textContent = ''; await start(); } catch (err) { error(err); } });
-$('tabs').addEventListener('click', event => { if (event.target.dataset.tab) { tab = event.target.dataset.tab; offset = 0; render().catch(error); } });
+$('logout').addEventListener('click', async () => { try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; tab = 'projects'; repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').textContent = ''; await start(); } catch (err) { error(err); } });
+$('tabs').addEventListener('click', event => { if (!event.target.dataset.tab) return; tab = event.target.dataset.tab; offset = 0;
+  if (location.hash) history.pushState(null, '', location.pathname); route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));
 $('sync').addEventListener('click', async () => {
   $('sync').disabled = true; $('message').textContent = '正在从 GitHub 同步安装列表…';
@@ -157,4 +150,4 @@ $('sync').addEventListener('click', async () => {
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
 start().catch(error);
-setInterval(()=>{if(me&&['reviews','developments','environments'].includes(tab)&&!document.querySelector('dialog[open]'))render().catch(error);},5000);
+setInterval(()=>{if(me&&['reviews','developments'].includes(tab)&&!projectRoute()&&!document.querySelector('dialog[open]'))render().catch(error);},5000);

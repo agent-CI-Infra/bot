@@ -88,3 +88,27 @@ test('a super administrator choosing a shared model grants it to the repository;
   assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', shared.id, '101'));
   assert.equal((await member('/api/repositories/101/policy', 'PATCH', { review_label: 'bot-reviewed' })).value.policy.review_label, 'bot-reviewed');
 });
+
+test('review rules choose the triggers, and the comment language and administrator guidance reach review prompts only', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  for (const body of [{ review_issues: 'yes' }, { review_language: 'fr' }, { review_language: ['zh'] }, { review_instructions: 'x'.repeat(8001) }])
+    assert.equal((await admin('/api/repositories/101/policy', 'PATCH', body)).status, 400);
+  const saved = (await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, review_issues: false, review_pr_updates: false, review_language: 'zh', review_instructions: 'Focus on API compatibility.' })).value.policy;
+  assert.deepEqual([saved.review_issues, saved.review_pull_requests, saved.review_pr_updates, saved.review_language], [0, 1, 0, 'zh']);
+  const pr = (action, sha) => ({ repository: { id: 101 }, action, pull_request: { number: 7, draft: false, state: 'open', head: { sha } } });
+  assert.equal((await h.hook(a.path, a.secret, 'issue', { repository: { id: 101 }, action: 'opened', issue: { number: 1, title: 'x', body: 'x' } })).value.tasks_created, 0);
+  assert.equal((await h.hook(a.path, a.secret, 'pr-open', pr('opened', 'a'.repeat(40)), { 'X-GitHub-Event': 'pull_request' })).value.tasks_created, 1);
+  assert.equal((await h.hook(a.path, a.secret, 'pr-push', pr('synchronize', 'b'.repeat(40)), { 'X-GitHub-Event': 'pull_request' })).value.tasks_created, 0);
+  const prompts = [], reply = { role: 'assistant', content: null, tool_calls: [call('f', 'finish_review', { summary: 's', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] })] };
+  const server = createServer(async (req, res) => { let raw = ''; for await (const b of req) raw += b; prompts.push(JSON.parse(raw).messages[0].content); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: reply }] })); });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
+  const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: `http://127.0.0.1:${server.address().port}/v1`, api_key: 'rules-fixture-key', model_name: 'fixture' })).value.model;
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
+  const workspace = { log: () => {}, write: async () => {}, call: async () => ({}) }, rules = { language: 'zh', instructions: 'Focus on API compatibility.' };
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('r','101','review.pr','running','pr',7,'c'),('d','101','development.issue','running','dev',1,'c')");
+  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules });
+  assert.match(prompts[0], /Simplified Chinese/); assert.match(prompts[0], /trusted configuration[^]*Focus on API compatibility\./);
+  reply.tool_calls = [call('g', 'finish_development', { summary: 'done', test_command: 'true' })];
+  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules });
+  assert.doesNotMatch(prompts[1], /Focus on API compatibility/);
+});
