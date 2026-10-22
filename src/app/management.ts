@@ -168,11 +168,13 @@ export async function management(store: Store, user: Actor, method: string, path
     const id = repoMatch[1]!; repository(store, user, id);
     if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)! };
     if (method === 'PATCH' && repoMatch[2]) {
-      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch']);
+      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','review_label']);
       for (const key of ['review_enabled', 'development_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       const previous = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
       if(body.test_command!==undefined&&(typeof body.test_command!=='string'||body.test_command.length>2048))fail(400,'invalid_test_command');
       if(body.base_branch!==undefined&&(typeof body.base_branch!=='string'||body.base_branch.length>256||body.base_branch.includes('\0')))fail(400,'invalid_base_branch');
+      // GitHub label names are at most 50 characters; an empty string leaves review results unlabeled.
+      if(body.review_label!==undefined&&(typeof body.review_label!=='string'||body.review_label.length>50||body.review_label!==body.review_label.trim()||/\p{Cc}/u.test(body.review_label)))fail(400,'invalid_review_label');
       if(body.max_revisions!==undefined&&(!Number.isSafeInteger(body.max_revisions)||Number(body.max_revisions)<0||Number(body.max_revisions)>10))fail(400,'invalid_revision_budget');
       const model = body.model_id === undefined ? previous.model_id : body.model_id === null ? null : text(body.model_id);
       if (model && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
@@ -183,7 +185,7 @@ export async function management(store: Store, user: Actor, method: string, path
           body.development_enabled === undefined ? previous.development_enabled : Number(body.development_enabled),
           body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
         store.audit(user.id, 'policy.updated', id, id);
-        store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),id);
+        store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,review_label=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),body.review_label===undefined?previous.review_label:String(body.review_label),id);
         return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true };
       });
     }

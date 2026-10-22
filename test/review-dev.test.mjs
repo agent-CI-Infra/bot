@@ -5,6 +5,7 @@ import { inlineLocation,validateReview } from '../dist/review/findings.js';
 import { Redactor } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { GitHub } from '../dist/github/client.js';
+import { Publisher } from '../dist/github/publisher.js';
 import { generateKeyPairSync,createVerify,randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -68,4 +69,43 @@ test('GitHub App tokens are signed in the control plane and restricted to the co
   const redactor=new Redactor(),github=new GitHub(h.store,h.store.get("SELECT * FROM repositories WHERE id='101'"),redactor,async()=>{},'http://127.0.0.1:'+server.address().port);
   await github.connect(false);assert.deepEqual(tokenRequest.repository_ids,[101]);assert.equal(tokenRequest.permissions.contents,'read');assert.equal(github.actorId,'999');
   assert.equal(redactor.text(installationToken),'[REDACTED]');assert.equal(redactor.text(privateKey.trim()),'[REDACTED]');
+});
+test('review_label is an optional validated policy string',async t=>{
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  assert.equal((await admin('/api/repositories/101')).value.policy.review_label,'');
+  for(const review_label of [' padded','x'.repeat(51),'tab\tlabel',7])assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label})).status,400);
+  assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label:'bot-reviewed'})).value.policy.review_label,'bot-reviewed');
+  assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_enabled:true})).value.policy.review_label,'bot-reviewed');
+  assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label:''})).value.policy.review_label,'');
+});
+test('reviews always publish one summary comment and the policy label is applied once',async t=>{
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,head_sha) VALUES('label-task','101','review.pr','publishing','pr',7,?)",'c'.repeat(40));
+  const requests=[],comments=[],reviews=[];let labels=[],dropLabel=true;
+  const server=createServer(async(req,res)=>{
+    let raw='';for await(const b of req)raw+=b;const path=new URL(req.url,'http://fake').pathname,body=raw?JSON.parse(raw):{};requests.push(req.method+' '+path);
+    res.setHeader('Content-Type','application/json');
+    if(path.endsWith('/issues/7/comments')){if(req.method==='POST'){const c={id:comments.length+1,body:body.body,user:{id:999}};comments.push(c);return res.end(JSON.stringify(c));}return res.end(JSON.stringify(comments));}
+    if(path.endsWith('/pulls/7/reviews')){if(req.method==='POST'){const r={id:reviews.length+1,...body,user:{id:999}};reviews.push(r);return res.end(JSON.stringify(r));}return res.end(JSON.stringify(reviews));}
+    if(path.endsWith('/comments'))return res.end('[]');
+    if(path.endsWith('/issues/7/labels')){
+      // The first POST is lost before GitHub applies it; an idempotent label may be sent again.
+      if(req.method==='POST'){if(dropLabel){dropLabel=false;return req.socket.destroy();}labels=[...new Set([...labels,...body.labels])];}
+      return res.end(JSON.stringify(labels.map(name=>({name}))));
+    }
+    res.statusCode=404;res.end('{}');
+  });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const github=new GitHub(h.store,h.store.get("SELECT * FROM repositories WHERE id='101'"),new Redactor(),async()=>{},'http://127.0.0.1:'+server.address().port);
+  Object.assign(github,{token:'fixture-token',actorId:'999',fullName:'fixture/project-101'});
+  const publisher=new Publisher(h.store,github,h.store.get("SELECT * FROM tasks WHERE id='label-task'"),async()=>{});
+  const files=[{filename:'a.js',patch:'@@ -1 +1 @@\n-old\n+new'}];
+  const result={summary:'Short summary.',reviewed_sha:'c'.repeat(40),coverage:['Snapshot'],findings:[{id:'f1',body:'Inline note',format:'inline',selection_reason:'On the changed line',path:'a.js',line:1,side:'RIGHT'}]};
+  await publisher.review(result,files);await publisher.review(result,files);
+  assert.equal(reviews.length,1);assert.equal(reviews[0].event,'COMMENT');
+  assert.equal(comments.length,1);assert.ok(comments[0].body.startsWith('Short summary.'));
+  await assert.rejects(publisher.label('bot-reviewed'),/github_response_unknown/);
+  assert.deepEqual((await publisher.label('bot-reviewed')).map(l=>l.name),['bot-reviewed']);
+  assert.deepEqual((await publisher.label('bot-reviewed')).map(l=>l.name),['bot-reviewed']);
+  assert.equal(requests.filter(r=>r==='POST /repos/fixture/project-101/issues/7/labels').length,2);
+  assert.equal(h.store.get("SELECT state FROM github_effects WHERE kind='label'").state,'sent');
 });

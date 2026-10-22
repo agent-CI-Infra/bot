@@ -122,7 +122,11 @@ export class TaskEngine {
       if(task.phase==='publish'){
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate);
         if(!development){
-          const outputs=await publisher.review(result,input.files);result={...result,outputs};
+          const outputs=await publisher.review(result,input.files);
+          // The policy label, never the model, is applied only after the summary comment was published.
+          const label=this.store.get('SELECT review_label FROM policies WHERE repository_id=?',task.repository_id)?.review_label;
+          if(label)outputs.push({labels:(await publisher.label(label)).map((l:any)=>l.name)});
+          result={...result,outputs};
           this.store.transaction(()=>{
             update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null});
             this.queueDevelopment(github,task,input,result);

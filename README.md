@@ -52,7 +52,7 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
 | `/api/repositories`、`/api/repositories/:id` | GET / POST、GET | 范围内列表／详情；创建仅超级管理员，字段 `id,full_name,owner_id,account_id` |
-| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支 |
+| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions,review_label`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；`review_label` 为可选标签名（最多 50 字符），留空不打标签 |
 | `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库 |
 | `/api/environments/:id/start`、`/stop`、`/reset` | POST | 仓库管理员操作；字段 `operation_id,generation`，操作 ID 为 48 位随机十六进制；重试必须复用同一 ID |
 | `/api/environments/:id/delete` | POST | 仅超级管理员，另需 `confirm:true`；删除容器／网络，保留卷 |
@@ -103,7 +103,7 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 16 次模型响应，工具命令限时 60 秒；临时调用失败最多重试 5 次，配置故障单独显示。
 
-Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。
+每次检视发布一条总结讨论评论，包含总结、非行内 finding 和检视 SHA。Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。policy 设置了 `review_label` 时，总结评论发布成功后由控制面用同一安装令牌给 Issue／PR 加这一个标签，仓库没有该标签时由 GitHub 创建；标签不由模型选择，重复执行不会重复添加。
 
 Issue 检视结果明确要求代码变更、存在原文证据且无需补充信息时，若仓库打开开发，创建关联开发任务。在同一项目容器的新任务工作目录中修改代码，模型完成后服务端再次运行仓库指定测试；未配置固定测试时使用模型给出的测试命令，不能没有测试。失败不会推分支或开 PR。成功后检查测试前后候选 tree 一致，再由控制面发布唯一 `bot/issue-...` 分支，并创建 PR、回填链接。默认分支从 GitHub 元数据或仓库 policy 获取，不写死。
 

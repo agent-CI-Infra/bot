@@ -17,14 +17,14 @@ function makeRepo(id){
   const files=[{path:'calc.mjs',mode:'100644',type:'blob',sha:blob(baseBody(id))},{path:'calc.test.mjs',mode:'100644',type:'blob',sha:blob("import test from 'node:test';import assert from 'node:assert/strict';import {add} from './calc.mjs';test('addition',()=>assert.equal(add(2,3),5));\n")},
     {path:'README.md',mode:'100644',type:'blob',sha:blob(`REPO_${id}_ONLY. Run tests with node --test. Fix implementation; preserve tests.\n`)}];
   const base=commit(files),foreign=commit(files.map(f=>f.path==='calc.mjs'?{...f,sha:blob(baseBody(id).trim()+' // contributor\n')}:f),base,'contributor');
-  const repo={id:Number(id),full_name:'fixture/project-'+id,owner:{id:10,login:'fixture'},default_branch:'trunk',refs:{trunk:base,contributor:foreign},issues:new Map(),pulls:new Map(),comments:new Map(),reviews:new Map(),refWrites:[],createdPrs:[],nextPr:70};
+  const repo={id:Number(id),full_name:'fixture/project-'+id,owner:{id:10,login:'fixture'},default_branch:'trunk',refs:{trunk:base,contributor:foreign},issues:new Map(),pulls:new Map(),comments:new Map(),reviews:new Map(),labels:new Map(),refWrites:[],createdPrs:[],nextPr:70};
   for(const [number,body] of [[1,'Fix add to sum both numbers.'],[2,'Explain the addition implementation.'],[3,'Fix add to sum both numbers.'],[4,'Explain the addition implementation.'],[6,'Fix add to sum both numbers.'],[8,'Explain the addition implementation.'],[10,'Explain recovery behavior.'],[12,'Fix add to sum both numbers.']])repo.issues.set(number,{id:1000+number,number,title:body,body,state:'open'});
   for(const number of [42,43,44,99])repo.pulls.set(number,{id:4000+number,number,title:'Review contributor change',body:'Please review this pull request.',state:'open',draft:number===99,user:{id:800,login:'contributor'},head:{sha:foreign,ref:'contributor',repo:{id:Number(id)}},base:{sha:base,ref:'trunk',repo:{id:Number(id)}},html_url:`https://github.invalid/${id}/pull/${number}`});
   return repo;
 }
 for(const id of ['101','202'])repositories.set(id,makeRepo(id));
 let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true;
-const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[]};
+const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function model(input){
   const context=JSON.parse(input.messages[1].content),repoId=context.repository.split('-').at(-1),repo=repositories.get(repoId),number=context.object.number;
@@ -79,6 +79,11 @@ const server=createServer(async(req,res)=>{
       if(number===12)return send({message:'Injected comment permission failure'},403);
       const value={id:stats.comments.length+1,body:body.body,user:{id:999},html_url:'https://github.invalid/comment/'+(stats.comments.length+1)};comments.push(value);repo.comments.set(number,comments);stats.comments.push({repository_id:repo.id,number,...value});
       if(number===4&&dropComment){dropComment=false;res.destroy();return;}return send(value,201);
+    }
+    if((m=/^\/issues\/(\d+)\/labels$/.exec(suffix))){
+      const number=Number(m[1]),labels=repo.labels.get(number)||[];
+      if(method==='POST'){for(const name of body.labels)if(!labels.includes(name))labels.push(name);repo.labels.set(number,labels);stats.labels.push({repository_id:repo.id,number,labels:body.labels});}
+      return send(method==='POST'||Number(url.searchParams.get('page')||1)===1?labels.map(name=>({name})):[]);
     }
     if((m=/^\/issues\/(\d+)$/.exec(suffix)))return send(repo.issues.get(Number(m[1]))||{},repo.issues.has(Number(m[1]))?200:404);
     if((m=/^\/pulls\/(\d+)\/files$/.exec(suffix))){

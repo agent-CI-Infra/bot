@@ -59,7 +59,7 @@ try{
   for(const repo of ['101','202'])await api('/api/repositories','POST',{id:repo,owner_id:'10',full_name:'fixture/project-'+repo,account_id:account.id});
   await api('/api/users','POST',{username:'member',password:memberPassword,repository_ids:['101']});
   const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
-  await api('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2});
+  await api('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2,review_label:'bot-reviewed'});
   const disabled=await hook('202',2);assert.equal(disabled.tasks_created,0);passed('review-disabled repository only archives');
   const delivery=id(),opened=await hook('101',1,'issues','opened',delivery);assert.equal(opened.tasks_created,1);
   const duplicate=await hook('101',1,'issues','opened',delivery);assert.equal(duplicate.duplicate,true);assert.equal(duplicate.tasks_created,0);
@@ -69,6 +69,7 @@ try{
   assert.equal(state.comments.filter(c=>c.repository_id===101&&c.number===1).length,2);
   assert.ok(state.models.some(m=>m.repository==='101'&&JSON.stringify(m.messages).includes('a - b')&&JSON.stringify(m.messages).includes('REPO_101_ONLY')));
   assert.ok(state.refWrites.every(r=>r.branch.startsWith('bot/issue-')&&r.branch!=='trunk'&&r.force!==true));
+  assert.deepEqual(state.labels.filter(l=>l.repository_id===101&&l.number===1).map(l=>l.labels),[['bot-reviewed']]);
   passed('Issue reviews once, executes code and tests in project container, and opens an owned bot PR');
   assert.equal((await hook('101',1)).tasks_created,0);state=await fake('state');assert.equal(state.comments.filter(c=>c.repository_id===101&&c.number===1).length,2);
   assert.equal((await tasks('101',1)).length,2);passed('duplicate and repeated opened deliveries do not duplicate tasks, comments, or PRs');
@@ -81,7 +82,9 @@ try{
   await hook('101',42,'pull_request','opened',id(),pull('101',42,state));const foreignReview=await done('101',42,'review.pr','succeeded');
   assert.ok(foreignReview.result.outputs.some(output=>output.inline_comments?.some(comment=>comment.id&&comment.finding_id)));
   state=await fake('state');assert.equal(state.refWrites.length,beforeForeign);assert.equal((await tasks('101',42)).length,1);
-  assert.ok(state.reviews.filter(r=>r.number===42).every(r=>r.event==='COMMENT'&&r.commit_id===pull('101',42,state).head.sha));passed('foreign PR produces COMMENT review and never receives a commit');
+  assert.ok(state.reviews.filter(r=>r.number===42).every(r=>r.event==='COMMENT'&&r.commit_id===pull('101',42,state).head.sha));
+  assert.equal(state.comments.filter(c=>c.repository_id===101&&c.number===42).length,1);assert.deepEqual(state.labels.filter(l=>l.repository_id===101&&l.number===42).map(l=>l.labels),[['bot-reviewed']]);
+  passed('foreign PR produces COMMENT review, one summary comment and the policy label, and never receives a commit');
   await hook('101',44,'pull_request','opened',id(),pull('101',44,state));await done('101',44,'review.pr','succeeded');state=await fake('state');
   assert.equal(state.reviews.filter(r=>r.number===44).length,0);assert.equal(state.comments.filter(r=>r.number===44).length,1);passed('unverifiable inline position falls back to discussion without fabricated lines');
   const staleHead=pull('101',43,state).head.sha;await hook('101',43,'pull_request','synchronize',id(),pull('101',43,state));await done('101',43,'review.pr','succeeded');
@@ -96,7 +99,8 @@ try{
   await api('/api/repositories/202/policy','PATCH',{review_enabled:true});await hook('202',2);
   const missing=await done('202',2,'review.issue','waiting_configuration');assert.equal(missing.error_code,'model_not_configured');
   const model2=(await api('/api/models','POST',{repository_id:'202',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
-  await api('/api/repositories/202/policy','PATCH',{model_id:model2.id,development_enabled:true,test_command:'node --test'});await api('/api/tasks/'+missing.id+'/retry','POST',{});await done('202',2,'review.issue','succeeded');passed('missing model is a configuration fault and resumes after configuration');
+  await api('/api/repositories/202/policy','PATCH',{model_id:model2.id,development_enabled:true,test_command:'node --test'});await api('/api/tasks/'+missing.id+'/retry','POST',{});await done('202',2,'review.issue','succeeded');
+  assert.ok((await fake('state')).labels.every(l=>l.repository_id!==202));passed('missing model is a configuration fault and resumes after configuration');
   await fake('faults',{tree_mismatch:true});const writesBefore=(await fake('state')).refWrites.length;await hook('202',3);
   const treeFailed=await wait(async()=>(await tasks('202',3,'development.issue')).find(t=>t.status==='failed'),'tree mismatch');assert.equal(treeFailed.error_code,'github_tree_mismatch');
   assert.equal((await fake('state')).refWrites.length,writesBefore);await fake('faults',{tree_mismatch:false});passed('remote tree mismatch prevents ref update');

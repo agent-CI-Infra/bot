@@ -5,7 +5,8 @@ import { inlineLocation } from '../review/findings.js';
 
 export class Publisher {
   constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>){}
-  async effect(key:string,kind:string,request:any,send:()=>Promise<any>,find:()=>Promise<any>){
+  // replayable effects (such as adding a label) are idempotent on GitHub, so an unknown response may be sent again.
+  async effect(key:string,kind:string,request:any,send:()=>Promise<any>,find:()=>Promise<any>,replayable=false){
     const id=operationId(this.task.id+':'+key),marker=`<!-- dept-bot:${id} -->`;
     let row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);
     if(!row){this.store.run("INSERT INTO github_effects VALUES(?,?,?,?, 'pending',NULL,?)",id,this.task.id,kind,JSON.stringify(request),marker);row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);}
@@ -13,7 +14,7 @@ export class Publisher {
     await this.validate();
     const existing=await find();
     if(existing){this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(existing),id);return existing;}
-    if(['unknown','inflight'].includes(row!.state))return stop('github_publication_unknown','waiting_publication');
+    if(!replayable&&['unknown','inflight'].includes(row!.state))return stop('github_publication_unknown','waiting_publication');
     this.store.run("UPDATE github_effects SET state='inflight' WHERE id=?",id);
     try{await this.validate();const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
     catch(error){this.store.run('UPDATE github_effects SET state=? WHERE id=?',error instanceof TaskError&&error.code==='github_response_unknown'?'unknown':'pending',id);throw error;}
@@ -43,8 +44,16 @@ export class Publisher {
         finding_id:result.findings.find((f:any)=>String(c.body).includes('dept-bot-finding:'+f.id))?.id||null}))};
       this.store.run('UPDATE github_effects SET response=? WHERE id=?',JSON.stringify(output),operationId(this.task.id+':inline'));outputs.push(output);
     }
-    if(discussion.length||!inline.length)outputs.push(await this.discussion('discussion',result.summary+'\n\n'+discussion.join('\n\n---\n\n')+'\n\n'+coverage));
+    // Every review publishes one summary discussion comment, even when all findings are inline.
+    outputs.push(await this.discussion('discussion',[result.summary,discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
     await this.validate();return outputs;
+  }
+  async label(name:string){
+    // Issues and pull requests share the issue labels endpoint; GitHub creates a missing repository label on first use.
+    const path=this.github.path(`/issues/${this.task.object_number}/labels`),payload={labels:[name]};
+    return this.effect('label','label',payload,()=>this.github.request('POST',path,payload),async()=>{
+      const labels=await this.github.pages(path);return labels.some(l=>String(l.name).toLowerCase()===name.toLowerCase())?labels:null;
+    },true);
   }
   async branch(candidate:any){
     const branch=this.store.get('SELECT * FROM bot_branches WHERE repository_id=? AND branch=?',this.task.repository_id,candidate.branch);
