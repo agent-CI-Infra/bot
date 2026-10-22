@@ -2,7 +2,7 @@
 
 一个 Node.js 22.13+ / TypeScript 控制面，使用系统内账号管理多个 GitHub App、机器人账号、仓库权限、模型配置和 Webhook 投递。许可证为 Apache-2.0。
 
-当前提供控制面与每个已启用仓库一个长期 Docker 环境。没有内置账号或仓库；已验签的投递被归档，不生成检视或开发任务。模型配置保存后视为可信接口，但当前版本不会调用模型。`/api/status` 中项目环境可用，检视、开发和模型调用仍不可用。
+当前提供多账号控制面、每仓库一个长期 Docker 环境，以及可读代码、运行命令和修改文件的检视／开发 Agent。没有内置账号或仓库；开启仓库检视后接收事件并创建任务，满足开发条件时自动实现、测试、发布 bot 分支和 PR。`/api/status` 的项目环境、检视、开发及模型调用能力均可用；具体任务缺配置或失败会显示故障状态。
 
 ## Docker 部署
 
@@ -27,15 +27,15 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 
 ## 使用与权限
 
-超级管理员登记 GitHub App（App ID、RSA 私钥）或机器人账号（Token），为入口保存签名凭据，然后登记需要启用的 GitHub 仓库 ID、owner/repo、所有者 ID 和关联账号。此版本由管理员显式登记仓库；尚未从 GitHub 自动同步安装范围，也不会交换安装令牌或检查远端凭据有效性。仓库 ID 使用字符串提交，避免 JavaScript 大整数丢精度。
+超级管理员登记 GitHub App（App ID、RSA 私钥）或机器人账号（Token），为入口保存签名凭据，然后登记需要启用的 GitHub 仓库 ID、owner/repo、所有者 ID 和关联账号。当前由管理员显式登记仓库，尚未定期自动同步安装列表。任务执行时校验账号、实际仓库 ID 和所有者；App 在控制面签发 JWT、取得目标仓库安装令牌，机器人账号使用已保存的 Token，均不进入项目环境。仓库 ID 使用字符串提交，避免 JavaScript 大整数丢精度。
 
 超级管理员可创建用户和分配项目管理员。每名项目管理员可分配多个仓库，每个仓库可有多名项目管理员。项目管理员只看到并操作自己的仓库、投递、模型、策略及任务读取接口；无筛选查询同样受限，未关联仓库或验签失败的投递仅超级管理员可见。账号凭据、全局用户和授权关系接口只允许超级管理员调用。用户停用会撤销已有会话，仓库分配调整在后续请求立即生效；不能停用最后一名超级管理员。
 
-模型配置包含接口 URL、API Key、模型名。超级管理员可管理全部模型；项目管理员可为自己的仓库创建和更新模型。部署共享模型由超级管理员通过 `models/:id/projects` 指定可用仓库，项目管理员只能读配置状态、选用，不能修改共享模型。仓库策略保存选用的模型 ID。保存即信任，后续执行阶段可发送项目代码、日志和测试材料；本版不发起模型请求，不引入额外的数据授权等待状态。
+模型配置包含接口 URL、API Key、模型名。超级管理员可管理全部模型；项目管理员可为自己的仓库创建和更新模型。部署共享模型由超级管理员通过 `models/:id/projects` 指定可用仓库，项目管理员只能读配置状态、选用，不能修改共享模型。仓库策略保存选用的模型 ID。保存即信任，可以发送本项目代码、日志和测试材料，不增加数据授权等待状态。接口采用兼容 Chat Completions 的 JSON 工具调用协议；URL 可填写基础路径或完整 `/chat/completions` 路径，基础路径会自动追加该后缀。没有模型配置、撤销 Key、认证失败会显示 waiting_configuration；网络／限流故障退避重试，持续故障停止任务。
 
 账号凭据、入口签名材料和模型 Key 用 AES-256-GCM 加密，密文绑定记录 ID。读取和写入响应均只返回是否已配置，不返回明文或密文。更新时留空或仅空白的凭据保持原值；撤销使用专用动作，不能靠提交空字符串撤销。模型 PATCH 必须带读取到的 `version`，旧版本返回 409。撤销账号凭据不会连带撤销入口签名；要禁用入口需单独撤销该入口。
 
-浏览器管理入口支持初始化、登录、投递列表与详情、项目环境列表和启动／停止／重置，以及账号／仓库／模型／用户新增。授权分配调整、策略更新、凭据轮换及撤销通过下列管理 API 完成；这些操作尚未提供完整表单。投递页支持仓库、账号和组织 ID 过滤及分页；项目管理员不显示账号管理入口。
+浏览器管理入口支持初始化、登录、投递列表与详情、项目环境列表和启动／停止／重置、检视／开发任务的状态／结果／日志／重试，以及账号／仓库／模型／用户新增。授权分配调整、策略更新、凭据轮换及撤销通过下列管理 API 完成；这些操作尚未提供完整表单。投递页支持仓库、账号和组织 ID 过滤及分页；项目管理员不显示账号管理入口。
 
 ## 接口
 
@@ -52,14 +52,15 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
 | `/api/repositories`、`/api/repositories/:id` | GET / POST、GET | 范围内列表／详情；创建仅超级管理员，字段 `id,full_name,owner_id,account_id` |
-| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled`；enabled 控制项目环境，另外两个开关不触发 Agent |
+| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支 |
 | `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库 |
 | `/api/environments/:id/start`、`/stop`、`/reset` | POST | 仓库管理员操作；字段 `operation_id,generation`，操作 ID 为 48 位随机十六进制；重试必须复用同一 ID |
 | `/api/environments/:id/delete` | POST | 仅超级管理员，另需 `confirm:true`；删除容器／网络，保留卷 |
 | `/api/models`、`/api/models/:id` | GET / POST、GET / PATCH | 范围内模型，字段 `repository_id,api_url,api_key,model_name`；PATCH 带 `version` |
 | `/api/models/:id/projects`、`/api/models/:id/credentials/revoke` | PUT、POST | 超级管理员分配共享模型；有权编辑者撤销模型 Key |
 | `/api/events`、`/api/events/:id` | GET | 范围内投递列表／正文和响应；列表可筛选 `repository_id,account_id,owner_id,event,status,delivery_id,limit,offset` |
-| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 未来任务的受限读取契约；当前不创建任务，列表为空 |
+| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和日志；支持仓库／账号／组织过滤及分页，不返回认领令牌或模型会话 |
+| `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
 | `/hooks/github/:account/:endpoint` | POST | 仅 Webhook 端口，按已登记入口验签和归档 |
 
@@ -67,7 +68,7 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 ## 源码与验证
 
-`src/main.ts` 是控制面入口，`src/server.ts` 分离管理与 Webhook 两个监听。`src/app/` 保存账号、登录、仓库授权、模型和投递归一化逻辑，`src/core/security.ts` 提供验签、慢哈希和凭据加密，`src/storage/database.ts` 管理 SQLite、事务及审计；`static/` 是同一管理入口。`src/projects/` 是环境网关，`manager/` 管理受管 Docker 资源，`runner/` 是容器内命令／文件协议，`images/project/` 构建批准镜像。manager／runner 独立实现，保留 Apache-2.0 及 NOTICE 中的上游设计归属，不携带完整员工平台。
+`src/main.ts` 是控制面入口，`src/server.ts` 分离管理与 Webhook 两个监听。`src/app/` 保存账号、登录、仓库授权、模型和投递归一化逻辑，`src/core/security.ts` 提供验签、慢哈希和凭据加密，`src/storage/database.ts` 管理 SQLite、事务及审计；`static/` 是同一管理入口。`src/agent/` 保存模型循环、任务认领及恢复，`src/review/` 保存触发和位置校验，`src/github/` 保存授权读取及发布 outbox。`src/projects/` 是环境网关，`manager/` 管理受管 Docker 资源，`runner/` 是容器内命令／文件协议，`images/project/` 构建批准镜像。manager／runner 独立实现，保留 Apache-2.0 及 NOTICE 中的上游设计归属，不携带完整员工平台。
 
 验证需要 Node.js 22.13+ 和 npm；这些是源码检查命令，部署仍使用上面的 Docker 方式。
 
@@ -84,7 +85,7 @@ docker compose config --quiet
 
 ## 项目环境生命周期
 
-新增仓库默认启用，后台登记一个环境；创建与周期对账均按仓库 ID 幂等，不随 Issue 或 PR 结束而删除。启动和后续命令复用同一容器及卷。同仓库的生命周期和执行请求持有同一串行锁，不同仓库可并行；命令退出、超时或输出超限时杀死整个进程组，后台子进程不能绕过锁继续写入。
+新增仓库默认启用，后台登记一个环境；创建与周期对账均按仓库 ID 幂等，不随 Issue 或 PR 结束而删除。启动和后续命令复用同一容器及卷。同仓库的生命周期和执行请求持有同一串行锁，不同仓库可并行；命令退出、超时或输出超限时清理进程组，并在释放锁前停止／启动同一个容器、重新检查 runner，清除另建会话的守护进程；卷和 generation 保持不变。测试服务与测试请求应放在同一个命令中，后台服务不跨命令保留。
 
 停止会将仓库 enabled 设为 false，停容器并保留卷；再次启动复用原代次和数据。签名可信的 App 卸载／暂停事件按账号和所有者范围停用，移除仓库事件按账号和仓库 ID 停用；这些意图随投递事务保存，再由后台停止环境，不在 webhook 响应链路调用 Docker。安装范围完整同步仍属后续工作。
 
@@ -92,10 +93,32 @@ docker compose config --quiet
 
 manager 重启会先停止不确定的执行，标记未完成操作 interrupted，再用同一代容器和卷检查 runner／journal 后恢复 ready；重置中断则保持 reset_failed。运行期发现容器重启或退出同样重新恢复，不以 Docker running 代替 ready。操作 ID 持久化去重，代次检查阻止旧请求写新环境，状态 revision 防止旧响应覆盖新状态。控制面保存操作意图并以原 ID 重试丢失响应，不自动重复重置。
 
-当前 runner 为无网络监听的一次性固定执行入口：manager 通过 Docker exec 发送校验后的请求，返回 JSON 与持久 journal，调用者不能指定 exec argv 或用户。支持工作区相对文件读取／写入和最长 60 秒的 shell 命令；单次写入 48 KiB、读取 1 MiB、命令输出 1 MiB。项目运行用户为 10001，根文件系统只读，工作卷可写，CPU／内存／PID 限制固定；项目镜像暂提供 Node 和 shell，不假装已有完整开发工具链、Git／模型代理或跨重启长任务续跑。执行入口仅供内部控制面和验收调用，管理页面没有通用终端。
+当前 runner 为无网络监听的一次性固定执行入口：manager 通过 Docker exec 发送校验后的请求，返回 JSON 与持久 journal，调用者不能指定 exec argv 或用户。支持工作区相对文件读取／写入和最长 60 秒的 shell 命令；单次写入 48 KiB、读取 1 MiB、命令输出 1 MiB。项目运行用户为 10001，根文件系统只读，工作卷可写，CPU／内存／PID 限制固定；项目镜像提供 Node、Git 和 shell，Git 操作在容器内执行。任务工具支持隔离工作目录、分块文件与 Git 候选；上游 API 认证始终由控制面代理。执行入口仅供内部控制面和验收调用，管理页面没有通用终端。
 
 实际 Docker 验收运行 `npm run test:docker`，需要 Docker 和上述 Playwright 浏览器。它使用独立 Compose 项目和 18881／18882／18883 测试端口，18883 仅在测试覆盖文件里映射 manager；生产 Compose 不发布该端口。测试会检查两个真实环境、串行与并行、文件／卷／网络隔离、无凭据、代次重置、重启和角色页面，并按本次部署标签清理容器、网络及卷。输出保存在 `.tmp/project-env/`。
 
-## 后续范围
+## 检视与开发数据流
 
-下一阶段接入 GitHub 安装范围同步、Git／令牌代理、检视总线及模型调用，并完善项目开发工具链、长命令与任务恢复。之后将检视结果按仓库策略接入 Issue 开发、bot 分支推送和 PR 发布；别人 PR 只评论，bot 自己的 PR 可继续提交，不自动合并。当前尚无检视与开发 Agent，不发送 GitHub 评论，不推分支或创建 PR。
+在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
+
+后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 16 次模型响应，工具命令限时 60 秒；临时调用失败最多重试 5 次，配置故障单独显示。
+
+Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。
+
+Issue 检视结果明确要求代码变更、存在原文证据且无需补充信息时，若仓库打开开发，创建关联开发任务。在同一项目容器的新任务工作目录中修改代码，模型完成后服务端再次运行仓库指定测试；未配置固定测试时使用模型给出的测试命令，不能没有测试。失败不会推分支或开 PR。成功后检查测试前后候选 tree 一致，再由控制面发布唯一 `bot/issue-...` 分支，并创建 PR、回填链接。默认分支从 GitHub 元数据或仓库 policy 获取，不写死。
+
+别人的 PR 只检视，不产生向作者分支提交的任务；分支名或机器人名称不能代替归属记录。由本系统创建的 PR 保存不可变 PR ID、作者、head 仓库、分支和发布 SHA，只有这些身份仍匹配、策略允许且确有修改项时才在原分支跟进。跟进默认最多 3 轮，可在 policy 的 max_revisions 中设置 0–10；不另开 PR，不强推，不自动合并。
+
+## 无凭据代码代理与发布
+
+当前采用 Git 数据 API 的有界快照传输：控制面读取固定 commit 的 tree/blob，经 manager 将文件分块交给 runner；runner 校验 blob 与源 tree，构建本地 Git 快照。它不是完整上游历史克隆，模型上下文和评论覆盖说明明确标识这一点。单文件最多 1 MiB，快照最多 2000 文件／32 MiB，超限、子模块或截断 tree 进入明确故障，不用不完整工作区开发。二进制和符号链接按 Git 对象处理，相对文件工具不跟随越界符号链接。
+
+开发候选由容器内 Git 生成，控制面保存候选 tree、文件清单、测试输出与本地提交映射，经 Git 数据 API 上传 blob/tree/commit。只有 GitHub 返回 tree 与已验证候选完全一致，才创建或更新登记的 bot 分支。更新固定 force:false；未知或变化的分支 head 会阻止发布。容器里没有 GitHub remote 认证、私钥或模型 Key；控制面不运行仓库 shell 或 git 命令。真实仓库访问仍需为 App／账号提供相应 Contents、Issues 和 Pull requests 权限。
+
+评论、Review、分支和 PR 都有持久 outbox。请求结果未知时按任务 marker、head 和远端对象先对账；未能确认就保持 waiting_publication，不盲目重复。控制面重启后恢复未完成阶段，已完成任务不重新入队；manager 中断的命令不当作通过，重新检查环境后在新 attempt 工作目录继续，旧目录保留。同代已完成工具通过原操作 ID 回放，generation 变化会阻止旧任务直接写入新环境。
+
+## 验证与当前限制
+
+`npm run test:agent` 使用假 GitHub、假模型和真实项目容器验收完整旅程，包括 Issue 到 bot PR、草稿忽略、COMMENT 行内评论、别人 PR 不推送、bot PR 跟进、重复投递／未知响应对账、测试失败、tree 不一致、配置故障、manager 中断恢复、凭据隔离及任务页面角色范围。浏览器使用 lockfile 中的 Playwright。测试端口 18891–18894，与部署和人类试用数据隔离，结束后清理测试容器、网络和卷；产物放 `.tmp/review-dev/`。
+
+尚未接入完整安装列表同步、Git smart HTTP／完整历史传输、子模块／LFS 和长命令跨重启续跑。项目当前没有外网出口，因此需要下载依赖或访问外部测试地址的任务会显示实际失败，受控依赖出口和更多开发工具链仍需后续配置。任务页面支持检视与开发结果，策略编辑和部分授权管理继续通过已有管理 API 完成。没有聊天、图形桌面、浏览器接管或远程桌面能力。

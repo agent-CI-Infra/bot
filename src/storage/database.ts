@@ -51,6 +51,26 @@ export class Store {
       action TEXT NOT NULL,input TEXT NOT NULL,state TEXT NOT NULL,result TEXT);
       PRAGMA user_version=2;`);
     if (!this.all('PRAGMA table_info(project_environments)').some(row => row.name === 'revision')) this.db.exec('ALTER TABLE project_environments ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    const extend = (table: string, columns: Record<string, string>) => {
+      const names = this.all(`PRAGMA table_info(${table})`).map(row => row.name);
+      for (const [name, type] of Object.entries(columns)) if (!names.includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    };
+    extend('policies', { test_command: "TEXT NOT NULL DEFAULT ''", base_branch:"TEXT NOT NULL DEFAULT ''", max_revisions: 'INTEGER NOT NULL DEFAULT 3' });
+    extend('tasks', { unique_key: 'TEXT', input: "TEXT NOT NULL DEFAULT '{}'", result: 'TEXT', phase: "TEXT NOT NULL DEFAULT 'prepare'",
+      object_number: 'INTEGER', head_sha: 'TEXT', source_task_id: 'TEXT', source_delivery_id: 'TEXT', generation: 'INTEGER',
+      workspace_id: 'TEXT', messages: 'TEXT', claim_token: 'TEXT', error_code: 'TEXT', attempt: 'INTEGER NOT NULL DEFAULT 1',
+      next_run_at: 'INTEGER NOT NULL DEFAULT 0',retry_count:'INTEGER NOT NULL DEFAULT 0', created_at: "TEXT NOT NULL DEFAULT ''", updated_at: "TEXT NOT NULL DEFAULT ''" });
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS task_unique_key ON tasks(unique_key);
+      CREATE TABLE IF NOT EXISTS task_locks(repository_id TEXT PRIMARY KEY,task_id TEXT,token TEXT,fence INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS task_tools(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),request TEXT NOT NULL,result TEXT,state TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS github_effects(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),kind TEXT NOT NULL,request TEXT NOT NULL,
+        state TEXT NOT NULL,response TEXT,marker TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS development_candidates(task_id TEXT PRIMARY KEY REFERENCES tasks(id),data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS bot_branches(repository_id TEXT NOT NULL,branch TEXT NOT NULL,task_id TEXT NOT NULL,PRIMARY KEY(repository_id,branch));
+      CREATE TABLE IF NOT EXISTS bot_pull_requests(repository_id TEXT NOT NULL,number INTEGER NOT NULL,pr_id TEXT NOT NULL,author_id TEXT NOT NULL,
+        head_repository_id TEXT NOT NULL,branch TEXT NOT NULL,sha TEXT NOT NULL,source_task_id TEXT NOT NULL,revisions INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(repository_id,number));
+      PRAGMA user_version=3;`);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

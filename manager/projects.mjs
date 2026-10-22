@@ -115,9 +115,14 @@ export class Projects {
           const container = await this.inspect(repo, project.generation, 'container');
           if (!container?.State.Running || container.State.StartedAt !== project.started_at) throw new ManagerError('recovery_required');
           const call = input.request;
-          if (!call || !['command', 'read', 'write'].includes(call.type) || Object.keys(call).some(k => !['type','command','path','content','timeout_ms'].includes(k))) throw new ManagerError('invalid_runner_request', 400);
+          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob'];
+          const keys=['type','command','path','content','timeout_ms','workspace_id','base64','offset','final','mode','snapshot','sha','tree_sha'];
+          if (!call || !types.includes(call.type) || Object.keys(call).some(k => !keys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
           result = await this.docker.runner(this.names(repo, project.generation).container, { ...call, operation_id: input.operation_id });
-          this.update(repo, 'ready', 'ready', null, project.started_at);
+          if(['command','workspace_command'].includes(call.type)){
+            // A repository can daemonize into another process group. The container is the cleanup boundary.
+            await this.stopGeneration(repo,project.generation);await this.provision(repo);
+          }else this.update(repo, 'ready', 'ready', null, project.started_at);
         } else {
           this.update(repo, action === 'reset' ? 'resetting' : 'recovering', action === 'stop' ? 'stopped' : action === 'delete' ? 'deleted' : 'ready');
           await this.stopAll(repo);

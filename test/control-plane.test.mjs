@@ -31,7 +31,7 @@ test('project administrator lists and details stay within assigned repositories,
   await h.hook(a.path, a.secret, 'repo-202', { repository: { id: 202 }, action: 'opened' });
   const all = (await admin('/api/events')).value.events, foreign = all.find(r => r.repository_id === '202');
   for (const [id, repo] of [['own', '101'], ['foreign', '202']]) {
-    h.store.run('INSERT INTO tasks VALUES(?,?,?,?,?)', id, repo, 'fixture', 'done', id);
+    h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,?,?,?,?)', id, repo, 'fixture', 'done', id);
     h.store.run('INSERT INTO task_logs VALUES(?,?,?)', id, id, `${id} log`);
   }
   assert.deepEqual((await project('/api/repositories')).value.repositories.map(r => r.id), ['101']);
@@ -139,7 +139,7 @@ test('empty repository configuration never creates review or development tasks',
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
   await h.hook(a.path, a.secret, 'enabled', { action: 'opened', repository: { id: 101 } });
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 0);
-  assert.deepEqual((await admin('/api/status')).value, { review_available: false, development_available: false, project_environments_available: true, model_calls_available: false });
+  assert.deepEqual((await admin('/api/status')).value, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true });
   assert.equal((await fetch(h.webhook + '/api/users')).status, 404);
 });
 

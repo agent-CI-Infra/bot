@@ -10,8 +10,8 @@
 </section>
 <section id="workspace" hidden>
   <div class="heading"><div><p class="eyebrow">运行记录与配置</p><h1>管理控制台</h1></div><span class="badge">控制面已就绪</span></div>
-  <p class="notice">当前版本提供账号、授权、投递归档和每仓库一个长期项目环境。检视、开发和模型调用尚未启用。</p>
-  <nav id="tabs" aria-label="管理页面"><button data-tab="events">Webhook 投递</button><button data-tab="environments">项目环境</button><button data-tab="repositories">仓库</button><button data-tab="models">模型</button><button data-tab="accounts" data-super>机器人账号</button><button data-tab="users" data-super>用户</button></nav>
+  <p class="notice">检视与开发按仓库策略自动执行，模型材料和工作环境按项目隔离。缺少配置、测试失败或发布结果待确认时，任务会显示具体故障。</p>
+  <nav id="tabs" aria-label="管理页面"><button data-tab="events">Webhook 投递</button><button data-tab="tasks">检视与开发任务</button><button data-tab="environments">项目环境</button><button data-tab="repositories">仓库</button><button data-tab="models">模型</button><button data-tab="accounts" data-super>机器人账号</button><button data-tab="users" data-super>用户</button></nav>
   <section class="card">
     <div class="heading"><h2 id="page-title"></h2><div class="actions"><button id="refresh" class="quiet">刷新</button><button id="add" hidden>新增</button></div></div>
     <form id="filters"><label>仓库<select id="repository-filter"><option value="">所有有权访问的仓库</option></select></label><label id="account-filter-label" hidden>账号<select id="account-filter"><option value="">全部账号</option></select></label><label>组织 ID<input id="owner-filter" placeholder="按组织或用户 ID 过滤"></label><button type="submit" class="quiet">筛选</button></form>
@@ -22,5 +22,5 @@
 <p id="message" role="status" aria-live="polite"></p>
 </main>
 <dialog id="editor"><form id="editor-form"><h2 id="editor-title"></h2><p class="muted">凭据仅保存，不会从读取接口返回。</p><div id="editor-fields"></div><p id="editor-error" role="alert"></p><div class="actions"><button type="button" id="cancel" class="quiet">取消</button><button type="submit">保存</button></div></form></dialog>
-<dialog id="detail"><div class="heading"><h2>投递详情</h2><button id="close-detail" class="quiet">关闭</button></div><pre id="detail-body"></pre></dialog>
+<dialog id="detail"><div class="heading"><h2 id="detail-title">投递详情</h2><button id="close-detail" class="quiet">关闭</button></div><pre id="detail-body"></pre></dialog>
 </body></html>

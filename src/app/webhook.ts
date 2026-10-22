@@ -1,6 +1,7 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
+import { queueWebhook } from '../review/queue.js';
 
 export function ingest(store: Store, accountId: string, endpointId: string, headers: IncomingHttpHeaders, bytes: Buffer, complete: boolean) {
   const endpoint = store.get('SELECT id,account_id,secret FROM endpoints WHERE id=? AND account_id=?', endpointId, accountId);
@@ -49,7 +50,10 @@ export function ingest(store: Store, accountId: string, endpointId: string, head
       for (const removed of payload.repositories_removed) if (removed && typeof removed === 'object')
         store.run('UPDATE policies SET enabled=0 WHERE repository_id IN (SELECT id FROM repositories WHERE account_id=? AND id=?)', accountId, String(removed.id || ''));
     }
-    // No review/development scheduler is installed in the control-plane release.
+    if (status === 200 && !duplicate && owner && payload) {
+      response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id);
+      store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
+    }
     return { status, response };
   });
 }

@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, realpath, readdir, rename, open } from 'nod
 import { constants } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import { spawn } from 'node:child_process';
+import { workspace as workspaceTool } from './workspace.mjs';
 
 const workspace = '/workspace', journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -16,6 +17,7 @@ async function filePath(value) {
   return target;
 }
 async function execute(input) {
+  if(input.type.startsWith('workspace_')) return workspaceTool(input);
   if (input.type === 'health') {
     let interrupted = 0;
     for (const name of await readdir(journal)) if (/^[a-f0-9]{48}\.json$/.test(name) && name !== `${input.operation_id}.json`) {

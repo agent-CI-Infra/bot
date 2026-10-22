@@ -26,8 +26,10 @@ services:
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_MANAGER_URL: http://manager:8793
+      BOT_GITHUB_API_URL: "${BOT_GITHUB_API_URL:-https://api.github.com}"
       BOT_COOKIE_SECURE: "${BOT_COOKIE_SECURE:-false}"
       BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
+    stop_grace_period: 100s
     ports:
       - "127.0.0.1:${BOT_WEBHOOK_PORT:-8791}:8791"
       - "127.0.0.1:${BOT_ADMIN_PORT:-8792}:8792"

@@ -8,9 +8,10 @@ import { models } from './app/models.js';
 import { queries } from './app/queries.js';
 import { ingest } from './app/webhook.js';
 import { type ProjectService } from './projects/service.js';
+import { type TaskEngine } from './agent/engine.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
-interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; }
+interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -112,10 +113,10 @@ export function createControlPlane(options: Options) {
       res.setHeader('Set-Cookie', cookie('', 0)); respond(res, 200, { ok: true }); return;
     }
     if (path === '/api/status' && method === 'GET') {
-      respond(res, 200, { review_available: false, development_available: false, project_environments_available: true, model_calls_available: false }); return;
+      respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
+    const result = options.engine?.api(user,method,url,input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
       ?? (method === 'GET' ? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     if (mutation && path.startsWith('/api/repositories')) void options.projects?.reconcile().catch(() => {});

@@ -9,11 +9,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit && node scripts/check-runtime.mjs",
     "start": "node dist/main.js",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
     "test:e2e": "npm run build && playwright test",
-    "test:docker": "npm run build && node test/docker-env.mjs"
+    "test:docker": "npm run build && node test/docker-env.mjs",
+    "test:agent": "npm run build && node test/review-dev-docker.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
