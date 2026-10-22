@@ -5,6 +5,7 @@ import { queueWebhook } from '../review/queue.js';
 import { recordAutomation } from '../automation/runner.js';
 import type { AutomationConfig } from '../automation/config.js';
 import { recordInstallationEvent } from './installations.js';
+import { enqueueForwards } from '../external/forward.js';
 
 export function ingest(
   store: Store,
@@ -68,6 +69,7 @@ export function ingest(
       // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
       const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());
       try { recordAutomation(store, String(owner.id), event, action, payload, id, {}, fallback); } catch { /* a rule cannot fail ingestion */ }
+      Object.assign(response, { forwards_created: enqueueForwards(store,String(owner.id),event,payload,id) });
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
     return { status, response, sync };

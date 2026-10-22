@@ -130,3 +130,20 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 `npm run test:agent` 使用假 GitHub、假模型和真实项目容器验收完整旅程，包括 Issue 到 bot PR、草稿忽略、COMMENT 行内评论、别人 PR 不推送、bot PR 跟进、重复投递／未知响应对账、测试失败、tree 不一致、配置故障、manager 中断恢复、凭据隔离及任务页面角色范围。浏览器使用 lockfile 中的 Playwright。测试端口 18891–18894，与部署和人类试用数据隔离，结束后清理测试容器、网络和卷；产物放 `.tmp/review-dev/`。
 
 尚未接入 Git smart HTTP／完整历史传输、子模块／LFS、按域名白名单的出口代理和长命令跨 manager 重启续跑（manager 重启会中断正在执行的命令）。命令输出由控制台每 2 秒轮询增量读取，不是推送。策略编辑和部分授权管理继续通过已有管理 API 完成。没有聊天、图形桌面、浏览器接管或远程桌面能力。
+
+
+## 外部执行端
+
+管理入口的「外部执行端」可登记逐仓库客户端、配置 Webhook 事件过滤与签名转发，并查看投递和临时授权记录。个人电脑使用独立客户端凭据，GitHub Actions 使用受信任 OIDC 身份；检视完成后向公开 `/external/token` 兑换限定仓库的 Bot 安装令牌，再以 Bot 身份回复结果。只有 GitHub App 能签发此类临时 GitHub 凭据，不分发长期账号 Token。完整接入、重试、权限与撤销边界见 [外部执行端](docs/external-executors.md)。`npm run test:external:docker` 使用独立临时镜像和无外网容器验证签名转发、兑换临时令牌和 Bot 身份评论；GitHub 为本地测试服务，结束后清理本次镜像及容器，不修改运行实例。
+
+## 独立工作区开发
+
+每项开发使用独立分支和 git worktree，避免在共享 main 工作区修改或覆盖别人的未提交内容。依赖、测试数据和端口按工作区隔离；Docker 验证使用独立的镜像名、容器名和端口，不替换正在运行的本机实例。
+
+```sh
+git worktree add -b feature/<topic> .worktrees/<topic> main
+cd .worktrees/<topic>
+npm ci
+npm run check
+npm test
+```

@@ -8,3 +8,4 @@ dist/
 *.key
 playwright-report/
 test-results/
+.worktrees/

@@ -10,11 +10,12 @@ import { ingest } from './app/webhook.js';
 import { type ProjectService } from './projects/service.js';
 import { type TaskEngine } from './agent/engine.js';
 import type { AutomationConfig } from './automation/config.js';
+import { ExternalService } from './external/service.js';
 import { type InstallationSync, installationApi } from './app/installations.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
-  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; }
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -29,6 +30,7 @@ function respond(res: ServerResponse, status: number, value: Json): void {
 }
 export function createControlPlane(options: Options) {
   const { store } = options;
+  const external = options.external || new ExternalService(store);
   const loginAttempts = new Map<string, { n: number; until: number }>();
   const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${options.secureCookies ? '; Secure' : ''}`;
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
@@ -45,6 +47,12 @@ export function createControlPlane(options: Options) {
   const webhook = createServer(wrap(async (req, res) => {
     const path = new URL(req.url || '/', 'http://localhost').pathname;
     if (req.method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
+    if(req.method==='POST'&&['/external/token','/external/revoke'].includes(path)){
+      if(!req.headers['content-type']?.startsWith('application/json'))fail(415,'json_required');
+      const input=await body(req,16384);if(!input.complete)fail(413,'payload_too_large');
+      let value:Json;try{value=object(JSON.parse(input.bytes.toString('utf8')));}catch{return fail(400,'invalid_json');}
+      respond(res,200,await external.publicApi(path,value,String(req.headers.authorization||'')));return;
+    }
     const match = /^\/hooks\/github\/([a-f0-9]{48})\/([a-f0-9]{48})$/.exec(path);
     if (req.method !== 'POST' || !match) return fail(404, 'not_found');
     const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
@@ -57,7 +65,7 @@ export function createControlPlane(options: Options) {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
-      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'] };
+      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/external.js':['external.js','text/javascript'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
       res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` }); res.end(bytes); return;
@@ -122,7 +130,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
+    const result = external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
       ?? (method === 'GET' ? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     if (mutation && (path.startsWith('/api/repositories') || path.startsWith('/api/installations'))) void options.projects?.reconcile().catch(() => {});

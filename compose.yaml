@@ -27,6 +27,7 @@ services:
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_MANAGER_URL: http://manager:8793
       BOT_GITHUB_API_URL: "${BOT_GITHUB_API_URL:-https://api.github.com}"
+      BOT_FORWARD_PRIVATE_HOSTS: "${BOT_FORWARD_PRIVATE_HOSTS:-}"
       BOT_COOKIE_SECURE: "${BOT_COOKIE_SECURE:-false}"
       BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
     stop_grace_period: 100s

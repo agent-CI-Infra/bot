@@ -14,7 +14,8 @@
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
     "test:e2e": "npm run build && playwright test",
     "test:docker": "npm run build && node test/docker-env.mjs",
-    "test:agent": "npm run build && node test/review-dev-docker.mjs"
+    "test:agent": "npm run build && node test/review-dev-docker.mjs",
+    "test:external:docker": "node test/external-docker.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
@@ -22,6 +23,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "yaml": "2.8.1"
+    "yaml": "2.8.1",
+    "jose": "^6.2.13"
   }
 }
