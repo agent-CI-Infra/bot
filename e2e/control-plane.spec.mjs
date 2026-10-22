@@ -13,7 +13,7 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '初始化并登录' }).click();
-    await expect(page.getByRole('heading', { name: '管理控制台' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Webhook 投递' })).toBeVisible();
     await expect(page.getByText('本页 0 条投递')).toBeVisible();
     await admin('/api/auth/login', 'POST', { username: 'administrator', password });
     await page.getByRole('button', { name: '机器人账号', exact: true }).click();

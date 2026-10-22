@@ -9,6 +9,17 @@ async function api(path, method = 'GET', body) {
 }
 function error(err) { $('message').textContent = err.message; if ($('editor').open) $('editor-error').textContent = err.message; }
 function element(tag, text, className) { const el = document.createElement(tag); el.textContent = text; if (className) el.className = className; return el; }
+const states = {
+  accepted:['已接收','success'], invalid_signature:['签名无效','danger'], invalid_payload:['正文无效','danger'], payload_too_large:['正文过大','danger'],
+  unknown_endpoint:['入口不存在','danger'], missing_event_or_delivery:['投递信息不全','danger'],
+  queued:['待执行','info'], running:['执行中','info'], preparing:['准备中','info'], implementing:['开发中','info'], validating:['测试中','info'], publishing:['发布中','info'],
+  succeeded:['已完成','success'], completed:['已完成','success'], pr_opened:['已创建 PR','success'], failed:['失败','danger'],
+  waiting_configuration:['配置待补','warning'], waiting_environment:['等待环境','warning'], waiting_permission:['权限待处理','warning'],
+  waiting_publication:['发布待确认','warning'], retry_wait:['等待重试','warning'], needs_replan:['需重新规划','warning'], cancelled:['已取消',''], superseded:['已过时',''],
+  ready:['就绪','success'], busy:['执行中','info'], stopped:['已停止',''], provisioning:['创建中','info'], recovering:['恢复中','info'], resetting:['重置中','warning'], reset_failed:['重置失败','danger'], unavailable:['不可用','danger'], result_ready:['待发布','info'], deleted:['已移除','']
+};
+function state(value) { const [caption,tone]=states[value]||[value,'']; const badge=element('span',caption,'status'+(tone?' status-'+tone:''));badge.title=value;return badge; }
+function timestamp(value) { return value ? value.replace('T',' ').replace(/\.\d+Z$/,' UTC') : ''; }
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
 async function start() {
   setup = !(await api('/api/setup')).initialized;
@@ -32,30 +43,38 @@ async function render() {
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   $('add').hidden = ['events','environments','tasks'].includes(tab) || me.role !== 'super_admin' && tab !== 'models';
   $('filters').hidden = !['events','environments','tasks'].includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin'; $('paging').hidden = !['events','tasks'].includes(tab);
+  $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
   if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
   if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
-  $('rows').replaceChildren();$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');
+  $('rows').replaceChildren();$('rows').dataset.view=tab;$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');
   let result;try{result=await api(`/api/${tab}${['events','environments','tasks'].includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
   if(request!==renderVersion)return;const rows=result[tab];
   $('rows').replaceChildren(); $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : `${rows.length} 条记录`;
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
-    const line = element('div', '', 'row'), content = element('div', '', 'row-content');
+    const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');
     const name = row.full_name || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
     content.append(element('strong', name));
-    const detail = tab === 'events' ? `${row.received_at} · ${row.status}${row.duplicate ? ' · 重复投递' : ''} · 仓库 ${row.repository_id || '未关联'} · ${row.delivery_id}`
-      : tab === 'tasks' ? `仓库 ID ${row.repository_id} · ${row.status} · ${row.head_sha ? row.head_sha.slice(0,12) : '等待材料'}${row.error_code ? ' · '+row.error_code : ''}${row.result?.pr_url ? ' · '+row.result.pr_url : ''}`
-      : tab === 'environments' ? `仓库 ID ${row.repository_id} · ${row.state} · generation ${row.generation || '待创建'} · ${row.enabled ? '已启用' : '已停用'}${row.operation_pending ? ' · 操作结果待确认' : ''}${row.error ? ' · ' + row.error : ''}`
-      : tab === 'models' ? `${row.api_url} · ${row.key_configured ? 'Key 已配置' : 'Key 已撤销'} · ${row.repository_id ? '仓库 ' + row.repository_id : '部署共享模型'}`
-      : tab === 'accounts' ? `${row.type} · ${row.credentials_configured ? '凭据已配置' : '凭据已撤销'} · ${row.endpoints.map(e => e.webhook_path).join('，')}`
-      : tab === 'users' ? `${row.role} · ${row.active ? '启用' : '停用'} · ID ${row.id}` : `仓库 ID ${row.id} · 组织 ID ${row.owner_id}`;
+    const detail = tab === 'events' ? `${timestamp(row.received_at)} · 仓库 ${row.repository_id || '未关联'} · ${row.delivery_id}`
+      : tab === 'tasks' ? `仓库 ID ${row.repository_id} · ${row.head_sha ? row.head_sha.slice(0,12) : '等待材料'}${row.error_code ? ' · '+row.error_code : ''}`
+      : tab === 'environments' ? `仓库 ID ${row.repository_id} · generation ${row.generation || '待创建'} · ${row.enabled ? '已启用' : '已停用'}${row.operation_pending ? ' · 操作结果待确认' : ''}${row.error ? ' · ' + row.error : ''}`
+      : tab === 'models' ? `${row.api_url} · ${row.repository_id ? '仓库 ' + row.repository_id : '部署共享模型'}`
+      : tab === 'accounts' ? `${row.type === 'github_app' ? 'GitHub App · App ID '+row.app_id : '机器人账号'}`
+      : tab === 'users' ? `${row.role === 'super_admin' ? '超级管理员' : '项目管理员'} · ID ${row.id}` : `仓库 ID ${row.id} · 组织 ID ${row.owner_id}`;
     content.append(element('p', detail)); line.append(content);
+    if(['events','tasks','environments'].includes(tab))status.append(state(tab === 'environments' ? row.state : row.status));
+    if(tab==='events'&&row.duplicate)status.append(element('span','重复','status'));
+    if(['models','accounts'].includes(tab)){const configured=tab==='models'?row.key_configured:row.credentials_configured;status.append(element('span',configured?'凭据已配置':'凭据已撤销','status status-'+(configured?'success':'warning')));}
+    if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
+    if(tab==='accounts'&&row.endpoints.length){const endpoints=element('details',''),summary=element('summary',`${row.endpoints.length} 个 Webhook 入口`);endpoints.append(summary);row.endpoints.forEach(e=>endpoints.append(element('code',e.webhook_path)));content.append(endpoints);}
+    if(tab==='tasks'&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
+    if(status.childElementCount)line.append(status);
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').textContent = JSON.stringify(await api('/api/events/' + row.id), null, 2); $('detail').showModal(); } catch (err) { error(err); }
-      }); line.append(button);
+      }); const actions=element('div','','actions');actions.append(button);line.append(actions);
     }
     if(tab==='tasks'){
       const actions=element('div','','actions'),detail=element('button','结果与日志','quiet');
@@ -79,7 +98,7 @@ async function render() {
       }
       line.append(actions);
     }
-    $('rows').append(line);
+    line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));$('rows').append(line);
   });
 }
 const forms = {
