@@ -18,21 +18,25 @@ $('external-cancel').onclick=()=>externalDialog.close();externalDialog.addEventL
 $('logout').addEventListener('click',()=>{externalDialog.close();credentialDialog.close();$('external-panel').replaceChildren();});
 $('external-form').onsubmit=async event=>{
   event.preventDefault();const save=saveExternal,submit=event.currentTarget.querySelector('[type=submit]');submit.disabled=true;$('external-error').textContent='';
-  try{const result=await save(Object.fromEntries(new FormData(event.currentTarget)));externalDialog.close();await render();if(result.client_secret||result.signing_secret)externalSecret(result.client_secret||result.signing_secret);}
-  catch(err){$('external-error').textContent=err.message;}finally{submit.disabled=false;}
+  try{const result=await save(Object.fromEntries(new FormData(event.currentTarget)));externalDialog.close();await render();if(result.signing_secret)externalSecret(result.signing_secret);}
+  catch(err){$('external-error').textContent=({invalid_client_public_key:'请填写 2048–4096 位 RSA 公钥（BEGIN PUBLIC KEY），不要提交私钥。',invalid_token_audience:'请填写以 /external/token 结尾的 HTTPS 地址，不能带查询参数、用户名或密码。'})[err.message]||err.message;}finally{submit.disabled=false;}
 };
 function editor(title,help,fields,save){$('external-title').textContent=title;$('external-help').textContent=help;$('external-fields').replaceChildren(...fields);$('external-error').textContent='';saveExternal=save;externalDialog.showModal();}
 function addClient(){
   if(!repositories.length){error(new Error('请先登记有权使用的 GitHub App 仓库'));return;}
-  const name=externalField('name','客户端名称'),repo=externalField('repository_id','授权仓库',repositories[0].id,repositories.map(r=>[r.id,r.full_name])),type=externalField('auth_type','身份认证','client_secret',[['client_secret','个人电脑 / 客户端凭据'],['github_actions_oidc','GitHub Actions OIDC']]);
+  const name=externalField('name','客户端名称'),repo=externalField('repository_id','授权仓库',repositories[0].id,repositories.map(r=>[r.id,r.full_name])),type=externalField('auth_type','身份认证','private_key_jwt',[['private_key_jwt','个人电脑 / 公钥签名'],['github_actions_oidc','GitHub Actions OIDC']]);
+  const key=publicKeyField();
   const trust=element('fieldset','');trust.hidden=true;trust.append(element('legend','受信任工作流'));
   const entries=[['audience','Audience'],['subject','Subject'],['repository','工作流仓库 owner/repo'],['repository_id','工作流仓库 ID'],['owner_id','工作流组织 ID'],['workflow_ref','Workflow ref'],['ref','分支 ref']];
   for(const [key,caption]of entries){const field=externalField('trust_'+key,caption,key==='ref'?'refs/heads/main':'');field.querySelector('input').disabled=true;trust.append(field);}
-  type.querySelector('select').onchange=event=>{trust.hidden=event.target.value!=='github_actions_oidc';trust.querySelectorAll('input').forEach(input=>input.disabled=trust.hidden);};
-  editor('新增客户端','授权限定为单仓库的代码读取与 Issue / PR 写入；GitHub 凭据不能细分到单个 PR。',[name,repo,type,trust],data=>{
-    const body={name:data.name,repository_id:data.repository_id,auth_type:data.auth_type};if(data.auth_type==='github_actions_oidc')body.trust=Object.fromEntries(entries.map(([key])=>[key,data['trust_'+key]]));return api('/api/external/clients','POST',body);
+  type.querySelector('select').onchange=event=>{trust.hidden=event.target.value!=='github_actions_oidc';trust.querySelectorAll('input').forEach(input=>input.disabled=trust.hidden);key.hidden=!trust.hidden;key.querySelector('textarea').disabled=key.hidden;};
+  editor('新增客户端','在个人电脑生成密钥，只登记 RSA 公钥，私钥留在本机。授权限定为单仓库。',[name,repo,type,key,trust],data=>{
+    const body={name:data.name,repository_id:data.repository_id,auth_type:data.auth_type};if(data.auth_type==='github_actions_oidc')body.trust=Object.fromEntries(entries.map(([key])=>[key,data['trust_'+key]]));else body.public_key=publicKeyValue(data.public_key);return api('/api/external/clients','POST',body);
   });
 }
+function publicKeyField(){const label=element('label','RSA 公钥（PEM）'),input=document.createElement('textarea');input.name='public_key';input.required=true;input.rows=7;input.spellcheck=false;input.placeholder='-----BEGIN PUBLIC KEY-----';label.append(input);return label;}
+function publicKeyValue(value){if(!value.trim().startsWith('-----BEGIN PUBLIC KEY-----')||value.includes('PRIVATE KEY'))throw new Error('请只粘贴公钥（BEGIN PUBLIC KEY），私钥必须留在个人电脑。');return value;}
+function registerPublicKey(client){editor(client.key_configured?'更换客户端公钥':'登记客户端公钥','只粘贴公钥，不能提交私钥。保存后旧公钥立即失效，客户端 ID 和订阅保留。',[publicKeyField()],data=>api('/api/external/clients/'+client.id,'PATCH',{public_key:publicKeyValue(data.public_key)}));}
 function editSubscription(clients,row=null){
   if(!clients.length){error(new Error('请先新增客户端'));return;}
   const client=externalField('client_id','外部客户端',row?.client_id||clients[0].id,clients.map(c=>[c.id,c.name+' · 仓库 '+c.repository_id]));client.querySelector('select').disabled=!!row;
@@ -49,12 +53,14 @@ function externalGroup(title,action){const group=element('section','','external-
 function externalRow(name,detail,stateLabel,actions=[]){const row=element('div','','row'+(actions.length?' has-actions':'')),content=element('div','','row-content');content.append(element('strong',name),element('p',detail));row.append(content,element('span',stateLabel,'status'));if(actions.length){const group=element('div','','actions');group.append(...actions);row.append(group);}return row;}
 async function renderExternal(params,request){
   const suffix='?'+params;
-  const [{clients},{subscriptions},{deliveries},{grants}]=await Promise.all(['clients','subscriptions','deliveries','grants'].map(type=>api('/api/external/'+type+suffix)));
+  const [{clients},{subscriptions},{deliveries},{grants},{settings}]=await Promise.all(['clients','subscriptions','deliveries','grants','settings'].map(type=>api('/api/external/'+type+suffix)));
   if(request!==renderVersion)return;$('count').textContent=clients.length+' 个客户端 · '+subscriptions.length+' 个订阅';const panel=$('external-panel');panel.replaceChildren();
-  const mutate=async(path,body)=>{const result=await api(path,'PATCH',body);await render();if(result.client_secret||result.signing_secret)externalSecret(result.client_secret||result.signing_secret);};
+  const mutate=async(path,body)=>{const result=await api(path,'PATCH',body);await render();if(result.signing_secret)externalSecret(result.signing_secret);};
+  const endpoint=externalGroup('签名证明的兑换地址',me.role==='super_admin'?button('设置兑换地址',()=>editor('设置兑换地址','填写客户端实际访问的 HTTPS /external/token 地址，作为签名证明的固定 audience。',[externalField('token_audience','兑换地址',settings.token_audience||'')],data=>api('/api/external/settings','PUT',data))):null);
+  endpoint.append(element('p',settings.token_audience||'尚未配置，个人电脑客户端暂不能兑换；请超级管理员设置。','muted'));panel.append(endpoint);
   const group=externalGroup('客户端',button('新增客户端',addClient));
-  for(const c of clients){const actions=[button(c.enabled?'停用':'启用',()=>mutate('/api/external/clients/'+c.id,{enabled:!c.enabled}).catch(error))];if(c.auth_type==='client_secret')actions.push(button('轮换凭据',()=>mutate('/api/external/clients/'+c.id,{rotate_secret:true}).catch(error)));
-    const row=externalRow(c.name,`仓库 ${c.repository_id} · ${c.auth_type==='client_secret'?'客户端凭据':'GitHub Actions OIDC'} · ID ${c.id}`,c.enabled?'已启用':'已停用',actions);group.append(row);}
+  for(const c of clients){const actions=[button(c.enabled?'停用':'启用',()=>mutate('/api/external/clients/'+c.id,{enabled:!c.enabled}).catch(error))];if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));
+    const pending=c.auth_type==='private_key_jwt'&&!c.key_configured,row=externalRow(c.name,`仓库 ${c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,pending?'待登记公钥':c.enabled?'已启用':'已停用',actions);if(c.key_fingerprint)row.querySelector('.row-content').append(element('p','公钥指纹 SHA256 '+c.key_fingerprint));if(pending)row.querySelector('.row-content').append(element('p','旧客户端凭据已停用，请在个人电脑生成密钥后登记公钥。'));group.append(row);}
   if(!clients.length)group.append(element('p','尚未配置外部客户端','muted'));panel.append(group);
   const subs=externalGroup('Webhook 转发订阅',button('新增转发订阅',()=>editSubscription(clients)));
   for(const s of subscriptions)subs.append(externalRow(s.name,`仓库 ${s.repository_id} · ${s.url} · ${s.filters.events.join(',')} / ${s.filters.actions.join(',')||'全部动作'}${s.filters.exclude_drafts?' · 排除草稿':''}`,s.enabled?'已启用':'已停用',[

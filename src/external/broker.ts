@@ -2,7 +2,7 @@ import { type Store } from '../storage/database.js';
 import { GitHub } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
 import { digest, fail, fields, randomId, text, type Json } from '../core/security.js';
-import { authenticate } from './identity.js';
+import { authenticate, tokenAudience } from './identity.js';
 import { type JWTVerifyGetKey } from 'jose';
 
 export const reviewPermissions={contents:'read',issues:'write',pull_requests:'write'};
@@ -11,13 +11,15 @@ export class TokenBroker {
   async issue(body:Json,authorization:string):Promise<Json>{
     fields(body,['client_id','request_id']);const id=text(body.client_id),request=text(body.request_id,128);
     if(!/^[a-zA-Z0-9_-]{16,128}$/.test(request))fail(400,'invalid_request_id');
-    const client=this.store.get('SELECT * FROM external_clients WHERE id=?',id),identity=await authenticate(this.store,client,authorization,this.oidcKeys);
+    const client=this.store.get('SELECT * FROM external_clients WHERE id=?',id),audience=client?.auth_type==='private_key_jwt'?tokenAudience(this.store):undefined,
+      identity=await authenticate(this.store,client,authorization,this.oidcKeys,request,audience);
     const repo=this.store.get('SELECT * FROM repositories WHERE id=?',client!.repository_id)!;
     const account=this.store.get('SELECT * FROM accounts WHERE id=?',repo.account_id);
     if(account?.type!=='github_app')fail(409,'github_app_required');
     const guard=async()=>{
       if(!this.store.get('SELECT 1 FROM external_clients c JOIN policies p ON p.repository_id=c.repository_id WHERE c.id=? AND c.enabled=1 AND c.version=? AND p.enabled=1',id,client!.version))fail(403,'external_grant_disabled');
       if(this.store.get('SELECT account_id FROM repositories WHERE id=?',repo.id)?.account_id!==repo.account_id)fail(403,'external_account_changed');
+      if(audience!==undefined&&tokenAudience(this.store)!==audience)fail(403,'external_audience_changed');
     };
     await guard();const grant=randomId();
     this.store.transaction(()=>{
@@ -35,7 +37,7 @@ export class TokenBroker {
       return {grant_id:grant,token:github.token,token_type:'Bearer',expires_at:github.expiresAt,repository_id:repo.id,permissions:reviewPermissions};
     }catch{
       // The GitHub request may already have minted a token. Consume this identity even after an unknown result.
-      if(github.token){try{await github.request('DELETE','/installation/token');}catch{}}
+      if(github.token){try{await fetch((this.githubUrl||'https://api.github.com').replace(/\/$/,'')+'/installation/token',{method:'DELETE',redirect:'error',signal:AbortSignal.timeout(10000),headers:{Authorization:'Bearer '+github.token,Accept:'application/vnd.github+json'}});}catch{}}
       this.store.run("UPDATE external_grants SET state='failed' WHERE id=?",grant);return fail(502,'external_token_unavailable');
     }
   }

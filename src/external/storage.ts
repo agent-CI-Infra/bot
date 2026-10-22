@@ -21,4 +21,7 @@ export function externalStorage(store: Store): void {
     CREATE INDEX IF NOT EXISTS external_delivery_repo ON external_deliveries(repository_id,created_at);
     CREATE INDEX IF NOT EXISTS external_retry_due ON external_deliveries(state,next_at);
   `);
+  if(!store.all('PRAGMA table_info(external_clients)').some(row=>row.name==='public_key'))store.db.exec('ALTER TABLE external_clients ADD COLUMN public_key TEXT');
+  // Keep client IDs and subscriptions, but never accept legacy reusable credentials after upgrade.
+  store.run("UPDATE external_clients SET auth_type='private_key_jwt',secret_hash=NULL,version=version+1 WHERE auth_type='client_secret'");
 }

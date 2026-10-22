@@ -21,6 +21,7 @@ COPY package.json ./package.json
 COPY --from=build /app/dist ./dist
 COPY static ./static
 COPY config ./config
+COPY scripts/external-token.mjs ./scripts/external-token.mjs
 COPY LICENSE ./LICENSE
 COPY NOTICE ./NOTICE
 USER 10001:10001

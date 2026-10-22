@@ -134,7 +134,7 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 ## 外部执行端
 
-管理入口的「外部执行端」可登记逐仓库客户端、配置 Webhook 事件过滤与签名转发，并查看投递和临时授权记录。个人电脑使用独立客户端凭据，GitHub Actions 使用受信任 OIDC 身份；检视完成后向公开 `/external/token` 兑换限定仓库的 Bot 安装令牌，再以 Bot 身份回复结果。只有 GitHub App 能签发此类临时 GitHub 凭据，不分发长期账号 Token。完整接入、重试、权限与撤销边界见 [外部执行端](docs/external-executors.md)。`npm run test:external:docker` 使用独立临时镜像和无外网容器验证签名转发、兑换临时令牌和 Bot 身份评论；GitHub 为本地测试服务，结束后清理本次镜像及容器，不修改运行实例。
+管理入口的「外部执行端」可登记逐仓库客户端、配置 Webhook 事件过滤与签名转发，并查看投递和临时授权记录。个人电脑登记公钥、用本机私钥签发两分钟内有效的证明，GitHub Actions 使用受信任 OIDC 身份；检视完成后向公开 `/external/token` 兑换限定仓库的 Bot 安装令牌，再以 Bot 身份回复结果。只有 GitHub App 能签发此类临时 GitHub 凭据，不分发长期账号 Token。超级管理员需先在该页设置实际 HTTPS 兑换地址；旧客户端保留 ID 和订阅，但须登记公钥后才能继续兑换。完整接入、重试、权限与撤销边界见 [外部执行端](docs/external-executors.md)。`npm run test:external:docker` 使用独立临时镜像和无外网容器验证签名转发、兑换临时令牌和 Bot 身份评论；GitHub 为本地测试服务，结束后清理本次镜像及容器，不修改运行实例。
 
 ## 独立工作区开发
 
