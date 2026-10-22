@@ -20,7 +20,9 @@ export async function harness(t, manager, options = {}) {
     for (const server of Object.values(servers)) { server.listen(0, '127.0.0.1'); await once(server, 'listening'); }
     Object.assign(h, { store, admin: `http://127.0.0.1:${servers.admin.address().port}`, webhook: `http://127.0.0.1:${servers.webhook.address().port}` });
   };
-  h.stop = async () => { await h.external?.forwarder.close(); await Promise.all(Object.values(servers).map(server => new Promise(resolve => server.close(resolve)))); store.close(); };
+  // A browser page may still hold open connections (including speculative ones without a request) when a test stops
+  // its servers; close them instead of waiting for the browser to give them up.
+  h.stop = async () => { await h.external?.forwarder.close(); await Promise.all(Object.values(servers).map(server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }))); store.close(); };
   h.client = () => {
     let cookie = '', csrf = '';
     return async (path, method = 'GET', data, headers = {}) => {
