@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { randomBytes } from 'node:crypto';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Redactor } from '../dist/agent/common.js';
@@ -57,4 +58,33 @@ test('environment detail shows the project computer, the task holding it and rec
   assert.equal(detail.current_task.id, 't1');
   assert.deepEqual(detail.commands.map(c => [c.command, c.exit_code, c.object_number]), [['node --test', 1, 4]]);
   assert.equal((await admin('/api/environments?repository_id=101')).value.environments[0].current_task_id, 't1');
+});
+
+test('only super administrators change the computer spec, which is forwarded to the manager without disabling the repository', async t => {
+  const calls = [], manager = { call: async (method, path, input) => { calls.push([method, path, input]);
+    return path.endsWith('/configure') ? { repository_id: '101', generation: 1, state: 'ready', desired: 'ready', revision: 3 } : { repository_id: '101', generation: 1, state: 'ready', desired: 'ready', revision: 2 }; } };
+  const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const member = h.client(), memberPassword = randomBytes(16).toString('hex');
+  await admin('/api/users', 'POST', { username: 'member', password: memberPassword, repository_ids: ['101'] });
+  await member('/api/auth/login', 'POST', { username: 'member', password: memberPassword });
+  const op = () => randomBytes(24).toString('hex'), spec = { memory_mb: 1024, egress: false };
+  assert.equal((await member('/api/environments/101/configure', 'POST', { operation_id: op(), generation: 1, spec })).status, 403);
+  assert.equal((await admin('/api/environments/101/configure', 'POST', { operation_id: op(), generation: 1, spec: 'big' })).status, 400);
+  assert.equal((await admin('/api/environments/101/start', 'POST', { operation_id: op(), generation: 1, spec })).status, 400);
+  assert.equal((await admin('/api/environments/101/configure', 'POST', { operation_id: op(), generation: 1, spec })).status, 201);
+  const sent = calls.find(c => c[1] === '/v1/projects/101/configure');
+  assert.deepEqual([sent[2].generation, sent[2].request], [1, spec]);
+  assert.equal(h.store.get("SELECT enabled FROM policies WHERE repository_id='101'").enabled, 1);
+});
+
+test('a super administrator choosing a shared model grants it to the repository; a project administrator cannot', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  const shared = (await admin('/api/models', 'POST', { repository_id: null, api_url: 'https://model.invalid/v1', api_key: randomBytes(12).toString('hex'), model_name: 'shared' })).value.model;
+  const member = h.client(), memberPassword = randomBytes(16).toString('hex');
+  await admin('/api/users', 'POST', { username: 'member', password: memberPassword, repository_ids: ['101'] });
+  await member('/api/auth/login', 'POST', { username: 'member', password: memberPassword });
+  assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: shared.id })).status, 400);
+  assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id, test_command: 'npm test', max_revisions: 2 })).value.policy.model_id, shared.id);
+  assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', shared.id, '101'));
+  assert.equal((await member('/api/repositories/101/policy', 'PATCH', { review_label: 'bot-reviewed' })).value.policy.review_label, 'bot-reviewed');
 });

@@ -113,6 +113,17 @@ try {
   assert.ok(Date.now() - stopping < 30000); assert.notEqual(await slow,'completed');
   await api('/api/environments/101/start','POST',{operation_id:id(),generation:1}); await wait(async () => (await manager('101'))?.state === 'ready','restart after interrupt');
   passed('stopping the computer interrupts a running long command');
+  // A super administrator edits the computer spec; the container is recreated with it and keeps its work volume.
+  const unchanged = inspect(name('101')).Id;
+  await assert.rejects(api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{memory_mb:100000}}),/invalid_spec/);
+  assert.equal(inspect(name('101')).Id,unchanged);
+  const configured = await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{cpus:0.5,memory_mb:768,pids:256,tmp_mb:128,egress:false}});
+  const host = inspect(name('101')).HostConfig; assert.deepEqual([host.NanoCpus,host.Memory,host.PidsLimit,host.Tmpfs['/tmp'].includes('size='+128*1024*1024)],[5e8,768*1024*1024,256,true]);
+  assert.equal(configured.environment.computer.memory_mb,768); assert.equal(configured.environment.computer.network_policy,'internal, no egress');
+  assert.equal((await manager('101','execute',{type:'read',path:'private.txt'})).result.content,'project-101-only');
+  assert.notEqual((await run('101', `node -e "fetch('https://github.com',{signal:AbortSignal.timeout(5000)}).then(()=>process.exit(0),()=>process.exit(1))"`)).result.exit_code,0);
+  await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{cpus:1,memory_mb:512,pids:128,tmp_mb:64,egress:true}});
+  passed('the computer spec is editable, enforced by the manager, and applied by recreating the container with its work volume');
   compose(['restart','manager']);
   await wait(async () => (await manager('101'))?.state==='ready','manager recovery');
   assert.equal((await manager('101','execute',{type:'read',path:'private.txt'})).result.content,'project-101-only');

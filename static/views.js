@@ -255,7 +255,8 @@ function renderEnvironment({ environment: env, current_task: current, tasks, com
   const pc = env.computer || {};
   $('environment-title').textContent = `虚拟电脑 · ${env.full_name}`;
   $('environment-badges').replaceChildren(state(env.state), element('span', env.enabled ? '仓库已启用' : '仓库已停用', 'muted'));
-  $('environment-actions').replaceChildren(...environmentButtons(env, current, refreshEnvironment, err => { $('environment-error').textContent = err.message; }), button('关闭', () => environmentView.close()));
+  $('environment-actions').replaceChildren(button('设置', () => openSettings(env.repository_id, refreshEnvironment).catch(err => { $('environment-error').textContent = err.message; })),
+    ...environmentButtons(env, current, refreshEnvironment, err => { $('environment-error').textContent = err.message; }), button('关闭', () => environmentView.close()));
   const machine = card('机器');
   machine.append(facts([['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)], ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null],
     ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['单条命令', pc.max_command_minutes ? `最长 ${pc.max_command_minutes} 分钟，容器不随命令重启` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null], ['运行用户', pc.user],
@@ -314,7 +315,7 @@ function installedActions(row, after) {
   if (row.registered && row.enabled) actions.append(button('禁用', () => {
     if (confirm(`禁用 ${row.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) call('disable', {}, `正在禁用 ${row.full_name}…`);
   }));
-  if (row.registered) actions.append(button('查看虚拟电脑', () => openEnvironment(row.id).catch(error)));
+  if (row.registered) actions.append(button('设置', () => openSettings(row.id, after).catch(error)), button('查看虚拟电脑', () => openEnvironment(row.id).catch(error)));
   return actions;
 }
 const activationView = document.createElement('dialog'); activationView.id = 'activation-view'; activationView.setAttribute('aria-labelledby', 'activation-title');
@@ -342,4 +343,78 @@ $('activation-form').addEventListener('submit', async event => {
     await api(`/api/installations/${target.row.id}/activate`, 'POST', { model_id: form.elements.model_id.value || null, development_enabled: form.elements.development_enabled.checked });
     activationView.close(); await target.after();
   } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
+});
+
+// Project settings: review/development policy (repository administrators) and the project computer spec (super administrators).
+const settingsView = document.createElement('dialog'); settingsView.id = 'settings-view'; settingsView.setAttribute('aria-labelledby', 'settings-title');
+settingsView.innerHTML = `<form id="settings-form" novalidate><h2 id="settings-title"></h2>
+<fieldset><legend>检视与开发</legend>
+<label>模型<select name="model_id"></select></label>
+<label class="check"><input type="checkbox" name="review_enabled"> 检视新打开的 Issue 和 PR</label>
+<label class="check"><input type="checkbox" name="development_enabled"> 自动开发：Issue 明确要求改代码时，在虚拟电脑里实现、测试并开 bot PR</label>
+<div class="field-grid"><label>测试命令<input name="test_command" maxlength="2048" placeholder="如 npm test；留空时用模型给出的命令"></label>
+<label>基准分支<input name="base_branch" maxlength="256" placeholder="留空使用仓库默认分支"></label>
+<label>bot PR 自动修订轮数<input name="max_revisions" type="number" min="0" max="10" step="1"></label>
+<label>检视后打的标签<input name="review_label" maxlength="50" placeholder="留空不打标签"></label></div>
+</fieldset>
+<fieldset id="settings-computer"><legend>虚拟电脑</legend><p id="settings-computer-note" class="muted"></p>
+<div class="field-grid"><label>CPU（核）<input name="cpus" type="number" step="0.25"></label><label>内存（MB）<input name="memory_mb" type="number" step="128"></label>
+<label>进程数上限<input name="pids" type="number" step="1"></label><label>/tmp 大小（MB）<input name="tmp_mb" type="number" step="16"></label></div>
+<label class="check"><input type="checkbox" name="egress"> 允许访问外网（安装依赖、访问测试地址）</label>
+</fieldset>
+<p id="settings-error" class="view-error" role="alert"></p>
+<div class="actions settings-actions"><button type="button" class="quiet" id="settings-cancel">取消</button><button type="submit">保存</button></div></form>`;
+document.body.append(settingsView);
+const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb'];
+let settingsTarget = null;
+async function openSettings(repositoryId, after = async () => {}) {
+  const form = $('settings-form'), superUser = me.role === 'super_admin';
+  const [{ repository, policy }, environment, models] = await Promise.all([api('/api/repositories/' + repositoryId),
+    api('/api/environments/' + repositoryId).catch(() => null), api(superUser ? '/api/models' : '/api/models?repository_id=' + repositoryId)]);
+  const pc = environment?.environment?.computer, select = form.elements.model_id;
+  settingsTarget = { repositoryId, after, policy, environment: environment?.environment, computer: pc };
+  $('settings-title').textContent = '项目设置 · ' + repository.full_name; $('settings-error').textContent = ''; form.reset(); select.replaceChildren(new Option('未选择（任务会等待模型配置）', ''));
+  for (const m of models.models.filter(m => m.repository_id === null || m.repository_id === repositoryId))
+    select.add(new Option(`${m.model_name} · ${m.repository_id ? '本仓库专属' : '部署共享'}${m.key_configured ? '' : '（Key 已撤销）'}`, m.id));
+  select.value = policy.model_id || '';
+  for (const name of ['review_enabled', 'development_enabled']) form.elements[name].checked = !!policy[name];
+  for (const name of ['test_command', 'base_branch', 'max_revisions', 'review_label']) form.elements[name].value = policy[name] ?? '';
+  // The manager reports the bounds it enforces; the form mirrors them so out-of-range values are caught before saving.
+  for (const name of specFields) { const input = form.elements[name]; input.value = pc?.[name] ?? ''; if (pc?.bounds?.[name]) [input.min, input.max] = pc.bounds[name]; }
+  form.elements.egress.checked = pc ? pc.network_policy === 'internet egress' : false;
+  const editable = superUser && !!pc;
+  $('settings-computer').disabled = !editable;
+  $('settings-computer-note').textContent = !pc ? '暂时读不到虚拟电脑规格，稍后再试。' : !superUser ? '虚拟电脑规格由超级管理员设置。'
+    : '保存后虚拟电脑按新规格重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。';
+  settingsView.showModal();
+}
+$('settings-cancel').addEventListener('click', () => settingsView.close());
+$('settings-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = event.currentTarget, target = settingsTarget, submit = form.querySelector('[type=submit]'); if (!target) return;
+  const invalid = [...form.querySelectorAll('input')].find(input => !input.disabled && !input.checkValidity());
+  if (invalid) {
+    const label = invalid.closest('label').firstChild.textContent.trim(), range = invalid.validity.rangeOverflow || invalid.validity.rangeUnderflow;
+    $('settings-error').textContent = range ? `${label}需在 ${invalid.min}–${invalid.max} 之间` : invalid.validity.stepMismatch ? `${label}的取值步长是 ${invalid.step}` : `${label}：${invalid.validationMessage}`;
+    invalid.focus(); return;
+  }
+  // Only changed fields are sent, so saving the policy never touches the computer and vice versa.
+  const values = { model_id: form.elements.model_id.value || null, review_enabled: form.elements.review_enabled.checked, development_enabled: form.elements.development_enabled.checked,
+    test_command: form.elements.test_command.value, base_branch: form.elements.base_branch.value.trim(), max_revisions: Number(form.elements.max_revisions.value), review_label: form.elements.review_label.value.trim() };
+  const saved = target.policy, current = { model_id: saved.model_id || null, review_enabled: !!saved.review_enabled, development_enabled: !!saved.development_enabled,
+    test_command: saved.test_command || '', base_branch: saved.base_branch || '', max_revisions: saved.max_revisions, review_label: saved.review_label || '' };
+  const policy = Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== current[key]));
+  const spec = {};
+  if (!$('settings-computer').disabled) {
+    for (const name of specFields) if (Number(form.elements[name].value) !== target.computer[name]) spec[name] = Number(form.elements[name].value);
+    if (form.elements.egress.checked !== (target.computer.network_policy === 'internet egress')) spec.egress = form.elements.egress.checked;
+  }
+  submit.disabled = true; $('settings-error').textContent = '';
+  try {
+    if (Object.keys(policy).length) await api(`/api/repositories/${target.repositoryId}/policy`, 'PATCH', policy);
+    if (Object.keys(spec).length) {
+      $('settings-error').textContent = '正在按新规格重建虚拟电脑…';
+      await api(`/api/environments/${target.repositoryId}/configure`, 'POST', { operation_id: operationId(), generation: target.environment.generation, spec });
+    }
+    settingsView.close(); await target.after();
+  } catch (err) { $('settings-error').textContent = err.message; } finally { submit.disabled = false; }
 });

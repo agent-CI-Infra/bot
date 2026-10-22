@@ -106,16 +106,20 @@ export class ProjectService {
         LEFT JOIN task_locks l ON l.repository_id=r.id LEFT JOIN tasks t ON t.id=l.task_id
         WHERE ${clauses.join(' AND ')} ORDER BY r.full_name`, ...args) };
     }
-    const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete))?$/.exec(url.pathname);
+    const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete|configure))?$/.exec(url.pathname);
     if (!match) return fail(404, 'not_found');
     const id = match[1]!; repository(this.store, user, id);
     if (!match[2] && method === 'GET') return this.detail(id);
     if (method !== 'POST' || !match[2]) return fail(404, 'not_found');
-    fields(input, ['operation_id','generation','confirm']);
+    fields(input, ['operation_id','generation','confirm','spec']);
     if (!/^[a-f0-9]{48}$/.test(String(input.operation_id || '')) || !Number.isSafeInteger(input.generation)) fail(400, 'invalid_operation');
     if (match[2] === 'delete') { superAdmin(user); if (input.confirm !== true) fail(400, 'confirmation_required'); }
+    // The computer spec (CPU, memory, processes, /tmp, internet) is a deployment resource: super administrators only.
+    // The manager enforces the bounds; the control plane only forwards the requested values.
+    if (match[2] === 'configure') { superAdmin(user); if (!input.spec || typeof input.spec !== 'object' || Array.isArray(input.spec)) fail(400, 'invalid_spec'); }
+    else if (input.spec !== undefined) fail(400, 'invalid_operation');
     const previous = this.store.get('SELECT * FROM environment_operations WHERE id=?', String(input.operation_id));
-    const payload = JSON.stringify({ operation_id: input.operation_id, generation: input.generation });
+    const payload = JSON.stringify({ operation_id: input.operation_id, generation: input.generation, ...(match[2] === 'configure' ? { request: input.spec } : {}) });
     if (previous && (previous.repository_id !== id || previous.action !== match[2] || previous.input !== payload)) fail(409, 'operation_id_conflict');
     if (!previous && this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id)) fail(409, 'environment_operation_pending');
     const state = await this.manager.call('GET', '/v1/projects/' + id) || await this.manager.call('PUT', '/v1/projects/' + id);
@@ -126,7 +130,7 @@ export class ProjectService {
         this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", String(input.operation_id), id, match[2]!, payload);
         this.store.audit(user.id, 'environment.' + match[2], String(input.operation_id), id);
         if (match[2] === 'start' || match[2] === 'reset') this.store.run('UPDATE policies SET enabled=1 WHERE repository_id=?', id);
-        else this.store.run('UPDATE policies SET enabled=0 WHERE repository_id=?', id);
+        else if (match[2] !== 'configure') this.store.run('UPDATE policies SET enabled=0 WHERE repository_id=?', id);
       }
     });
     return { environment: await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', String(input.operation_id))!) };

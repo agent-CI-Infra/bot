@@ -5,8 +5,19 @@ import { randomBytes } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
-// Fixed project computer template; the control plane only displays it and cannot change it.
-const limits = { memory_mb: 512, cpus: 1, pids: 128, tmp_mb: 64 };
+// Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
+const defaults = { memory_mb: 512, cpus: 1, pids: 128, tmp_mb: 64 };
+const bounds = { cpus: [0.25, 8], memory_mb: [256, 16384], pids: [64, 4096], tmp_mb: [16, 4096] };
+const mib = 1024 * 1024;
+export function validateSpec(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['egress', ...Object.keys(bounds)].includes(k))) throw new ManagerError('invalid_spec', 400);
+  for (const [key, [min, max]] of Object.entries(bounds)) if (input[key] !== undefined) {
+    const value = input[key];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max || key !== 'cpus' && !Number.isInteger(value) || key === 'cpus' && Math.round(value * 100) !== value * 100) throw new ManagerError('invalid_spec', 400);
+  }
+  if (input.egress !== undefined && typeof input.egress !== 'boolean') throw new ManagerError('invalid_spec', 400);
+  return input;
+}
 const maxCommandMs = 30 * 60 * 1000, commandTypes = ['command', 'workspace_command'];
 export class Projects {
   constructor({ database, docker, deployment, image, egress = true }) {
@@ -20,15 +31,20 @@ export class Projects {
       CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,action TEXT NOT NULL,generation INTEGER NOT NULL,input TEXT NOT NULL,state TEXT NOT NULL,result TEXT);
     `);
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'revision')) this.db.exec('ALTER TABLE projects ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'spec')) this.db.exec('ALTER TABLE projects ADD COLUMN spec TEXT');
   }
   get(repo) { return this.db.prepare('SELECT * FROM projects WHERE repository_id=?').get(repo); }
   list() { return this.db.prepare('SELECT * FROM projects ORDER BY repository_id').all(); }
+  // A project's saved spec over the defaults; it survives restarts and resets.
+  spec(repo) { const saved = this.get(repo)?.spec; return { ...defaults, egress: this.egress, ...(saved ? JSON.parse(saved) : {}) }; }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
     const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
-    return { ...project, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
-      root_filesystem: 'read-only', network_policy: this.egress ? 'internet egress' : 'internal, no egress', init: true, max_command_minutes: maxCommandMs / 60000, ...limits, retained_generations: generations } };
+    const { spec: _saved, ...state } = project, spec = this.spec(repo);
+    return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
+      root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true, max_command_minutes: maxCommandMs / 60000,
+      ...spec, retained_generations: generations, bounds } };
   }
   lock(repo, fn) {
     const previous = this.queues.get(repo) || Promise.resolve();
@@ -66,7 +82,8 @@ export class Projects {
     for (const row of this.db.prepare('SELECT generation FROM resources WHERE repository_id=?').all(repo)) await this.stopGeneration(repo, row.generation);
   }
   async provision(repo) {
-    const project = this.get(repo), generation = project.generation, names = this.names(repo, generation);
+    const project = this.get(repo), generation = project.generation, names = this.names(repo, generation), spec = this.spec(repo);
+    const tmpfs = `rw,nosuid,nodev,noexec,size=${spec.tmp_mb * mib},mode=1777`;
     const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
     if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
     let resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation);
@@ -74,23 +91,24 @@ export class Projects {
     if (!await this.inspect(repo, generation, 'volume')) await this.docker.request('POST', '/volumes/create', { Name: names.volume, Labels: this.labels(repo, generation, 'volume') });
     await this.inspect(repo, generation, 'volume');
     let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
-    // A container from an older template (approved image, init, network policy) is replaced in place when provisioned;
-    // the work volume and generation stay. This never happens in the middle of a command.
-    const networkStale = network && network.Internal !== !this.egress;
-    if (container && (container.Image !== approved.Id || container.HostConfig?.Init !== true || networkStale)) {
+    // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
+    // provisioned; the work volume and generation stay. This never happens in the middle of a command.
+    const networkStale = network && network.Internal !== !spec.egress, host = container?.HostConfig;
+    if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || host?.Memory !== spec.memory_mb * mib
+      || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs)) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
     if (resource.image !== approved.Id) { this.db.prepare('UPDATE resources SET image=? WHERE repository_id=? AND generation=?').run(approved.Id, repo, generation); resource = { image: approved.Id }; }
     if (networkStale) { await this.docker.request('DELETE', `/networks/${names.network}`); network = null; }
-    if (!network) await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: !this.egress, CheckDuplicate: true, Labels: this.labels(repo, generation, 'network') });
+    if (!network) await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: !spec.egress, CheckDuplicate: true, Labels: this.labels(repo, generation, 'network') });
     await this.inspect(repo, generation, 'network');
     if (!container) {
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
         Cmd: ['node', '/opt/runner/idle.mjs'], Env: ['HOME=/workspace/home', 'LANG=C.UTF-8'], Labels: this.labels(repo, generation, 'container'),
         HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
-          Memory: limits.memory_mb * 1024 * 1024, NanoCpus: limits.cpus * 1_000_000_000, PidsLimit: limits.pids, NetworkMode: names.network,
-          Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': `rw,nosuid,nodev,noexec,size=${limits.tmp_mb * 1024 * 1024},mode=1777` },
+          Memory: spec.memory_mb * mib, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
+          Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': tmpfs },
           Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }] } });
       container = await this.inspect(repo, generation, 'container');
     }
@@ -130,7 +148,9 @@ export class Projects {
   }
   async operate(repo, action, input) {
     this.validate(repo);
-    if (!['start', 'stop', 'reset', 'delete', 'execute'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
+    if (!['start', 'stop', 'reset', 'delete', 'execute', 'configure'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
+    // An invalid spec is rejected before it is recorded, so it never touches the running computer.
+    if (action === 'configure') validateSpec(input.request);
     // A long command holds the project lock; a new stop, reset or delete interrupts it by stopping the container.
     if (['stop', 'reset', 'delete'].includes(action) && this.executing.has(repo) && !this.db.prepare('SELECT 1 FROM operations WHERE id=?').get(input.operation_id)
       && this.get(repo)?.generation === input.generation) await this.stopGeneration(repo, input.generation).catch(() => {});
@@ -149,7 +169,13 @@ export class Projects {
       this.db.prepare("INSERT INTO operations VALUES(?,?,?,?,?,'running',NULL)").run(input.operation_id, repo, action, input.generation, encoded);
       try {
         let result;
-        if (action === 'execute') {
+        if (action === 'configure') {
+          // Saved under the project lock, so a running command finishes first; a stopped computer applies it on the next start.
+          const spec = { ...this.spec(repo), ...input.request };
+          this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(spec), repo);
+          if (project.desired === 'ready' && project.state !== 'reset_failed') { this.background.delete(repo); await this.stopGeneration(repo, project.generation); await this.provision(repo); }
+          result = this.describe(repo);
+        } else if (action === 'execute') {
           this.update(repo, 'busy', 'ready', null, project.started_at);
           const container = await this.inspect(repo, project.generation, 'container');
           if (!container?.State.Running || container.State.StartedAt !== project.started_at) throw new ManagerError('recovery_required');

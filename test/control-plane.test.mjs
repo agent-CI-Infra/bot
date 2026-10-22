@@ -170,7 +170,10 @@ test('shared model access requires explicit project grants and never grants cred
   assert.equal((await member(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: ['202'] })).status, 403);
   assert.equal((await member(`/api/models/${model.id}`, 'PATCH', { version: 1, api_key: testPassword() })).status, 403);
   assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: model.id })).status, 200);
-  assert.equal((await admin('/api/repositories/202/policy', 'PATCH', { model_id: model.id })).status, 400);
+  // A super administrator may grant a shared model by choosing it; the project administrator above could only use an existing grant.
+  assert.equal((await admin('/api/repositories/202/policy', 'PATCH', { model_id: model.id })).status, 200);
+  assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', model.id, '202'));
+  await admin('/api/repositories/202/policy', 'PATCH', { model_id: null });
   await admin(`/api/models/${model.id}/projects`, 'PUT', { repository_ids: [] });
   assert.equal((await member('/api/models/' + model.id)).status, 404);
   const b = await account(admin);
