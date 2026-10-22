@@ -138,7 +138,8 @@ try{
     // The process view shows the model's steps and the commands it ran in the project computer.
     await page.locator('#rows .row',{hasText:'Issue #1 · fixture/project-101'}).getByRole('button',{name:'查看过程',exact:true}).click();await page.locator('#timeline .step-model').first().waitFor();
     assert.ok(await page.locator('#timeline .step-tool').count()>=1);assert.match(await page.locator('#task-side').innerText(),/dbot-[0-9a-f]+-101-g\d/);await page.screenshot({path:'.tmp/review-dev/task-process.png'});
-    await page.getByRole('button',{name:'查看虚拟电脑',exact:true}).click();await page.locator('#environment-body .commands li').first().waitFor();await page.getByRole('button',{name:'关闭',exact:true}).click();
+    await page.getByRole('button',{name:'打开项目机器配置',exact:true}).click();await page.locator('#machine-status').waitFor();
+    await page.locator('.project-nav').getByRole('link',{name:'运行记录',exact:true}).click();await page.locator('#activity-status .commands li').first().waitFor();
     await page.getByRole('button',{name:'开发',exact:true}).click();await page.locator('#rows .row',{hasText:'Issue #1 · fixture/project-101'}).waitFor();
     await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'检视',exact:true}).click();await page.locator('#rows').getByText(/fixture\/project-101/).first().waitFor();
     assert.ok(!(await page.locator('#rows').innerText()).includes('fixture/project-202'));await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/review-dev/project-mobile.png'});assert.deepEqual(errors,[]);

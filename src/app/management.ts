@@ -169,7 +169,11 @@ export async function management(store: Store, user: Actor, method: string, path
     const id = repoMatch[1]!; repository(store, user, id);
     if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)! };
     if (method === 'PATCH' && repoMatch[2]) {
-      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','review_label','automation']);
+      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','review_label','automation',
+        'review_issues','review_pull_requests','review_pr_updates','review_language','review_instructions']);
+      for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
+      if (body.review_language !== undefined && (typeof body.review_language !== 'string' || !['auto', 'zh', 'en'].includes(body.review_language))) fail(400, 'invalid_review_language');
+      if (body.review_instructions !== undefined && (typeof body.review_instructions !== 'string' || body.review_instructions.length > 8000 || body.review_instructions.includes('\0'))) fail(400, 'invalid_review_instructions');
       for (const key of ['review_enabled', 'development_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       const previous = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
       if(body.test_command!==undefined&&(typeof body.test_command!=='string'||body.test_command.length>2048))fail(400,'invalid_test_command');
@@ -194,6 +198,10 @@ export async function management(store: Store, user: Actor, method: string, path
           body.development_enabled === undefined ? previous.development_enabled : Number(body.development_enabled),
           body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
         if (grant) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
+        const keep = (key: string, value: unknown) => body[key] === undefined ? previous[key] : value;
+        store.run('UPDATE policies SET review_issues=?,review_pull_requests=?,review_pr_updates=?,review_language=?,review_instructions=? WHERE repository_id=?',
+          keep('review_issues', Number(body.review_issues)), keep('review_pull_requests', Number(body.review_pull_requests)), keep('review_pr_updates', Number(body.review_pr_updates)),
+          keep('review_language', body.review_language), keep('review_instructions', body.review_instructions), id);
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,review_label=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),body.review_label===undefined?previous.review_label:String(body.review_label),automation,id);
         return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true };

@@ -35,7 +35,7 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 
 账号凭据、入口签名材料和模型 Key 用 AES-256-GCM 加密，密文绑定记录 ID。读取和写入响应均只返回是否已配置，不返回明文或密文。更新时留空或仅空白的凭据保持原值；撤销使用专用动作，不能靠提交空字符串撤销。模型 PATCH 必须带读取到的 `version`，旧版本返回 409。撤销账号凭据不会连带撤销入口签名；要禁用入口需单独撤销该入口。
 
-浏览器管理入口支持初始化、登录、投递列表与详情、项目环境（虚拟电脑）列表与详情及启动／停止／重置，检视和开发两个独立任务页，以及账号／仓库／模型／用户新增。任务详情按时间线展示 Agent 工作过程：工作区准备、每一步模型思考与工具选择、读写的文件、在项目容器中执行的命令及退出码和输出、GitHub 发布和故障；运行中每 2 秒刷新，正在执行的命令单独显示并实时追加输出。超级管理员的仓库页列出所有已安装和已登记的仓库及“未启动／工作中／已禁用／已移出安装”状态，可立即同步、启动、启用或禁用。每个已登记仓库有“设置”：仓库管理员可编辑模型、检视／开发开关、测试命令、基准分支、自动修订轮数和检视后标签；超级管理员还可编辑虚拟电脑：CPU、内存、进程数上限、/tmp 大小、单条命令最长时间、是否允许外网、额外系统软件包、环境变量和初始化脚本。虚拟电脑页显示软件包镜像构建、初始化脚本的状态与输出，以及实时资源占用。任务详情旁显示所用的虚拟电脑，即该仓库的长期项目容器：容器、代次、资源与网络限制，并可直接启停或重置。虚拟电脑详情列出卷、网络、镜像、正在执行的任务、最近任务和最近执行的命令。授权分配调整、策略更新、凭据轮换及撤销通过下列管理 API 完成；这些操作尚未提供完整表单。投递页支持仓库、账号和组织 ID 过滤及分页；项目管理员不显示账号管理入口。
+浏览器管理入口以项目为单位组织：“项目”页列出已安装和已登记的仓库及“未启动／工作中／已禁用／已移出安装”状态，超级管理员可同步安装列表、启动、启用或禁用；每个项目有独立的设置页（`#/projects/<仓库 ID>/<类别>`，可直接分享和刷新），左侧类别为基本设置（仓库信息、处理账号、基准分支）、机器配置（虚拟电脑状态、实时资源、软件安装与初始化结果、启停与重置，以及 CPU、内存、进程数、/tmp、单条命令时长、外网、额外软件包、环境变量和初始化脚本）、使用的模型（选择部署共享或本项目专属模型，添加模型、更换或撤销 Key）、检视规则（检视开关、Issue／PR 打开与 PR 新提交三个触发、评论语言、项目检视指引、检视后标签）、开发设置（自动开发、测试命令、bot PR 修订轮数）、成员（仅超级管理员，分配项目管理员）和运行记录（当前任务、最近任务与命令）。项目管理员只看到自己的项目，机器配置只读。“检视”“开发”两个任务页的任务详情按时间线展示 Agent 工作过程：工作区准备、每一步模型思考与工具选择、读写的文件、在项目容器中执行的命令及退出码和输出、GitHub 发布和故障；运行中每 2 秒刷新，正在执行的命令单独显示并实时追加输出。账号／用户新增在各自页面完成，凭据轮换等其余管理操作通过下列 API 完成。
 
 ## 接口
 
@@ -52,7 +52,7 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
 | `/api/repositories`、`/api/repositories/:id` | GET / POST、GET | 范围内列表／详情；创建仅超级管理员，字段 `id,full_name,owner_id,account_id` |
-| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions,review_label`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；`review_label` 为可选标签名（最多 50 字符），留空不打标签 |
+| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions,review_label`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；`review_label` 为可选标签名（最多 50 字符），留空不打标签；检视规则字段 `review_issues`、`review_pull_requests`、`review_pr_updates`（布尔，分别控制 Issue 打开、PR 打开／转为可检视、PR 新提交是否触发检视）、`review_language`（`auto`／`zh`／`en`）和 `review_instructions`（≤8000 字，作为管理员配置的项目检视指引写入检视 Agent 的系统提示，仓库内容仍按不可信数据处理） |
 | `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库。列表带当前执行任务；详情另含 manager 给出的容器／卷／网络／镜像／资源限制、当前任务、最近 20 个任务和最近 30 条命令 |
 | `/api/environments/:id/start`、`/stop`、`/reset` | POST | 仓库管理员操作；字段 `operation_id,generation`，操作 ID 为 48 位随机十六进制；重试必须复用同一 ID |
 | `/api/environments/:id/configure` | POST | 仅超级管理员；字段 `operation_id,generation,spec`，`spec` 可含 `cpus`（0.25–16，默认 2）、`memory_mb`（256–65536，默认 4096）、`pids`（64–16384，默认 1024）、`tmp_mb`（16–16384，默认 1024）、`max_command_minutes`（1–240，默认 60）、`egress`、`packages`（最多 100 个 Debian 包名）、`env`（最多 64 个非机密变量，`PATH`、`HOME`、`BOT_*`、`GIT_*` 等保留名拒绝）、`setup_script`（≤16 KiB）和一次性的 `rerun_setup`。范围由 manager 校验；规格随项目保存、跨重启和重置保留，保存后在项目锁内重建容器，工作卷和代次不变；软件包镜像构建失败时不改动正在运行的电脑 |
@@ -108,7 +108,7 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 ## 检视与开发数据流
 
-在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
+在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的检视规则中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
 
 后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 16 次模型响应；模型调用 run_command 时可设 `timeout_seconds`（默认 120，最多为项目的 `max_command_minutes`）和 `keep_background`，仓库测试验证同样受该上限；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
 

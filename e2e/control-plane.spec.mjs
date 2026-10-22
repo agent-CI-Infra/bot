@@ -13,7 +13,8 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '初始化并登录' }).click();
-    await expect(page.getByRole('heading', { name: 'Webhook 投递' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '项目' })).toBeVisible();
+    await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
     await expect(page.getByText('本页 0 条投递')).toBeVisible();
     await admin('/api/auth/login', 'POST', { username: 'administrator', password });
     await page.getByRole('button', { name: '机器人账号', exact: true }).click();
@@ -41,6 +42,7 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
     await page.getByLabel('用户名', { exact: true }).fill('project-admin'); await page.getByLabel('密码', { exact: true }).fill(memberPassword);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
     await expect(page.getByText('本页 1 条投递')).toBeVisible();
     await expect(page.getByRole('button', { name: '机器人账号', exact: true })).toBeHidden();
     await expect(page.getByRole('button', { name: '用户', exact: true })).toBeHidden();

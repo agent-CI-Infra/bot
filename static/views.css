@@ -39,10 +39,33 @@ button.linkish{border:0;background:none;padding:0;min-height:0;color:#16636b;tex
 #activation-view{width:min(560px,calc(100vw - 24px))}#activation-view h2{font-size:17px}#activation-view p{margin:0;font-size:13px}
 label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5}label.check input{width:auto;margin-top:3px}
 .step-running{margin:10px 0 0 18px;border-color:#b9cdea}.live-output{max-height:420px}
-@media(min-width:761px){.row>.actions{flex-wrap:nowrap}#rows[data-view=repositories] .row.has-actions{grid-template-columns:minmax(0,1fr) max-content max-content}}
-#settings-view{width:min(720px,calc(100vw - 24px))}#settings-view h2{font-size:17px}
-#settings-view fieldset{border:1px solid #e3eaf0;border-radius:6px;padding:10px 12px 12px;margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
-#settings-view legend{font-weight:600;color:#365564;padding:0 4px}#settings-view fieldset:disabled{background:#f7fafb}#settings-view fieldset:disabled input{color:#637c89}
+@media(min-width:761px){.row>.actions{flex-wrap:nowrap}#rows[data-view=projects] .row.has-actions{grid-template-columns:minmax(0,1fr) max-content max-content}}
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px}.settings-actions{justify-content:flex-end}
 @media(max-width:560px){.field-grid{grid-template-columns:minmax(0,1fr)}}
-#settings-view textarea{min-height:0;font-size:13px}#settings-view textarea.code{font:12px/1.5 ui-monospace,monospace}#settings-toolchain{margin:0;font-size:12px}
+
+/* Project page (static/project.js): categories on the left, one category's settings on the right. */
+.project-page{background:#fff;border:1px solid #dde6eb;border-radius:7px;overflow:hidden}
+.project-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:12px 16px;border-bottom:1px solid #e3eaf0}
+.project-head .title-group{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.project-head h1{font-size:19px;margin:0;overflow-wrap:anywhere}
+.back-link{flex-basis:100%;font-size:12px;color:#16636b;text-decoration:none}.back-link:hover{text-decoration:underline}
+.project-body{display:grid;grid-template-columns:200px minmax(0,1fr);min-height:calc(100svh - 200px)}
+.project-nav{display:flex;flex-direction:column;gap:2px;padding:12px 8px;border-right:1px solid #e3eaf0;background:#f7fafb}
+.project-nav a{padding:8px 12px;border-radius:5px;color:#365564;text-decoration:none;font-weight:600;font-size:14px}
+.project-nav a:hover{background:#edf3f5}.project-nav a[aria-current=page]{background:#16636b;color:#fff}
+.project-content{padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0;max-width:980px}
+.project-content .side-card h3{font-size:15px}.project-content h4{margin:6px 0 0;font-size:13px;color:#365564}
+.project-form{gap:10px}.project-form fieldset{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
+.project-form fieldset:disabled input,.project-form fieldset:disabled textarea,.project-form fieldset:disabled select{background:#f7fafb;color:#637c89}
+.project-form textarea{min-height:0;font-size:13px}.project-form textarea.code{font:12px/1.5 ui-monospace,monospace}.project-form p{margin:0}
+.form-actions{justify-content:flex-start}.view-success{margin:0;color:#24603d}.flash{padding:8px 12px;border-radius:5px;background:#e5f2e9}.view-progress{margin:0;color:#2c5791}.view-success:empty,.view-progress:empty{display:none}
+.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;align-items:start}
+.choices{display:flex;flex-direction:column;gap:6px}.choice{flex-direction:row;align-items:center;gap:10px;padding:8px 10px;border:1px solid #e3eaf0;border-radius:6px;font-size:13px;color:#183142;flex-wrap:wrap}
+.choice input{width:auto}.choice:has(input:checked){border-color:#16636b;background:#eef6f6}
+.add-model{margin-top:8px}.add-model>summary{font-weight:600;color:#16636b}.add-model .side-card{border:0;padding:8px 0 0}
+.member-add{margin-top:8px}.member-add select{width:auto;min-width:220px}
+@media(max-width:760px){
+  .project-body{grid-template-columns:minmax(0,1fr);min-height:0}
+  .project-nav{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid #e3eaf0;padding:8px}.project-nav a{white-space:nowrap;padding:6px 10px}
+  .project-content{padding:12px}.status-grid{grid-template-columns:minmax(0,1fr)}
+  .project-head .title-group{flex-basis:100%;flex-direction:row;align-items:center}.project-head h1{font-size:17px;flex-basis:100%}
+}
