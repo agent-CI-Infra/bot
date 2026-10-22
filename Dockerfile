@@ -6,10 +6,18 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
+# Production dependencies only; the runtime image has no compiler or dev tooling.
+FROM node:22-bookworm-slim AS dependencies
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --no-create-home bot \
     && mkdir /data /keys /internal && chown bot:bot /data /keys /internal && chmod 700 /data /keys && chmod 750 /internal
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY package.json ./package.json
 COPY --from=build /app/dist ./dist
 COPY static ./static
 COPY config ./config
