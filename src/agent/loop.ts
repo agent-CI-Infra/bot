@@ -1,7 +1,7 @@
 import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
 import { completion } from './model.js';
-import { type Redactor, safePath, stop } from './common.js';
+import { type Redactor, clip, safePath, stop } from './common.js';
 import { validateReview } from '../review/findings.js';
 
 export async function agentLoop(store:Store,task:Row,workspace:Workspace,redactor:Redactor,guard:()=>Promise<void>,context:any){
@@ -20,11 +20,15 @@ export async function agentLoop(store:Store,task:Row,workspace:Workspace,redacto
       if(messages.filter(m=>m.role==='assistant').length>=16)stop('model_step_budget_exhausted');
       const message=await completion(store,task.repository_id,messages,development,redactor);await guard();
       if(!Array.isArray(message.tool_calls)||!message.tool_calls.length){
+        workspace.log({type:'model',step:messages.filter(m=>m.role==='assistant').length+1,reasoning:clip(message.reasoning_content||message.reasoning||'',6000),content:clip(message.content||'',6000),tool_calls:[]});
         let result;try{result=JSON.parse(String(message.content).replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{return stop('model_finish_missing');}
         result=redactor.clean(result);return development?developmentResult(result):validateReview(result);
       }
       if(message.tool_calls.length>8||message.tool_calls.some((c:any)=>typeof c.id!=='string'||c.id.length>128||!c.function))stop('model_tool_invalid');
       messages.push(message);save();last=message;
+      // The visible process: what the model reasoned, said and asked to run at this step.
+      workspace.log({type:'model',step:messages.filter(m=>m.role==='assistant').length,reasoning:clip(message.reasoning_content||message.reasoning||'',6000),
+        content:clip(message.content||'',6000),tool_calls:message.tool_calls.map((c:any)=>({id:c.id,name:c.function.name,arguments:clip(c.function.arguments,4000)}))});
     }
     for(const call of last.tool_calls){
       if(answered.has(call.id))continue;
@@ -42,6 +46,8 @@ export async function agentLoop(store:Store,task:Row,workspace:Workspace,redacto
         result=await workspace.call('model:'+call.id,{type:'workspace_command',command:args.command,timeout_ms:60000});
       }else result={error:'tool_not_allowed_or_arguments_invalid'};
       const text=JSON.stringify(redactor.clean(result));messages.push({role:'tool',tool_call_id:call.id,content:text.length>24000?text.slice(0,12000)+'\n[output truncated]\n'+text.slice(-10000):text});save();
+      workspace.log({type:'tool',name,call_id:call.id,arguments:name==='write_file'?{path:args.path,bytes:Buffer.byteLength(String(args.content))}:args,
+        result:name==='read_file'?{bytes:Buffer.byteLength(String(result?.content??'')),content:clip(result?.content,4000),error:result?.error}:name==='run_command'?{...result,output:clip(result?.output)}:result});
     }
   }
   return stop('model_step_budget_exhausted');

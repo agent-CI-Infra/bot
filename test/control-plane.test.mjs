@@ -32,7 +32,7 @@ test('project administrator lists and details stay within assigned repositories,
   const all = (await admin('/api/events')).value.events, foreign = all.find(r => r.repository_id === '202');
   for (const [id, repo] of [['own', '101'], ['foreign', '202']]) {
     h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,?,?,?,?)', id, repo, 'fixture', 'done', id);
-    h.store.run('INSERT INTO task_logs VALUES(?,?,?)', id, id, `${id} log`);
+    h.store.run('INSERT INTO task_logs(id,task_id,content) VALUES(?,?,?)', id, id, `${id} log`);
   }
   assert.deepEqual((await project('/api/repositories')).value.repositories.map(r => r.id), ['101']);
   assert.deepEqual((await project('/api/events')).value.events.map(r => r.repository_id), ['101']);

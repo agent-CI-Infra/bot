@@ -1,7 +1,7 @@
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { GitHub } from '../github/client.js';
-import { blobSha, operationId, Redactor, safePath, stop } from './common.js';
+import { blobSha, clip, operationId, Redactor, safePath, stop } from './common.js';
 
 export class Workspace {
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void){}
@@ -19,7 +19,8 @@ export class Workspace {
     await this.guard();
     const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed'});
     this.store.run("UPDATE task_tools SET state='completed',result=? WHERE id=?",JSON.stringify(result),id);
-    if(request.type==='workspace_command')this.log({type:'command',command:request.command,...result});
+    // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
+    if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
     return result;
   }
   async write(key:string,path:string,data:Buffer,mode='100644',snapshot=false,hash?:string){

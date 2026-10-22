@@ -69,6 +69,28 @@ export class ProjectService {
       throw error;
     }
   }
+  // One project computer: its fixed spec from manager, the task holding it, and what recently ran inside.
+  async detail(id: string): Promise<Json> {
+    const saved = this.store.get(`SELECT r.full_name,p.enabled,e.* FROM repositories r JOIN policies p ON p.repository_id=r.id
+      LEFT JOIN project_environments e ON e.repository_id=r.id WHERE r.id=?`, id)!;
+    const live = await this.manager.call('GET', '/v1/projects/' + id).catch(() => null);
+    const tasks = this.store.all(`SELECT id,kind,status,phase,object_number,generation,error_code,updated_at FROM tasks WHERE repository_id=?
+      ORDER BY created_at DESC,id DESC LIMIT 20`, id);
+    const commands: Json[] = [];
+    for (const row of this.store.all(`SELECT l.task_id,l.content,l.created_at,t.kind,t.object_number FROM task_logs l JOIN tasks t ON t.id=l.task_id
+      WHERE t.repository_id=? ORDER BY l.rowid DESC LIMIT 500`, id)) {
+      let entry: Json; try { entry = JSON.parse(row.content); } catch { continue; }
+      const command = entry.type === 'command' ? entry : entry.type === 'tool' && entry.name === 'run_command' ? { command: (entry.arguments as Json)?.command, ...(entry.result as Json) } : null;
+      if (!command) continue;
+      commands.push({ task_id: row.task_id, kind: row.kind, object_number: row.object_number, created_at: row.created_at, command: command.command,
+        exit_code: command.exit_code ?? null, timed_out: !!command.timed_out, error: command.error ?? null });
+      if (commands.length >= 30) break;
+    }
+    return { environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer: live?.computer || null,
+        operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
+      current_task: this.store.get('SELECT t.id,t.kind,t.status,t.phase,t.object_number FROM task_locks l JOIN tasks t ON t.id=l.task_id WHERE l.repository_id=?', id) || null,
+      tasks, commands };
+  }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/environments')) return undefined;
     if (url.pathname === '/api/environments' && method === 'GET') {
@@ -78,14 +100,16 @@ export class ProjectService {
       }
       return { environments: this.store.all(`SELECT r.id AS repository_id,r.full_name,r.account_id,r.owner_id,p.enabled,
         e.generation,COALESCE(e.state,CASE WHEN p.enabled=1 THEN 'provisioning' ELSE 'stopped' END) AS state,e.desired,e.error,e.started_at,
-        EXISTS(SELECT 1 FROM environment_operations o WHERE o.repository_id=r.id AND o.state='pending') AS operation_pending
+        EXISTS(SELECT 1 FROM environment_operations o WHERE o.repository_id=r.id AND o.state='pending') AS operation_pending,
+        t.id AS current_task_id,t.kind AS current_task_kind,t.object_number AS current_task_number
         FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id
+        LEFT JOIN task_locks l ON l.repository_id=r.id LEFT JOIN tasks t ON t.id=l.task_id
         WHERE ${clauses.join(' AND ')} ORDER BY r.full_name`, ...args) };
     }
     const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete))?$/.exec(url.pathname);
     if (!match) return fail(404, 'not_found');
     const id = match[1]!; repository(this.store, user, id);
-    if (!match[2] && method === 'GET') return { environment: this.store.get('SELECT * FROM project_environments WHERE repository_id=?', id) || { repository_id: id, state: 'provisioning' } };
+    if (!match[2] && method === 'GET') return this.detail(id);
     if (method !== 'POST' || !match[2]) return fail(404, 'not_found');
     fields(input, ['operation_id','generation','confirm']);
     if (!/^[a-f0-9]{48}$/.test(String(input.operation_id || '')) || !Number.isSafeInteger(input.generation)) fail(400, 'invalid_operation');

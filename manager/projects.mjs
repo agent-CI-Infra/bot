@@ -5,6 +5,8 @@ import { randomBytes } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
+// Fixed project computer template; the control plane only displays it and cannot change it.
+const limits = { memory_mb: 512, cpus: 1, pids: 128, tmp_mb: 64 };
 export class Projects {
   constructor({ database, docker, deployment, image }) {
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
@@ -18,6 +20,13 @@ export class Projects {
   }
   get(repo) { return this.db.prepare('SELECT * FROM projects WHERE repository_id=?').get(repo); }
   list() { return this.db.prepare('SELECT * FROM projects ORDER BY repository_id').all(); }
+  describe(repo) {
+    const project = this.get(repo); if (!project) return null;
+    const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
+    const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
+    return { ...project, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
+      root_filesystem: 'read-only', network_policy: 'internal, no egress', ...limits, retained_generations: generations } };
+  }
   lock(repo, fn) {
     const previous = this.queues.get(repo) || Promise.resolve();
     const next = previous.catch(() => {}).then(fn); this.queues.set(repo, next);
@@ -70,8 +79,8 @@ export class Projects {
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
         Cmd: ['node', '/opt/runner/idle.mjs'], Env: ['HOME=/workspace/home', 'LANG=C.UTF-8'], Labels: this.labels(repo, generation, 'container'),
         HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
-          Memory: 512 * 1024 * 1024, NanoCpus: 1_000_000_000, PidsLimit: 128, NetworkMode: names.network,
-          RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': 'rw,nosuid,nodev,noexec,size=67108864,mode=1777' },
+          Memory: limits.memory_mb * 1024 * 1024, NanoCpus: limits.cpus * 1_000_000_000, PidsLimit: limits.pids, NetworkMode: names.network,
+          RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': `rw,nosuid,nodev,noexec,size=${limits.tmp_mb * 1024 * 1024},mode=1777` },
           Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }] } });
       container = await this.inspect(repo, generation, 'container');
     }
