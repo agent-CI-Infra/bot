@@ -61,6 +61,15 @@ try{
   const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
   await api('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2,review_label:'bot-reviewed'});
   const disabled=await hook('202',2);assert.equal(disabled.tasks_created,0);passed('review-disabled repository only archives');
+  // The account sees three repositories; 303 is installed but not started, so its events only archive until an administrator starts it.
+  const listed=(await api('/api/installations/sync','POST',{})).repositories;
+  assert.deepEqual(listed.map(r=>[r.id,r.registered,r.installed]).sort(),[['101',true,true],['202',true,true],['303',false,true]]);
+  assert.equal((await hook('303',2)).tasks_created,0);
+  const shared=(await api('/api/models','POST',{repository_id:null,api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
+  const started=(await api('/api/installations/303/activate','POST',{model_id:shared.id})).repository;assert.deepEqual([started.registered,started.enabled,started.review_enabled,started.development_enabled],[true,true,true,false]);
+  assert.equal((await hook('303',2)).tasks_created,1);await done('303',2,'review.issue','succeeded');
+  await api('/api/installations/303/disable','POST',{});assert.equal((await hook('303',4)).tasks_created,0);
+  passed('installed repositories are listed, start only from the console, and can be disabled');
   const delivery=id(),opened=await hook('101',1,'issues','opened',delivery);assert.equal(opened.tasks_created,1);
   const duplicate=await hook('101',1,'issues','opened',delivery);assert.equal(duplicate.duplicate,true);assert.equal(duplicate.tasks_created,0);
   await done('101',1,'review.issue','succeeded');const development=await done('101',1,'development.issue','pr_opened');

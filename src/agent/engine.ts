@@ -51,6 +51,7 @@ export class TaskEngine {
       Object.assign(task,values);const keys=Object.keys(values);
       this.store.run(`UPDATE tasks SET ${keys.map(k=>k+'=?').join(',')},updated_at=? WHERE id=? AND claim_token=?`,...keys.map(k=>values[k] as any),new Date().toISOString(),id,token);
     };
+    let workspace:Workspace|undefined;
     try{
       await guard();const config=selectedModel(this.store,task.repository_id);redactor.add(config.key);
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
@@ -73,7 +74,7 @@ export class TaskEngine {
           if(candidate&&!candidate.pr_number&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan');
         }
       };
-      const workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
+      workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
       if(task.phase==='prepare'){
         let environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         if(!environment)environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);
@@ -108,7 +109,7 @@ export class TaskEngine {
         const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
         const command=policy.test_command||result.test_command;if(typeof command!=='string'||!command.trim())stop('test_command_missing','waiting_configuration');
         const before=await workspace.artifact('validate:before');
-        const validation=await workspace.call('validate:tests',{type:'workspace_command',command,timeout_ms:60000});
+        const validation=await workspace.call('validate:tests',{type:'workspace_command',command,timeout_ms:1800000});
         if(validation.error||validation.exit_code!==0||validation.timed_out||validation.truncated)stop('validation_failed');
         const after=await workspace.artifact('validate:after');if(before.tree_sha!==after.tree_sha)stop('tests_changed_candidate');
         if(after.tree_sha===input.snapshot_tree)stop('development_has_no_changes');
@@ -141,9 +142,10 @@ export class TaskEngine {
           update({result:JSON.stringify({summary:candidate.summary,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         }
       }
-      log({type:'completed',status:task.status});
+      await workspace.release();log({type:'completed',status:task.status});
     }catch(error){
       if(!(error instanceof TaskError))log({type:'runtime_fault',message:redactor.text(String((error as Error)?.message||'runtime failure')).slice(0,2000)});
+      await workspace?.release();
       const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed');
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
       const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
@@ -154,6 +156,18 @@ export class TaskEngine {
       }
       log({type:'fault',state:failure.state,code:failure.code});
     }
+  }
+  // The command a running task is executing right now, with its output so far, read from the project computer.
+  async live(user:Actor,id:string,url:URL):Promise<Json>{
+    const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,id,...filter.args);
+    if(!task)return fail(404,'task_not_found');
+    const tool=task.status==='running'?this.store.get("SELECT id,request FROM task_tools WHERE task_id=? AND state='pending' ORDER BY rowid DESC LIMIT 1",task.id):undefined;
+    const request=tool?JSON.parse(tool.request).request:null;
+    if(!tool||!['workspace_command','command'].includes(request?.type))return {running:false};
+    const offset=Number(url.searchParams.get('offset'))||0;if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_offset');
+    const output=await this.manager.call('GET',`/v1/projects/${task.repository_id}/output/${tool.id}?offset=${offset}`).catch(()=>null);
+    return {running:true,operation_id:tool.id,command:request.command,timeout_ms:request.timeout_ms,keep_background:!!request.keep_background,
+      output:output?.data??'',offset:output?.offset??offset,state:output?.state??'unavailable'};
   }
   owned(github:GitHub,task:Row,pr:any):Row{
     const row=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number);
@@ -173,7 +187,9 @@ export class TaskEngine {
       enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:result},task.source_delivery_id,task.id);
     }
   }
-  api(user:Actor,method:string,url:URL,input:Json):Json|undefined{
+  async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
+    const live=/^\/api\/tasks\/([^/]+)\/live$/.exec(url.pathname);
+    if(live&&method==='GET')return this.live(user,live[1]!,url);
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
     fields(input,[]);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
     if(!task)return fail(404,'task_not_found');

@@ -73,7 +73,8 @@ try {
   assert.equal(cannotConnect.result.exit_code,0); await listening; passed('project networks cannot connect across repositories');
   const command = 'node -e "console.log(Date.now());setTimeout(()=>console.log(Date.now()),500)"';
   const same = await Promise.all([run('101',command),run('101',command)]);
-  const stamps = same.map(r=>r.result.output.trim().split('\n').map(Number)); assert.ok(stamps[0][1]<=stamps[1][0]);
+  // Either request may take the lock first; serialized means the two intervals do not overlap.
+  const stamps = same.map(r=>r.result.output.trim().split('\n').map(Number)).sort((a,b)=>a[0]-b[0]); assert.ok(stamps[0][1]<=stamps[1][0],JSON.stringify(stamps));
   const both = await Promise.all([run('101',command),run('202',command)]);
   const times = both.map(r=>r.result.output.trim().split('\n').map(Number)); assert.ok(Math.max(times[0][0],times[1][0])<Math.min(times[0][1],times[1][1]));
   passed('same repository serializes execution; different repositories overlap');
@@ -88,6 +89,30 @@ try {
   passed('project credentials absent; only manager has daemon access');
   const duplicate = id(); await run('101','printf x >> once.txt',1,duplicate); await run('101','printf x >> once.txt',1,duplicate);
   assert.equal((await manager('101','execute',{type:'read',path:'once.txt'})).result.content,'x'); passed('execution operation ids are idempotent');
+  // Commands run in the same container; long commands stream output; a task keeps background services until it releases the computer.
+  const startedAt = inspect(name('101')).State.StartedAt; await run('101','sleep 0.2 & true'); assert.equal(inspect(name('101')).State.StartedAt,startedAt);
+  assert.equal(inspect(name('101')).HostConfig.Init,true); passed('commands run in the same long-lived container without restarting it');
+  const egress = await run('101', `node -e "fetch('https://github.com',{signal:AbortSignal.timeout(20000)}).then(r=>{console.log(r.status);process.exit(0)},e=>{console.log(e.cause?.code||e.message);process.exit(1)})"`);
+  assert.equal(egress.result.exit_code,0,egress.result.output); passed('project containers can reach the internet');
+  const output = async op => (await (await fetch(`${managerUrl}/v1/projects/101/output/${op}?offset=0`,{headers:{Authorization:'Bearer '+token}})).json()).result;
+  const longOp = id(), longRun = manager('101','execute',{type:'command',command:'echo started; sleep 65; echo finished',timeout_ms:90000},1,longOp);
+  const partial = await wait(async () => { const r = await output(longOp); return r?.data === 'started\n' && r; }, 'live output');
+  assert.equal(partial.state,'running'); const long = await longRun; assert.equal(long.result.exit_code,0); assert.equal(long.result.output,'started\nfinished\n');
+  passed('a command longer than 60 seconds runs to completion and its output is readable while it runs');
+  const ws = id(); await manager('101','execute',{type:'workspace_init',workspace_id:ws});
+  const serve = `nohup node -e "require('node:http').createServer((q,s)=>s.end('up')).listen(7799)" > server.log 2>&1 &`;
+  assert.equal((await manager('101','execute',{type:'workspace_command',workspace_id:ws,command:serve,keep_background:true,timeout_ms:10000})).result.exit_code,0);
+  const probe = { type:'workspace_command', workspace_id:ws, timeout_ms:10000, command:`node -e "fetch('http://127.0.0.1:7799').then(r=>r.text()).then(t=>{console.log(t);process.exit(0)},()=>process.exit(3))"` };
+  const reached = await wait(async () => { const r = await manager('101','execute',probe); return r.result.exit_code === 0 && r; }, 'background service');
+  assert.equal(reached.result.output.trim(),'up'); await manager('101','execute',{type:'reap',workspace_id:ws});
+  assert.equal((await manager('101','execute',probe)).result.exit_code,3);
+  passed('a task keeps background services across its commands and they stop when it releases the computer');
+  const slowOp = id(), slow = manager('101','execute',{type:'command',command:'sleep 300',timeout_ms:400000},1,slowOp).then(() => 'completed', e => e.message);
+  await wait(async () => (await output(slowOp))?.state === 'running', 'slow command running');
+  const stopping = Date.now(); await api('/api/environments/101/stop','POST',{operation_id:id(),generation:1});
+  assert.ok(Date.now() - stopping < 30000); assert.notEqual(await slow,'completed');
+  await api('/api/environments/101/start','POST',{operation_id:id(),generation:1}); await wait(async () => (await manager('101'))?.state === 'ready','restart after interrupt');
+  passed('stopping the computer interrupts a running long command');
   compose(['restart','manager']);
   await wait(async () => (await manager('101'))?.state==='ready','manager recovery');
   assert.equal((await manager('101','execute',{type:'read',path:'private.txt'})).result.content,'project-101-only');

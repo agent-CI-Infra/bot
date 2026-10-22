@@ -1,8 +1,8 @@
-import { mkdir, readFile, writeFile, realpath, readdir, rename, open } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, realpath, readdir, rename, open, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
-import { spawn } from 'node:child_process';
 import { workspace as workspaceTool } from './workspace.mjs';
+import { command } from './command.mjs';
 
 const workspace = '/workspace', journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -17,7 +17,8 @@ async function filePath(value) {
   return target;
 }
 async function execute(input) {
-  if(input.type.startsWith('workspace_')) return workspaceTool(input);
+  const outputFile = `${journal}/${input.operation_id}.out`;
+  if(input.type.startsWith('workspace_')) return workspaceTool({ ...input, output_file: outputFile });
   if (input.type === 'health') {
     let interrupted = 0;
     for (const name of await readdir(journal)) if (/^[a-f0-9]{48}\.json$/.test(name) && name !== `${input.operation_id}.json`) {
@@ -37,33 +38,62 @@ async function execute(input) {
     try { if ((await handle.stat()).size > 1024 * 1024) throw new Error('file_too_large'); return { content: await handle.readFile('utf8') }; }
     finally { await handle.close(); }
   }
-  if (input.type !== 'command' || typeof input.command !== 'string' || !input.command || input.command.length > 32768) throw new Error('invalid_command');
-  const timeout = Math.min(60000, Math.max(100, Number(input.timeout_ms) || 10000));
-  return new Promise((resolveResult, reject) => {
-    // A process group is killed even when the shell exits, so background children cannot outlive the project lock.
-    const child = spawn('/bin/sh', ['-c', input.command], { cwd: workspace, detached: true,
-      env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/workspace/home', LANG: 'C.UTF-8', TMPDIR: '/tmp' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '', timedOut = false, truncated = false;
-    const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
-    const timer = setTimeout(() => { timedOut = true; kill(); }, timeout);
-    const collect = data => { if (Buffer.byteLength(output) + data.length <= 1024 * 1024) output += data.toString(); else { truncated = true; kill(); } };
-    child.stdout.on('data', collect); child.stderr.on('data', collect);
-    child.on('error', error => { clearTimeout(timer); kill(); reject(error); });
-    child.on('exit', () => kill());
-    child.on('close', (code, signal) => { clearTimeout(timer); kill(); resolveResult({ exit_code: code, signal, output, timed_out: timedOut, truncated }); });
-  });
+  if (input.type !== 'command') throw new Error('invalid_command');
+  return command(input.command, workspace, input.timeout_ms, { outputFile });
+}
+// Live output of a running command, cut at a UTF-8 character boundary.
+async function tail(input) {
+  if (!Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_offset');
+  const record = await readFile(`${journal}/${input.operation_id}.json`, 'utf8').then(JSON.parse).catch(() => null);
+  let handle; try { handle = await open(`${journal}/${input.operation_id}.out`, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch { return { data: '', offset: input.offset, size: 0, state: record?.state || 'missing' }; }
+  try {
+    const size = (await handle.stat()).size, buffer = Buffer.alloc(Math.max(0, Math.min(65536, size - input.offset)));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, input.offset);
+    let end = bytesRead; for (let back = 1; back <= 3 && end - back >= 0; back++) { const byte = buffer[end - back];
+      if ((byte & 0xc0) === 0x80) continue; const need = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1; if (need > back) end -= back; break; }
+    return { data: buffer.subarray(0, end).toString('utf8'), offset: input.offset + end, size, state: record?.state || 'running' };
+  } finally { await handle.close(); }
+}
+async function processes() {
+  const rows = [];
+  for (const name of await readdir('/proc')) if (/^\d+$/.test(name)) try {
+    const stat = await readFile(`/proc/${name}/stat`, 'utf8'), fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    rows.push({ pid: Number(name), state: fields[0], ppid: Number(fields[1]), cmdline: (await readFile(`/proc/${name}/cmdline`, 'utf8')).split('\0').filter(Boolean).join(' ') });
+  } catch { /* The process already exited. */ }
+  return rows;
+}
+// Ends every project process except init, the idle keeper and this runner. The container itself keeps running.
+async function reap() {
+  const keep = new Set([1, process.pid]);
+  // The idle keeper is the first child of the container init; later processes cannot take a lower PID.
+  const idle = (await processes()).filter(p => p.ppid === 1 && p.cmdline === 'node /opt/runner/idle.mjs').sort((a, b) => a.pid - b.pid)[0];
+  if (idle) keep.add(idle.pid);
+  let killed = 0;
+  for (let round = 0; round < 20; round++) {
+    const live = (await processes()).filter(p => !keep.has(p.pid) && p.state !== 'Z');
+    if (!live.length) return { killed, remaining: 0 };
+    for (const p of live) try { process.kill(p.pid, 'SIGKILL'); killed++; } catch { /* Already gone. */ }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('reap_incomplete');
 }
 await mkdir(journal, { recursive: true, mode: 0o700 }); await mkdir('/workspace/home', { recursive: true });
 const request = JSON.parse(Buffer.from(process.argv[2] || '', 'base64url').toString());
 if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operation_id');
 let result;
-try {
+if (['tail', 'reap'].includes(request.type)) {
+  // Reading progress and stopping leftovers are repeatable and never journaled.
+  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : await reap() }; } catch { result = { ok: false, error: request.type + '_failed' }; }
+} else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };
   else {
     await save(request.operation_id, { state: 'running' });
     try { result = { ok: true, result: await execute(request) }; } catch { result = { ok: false, error: 'runner_operation_failed' }; }
     await save(request.operation_id, { state: 'completed', result });
+    // The journal now holds the full result; the live copy is no longer needed.
+    await unlink(`${journal}/${request.operation_id}.out`).catch(() => {});
   }
 } catch { result = { ok: false, error: 'runner_journal_failed' }; }
 process.stdout.write(JSON.stringify(result));
