@@ -4,6 +4,7 @@ import { resolve,dirname,sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { command,environment } from './command.mjs';
+import {agentOperation} from './agent.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
 export async function workspace(input){
@@ -25,6 +26,7 @@ export async function workspace(input){
     return {initialized:true};
   }
   const actual=await realpath(repo);if(actual!==repo)throw new Error('workspace_replaced');
+  if(input.type.startsWith('workspace_agent_'))return agentOperation(input,root);
   if(input.type==='workspace_write'){
     if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>1024*1024)throw new Error('invalid_content');
     const data=Buffer.from(input.base64,'base64'),target=await path(input.path,true);

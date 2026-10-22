@@ -204,6 +204,11 @@ export async function management(store: Store, user: Actor, method: string, path
           keep('review_language', body.review_language), keep('review_instructions', body.review_instructions), id);
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,review_label=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),body.review_label===undefined?previous.review_label:String(body.review_label),automation,id);
+        if(body.review_label!==undefined){
+          const overrides=JSON.parse(previous.rule_overrides||'{}'),key='.bot/rules/labels.md',line='review_label: '+JSON.stringify(body.review_label),content=overrides[key]||'';
+          overrides[key]=/^review_label:.*$/m.test(content)?content.replace(/^review_label:.*$/m,line):line+'\n'+content;
+          store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?',JSON.stringify(overrides),id);
+        }
         return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true };
       });
     }

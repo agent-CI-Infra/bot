@@ -27,7 +27,7 @@ let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropCo
 const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function model(input){
-  const context=JSON.parse(input.messages[1].content),repoId=context.repository.split('-').at(-1),repo=repositories.get(repoId),number=context.object.number;
+  const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw),repoId=context.repository.split('-').at(-1),repo=repositories.get(repoId),number=context.object.number;
   models.push({repository:repoId,number,mode:context.mode,messages:input.messages,model:input.model});
   const tools=input.messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls||[]),names=tools.map(t=>t.function.name);
   let result;

@@ -9,26 +9,31 @@ import { Redactor } from '../dist/agent/common.js';
 
 const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 
-test('the agent loop records each model decision and tool result as a visible process step', async t => {
-  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  const replies = [
-    { role: 'assistant', content: 'Inspect the helper first.', reasoning_content: 'The PR adds one file; read it and run it.', tool_calls: [call('c1', 'read_file', { path: 'src/stats.js' }), call('c2', 'run_command', { command: 'node -e 1' })] },
-    { role: 'assistant', content: null, tool_calls: [call('c3', 'finish_review', { summary: 'Short summary.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] })] }];
-  const server = createServer(async (req, res) => { for await (const _ of req); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: replies.shift() }] })); });
-  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
-  const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: `http://127.0.0.1:${server.address().port}/v1`, api_key: 'process-fixture-key', model_name: 'fixture' })).value.model;
-  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, review_enabled: true });
+function proxyWorkspace(logs=[]) {
+  let configBytes=[],config,replyBytes=[],replied=false;
+  return {log:value=>logs.push(value),call:async(_key,request)=>{
+    if(request.type==='workspace_agent_config'){configBytes.push(Buffer.from(request.base64,'base64'));if(request.final)config=JSON.parse(Buffer.concat(configBytes));return {written:true};}
+    if(request.type==='workspace_agent_start')return {started:true};
+    if(request.type==='workspace_agent_reply'){replyBytes.push(Buffer.from(request.base64,'base64'));if(request.final)replied=true;return {written:true};}
+    if(request.type==='workspace_agent_poll'){
+      if(!replied)return {state:'running',request:{id:'a'.repeat(48),body:{stream:true,messages:[{role:'system',content:config.system},{role:'user',content:config.prompt}]}},events:[],offset:0};
+      const reply=JSON.parse(Buffer.concat(replyBytes)),chunk=JSON.parse(reply.body.split('\n')[0].slice(6)),call=chunk.choices[0].delta.tool_calls[0];
+      return {state:'completed',result:JSON.parse(call.function.arguments),events:[{type:'model',content:'Pi finished',tool_calls:[{name:call.function.name}]}],offset:1};
+    }
+    throw new Error('unexpected runner request');
+  }};
+}
+test('the control plane relays Pi model requests with the configured model and keeps its key out of the runner', async t => {
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const received=[],finish={summary:'Short summary.',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
+  const server=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;received.push({authorization:req.headers.authorization,body:JSON.parse(raw)});res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[call('f','finish_review',finish)]}}]}));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:'process-fixture-key',model_name:'fixture'})).value.model;
+  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('process','101','review.pr','running','pr',4,'claim')");
-  const logs = [], workspace = { log: value => logs.push(value), write: async () => {},
-    call: async (_key, request) => request.type === 'workspace_read' ? { content: 'export const x = 1;\n' } : { exit_code: 0, output: 'ok\n', timed_out: false, truncated: false } };
-  const result = await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='process'"), workspace, new Redactor(), async () => {}, { mode: 'review' });
-  assert.equal(result.summary, 'Short summary.');
-  assert.deepEqual(logs.map(l => l.type + (l.name ? ':' + l.name : '')), ['model', 'tool:read_file', 'tool:run_command', 'model']);
-  assert.equal(logs[0].reasoning, 'The PR adds one file; read it and run it.');
-  assert.deepEqual(logs[0].tool_calls.map(c => c.name), ['read_file', 'run_command']);
-  assert.equal(logs[1].result.bytes, 20);
-  assert.deepEqual([logs[2].arguments.command, logs[2].result.exit_code], ['node -e 1', 0]);
-  assert.equal(logs[3].tool_calls[0].name, 'finish_review');
+  const logs=[],workspace=proxyWorkspace(logs),requests=[],original=workspace.call;workspace.call=async(...args)=>{requests.push(args[1]);return original(...args);};
+  const result=await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='process'"),workspace,new Redactor(),async()=>{},{mode:'review',materials:[{path:'a.js',content:'code'}]});
+  assert.equal(result.summary,'Short summary.');assert.equal(received[0].authorization,'Bearer process-fixture-key');assert.equal(received[0].body.model,'fixture');assert.ok(!JSON.stringify(requests).includes('process-fixture-key'));assert.equal(logs[0].tool_calls[0].name,'finish_review');
 });
 
 test('task lists split review and development work, and logs carry their time', async t => {
@@ -104,11 +109,11 @@ test('review rules choose the triggers, and the comment language and administrat
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: `http://127.0.0.1:${server.address().port}/v1`, api_key: 'rules-fixture-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
-  const workspace = { log: () => {}, write: async () => {}, call: async () => ({}) }, rules = { language: 'zh', instructions: 'Focus on API compatibility.' };
+  let workspace = proxyWorkspace(); const rules = { language: 'zh', instructions: 'Focus on API compatibility.' };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('r','101','review.pr','running','pr',7,'c'),('d','101','development.issue','running','dev',1,'c')");
   await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules });
-  assert.match(prompts[0], /Simplified Chinese/); assert.match(prompts[0], /trusted configuration[^]*Focus on API compatibility\./);
-  reply.tool_calls = [call('g', 'finish_development', { summary: 'done', test_command: 'true' })];
+  assert.match(prompts[0], /Simplified Chinese/); assert.match(prompts[0], /Administrator review guidance[^]*Focus on API compatibility\./);
+  reply.tool_calls = [call('g', 'finish_development', { summary: 'done', test_command: 'true' })]; workspace=proxyWorkspace();
   await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules });
   assert.doesNotMatch(prompts[1], /Focus on API compatibility/);
 });

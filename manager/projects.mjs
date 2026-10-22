@@ -250,8 +250,8 @@ export class Projects {
           const container = await this.inspect(repo, project.generation, 'container');
           if (!container?.State.Running || container.State.StartedAt !== project.started_at) throw new ManagerError('recovery_required');
           const call = input.request;
-          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','reap'];
-          const keys=['type','command','path','content','timeout_ms','keep_background','workspace_id','base64','offset','final','mode','snapshot','sha','tree_sha'];
+          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_live','reap'];
+          const keys=['type','command','path','content','timeout_ms','keep_background','workspace_id','base64','offset','final','mode','snapshot','sha','tree_sha','config','request_id'];
           if (!call || !types.includes(call.type) || Object.keys(call).some(k => !keys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
           // Kept background processes belong to one task workspace; any other work stops them first.
           const owner = this.background.get(repo);

@@ -12,10 +12,12 @@ import { type TaskEngine } from './agent/engine.js';
 import type { AutomationConfig } from './automation/config.js';
 import { ExternalService } from './external/service.js';
 import { type InstallationSync, installationApi } from './app/installations.js';
+import { Onboarding } from './onboarding/service.js';
+import { RuleService } from './rules/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
-  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; }
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -31,13 +33,15 @@ function respond(res: ServerResponse, status: number, value: Json): void {
 export function createControlPlane(options: Options) {
   const { store } = options;
   const external = options.external || new ExternalService(store);
+  const onboarding = options.onboarding || new Onboarding(store);
+  const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const loginAttempts = new Map<string, { n: number; until: number }>();
   const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${options.secureCookies ? '; Secure' : ''}`;
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
   // Errors contain stable codes only: never echo a request, credential, SQL statement or stack.
   const wrap = (fn: (req: IncomingMessage, res: ServerResponse) => Promise<void>) => async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com");
     try { await fn(req, res); }
     catch (error) {
       if (!res.headersSent) respond(res, error instanceof HttpError ? error.status : 503, { error: error instanceof HttpError ? error.code : 'service_unavailable' });
@@ -45,7 +49,8 @@ export function createControlPlane(options: Options) {
     }
   };
   const webhook = createServer(wrap(async (req, res) => {
-    const path = new URL(req.url || '/', 'http://localhost').pathname;
+    const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname;
+    if (req.method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'webhook')); return; }
     if (req.method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     if(req.method==='POST'&&['/external/token','/external/revoke'].includes(path)){
       if(!req.headers['content-type']?.startsWith('application/json'))fail(415,'json_required');
@@ -63,9 +68,14 @@ export function createControlPlane(options: Options) {
   }));
   const admin = createServer(wrap(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
+    if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'admin')); return; }
+    if (method === 'GET' && path === '/onboarding/github/callback') {
+      await onboarding.callback(url.searchParams.get('code') || '', url.searchParams.get('state') || '');
+      res.writeHead(303, { Location: '/#onboarding' }); res.end(); return;
+    }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
-      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'] };
+      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
       res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` }); res.end(bytes); return;
@@ -130,7 +140,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
+    const result = await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
       ?? (method === 'GET' ? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     if (mutation && (path.startsWith('/api/repositories') || path.startsWith('/api/installations'))) void options.projects?.reconcile().catch(() => {});

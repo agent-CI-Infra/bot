@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视规则'], ['development', '开发设置'], ['members', '成员', true], ['activity', '运行记录']];
+const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视规则'], ['development', '开发设置'], ['rules','生效规则'], ['members', '成员', true], ['activity', '运行记录']];
 const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'max_command_minutes'];
 const packagesText = list => (list || []).join(' '), envText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
 const bytes = value => value == null ? '—' : value >= 1073741824 ? (value / 1073741824).toFixed(2) + ' GB' : value >= 1048576 ? (value / 1048576).toFixed(1) + ' MB' : Math.round(value / 1024) + ' KB';
@@ -49,6 +49,7 @@ async function renderProject(route) {
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   current.section = section; page.replaceChildren(projectHeader(), projectBody(section));
+  if(section==='rules')page.querySelector('.project-nav [aria-current=page]')?.scrollIntoView({block:'nearest',inline:'nearest'});
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
 }
 async function loadProject(id) {
@@ -80,7 +81,7 @@ function projectBody(section) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, model: modelSection, review: reviewSection, development: developmentSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ basic: basicSection, machine: machineSection, model: modelSection, review: reviewSection, development: developmentSection, rules: rulesSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
@@ -234,7 +235,7 @@ function reviewSection() {
     element('h4', '怎么写'), field('评论语言', language),
     field('项目检视指引', textarea('review_instructions', policy.review_instructions, { rows: 7, maxLength: 8000, placeholder: '写给检视 Agent 的项目规则，例如：\n- 重点关注 API 兼容性和数据迁移\n- 新增功能必须有测试，否则作为发现提出\n- 不评论代码格式，由 CI 检查' })),
     note('指引作为管理员配置传给模型；仓库里的内容仍按不可信数据处理。行内评论固定为 COMMENT，不会批准、请求修改或合并。'),
-    field('检视后打的标签', input('review_label', policy.review_label, { maxLength: 50, placeholder: '留空不打标签，例如 bot-reviewed' }))];
+    field('检视后打的标签', input('review_label', policy.review_label, { maxLength: 50, placeholder: '未设置时使用生效规则，默认 bot-reviewed' })),note('最终标签以「生效规则」为准，仓库文件优先。已有控制台标签可清空保存以关闭；未设置时使用内置默认。')];
   return [settingsForm('检视规则', nodes, form => patchPolicy(changed({
     review_enabled: form.elements.review_enabled.checked, review_issues: form.elements.review_issues.checked, review_pull_requests: form.elements.review_pull_requests.checked,
     review_pr_updates: form.elements.review_pr_updates.checked, review_language: form.elements.review_language.value, review_instructions: form.elements.review_instructions.value,
@@ -288,4 +289,31 @@ function activityCards() {
   }
   history.append(commands.length ? commandList : note('还没有命令记录。'));
   return [work, recent, history];
+}
+
+function rulesSection(){
+  const id=current.id,section=card('生效规则与来源');section.append(note('内置默认 → 项目控制台 → 默认分支仓库文件；PR 中的新行为文件不会直接启用。机器资源沿用「机器配置」。'));
+  async function load(refresh=false){
+    const {rules}=await api(`/api/repositories/${id}/rules${refresh?'/refresh':''}`,refresh?'POST':'GET',refresh?{}:undefined);
+    if(current.id!==id||current.section!=='rules')return;
+    const select=document.createElement('select');select.setAttribute('aria-label','规则文件');rules.files.forEach(row=>select.add(new Option(row.path,row.path)));
+    const head=element('div','','actions');head.append(button('刷新默认分支文件',()=>load(true).catch(error)),button('打开机器配置',()=>openProject(id,'machine')));
+    section.replaceChildren(element('h3','生效规则与来源'),note(rules.sha?`来源提交 ${rules.sha} · ${timestamp(rules.updated_at)}`:'尚未读取默认分支。当前展示内置与控制台配置，请点击刷新。'),head,field('规则文件',select));
+    const detail=element('div','','rule-layers');section.append(detail);
+    function show(){
+      const row=rules.files.find(item=>item.path===select.value),names={builtin:'内置默认',console:'项目控制台',repository:'仓库文件'};
+      detail.replaceChildren(element('p','最终来源：'+names[row.source],'rule-source'),collapsible('最终生效内容',row.effective,true));
+      for(const layer of row.layers)detail.append(collapsible(names[layer.source]+' · '+row.path,layer.content));
+      if(row.path==='.bot/computer.yaml'){
+        detail.append(note('这些值合并到现有 manager 的项目电脑规格。任务准备时应用默认分支的配置；手动应用仅限超级管理员。'));
+        if(me.role==='super_admin')detail.append(button('应用到此项目电脑',async()=>{try{await api(`/api/repositories/${id}/rules/apply-computer`,'POST',{});await load();}catch(e){error(e);}}));
+      }else if(row.path.startsWith('.bot/')){
+        const consoleLayer=row.layers.find(layer=>layer.source==='console'),editor=textarea('rule_content',consoleLayer?.content??'',{rows:6,spellcheck:false}),actions=element('div','','actions');
+        detail.append(field('项目控制台覆盖内容',editor),note(row.source==='repository'?'该文件已被仓库覆盖。控制台保存仍会保留，但最终以仓库文件为准。':'留空也是明确的空内容；恢复默认请使用清除按钮。'));
+        actions.append(button('保存控制台覆盖',async()=>{try{await api(`/api/repositories/${id}/rules`,'PUT',{path:row.path,content:editor.value});await load();}catch(e){error(e);}}),button('清除控制台覆盖',async()=>{try{await api(`/api/repositories/${id}/rules`,'PUT',{path:row.path,content:null});await load();}catch(e){error(e);}}));detail.append(actions);
+      }
+    }
+    select.onchange=show;show();
+  }
+  void load().catch(error);return [section];
 }

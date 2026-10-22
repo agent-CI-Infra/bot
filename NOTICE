@@ -6,3 +6,7 @@ The project execution isolation architecture was informed by Witden
 5a17a1e6ffeb204d9a18acd9020f47e828571fe4.
 The minimal manager and runner in this repository are independently implemented;
 they do not include Witden desktop, messaging, or employee delegation code.
+
+The headless project agent uses Pi (@earendil-works/pi-coding-agent 1.4.0),
+https://github.com/badlogic/pi-mono, under the MIT License.
+The upstream notice is retained in runner/licenses/pi-MIT.txt and the project image.

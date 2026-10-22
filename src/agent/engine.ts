@@ -9,13 +9,15 @@ import { agentLoop } from './loop.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
 import { Redactor, sha, operationId, stop, TaskError } from './common.js';
+import { RuleService, resolveRules, behaviorPath } from '../rules/service.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,max_command_minutes:c.max_command_minutes,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 export class TaskEngine {
   readonly active=new Map<string,Promise<void>>();private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string){}
+  readonly rules:RuleService;
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string){this.rules=new RuleService(store,manager,githubUrl);}
   start(){
     this.store.run("UPDATE task_locks SET task_id=NULL,token=NULL");
     this.store.run("UPDATE tasks SET status='queued',claim_token=NULL WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND status IN ('running','preparing','implementing','validating','publishing','result_ready')");
@@ -94,9 +96,18 @@ export class TaskEngine {
         const snapshot=await workspace.prepare(github,ref.object.sha);
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
         if(files.length>=3000)stop('pull_request_file_limit','waiting_environment');
+        const ruleSha=task.kind.endsWith('.pr')?(await github.ref(github.defaultBranch))?.object.sha:ref.object.sha;
+        const ruleFiles=ruleSha===ref.object.sha?snapshot.rule_files:await this.rules.fetch(github,ruleSha);
+        this.rules.cache(task.repository_id,ruleSha,ruleFiles);
+        const effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
+        if(Object.entries(effectiveRules.computer).some(([key,value])=>JSON.stringify(environment.computer?.[key])!==JSON.stringify(value))){
+          this.rules.rememberComputer(task.repository_id,environment.computer);
+          environment=await this.manager.call('POST',`/v1/projects/${task.repository_id}/configure`,{operation_id:randomId(),generation:environment.generation,request:redactor.clean(effectiveRules.computer)},35*60000);
+          environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
+        }
         const comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
         input={...input,object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
-          files,coverage:snapshot.coverage,context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,review:input.review||null,
+          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,review:input.review||null,effective_rules:effectiveRules,
             comments:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language,instructions:policy.review_instructions||''},
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
@@ -106,6 +117,7 @@ export class TaskEngine {
       if(task.phase==='model'){
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context);await validate();
         if(!development){
+          if(input.behavior_changes?.length){result.summary+='\n\n这些文件改变了 bot 的行为，需要人来决定：'+input.behavior_changes.join('、');result.clarification_required=true;}
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};
           update({result:JSON.stringify(result),phase:'publish'});
         }else update({result:JSON.stringify(result),phase:'validate'});
@@ -130,7 +142,7 @@ export class TaskEngine {
         if(!development){
           const outputs=await publisher.review(result,input.files);
           // The policy label, never the model, is applied only after the summary comment was published.
-          const label=this.store.get('SELECT review_label FROM policies WHERE repository_id=?',task.repository_id)?.review_label;
+          const label=input.review_label;
           if(label)outputs.push({labels:(await publisher.label(label)).map((l:any)=>l.name)});
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
           result={...result,outputs};
@@ -168,8 +180,12 @@ export class TaskEngine {
     if(!task)return fail(404,'task_not_found');
     const tool=task.status==='running'?this.store.get("SELECT id,request FROM task_tools WHERE task_id=? AND state='pending' ORDER BY rowid DESC LIMIT 1",task.id):undefined;
     const request=tool?JSON.parse(tool.request).request:null;
-    if(!tool||!['workspace_command','command'].includes(request?.type))return {running:false};
     const offset=Number(url.searchParams.get('offset'))||0;if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_offset');
+    if(!tool||!['workspace_command','command'].includes(request?.type)){
+      if(task.status!=='running'||task.phase!=='model'||!task.workspace_id||!task.generation)return {running:false};
+      const live=await this.manager.call('POST',`/v1/projects/${task.repository_id}/execute`,{operation_id:randomId(),generation:task.generation,request:{type:'workspace_agent_live',workspace_id:task.workspace_id,offset}}).catch(()=>null);
+      return live?.ok?live.result:{running:false};
+    }
     const output=await this.manager.call('GET',`/v1/projects/${task.repository_id}/output/${tool.id}?offset=${offset}`).catch(()=>null);
     return {running:true,operation_id:tool.id,command:request.command,timeout_ms:request.timeout_ms,keep_background:!!request.keep_background,
       output:output?.data??'',offset:output?.offset??offset,state:output?.state??'unavailable'};

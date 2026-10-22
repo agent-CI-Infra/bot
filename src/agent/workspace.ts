@@ -46,12 +46,13 @@ export class Workspace {
     const files=tree.tree.filter((f:any)=>f.type!=='tree');
     if(files.length>2000||files.some((f:any)=>f.type!=='blob'||!['100644','100755','120000'].includes(f.mode)||Number(f.size)>1024*1024))stop('repository_snapshot_limit','waiting_environment');
     const init=await this.call('prepare:init',{type:'workspace_init'});if(init.error)stop('workspace_init_failed','waiting_environment');
-    let bytes=0,contextBytes=0;const materials:any[]=[];
+    let bytes=0,contextBytes=0;const materials:any[]=[],ruleFiles:Record<string,string>={};
     for(const file of files){
       safePath(file.path);
       const blob=await github.request('GET',github.path('/git/blobs/'+file.sha));
       if(blob.encoding!=='base64')stop('unsupported_blob_encoding');
       const data=Buffer.from(blob.content,'base64');bytes+=data.length;
+      if ((file.path.startsWith('.bot/') || /^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(file.path)) && !data.includes(0)){if(file.mode==='120000')stop('unsafe_bot_rule','waiting_configuration');ruleFiles[file.path]=data.toString('utf8');}
       if(bytes>32*1024*1024||data.length>1024*1024||blobSha(data)!==file.sha)stop('repository_blob_limit_or_hash');
       await this.write('prepare:'+file.path,file.path,data,file.mode,true,file.sha);
       if(contextBytes<100000&&!data.includes(0)){
@@ -60,7 +61,7 @@ export class Workspace {
     }
     const ready=await this.call('prepare:git',{type:'workspace_snapshot',tree_sha:commit.tree.sha});
     if(ready.error||ready.tree_sha!==commit.tree.sha)stop('workspace_snapshot_mismatch','waiting_environment');
-    return {files:files.map((f:any)=>({path:f.path,sha:f.sha,mode:f.mode})),materials,tree_sha:commit.tree.sha,
+    return {files:files.map((f:any)=>({path:f.path,sha:f.sha,mode:f.mode})),materials,rule_files:ruleFiles,tree_sha:commit.tree.sha,
       coverage:[`Snapshot: ${files.length} files, ${bytes} bytes`,`Initial model context: ${materials.length} files; other files available through tools`,'Git workspace contains a fixed snapshot, not full upstream history' ]};
   }
   async artifact(key:string){

@@ -51,6 +51,9 @@ async function done(repo,number,kind,status){return wait(async()=>{const list=aw
 const pull=(repo,number,state,draft=false)=>({id:4000+number,number,state:'open',draft,user:{id:800},head:{sha:state.repositories.find(r=>r.id===Number(repo)).refs.contributor,ref:'contributor',repo:{id:Number(repo)}},base:{ref:'trunk',repo:{id:Number(repo)}}});
 try{
   compose(['up','-d','--build']);await wait(async()=>(await fetch(base+'/healthz')).ok,'control health');
+  const botId=compose(['ps','-q','bot']).trim(),control=JSON.parse(docker(['inspect',botId]))[0],address=Object.values(control.NetworkSettings.Networks)[0].IPAddress;
+  const denied=compose(['exec','-T','tunnel','node','--input-type=module','-e',`for(const url of ['http://bot:8792/healthz','http://${address}:8792/healthz']){try{await fetch(url,{signal:AbortSignal.timeout(1500)});process.exit(1);}catch{}}process.stdout.write('isolated');`]);assert.equal(denied.trim(),'isolated');
+  assert.equal(compose(['exec','-T','tunnel','node','--input-type=module','-e',"process.stdout.write(String((await fetch('http://webhook:8791/api/setup')).status))"]).trim(),'404');passed('Tunnel edge network cannot reach the management listener, even by its control-network IP');
   await fake('config',{github_token:githubToken,model_key:modelKey});
   const managerToken=compose(['exec','-T','bot','node','--input-type=module','-e',"import {readFileSync} from 'node:fs';process.stdout.write(readFileSync('/internal/manager.token').toString('base64'))"]).trim();
   deployment=createHash('sha256').update(Buffer.from(managerToken,'base64')).digest('hex').slice(0,16);
@@ -109,7 +112,7 @@ try{
   const missing=await done('202',2,'review.issue','waiting_configuration');assert.equal(missing.error_code,'model_not_configured');
   const model2=(await api('/api/models','POST',{repository_id:'202',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
   await api('/api/repositories/202/policy','PATCH',{model_id:model2.id,development_enabled:true,test_command:'node --test'});await api('/api/tasks/'+missing.id+'/retry','POST',{});await done('202',2,'review.issue','succeeded');
-  assert.ok((await fake('state')).labels.every(l=>l.repository_id!==202));passed('missing model is a configuration fault and resumes after configuration');
+  assert.ok((await fake('state')).labels.some(l=>l.repository_id===202&&l.labels.includes('bot-reviewed')));passed('missing model is a configuration fault and resumes with the built-in label after configuration');
   await fake('faults',{tree_mismatch:true});const writesBefore=(await fake('state')).refWrites.length;await hook('202',3);
   const treeFailed=await wait(async()=>(await tasks('202',3,'development.issue')).find(t=>t.status==='failed'),'tree mismatch');assert.equal(treeFailed.error_code,'github_tree_mismatch');
   assert.equal((await fake('state')).refWrites.length,writesBefore);await fake('faults',{tree_mismatch:false});passed('remote tree mismatch prevents ref update');
@@ -118,7 +121,12 @@ try{
   for(const t of (await api('/api/tasks?limit=100')).tasks){const details=await api('/api/tasks/'+t.id),logs=await api('/api/tasks/'+t.id+'/logs');assert.ok(!JSON.stringify({details,logs}).includes(modelKey));assert.ok(!JSON.stringify({details,logs}).includes(githubToken));}
   assert.ok(state.models.filter(m=>m.repository==='202').every(m=>!JSON.stringify(m.messages).includes('REPO_101_ONLY')));passed('model materials remain project-scoped and response/log secrets are redacted');
   await hook('101',10);
-  await wait(()=>compose(['exec','-T','manager','node','--input-type=module','-e',"import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync('/data/manager.sqlite');process.stdout.write(String(Number(db.prepare(\"SELECT input FROM operations WHERE state='running' AND action='execute'\").all().some(r=>r.input.includes('recovery-marker')))))"]).trim()==='1','active recovery command');
+  await wait(()=>{
+    const container=docker(['ps','-q','--filter',`label=department.bot.deployment=${deployment}`,'--filter','label=department.bot.repository=101']).trim();
+    if(!container)return false;
+    return docker(['exec',container,'node','--input-type=module','-e',"import{readdirSync,existsSync}from'node:fs';process.stdout.write(String(Number(readdirSync('/workspace/tasks').some(id=>existsSync('/workspace/tasks/'+id+'/repo/recovery-marker.txt')))))"]).trim()==='1';
+  },'Pi command has started in the project container');
+  const recoveryTask=(await tasks('101',10,'review.issue'))[0],live=await api('/api/tasks/'+recoveryTask.id+'/live?offset=0');assert.equal(live.running,true);assert.ok(live.command.includes('recovery-marker'));passed('Pi commands retain live command output in the existing task API');
   compose(['kill','-s','SIGKILL','manager']);compose(['start','manager']);
   const recovered=await done('101',10,'review.issue','succeeded');assert.ok(recovered.attempt>=2);assert.equal((await fake('state')).comments.filter(c=>c.repository_id===101&&c.number===10).length,1);
   passed('interrupted container work is rechecked and resumed in a fresh attempt without a duplicate comment');

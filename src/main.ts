@@ -7,6 +7,7 @@ import { TaskEngine } from './agent/engine.js';
 import { loadRepositoryConfigs, repositoryConfigMap } from './automation/repository-config.js';
 import { InstallationSync } from './app/installations.js';
 import { ExternalService } from './external/service.js';
+import { Onboarding } from './onboarding/service.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
@@ -26,10 +27,11 @@ void projects.reconcile();
 const timer = setInterval(() => { void projects.reconcile().catch(() => {}); }, 5000);
 // Installed repositories are listed on start and every ten minutes; webhook events update them in between.
 const installations = new InstallationSync(store, process.env.BOT_GITHUB_API_URL || undefined);
+const onboarding = new Onboarding(store, { tunnelFile: process.env.BOT_TUNNEL_TOKEN_FILE, tunnelMetrics: process.env.BOT_TUNNEL_METRICS_URL, githubUrl: process.env.BOT_GITHUB_API_URL });
 setTimeout(() => void installations.syncAll(), 5000).unref();
 const syncTimer = setInterval(() => void installations.syncAll(), 10 * 60_000);
 const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
-  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external });
+  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding });
 for (const [name, port] of [['webhook', 8791], ['admin', 8792]] as const) {
   const server = servers[name];
   server.on('error', () => { console.error(`${name} listener failed`); process.exit(1); });
