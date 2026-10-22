@@ -2,6 +2,7 @@ import { createPrivateKey } from 'node:crypto';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
 import { fail, fields, hashPassword, password, randomId, text, type Json } from '../core/security.js';
+import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 function repoIds(store: Store, value: unknown): string[] {
@@ -146,7 +147,7 @@ export async function management(store: Store, user: Actor, method: string, path
   if (path === '/api/repositories') {
     if (method === 'GET') {
       const filter = scope(user, 'r.id');
-      return { repositories: store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled FROM repositories r
+      return { repositories: store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled,p.automation FROM repositories r
         JOIN policies p ON p.repository_id=r.id WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args) };
     }
     if (method === 'POST') {
@@ -168,7 +169,7 @@ export async function management(store: Store, user: Actor, method: string, path
     const id = repoMatch[1]!; repository(store, user, id);
     if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)! };
     if (method === 'PATCH' && repoMatch[2]) {
-      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','review_label']);
+      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','review_label','automation']);
       for (const key of ['review_enabled', 'development_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       const previous = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
       if(body.test_command!==undefined&&(typeof body.test_command!=='string'||body.test_command.length>2048))fail(400,'invalid_test_command');
@@ -179,16 +180,30 @@ export async function management(store: Store, user: Actor, method: string, path
       const model = body.model_id === undefined ? previous.model_id : body.model_id === null ? null : text(body.model_id);
       if (model && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
         (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)))`, model, id, id)) fail(400, 'model_not_available');
+      let automation = previous.automation as string;
+      if (body.automation !== undefined) {
+        if (!body.automation || typeof body.automation !== 'object' || Array.isArray(body.automation)) fail(400, 'invalid_automation_config');
+        try { automation = JSON.stringify(parseAutomationConfig(body.automation, loadAutomationConfig(previous.automation).config)); }
+        catch { fail(400, 'invalid_automation_config'); }
+      }
       return store.transaction(() => {
         store.run('UPDATE policies SET model_id=?,review_enabled=?,development_enabled=?,enabled=? WHERE repository_id=?', model,
           body.review_enabled === undefined ? previous.review_enabled : Number(body.review_enabled),
           body.development_enabled === undefined ? previous.development_enabled : Number(body.development_enabled),
           body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
         store.audit(user.id, 'policy.updated', id, id);
-        store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,review_label=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),body.review_label===undefined?previous.review_label:String(body.review_label),id);
+        store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,review_label=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),body.review_label===undefined?previous.review_label:String(body.review_label),automation,id);
         return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true };
       });
     }
+  }
+  if (path === '/api/automation') {
+    if (method !== 'GET') return undefined;
+    const filter = scope(user, 'r.id');
+    return {
+      runs: store.all(`SELECT a.* FROM automation_runs a JOIN repositories r ON r.id=a.repository_id
+        WHERE ${filter.sql} ORDER BY a.created_at DESC LIMIT 100`, ...filter.args),
+    };
   }
   return undefined;
 }

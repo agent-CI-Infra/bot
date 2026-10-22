@@ -66,6 +66,10 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置和未登记的仓库只归档，不自动登记仓库或生成任务。
 
+## 仓库自动化规则
+
+PR 门禁、标签规范和合并队列是仓库策略，不写进每个仓库的 GitHub Actions：`src/automation/` 提供规则引擎和内置模块（`label-lint`、`pr-status`、`gate`、`merge-queue`），每个仓库在 policy 的 `automation` 字段里开启和配置，默认 dry-run、默认不自动合并。webhook 落库时规划动作并写入 `automation_runs`，执行器接入 outbox 后再产生真实写入。配置 schema 与新增模块的步骤见 [docs/automation.md](docs/automation.md)。
+
 ## 源码与验证
 
 `src/main.ts` 是控制面入口，`src/server.ts` 分离管理与 Webhook 两个监听。`src/app/` 保存账号、登录、仓库授权、模型和投递归一化逻辑，`src/core/security.ts` 提供验签、慢哈希和凭据加密，`src/storage/database.ts` 管理 SQLite、事务及审计；`static/` 是同一管理入口。`src/agent/` 保存模型循环、任务认领及恢复，`src/review/` 保存触发和位置校验，`src/github/` 保存授权读取及发布 outbox。`src/projects/` 是环境网关，`manager/` 管理受管 Docker 资源，`runner/` 是容器内命令／文件协议，`images/project/` 构建批准镜像。manager／runner 独立实现，保留 Apache-2.0 及 NOTICE 中的上游设计归属，不携带完整员工平台。

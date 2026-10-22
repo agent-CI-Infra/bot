@@ -2,6 +2,7 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
 import { queueWebhook } from '../review/queue.js';
+import { recordAutomation } from '../automation/runner.js';
 
 export function ingest(store: Store, accountId: string, endpointId: string, headers: IncomingHttpHeaders, bytes: Buffer, complete: boolean) {
   const endpoint = store.get('SELECT id,account_id,secret FROM endpoints WHERE id=? AND account_id=?', endpointId, accountId);
@@ -52,6 +53,8 @@ export function ingest(store: Store, accountId: string, endpointId: string, head
     }
     if (status === 200 && !duplicate && owner && payload) {
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id);
+      // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
+      try { recordAutomation(store, String(owner.id), event, action, payload, id); } catch { /* a rule cannot fail ingestion */ }
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
     return { status, response };
