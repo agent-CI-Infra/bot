@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import { workspace as workspaceTool } from './workspace.mjs';
 import { command } from './command.mjs';
+import { execFile } from 'node:child_process';
 
 const workspace = '/workspace', journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -63,6 +64,11 @@ async function processes() {
   } catch { /* The process already exited. */ }
   return rows;
 }
+// Bytes used by the work volume; bounded so a huge tree cannot hold the caller.
+function usage() {
+  return new Promise(resolve => execFile('du', ['-sxb', workspace], { timeout: 20000, maxBuffer: 65536 }, (error, stdout) =>
+    resolve({ workspace_bytes: Number(String(stdout).split('\t')[0]) || null, complete: !error })));
+}
 // Ends every project process except init, the idle keeper and this runner. The container itself keeps running.
 async function reap() {
   const keep = new Set([1, process.pid]);
@@ -82,9 +88,9 @@ await mkdir(journal, { recursive: true, mode: 0o700 }); await mkdir('/workspace/
 const request = JSON.parse(Buffer.from(process.argv[2] || '', 'base64url').toString());
 if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operation_id');
 let result;
-if (['tail', 'reap'].includes(request.type)) {
-  // Reading progress and stopping leftovers are repeatable and never journaled.
-  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : await reap() }; } catch { result = { ok: false, error: request.type + '_failed' }; }
+if (['tail', 'reap', 'usage'].includes(request.type)) {
+  // Reading progress or usage and stopping leftovers are repeatable and never journaled.
+  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : await reap() }; } catch { result = { ok: false, error: request.type + '_failed' }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };

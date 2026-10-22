@@ -234,10 +234,10 @@ function resultCard(task) {
   return section;
 }
 
-let openEnvironmentId = null, environmentTimer = null;
+let openEnvironmentId = null, environmentTimer = null, usageSampled = 0;
 async function openEnvironment(repositoryId) {
   if (taskView.open) taskView.close();
-  openEnvironmentId = repositoryId; clearTimeout(environmentTimer);
+  openEnvironmentId = repositoryId; clearTimeout(environmentTimer); usageSampled = 0; usageCard.replaceChildren(element('h3', '实时资源'), element('p', '读取中…', 'muted'));
   for (const part of ['environment-body', 'environment-badges', 'environment-actions']) $(part).replaceChildren();
   $('environment-title').textContent = '正在加载…'; $('environment-error').textContent = '';
   if (!environmentView.open) environmentView.showModal();
@@ -248,8 +248,30 @@ async function refreshEnvironment() {
   try {
     const detail = await api('/api/environments/' + id); if (openEnvironmentId !== id || !environmentView.open) return;
     $('environment-error').textContent = ''; keepOpen($('environment-body'), () => renderEnvironment(detail));
+    if (!usageSampled || Date.now() - usageSampled > 5000) { usageSampled = Date.now(); refreshUsage(id); }
   } catch (err) { $('environment-error').textContent = err.message; }
   environmentTimer = setTimeout(refreshEnvironment, 3000);
+}
+// Package image build and setup script results: what was installed into this computer and whether it worked.
+function preparationCard(pc) {
+  const section = card('软件安装与初始化'), build = pc.build, setup = pc.setup;
+  const buildState = { none: ['仅用镜像自带软件', ''], building: ['正在构建软件包镜像', 'info'], ready: ['软件包镜像已就绪', 'success'], failed: ['软件包镜像构建失败', 'danger'] }[build?.state] || ['未知', ''];
+  const setupState = !setup ? ['没有初始化脚本', ''] : { running: ['初始化脚本运行中', 'info'], succeeded: ['初始化脚本成功', 'success'], failed: ['初始化脚本失败', 'danger'] }[setup.state] || [setup.state, ''];
+  const head = element('div', '', 'actions'); head.append(badge(...buildState), badge(...setupState)); section.append(head);
+  section.append(facts([['镜像标签', build?.tag], ['构建完成', timestamp(build?.finished_at)], ['脚本退出码', setup?.exit_code ?? (setup?.error || null)], ['运行于', setup ? `g${setup.generation} · ${timestamp(setup.finished_at || setup.started_at)}` : null]]));
+  if (build?.output) section.append(collapsible('构建输出', build.output, build.state === 'failed'));
+  if (setup?.output) section.append(collapsible('初始化输出', setup.output, setup.state === 'failed'));
+  return section;
+}
+// Live resource use, read from Docker and refreshed while the computer view is open.
+const usageCard = card('实时资源'); usageCard.append(element('p', '读取中…', 'muted'));
+const bytes = value => value == null ? '—' : value >= 1073741824 ? (value / 1073741824).toFixed(2) + ' GB' : value >= 1048576 ? (value / 1048576).toFixed(1) + ' MB' : Math.round(value / 1024) + ' KB';
+async function refreshUsage(id) {
+  const { stats } = await api(`/api/environments/${id}/stats`).catch(() => ({ stats: null }));
+  const body = !stats ? element('p', '暂时读不到资源数据。', 'muted') : !stats.running ? element('p', '虚拟电脑未运行。', 'muted')
+    : facts([['CPU', `${stats.cpu_percent}%`], ['内存', `${bytes(stats.memory_bytes)} / ${bytes(stats.memory_limit_bytes)}`], ['进程', stats.pids], ['网络', `↓ ${bytes(stats.net_rx_bytes)} · ↑ ${bytes(stats.net_tx_bytes)}`],
+      ['磁盘读写', `${bytes(stats.block_read_bytes)} / ${bytes(stats.block_write_bytes)}`], ['工作区占用', bytes(stats.workspace_bytes)], ['采样', timestamp(stats.sampled_at).slice(11, 19)]]);
+  usageCard.replaceChildren(element('h3', '实时资源'), body);
 }
 function renderEnvironment({ environment: env, current_task: current, tasks, commands }) {
   const pc = env.computer || {};
@@ -261,6 +283,7 @@ function renderEnvironment({ environment: env, current_task: current, tasks, com
   machine.append(facts([['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)], ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null],
     ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['单条命令', pc.max_command_minutes ? `最长 ${pc.max_command_minutes} 分钟，容器不随命令重启` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null], ['运行用户', pc.user],
     ['资源', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程 · /tmp ${pc.tmp_mb} MB` : null], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读' : pc.root_filesystem],
+    ['工具链', pc.build?.toolchain], ['额外软件包', pc.packages?.length ? pc.packages.join(' ') : null], ['环境变量', pc.env && Object.keys(pc.env).length ? Object.keys(pc.env).join(', ') : null],
     ['保留代次', pc.retained_generations], ['故障', env.error]]));
   if (!env.computer) machine.append(element('p', '暂时读不到 manager 的机器信息。', 'muted'));
   const work = card('正在执行');
@@ -278,7 +301,7 @@ function renderEnvironment({ environment: env, current_task: current, tasks, com
     commandList.append(row);
   }
   history.append(commands.length ? commandList : element('p', '还没有命令记录。新任务的命令会显示在这里。', 'muted'));
-  const left = element('div', '', 'stack'), right = element('div', '', 'stack'); left.append(machine, work); right.append(recent, history);
+  const left = element('div', '', 'stack'), right = element('div', '', 'stack'); left.append(machine, usageCard, work); right.append(preparationCard(pc), recent, history);
   $('environment-body').replaceChildren(left, right);
 }
 for (const view of [taskView, environmentView]) view.addEventListener('close', () => { clearTimeout(taskTimer); clearTimeout(environmentTimer); if (view === taskView) openTaskId = null; else openEnvironmentId = null; });
@@ -359,13 +382,27 @@ settingsView.innerHTML = `<form id="settings-form" novalidate><h2 id="settings-t
 </fieldset>
 <fieldset id="settings-computer"><legend>虚拟电脑</legend><p id="settings-computer-note" class="muted"></p>
 <div class="field-grid"><label>CPU（核）<input name="cpus" type="number" step="0.25"></label><label>内存（MB）<input name="memory_mb" type="number" step="128"></label>
-<label>进程数上限<input name="pids" type="number" step="1"></label><label>/tmp 大小（MB）<input name="tmp_mb" type="number" step="16"></label></div>
+<label>进程数上限<input name="pids" type="number" step="1"></label><label>/tmp 大小（MB）<input name="tmp_mb" type="number" step="16"></label>
+<label>单条命令最长时间（分钟）<input name="max_command_minutes" type="number" step="1"></label></div>
 <label class="check"><input type="checkbox" name="egress"> 允许访问外网（安装依赖、访问测试地址）</label>
+<p id="settings-toolchain" class="muted"></p>
+<label>额外系统软件包<textarea name="packages" rows="2" spellcheck="false" placeholder="Debian 包名，空格或换行分隔，例如 ffmpeg libpq-dev"></textarea></label>
+<label>环境变量<textarea name="env" rows="3" spellcheck="false" placeholder="每行 名称=值，例如 PIP_INDEX_URL=https://mirror.example/simple。对仓库代码可见，不要填写密钥"></textarea></label>
+<label>初始化脚本<textarea name="setup_script" rows="5" spellcheck="false" class="code" placeholder="以项目用户在 /workspace 运行，HOME=/workspace/home，可联网；脚本或代次变化时重新运行。例如：&#10;uv tool install ruff&#10;npm install -g pnpm@9"></textarea></label>
+<label class="check"><input type="checkbox" name="rerun_setup"> 保存后重新运行初始化脚本</label>
 </fieldset>
 <p id="settings-error" class="view-error" role="alert"></p>
 <div class="actions settings-actions"><button type="button" class="quiet" id="settings-cancel">取消</button><button type="submit">保存</button></div></form>`;
 document.body.append(settingsView);
-const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb'];
+const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'max_command_minutes'];
+// Text forms of the list and map fields, and their parsed values for comparison and saving.
+const packagesText = list => (list || []).join(' '), envText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+function parseEnv(text) {
+  const env = {};
+  text.split('\n').forEach((line, index) => { if (!line.trim() || line.trim().startsWith('#')) return; const at = line.indexOf('=');
+    if (at < 1) throw new Error(`环境变量第 ${index + 1} 行需要写成 名称=值`); env[line.slice(0, at).trim()] = line.slice(at + 1); });
+  return env;
+}
 let settingsTarget = null;
 async function openSettings(repositoryId, after = async () => {}) {
   const form = $('settings-form'), superUser = me.role === 'super_admin';
@@ -382,10 +419,12 @@ async function openSettings(repositoryId, after = async () => {}) {
   // The manager reports the bounds it enforces; the form mirrors them so out-of-range values are caught before saving.
   for (const name of specFields) { const input = form.elements[name]; input.value = pc?.[name] ?? ''; if (pc?.bounds?.[name]) [input.min, input.max] = pc.bounds[name]; }
   form.elements.egress.checked = pc ? pc.network_policy === 'internet egress' : false;
+  form.elements.packages.value = packagesText(pc?.packages); form.elements.env.value = envText(pc?.env); form.elements.setup_script.value = pc?.setup_script || '';
+  $('settings-toolchain').textContent = pc?.build?.toolchain ? '镜像已包含：' + pc.build.toolchain : '';
   const editable = superUser && !!pc;
   $('settings-computer').disabled = !editable;
   $('settings-computer-note').textContent = !pc ? '暂时读不到虚拟电脑规格，稍后再试。' : !superUser ? '虚拟电脑规格由超级管理员设置。'
-    : '保存后虚拟电脑按新规格重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。';
+    : '保存后虚拟电脑按新规格重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包时会先构建镜像，首次可能需要几分钟。';
   settingsView.showModal();
 }
 $('settings-cancel').addEventListener('click', () => settingsView.close());
@@ -407,12 +446,18 @@ $('settings-form').addEventListener('submit', async event => {
   if (!$('settings-computer').disabled) {
     for (const name of specFields) if (Number(form.elements[name].value) !== target.computer[name]) spec[name] = Number(form.elements[name].value);
     if (form.elements.egress.checked !== (target.computer.network_policy === 'internet egress')) spec.egress = form.elements.egress.checked;
+    const packages = [...new Set(form.elements.packages.value.split(/[\s,]+/).filter(Boolean))];
+    if (packages.slice().sort().join(' ') !== [...(target.computer.packages || [])].sort().join(' ')) spec.packages = packages;
+    let env; try { env = parseEnv(form.elements.env.value); } catch (err) { $('settings-error').textContent = err.message; return; }
+    if (envText(env) !== envText(target.computer.env)) spec.env = env;
+    if (form.elements.setup_script.value !== (target.computer.setup_script || '')) spec.setup_script = form.elements.setup_script.value;
+    if (form.elements.rerun_setup.checked) spec.rerun_setup = true;
   }
   submit.disabled = true; $('settings-error').textContent = '';
   try {
     if (Object.keys(policy).length) await api(`/api/repositories/${target.repositoryId}/policy`, 'PATCH', policy);
     if (Object.keys(spec).length) {
-      $('settings-error').textContent = '正在按新规格重建虚拟电脑…';
+      $('settings-error').textContent = spec.packages ? '正在安装软件包并重建虚拟电脑，首次可能需要几分钟…' : spec.setup_script !== undefined || spec.rerun_setup ? '正在重建虚拟电脑并运行初始化脚本…' : '正在按新规格重建虚拟电脑…';
       await api(`/api/environments/${target.repositoryId}/configure`, 'POST', { operation_id: operationId(), generation: target.environment.generation, spec });
     }
     settingsView.close(); await target.after();

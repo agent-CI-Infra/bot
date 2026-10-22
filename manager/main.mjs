@@ -21,6 +21,7 @@ const server = createServer(async (req, res) => {
     let result;
     if (req.method === 'GET' && path === '/v1/projects') result = projects.list();
     else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
+    else if (req.method === 'GET' && /^\/v1\/projects\/[1-9]\d{0,19}\/stats$/.test(path)) result = await projects.stats(path.split('/')[3]);
     else {
       const match = /^\/v1\/projects\/([1-9]\d{0,19})(?:\/(start|stop|reset|delete|execute|configure))?$/.exec(path);
       if (!match) throw new ManagerError('not_found', 404);

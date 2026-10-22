@@ -57,7 +57,8 @@ export class ProjectService {
   }
   private async send(op: Row): Promise<Json> {
     try {
-      const result = await this.manager.call('POST', `/v1/projects/${op.repository_id}/${op.action}`, JSON.parse(op.input));
+      // Starting, resetting or reconfiguring may build a package image and run the setup script: allow up to 35 minutes.
+      const result = await this.manager.call('POST', `/v1/projects/${op.repository_id}/${op.action}`, JSON.parse(op.input), ['start', 'reset', 'configure'].includes(op.action) ? 35 * 60000 : 90000);
       this.store.transaction(() => {
         this.save(result); this.store.run("UPDATE environment_operations SET state='completed',result=? WHERE id=?", JSON.stringify(result), op.id);
       }); return result;
@@ -106,10 +107,11 @@ export class ProjectService {
         LEFT JOIN task_locks l ON l.repository_id=r.id LEFT JOIN tasks t ON t.id=l.task_id
         WHERE ${clauses.join(' AND ')} ORDER BY r.full_name`, ...args) };
     }
-    const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete|configure))?$/.exec(url.pathname);
+    const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete|configure|stats))?$/.exec(url.pathname);
     if (!match) return fail(404, 'not_found');
     const id = match[1]!; repository(this.store, user, id);
     if (!match[2] && method === 'GET') return this.detail(id);
+    if (match[2] === 'stats' && method === 'GET') return { stats: await this.manager.call('GET', `/v1/projects/${id}/stats`) };
     if (method !== 'POST' || !match[2]) return fail(404, 'not_found');
     fields(input, ['operation_id','generation','confirm','spec']);
     if (!/^[a-f0-9]{48}$/.test(String(input.operation_id || '')) || !Number.isSafeInteger(input.generation)) fail(400, 'invalid_operation');

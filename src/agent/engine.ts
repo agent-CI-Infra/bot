@@ -11,6 +11,8 @@ import { selectedModel } from './model.js';
 import { Redactor, sha, operationId, stop, TaskError } from './common.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
+const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,max_command_minutes:c.max_command_minutes,network:c.network_policy,toolchain:c.build?.toolchain||null,
+  extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 export class TaskEngine {
   readonly active=new Map<string,Promise<void>>();private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
   constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string){}
@@ -95,7 +97,9 @@ export class TaskEngine {
         const comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
         input={...input,object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           files,coverage:snapshot.coverage,context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,review:input.review||null,
-            comments:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null}};
+            comments:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
+            // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
+            computer:computerSummary(environment.computer)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
       }
       if(task.phase==='model'){
@@ -109,7 +113,7 @@ export class TaskEngine {
         const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
         const command=policy.test_command||result.test_command;if(typeof command!=='string'||!command.trim())stop('test_command_missing','waiting_configuration');
         const before=await workspace.artifact('validate:before');
-        const validation=await workspace.call('validate:tests',{type:'workspace_command',command,timeout_ms:1800000});
+        const validation=await workspace.call('validate:tests',{type:'workspace_command',command,timeout_ms:(input.context?.computer?.max_command_minutes||30)*60000});
         if(validation.error||validation.exit_code!==0||validation.timed_out||validation.truncated)stop('validation_failed');
         const after=await workspace.artifact('validate:after');if(before.tree_sha!==after.tree_sha)stop('tests_changed_candidate');
         if(after.tree_sha===input.snapshot_tree)stop('development_has_no_changes');
