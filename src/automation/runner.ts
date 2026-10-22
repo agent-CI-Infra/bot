@@ -1,6 +1,6 @@
 import { randomId, type Json } from '../core/security.js';
 import type { Store } from '../storage/database.js';
-import { loadAutomationConfig } from './config.js';
+import { loadAutomationConfig, type AutomationConfig } from './config.js';
 import { planAutomation } from './engine.js';
 import type { Action, AutomationFacts } from './types.js';
 
@@ -31,9 +31,11 @@ export function recordAutomation(
   payload: Json,
   deliveryId: string,
   facts: AutomationFacts = {},
+  /** A repository YAML file: used when the policy row has no automation config of its own. */
+  fallback?: AutomationConfig,
 ): AutomationRun {
   const row = store.get('SELECT automation FROM policies WHERE repository_id=?', repositoryId);
-  const { config, problem } = loadAutomationConfig(row?.automation);
+  const { config, problem } = loadAutomationConfig(row?.automation, fallback);
   const plan = planAutomation({ event: { repositoryId, event, action, payload, deliveryId }, config, facts });
   const notes = problem ? [problem, ...plan.notes] : plan.notes;
   const run: AutomationRun = {

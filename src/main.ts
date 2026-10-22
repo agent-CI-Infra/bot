@@ -4,6 +4,7 @@ import { Store } from './storage/database.js';
 import { createControlPlane } from './server.js';
 import { ManagerClient, ProjectService } from './projects/service.js';
 import { TaskEngine } from './agent/engine.js';
+import { loadRepositoryConfigs, repositoryConfigMap } from './automation/repository-config.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
@@ -13,11 +14,15 @@ const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');
 const manager=new ManagerClient(process.env.BOT_MANAGER_URL || 'http://manager:8793',readFileSync(tokenFile));
 const projects = new ProjectService(store, manager);
+// A repository's YAML config is the base for its automation; a policy row saved through the API
+// still merges on top. A malformed file stops startup instead of running with a silent default.
+const repositoryConfigs = repositoryConfigMap(loadRepositoryConfigs(
+  process.env.BOT_REPOSITORY_CONFIG_DIR || resolve(import.meta.dirname, '../config/repositories')));
 const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL);engine.start();
 void projects.reconcile();
 const timer = setInterval(() => { void projects.reconcile().catch(() => {}); }, 5000);
 const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
-  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine });
+  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs });
 for (const [name, port] of [['webhook', 8791], ['admin', 8792]] as const) {
   const server = servers[name];
   server.on('error', () => { console.error(`${name} listener failed`); process.exit(1); });

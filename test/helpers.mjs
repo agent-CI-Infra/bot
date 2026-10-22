@@ -7,7 +7,7 @@ import { createControlPlane } from '../dist/server.js';
 import { ProjectService } from '../dist/projects/service.js';
 
 export const testPassword = () => randomBytes(20).toString('hex');
-export async function harness(t, manager) {
+export async function harness(t, manager, options = {}) {
   mkdirSync(resolve('.tmp'), { recursive: true });
   const directory = mkdtempSync(resolve('.tmp/test-')), database = join(directory, 'control.sqlite'), key = randomBytes(32);
   let store, servers;
@@ -15,7 +15,7 @@ export async function harness(t, manager) {
   h.start = async () => {
     store = new Store(database, key);
     h.projects = manager ? new ProjectService(store, manager) : undefined;
-    servers = createControlPlane({ store, staticDirectory: resolve('static'), maxBodyBytes: 2048, projects: h.projects });
+    servers = createControlPlane({ store, staticDirectory: resolve('static'), maxBodyBytes: 2048, projects: h.projects, ...options });
     for (const server of Object.values(servers)) { server.listen(0, '127.0.0.1'); await once(server, 'listening'); }
     Object.assign(h, { store, admin: `http://127.0.0.1:${servers.admin.address().port}`, webhook: `http://127.0.0.1:${servers.webhook.address().port}` });
   };

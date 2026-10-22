@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { harness, setup, account, repository } from './helpers.mjs';
+import { loadRepositoryConfigs, parseRepositoryConfig, repositoryConfigMap } from '../dist/automation/repository-config.js';
 import { DEFAULT_AUTOMATION, AutomationConfigError, loadAutomationConfig, parseAutomationConfig } from '../dist/automation/config.js';
 import { planAutomation } from '../dist/automation/engine.js';
 import { labelLint, prStatus } from '../dist/automation/modules/labels.js';
@@ -33,6 +37,88 @@ test('config rejects unknown keys and bad values instead of ignoring them', () =
   assert.throws(() => parseAutomationConfig({ gate: { ready_label: 'ready' } }), AutomationConfigError);
   assert.throws(() => parseAutomationConfig({ gate: { requiredChecks: [] } }), AutomationConfigError);
   assert.throws(() => parseAutomationConfig({ labels: { lint: { triageLabel: 'Bad Label' } } }), AutomationConfigError);
+});
+
+test('config derives the label manifest from axes and rejects bad axis names', () => {
+  const config = parseAutomationConfig({ labels: { axes: { type: ['bug', 'docs'], priority: ['high'] } } });
+  assert.deepEqual(config.labels.manifest, ['type/bug', 'type/docs', 'priority/high']);
+  assert.throws(() => parseAutomationConfig({ labels: { axes: { Type: ['bug'] } } }), AutomationConfigError);
+  assert.throws(() => parseAutomationConfig({ labels: { axes: { type: ['Bug Label'] } } }), AutomationConfigError);
+});
+
+test('the CI stage catalog must cover every required check', () => {
+  const stage = (id, required) => ({ id, workflow: `${id}.yml`, runnerLabels: ['self-hosted'], required });
+  const config = parseAutomationConfig({
+    gate: { requiredChecks: ['check'] },
+    ci: { stages: [stage('check', true), stage('review', false)] },
+  });
+  assert.deepEqual(config.ci.stages.map(item => item.id), ['check', 'review']);
+  assert.throws(() => parseAutomationConfig({
+    gate: { requiredChecks: ['check'] }, ci: { stages: [stage('check', false)] },
+  }), AutomationConfigError);
+});
+
+test('a repository YAML declares its own labels, gate and CI stages', () => {
+  const config = parseRepositoryConfig(`
+labels:
+  axes:
+    type: [bug, docs]
+    source: [user]
+    priority: [high, low]
+  manifest: [blocker]
+  lint:
+    require: [type, source]
+    exactly_one: [priority]
+    triage: status/triage
+  pr_status:
+    ready: pr/ready
+    no_issue: pr/no-issue
+gate:
+  ready_label: ready
+  required_checks: [check]
+  maintainer_roles: [admin]
+ci:
+  stages:
+    - id: check
+      workflow: ci.yml
+      runner_labels: [self-hosted, cn-check]
+      required: true
+`, 'owner/repo');
+  assert.equal(config.dryRun, true);
+  assert.deepEqual(config.labels.manifest, ['type/bug', 'type/docs', 'source/user', 'priority/high', 'priority/low', 'blocker']);
+  assert.deepEqual(config.ci.stages, [{ id: 'check', workflow: 'ci.yml', runnerLabels: ['self-hosted', 'cn-check'], required: true }]);
+  assert.throws(() => parseRepositoryConfig('labelz: {}', 'owner/repo'), AutomationConfigError);
+  assert.throws(() => parseRepositoryConfig('labels:\n  lint:\n    triage_label: status/triage\n', 'owner/repo'), AutomationConfigError);
+});
+
+test('repository files map by owner__repo and reject duplicate or malformed names', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'repository-configs-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  writeFileSync(join(directory, 'Acme__Widget.yml'), 'labels:\n  axes:\n    type: [bug]\n');
+  writeFileSync(join(directory, 'Acme__Gadget.yaml'), 'dry_run: false\n');
+  writeFileSync(join(directory, 'notes.txt'), 'ignored');
+  const entries = loadRepositoryConfigs(directory);
+  assert.deepEqual(entries.map(entry => entry.fullName), ['Acme/Gadget', 'Acme/Widget']);
+  assert.ok(repositoryConfigMap(entries).has('acme/widget'));
+  assert.equal(loadRepositoryConfigs(join(directory, 'missing')).length, 0);
+  writeFileSync(join(directory, 'Acme__Widget.yaml'), 'labels: {}\n');
+  assert.throws(() => loadRepositoryConfigs(directory), AutomationConfigError);
+  rmSync(join(directory, 'Acme__Widget.yaml'));
+  writeFileSync(join(directory, 'not-a-repo.yml'), 'labels: {}\n');
+  assert.throws(() => loadRepositoryConfigs(directory), AutomationConfigError);
+});
+
+test('a repository YAML config drives the plan when policy automation is unset', async t => {
+  const config = parseRepositoryConfig('labels:\n  lint:\n    require: [type, source, priority]\n', 'fixture/project-202');
+  const h = await harness(t, undefined, { repositoryConfigs: repositoryConfigMap([{ fullName: 'fixture/project-202', path: 'memory', config }]) });
+  const { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '202');
+  const sent = await h.hook(a.path, a.secret, 'delivery-yaml-config', {
+    repository: { id: 202 }, action: 'opened', issue: { number: 7, labels: [{ name: 'type/bug' }] },
+  });
+  assert.equal(sent.status, 200);
+  const run = h.store.get('SELECT * FROM automation_runs');
+  assert.match(run.actions, /status\/triage/);
 });
 
 test('label-lint marks an issue that misses an axis and clears it when complete', () => {

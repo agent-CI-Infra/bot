@@ -9,9 +9,11 @@ import { queries } from './app/queries.js';
 import { ingest } from './app/webhook.js';
 import { type ProjectService } from './projects/service.js';
 import { type TaskEngine } from './agent/engine.js';
+import type { AutomationConfig } from './automation/config.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
-interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine; }
+interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -45,7 +47,7 @@ export function createControlPlane(options: Options) {
     const match = /^\/hooks\/github\/([a-f0-9]{48})\/([a-f0-9]{48})$/.exec(path);
     if (req.method !== 'POST' || !match) return fail(404, 'not_found');
     const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
-    const result = ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete);
+    const result = ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.repositoryConfigs);
     respond(res, result.status, result.response);
   }));
   const admin = createServer(wrap(async (req, res) => {

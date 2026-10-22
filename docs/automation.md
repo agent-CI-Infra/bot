@@ -8,6 +8,7 @@
 src/automation/
   types.ts      事件、动作、事实、模块接口
   config.ts     仓库配置的 schema、默认值、合并与校验
+  repository-config.ts  仓库 YAML 文件加载（<owner>__<repo>.yml）
   registry.ts   内置模块清单（加能力 = 加一个模块）
   engine.ts     逐模块规划、去重、记录模块失败
   runner.ts     读取策略、规划并写入 automation_runs（执行器接口在此）
@@ -21,7 +22,61 @@ src/automation/
 
 ## 仓库级配置
 
-配置保存在 `policies.automation`（JSON），通过 `PATCH /api/repositories/:id/policy` 的 `automation` 字段维护。补丁按字段**合并**到当前配置上，未知字段直接拒绝，避免拼写错误静默关闭规则。
+每个仓库用一份 YAML 声明自己的标签、门禁、合并策略和 CI 阶段：`config/repositories/<owner>__<repo>.yml`（文件名里的 `/` 写成 `__`，例如 `Jianyu010__PPMA.yml`）。启动时加载；目录不存在表示没有仓库文件，全部使用平台默认值。文件名不合法、重复或字段拼错都会让启动失败，而不是带着错误配置运行。
+
+```yaml
+# config/repositories/Jianyu010__PPMA.yml
+dry_run: true
+
+labels:
+  axes:                       # 标签轴：值不用写前缀，清单自动展开为 type/bug 等
+    type: [bug, feature, docs]
+    source: [user, ci, review]
+    priority: [critical, high, medium, low]
+    area: [api, runtime, storage]
+    size: [s, m, l]
+    status: [triage, claimed, blocked, needs-info]
+    pr: [ready, hold, no-issue]
+  manifest: [blocker]         # 不属于任何轴的单体标签
+  lint:
+    require: [type, source]
+    exactly_one: [priority]
+    triage: status/triage
+  pr_status:
+    ready: pr/ready
+    no_issue: pr/no-issue
+
+gate:
+  ready_label: ready
+  status: merge-gate
+  required_checks: [check, hygiene]
+  maintainer_roles: [admin, maintain]
+  review_must_be_answered: true
+
+merge:
+  enabled: false
+  oldest_first: true
+  skip_labels: [pr/hold]
+
+ci:
+  stages:
+    - id: check
+      workflow: ci.yml
+      runner_labels: [self-hosted, ppma-ci-cn-check]
+      required: true
+    - id: hygiene
+      workflow: hygiene.yml
+      runner_labels: [self-hosted, ppma-ci-cn-hygiene]
+      required: true
+    - id: review
+      workflow: opencode-review.yml
+      runner_labels: [self-hosted, opencode-review]
+      required: false
+```
+
+YAML 是仓库的**基础配置**；`policies.automation`（JSON，通过 `PATCH /api/repositories/:id/policy` 的 `automation` 字段维护）仍会合并在其上，冲突时以 API 保存的值为准。补丁按字段合并，未知字段直接拒绝，避免拼写错误静默关闭规则。`ci.stages` 描述每个阶段的 runner 池；`required: true` 的阶段必须恰好覆盖 `gate.required_checks`，否则配置校验失败。配置目录可用 `BOT_REPOSITORY_CONFIG_DIR` 覆盖。
+
+等价的 JSON 结构（API 存储形式）：
 
 ```json
 {
@@ -29,6 +84,8 @@ src/automation/
     "dryRun": true,
     "labels": {
       "enabled": true,
+      "axes": { "type": ["bug"], "source": ["user"], "priority": ["high", "medium"] },
+      "manifest": [],
       "lint": { "enabled": true, "require": ["type", "source"], "exactlyOne": ["priority"], "triageLabel": "status/triage" },
       "prStatus": { "enabled": true, "ready": "pr/ready", "noIssue": "pr/no-issue" }
     },
@@ -40,7 +97,8 @@ src/automation/
       "maintainerRoles": ["admin", "maintain"],
       "reviewMustBeAnswered": true
     },
-    "merge": { "enabled": false, "method": "merge", "oldestFirst": true, "skipLabels": ["pr/hold"] }
+    "merge": { "enabled": false, "method": "merge", "oldestFirst": true, "skipLabels": ["pr/hold"] },
+    "ci": { "stages": [{ "id": "check", "workflow": "ci.yml", "runnerLabels": ["self-hosted"], "required": true }] }
   }
 }
 ```
@@ -49,7 +107,7 @@ src/automation/
 
 ## 规划与执行
 
-- webhook 落库的同一个事务里，`recordAutomation` 读取该仓库配置、跑全部模块，把计划写入 `automation_runs`（`dry_run`、动作、说明）。任何规则异常只记在该运行上，**不会让投递失败**。
+- webhook 落库的同一个事务里，`recordAutomation` 读取该仓库配置（策略行未保存过配置时用 YAML 文件）、跑全部模块，把计划写入 `automation_runs`（`dry_run`、动作、说明）。任何规则异常只记在该运行上，**不会让投递失败**。
 - `GET /api/automation` 返回调用者有权限仓库的最近 100 条计划，管理页面可直接展示"本应做什么"。
 - 真正的 GitHub 写入由 `runner.ts` 的 `ActionExecutor` 接口承接，并接入现有 outbox（与评论、Review、分支发布同一套对账规则）。在本 PR 中执行器尚未接线，所有运行都是 dry-run。
 
@@ -74,7 +132,7 @@ webhook 载荷里没有"检查是否全绿""当前用户是否 maintainer""是�
 
 1. 在 `modules/` 新建文件，实现 `AutomationModule`（`id` + `plan`），只做规划。
 2. 在 `registry.ts` 的 `builtInModules` 注册。
-3. 如需要新的仓库开关，在 `config.ts` 的 schema、默认值和校验里加字段，并在 `management.ts` 的 PATCH 字段列表放行。
+3. 如需要新的仓库开关，在 `config.ts` 的 schema、默认值和校验里加字段，在 `repository-config.ts` 的 YAML 字段映射里放行 snake_case 写法，并在 `management.ts` 的 PATCH 字段列表放行。
 4. 在 `test/automation.test.mjs` 里用事件 + 事实固定行为，覆盖"事实缺失 → fail closed"。
 
 ## 信任边界

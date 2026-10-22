@@ -12,6 +12,7 @@ RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --no-create-home b
     && mkdir /data /keys /internal && chown bot:bot /data /keys /internal && chmod 700 /data /keys && chmod 750 /internal
 COPY --from=build /app/dist ./dist
 COPY static ./static
+COPY config ./config
 COPY LICENSE ./LICENSE
 COPY NOTICE ./NOTICE
 USER 10001:10001
