@@ -1,0 +1,55 @@
+import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { harness, repository, testPassword } from '../test/helpers.mjs';
+
+test('管理员完成初始化、登记账号、查看投递，项目管理员只看到自己的仓库', async ({ page, browser }) => {
+  const h = await harness();
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  const password = testPassword(), admin = h.client();
+  try {
+    await page.goto(h.admin);
+    await expect(page.getByRole('heading', { name: '创建第一名超级管理员' })).toBeVisible();
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '初始化并登录' }).click();
+    await expect(page.getByRole('heading', { name: '管理控制台' })).toBeVisible();
+    await expect(page.getByText('本页 0 条投递')).toBeVisible();
+    await admin('/api/auth/login', 'POST', { username: 'administrator', password });
+    await page.getByRole('button', { name: '机器人账号', exact: true }).click();
+    await page.getByRole('button', { name: '新增', exact: true }).click();
+    const secret = randomBytes(24).toString('hex');
+    await page.getByLabel('账号名称', { exact: true }).fill('Browser account');
+    await page.getByLabel('机器人 Token（仅机器人账号）', { exact: true }).fill(testPassword());
+    await page.getByLabel('Webhook 签名凭据', { exact: true }).fill(secret);
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(page.locator('#rows').getByText('Browser account', { exact: true })).toBeVisible();
+    const a = (await admin('/api/accounts')).value.accounts[0];
+    await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+    const memberPassword = testPassword();
+    await admin('/api/users', 'POST', { username: 'project-admin', password: memberPassword, repository_ids: ['101'] });
+    await h.hook(a.endpoints[0].webhook_path, secret, 'browser-own', { repository: { id: 101 }, action: 'opened', issue: { number: 1 } });
+    await h.hook(a.endpoints[0].webhook_path, secret, 'browser-other', { repository: { id: 202 }, action: 'opened' });
+    await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
+    await expect(page.getByText('本页 2 条投递')).toBeVisible();
+    await page.getByRole('button', { name: '查看详情', exact: true }).first().click();
+    await expect(page.locator('#detail-body')).toContainText('"tasks_created": 0');
+    await page.getByRole('button', { name: '关闭', exact: true }).click();
+    mkdirSync('.tmp/screenshots', { recursive: true });
+    await page.setViewportSize({ width: 1365, height: 900 }); await page.screenshot({ path: '.tmp/screenshots/admin-desktop.png', fullPage: true });
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
+    await page.getByLabel('用户名', { exact: true }).fill('project-admin'); await page.getByLabel('密码', { exact: true }).fill(memberPassword);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.getByText('本页 1 条投递')).toBeVisible();
+    await expect(page.getByRole('button', { name: '机器人账号', exact: true })).toBeHidden();
+    await expect(page.getByRole('button', { name: '用户', exact: true })).toBeHidden();
+    await expect(page.locator('#rows')).toContainText('browser-own'); await expect(page.locator('#rows')).not.toContainText('browser-other');
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/screenshots/project-mobile.png', fullPage: true });
+    const context = await browser.newContext(), fresh = await context.newPage(); await fresh.goto(h.admin);
+    await expect(fresh.getByRole('heading', { name: '登录', exact: true })).toBeVisible(); await context.close();
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); const { rmSync } = await import('node:fs'); rmSync(h.directory, { recursive: true, force: true }); }
+});

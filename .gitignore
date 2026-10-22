@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.cache/
+.tmp/
+.state/
+.env
+*.sqlite*
+*.key
+playwright-report/
+test-results/

@@ -1,0 +1,38 @@
+services:
+  key-init:
+    image: department-bot:local
+    build: .
+    command: ["node", "dist/keygen.js", "/keys/master.key"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - bot-keys:/keys
+    healthcheck:
+      disable: true
+    restart: "no"
+  bot:
+    image: department-bot:local
+    build: .
+    depends_on:
+      key-init:
+        condition: service_completed_successfully
+    environment:
+      BOT_DATABASE_PATH: /data/control.sqlite
+      BOT_MASTER_KEY_FILE: /keys/master.key
+      BOT_COOKIE_SECURE: "${BOT_COOKIE_SECURE:-false}"
+      BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
+    ports:
+      - "127.0.0.1:${BOT_WEBHOOK_PORT:-8791}:8791"
+      - "127.0.0.1:${BOT_ADMIN_PORT:-8792}:8792"
+    volumes:
+      - bot-data:/data
+      - bot-keys:/keys:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  bot-data:
+  bot-keys:

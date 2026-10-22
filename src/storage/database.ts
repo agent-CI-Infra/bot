@@ -1,0 +1,60 @@
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { chmodSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { SecretBox, randomId } from '../core/security.js';
+
+export type Row = Record<string, any>;
+export class Store {
+  readonly db: DatabaseSync;
+  readonly secrets: SecretBox;
+  constructor(path: string, key: Buffer) {
+    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    this.db = new DatabaseSync(path);
+    if (path !== ':memory:') chmodSync(path, 0o600);
+    this.secrets = new SecretBox(key);
+    this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('super_admin','project_admin')), active INTEGER NOT NULL DEFAULT 1);
+      CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), csrf TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('github_app','bot_account')),
+        app_id TEXT, credentials TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS endpoints(id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id), secret TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS repositories(id TEXT PRIMARY KEY, full_name TEXT NOT NULL COLLATE NOCASE UNIQUE, owner_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id));
+      CREATE TABLE IF NOT EXISTS project_admin_assignments(user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT NOT NULL REFERENCES repositories(id),
+        PRIMARY KEY(user_id,repository_id));
+      CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY, repository_id TEXT REFERENCES repositories(id), api_url TEXT NOT NULL, model_name TEXT NOT NULL,
+        api_key TEXT, version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_projects(model_id TEXT NOT NULL REFERENCES models(id), repository_id TEXT NOT NULL REFERENCES repositories(id),
+        PRIMARY KEY(model_id,repository_id));
+      CREATE TABLE IF NOT EXISTS policies(repository_id TEXT PRIMARY KEY REFERENCES repositories(id), model_id TEXT REFERENCES models(id),
+        review_enabled INTEGER NOT NULL DEFAULT 0, development_enabled INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY, account_id TEXT, endpoint_id TEXT, repository_id TEXT REFERENCES repositories(id),
+        delivery_id TEXT NOT NULL, event TEXT NOT NULL, route TEXT NOT NULL, status TEXT NOT NULL, duplicate INTEGER NOT NULL,
+        received_at TEXT NOT NULL, http_status INTEGER NOT NULL, request_headers TEXT NOT NULL, payload BLOB NOT NULL,
+        body_complete INTEGER NOT NULL, response TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS delivery_repo_time ON deliveries(repository_id,received_at);
+      CREATE TABLE IF NOT EXISTS processed_deliveries(account_id TEXT NOT NULL, endpoint_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+        PRIMARY KEY(account_id,endpoint_id,delivery_id));
+      CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES repositories(id), kind TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS task_logs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), content TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT REFERENCES repositories(id),
+        action TEXT NOT NULL, resource_id TEXT NOT NULL, created_at TEXT NOT NULL);
+      PRAGMA user_version=1;
+    `);
+  }
+  get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
+  all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }
+  run(sql: string, ...args: SQLInputValue[]) { return this.db.prepare(sql).run(...args); }
+  transaction<T>(fn: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try { const result = fn(); this.db.exec('COMMIT'); return result; }
+    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  audit(user: string, action: string, resource: string, repo: string | null = null): void {
+    this.run('INSERT INTO audit VALUES(?,?,?,?,?,?)', randomId(), user, repo, action, resource, new Date().toISOString());
+  }
+  close(): void { this.db.close(); }
+}

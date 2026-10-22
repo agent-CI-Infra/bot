@@ -1,0 +1,11 @@
+.git
+node_modules
+dist
+.cache
+.tmp
+.state
+.env
+*.key
+*.sqlite*
+test-results
+playwright-report
