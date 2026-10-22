@@ -178,7 +178,9 @@ export async function management(store: Store, user: Actor, method: string, path
       if(body.review_label!==undefined&&(typeof body.review_label!=='string'||body.review_label.length>50||body.review_label!==body.review_label.trim()||/\p{Cc}/u.test(body.review_label)))fail(400,'invalid_review_label');
       if(body.max_revisions!==undefined&&(!Number.isSafeInteger(body.max_revisions)||Number(body.max_revisions)<0||Number(body.max_revisions)>10))fail(400,'invalid_revision_budget');
       const model = body.model_id === undefined ? previous.model_id : body.model_id === null ? null : text(body.model_id);
-      if (model && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
+      // A super administrator choosing a deployment-shared model also makes it available to this repository.
+      const grant = !!model && user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', model);
+      if (model && !grant && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
         (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)))`, model, id, id)) fail(400, 'model_not_available');
       let automation = previous.automation as string;
       if (body.automation !== undefined) {
@@ -191,6 +193,7 @@ export async function management(store: Store, user: Actor, method: string, path
           body.review_enabled === undefined ? previous.review_enabled : Number(body.review_enabled),
           body.development_enabled === undefined ? previous.development_enabled : Number(body.development_enabled),
           body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
+        if (grant) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,review_label=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),body.review_label===undefined?previous.review_label:String(body.review_label),automation,id);
         return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true };

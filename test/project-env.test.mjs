@@ -18,11 +18,11 @@ class FakeDocker {
       return this.volumes.get(name) || null;
     }
     if (kind === 'networks') {
-      if (method === 'POST') { if (this.failNetwork) throw new ManagerError('injected_network_failure'); this.networks.set(body.Name, { Labels: body.Labels }); return {}; }
+      if (method === 'POST') { if (this.failNetwork) throw new ManagerError('injected_network_failure'); this.networks.set(body.Name, { Labels: body.Labels, Internal: body.Internal }); return {}; }
       if (method === 'DELETE') { this.networks.delete(name); return {}; }
       return this.networks.get(name) || null;
     }
-    if (path.startsWith('/containers/create')) { this.containers.set(new URL('http://docker' + path).searchParams.get('name'), { Config: body, State: { Running: false, StartedAt: '' } }); return {}; }
+    if (path.startsWith('/containers/create')) { this.containers.set(new URL('http://docker' + path).searchParams.get('name'), { Config: body, HostConfig: body.HostConfig, Image: body.Image, State: { Running: false, StartedAt: '' } }); this.created = (this.created || 0) + 1; return {}; }
     if (kind === 'containers') {
       const row = this.containers.get(name);
       if (method === 'GET') return row || null;
@@ -115,4 +115,21 @@ test('environment API enforces project roles for unfiltered list, detail, start,
   const pendingId=id(); h.store.run("INSERT INTO environment_operations VALUES(?,'101','reset','{}','pending',NULL)", pendingId);
   assert.equal((await member('/api/environments/101/reset','POST',{ operation_id:id(),generation:2 })).status,409);
   assert.equal((await member('/api/environments')).value.environments[0].operation_pending,1);
+});
+
+test('the project computer spec is validated by the manager, survives restarts and is applied by recreating the container', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const name = f.projects.names('101', 1).container, created = f.docker.created;
+  assert.deepEqual(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'network_policy'].map(k => f.projects.describe('101').computer[k]), [1, 512, 128, 64, 'internet egress']);
+  for (const spec of [{ memory_mb: 100000 }, { cpus: 0.1 }, { pids: 100.5 }, { egress: 'yes' }, { image: 'other' }, null])
+    await assert.rejects(f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: spec }), /invalid_spec/);
+  assert.equal(f.docker.created, created); assert.equal(f.projects.get('101').state, 'ready');
+  const result = await f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { cpus: 0.5, memory_mb: 1024, pids: 256, tmp_mb: 128, egress: false } });
+  const host = f.docker.containers.get(name).HostConfig;
+  assert.deepEqual([host.NanoCpus, host.Memory, host.PidsLimit, host.Tmpfs['/tmp'].includes(`size=${128 * 1024 * 1024}`)], [5e8, 1024 * 1024 * 1024, 256, true]);
+  assert.equal(f.docker.networks.get(f.projects.names('101', 1).network).Internal, true);
+  assert.equal(result.computer.network_policy, 'internal, no egress'); assert.equal(f.docker.created, created + 1);
+  assert.equal(f.docker.containers.get(name).State.Running, true); assert.equal(f.docker.volumes.size, 1);
+  f.restart(); assert.equal(f.projects.spec('101').memory_mb, 1024);
+  await f.projects.provision('101'); assert.equal(f.docker.created, created + 1);
 });
