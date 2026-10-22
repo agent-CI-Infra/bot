@@ -18,7 +18,7 @@ export class ManagerClient implements Manager {
 }
 export class ProjectService {
   private syncing: Promise<void> | null = null;
-  constructor(readonly store: Store, readonly manager: Manager) {}
+  constructor(readonly store: Store, readonly manager: Manager) {store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');}
   save(row: Row): void {
     if (!row) return;
     this.store.run(`INSERT INTO project_environments(repository_id,generation,state,desired,error,started_at,revision) VALUES(?,?,?,?,?,?,?)
@@ -61,6 +61,11 @@ export class ProjectService {
       const result = await this.manager.call('POST', `/v1/projects/${op.repository_id}/${op.action}`, JSON.parse(op.input), ['start', 'reset', 'configure'].includes(op.action) ? 35 * 60000 : 90000);
       this.store.transaction(() => {
         this.save(result); this.store.run("UPDATE environment_operations SET state='completed',result=? WHERE id=?", JSON.stringify(result), op.id);
+        if(op.action==='configure'){
+          const previous=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',op.repository_id),base=previous?JSON.parse(previous.spec):{};
+          const{rerun_setup:_rerun,...values}=JSON.parse(op.input).request;
+          this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec',op.repository_id,JSON.stringify({...base,...values}));
+        }
       }); return result;
     } catch (error) {
       // A timeout may mean the operation completed. Leave it pending and reconcile the same id.
@@ -126,6 +131,10 @@ export class ProjectService {
     if (!previous && this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id)) fail(409, 'environment_operation_pending');
     const state = await this.manager.call('GET', '/v1/projects/' + id) || await this.manager.call('PUT', '/v1/projects/' + id);
     this.save(state);
+    if(match[2]==='configure'&&!previous){
+      const names=['cpus','memory_mb','pids','tmp_mb','max_command_minutes','egress','packages','env','setup_script'];
+      this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(Object.fromEntries(names.filter(key=>state.computer?.[key]!==undefined).map(key=>[key,state.computer[key]]))));
+    }
     if (!previous && input.generation !== state.generation) fail(409, 'stale_generation');
     this.store.transaction(() => {
       if (!previous) {

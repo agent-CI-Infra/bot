@@ -110,7 +110,7 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的检视规则中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
 
-后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 16 次模型响应；模型调用 run_command 时可设 `timeout_seconds`（默认 120，最多为项目的 `max_command_minutes`）和 `keep_background`，仓库测试验证同样受该上限；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
+后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 32 次模型响应；模型调用 run_command 时可设 `timeout_seconds`（默认 120，最多为项目的 `max_command_minutes`）和 `keep_background`，仓库测试验证同样受该上限；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
 
 每次检视发布一条总结讨论评论，包含总结、非行内 finding 和检视 SHA。Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。policy 设置了 `review_label` 时，总结评论发布成功后由控制面用同一安装令牌给 Issue／PR 加这一个标签，仓库没有该标签时由 GitHub 创建；标签不由模型选择，重复执行不会重复添加。
 
@@ -148,3 +148,9 @@ npm ci
 npm run check
 npm test
 ```
+
+## 接入向导与现成 Agent
+
+超级管理员从「接入向导」依次准备公网 HTTPS、GitHub App、安装、模型与规则。新部署首次登录自动进入；已有部署可随时从导航打开，保留账号和数据。只发布 webhook，管理端口仍绑定本机。完整配置、规则路径与故障说明见 [Onboarding](docs/onboarding.md)。
+
+检视和开发由固定版本 Pi SDK 在项目长期容器内运行。真实 GitHub 凭据和模型 Key 仅在控制面；Pi 的 loopback 模型入口通过任务专属 runner 邮箱请求控制面代理，没有跨项目共享服务或新增公网端口。控制面继续独立验证测试、diff 位置、head、bot 分支归属并负责发布，Review 只允许 COMMENT，不自动合并。

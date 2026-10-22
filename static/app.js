@@ -35,14 +35,16 @@ async function start() {
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
+  if(me.role==='super_admin'&&!accounts.length&&!location.hash&&tab==='projects')tab='onboarding';
   await route();
 }
 // Review and development are separate pages over the same task API.
-const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'reviews', 'developments', 'external'];
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'reviews', 'developments', 'external','onboarding'];
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 async function route() {
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   if (target) tab = 'projects';
+  if(location.hash==='#onboarding'&&me.role==='super_admin')tab='onboarding';
   page.hidden = !target; list.hidden = !!target;
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   if (target) { $('message').textContent = ''; await renderProject(target); } else await render();
@@ -55,13 +57,14 @@ async function render() {
   $('add').hidden = listTabs.includes(tab) || me.role !== 'super_admin';
   $('add').textContent = tab === 'projects' ? '手动登记仓库' : '新增';
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=tab==='external';$('external-panel').hidden=tab!=='external';$('sync').hidden=true;
+  $('rows').hidden=['external','onboarding'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('sync').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
   if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
   if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
   $('rows').replaceChildren();$('rows').dataset.view=tab;$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');
+  if(tab==='onboarding'){$('filters').hidden=true;$('paging').hidden=true;try{await renderOnboarding(request);}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.
@@ -149,5 +152,5 @@ $('sync').addEventListener('click', async () => {
 });
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
-start().catch(error);
+document.addEventListener('DOMContentLoaded',()=>start().catch(error),{once:true});
 setInterval(()=>{if(me&&['reviews','developments'].includes(tab)&&!projectRoute()&&!document.querySelector('dialog[open]'))render().catch(error);},5000);

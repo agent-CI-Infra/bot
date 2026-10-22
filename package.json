@@ -23,7 +23,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "yaml": "2.8.1",
-    "jose": "^6.2.13"
+    "jose": "^6.2.13",
+    "yaml": "2.9.0"
   }
 }

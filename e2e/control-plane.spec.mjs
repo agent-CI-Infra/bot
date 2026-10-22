@@ -13,6 +13,7 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '初始化并登录' }).click();
+    await page.getByRole('button', { name: '项目', exact: true }).click();
     await expect(page.getByRole('heading', { name: '项目' })).toBeVisible();
     await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
     await expect(page.getByText('本页 0 条投递')).toBeVisible();

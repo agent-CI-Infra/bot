@@ -79,7 +79,7 @@ export class Store {
     extend('task_logs', { created_at: "TEXT NOT NULL DEFAULT ''" });
     // Review rules: which events start a review, the comment language and the administrator's project-specific guidance.
     extend('policies', { review_issues: 'INTEGER NOT NULL DEFAULT 1', review_pull_requests: 'INTEGER NOT NULL DEFAULT 1', review_pr_updates: 'INTEGER NOT NULL DEFAULT 1',
-      review_language: "TEXT NOT NULL DEFAULT 'auto'", review_instructions: "TEXT NOT NULL DEFAULT ''" });
+      review_language: "TEXT NOT NULL DEFAULT 'auto'", review_instructions: "TEXT NOT NULL DEFAULT ''", rule_overrides: "TEXT NOT NULL DEFAULT '{}'" });
     // Repositories each account can see on GitHub. Seeing a repository does not register or enable it.
     this.db.exec(`CREATE TABLE IF NOT EXISTS installed_repositories(account_id TEXT NOT NULL REFERENCES accounts(id),repository_id TEXT NOT NULL,
         installation_id TEXT,full_name TEXT NOT NULL,owner_id TEXT NOT NULL,owner_login TEXT NOT NULL DEFAULT '',private INTEGER NOT NULL DEFAULT 0,

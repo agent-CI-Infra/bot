@@ -30,6 +30,8 @@ services:
       BOT_FORWARD_PRIVATE_HOSTS: "${BOT_FORWARD_PRIVATE_HOSTS:-}"
       BOT_COOKIE_SECURE: "${BOT_COOKIE_SECURE:-false}"
       BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
+      BOT_TUNNEL_TOKEN_FILE: /tunnel/token
+      BOT_TUNNEL_METRICS_URL: http://webhook:8794
     stop_grace_period: 100s
     ports:
       - "0.0.0.0:${BOT_WEBHOOK_PORT:-8791}:8791"
@@ -38,7 +40,30 @@ services:
       - bot-data:/data
       - bot-keys:/keys:ro
       - internal-keys:/internal:ro
+      - tunnel-keys:/tunnel
     networks: [control]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  tunnel:
+    image: department-bot-tunnel:local
+    build:
+      context: .
+      dockerfile: tunnel/Dockerfile
+    volumes:
+      - tunnel-keys:/tunnel:ro
+    networks: [edge]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  webhook:
+    image: department-bot-webhook:local
+    build:
+      context: .
+      dockerfile: webhook/Dockerfile
+    networks: [control, edge]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -83,6 +108,9 @@ volumes:
   bot-keys:
   internal-keys:
   manager-data:
+  tunnel-keys:
 networks:
   control:
+    driver: bridge
+  edge:
     driver: bridge
