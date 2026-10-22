@@ -45,6 +45,14 @@ merge:
   oldest_first: true
   skip_labels: [pr/hold]
 
+# Outbound review dispatch (#1): create a target with POST /api/dispatch-targets, then forward
+# selected events to it. The worker receives a signed payload and returns its result through
+# POST /api/agent/reviews with a short-lived `botagent_…` token.
+# dispatch:
+#   - target: <dispatch-target-id>
+#     events: [pull_request.opened, pull_request.synchronize]
+#     labels: []                     # optional: only forward when one of these labels is present
+
 ci:
   stages:
     - id: check

@@ -12,6 +12,8 @@ src/automation/
   registry.ts   内置模块清单（加能力 = 加一个模块）
   engine.ts     逐模块规划、去重、记录模块失败
   runner.ts     读取策略、规划并写入 automation_runs（执行器接口在此）
+  dispatch.ts   事件过滤、投递队列与重试 worker
+  labels-bootstrap.ts  标签清单初始化（内置模板 + 仓库架构 → YAML/LABELING.md）
   modules/
     labels.ts       label-lint、pr-status
     gate.ts         ready 标签守卫、merge-gate 状态
@@ -134,6 +136,46 @@ webhook 载荷里没有"检查是否全绿""当前用户是否 maintainer""是�
 2. 在 `registry.ts` 的 `builtInModules` 注册。
 3. 如需要新的仓库开关，在 `config.ts` 的 schema、默认值和校验里加字段，在 `repository-config.ts` 的 YAML 字段映射里放行 snake_case 写法，并在 `management.ts` 的 PATCH 字段列表放行。
 4. 在 `test/automation.test.mjs` 里用事件 + 事实固定行为，覆盖"事实缺失 → fail closed"。
+
+## 委派身份（外部执行端）
+
+外部执行端（例如个人电脑上的检视工具）不持有 GitHub App 私钥或 PAT：
+
+1. 项目管理员调用 `POST /api/repositories/:id/agent-tokens`，传 `subject`、`scopes: ["review:submit"]`、`ttl_seconds`（60–86400，默认 3600）。返回的 `botagent_<48 hex>` **只出现一次**，库里只存 SHA-256。
+2. 执行端用 `Authorization: Bearer botagent_…` 调用 `POST /api/agent/reviews`，体为 `{pull_number, head_sha, body}`。控制面以 Bot 身份在对应 head 上发一条 `COMMENT` review；`token_id + PR + head + 正文摘要` 幂等，重试不会重复回写。
+3. `DELETE /api/agent-tokens/:id` 立即撤销；过期、撤销或仓库不存在的 token 返回 `401`。
+
+这条链路让外部端保留自己的检视实现，只借用 Bot 的身份和写权限。控制面始终不执行外部代码，也不把 token 回传给其他调用者。
+
+## 事件过滤与转发
+
+1. 超管注册目标：`POST /api/dispatch-targets`，体为 `{name, url, webhook_secret}`；secret 用 AES-256-GCM 加密存储，读取接口只返回名称和 URL。
+2. 仓库 YAML 声明哪些事件发往哪个目标：
+
+```yaml
+dispatch:
+  - target: <dispatch-target-id>
+    events: [pull_request.opened, pull_request.*, issues]
+    labels: [ready]          # 可选；为空表示不按标签过滤
+```
+
+3. webhook 落库事务内只写 `dispatch_deliveries`（`pending`），不直接联网；`DispatchWorker` 每 5 秒取到期行发送。信封为 `{event, action, repository_id, delivery_id, payload}`，请求头带 `X-Bot-Event`、`X-Bot-Delivery`、`X-Bot-Target` 和 `X-Bot-Signature-256`（`sha256=HMAC(body)`）。
+4. 2xx 记为 `delivered`；失败按 5s/10s/20s… 退避，最多 5 次，之后 `failed`。目标停用或删除不影响 webhook 投递。
+
+完整链路：GitHub 事件 → Bot 按仓库/事件/标签过滤 → 转发到个人电脑 → 本地检视 → 申请临时 token → `/api/agent/reviews` 以 Bot 身份回写。
+
+## 标签清单初始化
+
+标签清单的优先级是：仓库保存的 `policies.automation` → 仓内置 `config/repositories/<owner>__<repo>.yml` → Bot 内置模板。
+
+当两者都不存在时，`POST /api/repositories/:id/labels/bootstrap` 会：
+
+- 以 Bot 内置清单（type/source/priority/size/status/pr/gate）为底；
+- 用请求中的 `areas`（通常是仓库顶层目录/组件）生成 `area/*`，非法字符转成 `-`；
+- 返回 `yaml`（可直接放入 `config/repositories/`）和 `labeling`（可直接作为 `LABELING.md` 提交）；
+- `apply: true` 时同时写入 `policies.automation`，立即生效。
+
+再次调用会识别已有配置并返回 `source: "repository"`，不会覆盖。
 
 ## 信任边界
 

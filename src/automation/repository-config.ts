@@ -69,7 +69,7 @@ function translateCi(value: unknown): Record<string, unknown> {
 export function translateConfig(value: unknown): Record<string, unknown> {
   const root = object(value, 'yaml');
   const result = translated(root, {
-    dry_run: 'dryRun', labels: 'labels', gate: 'gate', merge: 'merge', ci: 'ci',
+    dry_run: 'dryRun', labels: 'labels', gate: 'gate', merge: 'merge', ci: 'ci', dispatch: 'dispatch',
   }, 'yaml');
   if (root.labels !== undefined) result.labels = translateLabels(root.labels);
   if (root.gate !== undefined) {
@@ -84,6 +84,12 @@ export function translateConfig(value: unknown): Record<string, unknown> {
     }, 'merge');
   }
   if (root.ci !== undefined) result.ci = translateCi(root.ci);
+  if (root.dispatch !== undefined) {
+    if (!Array.isArray(root.dispatch)) throw new AutomationConfigError('dispatch');
+    result.dispatch = root.dispatch.map((item, index) => translated(object(item, `dispatch[${index}]`), {
+      target: 'target', events: 'events', labels: 'labels',
+    }, `dispatch[${index}]`));
+  }
   return result;
 }
 

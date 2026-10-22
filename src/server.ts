@@ -10,10 +10,12 @@ import { ingest } from './app/webhook.js';
 import { type ProjectService } from './projects/service.js';
 import { type TaskEngine } from './agent/engine.js';
 import type { AutomationConfig } from './automation/config.js';
+import { submitAgentReview, type PublishReview } from './app/agent.js';
+import { publishAsBot } from './automation/review-callback.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
-  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; }
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; publishReview?: PublishReview; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -61,14 +63,13 @@ export function createControlPlane(options: Options) {
     if (!path.startsWith('/api/')) return fail(404, 'not_found');
     if (path === '/api/setup' && method === 'GET') { respond(res, 200, { initialized: initialized() }); return; }
     const mutation = !['GET', 'HEAD'].includes(method);
-    if (mutation && req.headers.origin) {
+    // Delegated workers use a Bearer token, not a browser session: no Origin and no CSRF cookie.
+    const agentRequest = path === '/api/agent/reviews';
+    if (mutation && req.headers.origin && !agentRequest) {
       const origin = options.adminOrigin || `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
       if (req.headers.origin !== origin) fail(403, 'origin_forbidden');
     }
     if (path === '/api/setup' && method === 'POST' && initialized()) fail(409, 'already_initialized');
-    const publicRequest = path === '/api/setup' && method === 'POST' || path === '/api/auth/login' && method === 'POST';
-    const user = publicRequest ? null : actor(store, req);
-    if (user && mutation && req.headers['x-csrf-token'] !== user.csrf) fail(403, 'csrf_required');
     let input: Json = {};
     if (mutation) {
       if (!req.headers['content-type']?.startsWith('application/json')) fail(415, 'json_required');
@@ -77,6 +78,14 @@ export function createControlPlane(options: Options) {
       try { input = object(JSON.parse(raw.bytes.toString('utf8'))); }
       catch (error) { if (error instanceof HttpError) throw error; fail(400, 'invalid_json'); }
     }
+    if (agentRequest) {
+      if (method !== 'POST') return fail(404, 'not_found');
+      const result = await submitAgentReview(store, req.headers, input, options.publishReview ?? publishAsBot);
+      respond(res, 201, result); return;
+    }
+    const publicRequest = path === '/api/setup' && method === 'POST' || path === '/api/auth/login' && method === 'POST';
+    const user = publicRequest ? null : actor(store, req);
+    if (user && mutation && req.headers['x-csrf-token'] !== user.csrf) fail(403, 'csrf_required');
     if (path === '/api/setup' && method === 'POST') {
       fields(input, ['username', 'password']);
       const username = text(input.username, 100), encoded = await hashPassword(password(input.password)), id = randomId();
@@ -118,7 +127,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = options.engine?.api(user,method,url,input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
+    const result = options.engine?.api(user,method,url,input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input, options.repositoryConfigs) ?? models(store, user, method, url, input)
       ?? (method === 'GET' ? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     if (mutation && path.startsWith('/api/repositories')) void options.projects?.reconcile().catch(() => {});

@@ -2,7 +2,8 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
 import { queueWebhook } from '../review/queue.js';
-import { recordAutomation } from '../automation/runner.js';
+import { automationConfigFor, recordAutomation } from '../automation/runner.js';
+import { enqueueDispatches } from '../automation/dispatch.js';
 import type { AutomationConfig } from '../automation/config.js';
 
 export function ingest(
@@ -65,7 +66,11 @@ export function ingest(
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id);
       // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
       const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());
-      try { recordAutomation(store, String(owner.id), event, action, payload, id, {}, fallback); } catch { /* a rule cannot fail ingestion */ }
+      try {
+        const { config } = automationConfigFor(store, String(owner.id), fallback);
+        enqueueDispatches(store, String(owner.id), config.dispatch, event, action, payload, id);
+        recordAutomation(store, String(owner.id), event, action, payload, id, {}, fallback);
+      } catch { /* a rule cannot fail ingestion */ }
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
     return { status, response };

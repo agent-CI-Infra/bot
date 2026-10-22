@@ -46,12 +46,23 @@ export interface CiConfig {
   stages: CiStage[];
 }
 
+/** One outbound dispatch rule: which events go to which registered target. */
+export interface DispatchRule {
+  /** Id of a `dispatch_targets` row, created by a super administrator. */
+  target: string;
+  /** `event`, `event.action` or `event.*` routes. */
+  events: string[];
+  /** Only forward when at least one of these labels is present (empty = any). */
+  labels: string[];
+}
+
 export interface AutomationConfig {
   dryRun: boolean;
   labels: LabelsConfig;
   gate: GateConfig;
   merge: MergeConfig;
   ci: CiConfig;
+  dispatch: DispatchRule[];
 }
 
 export const DEFAULT_AUTOMATION: AutomationConfig = {
@@ -73,6 +84,7 @@ export const DEFAULT_AUTOMATION: AutomationConfig = {
   },
   merge: { enabled: false, method: 'merge', oldestFirst: true, skipLabels: ['pr/hold'] },
   ci: { stages: [] },
+  dispatch: [],
 };
 
 export class AutomationConfigError extends Error {
@@ -86,6 +98,7 @@ const LABEL = /^[a-z0-9][a-z0-9._/-]{0,99}$/;
 const AXIS = /^[a-z][a-z0-9-]{0,31}$/;
 const VALUE = /^[a-z0-9][a-z0-9._-]{0,48}$/;
 const WORD = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+const ROUTE = /^[a-z_]+(?:\.(?:\*|[a-z_]+))?$/;
 
 function record(value: unknown, field: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AutomationConfigError(field);
@@ -158,10 +171,27 @@ function stages(value: unknown, field: string, fallback: CiStage[]): CiStage[] {
   });
 }
 
+function dispatch(value: unknown, field: string, fallback: DispatchRule[]): DispatchRule[] {
+  if (value === undefined) return fallback.map(rule => ({ ...rule, events: [...rule.events], labels: [...rule.labels] }));
+  if (!Array.isArray(value) || value.length > 100) throw new AutomationConfigError(field);
+  return value.map((item, index) => {
+    const at = `${field}[${index}]`, rule = record(item, at);
+    onlyKeys(rule, ['target', 'events', 'labels'], at);
+    if (typeof rule.target !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(rule.target)) {
+      throw new AutomationConfigError(`${at}.target`);
+    }
+    if (!Array.isArray(rule.events) || rule.events.length === 0 || rule.events.length > 50
+      || rule.events.some(route => typeof route !== 'string' || !ROUTE.test(route))) {
+      throw new AutomationConfigError(`${at}.events`);
+    }
+    return { target: rule.target, events: [...(rule.events as string[])], labels: labels(rule.labels, `${at}.labels`, []) };
+  });
+}
+
 /** Parse a stored or posted config, merging it over `base`. */
 export function parseAutomationConfig(value: unknown, base: AutomationConfig = DEFAULT_AUTOMATION): AutomationConfig {
   const root = record(value, 'automation');
-  onlyKeys(root, ['dryRun', 'labels', 'gate', 'merge', 'ci'], 'automation');
+  onlyKeys(root, ['dryRun', 'labels', 'gate', 'merge', 'ci', 'dispatch'], 'automation');
   const labelsValue = root.labels === undefined ? {} : record(root.labels, 'labels');
   onlyKeys(labelsValue, ['enabled', 'axes', 'manifest', 'lint', 'prStatus'], 'labels');
   const lintValue = labelsValue.lint === undefined ? {} : record(labelsValue.lint, 'labels.lint');
@@ -225,6 +255,7 @@ export function parseAutomationConfig(value: unknown, base: AutomationConfig = D
       skipLabels: labels(mergeValue.skipLabels, 'merge.skipLabels', base.merge.skipLabels),
     },
     ci: { stages: ciStages },
+    dispatch: dispatch(root.dispatch, 'dispatch', base.dispatch),
   };
 }
 

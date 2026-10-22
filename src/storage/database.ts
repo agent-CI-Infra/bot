@@ -74,7 +74,23 @@ export class Store {
       CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id),
         delivery_id TEXT,event TEXT NOT NULL,route TEXT NOT NULL,dry_run INTEGER NOT NULL,actions TEXT NOT NULL,notes TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS automation_repo_time ON automation_runs(repository_id,created_at);
-      PRAGMA user_version=4;`);
+      CREATE TABLE IF NOT EXISTS agent_tokens(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id),
+        subject TEXT NOT NULL,scopes TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,expires_at INTEGER NOT NULL,
+        created_at TEXT NOT NULL,created_by TEXT NOT NULL,revoked_at TEXT);
+      CREATE INDEX IF NOT EXISTS agent_tokens_repo ON agent_tokens(repository_id,created_at);
+      CREATE TABLE IF NOT EXISTS external_reviews(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id),
+        agent_token_id TEXT NOT NULL REFERENCES agent_tokens(id),pull_number INTEGER NOT NULL,head_sha TEXT NOT NULL,
+        body_hash TEXT NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL,response TEXT,created_at TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS external_review_once ON external_reviews(agent_token_id,pull_number,head_sha,body_hash);
+      CREATE TABLE IF NOT EXISTS dispatch_targets(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,url TEXT NOT NULL,
+        secret TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS dispatch_deliveries(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id),
+        target_id TEXT NOT NULL REFERENCES dispatch_targets(id),delivery_id TEXT NOT NULL,event TEXT NOT NULL,action TEXT NOT NULL,
+        payload TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL DEFAULT 0,response TEXT,created_at TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS dispatch_once ON dispatch_deliveries(delivery_id,target_id);
+      CREATE INDEX IF NOT EXISTS dispatch_pending ON dispatch_deliveries(state,next_attempt_at);
+      PRAGMA user_version=5;`);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }
