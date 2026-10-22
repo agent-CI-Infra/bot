@@ -2,6 +2,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { GitHub } from '../github/client.js';
 import { blobSha, clip, operationId, Redactor, safePath, stop } from './common.js';
+import { randomId } from '../core/security.js';
 
 export class Workspace {
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void){}
@@ -14,7 +15,8 @@ export class Workspace {
     if(row?.state==='completed')return JSON.parse(row.result);
     if(!row)this.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,this.task.id,JSON.stringify(input));
     let response;
-    try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input);}
+    // A command may run for up to 30 minutes; the manager answers only when it ends.
+    try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,request.type==='workspace_command'?Number(request.timeout_ms||10000)+120000:90000);}
     catch{return stop('execution_interrupted','waiting_environment');}
     await this.guard();
     const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed'});
@@ -22,6 +24,12 @@ export class Workspace {
     // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
     return result;
+  }
+  // Ends background processes this task kept so the next task starts on a clean project computer.
+  async release(){
+    if(!this.task.generation||!this.task.workspace_id)return;
+    await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
+      request:{type:'reap',workspace_id:this.task.workspace_id}}).catch(()=>{});
   }
   async write(key:string,path:string,data:Buffer,mode='100644',snapshot=false,hash?:string){
     safePath(path);if(this.redactor.contains(data))stop('credential_in_repository');

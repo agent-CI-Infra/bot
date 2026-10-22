@@ -2,12 +2,12 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 
-export interface Manager { call(method: string, path: string, input?: Json): Promise<any>; }
+export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
 export class ManagerClient implements Manager {
   constructor(private readonly url: string, private readonly token: Buffer) {}
-  async call(method: string, path: string, input?: Json) {
+  async call(method: string, path: string, input?: Json, timeoutMs = 90000) {
     let response;
-    try { response = await fetch(this.url + path, { method, signal: AbortSignal.timeout(90000),
+    try { response = await fetch(this.url + path, { method, signal: AbortSignal.timeout(timeoutMs),
       headers: { Authorization: 'Bearer ' + this.token.toString('base64'), 'Content-Type': 'application/json' },
       ...(input ? { body: JSON.stringify(input) } : {}) }); }
     catch { return fail(503, 'manager_unavailable'); }

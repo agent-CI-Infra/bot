@@ -5,7 +5,7 @@ export class ManagerError extends Error {
 }
 export class Docker {
   constructor(socketPath = '/var/run/docker.sock') { this.socketPath = socketPath; }
-  request(method, path, body, raw = false) {
+  request(method, path, body, raw = false, timeout = 90000) {
     return new Promise((resolve, reject) => {
       const bytes = body === undefined ? null : Buffer.from(JSON.stringify(body));
       const req = http.request({ socketPath: this.socketPath, path: '/v1.47' + path, method,
@@ -20,15 +20,15 @@ export class Docker {
         });
         res.on('error', reject);
       });
-      req.setTimeout(90000, () => req.destroy(new Error('docker_timeout'))); req.on('error', reject); req.end(bytes);
+      req.setTimeout(timeout, () => req.destroy(new Error('docker_timeout'))); req.on('error', reject); req.end(bytes);
     });
   }
-  async runner(container, input) {
+  async runner(container, input, timeout = 90000) {
     if (Buffer.byteLength(JSON.stringify(input)) > 64 * 1024) throw new ManagerError('runner_request_too_large', 413);
     const exec = await this.request('POST', `/containers/${encodeURIComponent(container)}/exec`, { AttachStdout: true, AttachStderr: true,
       User: '10001:10001', WorkingDir: '/workspace', Cmd: ['node', '/opt/runner/runner.mjs', Buffer.from(JSON.stringify(input)).toString('base64url')] });
     if (!exec) throw new ManagerError('container_missing');
-    const raw = await this.request('POST', `/exec/${exec.Id}/start`, { Detach: false, Tty: false }, true);
+    const raw = await this.request('POST', `/exec/${exec.Id}/start`, { Detach: false, Tty: false }, true, timeout);
     let offset = 0, stdout = '';
     while (offset + 8 <= raw.length) {
       const size = raw.readUInt32BE(offset + 4); if (offset + 8 + size > raw.length) throw new ManagerError('runner_protocol_failed');

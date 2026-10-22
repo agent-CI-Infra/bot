@@ -47,6 +47,7 @@ function keepOpen(container, render) {
   const open = new Set([...container.querySelectorAll('details[open] > summary')].map(s => s.textContent));
   render(); container.querySelectorAll('details > summary').forEach(s => { if (open.has(s.textContent)) s.parentElement.open = true; });
 }
+function networkText(pc) { return pc.network_policy === 'internet egress' ? '可访问外网（项目独立网络）' : pc.network_policy === 'internal, no egress' ? '项目内部网络，无外网' : pc.network_policy; }
 function scroller(node) { return getComputedStyle(node).overflowY === 'auto' ? node : node.parentElement; }
 function operationId() { return [...crypto.getRandomValues(new Uint8Array(24))].map(n => n.toString(16).padStart(2, '0')).join(''); }
 function environmentButtons(environment, task, after, report) {
@@ -70,16 +71,16 @@ function dialog(id, markup) {
 }
 const taskView = dialog('task-view', `<div class="view-head"><div class="title-group"><h2 id="task-title"></h2><span id="task-badges" class="actions"></span></div><div id="task-actions" class="actions"></div></div>
 <p id="task-error" class="view-error" role="alert"></p>
-<div class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
+<div class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
 taskView.setAttribute('aria-labelledby', 'task-title');
 const environmentView = dialog('environment-view', `<div class="view-head"><div class="title-group"><h2 id="environment-title"></h2><span id="environment-badges" class="actions"></span></div><div id="environment-actions" class="actions"></div></div>
 <p id="environment-error" class="view-error" role="alert"></p><div id="environment-body" class="environment-layout"></div>`);
 environmentView.setAttribute('aria-labelledby', 'environment-title');
 
-let openTaskId = null, taskTimer = null, renderedLogs = new Set();
+let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null;
 async function openTask(id) {
   if (environmentView.open) environmentView.close();
-  openTaskId = id; renderedLogs = new Set(); clearTimeout(taskTimer);
+  openTaskId = id; renderedLogs = new Set(); liveCommand = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; $('task-error').textContent = ''; $('timeline-live').hidden = true;
   if (!taskView.open) taskView.showModal();
@@ -92,7 +93,7 @@ async function refreshTask() {
     const environment = await api('/api/environments/' + detail.task.repository_id).catch(() => null);
     if (openTaskId !== id || !taskView.open) return;
     $('task-error').textContent = '';
-    renderTaskHeader(detail.task); renderTimeline(detail.task, logs); keepOpen($('task-side'), () => renderTaskSide(detail, environment));
+    renderTaskHeader(detail.task); renderTimeline(detail.task, logs); await refreshLive(detail.task); keepOpen($('task-side'), () => renderTaskSide(detail, environment));
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
   } catch (err) { $('task-error').textContent = err.message; taskTimer = setTimeout(refreshTask, 5000); }
 }
@@ -107,6 +108,22 @@ function renderTaskHeader(task) {
     await refreshTask();
   }));
   actions.append(button('关闭', () => taskView.close()));
+}
+// The command running right now in the project computer, with its output streamed by byte offset.
+async function refreshLive(task) {
+  const box = $('timeline-command');
+  if (task.status !== 'running') { box.hidden = true; liveCommand = null; return; }
+  let live = await api(`/api/tasks/${task.id}/live?offset=${liveCommand?.offset || 0}`).catch(() => null);
+  if (live?.running && liveCommand && live.operation_id !== liveCommand.operation_id) { liveCommand = null; live = await api(`/api/tasks/${task.id}/live?offset=0`).catch(() => null); }
+  if (!live?.running) { box.hidden = true; liveCommand = null; return; }
+  if (!liveCommand) liveCommand = { operation_id: live.operation_id, offset: 0, text: '', seen: Date.now() };
+  liveCommand.text = (liveCommand.text + live.output).slice(-65536); liveCommand.offset = live.offset;
+  const panel = scroller(box.parentElement), atBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 60;
+  const head = element('div', '', 'step-head'), meta = element('span', '', 'step-meta');
+  meta.append(badge('运行中', 'info'), element('span', `最长 ${Math.round((live.timeout_ms || 120000) / 60000)} 分钟${live.keep_background ? ' · 保留后台进程' : ''}`));
+  head.append(element('strong', '正在执行命令'), meta);
+  box.replaceChildren(head, element('pre', '$ ' + live.command, 'command'), element('pre', liveCommand.text || '（还没有输出）', 'output live-output'));
+  box.hidden = false; if (atBottom) panel.scrollTop = panel.scrollHeight;
 }
 function liveText(task) {
   if (terminalStates.includes(task.status)) return null;
@@ -191,7 +208,7 @@ function computerCard(task, environment) {
   const usage = current?.id === task.id ? '本任务正在使用' : current ? `正在执行 ${kindLabels[current.kind] || current.kind} #${current.object_number}` : '空闲';
   const head = element('div', '', 'actions'); head.append(state(env.state), element('span', usage, 'muted')); section.append(head);
   section.append(facts([['容器', pc.container], ['代次', task.generation && env.generation && task.generation !== env.generation ? `当前 g${env.generation}，本任务用 g${task.generation}` : env.generation ? 'g' + env.generation : '待创建'],
-    ['资源', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程` : null], ['网络', pc.network_policy === 'internal, no egress' ? '项目内部网络，无外网' : pc.network_policy]]));
+    ['资源', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程` : null], ['网络', networkText(pc)]]));
   const actions = element('div', '', 'actions');
   actions.append(button('查看虚拟电脑', () => openEnvironment(task.repository_id)), ...environmentButtons(env, current, refreshTask, err => { $('task-error').textContent = err.message; }));
   section.append(actions); return section;
@@ -241,7 +258,7 @@ function renderEnvironment({ environment: env, current_task: current, tasks, com
   $('environment-actions').replaceChildren(...environmentButtons(env, current, refreshEnvironment, err => { $('environment-error').textContent = err.message; }), button('关闭', () => environmentView.close()));
   const machine = card('机器');
   machine.append(facts([['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)], ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null],
-    ['网络', pc.network ? `${pc.network}（${pc.network_policy === 'internal, no egress' ? '项目内部网络，无外网' : pc.network_policy}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null], ['运行用户', pc.user],
+    ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['单条命令', pc.max_command_minutes ? `最长 ${pc.max_command_minutes} 分钟，容器不随命令重启` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null], ['运行用户', pc.user],
     ['资源', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程 · /tmp ${pc.tmp_mb} MB` : null], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读' : pc.root_filesystem],
     ['保留代次', pc.retained_generations], ['故障', env.error]]));
   if (!env.computer) machine.append(element('p', '暂时读不到 manager 的机器信息。', 'muted'));
@@ -265,3 +282,64 @@ function renderEnvironment({ environment: env, current_task: current, tasks, com
 }
 for (const view of [taskView, environmentView]) view.addEventListener('close', () => { clearTimeout(taskTimer); clearTimeout(environmentTimer); if (view === taskView) openTaskId = null; else openEnvironmentId = null; });
 $('logout').addEventListener('click', () => { for (const view of [taskView, environmentView]) if (view.open) view.close(); });
+
+// Installed repositories (super administrator): GitHub shows what is installed; nothing works until it is started here.
+function syncSummary(syncs = []) {
+  if (!syncs.length) return '尚未同步';
+  return syncs.map(s => s.error ? `${s.account_name} 同步失败（${s.error}）` : `${s.account_name} 同步于 ${timestamp(s.synced_at).slice(11, 19)}`).join(' · ');
+}
+function installedDetail(row) {
+  const parts = [row.owner_login || '所有者 ' + row.owner_id, row.private ? '私有' : '公开'];
+  if (row.account_name) parts.push(row.account_name + (row.installation_id ? ' 安装 ' + row.installation_id : ''));
+  parts.push('仓库 ID ' + row.id);
+  if (row.registered) parts.push(`检视${row.review_enabled ? '开' : '关'} · 开发${row.development_enabled ? '开' : '关'}${row.model_id ? '' : ' · 未选模型'}`);
+  return parts.join(' · ');
+}
+function installedBadges(row) {
+  const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : row.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning')];
+  if (row.installed === false) badges.push(badge('已移出安装', 'danger'));
+  else if (row.installed === null) badges.push(badge('手动登记'));
+  return badges;
+}
+function installedActions(row, after) {
+  const actions = element('div', '', 'actions');
+  const call = async (path, body, caption) => {
+    actions.querySelectorAll('button').forEach(b => { b.disabled = true; }); $('message').textContent = caption;
+    try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); $('message').textContent = ''; } catch (err) { error(err); }
+    await after();
+  };
+  if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
+  // Enabling also turns review on, so a manually registered repository starts working too.
+  if (row.registered && (!row.enabled || !row.review_enabled)) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
+  if (row.registered && row.enabled) actions.append(button('禁用', () => {
+    if (confirm(`禁用 ${row.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) call('disable', {}, `正在禁用 ${row.full_name}…`);
+  }));
+  if (row.registered) actions.append(button('查看虚拟电脑', () => openEnvironment(row.id).catch(error)));
+  return actions;
+}
+const activationView = document.createElement('dialog'); activationView.id = 'activation-view'; activationView.setAttribute('aria-labelledby', 'activation-title');
+activationView.innerHTML = `<form id="activation-form" method="dialog"><h2 id="activation-title"></h2>
+<p class="muted">启动后为这个仓库创建虚拟电脑，并开始检视新打开的 Issue 和 PR。启动前收到的事件只存档，不会补跑。</p>
+<label>检视和开发使用的模型<select name="model_id"></select></label>
+<label class="check"><input type="checkbox" name="development_enabled"> 同时开启自动开发：Issue 明确要求改代码时，在虚拟电脑里实现、测试并开 bot PR</label>
+<p id="activation-error" class="view-error" role="alert"></p>
+<div class="actions"><button type="button" class="quiet" id="activation-cancel">取消</button><button type="submit">启动</button></div></form>`;
+document.body.append(activationView);
+let activationTarget = null;
+async function openActivation(row, after) {
+  activationTarget = { row, after }; const form = $('activation-form'), select = form.elements.model_id;
+  $('activation-title').textContent = '启动 ' + row.full_name; $('activation-error').textContent = ''; form.reset(); select.replaceChildren();
+  const models = (await api('/api/models')).models.filter(m => m.repository_id === null || m.repository_id === row.id);
+  for (const m of models) select.add(new Option(`${m.model_name} · ${m.repository_id ? '本仓库专属' : '部署共享'}${m.key_configured ? '' : '（Key 已撤销）'}`, m.id));
+  select.add(new Option('暂不选择（任务会等待模型配置）', ''));
+  activationView.showModal();
+}
+$('activation-cancel').addEventListener('click', () => activationView.close());
+$('activation-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = event.currentTarget, submit = form.querySelector('[type=submit]'), target = activationTarget; if (!target) return;
+  submit.disabled = true;
+  try {
+    await api(`/api/installations/${target.row.id}/activate`, 'POST', { model_id: form.elements.model_id.value || null, development_enabled: form.elements.development_enabled.checked });
+    activationView.close(); await target.after();
+  } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
+});

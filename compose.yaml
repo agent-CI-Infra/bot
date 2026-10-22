@@ -55,6 +55,7 @@ services:
     environment:
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_PROJECT_IMAGE: department-bot-project:local
+      BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
       - manager-data:/data
       - internal-keys:/internal:ro

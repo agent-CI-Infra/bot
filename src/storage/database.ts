@@ -76,6 +76,11 @@ export class Store {
       CREATE INDEX IF NOT EXISTS automation_repo_time ON automation_runs(repository_id,created_at);
       PRAGMA user_version=4;`);
     extend('task_logs', { created_at: "TEXT NOT NULL DEFAULT ''" });
+    // Repositories each account can see on GitHub. Seeing a repository does not register or enable it.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS installed_repositories(account_id TEXT NOT NULL REFERENCES accounts(id),repository_id TEXT NOT NULL,
+        installation_id TEXT,full_name TEXT NOT NULL,owner_id TEXT NOT NULL,owner_login TEXT NOT NULL DEFAULT '',private INTEGER NOT NULL DEFAULT 0,
+        installed INTEGER NOT NULL DEFAULT 1,synced_at TEXT NOT NULL,PRIMARY KEY(account_id,repository_id));
+      CREATE TABLE IF NOT EXISTS installation_syncs(account_id TEXT PRIMARY KEY REFERENCES accounts(id),synced_at TEXT,error TEXT,repositories INTEGER);`);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

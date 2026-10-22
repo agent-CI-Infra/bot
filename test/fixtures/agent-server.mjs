@@ -22,7 +22,7 @@ function makeRepo(id){
   for(const number of [42,43,44,99])repo.pulls.set(number,{id:4000+number,number,title:'Review contributor change',body:'Please review this pull request.',state:'open',draft:number===99,user:{id:800,login:'contributor'},head:{sha:foreign,ref:'contributor',repo:{id:Number(id)}},base:{sha:base,ref:'trunk',repo:{id:Number(id)}},html_url:`https://github.invalid/${id}/pull/${number}`});
   return repo;
 }
-for(const id of ['101','202'])repositories.set(id,makeRepo(id));
+for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
 let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true;
 const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
@@ -68,6 +68,7 @@ const server=createServer(async(req,res)=>{
     const path=decodeURIComponent(url.pathname.slice(7));stats.requests.push({method,path});
     if(req.headers.authorization!=='Bearer '+config.github_token)return send({},401);
     if(path==='/user')return send({id:999,login:'department-bot'});
+    if(path==='/user/repos')return send(Number(url.searchParams.get('page')||1)===1?[...repositories.values()].map(r=>({...publicRepo(r),private:false})):[]);
     const byId=/^\/repositories\/(\d+)$/.exec(path);if(byId)return send(publicRepo(repositories.get(byId[1])));
     const match=/^\/repos\/fixture\/project-(\d+)(.*)$/.exec(path);if(!match)return send({},404);
     const repo=repositories.get(match[1]),suffix=match[2];if(!repo)return send({},404);

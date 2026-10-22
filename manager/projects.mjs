@@ -7,8 +7,11 @@ import { ManagerError } from './docker.mjs';
 const randomId = () => randomBytes(24).toString('hex');
 // Fixed project computer template; the control plane only displays it and cannot change it.
 const limits = { memory_mb: 512, cpus: 1, pids: 128, tmp_mb: 64 };
+const maxCommandMs = 30 * 60 * 1000, commandTypes = ['command', 'workspace_command'];
 export class Projects {
-  constructor({ database, docker, deployment, image }) {
+  constructor({ database, docker, deployment, image, egress = true }) {
+    // background: repository -> task workspace whose kept processes may outlive a command. executing: repositories running a runner request.
+    this.egress = egress; this.background = new Map(); this.executing = new Set();
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image; this.queues = new Map();
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
@@ -25,7 +28,7 @@ export class Projects {
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
     const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
     return { ...project, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
-      root_filesystem: 'read-only', network_policy: 'internal, no egress', ...limits, retained_generations: generations } };
+      root_filesystem: 'read-only', network_policy: this.egress ? 'internet egress' : 'internal, no egress', init: true, max_command_minutes: maxCommandMs / 60000, ...limits, retained_generations: generations } };
   }
   lock(repo, fn) {
     const previous = this.queues.get(repo) || Promise.resolve();
@@ -64,23 +67,30 @@ export class Projects {
   }
   async provision(repo) {
     const project = this.get(repo), generation = project.generation, names = this.names(repo, generation);
+    const approved = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
+    if (!approved?.Id) throw new ManagerError('approved_image_missing', 503);
     let resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation);
-    if (!resource) {
-      const image = await this.docker.request('GET', `/images/${encodeURIComponent(this.image)}/json`);
-      if (!image?.Id) throw new ManagerError('approved_image_missing', 503);
-      this.db.prepare('INSERT INTO resources VALUES(?,?,?)').run(repo, generation, image.Id); resource = { image: image.Id };
-    }
+    if (!resource) { this.db.prepare('INSERT INTO resources VALUES(?,?,?)').run(repo, generation, approved.Id); resource = { image: approved.Id }; }
     if (!await this.inspect(repo, generation, 'volume')) await this.docker.request('POST', '/volumes/create', { Name: names.volume, Labels: this.labels(repo, generation, 'volume') });
     await this.inspect(repo, generation, 'volume');
-    if (!await this.inspect(repo, generation, 'network')) await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: true, CheckDuplicate: true, Labels: this.labels(repo, generation, 'network') });
+    let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
+    // A container from an older template (approved image, init, network policy) is replaced in place when provisioned;
+    // the work volume and generation stay. This never happens in the middle of a command.
+    const networkStale = network && network.Internal !== !this.egress;
+    if (container && (container.Image !== approved.Id || container.HostConfig?.Init !== true || networkStale)) {
+      if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
+      await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
+    }
+    if (resource.image !== approved.Id) { this.db.prepare('UPDATE resources SET image=? WHERE repository_id=? AND generation=?').run(approved.Id, repo, generation); resource = { image: approved.Id }; }
+    if (networkStale) { await this.docker.request('DELETE', `/networks/${names.network}`); network = null; }
+    if (!network) await this.docker.request('POST', '/networks/create', { Name: names.network, Driver: 'bridge', Internal: !this.egress, CheckDuplicate: true, Labels: this.labels(repo, generation, 'network') });
     await this.inspect(repo, generation, 'network');
-    let container = await this.inspect(repo, generation, 'container');
     if (!container) {
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
         Cmd: ['node', '/opt/runner/idle.mjs'], Env: ['HOME=/workspace/home', 'LANG=C.UTF-8'], Labels: this.labels(repo, generation, 'container'),
         HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
           Memory: limits.memory_mb * 1024 * 1024, NanoCpus: limits.cpus * 1_000_000_000, PidsLimit: limits.pids, NetworkMode: names.network,
-          RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': `rw,nosuid,nodev,noexec,size=${limits.tmp_mb * 1024 * 1024},mode=1777` },
+          Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': `rw,nosuid,nodev,noexec,size=${limits.tmp_mb * 1024 * 1024},mode=1777` },
           Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }] } });
       container = await this.inspect(repo, generation, 'container');
     }
@@ -101,9 +111,29 @@ export class Projects {
       catch (error) { this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'provision_failed'); throw error; }
     });
   }
-  operate(repo, action, input) {
+  // Stops leftover processes without restarting the container; falls back to a restart if any survive.
+  async reap(repo, generation) {
+    const result = await this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'reap' }).catch(() => null);
+    if (result?.ok) return result.result;
+    await this.stopGeneration(repo, generation); await this.provision(repo); return { restarted: true };
+  }
+  async output(repo, operation, offset) {
+    this.validate(repo);
+    if (!/^[a-f0-9]{48}$/.test(operation) || !Number.isSafeInteger(offset) || offset < 0) throw new ManagerError('invalid_operation', 400);
+    const project = this.get(repo); if (!project) throw new ManagerError('project_not_registered', 404);
+    const container = await this.inspect(repo, project.generation, 'container');
+    if (!container?.State.Running) return { data: '', offset, size: 0, state: 'unavailable' };
+    // Read-only and outside the project lock, so it works while the command holds the lock.
+    const result = await this.docker.runner(this.names(repo, project.generation).container, { operation_id: operation, type: 'tail', offset });
+    if (!result.ok) throw new ManagerError('output_unavailable', 503);
+    return result.result;
+  }
+  async operate(repo, action, input) {
     this.validate(repo);
     if (!['start', 'stop', 'reset', 'delete', 'execute'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
+    // A long command holds the project lock; a new stop, reset or delete interrupts it by stopping the container.
+    if (['stop', 'reset', 'delete'].includes(action) && this.executing.has(repo) && !this.db.prepare('SELECT 1 FROM operations WHERE id=?').get(input.operation_id)
+      && this.get(repo)?.generation === input.generation) await this.stopGeneration(repo, input.generation).catch(() => {});
     return this.lock(repo, async () => {
       const encoded = JSON.stringify(input), old = this.db.prepare('SELECT * FROM operations WHERE id=?').get(input.operation_id);
       if (old) {
@@ -120,18 +150,29 @@ export class Projects {
       try {
         let result;
         if (action === 'execute') {
-          this.update(repo, 'busy', 'ready');
+          this.update(repo, 'busy', 'ready', null, project.started_at);
           const container = await this.inspect(repo, project.generation, 'container');
           if (!container?.State.Running || container.State.StartedAt !== project.started_at) throw new ManagerError('recovery_required');
           const call = input.request;
-          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob'];
-          const keys=['type','command','path','content','timeout_ms','workspace_id','base64','offset','final','mode','snapshot','sha','tree_sha'];
+          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','reap'];
+          const keys=['type','command','path','content','timeout_ms','keep_background','workspace_id','base64','offset','final','mode','snapshot','sha','tree_sha'];
           if (!call || !types.includes(call.type) || Object.keys(call).some(k => !keys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
-          result = await this.docker.runner(this.names(repo, project.generation).container, { ...call, operation_id: input.operation_id });
-          if(['command','workspace_command'].includes(call.type)){
-            // A repository can daemonize into another process group. The container is the cleanup boundary.
-            await this.stopGeneration(repo,project.generation);await this.provision(repo);
-          }else this.update(repo, 'ready', 'ready', null, project.started_at);
+          // Kept background processes belong to one task workspace; any other work stops them first.
+          const owner = this.background.get(repo);
+          if (owner && owner !== call.workspace_id) { this.background.delete(repo); await this.reap(repo, project.generation); }
+          if (call.type === 'reap') { this.background.delete(repo); result = { ok: true, result: await this.reap(repo, project.generation) }; }
+          else {
+            const timeout = commandTypes.includes(call.type) ? Math.min(Math.max(Number(call.timeout_ms) || 10000, 100), maxCommandMs) + 60000 : 90000;
+            this.executing.add(repo);
+            try { result = await this.docker.runner(this.names(repo, project.generation).container, { ...call, operation_id: input.operation_id }, timeout); }
+            finally { this.executing.delete(repo); }
+            if (commandTypes.includes(call.type)) {
+              if (call.type === 'workspace_command' && call.keep_background === true && result.ok) this.background.set(repo, call.workspace_id);
+              // Processes that escaped the command's process group end here unless this task keeps background work.
+              else if (!call.workspace_id || this.background.get(repo) !== call.workspace_id) await this.reap(repo, project.generation);
+            }
+          }
+          this.update(repo, 'ready', 'ready', null, this.get(repo).started_at);
         } else {
           this.update(repo, action === 'reset' ? 'resetting' : 'recovering', action === 'stop' ? 'stopped' : action === 'delete' ? 'deleted' : 'ready');
           await this.stopAll(repo);

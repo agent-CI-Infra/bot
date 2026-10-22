@@ -10,10 +10,11 @@ import { ingest } from './app/webhook.js';
 import { type ProjectService } from './projects/service.js';
 import { type TaskEngine } from './agent/engine.js';
 import type { AutomationConfig } from './automation/config.js';
+import { type InstallationSync, installationApi } from './app/installations.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
-  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; }
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -49,6 +50,8 @@ export function createControlPlane(options: Options) {
     const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
     const result = ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.repositoryConfigs);
     respond(res, result.status, result.response);
+    // Installation changes are already recorded; a full listing follows outside the delivery path.
+    if (result.status === 200 && 'sync' in result && result.sync) options.installations?.schedule(match[1]!);
   }));
   const admin = createServer(wrap(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
@@ -119,10 +122,10 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = options.engine?.api(user,method,url,input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
+    const result = await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
       ?? (method === 'GET' ? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
-    if (mutation && path.startsWith('/api/repositories')) void options.projects?.reconcile().catch(() => {});
+    if (mutation && (path.startsWith('/api/repositories') || path.startsWith('/api/installations'))) void options.projects?.reconcile().catch(() => {});
     respond(res, method === 'POST' ? 201 : 200, result);
   }));
   for (const server of [webhook, admin]) { server.requestTimeout = 30_000; server.headersTimeout = 10_000; }

@@ -10,7 +10,9 @@ export function selectedModel(store: Store, repositoryId: string) {
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};
 export function tools(development:boolean){
-  const result=[fn('read_file','Read a file in this task workspace',{path:string},['path']),fn('run_command','Run a bounded command in this task workspace',{command:string},['command'])];
+  const result=[fn('read_file','Read a file in this task workspace',{path:string},['path']),fn('run_command','Run a shell command in this task workspace inside the long-lived project container (internet access available for dependencies). Output is streamed to the console.',
+    {command:string,timeout_seconds:{type:'integer',minimum:1,maximum:1800,description:'Default 120, at most 1800'},
+      keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command'])];
   if(development)result.push(fn('write_file','Replace a text file in this task workspace',{path:string,content:string},['path','content']),
     fn('finish_development','Finish implementation; the server will independently run the required tests and publish only the registered bot branch',
       {summary:string,test_command:string},['summary','test_command']));

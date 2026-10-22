@@ -4,6 +4,7 @@ import { randomId, verifySignature, type Json } from '../core/security.js';
 import { queueWebhook } from '../review/queue.js';
 import { recordAutomation } from '../automation/runner.js';
 import type { AutomationConfig } from '../automation/config.js';
+import { recordInstallationEvent } from './installations.js';
 
 export function ingest(
   store: Store,
@@ -52,6 +53,7 @@ export function ingest(
       endpoint ? endpointId : null, owner?.id || null, deliveryId, event, route, outcome, Number(duplicate), new Date().toISOString(),
       status, JSON.stringify(safeHeaders), bytes, Number(complete), JSON.stringify(response));
     if (status === 200 && !duplicate) store.run('INSERT INTO processed_deliveries VALUES(?,?,?)', accountId, endpointId, deliveryId);
+    const sync = status === 200 && !duplicate && !!payload && recordInstallationEvent(store, accountId, event, payload);
     if (status === 200 && !duplicate && event === 'installation' && ['deleted','suspend'].includes(action)) {
       const installation = payload?.installation as Json | undefined, account = installation?.account as Json | undefined;
       const ownerId = String(account?.id || '');
@@ -68,6 +70,6 @@ export function ingest(
       try { recordAutomation(store, String(owner.id), event, action, payload, id, {}, fallback); } catch { /* a rule cannot fail ingestion */ }
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
-    return { status, response };
+    return { status, response, sync };
   });
 }

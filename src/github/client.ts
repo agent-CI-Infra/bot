@@ -2,6 +2,12 @@ import { createSign } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
 import { Redactor, stop, TaskError } from '../agent/common.js';
 
+// A GitHub App JWT signed in the control plane; it never leaves this process.
+export function appJwt(appId: string, privateKey: string): string {
+  const now = Math.floor(Date.now()/1000), encode = (v: unknown) => Buffer.from(JSON.stringify(v)).toString('base64url');
+  const unsigned = encode({ alg: 'RS256', typ: 'JWT' }) + '.' + encode({ iat: now-60, exp: now+540, iss: appId });
+  return unsigned + '.' + createSign('RSA-SHA256').update(unsigned).sign(privateKey).toString('base64url');
+}
 export class GitHub {
   token = ''; actorId = ''; fullName = ''; defaultBranch = '';
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
@@ -43,9 +49,7 @@ export class GitHub {
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration');
       this.redactor.add(secrets.private_key);
-      const now = Math.floor(Date.now()/1000), encode = (v: unknown) => Buffer.from(JSON.stringify(v)).toString('base64url');
-      const unsigned = encode({ alg: 'RS256', typ: 'JWT' }) + '.' + encode({ iat: now-60, exp: now+540, iss: String(account!.app_id) });
-      const jwt = unsigned + '.' + createSign('RSA-SHA256').update(unsigned).sign(String(secrets.private_key)).toString('base64url'); this.redactor.add(jwt);
+      const jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.redactor.add(jwt);
       const app = await this.request('GET','/app', undefined, false, jwt);
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission');
