@@ -3,7 +3,7 @@ import{externalFixture}from'./external-helpers.mjs';import{verifySignature}from'
 process.chdir('/data');mkdirSync('.tmp',{recursive:true});symlinkSync('/app/static','static');
 const h=await externalFixture(),seen=new Set();let delivered=0,signedSecret,created;
 const receiver=createServer(async(req,res)=>{try{let raw='';for await(const chunk of req)raw+=chunk;assert.ok(verifySignature(Buffer.from(raw),signedSecret,req.headers['x-bot-signature-256']));const event=JSON.parse(raw);
- if(!seen.has(event.id)){const grant=await h.exchange(created.client.id,created.client_secret,{request_id:event.id});assert.equal(grant.status,200);const reply=await fetch(h.github.url+'/repos/fixture/project-101/issues/1/comments',{method:'POST',headers:{Authorization:'Bearer '+grant.value.token,'Content-Type':'application/json'},body:JSON.stringify({body:'External review completed'})});assert.equal(reply.status,201);seen.add(event.id);delivered++;}
+ if(!seen.has(event.id)){const grant=await h.exchange(created.client.id,created.privateKey,{request_id:event.id});assert.equal(grant.status,200);const reply=await fetch(h.github.url+'/repos/fixture/project-101/issues/1/comments',{method:'POST',headers:{Authorization:'Bearer '+grant.value.token,'Content-Type':'application/json'},body:JSON.stringify({body:'External review completed'})});assert.equal(reply.status,201);seen.add(event.id);delivered++;}
  res.writeHead(204);res.end();}catch{res.writeHead(500);res.end();}});
 receiver.listen(0,'127.0.0.1');await once(receiver,'listening');
 try{
