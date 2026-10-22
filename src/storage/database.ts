@@ -44,6 +44,13 @@ export class Store {
         action TEXT NOT NULL, resource_id TEXT NOT NULL, created_at TEXT NOT NULL);
       PRAGMA user_version=1;
     `);
+    if (!this.all('PRAGMA table_info(policies)').some(row => row.name === 'enabled')) this.db.exec('ALTER TABLE policies ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS project_environments(repository_id TEXT PRIMARY KEY REFERENCES repositories(id),
+      generation INTEGER NOT NULL DEFAULT 1,state TEXT NOT NULL DEFAULT 'provisioning',desired TEXT NOT NULL DEFAULT 'ready',error TEXT,started_at TEXT);
+      CREATE TABLE IF NOT EXISTS environment_operations(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id),
+      action TEXT NOT NULL,input TEXT NOT NULL,state TEXT NOT NULL,result TEXT);
+      PRAGMA user_version=2;`);
+    if (!this.all('PRAGMA table_info(project_environments)').some(row => row.name === 'revision')) this.db.exec('ALTER TABLE project_environments ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'events', offset = 0, repositories = [], accounts = [];
-const titles = { events: 'Webhook 投递', repositories: '仓库', models: '模型', accounts: '机器人账号', users: '用户' };
+const titles = { events: 'Webhook 投递', environments: '项目环境', repositories: '仓库', models: '模型', accounts: '机器人账号', users: '用户' };
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
@@ -29,13 +29,13 @@ async function start() {
 async function render() {
   $('message').textContent = ''; $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  $('add').hidden = tab === 'events' || me.role !== 'super_admin' && tab !== 'models';
-  $('filters').hidden = tab !== 'events'; $('account-filter-label').hidden = me.role !== 'super_admin'; $('paging').hidden = tab !== 'events';
+  $('add').hidden = ['events','environments'].includes(tab) || me.role !== 'super_admin' && tab !== 'models';
+  $('filters').hidden = !['events','environments'].includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin'; $('paging').hidden = tab !== 'events';
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
   if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
   if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
-  const result = await api(`/api/${tab}${tab === 'events' ? '?' + params : ''}`), rows = result[tab];
+  const result = await api(`/api/${tab}${['events','environments'].includes(tab) ? '?' + params : ''}`), rows = result[tab];
   $('rows').replaceChildren(); $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : `${rows.length} 条记录`;
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
@@ -43,6 +43,7 @@ async function render() {
     const name = row.full_name || row.name || row.username || row.model_name || row.route || '未知事件';
     content.append(element('strong', name));
     const detail = tab === 'events' ? `${row.received_at} · ${row.status}${row.duplicate ? ' · 重复投递' : ''} · 仓库 ${row.repository_id || '未关联'} · ${row.delivery_id}`
+      : tab === 'environments' ? `仓库 ID ${row.repository_id} · ${row.state} · generation ${row.generation || '待创建'} · ${row.enabled ? '已启用' : '已停用'}${row.operation_pending ? ' · 操作结果待确认' : ''}${row.error ? ' · ' + row.error : ''}`
       : tab === 'models' ? `${row.api_url} · ${row.key_configured ? 'Key 已配置' : 'Key 已撤销'} · ${row.repository_id ? '仓库 ' + row.repository_id : '部署共享模型'}`
       : tab === 'accounts' ? `${row.type} · ${row.credentials_configured ? '凭据已配置' : '凭据已撤销'} · ${row.endpoints.map(e => e.webhook_path).join('，')}`
       : tab === 'users' ? `${row.role} · ${row.active ? '启用' : '停用'} · ID ${row.id}` : `仓库 ID ${row.id} · 组织 ID ${row.owner_id}`;
@@ -51,6 +52,21 @@ async function render() {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-body').textContent = JSON.stringify(await api('/api/events/' + row.id), null, 2); $('detail').showModal(); } catch (err) { error(err); }
       }); line.append(button);
+    }
+    if (tab === 'environments') {
+      const actions = element('div', '', 'actions');
+      for (const [action, caption] of [['start','启动'],['stop','停止'],['reset','重置']]) {
+        const button = element('button', caption, 'quiet');
+        button.disabled = !!row.operation_pending || !row.generation || ['provisioning','recovering','resetting','busy'].includes(row.state) || action === 'start' && ['ready','reset_failed'].includes(row.state) || action === 'stop' && row.state === 'stopped';
+        button.addEventListener('click', async () => {
+          if (action === 'reset' && !confirm(`重置 ${row.full_name}？旧工作卷会保留，新环境从空工作卷开始。`)) return;
+          actions.querySelectorAll('button').forEach(b => b.disabled = true); $('message').textContent = `${caption}环境中，请稍候…`;
+          const operation = [...crypto.getRandomValues(new Uint8Array(24))].map(n => n.toString(16).padStart(2,'0')).join('');
+          try { await api(`/api/environments/${row.repository_id}/${action}`, 'POST', { operation_id: operation, generation: row.generation }); await render(); }
+          catch (err) { await render(); error(err); }
+        }); actions.append(button);
+      }
+      line.append(actions);
     }
     $('rows').append(line);
   });

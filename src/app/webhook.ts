@@ -40,6 +40,15 @@ export function ingest(store: Store, accountId: string, endpointId: string, head
       endpoint ? endpointId : null, owner?.id || null, deliveryId, event, route, outcome, Number(duplicate), new Date().toISOString(),
       status, JSON.stringify(safeHeaders), bytes, Number(complete), JSON.stringify(response));
     if (status === 200 && !duplicate) store.run('INSERT INTO processed_deliveries VALUES(?,?,?)', accountId, endpointId, deliveryId);
+    if (status === 200 && !duplicate && event === 'installation' && ['deleted','suspend'].includes(action)) {
+      const installation = payload?.installation as Json | undefined, account = installation?.account as Json | undefined;
+      const ownerId = String(account?.id || '');
+      store.run('UPDATE policies SET enabled=0 WHERE repository_id IN (SELECT id FROM repositories WHERE account_id=? AND owner_id=?)', accountId, ownerId);
+    }
+    if (status === 200 && !duplicate && event === 'installation_repositories' && Array.isArray(payload?.repositories_removed)) {
+      for (const removed of payload.repositories_removed) if (removed && typeof removed === 'object')
+        store.run('UPDATE policies SET enabled=0 WHERE repository_id IN (SELECT id FROM repositories WHERE account_id=? AND id=?)', accountId, String(removed.id || ''));
+    }
     // No review/development scheduler is installed in the control-plane release.
     return { status, response };
   });

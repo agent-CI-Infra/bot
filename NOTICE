@@ -1,0 +1,8 @@
+Department Bot
+Licensed under the Apache License, Version 2.0.
+
+The project execution isolation architecture was informed by Witden
+(https://github.com/zhaozhaozz/witden), Apache-2.0, revision
+5a17a1e6ffeb204d9a18acd9020f47e828571fe4.
+The minimal manager and runner in this repository are independently implemented;
+they do not include Witden desktop, messaging, or employee delegation code.

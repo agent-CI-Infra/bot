@@ -2,13 +2,14 @@ services:
   key-init:
     image: department-bot:local
     build: .
-    command: ["node", "dist/keygen.js", "/keys/master.key"]
+    command: ["node", "dist/keygen.js", "/keys/master.key", "/internal/manager.token"]
     network_mode: none
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     volumes:
       - bot-keys:/keys
+      - internal-keys:/internal
     healthcheck:
       disable: true
     restart: "no"
@@ -18,9 +19,13 @@ services:
     depends_on:
       key-init:
         condition: service_completed_successfully
+      manager:
+        condition: service_started
     environment:
       BOT_DATABASE_PATH: /data/control.sqlite
       BOT_MASTER_KEY_FILE: /keys/master.key
+      BOT_MANAGER_TOKEN_FILE: /internal/manager.token
+      BOT_MANAGER_URL: http://manager:8793
       BOT_COOKIE_SECURE: "${BOT_COOKIE_SECURE:-false}"
       BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
     ports:
@@ -29,10 +34,51 @@ services:
     volumes:
       - bot-data:/data
       - bot-keys:/keys:ro
+      - internal-keys:/internal:ro
+    networks: [control]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
+  manager:
+    image: department-bot-manager:local
+    build:
+      context: .
+      dockerfile: manager/Dockerfile
+    depends_on:
+      key-init:
+        condition: service_completed_successfully
+      project-image:
+        condition: service_completed_successfully
+    environment:
+      BOT_MANAGER_TOKEN_FILE: /internal/manager.token
+      BOT_PROJECT_IMAGE: department-bot-project:local
+    volumes:
+      - manager-data:/data
+      - internal-keys:/internal:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [control]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 100s
+    restart: unless-stopped
+  project-image:
+    image: department-bot-project:local
+    build:
+      context: .
+      dockerfile: images/project/Dockerfile
+    command: ["node", "-e", "process.exit(0)"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
 volumes:
   bot-data:
   bot-keys:
+  internal-keys:
+  manager-data:
+networks:
+  control:
+    driver: bridge

@@ -129,7 +129,7 @@ test('signature validation precedes parsing and repository association, failed d
   assert.equal((await h.hook(a.path, a.secret, 'revoked', {})).status, 401);
 });
 
-test('empty repository configuration only archives, and policy flags do not pretend an executor exists', async t => {
+test('empty repository configuration never creates review or development tasks', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin);
   assert.deepEqual((await admin('/api/repositories')).value.repositories, []);
   const result = await h.hook(a.path, a.secret, 'opened', { action: 'opened', repository: { id: 987 }, issue: { number: 1, body: 'Please implement this' } });
@@ -139,7 +139,7 @@ test('empty repository configuration only archives, and policy flags do not pret
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
   await h.hook(a.path, a.secret, 'enabled', { action: 'opened', repository: { id: 101 } });
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 0);
-  assert.deepEqual((await admin('/api/status')).value, { review_available: false, development_available: false, project_environments_available: false, model_calls_available: false });
+  assert.deepEqual((await admin('/api/status')).value, { review_available: false, development_available: false, project_environments_available: true, model_calls_available: false });
   assert.equal((await fetch(h.webhook + '/api/users')).status, 404);
 });
 

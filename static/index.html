@@ -10,8 +10,8 @@
 </section>
 <section id="workspace" hidden>
   <div class="heading"><div><p class="eyebrow">运行记录与配置</p><h1>管理控制台</h1></div><span class="badge">控制面已就绪</span></div>
-  <p class="notice">当前版本提供账号、授权、模型配置和投递归档。检视、开发、模型调用及项目环境尚未启用。</p>
-  <nav id="tabs" aria-label="管理页面"><button data-tab="events">Webhook 投递</button><button data-tab="repositories">仓库</button><button data-tab="models">模型</button><button data-tab="accounts" data-super>机器人账号</button><button data-tab="users" data-super>用户</button></nav>
+  <p class="notice">当前版本提供账号、授权、投递归档和每仓库一个长期项目环境。检视、开发和模型调用尚未启用。</p>
+  <nav id="tabs" aria-label="管理页面"><button data-tab="events">Webhook 投递</button><button data-tab="environments">项目环境</button><button data-tab="repositories">仓库</button><button data-tab="models">模型</button><button data-tab="accounts" data-super>机器人账号</button><button data-tab="users" data-super>用户</button></nav>
   <section class="card">
     <div class="heading"><h2 id="page-title"></h2><div class="actions"><button id="refresh" class="quiet">刷新</button><button id="add" hidden>新增</button></div></div>
     <form id="filters"><label>仓库<select id="repository-filter"><option value="">所有有权访问的仓库</option></select></label><label id="account-filter-label" hidden>账号<select id="account-filter"><option value="">全部账号</option></select></label><label>组织 ID<input id="owner-filter" placeholder="按组织或用户 ID 过滤"></label><button type="submit" class="quiet">筛选</button></form>
