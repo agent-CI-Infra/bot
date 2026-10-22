@@ -55,7 +55,8 @@ export class Store {
       const names = this.all(`PRAGMA table_info(${table})`).map(row => row.name);
       for (const [name, type] of Object.entries(columns)) if (!names.includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
     };
-    extend('policies', { test_command: "TEXT NOT NULL DEFAULT ''", base_branch:"TEXT NOT NULL DEFAULT ''", max_revisions: 'INTEGER NOT NULL DEFAULT 3', review_label: "TEXT NOT NULL DEFAULT ''" });
+    extend('policies', { test_command: "TEXT NOT NULL DEFAULT ''", base_branch:"TEXT NOT NULL DEFAULT ''", max_revisions: 'INTEGER NOT NULL DEFAULT 3', review_label: "TEXT NOT NULL DEFAULT ''",
+      automation: "TEXT NOT NULL DEFAULT '{}'" });
     extend('tasks', { unique_key: 'TEXT', input: "TEXT NOT NULL DEFAULT '{}'", result: 'TEXT', phase: "TEXT NOT NULL DEFAULT 'prepare'",
       object_number: 'INTEGER', head_sha: 'TEXT', source_task_id: 'TEXT', source_delivery_id: 'TEXT', generation: 'INTEGER',
       workspace_id: 'TEXT', messages: 'TEXT', claim_token: 'TEXT', error_code: 'TEXT', attempt: 'INTEGER NOT NULL DEFAULT 1',
@@ -70,7 +71,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bot_pull_requests(repository_id TEXT NOT NULL,number INTEGER NOT NULL,pr_id TEXT NOT NULL,author_id TEXT NOT NULL,
         head_repository_id TEXT NOT NULL,branch TEXT NOT NULL,sha TEXT NOT NULL,source_task_id TEXT NOT NULL,revisions INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(repository_id,number));
-      PRAGMA user_version=3;`);
+      CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id),
+        delivery_id TEXT,event TEXT NOT NULL,route TEXT NOT NULL,dry_run INTEGER NOT NULL,actions TEXT NOT NULL,notes TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS automation_repo_time ON automation_runs(repository_id,created_at);
+      PRAGMA user_version=4;`);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

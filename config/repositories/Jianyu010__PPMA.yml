@@ -1,0 +1,69 @@
+# PPMA — Jianyu010/PPMA (#1)
+#
+# This file is the repository's base automation config: labels, gate, merge policy and CI stages
+# in one place. A policy row saved through the API still merges on top and wins on conflict.
+# Label axes mirror LABELING.md; `manifest` adds the standalone `blocker` flag, which has no axis.
+
+dry_run: true
+
+labels:
+  enabled: true
+  axes:
+    type: [bug, perf, feature, enhancement, refactor, test, ci, docs, security, chore]
+    source: [incidental, planned, review, ci, user, nightly, weekly, biweekly, routine]
+    priority: [critical, high, medium, low]
+    area: [api, runtime, core, missions, storage, hyper-agent, bridge, connectors, contracts, desktop]
+    size: [s, m, l]
+    agent: [ok, human-only]
+    status: [triage, claimed, blocked, needs-info]
+    pr: [ready, needs-human, hold, still-relevant, no-issue]
+    gate: [lint-failed, types-failed, arch-failed, test-failed, conformance-failed, contracts-failed,
+           hygiene-failed, secrets-failed, review-failed, check-failed]
+  manifest: [blocker]
+  lint:
+    enabled: true
+    require: [type, source]
+    exactly_one: [priority]
+    triage: status/triage
+  pr_status:
+    enabled: true
+    ready: pr/ready
+    no_issue: pr/no-issue
+
+gate:
+  enabled: true
+  ready_label: ready
+  status: merge-gate
+  required_checks: [check, hygiene]
+  maintainer_roles: [admin, maintain]
+  review_must_be_answered: true
+
+merge:
+  # The executor is not shipped yet; merge stays off until a repository enables it explicitly.
+  enabled: false
+  method: merge
+  oldest_first: true
+  skip_labels: [pr/hold]
+
+ci:
+  stages:
+    - id: check
+      workflow: ci.yml
+      runner_labels: [self-hosted, ppma-ci-cn-check]
+      required: true
+    - id: hygiene
+      workflow: hygiene.yml
+      runner_labels: [self-hosted, ppma-ci-cn-hygiene]
+      required: true
+    - id: review
+      workflow: opencode-review.yml
+      runner_labels: [self-hosted, opencode-review]
+      required: false
+    - id: gate
+      workflow: gate.yml
+      runner_labels: [self-hosted, ppma-gate]
+      required: false
+    - id: gate-queue
+      workflow: gate-queue.yml
+      runner_labels: [self-hosted, ppma-gate]
+      required: false

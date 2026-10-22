@@ -2,8 +2,19 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
 import { queueWebhook } from '../review/queue.js';
+import { recordAutomation } from '../automation/runner.js';
+import type { AutomationConfig } from '../automation/config.js';
 
-export function ingest(store: Store, accountId: string, endpointId: string, headers: IncomingHttpHeaders, bytes: Buffer, complete: boolean) {
+export function ingest(
+  store: Store,
+  accountId: string,
+  endpointId: string,
+  headers: IncomingHttpHeaders,
+  bytes: Buffer,
+  complete: boolean,
+  /** Repository YAML configs, keyed by lower-cased `owner/repo` (#1). */
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>,
+) {
   const endpoint = store.get('SELECT id,account_id,secret FROM endpoints WHERE id=? AND account_id=?', endpointId, accountId);
   const secret = endpoint ? store.secrets.open(endpoint.secret, `endpoint:${endpointId}`).value : '';
   const signature = String(headers['x-hub-signature-256'] || '');
@@ -25,7 +36,7 @@ export function ingest(store: Store, accountId: string, endpointId: string, head
   const candidate = payload?.repository;
   const repoId = candidate && typeof candidate === 'object' ? String((candidate as Json).id || '') : '';
   const owner = status === 200 && event !== 'installation' && event !== 'installation_repositories'
-    ? store.get('SELECT id FROM repositories WHERE id=? AND account_id=?', repoId, accountId) : undefined;
+    ? store.get('SELECT id,full_name FROM repositories WHERE id=? AND account_id=?', repoId, accountId) : undefined;
   const action = typeof payload?.action === 'string' ? payload.action.slice(0, 100) : '';
   const kind = event === 'issues' ? 'issue' : event;
   const route = kind + (action ? `.${action}` : '');
@@ -52,6 +63,9 @@ export function ingest(store: Store, accountId: string, endpointId: string, head
     }
     if (status === 200 && !duplicate && owner && payload) {
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id);
+      // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
+      const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());
+      try { recordAutomation(store, String(owner.id), event, action, payload, id, {}, fallback); } catch { /* a rule cannot fail ingestion */ }
       store.run('UPDATE deliveries SET response=? WHERE id=?', JSON.stringify(response), id);
     }
     return { status, response };
