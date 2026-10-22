@@ -75,6 +75,7 @@ export class Store {
         delivery_id TEXT,event TEXT NOT NULL,route TEXT NOT NULL,dry_run INTEGER NOT NULL,actions TEXT NOT NULL,notes TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS automation_repo_time ON automation_runs(repository_id,created_at);
       PRAGMA user_version=4;`);
+    extend('task_logs', { created_at: "TEXT NOT NULL DEFAULT ''" });
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

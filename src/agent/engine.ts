@@ -39,7 +39,7 @@ export class TaskEngine {
   async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled(this.active.values());}
   async run(id:string,token:string){
     const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const redactor=new Redactor();
-    const log=(value:unknown)=>this.store.run('INSERT INTO task_logs VALUES(?,?,?)',randomId(),id,JSON.stringify(redactor.clean(value)).slice(0,70000));
+    const log=(value:unknown)=>this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,JSON.stringify(redactor.clean(value)).slice(0,70000),new Date().toISOString());
     const guard=async()=>{
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),lock=this.store.get('SELECT * FROM task_locks WHERE repository_id=?',task.repository_id);
       if(current?.claim_token!==token||lock?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled');
@@ -126,6 +126,7 @@ export class TaskEngine {
           // The policy label, never the model, is applied only after the summary comment was published.
           const label=this.store.get('SELECT review_label FROM policies WHERE repository_id=?',task.repository_id)?.review_label;
           if(label)outputs.push({labels:(await publisher.label(label)).map((l:any)=>l.name)});
+          log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
           result={...result,outputs};
           this.store.transaction(()=>{
             update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null});
@@ -135,6 +136,7 @@ export class TaskEngine {
         else{
           const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
           const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
+          log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
           await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\nTests: ${candidate.validation.command}\nExit code: ${candidate.validation.exit_code}\nCommit: ${commit}`);
           update({result:JSON.stringify({summary:candidate.summary,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         }
