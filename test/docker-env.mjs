@@ -124,6 +124,16 @@ try {
   assert.notEqual((await run('101', `node -e "fetch('https://github.com',{signal:AbortSignal.timeout(5000)}).then(()=>process.exit(0),()=>process.exit(1))"`)).result.exit_code,0);
   await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{cpus:1,memory_mb:512,pids:128,tmp_mb:64,egress:true}});
   passed('the computer spec is editable, enforced by the manager, and applied by recreating the container with its work volume');
+  // Software and initialization: a package image, a variable and a setup script; everything runs as the project user.
+  const software = await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{packages:['tree'],env:{GREETING:'hello'},
+    setup_script:'mkdir -p "$HOME/.local/bin" && ln -sf /bin/echo "$HOME/.local/bin/greet"'}});
+  assert.deepEqual([software.environment.computer.build.state,software.environment.computer.setup.exit_code],['ready',0]);
+  const tools = await run('101','tree --version >/dev/null && echo "$GREETING" && greet from-setup');
+  assert.equal(tools.result.output,'hello\nfrom-setup\n',tools.result.output);
+  const stats = (await api('/api/environments/101/stats')).stats;
+  assert.equal(stats.running,true); assert.ok(stats.memory_limit_bytes>0); assert.ok(stats.workspace_bytes>0); assert.ok(stats.pids>=1);
+  await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{packages:[],env:{},setup_script:''}});
+  passed('system packages, variables and a setup script customize the computer, and live resource use is readable');
   compose(['restart','manager']);
   await wait(async () => (await manager('101'))?.state==='ready','manager recovery');
   assert.equal((await manager('101','execute',{type:'read',path:'private.txt'})).result.content,'project-101-only');
@@ -163,8 +173,8 @@ try {
 } finally {
   // Clean only the unique deployment created by this run, including retained reset volumes.
   compose(['down','--volumes']);
-  if(deployment) for(const [kind,find,remove] of [['container',['ps','-aq'],['rm','-f']],['network',['network','ls','-q'],['network','rm']],['volume',['volume','ls','-q'],['volume','rm']]]) {
-    const names=docker([...find,'--filter',`label=department.bot.deployment=${deployment}`]).trim().split('\n').filter(Boolean);
+  if(deployment) for(const [kind,find,remove] of [['container',['ps','-aq'],['rm','-f']],['network',['network','ls','-q'],['network','rm']],['volume',['volume','ls','-q'],['volume','rm']],['image',['images','-q'],['rmi','-f']]]) {
+    const names=[...new Set(docker([...find,'--filter',`label=department.bot.deployment=${deployment}`]).trim().split('\n').filter(Boolean))];
     if(names.length) docker([...remove,...names]);
   }
   writeFileSync('.tmp/project-env/evidence.json',JSON.stringify(evidence,null,2));

@@ -1,8 +1,14 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
-export const environment = { PATH:'/usr/local/bin:/usr/bin:/bin', HOME:'/workspace/home',LANG:'C.UTF-8',TMPDIR:'/tmp',
-  GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_TERMINAL_PROMPT:'0' };
-export const maxCommandMs = 30 * 60 * 1000;
+// User-level installs (pip --user, uv tool, cargo, npm prefix) land under HOME, which lives in the work volume.
+const home = '/workspace/home', userBins = ['.local/bin', '.cargo/bin', '.npm-global/bin'].map(dir => `${home}/${dir}`).join(':');
+// Repository variables configured by an administrator; the manager lists their names in BOT_PROJECT_ENV_KEYS.
+const projectEnvironment = Object.fromEntries(String(process.env.BOT_PROJECT_ENV_KEYS || '').split(',').filter(Boolean)
+  .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+export const environment = { LANG:'C.UTF-8', ...projectEnvironment, PATH:`${userBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:'/tmp',
+  NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };
+// Absolute ceiling; each project's own limit (set by an administrator) is enforced by the manager.
+export const maxCommandMs = 4 * 60 * 60 * 1000;
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
 export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false}={}) {
   if(typeof value!=='string'||!value||value.length>32768)throw new Error('invalid_command');

@@ -10,8 +10,9 @@ const id = () => randomBytes(24).toString('hex');
 
 class FakeDocker {
   containers = new Map(); volumes = new Map(); networks = new Map(); starts = 0; failNetwork = false;
+  images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; runs = [];
   async request(method, path, body) {
-    if (path.startsWith('/images/')) return { Id: 'sha256:fixture' };
+    if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
     const [kind, name] = path.slice(1).split('/');
     if (kind === 'volumes') {
       if (method === 'POST') { this.volumes.set(body.Name, { Labels: body.Labels }); return {}; }
@@ -32,7 +33,9 @@ class FakeDocker {
     }
     throw new Error('Unexpected fake Docker call');
   }
-  async runner() { return { ok: true, result: { ready: true } }; }
+  async build(tag, dockerfile) { this.builds.push(dockerfile); if (dockerfile.includes('broken-package')) throw Object.assign(new ManagerError('image_build_failed'), { output: 'E: Unable to locate package' });
+    this.images.set(tag, { Id: 'sha256:' + tag.split(':')[1] }); return 'built'; }
+  async runner(container, input) { this.runs.push(input); return { ok: true, result: { ready: true, exit_code: 0, output: 'setup output' } }; }
 }
 function fixture(t) {
   mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/env-unit-'));
@@ -120,7 +123,7 @@ test('environment API enforces project roles for unfiltered list, detail, start,
 test('the project computer spec is validated by the manager, survives restarts and is applied by recreating the container', async t => {
   const f = fixture(t); await f.projects.register('101');
   const name = f.projects.names('101', 1).container, created = f.docker.created;
-  assert.deepEqual(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'network_policy'].map(k => f.projects.describe('101').computer[k]), [1, 512, 128, 64, 'internet egress']);
+  assert.deepEqual(['cpus', 'memory_mb', 'pids', 'tmp_mb', 'max_command_minutes', 'network_policy'].map(k => f.projects.describe('101').computer[k]), [2, 4096, 1024, 1024, 60, 'internet egress']);
   for (const spec of [{ memory_mb: 100000 }, { cpus: 0.1 }, { pids: 100.5 }, { egress: 'yes' }, { image: 'other' }, null])
     await assert.rejects(f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: spec }), /invalid_spec/);
   assert.equal(f.docker.created, created); assert.equal(f.projects.get('101').state, 'ready');
@@ -132,4 +135,27 @@ test('the project computer spec is validated by the manager, survives restarts a
   assert.equal(f.docker.containers.get(name).State.Running, true); assert.equal(f.docker.volumes.size, 1);
   f.restart(); assert.equal(f.projects.spec('101').memory_mb, 1024);
   await f.projects.provision('101'); assert.equal(f.docker.created, created + 1);
+});
+
+test('packages build a derived image once, variables reach the container, and the setup script runs when it changes', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const name = f.projects.names('101', 1).container, configure = request => f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request });
+  for (const request of [{ packages: ['ok', '-rf'] }, { packages: ['a'.repeat(120)] }, { env: { PATH: '/tmp' } }, { env: { BOT_TOKEN: 'x' } }, { env: { GOOD: 1 } },
+    { setup_script: 'x'.repeat(20000) }, { max_command_minutes: 500 }, { rerun_setup: 'yes' }])
+    await assert.rejects(configure(request), /invalid_(spec|packages|env|setup_script)/);
+  await assert.rejects(configure({ packages: ['broken-package'] }), /image_build_failed/);
+  assert.equal(f.projects.spec('101').packages.length, 0); assert.equal(f.projects.get('101').state, 'ready');
+  assert.equal(f.projects.describe('101').computer.build.state, 'failed');
+  const result = await configure({ packages: ['ffmpeg', 'libpq-dev'], env: { PIP_INDEX_URL: 'https://mirror.invalid/simple' }, setup_script: 'echo setup', max_command_minutes: 5 });
+  assert.equal(f.docker.builds.length, 2); assert.match(f.docker.builds[1], /apt-get install -y --no-install-recommends -- ffmpeg libpq-dev/);
+  const container = f.docker.containers.get(name);
+  assert.match(container.Image, /^sha256:[0-9a-f]{16}$/); assert.ok(container.Config.Env.includes('PIP_INDEX_URL=https://mirror.invalid/simple'));
+  assert.ok(container.Config.Env.includes('BOT_PROJECT_ENV_KEYS=PIP_INDEX_URL'));
+  assert.deepEqual([result.computer.build.state, result.computer.build.toolchain, result.computer.setup.state, result.computer.setup.exit_code], ['ready', 'fixture toolchain', 'succeeded', 0]);
+  const setupRuns = () => f.docker.runs.filter(r => r.type === 'command' && r.command === 'echo setup').length;
+  assert.equal(setupRuns(), 1);
+  await configure({ cpus: 3 }); assert.equal(setupRuns(), 1); assert.equal(f.docker.builds.length, 2);
+  await configure({ rerun_setup: true }); assert.equal(setupRuns(), 2); assert.equal(f.projects.spec('101').rerun_setup, undefined);
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'command', command: 'sleep 1', timeout_ms: 3600000 } });
+  assert.equal(f.docker.runs.find(r => r.command === 'sleep 1').timeout_ms, 5 * 60000);
 });

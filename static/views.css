@@ -45,3 +45,4 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 #settings-view legend{font-weight:600;color:#365564;padding:0 4px}#settings-view fieldset:disabled{background:#f7fafb}#settings-view fieldset:disabled input{color:#637c89}
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px}.settings-actions{justify-content:flex-end}
 @media(max-width:560px){.field-grid{grid-template-columns:minmax(0,1fr)}}
+#settings-view textarea{min-height:0;font-size:13px}#settings-view textarea.code{font:12px/1.5 ui-monospace,monospace}#settings-toolchain{margin:0;font-size:12px}
