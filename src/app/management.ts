@@ -1,8 +1,10 @@
 import { createPrivateKey } from 'node:crypto';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
-import { fail, fields, hashPassword, password, randomId, text, type Json } from '../core/security.js';
-import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
+import { fail, fields, hashPassword, HttpError, password, randomId, text, type Json } from '../core/security.js';
+import { type AutomationConfig, loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
+import { bootstrapConfig, areasFrom, toLabeling, toRepositoryYaml } from '../automation/labels-bootstrap.js';
+import { issueAgentToken, listAgentTokens, revokeAgentToken } from './agent.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 function repoIds(store: Store, value: unknown): string[] {
@@ -28,7 +30,20 @@ function credential(type: string, value: unknown): string {
   return result;
 }
 
-export async function management(store: Store, user: Actor, method: string, path: string, body: Json): Promise<Json | undefined> {
+function dispatchUrl(value: unknown): string {
+  const url = text(value, 2048);
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) fail(400, 'invalid_dispatch_url');
+  } catch (error) { if (error instanceof HttpError) throw error; fail(400, 'invalid_dispatch_url'); }
+  return url;
+}
+
+export async function management(
+  store: Store, user: Actor, method: string, path: string, body: Json,
+  /** Repository YAML configs, keyed by lower-cased `owner/repo` (#1). */
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>,
+): Promise<Json | undefined> {
   if (path === '/api/users') {
     superAdmin(user);
     if (method === 'GET') return { users: store.all('SELECT id,username,role,active FROM users ORDER BY username').map(publicUser) };
@@ -143,6 +158,87 @@ export async function management(store: Store, user: Actor, method: string, path
         return { ok: true };
       });
     }
+  }
+  if (path === '/api/dispatch-targets' || path.startsWith('/api/dispatch-targets/')) {
+    superAdmin(user);
+    if (path === '/api/dispatch-targets' && method === 'GET') {
+      return { targets: store.all('SELECT id,name,url,active,created_at FROM dispatch_targets ORDER BY created_at') };
+    }
+    if (path === '/api/dispatch-targets' && method === 'POST') {
+      fields(body, ['name', 'url', 'webhook_secret']);
+      const name = text(body.name, 100), url = dispatchUrl(body.url), secret = text(body.webhook_secret, 32768), id = randomId();
+      return store.transaction(() => {
+        if (store.get('SELECT id FROM dispatch_targets WHERE name=?', name)) fail(409, 'dispatch_target_name_exists');
+        const created = new Date().toISOString();
+        store.run('INSERT INTO dispatch_targets VALUES(?,?,?,?,1,?)', id, name, url, store.secrets.seal({ value: secret }, `dispatch:${id}`), created);
+        store.audit(user.id, 'dispatch_target.created', id);
+        return { target: { id, name, url, active: true, created_at: created } };
+      });
+    }
+    const targetId = path.split('/')[3] || '';
+    const target = targetId ? store.get('SELECT * FROM dispatch_targets WHERE id=?', targetId) : undefined;
+    if (!target) return fail(404, 'dispatch_target_not_found');
+    if (path === `/api/dispatch-targets/${targetId}` && method === 'PATCH') {
+      fields(body, ['name', 'url', 'webhook_secret', 'active']);
+      const name = body.name === undefined ? target.name : text(body.name, 100);
+      const url = body.url === undefined ? target.url : dispatchUrl(body.url);
+      const active = body.active === undefined ? !!target.active : body.active;
+      if (typeof active !== 'boolean') fail(400, 'invalid_active');
+      const secret = body.webhook_secret === undefined ? target.secret
+        : store.secrets.seal({ value: text(body.webhook_secret, 32768) }, `dispatch:${targetId}`);
+      return store.transaction(() => {
+        if (name !== target.name && store.get('SELECT id FROM dispatch_targets WHERE name=?', name)) fail(409, 'dispatch_target_name_exists');
+        store.run('UPDATE dispatch_targets SET name=?,url=?,secret=?,active=? WHERE id=?', name, url, secret, Number(active), targetId);
+        store.audit(user.id, 'dispatch_target.updated', targetId);
+        return { target: { id: targetId, name, url, active, created_at: target.created_at } };
+      });
+    }
+    if (path === `/api/dispatch-targets/${targetId}` && method === 'DELETE') {
+      if (store.get('SELECT 1 FROM dispatch_deliveries WHERE target_id=? LIMIT 1', targetId)) fail(409, 'dispatch_target_has_deliveries');
+      store.run('DELETE FROM dispatch_targets WHERE id=?', targetId);
+      store.audit(user.id, 'dispatch_target.deleted', targetId);
+      return { ok: true };
+    }
+  }
+  const agentTokens = /^\/api\/repositories\/([^/]+)\/agent-tokens$/.exec(path);
+  if (agentTokens) {
+    const id = agentTokens[1]!;
+    repository(store, user, id);
+    if (method === 'GET') return listAgentTokens(store, id);
+    if (method === 'POST') return issueAgentToken(store, user, id, body);
+  }
+  const revokeToken = /^\/api\/agent-tokens\/([^/]+)$/.exec(path);
+  if (revokeToken && method === 'DELETE') {
+    const row = store.get('SELECT repository_id FROM agent_tokens WHERE id=?', revokeToken[1]!);
+    if (!row) return fail(404, 'agent_token_not_found');
+    repository(store, user, String(row.repository_id));
+    return revokeAgentToken(store, user, revokeToken[1]!);
+  }
+  const bootstrap = /^\/api\/repositories\/([^/]+)\/labels\/bootstrap$/.exec(path);
+  if (bootstrap && method === 'POST') {
+    const id = bootstrap[1]!;
+    repository(store, user, id);
+    fields(body, ['areas', 'apply']);
+    if (body.areas !== undefined && (!Array.isArray(body.areas) || body.areas.length > 200
+      || body.areas.some(area => typeof area !== 'string' || area.length > 200))) fail(400, 'invalid_areas');
+    if (body.apply !== undefined && typeof body.apply !== 'boolean') fail(400, 'invalid_apply');
+    const repo = store.get('SELECT full_name FROM repositories WHERE id=?', id)!;
+    const key = String(repo.full_name).toLowerCase();
+    const row = store.get('SELECT automation FROM policies WHERE repository_id=?', id)!;
+    let saved: unknown;
+    try { saved = JSON.parse(String(row.automation || '{}')); } catch { saved = null; }
+    const hasSaved = !!saved && typeof saved === 'object' && !Array.isArray(saved) && Object.keys(saved as Json).length > 0;
+    const file = repositoryConfigs?.get(key);
+    let source: 'repository' | 'generated', config: AutomationConfig;
+    if (hasSaved) { source = 'repository'; config = loadAutomationConfig(row.automation, file).config; }
+    else if (file) { source = 'repository'; config = file; }
+    else { source = 'generated'; config = bootstrapConfig((body.areas as string[] | undefined) ?? []); }
+    const applied = source === 'generated' && body.apply === true;
+    if (applied) store.run('UPDATE policies SET automation=? WHERE repository_id=?', JSON.stringify(config), id);
+    return {
+      source, applied, config, yaml: toRepositoryYaml(config),
+      labeling: toLabeling(config, String(repo.full_name), source === 'generated'),
+    };
   }
   if (path === '/api/repositories') {
     if (method === 'GET') {

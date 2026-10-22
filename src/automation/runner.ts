@@ -23,6 +23,12 @@ export interface AutomationRun {
  * until the executor ships. A rule or config failure is recorded on the run, never on the delivery,
  * so a bad rule cannot make webhook ingestion fail.
  */
+/** The effective config: the policy row when it has one, otherwise the repository YAML file. */
+export function automationConfigFor(store: Store, repositoryId: string, fallback?: AutomationConfig) {
+  const row = store.get('SELECT automation FROM policies WHERE repository_id=?', repositoryId);
+  return loadAutomationConfig(row?.automation, fallback);
+}
+
 export function recordAutomation(
   store: Store,
   repositoryId: string,
@@ -34,8 +40,7 @@ export function recordAutomation(
   /** A repository YAML file: used when the policy row has no automation config of its own. */
   fallback?: AutomationConfig,
 ): AutomationRun {
-  const row = store.get('SELECT automation FROM policies WHERE repository_id=?', repositoryId);
-  const { config, problem } = loadAutomationConfig(row?.automation, fallback);
+  const { config, problem } = automationConfigFor(store, repositoryId, fallback);
   const plan = planAutomation({ event: { repositoryId, event, action, payload, deliveryId }, config, facts });
   const notes = problem ? [problem, ...plan.notes] : plan.notes;
   const run: AutomationRun = {

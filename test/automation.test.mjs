@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { loadRepositoryConfigs, parseRepositoryConfig, repositoryConfigMap } from '../dist/automation/repository-config.js';
+import { DispatchWorker, matchesDispatch } from '../dist/automation/dispatch.js';
 import { DEFAULT_AUTOMATION, AutomationConfigError, loadAutomationConfig, parseAutomationConfig } from '../dist/automation/config.js';
 import { planAutomation } from '../dist/automation/engine.js';
 import { labelLint, prStatus } from '../dist/automation/modules/labels.js';
@@ -119,6 +121,87 @@ test('a repository YAML config drives the plan when policy automation is unset',
   assert.equal(sent.status, 200);
   const run = h.store.get('SELECT * FROM automation_runs');
   assert.match(run.actions, /status\/triage/);
+});
+
+test('dispatch matches event routes and optional labels', () => {
+  assert.equal(matchesDispatch({ target: 'laptop', events: ['pull_request.*'], labels: [] }, 'pull_request', 'opened', []), true);
+  assert.equal(matchesDispatch({ target: 'laptop', events: ['pull_request.*'], labels: ['ready'] }, 'pull_request', 'opened', ['ready']), true);
+  assert.equal(matchesDispatch({ target: 'laptop', events: ['pull_request.*'], labels: ['ready'] }, 'pull_request', 'opened', []), false);
+  assert.equal(matchesDispatch({ target: 'laptop', events: ['issues'], labels: [] }, 'issues', 'opened', []), true);
+  assert.equal(matchesDispatch({ target: 'laptop', events: ['pull_request.synchronize'], labels: [] }, 'pull_request', 'opened', []), false);
+});
+
+test('a matching event is queued, signed and delivered to its target', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  const created = await admin('/api/dispatch-targets', 'POST', {
+    name: 'maintainer laptop', url: 'https://laptop.example/hooks/review', webhook_secret: 's'.repeat(32),
+  });
+  assert.equal(created.status, 201);
+  await repository(admin, a.id, '203');
+  const patched = await admin('/api/repositories/203/policy', 'PATCH', {
+    automation: { dispatch: [{ target: created.value.target.id, events: ['pull_request.*'], labels: [] }] },
+  });
+  assert.equal(patched.status, 200);
+  const sent = await h.hook(a.path, a.secret, 'delivery-dispatch', {
+    repository: { id: 203 }, action: 'opened', pull_request: { number: 11, labels: [] },
+  }, { 'X-GitHub-Event': 'pull_request' });
+  assert.equal(sent.status, 200);
+  assert.equal(h.store.all('SELECT * FROM dispatch_deliveries').length, 1);
+  let request;
+  const worker = new DispatchWorker(h.store, async value => { request = value; return { status: 204 }; }, 60_000);
+  assert.equal(await worker.tick(), 1);
+  assert.equal(h.store.get('SELECT state FROM dispatch_deliveries').state, 'delivered');
+  assert.equal(request.headers['X-Bot-Event'], 'pull_request.opened');
+  assert.equal(request.headers['X-Bot-Signature-256'], `sha256=${createHmac('sha256', 's'.repeat(32)).update(request.body).digest('hex')}`);
+  assert.equal(JSON.parse(request.body).payload.pull_request.number, 11);
+});
+
+test('a delegated token publishes a review as the bot exactly once', async t => {
+  const calls = [];
+  const h = await harness(t, undefined, {
+    publishReview: async (...args) => { calls.push(args); return { id: '42', url: 'https://github.com/fixture/project-204/pull/9#pullrequestreview-42' }; },
+  });
+  const { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '204');
+  const issued = await admin('/api/repositories/204/agent-tokens', 'POST', { subject: 'maintainer laptop', scopes: ['review:submit'] });
+  assert.equal(issued.status, 201);
+  assert.match(issued.value.token, /^botagent_[a-f0-9]{48}$/);
+  const submit = async (token, body) => {
+    const response = await fetch(h.admin + '/api/agent/reviews', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
+    });
+    return { status: response.status, value: await response.json() };
+  };
+  const payload = { pull_number: 9, head_sha: 'a'.repeat(40), body: 'Reviewed; one finding.' };
+  const first = await submit(issued.value.token, payload);
+  assert.equal(first.status, 201);
+  assert.equal(first.value.state, 'sent');
+  const again = await submit(issued.value.token, payload);
+  assert.equal(again.value.duplicate, true);
+  assert.equal(calls.length, 1);
+  const invalid = await submit(`botagent_${'0'.repeat(48)}`, payload);
+  assert.equal(invalid.status, 401);
+  const revokedToken = await admin(`/api/agent-tokens/${issued.value.id}`, 'DELETE', {});
+  assert.equal(revokedToken.status, 200);
+  const revoked = await submit(issued.value.token, payload);
+  assert.equal(revoked.status, 401);
+});
+
+test('label bootstrap derives areas and becomes the repository config', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '205');
+  const generated = await admin('/api/repositories/205/labels/bootstrap', 'POST', { areas: ['src/api', 'src/runtime', 'src/api'], apply: true });
+  assert.equal(generated.status, 201);
+  assert.equal(generated.value.source, 'generated');
+  assert.equal(generated.value.applied, true);
+  assert.deepEqual(generated.value.config.labels.axes.area, ['src-api', 'src-runtime']);
+  assert.match(generated.value.yaml, /area:/);
+  assert.match(generated.value.labeling, /area\/src-api/);
+  const policy = await admin('/api/repositories/205');
+  assert.deepEqual(JSON.parse(policy.value.policy.automation).labels.axes.area, ['src-api', 'src-runtime']);
+  const second = await admin('/api/repositories/205/labels/bootstrap', 'POST', {});
+  assert.equal(second.value.source, 'repository');
+  assert.equal(second.value.applied, false);
 });
 
 test('label-lint marks an issue that misses an axis and clears it when complete', () => {

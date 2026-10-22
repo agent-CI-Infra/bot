@@ -68,7 +68,7 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 ## 仓库自动化规则
 
-PR 门禁、标签规范和合并队列是仓库策略，不写进每个仓库的 GitHub Actions：`src/automation/` 提供规则引擎和内置模块（`label-lint`、`pr-status`、`gate`、`merge-queue`）。每个仓库用 `config/repositories/<owner>__<repo>.yml` 声明自己的标签轴、门禁、合并策略和 CI 阶段（仓库示例见 [Jianyu010__PPMA.yml](config/repositories/Jianyu010__PPMA.yml)），policy 的 `automation` 字段仍可覆盖，默认 dry-run、默认不自动合并。webhook 落库时规划动作并写入 `automation_runs`，执行器接入 outbox 后再产生真实写入。配置 schema 与新增模块的步骤见 [docs/automation.md](docs/automation.md)。
+PR 门禁、标签规范和合并队列是仓库策略，不写进每个仓库的 GitHub Actions：`src/automation/` 提供规则引擎和内置模块（`label-lint`、`pr-status`、`gate`、`merge-queue`）。每个仓库用 `config/repositories/<owner>__<repo>.yml` 声明自己的标签轴、门禁、合并策略和 CI 阶段（仓库示例见 [Jianyu010__PPMA.yml](config/repositories/Jianyu010__PPMA.yml)），policy 的 `automation` 字段仍可覆盖，默认 dry-run、默认不自动合并。webhook 落库时规划动作并写入 `automation_runs`，执行器接入 outbox 后再产生真实写入。仓库还可以把筛选后的事件签名转发给外部执行端，外部端用短期 `botagent_…` token 以 Bot 身份回写检视结果；标签清单缺失时由 Bot 按仓库架构生成 YAML/LABELING.md。配置 schema、委派和转发细节见 [docs/automation.md](docs/automation.md)。
 
 ## 源码与验证
 
