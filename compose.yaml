@@ -31,7 +31,7 @@ services:
       BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
     stop_grace_period: 100s
     ports:
-      - "127.0.0.1:${BOT_WEBHOOK_PORT:-8791}:8791"
+      - "0.0.0.0:${BOT_WEBHOOK_PORT:-8791}:8791"
       - "127.0.0.1:${BOT_ADMIN_PORT:-8792}:8792"
     volumes:
       - bot-data:/data

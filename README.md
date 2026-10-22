@@ -15,7 +15,7 @@ docker compose ps
 
 打开 <http://127.0.0.1:8792/>，创建第一名超级管理员。初始化只允许成功一次，重启不会重新开放。用户名和密码属于本系统；密码长度为 12–256 字符，使用随机盐的 scrypt 慢哈希保存。先完成初始化，再将入口开放给其他人。
 
-`8792` 是管理页面和管理 API，`8791` 是 Webhook 接收入口，两者默认仅绑定宿主回环地址。管理员可在机器人账号页面登记账号，取得 `/hooks/github/<account_id>/<endpoint_id>`，通过自己的 HTTPS 反向代理将 GitHub Webhook 路由到 `8791`；管理页面经独立的 HTTPS 入口访问。不要把两个监听端口混接。可用 `BOT_WEBHOOK_PORT`、`BOT_ADMIN_PORT` 调整宿主端口。外部 HTTPS 管理入口需要设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN` 为自己的管理站 origin；这些变量通过 Compose 环境传入，不包含上游凭据。管理 API 不开放跨域访问。
+`8791` 是 Webhook 接收入口，宿主端口默认绑定 `0.0.0.0`，对所有 IPv4 网卡开放；`8792` 是管理页面和管理 API，仍仅绑定宿主回环地址 `127.0.0.1`，只在本机访问。管理员可在机器人账号页面登记账号，取得 `/hooks/github/<account_id>/<endpoint_id>`，通过自己的 HTTPS 反向代理将 GitHub Webhook 路由到 `8791`。不要把两个监听端口混接。可用 `BOT_WEBHOOK_PORT`、`BOT_ADMIN_PORT` 调整宿主端口。需要远程访问管理页面时，另行配置独立的 HTTPS 反向代理，并设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN` 为自己的管理站 origin；这些变量通过 Compose 环境传入，不包含上游凭据。管理 API 不开放跨域访问。
 
 Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` 与 `project-image`。`project-image` 仅确保批准的项目镜像已构建，不是某个仓库的长期环境。manager 按仓库创建动态项目容器，项目容器不属于 Compose 静态服务，不对宿主或公网发布端口。
 
