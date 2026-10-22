@@ -22,7 +22,7 @@ const server = createServer(async (req, res) => {
     else {
       const match = /^\/v1\/projects\/([1-9]\d{0,19})(?:\/(start|stop|reset|delete|execute))?$/.exec(path);
       if (!match) throw new ManagerError('not_found', 404);
-      if (req.method === 'GET' && !match[2]) result = projects.get(match[1]) || null;
+      if (req.method === 'GET' && !match[2]) result = projects.describe(match[1]);
       else if (req.method === 'PUT' && !match[2]) result = await projects.register(match[1]);
       else if (req.method === 'POST' && match[2]) {
         let bytes = ''; for await (const chunk of req) { bytes += chunk; if (Buffer.byteLength(bytes) > 1500000) throw new ManagerError('payload_too_large', 413); }

@@ -112,8 +112,8 @@ try {
     await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();
     await page.getByRole('button',{name:'项目环境',exact:true}).click();await page.locator('#rows .row').first().waitFor();assert.equal(await page.locator('#rows .row').count(),1);
     assert.ok((await page.locator('#rows').innerText()).includes('project-101'));assert.ok(!(await page.locator('#rows').innerText()).includes('project-202'));
-    await page.getByRole('button',{name:'停止',exact:true}).click();await page.getByText(/仓库 ID 101 · stopped/).waitFor();
-    await page.getByRole('button',{name:'启动',exact:true}).click();await page.getByText(/仓库 ID 101 · ready/).waitFor();
+    await page.getByRole('button',{name:'停止',exact:true}).click();await page.locator('#rows .row .status',{hasText:'已停止'}).waitFor();
+    await page.getByRole('button',{name:'启动',exact:true}).click();await page.locator('#rows .row .status',{hasText:'就绪'}).waitFor();
     page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'重置',exact:true}).click();await page.getByText(/generation 3/).waitFor();
     await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/project-env/project-mobile.png',fullPage:true});
     assert.deepEqual(errors,[]);passed('desktop and mobile environment page obey administrator scope');
