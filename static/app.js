@@ -38,19 +38,21 @@ async function start() {
   await render();
 }
 // Review and development are separate pages over the same task API.
-const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'environments', 'reviews', 'developments'];
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'environments', 'reviews', 'developments','external'];
 async function render() {
   const request=++renderVersion, taskTab = !!taskKinds[tab];
   $('message').textContent = ''; $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   $('add').hidden = listTabs.includes(tab) || me.role !== 'super_admin' && tab !== 'models';
-  $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin'; $('paging').hidden = tab === 'environments' || !listTabs.includes(tab);
+  $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = ['environments','external'].includes(tab) || !listTabs.includes(tab);
+  $('rows').hidden=tab==='external';$('external-panel').hidden=tab!=='external';$('sync').hidden=tab!=='repositories'||me.role!=='super_admin';
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
   if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
   if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
   $('rows').replaceChildren();$('rows').dataset.view=tab;$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');
+  if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.
   const installedView = tab === 'repositories' && me.role === 'super_admin'; $('sync').hidden = !installedView;

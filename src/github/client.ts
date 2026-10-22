@@ -9,7 +9,7 @@ export function appJwt(appId: string, privateKey: string): string {
   return unsigned + '.' + createSign('RSA-SHA256').update(unsigned).sign(privateKey).toString('base64url');
 }
 export class GitHub {
-  token = ''; actorId = ''; fullName = ''; defaultBranch = '';
+  token = ''; actorId = ''; fullName = ''; defaultBranch = ''; expiresAt = '';
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
@@ -38,7 +38,7 @@ export class GitHub {
     }
     return stop('github_pagination_limit', 'waiting_configuration');
   }
-  async connect(development: boolean): Promise<any> {
+  async connect(development: boolean, requiredPermissions?: Record<string,string>): Promise<any> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', this.repository.account_id);
     if (!account) stop('github_account_missing', 'waiting_configuration');
     const secrets = this.store.secrets.open(account!.credentials, `account:${account!.id}`);
@@ -53,11 +53,13 @@ export class GitHub {
       const app = await this.request('GET','/app', undefined, false, jwt);
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission');
-      const requested: Record<string,string> = { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
+      const requested: Record<string,string> = requiredPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
+      if(requiredPermissions&&Object.entries(requiredPermissions).some(([key,value])=>!installation.permissions?.[key]||value==='write'&&installation.permissions[key]!=='write'))stop('github_permissions_insufficient','waiting_permission');
       const permissions: Record<string,string> = {};
       for (const [key,value] of Object.entries(requested)) if (installation.permissions?.[key]) permissions[key] = installation.permissions[key] === 'read' ? 'read':value;
       const access = await this.request('POST',`/app/installations/${installation.id}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions }, false,jwt);
       this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission'); this.redactor.add(this.token);
+      this.expiresAt=String(access.expires_at||'');
       this.actorId = String((await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'))).id);
     }
     const repo = await this.request('GET','/repositories/' + this.repository.id);
