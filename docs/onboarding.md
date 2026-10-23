@@ -16,11 +16,19 @@ Cloudflare Tunnel 是 Compose 中独立的 `tunnel` 服务。初始没有 token�
 
 优先使用已有 GitHub App。选择「使用此 App」会检查 App 和安装，并将 webhook 更新到验证过的域名及该账号已登记的 webhook 路径。凭据不会返回浏览器。
 
-没有 App 时，填写组织和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。默认是组织私有 App；需要一个 App 覆盖多个组织时，勾选「公开 App，允许安装到其他组织」。固定权限为 contents、issues、pull_requests 写和 metadata 读；default_events 只有 issues、pull_request。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
+没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 3 步选择。默认是组织私有 App；需要一个 App 覆盖多个组织时，勾选「公开 App，允许安装到其他组织」。固定权限为 contents、issues、pull_requests 写和 metadata 读；default_events 只有 issues、pull_request。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
 
 GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥与 webhook secret 只在控制面加密保存，client secret 不需要则丢弃。
 
-安装页提供 GitHub 安装链接和「重新检查安装」。也可以跳过并继续配置模型和规则；页面标明尚未安装，向导不启用检视。已有安装不会被删除或重新创建。确认安装、选择模型后，最后一步仅对用户明确选择的项目启用检视，自动开发保持关闭。
+第 3 步的「安装组织」支持组织名、`owner/repo`、GitHub 组织或仓库链接（包括 Issue、PR、代码目录链接），以及 `git@github.com:owner/repo.git`、`ssh://git@github.com/owner/repo.git`。点击「解析组织」，控制面从链接提取 owner，再通过 GitHub 核对组织身份并显示规范名称；个人账号、无效链接和不存在的组织会显示原因。解析时不连接粘贴的网址，不读取仓库内容，也不会安装 App 或启用仓库。
+
+确认组织后，点击「前往 <组织> 安装」，打开 GitHub 定向安装页。使用 GitHub [文档支持的 `suggested_target_id`](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/migrating-oauth-apps-to-github-apps) 预选组织 ID，仓库范围及安装权限由 GitHub 页面确认。如果此 App 已安装到该组织，入口改为该组织现有的安装设置。跨组织安装仍要求公开 App 和相应的 GitHub 权限；向导不会绕过它们。
+
+安装页也保留「在 GitHub 选择组织」和「重新检查安装」。安装后点「重新检查安装」，再到第 6 步同步并启动目标仓库。也可以跳过并继续配置模型和规则；页面标明尚未安装，向导不启用检视。已有安装不会被删除或重新创建。确认安装、选择模型后，最后一步仅对用户明确选择的项目启用检视，自动开发保持关闭。
+
+![指定 GitHub 安装组织（桌面）](images/organization-install-desktop.png)
+
+![指定 GitHub 安装组织（390px）](images/organization-install-mobile.png)
 
 ## 模型与规则
 
