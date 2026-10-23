@@ -8,9 +8,15 @@ export function shortTitle(value: string, limit = 160): string {
   }
   return (end.trimEnd() || 'Implementation update'.slice(0, limit - 1)) + '…';
 }
+export function testEvidence(candidate: any) {
+  const validation=candidate.validation;
+  return `Tests: ${candidate.test_command||validation.command}\n`+(validation.source==='agent'
+    ? 'Reported by the agent; not rerun by the control plane.'
+    : `${validation.source==='policy'?'Policy tests: '+validation.command+'\n':''}Exit code: ${validation.exit_code}`);
+}
 export function implementationText(candidate: any, issue: number) {
   const title = shortTitle(candidate.change_title || `Implement #${issue}: ${candidate.implementation_goal || 'Update implementation'}`);
-  const body = `${candidate.summary}\n\nCloses #${issue}\n\nTests: ${candidate.validation.command}\nExit code: ${candidate.validation.exit_code}\nCommit: ${candidate.remote_sha}`;
+  const body = `${candidate.summary}\n\nCloses #${issue}\n\n${testEvidence(candidate)}\nCommit: ${candidate.remote_sha}`;
   return { title, body };
 }
 // Presentation-only routing reasons are retained in task results, never published as findings.

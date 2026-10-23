@@ -43,15 +43,19 @@ function model(input){
       findings:[{body:'The arithmetic implementation requires attention.',format:issue?'discussion':'inline',actionable:true,within_goal:true,requires_human_decision:false,selection_reason:issue?'Issue has no inline diff.':'Evidence is on the changed arithmetic line.',path:'calc.mjs',line:number===44?999:1,side:'RIGHT'}]};
     return call('finish_review',result,'finish');
   }
+  if(number===6&&input.messages.some(m=>m.role==='tool'&&JSON.stringify(m.content).includes('validation_failed'))){
+    if(!tools.some(t=>t.id==='call-repair'))return call('write_file',{path:'calc.mjs',content:goodBody(repoId)},'repair');
+    if(!tools.some(t=>t.id==='call-retest'))return call('run_command',{command:'node --test'},'retest');
+  }
   if(!names.includes('write_file')){
     const own=Boolean(context.object.head),content=number===6?baseBody(repoId).replace('a - b','a * b'):own?`// Normalize numeric inputs.\nexport const add = (a, b) => Number(a) + Number(b); // REPO_${repoId}_ONLY\n`:goodBody(repoId);
     return call('write_file',{path:'calc.mjs',content},'write');
   }
   if(!names.includes('run_command'))return call('run_command',{command:'node --test'},'test');
-  return call('finish_development',{summary:'Fix addition behavior',change_title:'Fix addition behavior',test_command:'node --test'},'finish');
+  return call('create_pull_request',{summary:'Fix addition behavior',change_title:'Fix addition behavior',test_command:'node --test'},'finish');
 }
 const publicRepo=repo=>({id:repo.id,full_name:repo.full_name,owner:repo.owner,default_branch:repo.default_branch});
-const server=createServer(async(req,res)=>{
+export const server=createServer(async(req,res)=>{
   const url=new URL(req.url,'http://fixtures'),method=req.method;let bytes='';for await(const c of req)bytes+=c;
   let body;try{body=bytes?JSON.parse(bytes):{};}catch{res.writeHead(400);res.end('{}');return;}
   const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};

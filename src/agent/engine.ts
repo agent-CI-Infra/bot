@@ -4,6 +4,7 @@ import { randomId, fields, fail, type Json } from '../core/security.js';
 import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
+import { testEvidence } from '../github/text.js';
 import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop } from './loop.js';
@@ -86,9 +87,24 @@ export class TaskEngine {
         if(development){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=saved?JSON.parse(saved.data):null;
           if(candidate&&!candidate.pr_number&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan');
+          if(input.bot_pr){
+            const pr=await github.object('review.pr',input.bot_pr.number),owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
+            assertOwnedPR(owned,pr,github.actorId,task.repository_id);
+            if(pr.state!=='open'||pr.draft===true)stop('object_closed_or_draft','cancelled');
+            if(pr.head.sha!==task.head_sha&&pr.head.sha!==candidate?.remote_sha)stop('pull_request_head_changed','superseded');
+          }
         }
       };
       workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
+      const publishDevelopment=async()=>{
+        update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log);
+        const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+        const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
+        log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
+        await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
+        update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
+        return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
+      };
       if(task.phase==='prepare'){
         let environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         if(!environment)environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);
@@ -109,8 +125,16 @@ export class TaskEngine {
           }
         }
         const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
-        const baseBranch=policy.base_branch||github.defaultBranch;
-        const ref=task.kind.endsWith('.pr')?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
+        if(task.kind==='development.issue'){
+          const owned=this.store.get(`SELECT p.* FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
+            WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? ORDER BY t.created_at LIMIT 1`,task.repository_id,task.object_number);
+          if(owned){
+            const pr=await github.object('review.pr',owned.number);assertOwnedPR(owned,pr,github.actorId,task.repository_id);
+            input.bot_pr=pr;update({head_sha:pr.head.sha});await validate();
+          }
+        }
+        const baseBranch=input.bot_pr?.base?.ref||policy.base_branch||github.defaultBranch;
+        const ref=task.kind.endsWith('.pr')||input.bot_pr?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
         if(!ref?.object?.sha)stop('repository_has_no_commit','waiting_configuration');
         if(development&&task.kind.endsWith('.pr')){
           const owned=this.owned(github,task,object);
@@ -139,29 +163,40 @@ export class TaskEngine {
             computer:computerSummary(environment.computer)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
       }
+      if(task.phase==='validate')stop('create_pull_request_required','needs_replan');
       if(task.phase==='model'){
-        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl));await validate();
+        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl),development?async(requestId,args)=>{
+          // Fix the only candidate snapshot before any policy command can create or modify files.
+          const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
+          if(snapshot.tree_sha===input.snapshot_tree){
+            update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
+            return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
+          }
+          await validate();
+          const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
+          const command=String(policy.test_command||'').trim();
+          let validation:any={command:args.test_command,source:'agent',skipped:true};
+          if(command){
+            validation={...await workspace!.call('create-pr:'+requestId+':tests',{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'};
+            if(validation.error||validation.exit_code!==0||validation.timed_out||validation.truncated)return {...validation,error:'validation_failed'};
+          }
+          let branch:string,ownerTask=id,prNumber:number|null=null;
+          if(task.kind==='development.pr'||input.bot_pr){
+            const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
+            assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
+          }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
+          const candidate={...snapshot,files:await workspace!.contents(snapshot.files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,
+            implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
+            branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
+          this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
+          update({result:JSON.stringify(args),phase:'publish'});
+          return publishDevelopment();
+        }:undefined);await validate();
         if(!development){
           if(input.behavior_changes?.length){result.summary+='\n\n这些文件改变了 bot 的行为，需要人来决定：'+input.behavior_changes.join('、');result.clarification_required=true;}
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};
           update({result:JSON.stringify(result),phase:'publish'});
-        }else update({result:JSON.stringify(result),phase:'validate'});
-      }
-      if(task.phase==='validate'){
-        const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
-        const command=policy.test_command||result.test_command;if(typeof command!=='string'||!command.trim())stop('test_command_missing','waiting_configuration');
-        const before=await workspace.artifact('validate:before');
-        // The required tests run until they end, like any other command.
-        const validation=await workspace.call('validate:tests',{type:'workspace_command',command,timeout_ms:null});
-        if(validation.error||validation.exit_code!==0||validation.timed_out||validation.truncated)stop('validation_failed');
-        const after=await workspace.artifact('validate:after');if(before.tree_sha!==after.tree_sha)stop('tests_changed_candidate');
-        if(after.tree_sha===input.snapshot_tree)stop('development_has_no_changes');
-        let branch:string,ownerTask=id,prNumber:number|null=null;
-        if(task.kind==='development.pr'){const owned=this.owned(github,task,input.object);branch=owned.branch;prNumber=owned.number;ownerTask=owned.source_task_id;}
-        else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-        const candidate={...after,files:await workspace.contents(after.files),summary:result.summary,change_title:result.change_title,implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
-          branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation:{...validation,command}};
-        this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));update({phase:'publish'});
+        }else if(task.phase!=='done')stop('create_pull_request_required');
       }
       if(task.phase==='publish'){
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log);
@@ -187,13 +222,7 @@ export class TaskEngine {
             this.queueDevelopment(github,task,input,result,approved);
           });
         }
-        else{
-          const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
-          const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
-          log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
-          await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\nTests: ${candidate.validation.command}\nExit code: ${candidate.validation.exit_code}\nCommit: ${commit}`);
-          update({result:JSON.stringify({summary:candidate.summary,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
-        }
+        else await publishDevelopment();
       }
       await workspace.release();log({type:'completed',status:task.status});
     }catch(error){

@@ -3,24 +3,32 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { resolveRules } from '../dist/rules/service.js';
 import { Redactor } from '../dist/agent/common.js';
+import { TaskEngine } from '../dist/agent/engine.js';
+import { Publisher } from '../dist/github/publisher.js';
+import { server as githubFixture } from './fixtures/agent-server.mjs';
+import { agentOperation, waitingAgent } from '../runner/agent.mjs';
 
 const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 
 function proxyWorkspace(logs=[]) {
-  let configBytes=[],config,replyBytes=[],replied=false;
+  let configBytes=[],config,replyBytes=[],replied=false,publication;
   return {log:value=>logs.push(value),call:async(_key,request)=>{
     if(request.type==='workspace_agent_config'){configBytes.push(Buffer.from(request.base64,'base64'));if(request.final)config=JSON.parse(Buffer.concat(configBytes));return {written:true};}
     if(request.type==='workspace_agent_start')return {started:true};
     if(request.type==='workspace_agent_reply'){replyBytes.push(Buffer.from(request.base64,'base64'));if(request.final)replied=true;return {written:true};}
+    if(request.type==='workspace_agent_pull_request'){if(request.final)publication=true;return {written:true};}
     if(request.type==='workspace_agent_poll'){
       if(!replied)return {state:'running',request:{id:'a'.repeat(48),body:{stream:true,messages:[{role:'system',content:config.system},{role:'user',content:config.prompt}]}},events:[],offset:0};
       const reply=JSON.parse(Buffer.concat(replyBytes)),chunk=JSON.parse(reply.body.split('\n')[0].slice(6)),call=chunk.choices[0].delta.tool_calls[0];
+      if(call.function.name==='create_pull_request'&&!publication)return {state:'running',pull_request:{id:'b'.repeat(48),arguments:JSON.parse(call.function.arguments)}};
       return {state:'completed',result:JSON.parse(call.function.arguments),events:[{type:'model',content:'Pi finished',tool_calls:[{name:call.function.name}]}],offset:1};
     }
     throw new Error('unexpected runner request');
@@ -144,12 +152,12 @@ test('review rules choose the triggers, and the comment language and only the ef
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('r','101','review.pr','running','pr',7,'c'),('d','101','development.issue','running','dev',1,'c')");
   await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='r'"), workspace, new Redactor(), async () => {}, { mode: 'review', review_rules: rules, effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Repository review content.'}]} });
   assert.match(prompts[0], /Simplified Chinese/); assert.doesNotMatch(prompts[0], /Administrator review guidance|Focus on API compatibility/);assert.match(prompts[0],/Repository review content\./);assert.doesNotMatch(requestTexts[0],/Focus on API compatibility|Administrator review guidance/);
-  reply.tool_calls = [call('g', 'finish_development', { summary: 'done', test_command: 'true' })]; workspace=proxyWorkspace();
-  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules });
+  reply.tool_calls = [call('g', 'create_pull_request', { summary: 'done', test_command: 'true' })]; workspace=proxyWorkspace();
+  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules }, undefined, async()=>({status:'no_changes'}));
   assert.doesNotMatch(prompts[1], /Focus on API compatibility/);
   // With no console layer or repository file, the system prompt carries each docs/prompts file in full.
   workspace=proxyWorkspace();
-  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) });
+  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) }, undefined, async()=>({status:'no_changes'}));
   for (const name of ['labels.md', 'issue-review.md', 'pr-review.md', 'issue-development.md'])
     assert.ok(prompts[2].includes(`## .bot/rules/${name} (builtin)\n` + readFileSync(new URL('../docs/prompts/' + name, import.meta.url), 'utf8')), name);
 });
@@ -186,4 +194,164 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
   task=h.store.get("SELECT * FROM tasks WHERE id='none'");fake=runner();
   await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,new Redactor(),async()=>{},()=>{}),new Redactor(),async()=>{},{mode:'review'});
   assert.deepEqual(fake.delivered,[{error:'github_read_token_unavailable'}]);
+});
+
+// Run the control-plane publication path against real Git objects and a local GitHub fixture.
+// The manager substitutes for the project computer; no deployment or external API is used.
+async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true } = {}) {
+  githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
+  t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
+  const endpoint = 'http://127.0.0.1:' + githubFixture.address().port;
+  let repoDirectory, step = 0, started = false, terminal, bytes = [], snapshots = 0, revision = 0;
+  const replies = [], commands = [], requests = [], ids = [], manifests = [];
+  const gitBytes = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoDirectory, stdio: ['ignore', 'pipe', 'pipe'] });
+  const git = (...args) => gitBytes(...args).toString().trim();
+  const write = (path, content) => { mkdirSync(dirname(join(repoDirectory, path)), { recursive: true }); writeFileSync(join(repoDirectory, path), content); };
+  const args = { summary: 'Fix requested addition', change_title: 'Fix requested addition', test_command: 'agent-already-ran-tests' };
+  const manager = { call: async (_method, path, input) => {
+    if (!path.endsWith('/execute')) return { state: 'ready', generation: 1, computer: resolveRules({}, {}).computer };
+    const r = input.request; requests.push(r); let value = {};
+    if (r.type === 'workspace_init') git('init', '--initial-branch=bot-local');
+    else if (r.type === 'workspace_write') write(r.path, Buffer.from(r.base64, 'base64'));
+    else if (r.type === 'workspace_snapshot') { git('add', '--all'); value = { tree_sha: git('write-tree') }; }
+    else if (r.type === 'workspace_agent_config' || r.type === 'workspace_agent_start') value = { written: true, started: true };
+    else if (r.type === 'workspace_agent_poll') {
+      if (terminal) value = { state: 'completed', result: { ...args, ...terminal } };
+      else {
+        if (!started) { started = true; if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n'); }
+        ids[step] ||= randomBytes(24).toString('hex');
+        value = { state: 'running', pull_request: { id: ids[step], arguments: args } };
+      }
+    } else if (r.type === 'workspace_finalize') {
+      snapshots++; git('add', '--all'); const tree_sha = git('write-tree');
+      const files = git('ls-tree', '-r', tree_sha).split('\n').filter(Boolean).map(line => {
+        const [metadata, path] = line.split('\t'), [mode, , sha] = metadata.split(' ');
+        return { path, mode, sha, size: Number(git('cat-file', '-s', sha)) };
+      });
+      manifests.push(files); value = { tree_sha, local_sha: tree_sha, files };
+    } else if (r.type === 'workspace_blob') value = { base64: gitBytes('cat-file', 'blob', r.sha).subarray(r.offset, r.offset + 30000).toString('base64') };
+    else if (r.type === 'workspace_command') {
+      commands.push(r.command);
+      try { value = { exit_code: 0, output: execFileSync('/bin/sh', ['-c', r.command], { cwd: repoDirectory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), timed_out: false, truncated: false }; }
+      catch (error) { value = { exit_code: error.status, output: String(error.stdout) + String(error.stderr), timed_out: false, truncated: false }; }
+      if (validationResult) value = { ...value, ...validationResult };
+    } else if (r.type === 'workspace_agent_pull_request') {
+      bytes.push(Buffer.from(r.base64, 'base64'));
+      if (r.final) {
+        const reply = JSON.parse(Buffer.concat(bytes)); bytes = []; replies.push(reply);
+        if (reply.error === 'validation_failed') {
+          assert.equal(h.store.get('SELECT count(*) n FROM development_candidates').n, 0);
+          assert.equal(h.store.get('SELECT count(*) n FROM github_effects').n, 0);
+        }
+        if (reply.pr || reply.status === 'no_changes') terminal = reply;
+        else if (repair) { assert.equal(reply.error, 'validation_failed'); write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
+        else value = { error: 'fixture_stopped_after_reply' };
+      }
+    } else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
+    return { ok: true, result: value };
+  } };
+  const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  repoDirectory = join(h.directory, 'repo'); mkdirSync(repoDirectory);
+  await fetch(endpoint + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: a.token }) });
+  const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: true, test_command: policy });
+  const taskId = randomBytes(24).toString('hex'), input = { review: { implementation_goal: 'Fix requested addition' } };
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101','development.issue','running','dev',1,'claim',?,?)", taskId, JSON.stringify(input), new Date().toISOString());
+  h.store.run("INSERT INTO task_locks(repository_id,task_id,token) VALUES('101',?,'claim')", taskId);
+  const engine = new TaskEngine(h.store, manager, endpoint + '/github');
+  await engine.run(taskId, 'claim');
+  const task = h.store.get('SELECT * FROM tasks WHERE id=?', taskId), saved = h.store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId);
+  const continueIssue = async () => {
+    revision++; repoDirectory = join(h.directory, 'revision-' + revision); mkdirSync(repoDirectory);
+    started = false; terminal = undefined; step = 0; ids.length = 0;
+    const nextId = randomBytes(24).toString('hex');
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101','development.issue','running','dev',1,'claim',?,?)", nextId, JSON.stringify(input), new Date().toISOString());
+    h.store.run("UPDATE task_locks SET task_id=? WHERE repository_id='101'", nextId);
+    await engine.run(nextId, 'claim');
+    return { task: h.store.get('SELECT * FROM tasks WHERE id=?', nextId), candidate: JSON.parse(h.store.get('SELECT data FROM development_candidates WHERE task_id=?', nextId)?.data || 'null') };
+  };
+  return { h, task, candidate: saved && JSON.parse(saved.data), replies, commands, requests, snapshots, manifests, repoDirectory, endpoint, engine, git, continueIssue };
+}
+
+test('create_pull_request with empty policy never reruns agent evidence and returns the published call-time tree', async t => {
+  const d = await developmentHarness(t);
+  assert.equal(d.task.status, 'pr_opened', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  assert.deepEqual(d.commands, []); assert.equal(d.snapshots, 1);
+  assert.equal(d.candidate.test_command, 'agent-already-ran-tests');
+  assert.deepEqual(d.replies, [{ pr: { number: JSON.parse(d.task.result).pr_number, html_url: JSON.parse(d.task.result).pr_url, sha: d.candidate.remote_sha } }]);
+  assert.equal(d.candidate.tree_sha, JSON.parse(d.task.result).tree_sha);
+  const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json());
+  assert.match(state.prs.at(-1).body, /Tests: agent-already-ran-tests/);
+  assert.match(state.prs.at(-1).body, /not rerun by the control plane/); assert.doesNotMatch(state.prs.at(-1).body, /Exit code:/);
+});
+
+test('a later call for the same Issue appends to the same bot branch and PR', async t => {
+  const d = await developmentHarness(t), first = JSON.parse(d.task.result), next = await d.continueIssue();
+  assert.equal(next.task.status, 'completed', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  const result = JSON.parse(next.task.result);
+  assert.equal(result.pr_number, first.pr_number); assert.equal(result.branch, first.branch); assert.notEqual(result.sha, first.sha);
+  assert.equal(next.candidate.base_sha, first.sha); assert.equal(next.candidate.expected_sha, first.sha);
+  assert.equal(d.h.store.get('SELECT count(*) n FROM bot_pull_requests').n, 1);
+  assert.equal(d.h.store.get('SELECT count(*) n FROM bot_branches').n, 1);
+  const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), writes = state.refWrites.filter(w => w.branch === first.branch);
+  assert.deepEqual(writes.map(w => w.method), ['POST', 'PATCH']); assert.equal(writes[1].force, false);
+});
+
+test('policy-generated untracked files and tracked edits stay outside the published snapshot', async t => {
+  const policy = `node -e "const fs=require('node:fs');fs.mkdirSync('__pycache__');fs.writeFileSync('__pycache__/test.pyc','generated');fs.writeFileSync('calc.mjs','changed by policy');console.log('OK')"`;
+  const d = await developmentHarness(t, { policy });
+  assert.equal(d.task.status, 'pr_opened'); assert.deepEqual(d.commands, [policy]); assert.equal(d.snapshots, 1);
+  assert.ok(existsSync(join(d.repoDirectory, '__pycache__/test.pyc')));
+  assert.ok(!d.candidate.files.some(f => f.path.startsWith('__pycache__/')));
+  assert.match(Buffer.from(d.candidate.files.find(f => f.path === 'calc.mjs').base64, 'base64').toString(), /a \+ b/);
+  assert.equal(readFileSync(join(d.repoDirectory, 'calc.mjs'), 'utf8'), 'changed by policy');
+});
+
+test('policy failure returns output without publication and the same agent can repair and call again', async t => {
+  const policy = `node -e "if(!require('node:fs').existsSync('ready')){console.log('not ready');process.exit(1)}console.log('OK')"`;
+  const d = await developmentHarness(t, { policy });
+  assert.equal(d.task.status, 'pr_opened'); assert.equal(d.snapshots, 2); assert.equal(d.commands.length, 2);
+  assert.equal(d.replies[0].error, 'validation_failed'); assert.equal(d.replies[0].exit_code, 1); assert.match(d.replies[0].output, /not ready/);
+  assert.ok(d.replies[1].pr); assert.ok(d.candidate.files.some(f => f.path === 'ready'));
+  assert.equal(d.h.store.get("SELECT count(*) n FROM github_effects WHERE kind='branch'").n, 1);
+});
+
+for (const failure of [{ exit_code: 1 }, { timed_out: true }, { truncated: true }]) test('invalid policy result blocks publication: ' + JSON.stringify(failure), async t => {
+  const d = await developmentHarness(t, { policy: 'true', validationResult: failure, repair: false });
+  assert.equal(d.replies[0].error, 'validation_failed'); assert.equal(d.candidate, undefined);
+  assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n, 0);
+  assert.ok(!d.replies.some(reply => reply.pr));
+});
+
+test('an unchanged workspace ends development normally without tests, a candidate or a PR', async t => {
+  const d = await developmentHarness(t, { change: false, policy: 'exit 99' });
+  assert.equal(d.task.status, 'completed'); assert.equal(d.task.error_code, null); assert.equal(d.snapshots, 1);
+  assert.equal(d.replies[0].status, 'no_changes'); assert.deepEqual(d.commands, []); assert.equal(d.candidate, undefined);
+  assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n, 0);
+});
+
+test('publication still rejects a registered branch outside bot/issue-', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('owner','101','development.issue','running','dev',1)");
+  h.store.run("INSERT INTO bot_branches VALUES('101','contributor','owner')");
+  const publisher = new Publisher(h.store, { defaultBranch: 'main' }, h.store.get("SELECT * FROM tasks WHERE id='owner'"), async () => assert.fail('must reject before network access'));
+  await assert.rejects(publisher.branch({ branch: 'contributor', owner_task_id: 'owner' }), error => error.code === 'branch_not_owned');
+});
+
+test('the runner mailbox waits for publication replies and preserves only the exact waiting Pi process', async t => {
+  const h = await harness(t), root = join(h.directory, 'workspace'), dir = join(root, 'agent'); mkdirSync(dir, { recursive: true });
+  const id = 'a'.repeat(48), args = { summary: 'Ready', test_command: 'true' };
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ state: 'running', pid: 123 }));
+  writeFileSync(join(dir, 'pr-request.json'), JSON.stringify({ id, arguments: args }));
+  const value = { pr: { number: 70, html_url: 'https://github.invalid/pull/70', sha: 'b'.repeat(40) } }, reply = Buffer.from(JSON.stringify(value));
+  const pending = await agentOperation({ type: 'workspace_agent_poll' }, root);
+  assert.deepEqual(pending.pull_request, { id, arguments: args });
+  assert.ok(!existsSync(join(dir, 'pr-reply-' + id + '.json')));
+  for (let offset = 0; offset < reply.length; offset += 20) await agentOperation({ type: 'workspace_agent_pull_request', request_id: id, base64: reply.subarray(offset, offset + 20).toString('base64'), offset, final: offset + 20 >= reply.length }, root);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'pr-reply-' + id + '.json'))), value);
+  const processes = [{ pid: 123, cmdline: 'node /opt/runner/pi-entry.mjs ' + root }, { pid: 124, cmdline: 'test child' }];
+  assert.equal(await waitingAgent(root, processes), 123);
+  assert.equal(await waitingAgent(root, [{ pid: 123, cmdline: 'another process' }]), null);
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ state: 'completed', pid: 123 }));
+  assert.equal(await waitingAgent(root, processes), null);
 });
