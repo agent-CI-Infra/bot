@@ -13,7 +13,7 @@ export class GitHub {
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
-  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token): Promise<any> {
+  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false): Promise<any> {
     await this.guard();
     let response: Response;
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
@@ -21,6 +21,11 @@ export class GitHub {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
     catch { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait'); }
     if (response.status === 404 && allow404) return null;
+    // Ref reads report an empty repository as 409; writes and other conflicts must still fail.
+    if (response.status === 409 && allowEmptyRepository) {
+      let error; try { error = await response.json(); } catch { /* Keep the original HTTP failure for other responses. */ }
+      if (error?.message === 'Git Repository is empty.' || error?.message === 'Git Repository is empty') return null;
+    }
     if (!response.ok) {
       if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission');
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait');
@@ -75,5 +80,5 @@ export class GitHub {
     return `${this.actorId}+${this.actorLogin}@users.noreply.github.com`;
   }
   async object(kind: string, number: number): Promise<any> { return this.request('GET',this.path(`/${kind.endsWith('.pr') ? 'pulls':'issues'}/${number}`)); }
-  async ref(branch: string): Promise<any> { return this.request('GET',this.path('/git/ref/heads/' + encodeURIComponent(branch)), undefined, true); }
+  async ref(branch: string): Promise<any> { return this.request('GET',this.path('/git/ref/heads/' + encodeURIComponent(branch)), undefined, true, this.token, true); }
 }
