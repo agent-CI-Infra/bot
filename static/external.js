@@ -9,17 +9,19 @@ let saveExternal=null;
 let externalAudience='';
 const externalKeyCommands='umask 077\nopenssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out bot-client.pem\nopenssl pkey -in bot-client.pem -pubout -out bot-client.pub.pem';
 const externalTokenPermissions='contents: read、issues: write、pull_requests: write';
-function externalTokenCommand(client,audience){
+const externalTokenDocs='/docs/external-token-api.md';
+function externalTokenRequest(audience){
   const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
-  return 'node scripts/external-token.mjs --url '+quote(audience)+' --client-id '+quote(client.id)+' --key ./bot-client.pem';
+  return 'curl --fail-with-body --silent --show-error \\\n  --request POST '+quote(audience)+' \\\n  --header \'Content-Type: application/json\' \\\n  --header @proof-header.txt \\\n  --data-binary @token-request.json \\\n  --output token-response.json';
 }
 function externalAgentInstructions(client,audience){
   const exchange=audience
-    ?'兑换地址（同时是签名证明的 audience）：'+audience+'\n公钥登记完成后运行：\n'+externalTokenCommand(client,audience)
+    ?'兑换地址（同时是签名证明的 audience）：'+audience+'\n公钥登记完成后，用本机私钥签名，再通过任意 HTTP 客户端兑换。curl 请求示例：\n'+externalTokenRequest(audience)
     :'兑换地址尚未配置。请先让超级管理员在「外部执行端 → 设置兑换地址」保存以 /external/token 结尾的 HTTPS 地址，再从页面重新复制指令；不要猜测或编造 URL，配置完成前不要兑换。';
   return '请在我的个人电脑上完成部门 Bot 公钥接入。客户端 ID：'+client.id+'；绑定仓库 ID：'+client.repository_id+'。\n\n'
-    +'1. 确保本机有 OpenSSL 和 Node.js 22+。从 https://github.com/agent-CI-Infra/bot 获取现有 scripts/external-token.mjs，保持此相对路径，协议以该仓库 docs/external-executors.md 为准，不要另造兑换方法。先检查密钥文件是否已存在，不要覆盖已有私钥；如果没有，在本机私有目录运行：\n'+externalKeyCommands+'\n只将 bot-client.pub.pem 的公钥内容交给我，由我在这个客户端的「登记公钥／更换公钥」中保存，并等待我确认。只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。bot-client.pem 私钥始终留在我的电脑，不要粘贴到 Bot、聊天或日志。\n\n'
-    +'2. '+exchange+'\n脚本只发送最长 120 秒的签名证明，不上传私钥。不要在聊天、日志或提交中显示私钥、签名证明或响应 token；安全地保留响应里的 grant_id、token 和 expires_at 供本次任务使用。\n\n'
+    +'1. 可使用任意语言或工具，不需要 Node.js，也不要求下载项目脚本。详细接口规则和 OpenSSL＋curl 完整示例：https://github.com/agent-CI-Infra/bot/blob/main/docs/external-token-api.md（管理入口也可打开 '+new URL(externalTokenDocs,location.origin).href+'）。先检查密钥文件是否已存在，不要覆盖已有私钥；如果没有，在本机私有目录运行：\n'+externalKeyCommands+'\n只将 bot-client.pub.pem 的公钥内容交给我，由我在这个客户端的「登记公钥／更换公钥」中保存，并等待我确认。只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。bot-client.pem 私钥始终留在我的电脑，不要粘贴到 Bot、聊天或日志。\n\n'
+    +'2. '+exchange+'\n签名证明是最长 120 秒的 RS256 JWT：header 为 {"alg":"RS256","typ":"JWT"}；payload 中 iss 和 sub 都为 '+client.id+'，aud 必须与上面的完整兑换地址一致，iat 为当前 Unix 秒，exp 大于 iat 且不超过 iat + 120，jti 为每次新生成的 16–128 位字母、数字、下划线或短横线。JWT 三段都用无填充 base64url 编码，对 header.payload 用 RSA-SHA256 签名。\n'
+    +'在 umask 077 的私有目录中，将 Authorization: Bearer <签名JWT> 写入 proof-header.txt；将 '+JSON.stringify({client_id:client.id,request_id:'<与 jti 完全相同>'})+' 写入 token-request.json，再发送上面的 POST 请求。只发送签名证明，不上传私钥；不要开启 shell 跟踪或在聊天、日志、提交中显示私钥、签名证明或响应 token。请求不可重放，失败时先查看原因，确需重新兑换时生成新的 jti 和证明。安全地保留响应里的 grant_id、token 和 expires_at 供本次任务使用。\n\n'
     +'3. 成功响应里的 token 是该仓库的 GitHub App 安装令牌。以 Authorization: Bearer <token> 调用 GitHub，只操作绑定仓库。固定权限为 '+externalTokenPermissions+'，不能扩大权限，不能当 Contents write 使用；按 expires_at 到期。\n\n'
     +'4. 完成任务后，对'+(audience?' '+new URL('/external/revoke',audience).href+' ':'与兑换地址同源的 /external/revoke ')+'发送 POST，Content-Type: application/json，正文为 {"grant_id":"<响应中的 grant_id>","token":"<响应中的 token>"}，撤销本次令牌。不要输出实际 token。';
 }
@@ -38,9 +40,11 @@ function externalPublicKeyGuide(client=null,audience=externalAudience){
   const steps=element('ol','');
   const keyStep=element('li','');keyStep.append(element('strong','在个人电脑生成公钥'),element('pre',externalKeyCommands),element('p','先检查文件是否已存在，不要覆盖已有私钥。仅将 bot-client.pub.pem 的公钥粘贴到 Bot；只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。bot-client.pem 私钥留在个人电脑，不要粘贴进 Bot、聊天或日志。'));
   const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换自己的 GitHub token'),element('p','超级管理员先设置以 /external/token 结尾的 HTTPS 兑换地址；该完整地址就是签名证明的 audience。'));
-  if(audience){exchangeStep.append(element('p','当前兑换地址：'+audience));if(client)exchangeStep.append(element('pre',externalTokenCommand(client,audience)));else exchangeStep.append(element('p','新增客户端并登记公钥后，在该客户端的接入说明中取得带真实客户端 ID 的命令。'));}
+  if(audience){exchangeStep.append(element('p','当前兑换地址：'+audience));if(client)exchangeStep.append(element('pre',externalTokenRequest(audience)));else exchangeStep.append(element('p','新增客户端并登记公钥后，使用该客户端 ID 按下面的接口规则兑换。'));}
   else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员先设置，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
-  const scriptHelp=element('p','在个人电脑使用 Node.js 22+，获取 '),scriptLink=element('a','scripts/external-token.mjs');scriptLink.href='https://github.com/agent-CI-Infra/bot/blob/main/scripts/external-token.mjs';scriptLink.target='_blank';scriptLink.rel='noopener noreferrer';scriptHelp.append(scriptLink,document.createTextNode(' 后运行。工具只发送最长 120 秒的签名证明，不上传私钥；成功响应的 token 是绑定仓库的 GitHub App 安装令牌。'));exchangeStep.append(scriptHelp);
+  exchangeStep.append(element('p','可用任意语言或 HTTP 工具，不要求 Node.js 或项目脚本。用本机私钥签名 RS256 JWT，最长 120 秒：iss、sub 均为客户端 ID，aud 为完整兑换地址，iat 为当前 Unix 秒，exp ≤ iat + 120；每次生成唯一 jti（16–128 位字母、数字、下划线或短横线）。'),element('p','POST /external/token：Authorization: Bearer <签名JWT>，Content-Type: application/json。正文的 request_id 必须等于 jti；只发送证明，不上传私钥。'));
+  exchangeStep.append(element('pre',JSON.stringify({client_id:client?client.id:'<客户端ID>',request_id:'<与 jti 完全相同>'},null,2)),element('p','curl 示例从私有文件读取请求头和正文（umask 077），响应保存到 token-response.json，不要输出到公共日志。成功的 token 是绑定仓库的 GitHub App 安装令牌。'));
+  const docs=element('a','详细接口文档：OpenSSL 签名、curl 兑换与撤销');docs.href=externalTokenDocs;docs.target='_blank';docs.rel='noopener noreferrer';exchangeStep.append(docs);
   const tokenStep=element('li','');tokenStep.append(element('strong','使用并撤销 token'),element('p','用 Authorization: Bearer <token> 调用 GitHub。权限固定为 '+externalTokenPermissions+'，只限客户端绑定仓库，不能扩大权限，不能当 Contents write。按响应 expires_at 到期，不要将 token 写入聊天、日志或提交。'),element('p','用完调用 POST '+(audience?new URL('/external/revoke',audience).href:'/external/revoke（与兑换地址同源）')+'，Content-Type: application/json，正文：'),element('pre','{"grant_id":"<响应中的 grant_id>","token":"<响应中的 token>"}'));
   steps.append(keyStep,exchangeStep,tokenStep);body.append(steps);guide.append(body);return guide;
 }

@@ -75,7 +75,8 @@ export function createControlPlane(options: Options) {
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
-      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'] };
+      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
+      '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
       res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8` }); res.end(bytes); return;

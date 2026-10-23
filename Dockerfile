@@ -20,6 +20,7 @@ COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json ./package.json
 COPY --from=build /app/dist ./dist
 COPY static ./static
+COPY docs/external-token-api.md ./docs/external-token-api.md
 COPY config ./config
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
 COPY LICENSE ./LICENSE
