@@ -61,7 +61,8 @@ export async function workspace(input){
     const target=await path(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
     try{if((await handle.stat()).size>1024*1024)throw new Error('file_too_large');return {content:await handle.readFile('utf8')};}finally{await handle.close();}
   }
-  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true});
+  // secret_env comes only from the agent process in this container; the manager forwards no such field.
+  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env});
   if(input.type==='workspace_finalize'){
     await git(['add','--all']);const tree=(await git(['write-tree'])).toString().trim();
     const raw=(await git(['ls-tree','-r','-z',tree])).toString();const files=[];

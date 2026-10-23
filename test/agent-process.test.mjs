@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
+import { Workspace } from '../dist/agent/workspace.js';
 import { resolveRules } from '../dist/rules/service.js';
 import { Redactor } from '../dist/agent/common.js';
 
@@ -149,4 +150,38 @@ test('review rules choose the triggers, and the comment language and only the ef
   await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) });
   for (const name of ['labels.md', 'issue-review.md', 'pr-review.md', 'issue-development.md'])
     assert.ok(prompts[2].includes(`## .bot/rules/${name} (builtin)\n` + readFileSync(new URL('../docs/prompts/' + name, import.meta.url), 'utf8')), name);
+});
+
+test('the agent exchanges a read-only GitHub token that is not stored, never reaches the provider and is revoked at the end', async t => {
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const finish={summary:'Read the checks.',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]},bodies=[];
+  const server=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;bodies.push(raw);res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[call('f','finish_review',finish)]}}]}));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:'token-fixture-key',model_name:'fixture'})).value.model;
+  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,generation,workspace_id) VALUES('tok','101','review.pr','running','pr',4,'claim',1,?),('none','101','review.pr','running','pr',5,'claim',1,?)",'d'.repeat(48),'e'.repeat(48));
+  const token='ghs_'+randomBytes(18).toString('hex');
+  // The manager plays the runner: the agent asks for a token, then a command echoes it into the next model request.
+  const runner=()=>{const delivered=[];let phase='token';return {delivered,manager:{call:async(_method,_path,input)=>{const r=input.request;
+    if(r.type==='workspace_agent_token'){delivered.push(JSON.parse(Buffer.from(r.base64,'base64')));phase='model';return {ok:true,result:{written:true}};}
+    if(r.type==='workspace_agent_poll'){
+      if(phase==='token')return {ok:true,result:{state:'running',token_request:{id:'b'.repeat(48)},events:[],offset:0}};
+      if(phase==='model')return {ok:true,result:{state:'running',request:{id:'c'.repeat(48),body:{messages:[{role:'tool',content:'GH_TOKEN='+token}]}},events:[],offset:0}};
+      return {ok:true,result:{state:'completed',result:finish,events:[],offset:0}};
+    }
+    if(r.type==='workspace_agent_reply')phase='done';
+    return {ok:true,result:{written:true,started:true}};
+  }}};};
+  const redactor=new Redactor(),logs=[];let revoked=0;
+  const tokens={issue:async()=>{redactor.add(token);return {token,expires_at:'2099-01-01T00:00:00Z',permissions:{contents:'read',actions:'read'},repository:'fixture/project-101'};},revoke:async()=>{revoked++;}};
+  let task=h.store.get("SELECT * FROM tasks WHERE id='tok'"),fake=runner();
+  const result=await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},value=>logs.push(value)),redactor,async()=>{},{mode:'review'},tokens);
+  assert.equal(result.summary,'Read the checks.');assert.equal(fake.delivered[0].token,token);assert.equal(revoked,1);
+  assert.ok(!JSON.stringify(h.store.all('SELECT * FROM task_tools')).includes('workspace_agent_token'),'the delivery is not recorded');
+  assert.ok(!bodies[0].includes(token)&&bodies[0].includes('[REDACTED]'),'the provider never sees the token');
+  assert.ok(!JSON.stringify(logs).includes(token));assert.deepEqual(logs.find(l=>l.type==='github_read_token').permissions,{contents:'read',actions:'read'});
+  // Without a token issuer the agent gets the reason and the task carries on.
+  task=h.store.get("SELECT * FROM tasks WHERE id='none'");fake=runner();
+  await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,new Redactor(),async()=>{},()=>{}),new Redactor(),async()=>{},{mode:'review'});
+  assert.deepEqual(fake.delivered,[{error:'github_read_token_unavailable'}]);
 });

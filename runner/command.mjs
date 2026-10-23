@@ -9,22 +9,25 @@ export const environment = { LANG:'C.UTF-8', ...projectEnvironment, PATH:`${user
   NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
 // timeoutMs null runs the command until it ends (stopping the project computer still ends it); omitted means 10 seconds.
-export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false}={}) {
+// secretEnv (the task's read-only GitHub token) is added to the command's environment and masked in everything it prints.
+export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false,secretEnv}={}) {
   if(typeof value!=='string'||!value||value.length>32768)throw new Error('invalid_command');
+  const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
+  const mask=text=>Object.values(extra).reduce((masked,secret)=>masked.replaceAll(secret,'[REDACTED]'),text);
   return new Promise((resolve,reject)=>{
-    const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:environment,stdio:['ignore','pipe','pipe']});
+    const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:{...environment,...extra},stdio:['ignore','pipe','pipe']});
     let output='',timedOut=false,truncated=false,done=false;
     const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
     const timer=timeoutMs===null?null:setTimeout(()=>{timedOut=true;kill();},Math.max(100,Number(timeoutMs)||10000));
     const collect=data=>{
       if(Buffer.byteLength(output)+data.length>1024*1024){truncated=true;kill();return;}
-      output+=data.toString();if(outputFile)try{appendFileSync(outputFile,data,{mode:0o600});}catch{/* Live output is best effort. */}
+      output+=data.toString();if(outputFile)try{appendFileSync(outputFile,mask(data.toString()),{mode:0o600});}catch{/* Live output is best effort. */}
     };
     const finish=(code,signal)=>{
       if(done)return;done=true;clearTimeout(timer);
       // Kept background processes may still hold the pipes; release them instead of waiting.
       if(keepBackground&&!timedOut&&!truncated){child.stdout.destroy();child.stderr.destroy();child.unref();}else kill();
-      resolve({exit_code:code,signal,output,timed_out:timedOut,truncated});
+      resolve({exit_code:code,signal,output:mask(output),timed_out:timedOut,truncated});
     };
     child.stdout.on('data',collect);child.stderr.on('data',collect);
     child.on('error',error=>{clearTimeout(timer);kill();reject(error);});

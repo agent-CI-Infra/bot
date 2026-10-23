@@ -12,7 +12,8 @@ const string={type:'string'};
 export function tools(development:boolean){
   const result=[fn('read_file','Read a file in this task workspace',{path:string},['path']),fn('run_command','Run a shell command in this task workspace inside the long-lived project container (internet access available for dependencies). Output is streamed to the console.',
     {command:string,timeout_seconds:{type:'integer',minimum:1,description:'Optional. Without it the command runs until it ends; set it only for a command that might hang'},
-      keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command'])];
+      keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command']),
+    fn('github_read_token','Exchange a short-lived read-only GitHub token for this repository. Later run_command calls get it as GH_TOKEN and GITHUB_TOKEN for https://api.github.com; it can read code, Issues, pull requests, comments, reviews, Actions runs and checks, and cannot write anything. The token value is never shown to you',{},[])];
   if(development)result.push(fn('write_file','Replace a text file in this task workspace',{path:string,content:string},['path','content']),
     fn('finish_development','Finish implementation; the server will independently run the required tests and publish only the registered bot branch',
       {summary:string,test_command:string,change_title:{type:'string',description:'Concise code-change subject only. No review passphrase or review template.'}},['summary','test_command','change_title']));
