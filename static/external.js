@@ -30,8 +30,8 @@ function externalKeyHelp(){
   const help=element('details','','external-key-help');help.append(element('summary','如何在个人电脑生成公钥'));
   help.append(element('p','在个人电脑的私有目录执行；先检查文件是否存在，不要覆盖已有私钥。'),element('pre',externalKeyCommands),element('p','只粘贴 bot-client.pub.pem 中 BEGIN PUBLIC KEY 的 SPKI PEM 公钥，支持 2048–4096 位 RSA。bot-client.pem 私钥留在个人电脑，不要交给 Bot、聊天或日志。'));return help;
 }
-function externalPublicKeyGuide(clients=[],audience=externalAudience){
-  const guide=element('details','','external-guide');guide.append(element('summary','个人电脑接入：生成公钥、兑换与使用 token'));
+function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=false}={}){
+  const guide=element(expanded?'section':'details','','external-guide');guide.append(element(expanded?'h3':'summary','个人电脑接入：生成公钥、兑换与使用 token'));
   const body=element('div','','external-guide-body'),head=element('div','','heading'),status=element('p','','muted');status.setAttribute('role','status');
   const available=clients.filter(c=>c.auth_type==='private_key_jwt');
   head.append(element('strong','按以下步骤接入个人电脑'));
@@ -43,7 +43,7 @@ function externalPublicKeyGuide(clients=[],audience=externalAudience){
       const text=externalAgentInstructions(available.find(c=>c.id===select.value),audience);
       try{await navigator.clipboard.writeText(text);status.textContent='已复制接入指令';}catch{fallback.value=text;fallback.hidden=false;fallback.focus();fallback.select();status.textContent='剪贴板不可用，请手动复制下方完整指令。';}
     }));body.append(head,selection,status,fallback);
-  }else body.append(head,element('p','先在项目设置 → 外部执行中新增个人电脑客户端，再回到这里选择客户端并复制接入指令。'));
+  }else body.append(head,element('p',expanded?'在本项目新增个人电脑客户端后，即可在这里选择并复制接入指令。':'先在项目设置 → 外部执行中新增个人电脑客户端，再回到这里选择客户端并复制接入指令。'));
   const steps=element('ol','');
   const keyStep=element('li','');keyStep.append(element('strong','在个人电脑生成公钥'),element('pre',externalKeyCommands),element('p','先检查文件是否已存在，不要覆盖已有私钥。仅将 bot-client.pub.pem 的公钥粘贴到 Bot；只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。bot-client.pem 私钥留在个人电脑，不要粘贴进 Bot、聊天或日志。'));
   const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换自己的 GitHub token'),element('p','超级管理员先设置以 /external/token 结尾的 HTTPS 兑换地址；该完整地址就是签名证明的 audience。'));
@@ -103,8 +103,9 @@ function externalGroup(title,action){const group=element('section','','external-
 function externalRow(name,detail,stateLabel,actions=[]){const row=element('div','','row'+(actions.length?' has-actions':'')),content=element('div','','row-content');content.append(element('strong',name),element('p',detail));row.append(content,element('span',stateLabel,'status'));if(actions.length){const group=element('div','','actions');group.append(...actions);row.append(group);}return row;}
 const externalProjectApi=(repositoryId,path,method='GET',body)=>api('/api/repositories/'+repositoryId+'/external'+path,method,body);
 async function loadExternalProject(repositoryId){
-  const [{clients},{subscriptions},{deliveries},{grants}]=await Promise.all(['clients','subscriptions','deliveries','grants'].map(type=>externalProjectApi(repositoryId,'/'+type)));
-  return {clients,subscriptions,deliveries,grants};
+  const [{clients},{subscriptions},{deliveries},{grants},{settings}]=await Promise.all([
+    ...['clients','subscriptions','deliveries','grants'].map(type=>externalProjectApi(repositoryId,'/'+type)),api('/api/external/settings')]);
+  return {clients,subscriptions,deliveries,grants,settings};
 }
 async function renderExternal(params,request){
   const [{clients},{settings}]=await Promise.all([api('/api/external/clients?'+params),api('/api/external/settings')]);
@@ -120,10 +121,10 @@ async function renderExternal(params,request){
   if(!clients.length)projects.append(element('p','尚未配置外部客户端，请到项目设置 → 外部执行添加。','muted'));panel.append(projects);
 }
 function externalSection(){
-  const repositoryId=current.id,{clients,subscriptions,deliveries,grants}=current.external;
+  const repositoryId=current.id,{clients,subscriptions,deliveries,grants,settings}=current.external;
   const mutate=async(path,body)=>{const result=await externalProjectApi(repositoryId,path,'PATCH',body);await route();if(result.signing_secret)externalSecret(result.signing_secret);};
-  const intro=externalGroup('当前项目的外部执行');const guide=element('a','查看全局接入说明与复制指令');guide.href='#external';
-  intro.append(element('p','客户端只授权当前仓库，固定权限为 '+externalTokenPermissions+'。Webhook 推送和事件轮询可同时使用。','muted'),guide);
+  const intro=externalGroup('当前项目的外部执行');
+  intro.append(element('p','客户端只授权当前仓库，固定权限为 '+externalTokenPermissions+'。Webhook 推送和事件轮询可同时使用。','muted'),externalPublicKeyGuide(clients,settings.token_audience||'',{expanded:true}));
   const group=externalGroup('客户端',button('新增客户端',()=>addClient(repositoryId)));
   for(const c of clients){const actions=[button(c.enabled?'停用':'启用',()=>mutate('/clients/'+c.id,{enabled:!c.enabled}).catch(error))];if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));
     const pending=c.auth_type==='private_key_jwt'&&!c.key_configured,row=externalRow(c.name,`仓库 ${c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,pending?'待登记公钥':c.enabled?'已启用':'已停用',actions);
