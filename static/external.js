@@ -31,7 +31,7 @@ function externalKeyHelp(){
   help.append(element('p','在个人电脑的私有目录执行；先检查文件是否存在，不要覆盖已有私钥。'),element('pre',externalKeyCommands),element('p','只粘贴 bot-client.pub.pem 中 BEGIN PUBLIC KEY 的 SPKI PEM 公钥，支持 2048–4096 位 RSA。bot-client.pem 私钥留在个人电脑，不要交给 Bot、聊天或日志。'));return help;
 }
 function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=false}={}){
-  const guide=element(expanded?'section':'details','','external-guide');guide.append(element(expanded?'h3':'summary','个人电脑接入：生成公钥、兑换与使用 token'));
+  const guide=element('details','','external-guide');guide.open=expanded;guide.append(element('summary','个人电脑接入：生成公钥、兑换与使用 token'));
   const body=element('div','','external-guide-body'),head=element('div','','heading'),status=element('p','','muted');status.setAttribute('role','status');
   const available=clients.filter(c=>c.auth_type==='private_key_jwt');
   head.append(element('strong','按以下步骤接入个人电脑'));

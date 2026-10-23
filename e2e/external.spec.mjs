@@ -112,7 +112,7 @@ test('空项目可直接新增，取消不留下草稿，全局仍只有一套�
   }finally{await cleanup(h);}
 });
 
-test('项目链接直接展开说明并复制当前项目客户端，刷新读取最新地址，窄屏也能直接复制',async({page,context})=>{
+test('项目说明原页展开收起并复制当前项目客户端，刷新读取最新地址，窄屏也能折叠复制',async({page,context})=>{
   const h=await externalFixture(),requests=[];
   try{
     const a=await h.client('101',{name:'First workstation'}),b=await h.client('101',{name:'Second workstation'}),foreign=await h.client('202',{name:'Foreign workstation'});
@@ -123,7 +123,7 @@ test('项目链接直接展开说明并复制当前项目客户端，刷新读�
     await page.goto(h.adminBase+'/#/projects/101/external');await page.getByLabel('用户名',{exact:true}).fill('administrator');
     await page.getByLabel('密码',{exact:true}).fill(h.password);await page.getByRole('button',{name:'登录',exact:true}).click();
     const panel=page.locator('#project-page'),guide=panel.locator('.external-guide'),select=guide.getByRole('combobox',{name:'复制指令所用客户端',exact:true}),copy=guide.getByRole('button',{name:'复制给我的 AI agent',exact:true});
-    await expect(guide).toHaveCount(1);await expect(guide.locator('summary')).toHaveCount(0);
+    await expect(guide).toHaveCount(1);await expect(guide.locator('summary')).toHaveCount(1);
     await expect(guide).toContainText(audience);await expect(guide).toContainText('GET https://executor.invalid/external/events');await expect(copy).toBeVisible();
     await expect(panel.getByRole('link',{name:'查看全局接入说明与复制指令',exact:true})).toHaveCount(0);
     await expect(select.locator('option')).toHaveCount(2);await expect(select.locator('option[value="'+foreign.client.id+'"]')).toHaveCount(0);
@@ -133,8 +133,14 @@ test('项目链接直接展开说明并复制当前项目客户端，刷新读�
     expect(requests).toContain('/api/external/settings');expect(requests).not.toContain('/api/external/clients');
     mkdirSync('.tmp/project-external-guide',{recursive:true});await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
     await page.screenshot({path:'.tmp/project-external-guide/desktop.png',fullPage:true});
+    await guide.locator('summary').click();await expect(copy).toBeHidden();await expect(guide).not.toHaveAttribute('open','');
+    await expect(page).toHaveURL(/\/projects\/101\/external$/);await page.screenshot({path:'.tmp/project-external-guide/desktop-collapsed.png',fullPage:true});
+    await guide.locator('summary').click();await expect(copy).toBeVisible();await expect(select).toHaveValue(b.client.id);
     await page.setViewportSize({width:390,height:844});await noOverflow(page);await visibleButton(page,copy);
     await page.screenshot({path:'.tmp/project-external-guide/mobile.png',fullPage:true});
+    await guide.locator('summary').focus();await guide.locator('summary').press('Enter');await expect(copy).toBeHidden();await noOverflow(page);
+    await page.screenshot({path:'.tmp/project-external-guide/mobile-collapsed.png',fullPage:true});
+    await guide.locator('summary').press('Enter');await expect(copy).toBeVisible();await copy.click();expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain(b.client.id);
     const updated='https://updated.invalid/external/token';await h.admin('/api/external/settings','PUT',{token_audience:updated});await page.reload();
     await expect(guide).toContainText(updated);await copy.click();expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain(updated);
     h.store.run("DELETE FROM settings WHERE key='external_token_audience'");await page.reload();
