@@ -188,7 +188,7 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的「检视」中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
 
-后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 32 次模型响应；模型调用 run_command 时命令不限时长，可选 `timeout_seconds` 为可能卡住的命令自设超时，服务和监视进程用 `keep_background` 放到后台；仓库测试验证同样不限时长；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
+后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务不限模型调用次数，也没有总时长上限，禁用项目或停止虚拟电脑可以中止正在执行的任务；模型调用 run_command 时命令不限时长，可选 `timeout_seconds` 为可能卡住的命令自设超时，服务和监视进程用 `keep_background` 放到后台；仓库测试验证同样不限时长；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
 
 每次检视发布一条总结讨论评论，包含总结、非行内 finding 和检视 SHA。Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。policy 设置了 `review_label` 时，总结评论发布成功后由控制面用同一安装令牌给 Issue／PR 加这一个标签，仓库没有该标签时由 GitHub 创建；标签不由模型选择，重复执行不会重复添加。
 

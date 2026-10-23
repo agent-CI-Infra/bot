@@ -22,8 +22,10 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
   }
   const started = await workspace.call('pi:start', { type: 'workspace_agent_start' });
   if (started.error) stop('execution_interrupted', 'waiting_environment');
-  // No overall deadline: the task is bounded by its model request budget, and commands run until they end.
-  let offset = 0, requests = 0;
+  // No deadline and no model request budget: the task runs until the agent finishes. Disabling the project or
+  // stopping its computer ends it (guard() and the interrupted poll below).
+  // A request stays visible until the agent picks up its reply; answering it twice would call the model twice.
+  let offset = 0; const answered = new Set<string>();
   for (;;) {
     await guard();
     const state = await workspace.call('pi:poll:' + randomId(), { type: 'workspace_agent_poll', offset });
@@ -37,8 +39,7 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
     }
     if (state.error || ['interrupted', 'missing'].includes(state.state)) stop('execution_interrupted', 'waiting_environment');
     if (state.state === 'failed') stop('pi_execution_failed');
-    if (state.request) {
-      if (++requests > 32) stop('model_step_budget_exhausted');
+    if (state.request && !answered.has(state.request.id)) {
       const model = selectedModel(store, task.repository_id); redactor.add(model.key);
       const body = state.request.body;
       if (!body || !Array.isArray(body.messages) || JSON.stringify(body).length > 2 * 1024 * 1024) stop('model_request_invalid');
@@ -62,6 +63,8 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
         const wrote = await workspace.call(`pi:reply:${state.request.id}:${at}`, { type: 'workspace_agent_reply', request_id: state.request.id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });
         if (wrote.error) stop('execution_interrupted', 'waiting_environment');
       }
+      // The agent continues as soon as it has the reply; poll again right away instead of waiting.
+      answered.add(state.request.id); continue;
     }
     await new Promise(resolve => setTimeout(resolve, 500));
   }

@@ -7,10 +7,11 @@ import {workspace} from './workspace.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const save=async value=>{await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let calls=0,steps=0,session,finished;
+let steps=0,session,finished;
 const server=createServer(async(req,res)=>{
   try{
-    if(req.url!=='/v1/chat/completions'||req.method!=='POST'||++calls>32)throw new Error('model_request_not_allowed');
+    // Any number of model requests per task; only the chat completion endpoint is proxied.
+    if(req.url!=='/v1/chat/completions'||req.method!=='POST')throw new Error('model_request_not_allowed');
     let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>2*1024*1024)throw new Error('model_request_too_large');}
     const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:JSON.parse(raw)}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
     const end=Date.now()+120000;let response;

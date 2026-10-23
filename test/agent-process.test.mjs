@@ -36,6 +36,31 @@ test('the control plane relays Pi model requests with the configured model and k
   assert.equal(result.summary,'Short summary.');assert.equal(received[0].authorization,'Bearer process-fixture-key');assert.equal(received[0].body.model,'fixture');assert.ok(!JSON.stringify(requests).includes('process-fixture-key'));assert.equal(logs[0].tool_calls[0].name,'finish_review');
 });
 
+test('a task may make any number of model requests, and a request still visible after its reply is not sent twice', async t => {
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const finish={summary:'Done after many steps.',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
+  let received=0;const server=createServer(async(req,res)=>{for await(const _ of req);received++;res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[call('c'+received,'finish_review',finish)]}}]}));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:'budget-fixture-key',model_name:'fixture'})).value.model;
+  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('many','101','review.pr','running','pr',4,'claim')");
+  // 40 model requests, more than the former limit of 32. After every tenth reply the same request is still visible once, as can happen in the container.
+  let step=0,stale=false;const total=40,request=n=>({id:String(n).padStart(48,'0'),body:{messages:[{role:'user',content:'step '+n}]}});
+  const workspace={log:()=>{},call:async(_key,input)=>{
+    if(input.type==='workspace_agent_poll'){
+      if(stale){stale=false;return {state:'running',request:request(step),events:[],offset:0};}
+      return step<total?{state:'running',request:request(++step),events:[],offset:0}:{state:'completed',result:finish,events:[],offset:0};
+    }
+    if(input.type==='workspace_agent_reply'){stale=step%10===0;return {written:true};}
+    return {written:true,started:true};
+  }};
+  const started=Date.now(),result=await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='many'"),workspace,new Redactor(),async()=>{},{mode:'review'});
+  assert.equal(result.summary,'Done after many steps.');assert.equal(received,total);
+  // Answered requests are followed by an immediate poll, so 40 steps do not wait 40 polling intervals.
+  assert.ok(Date.now()-started<total*500,'polls right after a reply');
+});
+
 test('task lists split review and development work, and logs carry their time', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   for (const [id, kind] of [['r1', 'review.issue'], ['r2', 'review.pr'], ['d1', 'development.issue']])
