@@ -3,7 +3,7 @@ import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, type Json } from '../core/security.js';
 import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
-import { Publisher } from '../github/publisher.js';
+import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { enqueue } from '../review/queue.js';
 import { agentLoop } from './loop.js';
 import { Workspace } from './workspace.js';
@@ -21,12 +21,13 @@ export class TaskEngine {
   start(){
     this.store.run("UPDATE task_locks SET task_id=NULL,token=NULL");
     this.store.run("UPDATE tasks SET status='queued',claim_token=NULL WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND status IN ('running','preparing','implementing','validating','publishing','result_ready')");
+    this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
     this.timer=setInterval(()=>this.tick(),1000);this.tick();
   }
   tick(){
     if(this.closing)return;
     const tasks=this.store.all(`SELECT * FROM tasks WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND
-      status IN ('queued','retry_wait','waiting_configuration','waiting_environment') AND next_run_at<=? ORDER BY created_at,id`,Date.now());
+      status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY created_at,id`,Date.now());
     for(const task of tasks){
       if(this.active.has(task.repository_id))continue;
       const token=randomId();
@@ -62,16 +63,17 @@ export class TaskEngine {
       const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.'));
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.');
+      if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan');
       const validate=async()=>{
         await guard();const current=await github.object(task.kind,task.object_number);
         if(current.state!=='open'||current.draft===true)stop('object_closed_or_draft','cancelled');
         if(task.kind.endsWith('.pr')){
+          if(development)this.owned(github,task,current);
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
           if(current.head?.sha!==task.head_sha&&!(development&&candidate?.remote_sha===current.head?.sha)){
             this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
             stop('pull_request_head_changed','superseded');
           }
-          if(development)this.owned(github,task,current);
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan');
         if(development){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=saved?JSON.parse(saved.data):null;
@@ -85,6 +87,19 @@ export class TaskEngine {
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment');
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         const object=await github.object(task.kind,task.object_number);await validate();
+        let implementationGoal=input.review?.implementation_goal||'',actionableFindings:any[]=[];
+        if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan');
+        if(task.kind.endsWith('.pr')){
+          const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number);
+          if(owned){
+            const source=this.store.get('SELECT input FROM tasks WHERE id=?',owned.source_task_id);
+            implementationGoal=source?JSON.parse(source.input).review?.implementation_goal||'':'';
+            if(development){
+              actionableFindings=(input.review?.findings||[]).filter(actionableFinding);
+              if(!implementationGoal||!actionableFindings.length)stop('revision_scope_unconfirmed','needs_replan');
+            }
+          }
+        }
         const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
         const baseBranch=policy.base_branch||github.defaultBranch;
         const ref=task.kind.endsWith('.pr')?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
@@ -107,8 +122,8 @@ export class TaskEngine {
         }
         const comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
         input={...input,object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
-          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,review:input.review||null,effective_rules:effectiveRules,
-            comments:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
+          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
+            comments:development&&task.kind.endsWith('.pr')?[]:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language,instructions:policy.review_instructions||''},
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
@@ -133,12 +148,12 @@ export class TaskEngine {
         let branch:string,ownerTask=id,prNumber:number|null=null;
         if(task.kind==='development.pr'){const owned=this.owned(github,task,input.object);branch=owned.branch;prNumber=owned.number;ownerTask=owned.source_task_id;}
         else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-        const candidate={...after,files:await workspace.contents(after.files),summary:result.summary,base_sha:input.snapshot_sha,base_branch:input.base_branch,
+        const candidate={...after,files:await workspace.contents(after.files),summary:result.summary,change_title:result.change_title,implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
           branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation:{...validation,command}};
         this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));update({phase:'publish'});
       }
       if(task.phase==='publish'){
-        update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate);
+        update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log);
         if(!development){
           const outputs=await publisher.review(result,input.files);
           // The policy label, never the model, is applied only after the summary comment was published.
@@ -192,20 +207,22 @@ export class TaskEngine {
   }
   owned(github:GitHub,task:Row,pr:any):Row{
     const row=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number);
-    if(!row||row.pr_id!==String(pr.id)||row.author_id!==String(pr.user?.id)||row.author_id!==github.actorId||row.head_repository_id!==String(pr.head?.repo?.id)||row.head_repository_id!==task.repository_id||row.branch!==pr.head?.ref) return stop('pull_request_not_owned','waiting_permission');
-    return row;
+    assertOwnedPR(row,pr,github.actorId,task.repository_id);
+    return row!;
   }
   queueDevelopment(github:GitHub,task:Row,input:any,result:any){
     const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-    if(!policy?.enabled||!policy.development_enabled||!result.requires_code_change||result.clarification_required||!result.implementation_goal.trim())return;
+    if(!policy?.enabled||!policy.development_enabled||!result.requires_code_change||result.clarification_required)return;
     if(task.kind==='review.issue'){
       const text=String(input.object.title)+'\n'+String(input.object.body||'');
-      if(!result.issue_requests_code||!result.request_quote.trim()||!text.includes(result.request_quote))return;
+      if(!result.implementation_goal.trim()||!result.issue_requests_code||!result.request_quote.trim()||!text.includes(result.request_quote))return;
       enqueue(this.store,task.repository_id,'development.issue',task.object_number,null,{review:result,object_hash:input.object_hash},task.source_delivery_id,task.id);
     }else{
       let owned:Row;try{owned=this.owned(github,task,input.object);}catch{return;}
-      if(owned.revisions>=policy.max_revisions||!result.findings.length)return;
-      enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:result},task.source_delivery_id,task.id);
+      const findings=result.findings.filter(actionableFinding);
+      const source=this.store.get('SELECT input FROM tasks WHERE id=?',owned.source_task_id),goal=source?JSON.parse(source.input).review?.implementation_goal:'';
+      if(owned.revisions>=policy.max_revisions||!findings.length||!goal)return;
+      enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:{...result,implementation_goal:goal,findings}},task.source_delivery_id,task.id);
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
@@ -214,7 +231,7 @@ export class TaskEngine {
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
     fields(input,[]);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
     if(!task)return fail(404,'task_not_found');
-    if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','retry_wait','needs_replan'].includes(task.status)||this.active.has(task.repository_id))fail(409,'task_not_retryable');
+    if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status)||this.active.has(task.repository_id))fail(409,'task_not_retryable');
     this.store.transaction(()=>{
       if(task.phase!=='publish'&&['failed','waiting_environment','needs_replan'].includes(task.status)){
         this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,attempt=attempt+1 WHERE id=?",task.id);
@@ -224,3 +241,5 @@ export class TaskEngine {
     });this.tick();return {ok:true};
   }
 }
+
+export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;

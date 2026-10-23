@@ -1,6 +1,6 @@
 // Task process and project computer views. Loaded after app.js and reuses its helpers ($, api, element, state, states, timestamp).
 const terminalStates = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
-const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'retry_wait', 'needs_replan'];
+const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 const kindLabels = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', publish: '发布', done: '完成' };
@@ -121,16 +121,20 @@ async function refreshLive(task) {
   box.replaceChildren(head, element('pre', '$ ' + live.command, 'command'), element('pre', liveCommand.text || '（还没有输出）', 'output live-output'));
   box.hidden = false; if (atBottom) panel.scrollTop = panel.scrollHeight;
 }
+const ownershipErrors={bot_pr_identity_changed:'PR 身份改变，需要核对原 PR',bot_pr_author_changed:'PR 作者改变，需要管理员确认',bot_pr_head_repository_changed:'PR 的 head 仓库改变，需要管理员确认',bot_pr_branch_changed:'PR 的 head 分支改变，需要管理员确认'};
 function liveText(task) {
   if (terminalStates.includes(task.status)) return null;
   if (task.status === 'queued') return '排队中，等待这个仓库的虚拟电脑空闲…';
+  if(task.status==='waiting_pr_head')return `PR 尚未指向刚推送的提交 ${task.pushed_sha||'（读取中）'}；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。`;
   if (task.status === 'publishing') return '正在发布到 GitHub…';
+  if(ownershipErrors[task.error_code])return ownershipErrors[task.error_code]+'；已暂停，不会推送其他作者或分支。';
   if (task.status.startsWith('waiting_') || task.status === 'retry_wait') return `已暂停：${(states[task.status] || [task.status])[0]}${task.error_code ? '（' + task.error_code + '）' : ''}，条件满足后自动继续`;
   return { prepare: '正在准备工作区：拉取固定提交并写入虚拟电脑…', model: 'Agent 正在思考，或在虚拟电脑里执行工具…', validate: '正在虚拟电脑里运行仓库测试…', publish: '正在发布到 GitHub…' }[task.phase] || '执行中…';
 }
 function renderTimeline(task, logs) {
+  let modelStep=0;
   const list = $('timeline'), box = scroller(list.parentElement), first = !list.childElementCount, atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  for (const log of logs) if (!renderedLogs.has(log.id)) { renderedLogs.add(log.id); list.append(step(log)); }
+  for (let log of logs) {let value;try{value=JSON.parse(log.content);}catch{}if(value?.type==='model'){modelStep++;if(!Number.isSafeInteger(value.step))log={...log,content:JSON.stringify({...value,step:modelStep})};}if(!renderedLogs.has(log.id)){renderedLogs.add(log.id);list.append(step(log));}}
   const live = liveText(task); $('timeline-live').hidden = !live; $('timeline-live').textContent = live || '';
   // A finished task opens at its first step; a running one follows the newest step unless the reader scrolled up.
   if (first ? !!live : atBottom) box.scrollTop = box.scrollHeight;
@@ -160,10 +164,15 @@ function step(log) {
     title.textContent = '执行命令'; meta.prepend(exitBadge(command)); add(element('pre', '$ ' + command.command, 'command'));
     if (command.output) add(output(command.output));
   } else if (value.type === 'tool' && value.name === 'read_file') {
-    title.textContent = '读取文件'; add(element('p', `${args.path} · ${result.error || result.bytes + ' 字节'}`));
+    title.textContent = '读取文件'; add(element('p', `${args.path} · ${result.error || (result.bytes??new TextEncoder().encode(result.content||'').length) + ' 字节'}`));
     if (result.content) add(collapsible('文件内容', result.content));
   } else if (value.type === 'tool' && value.name === 'write_file') {
-    title.textContent = '写入文件'; add(element('p', `${args.path} · ${args.bytes} 字节`));
+    title.textContent = '写入文件'; add(element('p', `${args.path} · ${args.bytes??new TextEncoder().encode(args.content||'').length} 字节`));
+  } else if (value.type==='tool' && ['finish_review','finish_development'].includes(value.name)) {
+    title.textContent=value.name==='finish_review'?'提交检视结论':'提交开发结果';
+    if(args.summary)add(element('p',clipText(args.summary,240)));
+    if(args.test_command)add(element('p','测试：'+args.test_command,'muted'));
+    add(collapsible('原始 JSON',JSON.stringify({arguments:args,result},null,2)));
   } else if (value.type === 'published') {
     title.textContent = '发布到 GitHub'; const links = element('div', '', 'calls');
     for (const out of value.outputs || []) {
@@ -171,6 +180,8 @@ function step(log) {
       else if (out.html_url) links.append(link(out.html_url, out.branch ? 'PR · ' + out.branch : out.inline_comments ? `行内检视 · ${out.inline_comments} 条` : /pull\/\d+$/.test(out.html_url) ? 'PR' : '总结评论', 'call call-link'));
     }
     add(links);
+  } else if(value.type==='pr_head_wait'){
+    title.textContent='等待 GitHub 更新 PR head';add(element('p','已推送 '+value.expected_sha),element('p','当前 PR '+value.observed_sha+'；自动重读，确认后继续。','muted'));
   } else if (value.type === 'completed') { title.textContent = '任务结束'; meta.prepend(state(value.status)); }
   else if (value.type === 'fault') { title.textContent = '任务暂停或失败'; meta.prepend(state(value.state)); add(element('p', value.code, 'muted')); }
   else if (value.type === 'restart_attempt') { title.textContent = '重新开始一次尝试'; add(element('p', '中断的工作目录保留，新的尝试使用新目录。', 'muted')); }
@@ -182,7 +193,7 @@ function renderTaskSide(detail, environment) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const info = card('任务');
   info.append(facts([['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
-    ['故障', task.error_code], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
+    ['故障', task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||task.error_code], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
   side.append(info, computerCard(task, environment));
   const result = resultCard(task); if (result) side.append(result);

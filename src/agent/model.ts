@@ -15,10 +15,10 @@ export function tools(development:boolean){
       keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command'])];
   if(development)result.push(fn('write_file','Replace a text file in this task workspace',{path:string,content:string},['path','content']),
     fn('finish_development','Finish implementation; the server will independently run the required tests and publish only the registered bot branch',
-      {summary:string,test_command:string},['summary','test_command']));
+      {summary:string,test_command:string,change_title:{type:'string',description:'Concise code-change subject only. No review passphrase or review template.'}},['summary','test_command','change_title']));
   else result.push(fn('finish_review','Finish review with evidence and explicit issue intent; only real diff locations can be inline',{
     summary:string,requires_code_change:{type:'boolean'},issue_requests_code:{type:'boolean'},clarification_required:{type:'boolean'},implementation_goal:string,request_quote:string,
-    findings:{type:'array',items:{type:'object',properties:{body:string,format:{type:'string',enum:['discussion','inline']},selection_reason:string,path:string,line:{type:'integer'},side:{type:'string',enum:['LEFT','RIGHT']},start_line:{type:'integer'},start_side:{type:'string',enum:['LEFT','RIGHT']}},required:['body','format','selection_reason'],additionalProperties:false}}
+    findings:{type:'array',items:{type:'object',properties:{body:string,format:{type:'string',enum:['discussion','inline']},selection_reason:string,actionable:{type:'boolean'},within_goal:{type:'boolean'},requires_human_decision:{type:'boolean'},path:string,line:{type:'integer'},side:{type:'string',enum:['LEFT','RIGHT']},start_line:{type:'integer'},start_side:{type:'string',enum:['LEFT','RIGHT']}},required:['body','format','selection_reason','actionable','within_goal','requires_human_decision'],additionalProperties:false}}
   },['summary','requires_code_change','issue_requests_code','clarification_required','implementation_goal','request_quote','findings']));
   return result;
 }

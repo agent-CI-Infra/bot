@@ -7,7 +7,7 @@ import {workspace} from './workspace.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const save=async value=>{await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let calls=0,session,finished;
+let calls=0,steps=0,session,finished;
 const server=createServer(async(req,res)=>{
   try{
     if(req.url!=='/v1/chat/completions'||req.method!=='POST'||++calls>32)throw new Error('model_request_not_allowed');
@@ -42,7 +42,7 @@ try{
   ({session}=await createAgentSession({cwd,agentDir:dir,modelRuntime:runtime,model:runtime.getModel('department-proxy','selected'),thinkingLevel:'off',resourceLoader:loader,
     tools:tools.map(tool=>tool.name),customTools:tools,sessionManager:SessionManager.inMemory(cwd),settingsManager:SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false}})}));
   session.subscribe(event=>{if(event.type==='message_end'&&event.message.role==='assistant'){
-    const m=event.message;void appendFile(dir+'/events.jsonl',JSON.stringify({type:'model',reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))})+'\n',{mode:0o600});
+    const m=event.message;void appendFile(dir+'/events.jsonl',JSON.stringify({type:'model',step:++steps,reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))})+'\n',{mode:0o600});
   }});
   try{await session.prompt(config.prompt);}catch(error){if(!finished)throw error;}
   const result=finished||JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,''));await save({state:'completed',result,agent:'pi',version:'1.4.0'});

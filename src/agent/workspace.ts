@@ -45,7 +45,7 @@ export class Workspace {
     if(tree.truncated||!Array.isArray(tree.tree))stop('repository_tree_truncated','waiting_environment');
     const files=tree.tree.filter((f:any)=>f.type!=='tree');
     if(files.length>2000||files.some((f:any)=>f.type!=='blob'||!['100644','100755','120000'].includes(f.mode)||Number(f.size)>1024*1024))stop('repository_snapshot_limit','waiting_environment');
-    const init=await this.call('prepare:init',{type:'workspace_init'});if(init.error)stop('workspace_init_failed','waiting_environment');
+    const init=await this.call('prepare:init',{type:'workspace_init',author_email:github.authorEmail()});if(init.error)stop('workspace_init_failed','waiting_environment');
     let bytes=0,contextBytes=0;const materials:any[]=[],ruleFiles:Record<string,string>={};
     for(const file of files){
       safePath(file.path);

@@ -22,7 +22,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   const overrides = JSON.parse(policy.rule_overrides || '{}'), rows: any[] = [];
   const consoleRules: Record<string, string> = { ...overrides };
   if (policy.review_instructions) for (const path of ['.bot/rules/issue-review.md', '.bot/rules/pr-review.md']) if (!(path in consoleRules)) consoleRules[path] = defaults[path] + '\n\n' + policy.review_instructions;
-  if (policy.review_label && !consoleRules['.bot/rules/labels.md']) consoleRules['.bot/rules/labels.md'] = 'review_label: ' + JSON.stringify(policy.review_label);
+  if (policy.review_label && !Object.hasOwn(consoleRules,'.bot/rules/labels.md')) consoleRules['.bot/rules/labels.md'] = 'review_label: ' + JSON.stringify(policy.review_label);
   // The existing manager computer is the console layer, not a new resource system.
   const allowed = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'max_command_minutes', 'egress', 'packages', 'env', 'setup_script'];
   const consoleComputer = Object.fromEntries(allowed.filter(key => computer[key] !== undefined).map(key => [key, computer[key]]));
@@ -84,7 +84,8 @@ export class RuleService {
       const row = this.store.get('SELECT * FROM policies WHERE repository_id=?', id)!, values = JSON.parse(row.rule_overrides || '{}');
       if (input.content === null) delete values[String(input.path)]; else values[String(input.path)] = input.content;
       resolveRules({ ...row, rule_overrides: JSON.stringify(values) }, {});
-      this.store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?', JSON.stringify(values), id); this.store.audit(user.id, 'rules.updated', String(input.path), id); return { rules: await this.view(id) };
+      this.store.transaction(()=>{this.store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?', JSON.stringify(values), id);
+        if(input.path==='.bot/rules/labels.md')this.store.run('UPDATE policies SET review_label=? WHERE repository_id=?',input.content===null?'':resolveRules({...row,rule_overrides:JSON.stringify(values)},{}).review_label,id);}); this.store.audit(user.id, 'rules.updated', String(input.path), id); return { rules: await this.view(id) };
     }
     if (method === 'POST' && match[2] === 'refresh') {
       fields(input, []); const repo = this.store.get('SELECT * FROM repositories WHERE id=?', id)!;

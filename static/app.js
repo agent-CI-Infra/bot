@@ -15,10 +15,11 @@ const states = {
   queued:['待执行','info'], running:['执行中','info'], preparing:['准备中','info'], implementing:['开发中','info'], validating:['测试中','info'], publishing:['发布中','info'],
   succeeded:['已完成','success'], completed:['已完成','success'], pr_opened:['已创建 PR','success'], failed:['失败','danger'],
   waiting_configuration:['配置待补','warning'], waiting_environment:['等待环境','warning'], waiting_permission:['权限待处理','warning'],
-  waiting_publication:['发布待确认','warning'], retry_wait:['等待重试','warning'], needs_replan:['需重新规划','warning'], cancelled:['已取消',''], superseded:['已过时',''],
+  waiting_pr_head:['等待 PR 更新','info'], waiting_publication:['发布待确认','warning'], retry_wait:['等待重试','warning'], needs_replan:['需重新规划','warning'], cancelled:['已取消',''], superseded:['已过时',''],
   ready:['就绪','success'], busy:['执行中','info'], stopped:['已停止',''], provisioning:['创建中','info'], recovering:['恢复中','info'], resetting:['重置中','warning'], reset_failed:['重置失败','danger'], unavailable:['不可用','danger'], result_ready:['待发布','info'], deleted:['已移除','']
 };
 function state(value) { const [caption,tone]=states[value]||[value,'']; const badge=element('span',caption,'status'+(tone?' status-'+tone:''));badge.title=value;return badge; }
+function deliveryCaption(row){return {tasks_created:'已创建任务',draft:'因草稿跳过',not_trigger:'不是触发事件',duplicate:'重复，不重复建任务',review_disabled:'检视未开启，仅归档',unregistered_repository:'仓库未启动，仅归档'}[row.processing_result]||row.processing_result||'已归档';}
 function timestamp(value) { return value ? value.replace('T',' ').replace(/\.\d+Z$/,' UTC') : ''; }
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
 async function start() {
@@ -76,16 +77,16 @@ async function render() {
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');
-    const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : row.full_name || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
+    const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : (tab==='events'?(row.full_name?row.full_name+' · '+row.route:row.route):row.full_name) || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
     content.append(element('strong', name));
-    const detail = tab === 'events' ? `${timestamp(row.received_at)} · 仓库 ${row.repository_id || '未关联'} · ${row.delivery_id}`
+    const detail = tab === 'events' ? `${timestamp(row.received_at)} · ${deliveryCaption(row)} · ${row.delivery_id}`
       : taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+row.error_code : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
       : tab === 'accounts' ? `${row.type === 'github_app' ? 'GitHub App · App ID '+row.app_id : '机器人账号'}`
       : tab === 'users' ? `${row.role === 'super_admin' ? '超级管理员' : '项目管理员'} · ID ${row.id}`
       : installedView ? installedDetail(row) : `仓库 ID ${row.id} · 检视${row.review_enabled ? '开' : '关'} · 开发${row.development_enabled ? '开' : '关'}${row.model_id ? '' : ' · 未选模型'}`;
     content.append(element('p', detail)); line.append(content);
     if(listTabs.includes(tab))status.append(state(row.status));
-    if(tab==='events'&&row.duplicate)status.append(element('span','重复','status'));
+    if(tab==='events')for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
     if(tab==='accounts')status.append(element('span',row.credentials_configured?'凭据已配置':'凭据已撤销','status status-'+(row.credentials_configured?'success':'warning')));
     if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
     if(installedView)status.append(...installedBadges(row));

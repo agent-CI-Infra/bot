@@ -102,7 +102,7 @@ test('reviews always publish one summary comment and the policy label is applied
   const result={summary:'Short summary.',reviewed_sha:'c'.repeat(40),coverage:['Snapshot'],findings:[{id:'f1',body:'Inline note',format:'inline',selection_reason:'On the changed line',path:'a.js',line:1,side:'RIGHT'}]};
   await publisher.review(result,files);await publisher.review(result,files);
   assert.equal(reviews.length,1);assert.equal(reviews[0].event,'COMMENT');
-  assert.equal(comments.length,1);assert.ok(comments[0].body.startsWith('Short summary.'));
+  assert.equal(comments.length,1);assert.ok(comments[0].body.startsWith('Short summary.'));assert.doesNotMatch(JSON.stringify([...comments,...reviews]),/Selection:|On the changed line/);
   await assert.rejects(publisher.label('bot-reviewed'),/github_response_unknown/);
   assert.deepEqual((await publisher.label('bot-reviewed')).map(l=>l.name),['bot-reviewed']);
   assert.deepEqual((await publisher.label('bot-reviewed')).map(l=>l.name),['bot-reviewed']);

@@ -34,7 +34,7 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存' 
     }
     submit.disabled = true;
     // The page re-renders after saving, so the result is shown at the top of the refreshed section.
-    try { const done = await save(form, text => { message.className = 'view-progress'; message.textContent = text; }); current.flash = done || '已保存'; await reloadProject(); }
+    try { const done = await save(form, text => { message.className = 'view-progress'; message.textContent = text; }); current.flash = typeof done === 'string' && done ? done : '已保存'; await reloadProject(); }
     catch (err) { message.className = 'view-error'; message.textContent = err.message; } finally { submit.disabled = false; }
   });
   section.append(form); return section;
@@ -54,8 +54,8 @@ async function renderProject(route) {
 }
 async function loadProject(id) {
   const superUser = me.role === 'super_admin';
-  const [repo, environment, installed] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null]);
-  Object.assign(current, { repository: repo.repository, policy: repo.policy, environment, installed: installed?.repositories.find(r => r.id === id) || null });
+  const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api('/api/models?repository_id='+id).catch(()=>null)]);
+  Object.assign(current, { repository: repo.repository, policy: repo.policy, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules, models:models?.models||[] });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
 function projectStatus() {
@@ -93,8 +93,8 @@ function basicSection() {
     ['处理账号', installed?.account_name || repository.account_id], ['安装', installed ? installed.installation_id ? `安装 ${installed.installation_id}${installed.installed === false ? '（已移出）' : ''}` : '手动登记' : null],
     ['可见性', installed ? installed.private ? '私有' : '公开' : null], ['项目状态', policy.enabled ? '已启用' : '已禁用'], ['虚拟电脑', environment ? (states[environment.environment.state] || [environment.environment.state])[0] : '读取失败']]));
   const summary = card('当前配置一览');
-  summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'], ['模型', policy.model_id ? '已选择' : '未选择，任务会等待配置'],
-    ['机器', environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null]]));
+  summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'], ['模型', current.models.find(m=>m.id===policy.model_id)?.model_name || (policy.model_id?'模型不可用':'未选择，任务会等待配置')],
+    ['机器', current.rules?.computer?.cpus ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB（${current.rules.files.find(f=>f.path==='.bot/computer.yaml').source==='repository'?'仓库 .bot/computer.yaml':'控制台'}）` : environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null]]));
   const branch = settingsForm('分支', [field('基准分支', input('base_branch', policy.base_branch, { maxLength: 256, placeholder: '留空使用仓库默认分支' })),
     note('开发任务从这个分支拉取代码并向它开 PR；检视 Issue 时也读取这个分支的代码。')],
   form => patchPolicy(changed({ base_branch: form.elements.base_branch.value.trim() }, { base_branch: policy.base_branch || '' })));
@@ -105,27 +105,31 @@ function machineSection() {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
   const status = element('div', '', 'status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
   if (!pc) return [status, note('暂时读不到虚拟电脑规格，稍后再试。')];
-  const number = (name, step) => input(name, pc[name], { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '' });
+  const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
+  const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
+  const number = (name, step) => input(name, shown[name], { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '' });
+  const sourceLink=element('a','查看生效规则与来源');sourceLink.href=`#/projects/${current.id}/rules`;
   const nodes = [
+    note(source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的生效值。这里保存的是控制台配置，下次任务准备时会再次被仓库文件覆盖。':'表单显示当前生效电脑规格；仓库 .bot/computer.yaml 可以覆盖控制台值。'),sourceLink,
     note(editable ? '保存后虚拟电脑按新配置重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包时会先构建镜像，首次可能需要几分钟。' : '机器配置由超级管理员设置。'),
     element('h4', '资源'),
     (() => { const grid = element('div', '', 'field-grid'); grid.append(field('CPU（核）', number('cpus', '0.25')), field('内存（MB）', number('memory_mb', '128')), field('进程数上限', number('pids', '1')),
       field('/tmp 大小（MB）', number('tmp_mb', '16')), field('单条命令最长时间（分钟）', number('max_command_minutes', '1'))); return grid; })(),
-    checkbox('egress', pc.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）'),
+    checkbox('egress', shown.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）'),
     element('h4', '软件'),
     note(pc.build?.toolchain ? '镜像已包含：' + pc.build.toolchain : ''),
-    field('额外系统软件包', textarea('packages', packagesText(pc.packages), { rows: 2, spellcheck: false, placeholder: 'Debian 包名，空格或换行分隔，例如 ffmpeg libpq-dev' })),
-    field('环境变量', textarea('env', envText(pc.env), { rows: 3, spellcheck: false, placeholder: '每行 名称=值。对仓库代码可见，不要填写密钥' })),
-    field('初始化脚本', textarea('setup_script', pc.setup_script || '', { rows: 5, spellcheck: false, className: 'code', placeholder: '以项目用户在 /workspace 运行，HOME=/workspace/home 持久保存，可联网；脚本或代次变化时重新运行' })),
+    field('额外系统软件包', textarea('packages', packagesText(shown.packages), { rows: 2, spellcheck: false, placeholder: 'Debian 包名，空格或换行分隔，例如 ffmpeg libpq-dev' })),
+    field('环境变量', textarea('env', envText(shown.env), { rows: 3, spellcheck: false, placeholder: '每行 名称=值。对仓库代码可见，不要填写密钥' })),
+    field('初始化脚本', textarea('setup_script', shown.setup_script || '', { rows: 5, spellcheck: false, className: 'code', placeholder: '以项目用户在 /workspace 运行，HOME=/workspace/home 持久保存，可联网；脚本或代次变化时重新运行' })),
     checkbox('rerun_setup', false, '保存后重新运行初始化脚本')];
   const form = settingsForm('配置', nodes, async (form, progress) => {
     const spec = {};
-    for (const name of specFields) if (Number(form.elements[name].value) !== pc[name]) spec[name] = Number(form.elements[name].value);
-    if (form.elements.egress.checked !== (pc.network_policy === 'internet egress')) spec.egress = form.elements.egress.checked;
+    for (const name of specFields) if (Number(form.elements[name].value) !== shown[name]) spec[name] = Number(form.elements[name].value);
+    if (form.elements.egress.checked !== (shown.network_policy === 'internet egress')) spec.egress = form.elements.egress.checked;
     const packages = [...new Set(form.elements.packages.value.split(/[\s,]+/).filter(Boolean))];
-    if (packages.slice().sort().join(' ') !== [...(pc.packages || [])].sort().join(' ')) spec.packages = packages;
-    const env = parseEnv(form.elements.env.value); if (envText(env) !== envText(pc.env)) spec.env = env;
-    if (form.elements.setup_script.value !== (pc.setup_script || '')) spec.setup_script = form.elements.setup_script.value;
+    if (packages.slice().sort().join(' ') !== [...(shown.packages || [])].sort().join(' ')) spec.packages = packages;
+    const env = parseEnv(form.elements.env.value); if (envText(env) !== envText(shown.env)) spec.env = env;
+    if (form.elements.setup_script.value !== (shown.setup_script || '')) spec.setup_script = form.elements.setup_script.value;
     if (form.elements.rerun_setup.checked) spec.rerun_setup = true;
     if (!Object.keys(spec).length) return '没有改动';
     progress(spec.packages ? '正在安装软件包并重建虚拟电脑，首次可能需要几分钟…' : spec.setup_script !== undefined || spec.rerun_setup ? '正在重建虚拟电脑并运行初始化脚本…' : '正在按新配置重建虚拟电脑…');
@@ -185,13 +189,13 @@ function modelSection() {
     const choices = element('div', '', 'choices'), save = element('button', '保存选择'), message = element('p', '', 'view-error');
     const option = (value, title, detail, checked) => { const label = element('label', '', 'choice'), radio = input('model', value, { type: 'radio', checked }); label.append(radio, element('strong', title), element('span', detail, 'muted')); return label; };
     choices.append(option('', '不使用模型', '检视和开发任务会停在“配置待补”', !policy.model_id));
-    for (const m of models) choices.append(option(m.id, m.model_name, `${m.repository_id ? '本项目专属' : '部署共享'} · ${hostOf(m.api_url)}${m.key_configured ? '' : ' · Key 已撤销'}`, policy.model_id === m.id));
+    for (const m of models) choices.append(option(m.id, m.model_name, `${m.repository_id ? '本项目专属' : '部署共享'} · ${m.api_url}${m.key_configured ? '' : ' · Key 已撤销'}`, policy.model_id === m.id));
     save.type = 'button'; save.addEventListener('click', async () => {
       const value = choices.querySelector('input:checked')?.value || null; save.disabled = true;
       try { await patchPolicy(changed({ model_id: value }, { model_id: policy.model_id || null })); await reloadProject(); } catch (err) { message.textContent = err.message; save.disabled = false; }
     });
     const actions = element('div', '', 'actions form-actions'); actions.append(save); list.replaceChildren(choices, message, actions);
-    const row = (m, target) => { const li = element('li', ''); li.append(element('span', `${m.model_name} · ${hostOf(m.api_url)}`), modelActions(m)); target.append(li); };
+    const row = (m, target) => { const li = element('li', '', 'model-entry'); li.append(element('span', `${m.model_name} · ${m.api_url}`, 'model-address'), modelActions(m)); target.append(li); };
     models.filter(m => m.repository_id === current.id).forEach(m => row(m, ownList)); if (!ownList.childElementCount) ownList.append(element('li', '还没有专属模型。', 'muted'));
     models.filter(m => m.repository_id === null).forEach(m => row(m, sharedList)); if (!sharedList.childElementCount) sharedList.append(element('li', '还没有共享模型。', 'muted'));
   })().catch(err => list.replaceChildren(element('p', err.message, 'view-error')));
@@ -234,8 +238,8 @@ function reviewSection() {
     checkbox('review_pr_updates', policy.review_pr_updates, 'PR 推送新提交后（bot PR 的自动跟进也依赖它）'), note('草稿 PR 不检视；编辑、评论和重新打开不额外触发。'),
     element('h4', '怎么写'), field('评论语言', language),
     field('项目检视指引', textarea('review_instructions', policy.review_instructions, { rows: 7, maxLength: 8000, placeholder: '写给检视 Agent 的项目规则，例如：\n- 重点关注 API 兼容性和数据迁移\n- 新增功能必须有测试，否则作为发现提出\n- 不评论代码格式，由 CI 检查' })),
-    note('指引作为管理员配置传给模型；仓库里的内容仍按不可信数据处理。行内评论固定为 COMMENT，不会批准、请求修改或合并。'),
-    field('检视后打的标签', input('review_label', policy.review_label, { maxLength: 50, placeholder: '未设置时使用生效规则，默认 bot-reviewed' })),note('最终标签以「生效规则」为准，仓库文件优先。已有控制台标签可清空保存以关闭；未设置时使用内置默认。')];
+    note('项目检视指引属于控制台层，写入 Issue／PR 检视规则；默认分支对应仓库文件生效时整份覆盖，不会额外拼接。请在「生效规则」查看最终文本。行内评论固定 COMMENT，不会批准、请求修改或合并。'),
+    field('检视后打的标签', input('review_label', policy.review_label, { maxLength: 50, placeholder: '未设置时使用生效规则，默认 bot-reviewed' })),note('这里与「生效规则 → .bot/rules/labels.md」是同一控制台标签配置，修改一处会同步另一处。仓库文件优先；清空保存可关闭控制台标签，未设置时使用内置默认。')];
   return [settingsForm('检视规则', nodes, form => patchPolicy(changed({
     review_enabled: form.elements.review_enabled.checked, review_issues: form.elements.review_issues.checked, review_pull_requests: form.elements.review_pull_requests.checked,
     review_pr_updates: form.elements.review_pr_updates.checked, review_language: form.elements.review_language.value, review_instructions: form.elements.review_instructions.value,
@@ -292,28 +296,34 @@ function activityCards() {
 }
 
 function rulesSection(){
-  const id=current.id,section=card('生效规则与来源');section.append(note('内置默认 → 项目控制台 → 默认分支仓库文件；PR 中的新行为文件不会直接启用。机器资源沿用「机器配置」。'));
-  async function load(refresh=false){
-    const {rules}=await api(`/api/repositories/${id}/rules${refresh?'/refresh':''}`,refresh?'POST':'GET',refresh?{}:undefined);
-    if(current.id!==id||current.section!=='rules')return;
-    const select=document.createElement('select');select.setAttribute('aria-label','规则文件');rules.files.forEach(row=>select.add(new Option(row.path,row.path)));
-    const head=element('div','','actions');head.append(button('刷新默认分支文件',()=>load(true).catch(error)),button('打开机器配置',()=>openProject(id,'machine')));
-    section.replaceChildren(element('h3','生效规则与来源'),note(rules.sha?`来源提交 ${rules.sha} · ${timestamp(rules.updated_at)}`:'尚未读取默认分支。当前展示内置与控制台配置，请点击刷新。'),head,field('规则文件',select));
-    const detail=element('div','','rule-layers');section.append(detail);
-    function show(){
-      const row=rules.files.find(item=>item.path===select.value),names={builtin:'内置默认',console:'项目控制台',repository:'仓库文件'};
-      detail.replaceChildren(element('p','最终来源：'+names[row.source],'rule-source'),collapsible('最终生效内容',row.effective,true));
-      for(const layer of row.layers)detail.append(collapsible(names[layer.source]+' · '+row.path,layer.content));
-      if(row.path==='.bot/computer.yaml'){
-        detail.append(note('这些值合并到现有 manager 的项目电脑规格。任务准备时应用默认分支的配置；手动应用仅限超级管理员。'));
-        if(me.role==='super_admin')detail.append(button('应用到此项目电脑',async()=>{try{await api(`/api/repositories/${id}/rules/apply-computer`,'POST',{});await load();}catch(e){error(e);}}));
-      }else if(row.path.startsWith('.bot/')){
-        const consoleLayer=row.layers.find(layer=>layer.source==='console'),editor=textarea('rule_content',consoleLayer?.content??'',{rows:6,spellcheck:false}),actions=element('div','','actions');
-        detail.append(field('项目控制台覆盖内容',editor),note(row.source==='repository'?'该文件已被仓库覆盖。控制台保存仍会保留，但最终以仓库文件为准。':'留空也是明确的空内容；恢复默认请使用清除按钮。'));
-        actions.append(button('保存控制台覆盖',async()=>{try{await api(`/api/repositories/${id}/rules`,'PUT',{path:row.path,content:editor.value});await load();}catch(e){error(e);}}),button('清除控制台覆盖',async()=>{try{await api(`/api/repositories/${id}/rules`,'PUT',{path:row.path,content:null});await load();}catch(e){error(e);}}));detail.append(actions);
+  const id=current.id,section=card('生效规则与来源'),intro=note('内置默认 → 项目控制台 → 默认分支仓库文件；PR 中的新行为文件不会直接启用。机器资源沿用「机器配置」。'),source=note('正在读取规则来源…'),message=element('p','','view-error'),head=element('div','','actions'),detail=element('div','','rule-layers');
+  message.setAttribute('role','alert');let busy=false,selected;
+  const refresh=button('刷新默认分支文件',()=>load(true)),select=document.createElement('select');select.setAttribute('aria-label','规则文件');
+  head.append(refresh,button('打开机器配置',()=>openProject(id,'machine')));section.append(intro,source,head,field('规则文件',select),message,detail);
+  async function load(update=false){
+    if(busy)return;busy=true;refresh.disabled=true;refresh.textContent=update?'正在读取默认分支…':'正在读取…';message.textContent='';
+    try{
+      const {rules}=await api(`/api/repositories/${id}/rules${update?'/refresh':''}`,update?'POST':'GET',update?{}:undefined);
+      if(current.id!==id||current.section!=='rules')return;
+      current.rules=rules;source.textContent=rules.sha?`来源提交 ${rules.sha} · ${timestamp(rules.updated_at)}`:'尚未读取默认分支。当前展示内置与控制台配置，请点击刷新。';
+      select.replaceChildren();rules.files.forEach(row=>select.add(new Option(row.path,row.path)));if(rules.files.some(r=>r.path===selected))select.value=selected;
+      function show(){
+        selected=select.value;const row=rules.files.find(item=>item.path===selected),names={builtin:'内置默认',console:'项目控制台',repository:'仓库文件'};
+        detail.replaceChildren(element('p','最终来源：'+names[row.source],'rule-source'),collapsible('最终生效内容',row.effective,true));
+        for(const layer of row.layers)detail.append(collapsible(names[layer.source]+' · '+row.path,layer.content));
+        if(row.path==='.bot/computer.yaml'){
+          detail.append(note('合并到现有项目电脑规格，任务准备时应用默认分支配置；手动应用仅限超级管理员。'));
+          if(me.role==='super_admin')detail.append(button('应用到此项目电脑',async()=>{try{await api(`/api/repositories/${id}/rules/apply-computer`,'POST',{});await load();}catch(e){message.textContent=e.message;}}));
+        }else if(row.path.startsWith('.bot/')){
+          const consoleLayer=row.layers.find(layer=>layer.source==='console'),editor=textarea('rule_content',consoleLayer?.content??'',{rows:6,spellcheck:false}),actions=element('div','','actions');
+          detail.append(field('项目控制台覆盖内容',editor),note(row.source==='repository'?'该文件已被仓库覆盖。控制台保存仍会保留，但最终以仓库文件为准。':'留空也是明确的空内容；恢复默认请使用清除按钮。'));
+          if(row.path==='.bot/rules/labels.md')detail.append(note('与「检视规则 → 检视后打的标签」共用同一控制台层；保存 review_label 声明会同步该表单。默认分支仓库文件仍优先。'));
+          const save=async(content)=>{try{await api(`/api/repositories/${id}/rules`,'PUT',{path:row.path,content});await load();}catch(e){message.textContent=e.message;}};
+          actions.append(button('保存控制台覆盖',()=>save(editor.value)),button('清除控制台覆盖',()=>save(null)));detail.append(actions);
+        }
       }
-    }
-    select.onchange=show;show();
+      select.onchange=show;show();
+    }catch(e){message.textContent=e.message;}finally{busy=false;refresh.disabled=false;refresh.textContent='刷新默认分支文件';}
   }
-  void load().catch(error);return [section];
+  void load();return [section];
 }
