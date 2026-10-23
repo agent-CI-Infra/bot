@@ -1,3 +1,5 @@
+development_label: bot-develop
+
 # Issue development
 
 These rules apply to development tasks: implementing an Issue as a new pull request, or revising a
@@ -6,19 +8,24 @@ after you have made and tested the change, or stop as described below.
 
 ## Eligibility
 
-The control plane creates a development task only when the project has development enabled, the
-Issue review has been published, and that review found that the Issue text explicitly requests a
-code change. The review's `request_quote` in the context is the authorizing sentence from the
-Issue. A revision task exists only for a pull request the bot opened, limited to the review
-findings recorded as actionable. When you receive the task these checks have passed: do not refuse
-it because labels that some repositories use for unattended work are missing.
+The control plane creates a development task for an Issue only when all of these hold:
 
-Some repositories declare their own prerequisites for unattended work in their rules or
-contributor docs (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, a label manifest), for example a
-maintainer opt-in label, allowed Issue types or sizes, required Issue sections, or areas that
-always need a human. Follow them only when the repository declares them; if the Issue does not
-meet them, stop instead of changing code. Never infer eligibility from a label you suggested
-yourself.
+- the project has development enabled;
+- the Issue review has been published and found that the Issue text explicitly requests a code
+  change; the review's `request_quote` in the context is the authorizing sentence;
+- a person, not an app, applied the `development_label` named on the first line of this file;
+- nobody is assigned to the Issue.
+
+The control plane checks the label and the assignees again before it publishes and stops if either
+changed. A revision task exists only for a pull request the bot opened, limited to the review
+findings recorded as actionable. When you receive the task these checks have passed: do not refuse
+it for want of other labels.
+
+Some repositories declare further prerequisites for unattended work in their rules or contributor
+docs (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, a label manifest), for example allowed Issue
+types or sizes, required Issue sections, or areas that always need a human. Follow them only when
+the repository declares them; if the Issue does not meet them, stop instead of changing code.
+Never infer eligibility from a label you suggested yourself.
 
 ## Scope
 

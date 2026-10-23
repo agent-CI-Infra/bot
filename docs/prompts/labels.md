@@ -54,6 +54,7 @@ Use these only for axes the manifest declares:
 ## Never suggest
 
 - `review_label`; the control plane owns it.
+- The development label named in `issue-development.md`; only a person applies it.
 - Opt-in, veto or claim labels such as `agent/*`, and `blocker` or `priority/critical`. These are
   maintainer decisions and are never inferred from Issue text.
 - PR state, hold and gate labels such as `pr/*` and `gate/*`; automation and maintainers own them.

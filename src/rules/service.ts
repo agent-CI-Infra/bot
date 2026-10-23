@@ -48,11 +48,28 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
     rows.push({ path, layers, source: layers.at(-1)!.source, effective });
   }
   for (const [path, content] of Object.entries(files).filter(([path]) => skillPath(path))) rows.push({ path, source: 'repository', layers: [{ source: 'repository', content }], effective: content });
-  const label = /^review_label:\s*(.+)$/m.exec(rows.find(r => r.path === '.bot/rules/labels.md')!.effective)?.[1]?.trim();
-  let reviewLabel = label || '';
-  try { if (label?.startsWith('"')) reviewLabel = JSON.parse(label); } catch { return fail(400, 'invalid_bot_label'); }
-  if (reviewLabel.length > 50 || reviewLabel!==reviewLabel.trim() || /\p{Cc}/u.test(reviewLabel)) fail(400, 'invalid_bot_label');
-  return { files: rows, computer: effectiveComputer, review_label: reviewLabel };
+  const effective = (path: string) => rows.find(r => r.path === path)!.effective;
+  return { files: rows, computer: effectiveComputer, review_label: declaredLabel(effective('.bot/rules/labels.md'), 'review_label'),
+    development_label: declaredLabel(effective('.bot/rules/issue-development.md'), 'development_label') || defaultDevelopmentLabel };
+}
+// Automatic development needs this label on the Issue, applied by a person. A development rule without the line keeps
+// the built-in name, so replacing the rule text can never switch the requirement off.
+export const defaultDevelopmentLabel = 'bot-develop';
+// The first `key: value` line of a rule file; a JSON string keeps the exact characters.
+function declaredLabel(text: string, key: string) {
+  const raw = new RegExp(`^${key}:\\s*(.+)$`, 'm').exec(text)?.[1]?.trim();
+  let label = raw || '';
+  try { if (raw?.startsWith('"')) label = JSON.parse(raw); } catch { return fail(400, 'invalid_bot_label'); }
+  if (label.length > 50 || label !== label.trim() || /\p{Cc}/u.test(label)) fail(400, 'invalid_bot_label');
+  return label;
+}
+// The development label from the saved rule layers, without calling GitHub or the manager.
+export function developmentLabel(store: Store, repositoryId: string) {
+  const path = '.bot/rules/issue-development.md', policy = store.get('SELECT rule_overrides FROM policies WHERE repository_id=?', repositoryId);
+  const saved = store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?', repositoryId);
+  const files = saved ? JSON.parse(saved.files) : {}, overrides = JSON.parse(policy?.rule_overrides || '{}');
+  const text = Object.hasOwn(files, path) ? files[path] : Object.hasOwn(overrides, path) ? overrides[path] : defaults[path]!;
+  return declaredLabel(text, 'development_label') || defaultDevelopmentLabel;
 }
 export class RuleService {
   constructor(readonly store: Store, readonly manager?: Manager, readonly githubUrl?: string) {
