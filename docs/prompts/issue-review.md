@@ -26,9 +26,8 @@ code paths the Issue names. Cite `path:line` for every code claim.
 
 1. **Intent**: one or two sentences, in your own words, stating what the reporter wants. Do not
    copy slogans from the body.
-2. **Classification**: suggested labels from the repository's declared manifest only, as
-   described in `labels.md`; none when the repository has no manifest. Say when a value is a
-   guess.
+2. **Classification**: labels from `repository_labels` only, as described in `labels.md`,
+   returned in `labels`; none when nothing fits. Say when a value is a guess.
 3. **Missing information**: name the missing part and why it is needed. Be concrete: "no
    reproduction steps; the version, platform and input are unknown" beats "more detail needed".
 4. **Code evidence**: where the described behavior lives today, whether the behavior matches the
@@ -70,7 +69,8 @@ a human. When the repository declares such prerequisites, check them against the
 
 ## Never
 
-- Never implement, claim, assign, close, label, merge or push while reviewing.
+- Never implement, claim, assign, close, merge or push while reviewing, and never apply labels
+  yourself; return them in `labels`.
 - Never reproduce Issue bodies verbatim in the summary; summarize. `request_quote` is the only
   verbatim copy.
 - Never state a test, CI run or reproduction was executed unless it actually was.
@@ -78,7 +78,7 @@ a human. When the repository declares such prerequisites, check them against the
 ## Output
 
 Return the review through `finish_review`. The `summary` is short: the intent, the recommendation
-as a one-line verdict, and suggested labels when there are any. Put each concrete point under
+as a one-line verdict, and the `Labels:` line when you return labels. Put each concrete point under
 missing information, code evidence, scope and risk, and related work in `findings` as a
 `discussion` finding, most important first. Keep it short enough to read: evidence and the next
 action, not a rewrite of the Issue.

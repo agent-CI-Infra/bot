@@ -2,7 +2,8 @@ import { stop } from '../agent/common.js';
 export function validateReview(value: any) {
   if (!value || typeof value.summary !== 'string' || value.summary.length > 16000 || !Array.isArray(value.findings) || value.findings.length > 100
     || ['requires_code_change','issue_requests_code','clarification_required'].some(k => typeof value[k] !== 'boolean')
-    || typeof value.implementation_goal !== 'string' || typeof value.request_quote !== 'string' || value.event !== undefined) stop('model_review_invalid');
+    || typeof value.implementation_goal !== 'string' || typeof value.request_quote !== 'string' || value.event !== undefined
+    || value.labels !== undefined && (!Array.isArray(value.labels) || value.labels.length > 20 || value.labels.some((l: unknown) => typeof l !== 'string' || l.length > 50))) stop('model_review_invalid');
   for (const finding of value.findings) if (!finding || typeof finding.body !== 'string' || finding.body.length > 16000 || !['discussion','inline'].includes(finding.format)
     || typeof finding.selection_reason !== 'string' || finding.selection_reason.length > 2000 || finding.event !== undefined) stop('model_finding_invalid');
   for(const finding of value.findings)if(['actionable','within_goal','requires_human_decision'].some(key=>finding[key]!==undefined&&typeof finding[key]!=='boolean'))stop('model_finding_invalid');

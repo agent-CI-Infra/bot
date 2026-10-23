@@ -60,7 +60,12 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务不限模型调用次数，也没有总时长上限，禁用项目或停止虚拟电脑可以中止正在执行的任务；模型调用 run_command 时命令不限时长，可选 `timeout_seconds` 为可能卡住的命令自设超时，服务和监视进程用 `keep_background` 放到后台；仓库测试验证同样不限时长；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
 
-每次检视发布一条总结讨论评论，包含总结、非行内 finding 和检视 SHA。Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。policy 设置了 `review_label` 时，总结评论发布成功后由控制面用同一安装令牌给 Issue／PR 加这一个标签，仓库没有该标签时由 GitHub 创建；标签不由模型选择，重复执行不会重复添加。
+每次检视发布一条总结讨论评论，包含总结、非行内 finding 和检视 SHA。Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。标签都在总结评论发布成功后由控制面用同一安装令牌一次加上，重复执行不会重复添加：
+
+- `labels.md` 声明了 `review_label` 时，加上这个检视标签；仓库没有该标签时由 GitHub 创建。
+- 检视任务准备时，控制面读取仓库现有标签，作为 `repository_labels` 交给模型。模型在 `finish_review` 的 `labels` 里选分类标签。控制面只加仓库已有、不属于保留标签、而且 Issue／PR 上该维度（`type/`、`priority/` 等前缀）还没有值的那些；`priority` 只取第一个，最多 8 个。保留标签包括检视标签、开发标签、`agent/*`、`blocker`、`priority/critical`、`pr/*`、`gate/*`。
+
+模型不调用标签接口，也不能让 GitHub 新建标签。
 
 Issue 检视结果明确要求代码变更、存在原文证据且无需补充信息时，若仓库打开开发，并且有人（不是 App）在该 Issue 上加了开发标签（`.bot/rules/issue-development.md` 第一行 `development_label:`，默认 `bot-develop`）、Issue 没有指派人，创建关联开发任务。标签可以在检视前或检视后加：检视发布时已满足就立即创建，否则由之后的 `issues.labeled` 事件创建；发布前再次确认标签仍在、仍无指派人。在同一项目容器的新任务工作目录中修改代码，模型完成后服务端再次运行仓库指定测试；未配置固定测试时使用模型给出的测试命令，不能没有测试。失败不会推分支或开 PR。成功后检查测试前后候选 tree 一致，再由控制面发布唯一 `bot/issue-...` 分支，并创建 PR、回填链接。默认分支从 GitHub 元数据或仓库 policy 获取，不写死。
 

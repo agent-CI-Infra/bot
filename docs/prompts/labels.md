@@ -4,23 +4,27 @@ review_label: bot-reviewed
 
 These rules cover labels in Issue and PR reviews.
 
-The control plane, not the model, applies `review_label`: it adds that one label only after the
-review summary comment has been published. A failed, cancelled or unfinished review gets no label.
-Never call a label API, never say a label was applied, and never invent `review_label` or any
-other label.
+The control plane, not the model, applies every label, and only after the review summary comment
+has been published. A failed, cancelled or unfinished review gets no label. It always adds
+`review_label`, and adds the classification labels you return in the `labels` field of
+`finish_review` once they pass its checks. Never call a label API, never say a label was applied,
+and never invent `review_label` or any other label.
 
-## Suggest only declared labels
+## Choose only existing labels
 
-Label suggestions are part of the review text; they change nothing on GitHub by themselves.
-Suggest labels only when the repository declares a label manifest, for example a `LABELING.md` or
-a label list in its contributor docs. That manifest is the complete set of names: never invent,
-rename or create a label, and never fall back to GitHub's default labels. If a needed value is
-missing from the manifest, say so instead of inventing one. Without a manifest, suggest no labels.
+Your context lists the repository's labels as `repository_labels`, with their descriptions. That
+list is the complete set of names: never invent, rename or create a label. If a needed value is
+missing from the list, say so in the summary instead of inventing one. When the list is empty or
+nothing fits, return no labels. When the repository has both axis labels such as `type/*` and
+GitHub's generic defaults such as `bug`, `enhancement` or `question`, use the axis labels.
+
+The control plane drops any name that is not in the list, any reserved label below, any value on an
+axis the Issue or PR already has, and any priority after the first.
 
 ## Axes and cardinality
 
-Many manifests use `axis/value` names in lowercase kebab-case. When the manifest declares axes,
-follow its cardinality. A common one is:
+Many repositories use `axis/value` names in lowercase kebab-case. When the labels have axes,
+follow their cardinality. A common one is:
 
 | Axis | Count |
 | --- | --- |
@@ -32,13 +36,13 @@ follow its cardinality. A common one is:
 
 `type/*` lists every kind that applies; mixed requirements carry several types rather than one
 compromise label. `source/*` records where the problem was found; an issue found independently
-more than once carries every source. `area/*` is repository-specific and comes from the manifest.
-If the manifest marks Issues with a missing axis for triage (for example `status/triage`), you may
-suggest that label.
+more than once carries every source. `area/*` is repository-specific; pick the one whose description matches the
+affected code. If the repository has a triage label for Issues with a missing axis (for example
+`status/triage`), you may use it.
 
 ## Which value
 
-Use these only for axes the manifest declares:
+Use these only for axes the repository has:
 
 - `type`: prefer the concrete defect over a broad category. A crash is `type/bug`; the same
   behavior faster is `type/perf`; a capability that does not exist is `type/feature`; an
@@ -51,7 +55,7 @@ Use these only for axes the manifest declares:
 - `size`: only when the change is clearly small or about half a day. A large size means it needs a
   design or plan before implementation. Omit when you cannot tell.
 
-## Never suggest
+## Never choose
 
 - `review_label`; the control plane owns it.
 - The development label named in `issue-development.md`; only a person applies it.
@@ -61,8 +65,8 @@ Use these only for axes the manifest declares:
 - A different value on an axis a human already labeled. Treat human-set labels as decisions:
   suggest only missing axes and never relabel an axis.
 
-A PR usually inherits `type/*` and `priority/*` from its linked Issue when the manifest declares
-those axes.
+A PR usually takes the `type/*` and `priority/*` of its linked Issue when the repository has those
+axes; its `area/*` follows the files it changes.
 
 ## Classification is not authorization
 
@@ -73,12 +77,10 @@ change that.
 
 ## Output
 
-When the repository has a label manifest, put the suggestion and one short reason in the review
-summary:
+Return the chosen names in `labels`, and add one line with a short reason to the review summary:
 
 ```text
-Suggested labels: type/bug, source/user, priority/high, area/api, size/s
-Reason: A verified crash in the API binding, reported by a user, scoped to one endpoint.
+Labels: type/bug, source/user, priority/high, area/api, size/s (a verified crash in the API binding, reported by a user, scoped to one endpoint)
 ```
 
-Leave this out when the repository declares no labels.
+Leave both out when no label fits.

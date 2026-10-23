@@ -5,6 +5,7 @@ import { inlineLocation,validateReview } from '../dist/review/findings.js';
 import { Redactor } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { developmentReady } from '../dist/review/queue.js';
+import { classificationLabels, repositoryLabels } from '../dist/review/labels.js';
 import { ReadTokens } from '../dist/agent/read-token.js';
 import { GitHub } from '../dist/github/client.js';
 import { Publisher } from '../dist/github/publisher.js';
@@ -173,4 +174,33 @@ test('task read tokens cover one repository with read permissions only, need a G
   granted={contents:'write'};await assert.rejects(tokens.issue(),/github_read_token_not_read_only/);
   await tokens.revoke();assert.deepEqual(deleted,minted);
   await assert.rejects(new ReadTokens(h.store,repo('202'),new Redactor(),async()=>{},url).issue(),/github_app_required/);
+});
+test('classification labels come only from the repository, skip reserved labels and decided axes, and go on with the review label',async t=>{
+  const available=[{name:'type/bug'},{name:'type/feature'},{name:'Priority/High'},{name:'priority/low'},{name:'priority/critical'},{name:'area/inventory'},{name:'agent/ok'},{name:'blocker'},{name:'bot-develop'},{name:'bot-reviewed'},{name:'size/s'}];
+  const own=['bot-reviewed','bot-develop'];
+  // Names are matched case-insensitively and returned as the repository spells them; unknown names are dropped.
+  assert.deepEqual(classificationLabels(['type/bug','priority/high','area/inventory','type/made-up'],available,[],own),['type/bug','Priority/High','area/inventory']);
+  // Reserved labels never go on, whatever the model says.
+  assert.deepEqual(classificationLabels(['agent/ok','blocker','priority/critical','bot-develop','bot-reviewed','size/s'],available,[],own),['size/s']);
+  // A value a person already chose on an axis stays; only one priority is added.
+  assert.deepEqual(classificationLabels(['type/feature','priority/low','size/s'],available,[{name:'type/bug'}],own),['priority/low','size/s']);
+  assert.deepEqual(classificationLabels(['priority/high','priority/low'],available,[],own),['Priority/High']);
+  assert.deepEqual(classificationLabels(undefined,available,[],own),[]);assert.deepEqual(classificationLabels(['type/bug'],[],[],own),[]);
+  assert.deepEqual(repositoryLabels([{name:'type/bug',description:'A defect'},{name:''},{id:3}]),[{name:'type/bug',description:'A defect'}]);
+  const review={summary:'s',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
+  assert.deepEqual(validateReview({...review,labels:['type/bug']}).labels,['type/bug']);
+  for(const labels of ['type/bug',[1],['x'.repeat(51)],Array(21).fill('a')])assert.throws(()=>validateReview({...review,labels}),/model_review_invalid/);
+  // The review label and the classification labels go on in one idempotent call.
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('labels-task','101','review.issue','publishing','issue',9)");
+  let labels=[];const posts=[];
+  const server=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;res.setHeader('Content-Type','application/json');
+    if(new URL(req.url,'http://fake').pathname.endsWith('/issues/9/labels')){if(req.method==='POST'){posts.push(JSON.parse(raw).labels);labels=[...new Set([...labels,...JSON.parse(raw).labels])];}return res.end(JSON.stringify(labels.map(name=>({name}))));}
+    res.statusCode=404;res.end('{}');});
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const github=new GitHub(h.store,h.store.get("SELECT * FROM repositories WHERE id='101'"),new Redactor(),async()=>{},'http://127.0.0.1:'+server.address().port);
+  Object.assign(github,{token:'fixture-token',actorId:'999',fullName:'fixture/project-101'});
+  const publisher=new Publisher(h.store,github,h.store.get("SELECT * FROM tasks WHERE id='labels-task'"),async()=>{});
+  assert.deepEqual((await publisher.labels(['bot-reviewed','type/bug','priority/high'])).map(l=>l.name),['bot-reviewed','type/bug','priority/high']);
+  await publisher.labels(['bot-reviewed','type/bug','priority/high']);assert.deepEqual(posts,[['bot-reviewed','type/bug','priority/high']]);
 });
