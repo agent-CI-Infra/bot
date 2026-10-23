@@ -91,6 +91,7 @@ async function render() {
     if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     if(tab==='events')for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
     if(tab==='accounts')status.append(element('span',row.credentials_configured?'凭据已配置':'凭据已撤销','status status-'+(row.credentials_configured?'success':'warning')));
+    if(tab==='accounts'&&row.type==='github_app'&&row.credentials_configured)content.append(appPermissionCheck(row));
     if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
     if(tab==='projects'){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(tab==='accounts'&&row.endpoints.length){const endpoints=element('details',''),summary=element('summary',`${row.endpoints.length} 个 Webhook 入口`);endpoints.append(summary);row.endpoints.forEach(e=>endpoints.append(element('code',e.webhook_path)));content.append(endpoints);}

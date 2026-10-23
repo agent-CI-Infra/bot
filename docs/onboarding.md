@@ -16,7 +16,7 @@ Cloudflare Tunnel 是 Compose 中独立的 `tunnel` 服务。初始没有 token�
 
 优先使用已有 GitHub App。选择「使用此 App」会检查 App 和安装，并将 webhook 更新到验证过的域名及该账号已登记的 webhook 路径。凭据不会返回浏览器。
 
-没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 3 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 读；default_events 只有 issues、pull_request。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
+没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 3 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 读（之前创建的 App 在「机器人账号」页或本步「使用已登记的 App」下点「检查权限」：页面列出 App 和各安装缺少的权限，链接到 App 的 Permissions & events 页和各安装的确认页；GitHub 不提供修改 App 权限的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 只有 issues、pull_request。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
 
 GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥与 webhook secret 只在控制面加密保存，client secret 不需要则丢弃。
 

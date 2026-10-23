@@ -8,6 +8,15 @@ export function appJwt(appId: string, privateKey: string): string {
   const unsigned = encode({ alg: 'RS256', typ: 'JWT' }) + '.' + encode({ iat: now-60, exp: now+540, iss: appId });
   return unsigned + '.' + createSign('RSA-SHA256').update(unsigned).sign(privateKey).toString('base64url');
 }
+// The permissions a GitHub App needs for every bot feature: the onboarding manifest asks for exactly these, and the
+// permission check compares existing Apps and installations with them. Tokens still request only what each use needs.
+export const appPermissions: Record<string,string> = { contents:'write', issues:'write', pull_requests:'write', statuses:'write', actions:'write', checks:'write', metadata:'read' };
+const permissionRank: Record<string,number> = { read:1, write:2, admin:3 };
+export function missingPermissions(granted: unknown) {
+  const have = granted && typeof granted === 'object' ? granted as Record<string,unknown> : {};
+  return Object.entries(appPermissions).filter(([name, level]) => (permissionRank[String(have[name])] || 0) < permissionRank[level]!)
+    .map(([name, level]) => ({ permission: name, required: level, current: typeof have[name] === 'string' ? have[name] as string : null }));
+}
 // What a task agent may read with its own token. Every value is read; installations that lack one simply omit it.
 export const agentReadPermissions: Record<string,string> = { metadata:'read', contents:'read', issues:'read', pull_requests:'read', actions:'read', checks:'read', statuses:'read' };
 export async function revokeInstallationToken(apiUrl: string, token: string) {
