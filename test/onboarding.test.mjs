@@ -35,6 +35,24 @@ test('rules show per-file precedence and skills; computer overlays the existing 
  const guide=result.files.find(row=>row.path==='.bot/guide.md');assert.deepEqual(guide.layers.map(l=>l.source),['builtin','console','repository']);assert.equal(guide.effective,'Repository guide');assert.equal(result.files.find(row=>row.path==='.bot/rules/pr-review.md').effective,'Repository PR rule');assert.equal(result.review_label,'console-label');assert.equal(result.computer.memory_mb,2048);assert.equal(result.computer.cpus,2);assert.equal(result.files.at(-1).path,'.agents/skills/review/SKILL.md');
  assert.throws(()=>resolveRules(policy,{'.bot/computer.yaml':'docker_socket: /var/run/docker.sock'}));
 });
+test('the built-in scenario rules are the docs/prompts files, and saved overrides still win',()=>{
+ const names=['labels.md','issue-review.md','pr-review.md','issue-development.md'],plain=resolveRules({},{});
+ for(const name of names){
+  const text=readFileSync(new URL('../docs/prompts/'+name,import.meta.url),'utf8'),row=plain.files.find(r=>r.path==='.bot/rules/'+name);
+  assert.equal(defaults['.bot/rules/'+name],text);assert.ok(Buffer.byteLength(text)<=16384);
+  assert.deepEqual(row.layers.map(l=>l.source),['builtin']);assert.equal(row.effective,text);
+ }
+ assert.equal(plain.review_label,'bot-reviewed');
+ // Only PR review forbids touching the working tree; the guide applies to development too. No organization is built in.
+ assert.match(defaults['.bot/rules/pr-review.md'],/never modify the working tree while reviewing a PR/);assert.match(defaults['.bot/rules/pr-review.md'],/Review event is COMMENT only/);
+ assert.doesNotMatch(defaults['.bot/guide.md']+defaults['.bot/rules/issue-development.md'],/modify the working tree/i);
+ assert.doesNotMatch(names.map(name=>defaults['.bot/rules/'+name]).join('\n'),/PPMA|ScienceDiscovery|agent-CI-Infra/i);
+ const layered=resolveRules({rule_overrides:JSON.stringify({'.bot/rules/issue-development.md':'Console development','.bot/rules/labels.md':'review_label: console-label'})},{'.bot/rules/pr-review.md':'Repository review'});
+ const row=path=>layered.files.find(r=>r.path===path);
+ assert.deepEqual(row('.bot/rules/issue-development.md').layers.map(l=>l.source),['builtin','console']);assert.equal(row('.bot/rules/issue-development.md').effective,'Console development');
+ assert.equal(row('.bot/rules/pr-review.md').source,'repository');assert.equal(row('.bot/rules/pr-review.md').layers[0].content,defaults['.bot/rules/pr-review.md']);
+ assert.equal(layered.review_label,'console-label');
+});
 test('rule editing and effective configuration APIs preserve repository administrator scope',async t=>{
  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'Repository behavior'});
  const password=testPassword();await admin('/api/users','POST',{username:'member',password,repository_ids:['101']});const member=h.client();await member('/api/auth/login','POST',{username:'member',password});

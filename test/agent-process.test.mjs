@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
+import { resolveRules } from '../dist/rules/service.js';
 import { Redactor } from '../dist/agent/common.js';
 
 const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
@@ -142,4 +144,9 @@ test('review rules choose the triggers, and the comment language and only the ef
   reply.tool_calls = [call('g', 'finish_development', { summary: 'done', test_command: 'true' })]; workspace=proxyWorkspace();
   await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', review_rules: rules });
   assert.doesNotMatch(prompts[1], /Focus on API compatibility/);
+  // With no console layer or repository file, the system prompt carries each docs/prompts file in full.
+  workspace=proxyWorkspace();
+  await agentLoop(h.store, h.store.get("SELECT * FROM tasks WHERE id='d'"), workspace, new Redactor(), async () => {}, { mode: 'development', effective_rules: resolveRules({}, {}) });
+  for (const name of ['labels.md', 'issue-review.md', 'pr-review.md', 'issue-development.md'])
+    assert.ok(prompts[2].includes(`## .bot/rules/${name} (builtin)\n` + readFileSync(new URL('../docs/prompts/' + name, import.meta.url), 'utf8')), name);
 });

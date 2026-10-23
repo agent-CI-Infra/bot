@@ -21,6 +21,8 @@ COPY package.json ./package.json
 COPY --from=build /app/dist ./dist
 COPY static ./static
 COPY docs/external-token-api.md ./docs/external-token-api.md
+# The built-in rule files; dist/rules/service.js reads them at startup.
+COPY docs/prompts ./docs/prompts
 COPY config ./config
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
 # The webhook gateway service runs from this image too (node webhook/main.mjs), as its own container.
