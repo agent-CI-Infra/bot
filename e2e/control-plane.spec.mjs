@@ -43,6 +43,9 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
     await page.getByLabel('用户名', { exact: true }).fill('project-admin'); await page.getByLabel('密码', { exact: true }).fill(memberPassword);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    // Each project row opens its settings page through the "设置" action.
+    await page.locator('#rows .row').filter({ hasText: 'fixture/project-101' }).getByRole('button', { name: '设置', exact: true }).click();
+    await expect(page).toHaveURL(/#\/projects\/101\/basic$/); await expect(page.getByRole('link', { name: '基本设置', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
     await expect(page.getByText('本页 1 条投递')).toBeVisible();
     await expect(page.getByRole('button', { name: '机器人账号', exact: true })).toBeHidden();
