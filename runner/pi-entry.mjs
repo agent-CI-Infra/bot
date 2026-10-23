@@ -7,7 +7,18 @@ import {workspace} from './workspace.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const save=async value=>{await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let steps=0,session,finished;
+let steps=0,session,finished,grant=null;
+// Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
+async function exchange(){
+  const id=randomBytes(24).toString('hex'),reply=dir+'/token-reply-'+id+'.json';
+  await writeFile(dir+'/token-request.tmp',JSON.stringify({id}),{mode:0o600});await rename(dir+'/token-request.tmp',dir+'/token-request.json');
+  try{
+    for(const end=Date.now()+120000;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,100))){
+      const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;
+    }
+    return {error:'github_read_token_timeout'};
+  }finally{await unlink(dir+'/token-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
+}
 const server=createServer(async(req,res)=>{
   try{
     // Any number of model requests per task; only the chat completion endpoint is proxied.
@@ -37,7 +48,12 @@ try{
         // Commands have no time limit; the model may still bound one that could hang.
         const timeout=args.timeout_seconds>0?args.timeout_seconds*1000:null;
         await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify({operation_id:id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true}),{mode:0o600});
-        try{result=await workspace({type:'workspace_command',workspace_id:config.workspace_id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true,output_file:dir+'/command.out'});}finally{await unlink(dir+'/live.json').catch(()=>{});}
+        const secret_env=grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
+        try{result=await workspace({type:'workspace_command',workspace_id:config.workspace_id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true,output_file:dir+'/command.out',secret_env});}finally{await unlink(dir+'/live.json').catch(()=>{});}
+      }else if(tool.function.name==='github_read_token'){
+        // The token stays in this process and reaches later commands only as environment variables; the model sees what it can do, not the value.
+        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange();if(reply.error)result={error:reply.error};else grant=reply;}
+        result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else throw new Error('tool_not_allowed');
       await appendFile(dir+'/events.jsonl',JSON.stringify({type:'tool',name:tool.function.name,call_id:id,arguments:args,result})+'\n',{mode:0o600});return {content:[{type:'text',text:JSON.stringify(result)}],details:{}};
     }}));

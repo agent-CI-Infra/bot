@@ -32,9 +32,17 @@ export async function agentOperation(input,root){
     const state=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({state:'missing'}));
     if(state.state==='running')try{if(state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
     const request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
+    const token_request=await readFile(dir+'/token-request.json','utf8').then(JSON.parse).catch(()=>null);
     const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').filter(Boolean);
     const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-    return {...state,request,events,offset:offset+events.length};
+    return {...state,request,token_request,events,offset:offset+events.length};
+  }
+  // The answer to the agent's github_read_token request: a read-only token, or the reason there is none.
+  if(input.type==='workspace_agent_token'){
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000)throw new Error('invalid_agent_token');
+    const current=JSON.parse(await readFile(dir+'/token-request.json','utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
+    const path=dir+'/token-reply-'+input.request_id;
+    await writeFile(path+'.tmp',Buffer.from(input.base64,'base64'),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
   }
   if(input.type==='workspace_agent_reply'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
