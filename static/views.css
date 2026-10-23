@@ -81,3 +81,24 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 
 .model-address{display:block;min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
 @media(max-width:760px){.history .model-entry{grid-template-columns:minmax(0,1fr)}.model-entry>.actions{grid-column:1;justify-content:flex-start;flex-wrap:wrap}}
+
+/* Rule files (static/project.js): the overview table and one card per file. */
+.rule-table-wrap{min-width:0}
+.rule-table{width:100%;border-collapse:collapse;font-size:13px}
+.rule-table th{text-align:left;font-size:12px;font-weight:600;color:#637c89;padding:6px 8px;border-bottom:1px solid #dde6eb;white-space:nowrap}
+.rule-table td{padding:8px;border-bottom:1px solid #edf1f4;vertical-align:middle}
+.rule-table tr:last-child td{border-bottom:0}
+.rule-table td code{font-size:12px;overflow-wrap:anywhere}
+.rule-table td:last-child{text-align:right;white-space:nowrap}
+.rule-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:0 0 4px}.rule-meta code{font-size:12px;overflow-wrap:anywhere}
+.rule-card .fold{margin-top:8px}.rule-card pre.output{max-height:none;overflow:visible}.rule-card>.muted{margin:8px 0 0}.rule-card>.actions{margin-top:8px}.rule-card .flash{margin-top:6px}
+.rule-editor{margin-top:8px}
+@media(max-width:760px){
+  /* Each file becomes a small card: label on the left, value on the right. */
+  .rule-table thead{display:none}.rule-table,.rule-table tbody,.rule-table tr,.rule-table td{display:block}
+  .rule-table tr{padding:8px 0;border-bottom:1px solid #e3eaf0}.rule-table tr:last-child{border-bottom:0}
+  .rule-table td{display:grid;grid-template-columns:84px minmax(0,1fr);gap:8px;align-items:center;padding:3px 0;border:0}
+  .rule-table td::before{content:attr(data-label);color:#637c89;font-size:12px}
+  .rule-table td:last-child{text-align:left}.rule-table td:last-child::before{content:''}
+  .rule-table td>.status,.rule-table td>button{justify-self:start}
+}

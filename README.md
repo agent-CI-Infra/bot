@@ -35,7 +35,7 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 
 账号凭据、入口签名材料和模型 Key 用 AES-256-GCM 加密，密文绑定记录 ID。读取和写入响应均只返回是否已配置，不返回明文或密文。更新时留空或仅空白的凭据保持原值；撤销使用专用动作，不能靠提交空字符串撤销。模型 PATCH 必须带读取到的 `version`，旧版本返回 409。撤销账号凭据不会连带撤销入口签名；要禁用入口需单独撤销该入口。
 
-浏览器管理入口以项目为单位组织：“项目”页列出已安装和已登记的仓库及“未启动／工作中／已禁用／已移出安装”状态，超级管理员可同步安装列表、启动、启用或禁用；点每行的“设置”进入该项目独立的设置页（`#/projects/<仓库 ID>/<类别>`，可直接分享和刷新），左侧类别为基本设置（仓库信息、处理账号、基准分支）、机器配置（虚拟电脑状态、实时资源、软件安装与初始化结果、启停与重置，以及 CPU、内存、进程数、/tmp、外网、额外软件包、环境变量和初始化脚本）、使用的模型（选择部署共享或本项目专属模型，添加模型、更换或撤销 Key）、检视规则（检视开关、Issue／PR 打开与 PR 新提交三个触发、评论语言、项目检视指引、检视后标签）、开发设置（自动开发、测试命令、bot PR 修订轮数）、成员（仅超级管理员，分配项目管理员）和运行记录（当前任务、最近任务与命令）。项目管理员只看到自己的项目，机器配置只读。“检视”“开发”两个任务页的任务详情按时间线展示 Agent 工作过程：工作区准备、每一步模型思考与工具选择、读写的文件、在项目容器中执行的命令及退出码和输出、GitHub 发布和故障；运行中每 2 秒刷新，正在执行的命令单独显示并实时追加输出。账号／用户新增在各自页面完成，凭据轮换等其余管理操作通过下列 API 完成。
+浏览器管理入口以项目为单位组织：“项目”页列出已安装和已登记的仓库及“未启动／工作中／已禁用／已移出安装”状态，超级管理员可同步安装列表、启动、启用或禁用；点每行的“设置”进入该项目独立的设置页（`#/projects/<仓库 ID>/<类别>`，可直接分享和刷新），左侧类别为基本设置（仓库信息、处理账号、基准分支）、机器配置（虚拟电脑状态、实时资源、软件安装与初始化结果、启停与重置，以及 CPU、内存、进程数、/tmp、外网、额外软件包、环境变量和初始化脚本）、使用的模型（选择部署共享或本项目专属模型，添加模型、更换或撤销 Key）、检视（检视开关、Issue／PR 打开与 PR 新提交三个触发、评论语言，以及 Issue 检视规则、PR 检视规则、检视标签三份规则文件）、开发（自动开发、测试命令、bot PR 修订轮数和开发规则文件）、规则总览（一张表列出每份规则文件的作用、路径、用于哪些任务，以及内置默认／项目控制台／仓库文件哪一层生效；行为指南和仓库 skill 也在这里）、成员（仅超级管理员，分配项目管理员）和运行记录（当前任务、最近任务与命令）。项目管理员只看到自己的项目，机器配置只读。“检视”“开发”两个任务页的任务详情按时间线展示 Agent 工作过程：工作区准备、每一步模型思考与工具选择、读写的文件、在项目容器中执行的命令及退出码和输出、GitHub 发布和故障；运行中每 2 秒刷新，正在执行的命令单独显示并实时追加输出。账号／用户新增在各自页面完成，凭据轮换等其余管理操作通过下列 API 完成。
 
 ## 接口
 
@@ -52,7 +52,8 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
 | `/api/repositories`、`/api/repositories/:id` | GET / POST、GET | 范围内列表／详情；创建仅超级管理员，字段 `id,full_name,owner_id,account_id` |
-| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions,review_label`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；`review_label` 为可选标签名（最多 50 字符），留空不打标签；检视规则字段 `review_issues`、`review_pull_requests`、`review_pr_updates`（布尔，分别控制 Issue 打开、PR 打开／转为可检视、PR 新提交是否触发检视）、`review_language`（`auto`／`zh`／`en`）和 `review_instructions`（≤8000 字，作为管理员配置的项目检视指引写入检视 Agent 的系统提示，仓库内容仍按不可信数据处理） |
+| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；检视规则字段 `review_issues`、`review_pull_requests`、`review_pr_updates`（布尔，分别控制 Issue 打开、PR 打开／转为可检视、PR 新提交是否触发检视）和 `review_language`（`auto`／`zh`／`en`）。检视指引和检视标签不是策略字段，写在规则文件里，见下一行 |
+| `/api/repositories/:id/rules` | GET / PUT | 每份规则文件的内置默认、项目控制台、仓库文件三层和最终内容；PUT `{path,content}` 保存或（`content: null`）清除某个 `.bot/` 规则文件的控制台覆盖。`POST …/rules/refresh` 重新读取默认分支文件，`POST …/rules/apply-computer` 由超级管理员立即应用 `.bot/computer.yaml` |
 | `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库。列表带当前执行任务；详情另含 manager 给出的容器／卷／网络／镜像／资源限制、当前任务、最近 20 个任务和最近 30 条命令 |
 | `/api/environments/:id/start`、`/stop`、`/reset` | POST | 仓库管理员操作；字段 `operation_id,generation`，操作 ID 为 48 位随机十六进制；重试必须复用同一 ID |
 | `/api/environments/:id/configure` | POST | 仅超级管理员；字段 `operation_id,generation,spec`，`spec` 可含 `cpus`（0.25–16，默认 2）、`memory_mb`（256–65536，默认 4096）、`pids`（64–16384，默认 1024）、`tmp_mb`（16–16384，默认 1024）、`egress`、`packages`（最多 100 个 Debian 包名）、`env`（最多 64 个非机密变量，`PATH`、`HOME`、`BOT_*`、`GIT_*` 等保留名拒绝）、`setup_script`（≤16 KiB）和一次性的 `rerun_setup`。范围由 manager 校验；规格随项目保存、跨重启和重置保留，保存后在项目锁内重建容器，工作卷和代次不变；软件包镜像构建失败时不改动正在运行的电脑 |
@@ -108,7 +109,7 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 ## 检视与开发数据流
 
-在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的检视规则中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
+在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的「检视」中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
 
 后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 32 次模型响应；模型调用 run_command 时命令不限时长，可选 `timeout_seconds` 为可能卡住的命令自设超时，服务和监视进程用 `keep_background` 放到后台；仓库测试验证同样不限时长；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
 

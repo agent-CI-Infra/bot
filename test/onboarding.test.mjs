@@ -27,7 +27,7 @@ test('tunnel token is private and write-only; skip installation does not enable 
  await admin('/api/onboarding/tunnel','POST',{revoke:true});assert.equal((await admin('/api/onboarding')).value.tunnel.token_configured,false);
 });
 test('rules show per-file precedence and skills; computer overlays the existing manager spec',()=>{
- const policy={review_instructions:'Console review guidance',review_label:'console-label',rule_overrides:JSON.stringify({'.bot/guide.md':'Console guide'})};
+ const policy={rule_overrides:JSON.stringify({'.bot/guide.md':'Console guide','.bot/rules/labels.md':'review_label: "console-label"'})};
  const result=resolveRules(policy,{'.bot/guide.md':'Repository guide','.bot/rules/pr-review.md':'Repository PR rule','.bot/computer.yaml':'memory_mb: 2048\npackages: [jq]','.agents/skills/review/SKILL.md':'Repository skill'},{cpus:2,memory_mb:4096,packages:[],max_command_minutes:60});
  // max_command_minutes was removed: an old console spec or repository file that still sets it is ignored rather than rejected.
  assert.equal(result.computer.max_command_minutes,undefined);
@@ -39,7 +39,19 @@ test('rule editing and effective configuration APIs preserve repository administ
  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');const rules=new RuleService(h.store);rules.cache('101','a'.repeat(40),{'.bot/guide.md':'Repository behavior'});
  const password=testPassword();await admin('/api/users','POST',{username:'member',password,repository_ids:['101']});const member=h.client();await member('/api/auth/login','POST',{username:'member',password});
  assert.equal((await member('/api/repositories/101/rules','PUT',{path:'.bot/guide.md',content:'Console change'})).status,200);assert.equal((await member('/api/repositories/101/rules')).value.rules.files[0].effective,'Repository behavior');assert.equal((await member('/api/repositories/202/rules')).status,403);assert.equal((await member('/api/repositories/101/rules','PUT',{path:'constructor',content:'bad'})).status,400);assert.equal((await member('/api/repositories/101/rules/apply-computer','POST',{})).status,403);
-  assert.equal((await member('/api/repositories/101/rules')).value.rules.review_label,'bot-reviewed');await member('/api/repositories/101/policy','PATCH',{review_label:''});assert.equal((await member('/api/repositories/101/rules')).value.rules.review_label,'');
+  // The label is declared only in .bot/rules/labels.md; a console file without a review_label line turns labeling off.
+  assert.equal((await member('/api/repositories/101/rules')).value.rules.review_label,'bot-reviewed');assert.equal((await member('/api/repositories/101/policy','PATCH',{review_label:''})).status,400);
+  await member('/api/repositories/101/rules','PUT',{path:'.bot/rules/labels.md',content:'Do not label reviews.'});assert.equal((await member('/api/repositories/101/rules')).value.rules.review_label,'');
+});
+test('review guidance and the label saved as policy fields by earlier versions move into the rule files once',async t=>{
+ const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ h.store.run("UPDATE policies SET review_instructions='Focus on API compatibility.',review_label='legacy-label',rule_overrides=? WHERE repository_id='101'",JSON.stringify({'.bot/rules/pr-review.md':'Explicit PR rule'}));
+ new RuleService(h.store);new RuleService(h.store);
+ const {rules}=(await admin('/api/repositories/101/rules')).value,file=path=>rules.files.find(f=>f.path===path);
+ assert.equal(file('.bot/rules/issue-review.md').effective,defaults['.bot/rules/issue-review.md']+'\n\nFocus on API compatibility.');
+ assert.equal(file('.bot/rules/pr-review.md').effective,'Explicit PR rule');assert.equal(rules.review_label,'legacy-label');
+ const policy=h.store.get("SELECT * FROM policies WHERE repository_id='101'");assert.deepEqual([policy.review_instructions,policy.review_label],['','']);
+ assert.equal(Object.keys(JSON.parse(policy.rule_overrides)).length,3);
 });
 test('removing a repository computer override restores the saved console spec instead of treating the override as console input',async t=>{
  const computer={cpus:2,memory_mb:2048,packages:[]},manager={call:async()=>({computer})};const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store,manager);rules.rememberComputer('101',{cpus:2,memory_mb:4096,packages:[]});rules.cache('101','a'.repeat(40),{'.bot/computer.yaml':'memory_mb: 2048'});assert.equal((await rules.view('101')).computer.memory_mb,2048);rules.cache('101','b'.repeat(40),{});assert.equal((await rules.view('101')).computer.memory_mb,4096);

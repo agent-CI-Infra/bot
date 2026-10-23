@@ -62,7 +62,7 @@ try{
   for(const repo of ['101','202'])await api('/api/repositories','POST',{id:repo,owner_id:'10',full_name:'fixture/project-'+repo,account_id:account.id});
   await api('/api/users','POST',{username:'member',password:memberPassword,repository_ids:['101']});
   const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
-  await api('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2,review_label:'bot-reviewed'});
+  await api('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2});
   const disabled=await hook('202',2);assert.equal(disabled.tasks_created,0);passed('review-disabled repository only archives');
   // The account sees three repositories; 303 is installed but not started, so its events only archive until an administrator starts it.
   const listed=(await api('/api/installations/sync','POST',{})).repositories;

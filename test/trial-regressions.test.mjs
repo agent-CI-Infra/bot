@@ -70,10 +70,10 @@ test('revision scopes retain the original goal and exclude human decisions and u
  result.clarification_required=false;engine.queueDevelopment({actorId:'999'},task,{object:pr},result);const input=JSON.parse(h.store.get("SELECT input FROM tasks WHERE kind='development.pr'").input);assert.equal(input.review.implementation_goal,'Add clamp and requested tests');assert.equal(input.review.findings.length,1);assert.match(input.review.findings[0].body,/failing/);
 });
 
-test('labels have one bidirectional console layer and delivery outcomes link tasks without exposing JSON',async t=>{
- const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,review_label:'first-label'});
- await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/labels.md',content:'review_label: second-label\nUse after review.'});assert.equal((await admin('/api/repositories/101')).value.policy.review_label,'second-label');
- await admin('/api/repositories/101/policy','PATCH',{review_label:'third-label'});assert.match((await admin('/api/repositories/101/rules')).value.rules.files.find(f=>f.path==='.bot/rules/labels.md').effective,/third-label/);
+test('the label has one console layer, the labels.md file, and delivery outcomes link tasks without exposing JSON',async t=>{
+ const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await admin('/api/repositories/101/policy','PATCH',{review_enabled:true});
+ await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/labels.md',content:'review_label: second-label\nUse after review.'});assert.equal((await admin('/api/repositories/101/rules')).value.rules.review_label,'second-label');
+ assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label:'third-label'})).status,400);assert.match((await admin('/api/repositories/101/rules')).value.rules.files.find(f=>f.path==='.bot/rules/labels.md').effective,/second-label/);
  const opened={repository:{id:101,full_name:'fixture/project-101'},action:'opened',issue:{number:1,title:'Review'}};await h.hook(a.path,a.secret,'opened',opened);await h.hook(a.path,a.secret,'logical-duplicate',opened);await h.hook(a.path,a.secret,'draft',{repository:{id:101},action:'opened',pull_request:{number:2,draft:true,head:{sha:'a'.repeat(40)}}},{'X-GitHub-Event':'pull_request'});
  const rows=(await admin('/api/events')).value.events,first=rows.find(r=>r.delivery_id==='opened'),duplicate=rows.find(r=>r.delivery_id==='logical-duplicate');assert.equal(first.processing_result,'tasks_created');assert.equal(first.full_name,'fixture/project-101');assert.equal(first.tasks.length,1);assert.equal(first.payload,undefined);assert.equal(rows.find(r=>r.delivery_id==='draft').processing_result,'draft');assert.equal(duplicate.processing_result,'duplicate');assert.equal(duplicate.tasks[0].id,first.tasks[0].id);
 });
