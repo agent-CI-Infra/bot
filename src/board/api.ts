@@ -1,6 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
+import { withTaskMetrics } from '../metrics/accounting.js';
 
 // `pr` overrides the wording on the PR board: development of a PR is the bot revising its own PR after a review.
 export const boardStages = [
@@ -128,7 +129,7 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       const rows = store.all(`SELECT id,kind,status,summary,created_at,updated_at FROM tasks
         WHERE repository_id=? AND object_number=? AND kind IN (?,?) ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?`,
         repo!,number,`review.${type}`,`development.${type}`,limit+1,offset);
-      return { tasks: rows.slice(0,limit), has_more: rows.length>limit };
+      return { tasks: withTaskMetrics(store,rows.slice(0,limit)), has_more: rows.length>limit };
     }
     if (method === 'PATCH' && !tasks) {
       fields(body,['field_id','option_id']);

@@ -20,6 +20,8 @@ export class TaskEngine {
   readonly rules:RuleService;
   constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string){this.rules=new RuleService(store,manager,githubUrl);}
   start(){
+    // A previous process may have stopped between checkpoints; never charge server downtime as task runtime.
+    this.store.run('UPDATE task_metrics SET active_since=NULL,complete=0 WHERE active_since IS NOT NULL');
     this.store.run("UPDATE task_locks SET task_id=NULL,token=NULL");
     this.store.run("UPDATE tasks SET status='queued',claim_token=NULL WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND status IN ('running','preparing','implementing','validating','publishing','result_ready')");
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
@@ -27,6 +29,8 @@ export class TaskEngine {
   }
   tick(){
     if(this.closing)return;
+    const checkpoint=Date.now();
+    this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
     const tasks=this.store.all(`SELECT * FROM tasks WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND
       status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY created_at,id`,Date.now());
     for(const task of tasks){

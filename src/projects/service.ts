@@ -3,6 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
+import { withTaskMetrics } from '../metrics/accounting.js';
 
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
@@ -107,7 +108,7 @@ export class ProjectService {
     return { environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer: live?.computer || null,
         operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
       current_task: this.store.get('SELECT t.id,t.kind,t.status,t.phase,t.object_number FROM task_locks l JOIN tasks t ON t.id=l.task_id WHERE l.repository_id=?', id) || null,
-      tasks, commands };
+      tasks:withTaskMetrics(this.store,tasks), commands };
   }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/environments')) return undefined;

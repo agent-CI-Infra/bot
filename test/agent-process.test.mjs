@@ -29,14 +29,15 @@ function proxyWorkspace(logs=[]) {
 test('the control plane relays Pi model requests with the configured model and keeps its key out of the runner', async t => {
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const received=[],finish={summary:'Short summary.',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
-  const server=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;received.push({authorization:req.headers.authorization,body:JSON.parse(raw)});res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[call('f','finish_review',finish)]}}]}));});
+  const server=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;received.push({authorization:req.headers.authorization,body:JSON.parse(raw)});res.setHeader('Content-Type','application/json');res.end(JSON.stringify({usage:{prompt_tokens:1000,completion_tokens:200,prompt_tokens_details:{cached_tokens:750}},choices:[{message:{role:'assistant',content:null,tool_calls:[call('f','finish_review',finish)]}}]}));});
   server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
-  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:'process-fixture-key',model_name:'fixture'})).value.model;
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:'process-fixture-key',model_name:'fixture',pricing:{currency:'USD',input_per_million:2,output_per_million:10,cache_per_million:0.2}})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('process','101','review.pr','running','pr',4,'claim')");
   const logs=[],workspace=proxyWorkspace(logs),requests=[],original=workspace.call;workspace.call=async(...args)=>{requests.push(args[1]);return original(...args);};
   const result=await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='process'"),workspace,new Redactor(),async()=>{},{mode:'review',materials:[{path:'a.js',content:'code'}]});
   assert.equal(result.summary,'Short summary.');assert.equal(received[0].authorization,'Bearer process-fixture-key');assert.equal(received[0].body.model,'fixture');assert.ok(!JSON.stringify(requests).includes('process-fixture-key'));assert.equal(logs[0].tool_calls[0].name,'finish_review');
+  const usage=h.store.get('SELECT * FROM model_requests');assert.equal(usage.task_id,'process');assert.equal(usage.state,'received');assert.equal(usage.input_tokens,1000);assert.equal(usage.cached_input_tokens,750);assert.equal(usage.cost,0.00265);
 });
 
 test('a task may make any number of model requests, and a request still visible after its reply is not sent twice', async t => {
@@ -60,6 +61,7 @@ test('a task may make any number of model requests, and a request still visible 
   }};
   const started=Date.now(),result=await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='many'"),workspace,new Redactor(),async()=>{},{mode:'review'});
   assert.equal(result.summary,'Done after many steps.');assert.equal(received,total);
+  assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,total,'stale polls do not create extra usage entries');
   // Answered requests are followed by an immediate poll, so 40 steps do not wait 40 polling intervals.
   assert.ok(Date.now()-started<total*500,'polls right after a reply');
 });

@@ -300,6 +300,7 @@ async function boardObject(item) {
     for(const task of result.tasks){
       const row=element('div','','board-task-row');row.append(element('span',kindLabels[task.kind]+' · '+timestamp(task.updated_at||task.created_at)),state(task.status),
         boardButton('查看任务详情',async()=>{modal.close();await openTask(task.id);}));taskList.append(row);
+      row.append(taskMetricsLine(task));
     }
     if(!taskList.children.length)taskList.textContent='这个对象尚无 bot 任务。';
     if(result.has_more){const more=boardButton('更多关联任务',async()=>{more.remove();offset+=100;await load();});taskList.append(more);}

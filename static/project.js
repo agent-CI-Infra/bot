@@ -227,6 +227,7 @@ function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
 function modelActions(model) {
   const actions = element('div', '', 'actions'), editable = me.role === 'super_admin' || model.repository_id === current.id;
   if (!editable) return actions;
+  actions.append(button('计费单价',()=>modelPricing(model)));
   actions.append(button('更换 Key', async () => {
     const key = prompt(`为 ${model.model_name} 输入新的 API Key（不会回显）`); if (!key?.trim()) return;
     await api('/api/models/' + model.id, 'PATCH', { version: model.version, api_key: key.trim() }).catch(error); await reloadProject();
@@ -299,7 +300,7 @@ function activityCards() {
   const recent = card('最近任务'), taskList = element('ul', '', 'history');
   for (const task of tasks) {
     const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status));
-    row.append(element('span', `${task.generation ? 'g' + task.generation + ' · ' : ''}${timestamp(task.updated_at)}`, 'muted wide-cell')); taskList.append(row);
+    row.append(element('span', `${task.generation ? 'g' + task.generation + ' · ' : ''}${timestamp(task.updated_at)}`, 'muted wide-cell'),taskMetricsLine(task)); taskList.append(row);
   }
   recent.append(tasks.length ? taskList : note('还没有任务。'));
   const history = card('最近在虚拟电脑上执行的命令'), commandList = element('ul', '', 'history commands');

@@ -206,7 +206,7 @@ function renderTaskSide(detail, environment) {
   info.append(facts([['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code)], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
-  side.append(info, computerCard(task, environment));
+  side.append(info,taskMetricsCard(task), computerCard(task, environment));
   const result = resultCard(task); if (result) side.append(result);
   if (publications?.length) {
     const section = card('GitHub 发布记录'), list = element('ul', '', 'history');

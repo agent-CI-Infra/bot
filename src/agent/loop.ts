@@ -5,6 +5,7 @@ import { type Redactor, stop, TaskError } from './common.js';
 import { validateReview } from '../review/findings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
+import { beginModelRequest, finishModelRequest } from '../metrics/accounting.js';
 
 export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens) {
   try { return await run(store, task, workspace, redactor, guard, context, tokens); }
@@ -63,12 +64,21 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       const endpoint = model.url.replace(/\/$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
       let response: Response;
       const { stream_options: _streamOptions, ...requestBody } = body;
+      const requestLog=beginModelRequest(store,task,String(state.request.id),model);
       // Anything the task's redactor knows, such as an exchanged GitHub token echoed by a command, never reaches the provider.
       try { response = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(90000), headers: { Authorization: 'Bearer ' + model.key, 'Content-Type': 'application/json' }, body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, max_tokens: 8192, stream: false })) }); }
-      catch { return stop('model_unavailable', 'retry_wait'); }
-      if ([401, 403].includes(response.status)) stop('model_authentication_failed', 'waiting_configuration');
-      if (!response.ok) stop('model_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed');
-      const raw = await response.text(); if (raw.length > 2 * 1024 * 1024) stop('model_response_too_large');
+      catch { finishModelRequest(store,requestLog,null,null,'transport_error');return stop('model_unavailable', 'retry_wait'); }
+      if (!response.ok) {
+        finishModelRequest(store,requestLog,null,response.status,'http_error');
+        if ([401,403].includes(response.status)) stop('model_authentication_failed','waiting_configuration');
+        stop('model_http_'+response.status,response.status===429||response.status>=500?'retry_wait':'failed');
+      }
+      let raw: string;
+      try { raw=await response.text(); } catch { finishModelRequest(store,requestLog,null,response.status,'transport_error');return stop('model_unavailable','retry_wait'); }
+      if (raw.length>2*1024*1024) { finishModelRequest(store,requestLog,null,response.status,'invalid_response');stop('model_response_too_large'); }
+      let usage;try { usage=JSON.parse(raw).usage; } catch { /* The response validation below reports malformed model output. */ }
+      // Persist the provider's usage before forwarding: a runner failure does not undo an already billed call.
+      finishModelRequest(store,requestLog,usage,response.status);
       let responseBody = redactor.text(raw), contentType = 'application/json';
       if (body.stream) {
         const value = JSON.parse(responseBody), message = value.choices?.[0]?.message; if (!message) stop('model_response_invalid');
