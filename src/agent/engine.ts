@@ -6,6 +6,7 @@ import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
 import { agentLoop } from './loop.js';
+import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
 import { Redactor, sha, operationId, stop, TaskError } from './common.js';
@@ -132,7 +133,7 @@ export class TaskEngine {
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
       }
       if(task.phase==='model'){
-        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context);await validate();
+        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl));await validate();
         if(!development){
           if(input.behavior_changes?.length){result.summary+='\n\n这些文件改变了 bot 的行为，需要人来决定：'+input.behavior_changes.join('、');result.clarification_required=true;}
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};

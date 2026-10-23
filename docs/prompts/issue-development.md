@@ -73,8 +73,8 @@ working tree is unchanged. Do not guess.
 
 - The control plane publishes, not you. It commits the working tree to a branch the bot owns,
   opens or updates the bot's own PR, links the Issue with `Closes #N`, and appends the test command
-  and its exit code. No GitHub credentials exist in your environment: never push, open a PR,
-  comment, assign or label through the shell. Never push to another author's branch, never
+  and its exit code. The token from `github_read_token` can only read: never try to push, open a
+  PR, comment, assign or label through the shell. Never push to another author's branch, never
   force-push, and never merge.
 - Your `finish_development` summary becomes the PR description. Describe what changed and why, how
   it maps to the goal, the tests you ran and their actual result, and the remaining risk. Quote the

@@ -5,6 +5,7 @@ import { inlineLocation,validateReview } from '../dist/review/findings.js';
 import { Redactor } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { developmentReady } from '../dist/review/queue.js';
+import { ReadTokens } from '../dist/agent/read-token.js';
 import { GitHub } from '../dist/github/client.js';
 import { Publisher } from '../dist/github/publisher.js';
 import { generateKeyPairSync,createVerify,randomBytes } from 'node:crypto';
@@ -145,4 +146,31 @@ test('development needs the development label from a person and no assignee, whe
   // The same predicate guards every validation of the development task until publication.
   assert.equal(developmentReady({labels:['Bot-Develop'],assignees:[]},'bot-develop'),true);
   assert.equal(developmentReady({labels:[{name:'bot-develop'}],assignee:{login:'x'}},'bot-develop'),false);
+});
+test('task read tokens cover one repository with read permissions only, need a GitHub App and are revoked',async t=>{
+  const h=await harness(t),{admin}=await setup(h),keys=generateKeyPairSync('rsa',{modulusLength:2048}),privateKey=keys.privateKey.export({type:'pkcs8',format:'pem'});
+  const app=await account(admin,{type:'github_app',app_id:'123',private_key:privateKey,token:undefined});await repository(admin,app.id,'101');
+  const bot=await account(admin);await repository(admin,bot.id,'202');
+  const minted=[],tokenRequests=[],deleted=[];let granted=null;
+  const server=createServer(async(req,res)=>{
+    let raw='';for await(const b of req)raw+=b;const path=new URL(req.url,'http://fake').pathname,authorization=req.headers.authorization?.slice(7);res.setHeader('Content-Type','application/json');
+    if(path==='/app')res.end(JSON.stringify({slug:'fixture-app'}));
+    // The installation may write, and has a permission the agent never asks for.
+    else if(path.endsWith('/installation'))res.end(JSON.stringify({id:7,account:{id:10},permissions:{metadata:'read',contents:'write',issues:'write',pull_requests:'write',actions:'read',administration:'write'}}));
+    else if(path.endsWith('/access_tokens')){const body=JSON.parse(raw);tokenRequests.push(body);const token=randomBytes(24).toString('hex');minted.push(token);res.end(JSON.stringify({token,expires_at:'2099-01-01T00:00:00Z',permissions:granted||body.permissions}));}
+    else if(path==='/installation/token'&&req.method==='DELETE'){deleted.push(authorization);res.statusCode=204;res.end();}
+    else if(path.startsWith('/users/'))res.end(JSON.stringify({id:999}));
+    else if(path==='/repositories/101')res.end(JSON.stringify({id:101,full_name:'fixture/project-101',owner:{id:10},default_branch:'trunk'}));
+    else{res.statusCode=404;res.end('{}');}
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const url=`http://127.0.0.1:${server.address().port}`,redactor=new Redactor(),repo=id=>h.store.get('SELECT * FROM repositories WHERE id=?',id);
+  const tokens=new ReadTokens(h.store,repo('101'),redactor,async()=>{},url);
+  const grant=await tokens.issue();
+  assert.deepEqual(tokenRequests[0],{repository_ids:[101],permissions:{metadata:'read',contents:'read',issues:'read',pull_requests:'read',actions:'read'}});
+  assert.deepEqual([grant.token,grant.repository,grant.permissions.contents],[minted[0],'fixture/project-101','read']);assert.equal(redactor.text(grant.token),'[REDACTED]');
+  // A grant that could write anything is refused, and still revoked with the rest.
+  granted={contents:'write'};await assert.rejects(tokens.issue(),/github_read_token_not_read_only/);
+  await tokens.revoke();assert.deepEqual(deleted,minted);
+  await assert.rejects(new ReadTokens(h.store,repo('202'),new Redactor(),async()=>{},url).issue(),/github_app_required/);
 });

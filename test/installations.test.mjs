@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { InstallationSync } from '../dist/app/installations.js';
@@ -108,4 +108,20 @@ test('runner commands without a timeout run until they end; an explicit timeout 
   const dir = mkdtempSync(resolve('.tmp/command-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   assert.deepEqual(await command('sleep 0.3; echo done', dir, null), { exit_code: 0, signal: null, output: 'done\n', timed_out: false, truncated: false });
   const stopped = await command('sleep 5; echo late', dir, 200); assert.equal(stopped.timed_out, true); assert.equal(stopped.output, '');
+});
+
+test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKEN and is masked in their output', async t => {
+  mkdirSync('.tmp', { recursive: true });
+  const dir = mkdtempSync(resolve('.tmp/token-')), out = join(dir, 'op.out'), token = 'ghs_' + 'x'.repeat(36); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const result = await command('echo "$GH_TOKEN|$GITHUB_TOKEN|$OTHER"', dir, 10000, { outputFile: out, secretEnv: { GH_TOKEN: token, GITHUB_TOKEN: token, OTHER: 'not-a-token-variable' } });
+  assert.equal(result.output, '[REDACTED]|[REDACTED]|\n'); assert.equal(readFileSync(out, 'utf8'), '[REDACTED]|[REDACTED]|\n');
+  assert.equal((await command('echo "$GH_TOKEN"', dir, 10000)).output, '\n');
+  // The answer to a token request goes to the request it was made for, and only that one.
+  const { agentOperation } = await import('../runner/agent.mjs'), id = 'a'.repeat(48);
+  mkdirSync(join(dir, 'agent')); writeFileSync(join(dir, 'agent/token-request.json'), JSON.stringify({ id }));
+  assert.deepEqual((await agentOperation({ type: 'workspace_agent_poll' }, dir)).token_request, { id });
+  const base64 = Buffer.from(JSON.stringify({ token })).toString('base64');
+  await assert.rejects(agentOperation({ type: 'workspace_agent_token', request_id: 'b'.repeat(48), base64 }, dir), /agent_request_changed/);
+  assert.deepEqual(await agentOperation({ type: 'workspace_agent_token', request_id: id, base64 }, dir), { written: true });
+  assert.equal(JSON.parse(readFileSync(join(dir, `agent/token-reply-${id}.json`), 'utf8')).token, token);
 });

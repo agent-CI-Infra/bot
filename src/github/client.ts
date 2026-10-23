@@ -8,8 +8,15 @@ export function appJwt(appId: string, privateKey: string): string {
   const unsigned = encode({ alg: 'RS256', typ: 'JWT' }) + '.' + encode({ iat: now-60, exp: now+540, iss: appId });
   return unsigned + '.' + createSign('RSA-SHA256').update(unsigned).sign(privateKey).toString('base64url');
 }
+// What a task agent may read with its own token. Every value is read; installations that lack one simply omit it.
+export const agentReadPermissions: Record<string,string> = { metadata:'read', contents:'read', issues:'read', pull_requests:'read', actions:'read', checks:'read', statuses:'read' };
+export async function revokeInstallationToken(apiUrl: string, token: string) {
+  const response = await fetch(apiUrl.replace(/\/$/, '') + '/installation/token', { method:'DELETE', redirect:'error', signal:AbortSignal.timeout(10000),
+    headers:{ Authorization:'Bearer ' + token, Accept:'application/vnd.github+json' } });
+  return [204, 401].includes(response.status);
+}
 export class GitHub {
-  token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = '';
+  token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = ''; permissions: Record<string,string> = {};
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
@@ -43,7 +50,8 @@ export class GitHub {
     }
     return stop('github_pagination_limit', 'waiting_configuration');
   }
-  async connect(development: boolean, requiredPermissions?: Record<string,string>): Promise<any> {
+  // requiredPermissions must all be granted; requestedPermissions are taken where the installation has them.
+  async connect(development: boolean, requiredPermissions?: Record<string,string>, requestedPermissions?: Record<string,string>): Promise<any> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', this.repository.account_id);
     if (!account) stop('github_account_missing', 'waiting_configuration');
     const secrets = this.store.secrets.open(account!.credentials, `account:${account!.id}`);
@@ -58,13 +66,13 @@ export class GitHub {
       const app = await this.request('GET','/app', undefined, false, jwt);
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission');
-      const requested: Record<string,string> = requiredPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
+      const requested: Record<string,string> = requiredPermissions || requestedPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
       if(requiredPermissions&&Object.entries(requiredPermissions).some(([key,value])=>!installation.permissions?.[key]||value==='write'&&installation.permissions[key]!=='write'))stop('github_permissions_insufficient','waiting_permission');
       const permissions: Record<string,string> = {};
       for (const [key,value] of Object.entries(requested)) if (installation.permissions?.[key]) permissions[key] = installation.permissions[key] === 'read' ? 'read':value;
       const access = await this.request('POST',`/app/installations/${installation.id}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions }, false,jwt);
       this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission'); this.redactor.add(this.token);
-      this.expiresAt=String(access.expires_at||'');
+      this.expiresAt=String(access.expires_at||'');this.permissions=access.permissions&&typeof access.permissions==='object'?access.permissions:permissions;
       const actor = await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'));
       this.actorId = String(actor.id); this.actorLogin = String(actor.login || app.slug + '[bot]');
     }
