@@ -5,6 +5,7 @@ import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
+import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop } from './loop.js';
 import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
@@ -124,10 +125,12 @@ export class TaskEngine {
           environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         }
         const comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
+        // Classification is optional: a repository whose labels cannot be read is reviewed without them.
+        const labels=development?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         input={...input,object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
-          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
+          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             comments:development&&task.kind.endsWith('.pr')?[]:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
-            review_rules:{language:policy.review_language},
+            review_rules:{language:policy.review_language},...(development?{}:{repository_labels:labels}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
@@ -160,9 +163,11 @@ export class TaskEngine {
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log);
         if(!development){
           const outputs=await publisher.review(result,input.files);
-          // The policy label, never the model, is applied only after the summary comment was published.
-          const label=input.review_label;
-          if(label)outputs.push({labels:(await publisher.label(label)).map((l:any)=>l.name)});
+          // Labels go on only after the summary comment was published: the policy's review label, plus the classification
+          // labels the model named that pass classificationLabels against the repository and the object's current labels.
+          const label=input.review_label,current=(await github.object(task.kind,task.object_number)).labels;
+          const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label])];
+          if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
           result={...result,outputs};
           // A review that finds a code request starts development only with a person's go-ahead already on the Issue;

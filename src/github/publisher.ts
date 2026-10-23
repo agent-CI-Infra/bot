@@ -50,11 +50,13 @@ export class Publisher {
     outputs.push(await this.discussion('discussion',[text.overview,text.discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
     await this.validate();return outputs;
   }
-  async label(name:string){
-    // Issues and pull requests share the issue labels endpoint; GitHub creates a missing repository label on first use.
-    const path=this.github.path(`/issues/${this.task.object_number}/labels`),payload={labels:[name]};
+  async label(name:string){return this.labels([name]);}
+  // Issues and pull requests share the issue labels endpoint; GitHub creates a missing repository label on first use,
+  // which only the policy's review label can reach: classification labels are checked against the repository first.
+  async labels(names:string[]){
+    const path=this.github.path(`/issues/${this.task.object_number}/labels`),payload={labels:names},wanted=names.map(name=>name.toLowerCase());
     return this.effect('label','label',payload,()=>this.github.request('POST',path,payload),async()=>{
-      const labels=await this.github.pages(path);return labels.some(l=>String(l.name).toLowerCase()===name.toLowerCase())?labels:null;
+      const labels=await this.github.pages(path),have=new Set(labels.map(l=>String(l.name).toLowerCase()));return wanted.every(name=>have.has(name))?labels:null;
     },true);
   }
   async branch(candidate:any){

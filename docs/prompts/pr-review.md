@@ -105,11 +105,14 @@ that those changes need a human decision, and they never take effect for the cur
 
 Review event is COMMENT only. The control plane publishes inline findings in one COMMENT review and
 everything else in one summary comment, then applies the declared `review_label`. Never approve,
-request changes, merge, push, label or edit the PR. Return the review through `finish_review`:
+request changes, merge, push or edit the PR, and never apply labels yourself. Return the review
+through `finish_review`:
 
 - `summary`: 1-3 sentences on what the PR does and your overall assessment, then the status of
   earlier findings (`F3: fixed — the lock now covers the read.`) and the relevance verdict when
   they apply. Do not repeat the findings here.
+- `labels`: classification labels for the PR from `repository_labels`, as described in
+  `labels.md`. A PR usually takes the `type/*` and `priority/*` of its linked Issue.
 - `findings`: one entry per finding, most severe first. Set `actionable` to true only for
   `must-fix` findings. Write each body in this shape:
 

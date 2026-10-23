@@ -6,7 +6,7 @@
 
 | 文件 | 内置到的路径 | 作用 |
 | --- | --- | --- |
-| [`labels.md`](labels.md) | `.bot/rules/labels.md` | 检视标签声明；只在仓库有标签清单时建议 `type`、`source`、`priority`、`area`、`size`，分类不等于授权 |
+| [`labels.md`](labels.md) | `.bot/rules/labels.md` | 检视标签声明；从仓库已有标签里为 Issue 和 PR 选择 `type`、`source`、`priority`、`area`、`size` 等分类标签，由控制面校验后添加；分类不等于授权 |
 | [`issue-review.md`](issue-review.md) | `.bot/rules/issue-review.md` | 新 Issue 的意图、缺失信息、代码证据与授权判断，以及哪些检视结果会启动开发 |
 | [`pr-review.md`](pr-review.md) | `.bot/rules/pr-review.md` | PR 检视：一轮报全、严重度与处置、复审收敛、相关性判断、COMMENT 输出 |
 | [`issue-development.md`](issue-development.md) | `.bot/rules/issue-development.md` | 开发任务的资格、范围、停止条件、测试与 PR 说明 |
@@ -31,4 +31,4 @@
 - **检视输出**：PR 与 Issue 检视都通过 `finish_review` 返回，总结和每条发现分开；有真实 diff 位置的发现走行内，其余并入一条总结评论。GitHub review event 只用 COMMENT，模型不批准、不请求变更、不合并，也不调用标签接口。
 - **工具边界**：PR 检视可以读代码、跑仓库已有的测试和 lint，不直接执行 PR 首次加入的脚本，不抓取 PR 文本里的 URL，不改工作树。这条只写在 `pr-review.md`；开发任务必须改文件。Issue 检视只能打开指向 GitHub（`github.com`、`*.githubusercontent.com`）的链接，其他主机的链接不打开。模型需要自己读本仓库的 Issue、PR、评论、行内检视、Actions 运行和检查状态时，调用 `github_read_token` 兑换只读令牌；令牌不能写，评论、标签、检视和 PR 仍由控制面发布。
 - **开发资格**：控制面在以下条件同时满足时才创建开发任务：开发已开启；检视评论已发布，并判定 Issue 原文明确要求改代码；Issue 上有人（不是 App）加了开发标签；Issue 没有指派人。人在检视前或检视后加标签都可以。控制面在发布前再查一次标签和指派人，任一条件不再满足就停下，等人重试。限定 `type`／`size`、敏感区域必须人工这类额外条件，只在仓库自己的规则声明时才遵守。PR 由控制面从 Bot 自己的分支发布，PR 说明引用 Issue 中授权的原句。
-- **标签**：不写死任何组织的标签清单。模型只在检视正文里建议仓库清单里已有的标签，`agent/*`、`blocker`、`priority/critical`、`pr/*`、`gate/*` 和开发标签不由模型提出。
+- **标签**：可用标签就是仓库里已有的标签，控制面把清单作为 `repository_labels` 交给模型。模型在 `finish_review` 的 `labels` 里选标签，不调用标签接口；控制面在总结评论发布后校验并添加，和检视标签一起加。校验时丢弃以下几类：仓库里没有的标签、保留标签（检视标签、开发标签、`agent/*`、`blocker`、`priority/critical`、`pr/*`、`gate/*`）、Issue 或 PR 上已经有值的维度。`priority` 只保留一个。
