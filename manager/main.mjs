@@ -7,7 +7,7 @@ import { Projects } from './projects.mjs';
 process.umask(0o077);
 const token = readFileSync(process.env.BOT_MANAGER_TOKEN_FILE), bearer = 'Bearer ' + token.toString('base64');
 const projects = new Projects({ database: process.env.BOT_MANAGER_DATABASE || '/data/manager.sqlite', docker: new Docker(),
-  deployment: createHash('sha256').update(token).digest('hex').slice(0, 16), image: process.env.BOT_PROJECT_IMAGE || 'department-bot-project:local',
+  deployment: createHash('sha256').update(token).digest('hex').slice(0, 16), image: process.env.BOT_PROJECT_IMAGE || 'department-bot-project-computer:local',
   egress: process.env.BOT_PROJECT_EGRESS !== 'false' });
 await projects.recover();
 let checking = false;

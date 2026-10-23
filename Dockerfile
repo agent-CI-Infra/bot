@@ -23,6 +23,8 @@ COPY static ./static
 COPY docs/external-token-api.md ./docs/external-token-api.md
 COPY config ./config
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
+# The webhook gateway service runs from this image too (node webhook/main.mjs), as its own container.
+COPY webhook/main.mjs ./webhook/main.mjs
 COPY LICENSE ./LICENSE
 COPY NOTICE ./NOTICE
 USER 10001:10001

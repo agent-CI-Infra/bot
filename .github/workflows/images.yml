@@ -24,21 +24,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: bot
+          - name: bot-control-plane
             dockerfile: Dockerfile
-            description: Control plane (admin console, webhook receiver, task engine); also runs key-init.
-          - name: bot-manager
+            description: Control plane (admin console, webhook receiver, task engine); also runs key-init and the webhook gateway.
+          - name: bot-computer-manager
             dockerfile: manager/Dockerfile
-            description: Manager of the per-repository project containers; the only service with the Docker socket.
-          - name: bot-project
+            description: Creates and runs the per-repository project computers; the only service with the Docker socket.
+          - name: bot-project-computer
             dockerfile: images/project/Dockerfile
-            description: Approved image of the per-repository project computers.
-          - name: bot-tunnel
+            description: System image of the per-repository project computers.
+          - name: bot-cloudflare-tunnel
             dockerfile: tunnel/Dockerfile
             description: Optional Cloudflare Tunnel connector for the webhook listener.
-          - name: bot-webhook
-            dockerfile: webhook/Dockerfile
-            description: Fixed gateway from the tunnel network to the webhook listener.
     env:
       IMAGE: ghcr.io/agent-ci-infra/${{ matrix.name }}
       PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

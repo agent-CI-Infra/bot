@@ -3,31 +3,29 @@
 #   docker compose -f compose.yaml -f compose.build.yaml up -d --build
 services:
   key-init:
-    image: department-bot:local
+    image: department-bot-control-plane:local
     build: .
   bot:
-    image: department-bot:local
+    image: department-bot-control-plane:local
+    build: .
+  webhook:
+    image: department-bot-control-plane:local
     build: .
   tunnel:
-    image: department-bot-tunnel:local
+    image: department-bot-cloudflare-tunnel:local
     build:
       context: .
       dockerfile: tunnel/Dockerfile
-  webhook:
-    image: department-bot-webhook:local
-    build:
-      context: .
-      dockerfile: webhook/Dockerfile
   manager:
-    image: department-bot-manager:local
+    image: department-bot-computer-manager:local
     build:
       context: .
       dockerfile: manager/Dockerfile
     environment:
       # Must stay equal to the project-image reference below.
-      BOT_PROJECT_IMAGE: department-bot-project:local
+      BOT_PROJECT_IMAGE: department-bot-project-computer:local
   project-image:
-    image: department-bot-project:local
+    image: department-bot-project-computer:local
     build:
       context: .
       dockerfile: images/project/Dockerfile
