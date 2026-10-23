@@ -65,6 +65,14 @@ export function ingest(
         store.run('UPDATE policies SET enabled=0 WHERE repository_id IN (SELECT id FROM repositories WHERE account_id=? AND id=?)', accountId, String(removed.id || ''));
     }
     if (status === 200 && !duplicate && owner && payload) {
+      if(['issues','pull_request'].includes(event)){
+        store.run('DELETE FROM external_events WHERE received_at<=?',new Date(Date.now()-86400000).toISOString());
+        // Cross-endpoint redeliveries must not restart the first delivery's 24-hour window.
+        store.run(`INSERT OR IGNORE INTO external_events(source_id,repository_id,delivery_id,received_at)
+          SELECT d.id,d.repository_id,d.delivery_id,d.received_at FROM deliveries d WHERE d.id=?
+          AND NOT EXISTS(SELECT 1 FROM deliveries first WHERE first.repository_id=d.repository_id AND first.delivery_id=d.delivery_id
+            AND first.status='accepted' AND first.rowid<d.rowid)`,id);
+      }
       const policy=store.get('SELECT * FROM policies WHERE repository_id=?',String(owner.id)),pr=payload.pull_request as Json|undefined;
       Object.assign(response,{review_outcome:pr?.draft===true?'draft':!policy?.enabled||!policy.review_enabled?'review_disabled':'not_trigger'});
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id);

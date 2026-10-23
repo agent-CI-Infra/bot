@@ -43,6 +43,8 @@ async function start() {
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'reviews', 'developments', 'external','onboarding'];
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 async function route() {
+  renderVersion++;
+  if(location.hash==='#external')tab='external';
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   if (target) tab = 'projects';
   if(location.hash==='#onboarding'&&me.role==='super_admin')tab='onboarding';

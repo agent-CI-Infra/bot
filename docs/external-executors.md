@@ -1,26 +1,22 @@
-# 外部执行端：临时授权与事件转发
+# 外部执行端：临时授权、事件转发与轮询
 
 外部执行端可继续使用自己的检视工具。Bot 负责验证 GitHub 投递、过滤转发，并在执行端完成工作后兑换 Bot 身份的临时 GitHub 凭据。两项功能均默认关闭，没有预置客户端、仓库或订阅。
 
 ## 一次完整接入
 
 1. 超级管理员登记 GitHub App 和目标仓库，并在 App 安装中授予 Contents read、Issues write、Pull requests write。外部凭据兑换只支持 GitHub App；不会把机器人账号的长期 Token 当作临时凭据分发。
-2. 在管理入口的「外部执行端」选择「新增客户端」，绑定一个仓库。个人电脑选择公钥签名认证；GitHub Actions 选择 OIDC。项目管理员只能配置分配给自己的仓库。
-3. 个人电脑在本机生成 RSA 密钥，只向 Bot 登记 SPKI PEM 公钥；私钥不离开个人电脑。管理页显示公钥指纹，支持更换公钥或停用客户端。超级管理员先在本页设置实际 HTTPS 兑换地址，作为签名证明的固定 audience。
-4. 新增转发订阅，指定接收 URL、事件和动作。例如事件 `pull_request`，动作 `opened,ready_for_review,synchronize`，勾选排除草稿。保存后显示一次签名密钥，在接收端保存并校验签名。客户端私钥与转发签名密钥分开管理。
-5. 外部接收端收到消息后，按转发 ID 去重，再运行原来的检视工具。检视完成后调用公开的临时凭据接口，再用取得的令牌请求 GitHub 评论／Review API。完成后调用撤销接口。
+2. 在目标项目设置的「外部执行」类别选择「新增客户端」，自动绑定当前项目，不提供仓库选择。个人电脑选择公钥签名认证；GitHub Actions 选择 OIDC。项目管理员只能配置分配给自己的仓库。
+3. 个人电脑在本机生成 RSA 密钥，只向 Bot 登记 SPKI PEM 公钥；私钥不离开个人电脑。管理页显示公钥指纹，支持更换公钥或停用客户端。超级管理员先在全局「外部执行端」页设置实际 HTTPS 兑换地址，作为签名证明的固定 audience。
+4. 在当前项目的「外部执行」中新增转发订阅，指定接收 URL、事件和动作。例如事件 `pull_request`，动作 `opened,ready_for_review,synchronize`，勾选排除草稿。保存后显示一次签名密钥，在接收端保存并校验签名。客户端私钥与转发签名密钥分开管理。
+5. 外部接收端收到消息后，按转发 ID 去重，再运行原来的检视工具。检视完成后调用公开的临时凭据接口，再用取得的令牌请求 GitHub 评论／Review API。也可先兑换临时令牌，再用同一个令牌调用 `GET /external/events` 拉取事件。完成后调用撤销接口。
 
 若只想使用外部检视，可保留仓库 enabled，但关闭内置 review_enabled；转发订阅有自己的启用开关，不依赖内置模型或检视开关。两边同时启用时都会处理事件，Bot 不会自动关闭其中一边。
 
 ## 管理页中的接入说明
 
-兑换地址下方提供个人电脑接入步骤；新增客户端时，公钥输入框旁可展开密钥生成命令。每个公钥客户端（包括待登记的旧客户端）下方都有「公钥接入说明与复制指令」，登记或更换公钥的表单也提供同一说明。展开后点击「复制给我的 AI agent」，取得含该客户端 ID、绑定仓库 ID 和已配置兑换地址的纯文本指令。地址未配置时，指令会要求超级管理员先设置，再重新复制，不生成示例地址。GitHub Actions OIDC 客户端不显示这套个人电脑公钥流程。
+全局「外部执行端」只管理兑换地址、展示一套完整接入说明，并列出已配置外部客户端的项目链接。超级管理员可以设置兑换地址，项目管理员只读。展开说明后选择个人电脑客户端，点击「复制给我的 AI agent」，取得含客户端 ID、绑定仓库 ID、兑换／轮询地址的纯文本指令；地址未配置时不会编造 URL。客户端行和公钥登记表单不重复完整步骤，新增客户端对话框只保留简短的 OpenSSL 帮助。GitHub Actions OIDC 客户端不套用个人电脑公钥流程。
 
-以下使用测试数据展示桌面和窄屏入口，实际操作以页面中的客户端与兑换地址为准。
-
-![桌面公钥接入说明与复制按钮](images/external-client-guide-desktop.png)
-
-![窄屏公钥接入说明与复制按钮](images/external-client-guide-mobile.png)
+客户端、公钥、Webhook 订阅、转发状态和令牌记录在所属项目的「外部执行」类别管理。项目管理员只能查看和修改分配给自己的项目；超级管理员在某个项目中也只能操作该项目的资源。创建客户端自动绑定当前仓库，订阅不能引用其他仓库的客户端，令牌权限始终固定。
 
 ## 个人电脑认证与兑换
 
@@ -101,22 +97,30 @@ DNS 检查在每次投递前执行，连接固定使用已验证的地址；不�
 
 转发采用至少一次投递。响应丢失或 Bot 重启时可能再次发送同一个 ID，接收端负责幂等；不能把内存去重当作生产保证。订阅变更、停用或客户端公钥更换会取消尚未发送的旧任务；已经发出的网络请求无法撤回。失败投递可在管理页面重试，仍使用同一个转发 ID。
 
+## 事件轮询
+
+公开 Webhook 监听提供与兑换地址同源的 `GET /external/events`。先按既有流程兑换，然后以 `Authorization: Bearer <token>` 使用同一个 GitHub App 安装令牌拉取。无需第二套登录或第二种令牌，不消耗每小时 20 次兑换额度；服务端校验已保存的 `external_grants.token_hash`、签发状态及到期时间，拒绝未知、撤销、过期令牌和已停用的客户端／项目。
+
+轮询只返回绑定仓库最近 24 小时已验签归档的 `issues`、`pull_request`，包含事件名、GitHub delivery ID、action、仓库 ID、Issue／PR 编号和原始事件载荷。轮询与 Webhook 订阅过滤独立，同一次 GitHub delivery 去重，每批最多 100 条，无新事件时返回 `{"events":[]}`。管理页投递档案不受 24 小时窗口影响。
+
+每个客户端独立持久保存进度，续换令牌和重启不重置。HTTP 200 响应写出完成后进度前进，此客户端下次不再收到这批旧事件；另一个客户端仍可取得自己未读的事件。发出前失败不前进；客户端丢失成功响应时服务端不补发。没有回放或显式 ACK；需要至少一次交付时仍可使用现有 Webhook 推送。完整请求和响应见[接口说明](external-token-api.md#4-get-externalevents用同一个-token-轮询)。
+
 ## 管理 API
 
-这些接口使用既有登录会话和 CSRF 校验，列表即使不筛选，也只返回项目管理员已分配仓库的数据。
+这些接口使用既有登录会话和 CSRF 校验。项目配置路径中的 `:repository` 固定为当前项目，列表、单条读取、更新和重试都校验项目归属；跨项目资源会被拒绝。全局兼容接口也按项目管理员的分配范围过滤。
 
 | 路径 | 方法 | 内容 |
 | --- | --- | --- |
 | `/api/external/settings` | GET / PUT | 读取固定 token_audience；只有超级管理员可保存完整 HTTPS 兑换地址 |
-| `/api/external/clients` | GET / POST | 客户端列表／创建；字段 name、repository_id、auth_type；private_key_jwt 必须提供 public_key，OIDC 提供 trust |
-| `/api/external/clients/:id` | GET / PATCH | 读取元数据、公钥与指纹；enabled 启停、public_key 登记或更换公钥 |
-| `/api/external/subscriptions` | GET / POST | 列表／创建，字段 client_id、name、url、filters；签名密钥只在创建时返回 |
-| `/api/external/subscriptions/:id` | GET / PATCH | 更新 name、url、filters、enabled 或 rotate_secret；读取不含密钥 |
-| `/api/external/deliveries` | GET | 最近 100 条转发状态、尝试次数与错误码 |
-| `/api/external/deliveries/:id/retry` | POST | 重试失败投递 |
-| `/api/external/grants` | GET | 最近 100 条签发记录，无原始凭据和身份 JWT |
+| `/api/repositories/:repository/external/clients` | GET / POST | 客户端列表／创建；字段 name、auth_type；repository_id 从路径确定，正文若提供必须一致；private_key_jwt 必须提供 public_key，OIDC 提供 trust |
+| `/api/repositories/:repository/external/clients/:id` | GET / PATCH | 读取元数据、公钥与指纹；enabled 启停、public_key 登记或更换公钥 |
+| `/api/repositories/:repository/external/subscriptions` | GET / POST | 列表／创建，字段 client_id、name、url、filters；签名密钥只在创建时返回 |
+| `/api/repositories/:repository/external/subscriptions/:id` | GET / PATCH | 更新 name、url、filters、enabled 或 rotate_secret；读取不含密钥 |
+| `/api/repositories/:repository/external/deliveries` | GET | 最近 100 条转发状态、尝试次数与错误码 |
+| `/api/repositories/:repository/external/deliveries/:id/retry` | POST | 重试失败投递 |
+| `/api/repositories/:repository/external/grants` | GET | 最近 100 条签发记录，无原始凭据和身份 JWT |
 
-列表均可用 repository_id 筛选。订阅签名密钥只在创建／轮换时显示一次。公钥可读，客户端私钥永不上传或回显。凭据兑换失败不降级为长期 PAT，不调用模型或读取其他项目材料。
+全局 `/api/external/` 兼容列表可用 repository_id 筛选，项目路径不允许以查询参数切换仓库。订阅签名密钥只在创建／轮换时显示一次。公钥可读，客户端私钥永不上传或回显。凭据兑换失败不降级为长期 PAT，不调用模型或读取其他项目材料。
 
 ## 参考
 
