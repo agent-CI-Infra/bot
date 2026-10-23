@@ -52,7 +52,7 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 令牌经 manager 直接交给 runner，不写入 `task_tools` 或任务日志；runner 只把它放进该任务之后的 `run_command` 环境变量 `GH_TOKEN`、`GITHUB_TOKEN`，并在命令输出中替换为 `[REDACTED]`。模型拿到的工具结果只有变量名、仓库、权限和到期时间，看不到令牌本身。令牌加入任务的脱敏表，发往模型服务商的请求也会先脱敏。同一任务最多签发 10 次；模型阶段结束（完成、失败或被中止）时，控制面逐个调用 `DELETE /installation/token` 撤销。
 
-令牌和 PR 检视时运行的仓库测试处在同一台虚拟电脑里，测试代码能读到这些环境变量，所以令牌被设计成只读、只覆盖本仓库，并在模型阶段结束时撤销；GitHub 安装令牌最长有效一小时。评论、标签、行内检视、分支和 PR 仍只由控制面用自己的令牌发布。读取 Actions 和检查状态需要 App 授予 Actions、Checks、Commit statuses 的 read 权限；接入向导生成的 manifest 已包含这三项，之前创建的 App 需要在 GitHub 上补加这三项权限，并由安装方同意。
+令牌和 PR 检视时运行的仓库测试处在同一台虚拟电脑里，测试代码能读到这些环境变量，所以令牌被设计成只读、只覆盖本仓库，并在模型阶段结束时撤销；GitHub 安装令牌最长有效一小时。评论、标签、行内检视、分支和 PR 仍只由控制面用自己的令牌发布。读取 Actions 和检查状态需要 App 授予 Actions、Checks、Commit statuses 权限；接入向导生成的 manifest 申请 Actions、Checks 读和 Commit statuses 写（写留给合并门禁发布 commit status，任务令牌仍一律降为读）。之前创建的 App 需要在 GitHub 上补加这三项权限，并由安装方同意。App 刻意不申请 workflows：开发任务改到 `.github/workflows/` 时 GitHub 会拒绝发布。也不申请 administration、secrets、security_events、vulnerability_alerts、secret_scanning_alerts：任务令牌对 PR 代码可见，不能让它读到仓库设置、密钥或未公开的漏洞告警。
 
 ## 代码快照与发布
 
