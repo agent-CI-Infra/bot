@@ -12,7 +12,7 @@ import { Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath } from '../rules/service.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
-const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,max_command_minutes:c.max_command_minutes,network:c.network_policy,toolchain:c.build?.toolchain||null,
+const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 export class TaskEngine {
   readonly active=new Map<string,Promise<void>>();private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
@@ -141,7 +141,8 @@ export class TaskEngine {
         const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
         const command=policy.test_command||result.test_command;if(typeof command!=='string'||!command.trim())stop('test_command_missing','waiting_configuration');
         const before=await workspace.artifact('validate:before');
-        const validation=await workspace.call('validate:tests',{type:'workspace_command',command,timeout_ms:(input.context?.computer?.max_command_minutes||30)*60000});
+        // The required tests run until they end, like any other command.
+        const validation=await workspace.call('validate:tests',{type:'workspace_command',command,timeout_ms:null});
         if(validation.error||validation.exit_code!==0||validation.timed_out||validation.truncated)stop('validation_failed');
         const after=await workspace.artifact('validate:after');if(before.tree_sha!==after.tree_sha)stop('tests_changed_candidate');
         if(after.tree_sha===input.snapshot_tree)stop('development_has_no_changes');

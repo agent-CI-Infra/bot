@@ -33,9 +33,10 @@ try{
       else if(tool.function.name==='write_file'){
         const data=Buffer.from(args.content);if(data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:config.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});
       }else if(tool.function.name==='run_command'){
-        if(args.timeout_seconds>config.max_command_minutes*60)throw new Error('command_timeout_exceeds_project_limit');
-        await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify({operation_id:id,command:args.command,timeout_ms:Math.min(args.timeout_seconds||120,config.max_command_minutes*60)*1000,keep_background:args.keep_background===true}),{mode:0o600});
-        try{result=await workspace({type:'workspace_command',workspace_id:config.workspace_id,command:args.command,timeout_ms:Math.min(args.timeout_seconds||120,config.max_command_minutes*60)*1000,keep_background:args.keep_background===true,output_file:dir+'/command.out'});}finally{await unlink(dir+'/live.json').catch(()=>{});}
+        // Commands have no time limit; the model may still bound one that could hang.
+        const timeout=args.timeout_seconds>0?args.timeout_seconds*1000:null;
+        await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify({operation_id:id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true}),{mode:0o600});
+        try{result=await workspace({type:'workspace_command',workspace_id:config.workspace_id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true,output_file:dir+'/command.out'});}finally{await unlink(dir+'/live.json').catch(()=>{});}
       }else throw new Error('tool_not_allowed');
       await appendFile(dir+'/events.jsonl',JSON.stringify({type:'tool',name:tool.function.name,call_id:id,arguments:args,result})+'\n',{mode:0o600});return {content:[{type:'text',text:JSON.stringify(result)}],details:{}};
     }}));

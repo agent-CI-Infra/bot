@@ -24,7 +24,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   if (policy.review_instructions) for (const path of ['.bot/rules/issue-review.md', '.bot/rules/pr-review.md']) if (!(path in consoleRules)) consoleRules[path] = defaults[path] + '\n\n' + policy.review_instructions;
   if (policy.review_label && !Object.hasOwn(consoleRules,'.bot/rules/labels.md')) consoleRules['.bot/rules/labels.md'] = 'review_label: ' + JSON.stringify(policy.review_label);
   // The existing manager computer is the console layer, not a new resource system.
-  const allowed = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'max_command_minutes', 'egress', 'packages', 'env', 'setup_script'];
+  const allowed = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress', 'packages', 'env', 'setup_script'];
   const consoleComputer = Object.fromEntries(allowed.filter(key => computer[key] !== undefined).map(key => [key, computer[key]]));
   let effectiveComputer = { ...consoleComputer };
   for (const [path, builtin] of Object.entries(defaults)) {
@@ -35,7 +35,10 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
     let effective = layers.at(-1)!.content;
     if (path === '.bot/computer.yaml') {
       try { const value = parse(files[path] || consoleRules[path] || '{}', { maxAliasCount: 0 }) || {};
-        if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !allowed.includes(key))) throw new Error();
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+        // Commands no longer have a time limit; files written for older versions may still set one, which is ignored.
+        delete value.max_command_minutes;
+        if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error();
         effectiveComputer = { ...consoleComputer, ...value }; effective = JSON.stringify(effectiveComputer, null, 2);
       } catch { return fail(400, 'invalid_bot_computer'); }
     }

@@ -1,7 +1,7 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
 const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视规则'], ['development', '开发设置'], ['rules','生效规则'], ['members', '成员', true], ['activity', '运行记录']];
-const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'max_command_minutes'];
+const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb'];
 const packagesText = list => (list || []).join(' '), envText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
 const bytes = value => value == null ? '—' : value >= 1073741824 ? (value / 1073741824).toFixed(2) + ' GB' : value >= 1048576 ? (value / 1048576).toFixed(1) + ' MB' : Math.round(value / 1024) + ' KB';
 function parseEnv(text) {
@@ -114,7 +114,7 @@ function machineSection() {
     note(editable ? '保存后虚拟电脑按新配置重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包时会先构建镜像，首次可能需要几分钟。' : '机器配置由超级管理员设置。'),
     element('h4', '资源'),
     (() => { const grid = element('div', '', 'field-grid'); grid.append(field('CPU（核）', number('cpus', '0.25')), field('内存（MB）', number('memory_mb', '128')), field('进程数上限', number('pids', '1')),
-      field('/tmp 大小（MB）', number('tmp_mb', '16')), field('单条命令最长时间（分钟）', number('max_command_minutes', '1'))); return grid; })(),
+      field('/tmp 大小（MB）', number('tmp_mb', '16'))); return grid; })(),
     checkbox('egress', shown.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）'),
     element('h4', '软件'),
     note(pc.build?.toolchain ? '镜像已包含：' + pc.build.toolchain : ''),

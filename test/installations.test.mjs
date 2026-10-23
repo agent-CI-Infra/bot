@@ -95,3 +95,10 @@ test('runner commands stream output while running and can keep background proces
   const ended = Number(readFileSync(join(dir, 'pid2'), 'utf8')), state = () => { try { return readFileSync(`/proc/${ended}/stat`, 'utf8').split(') ')[1][0]; } catch { return 'gone'; } };
   await new Promise(r => setTimeout(r, 100)); assert.ok(['gone', 'Z'].includes(state()));
 });
+
+test('runner commands without a timeout run until they end; an explicit timeout still stops them', async t => {
+  mkdirSync('.tmp', { recursive: true });
+  const dir = mkdtempSync(resolve('.tmp/command-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.deepEqual(await command('sleep 0.3; echo done', dir, null), { exit_code: 0, signal: null, output: 'done\n', timed_out: false, truncated: false });
+  const stopped = await command('sleep 5; echo late', dir, 200); assert.equal(stopped.timed_out, true); assert.equal(stopped.output, '');
+});

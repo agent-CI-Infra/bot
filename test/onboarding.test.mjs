@@ -29,6 +29,9 @@ test('tunnel token is private and write-only; skip installation does not enable 
 test('rules show per-file precedence and skills; computer overlays the existing manager spec',()=>{
  const policy={review_instructions:'Console review guidance',review_label:'console-label',rule_overrides:JSON.stringify({'.bot/guide.md':'Console guide'})};
  const result=resolveRules(policy,{'.bot/guide.md':'Repository guide','.bot/rules/pr-review.md':'Repository PR rule','.bot/computer.yaml':'memory_mb: 2048\npackages: [jq]','.agents/skills/review/SKILL.md':'Repository skill'},{cpus:2,memory_mb:4096,packages:[],max_command_minutes:60});
+ // max_command_minutes was removed: an old console spec or repository file that still sets it is ignored rather than rejected.
+ assert.equal(result.computer.max_command_minutes,undefined);
+ assert.deepEqual(resolveRules(policy,{'.bot/computer.yaml':'cpus: 1\nmax_command_minutes: 15'}).computer,{cpus:1});
  const guide=result.files.find(row=>row.path==='.bot/guide.md');assert.deepEqual(guide.layers.map(l=>l.source),['builtin','console','repository']);assert.equal(guide.effective,'Repository guide');assert.equal(result.files.find(row=>row.path==='.bot/rules/pr-review.md').effective,'Repository PR rule');assert.equal(result.review_label,'console-label');assert.equal(result.computer.memory_mb,2048);assert.equal(result.computer.cpus,2);assert.equal(result.files.at(-1).path,'.agents/skills/review/SKILL.md');
  assert.throws(()=>resolveRules(policy,{'.bot/computer.yaml':'docker_socket: /var/run/docker.sock'}));
 });

@@ -116,7 +116,9 @@ async function refreshLive(task) {
   liveCommand.text = (liveCommand.text + live.output).slice(-65536); liveCommand.offset = live.offset;
   const panel = scroller(box.parentElement), atBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 60;
   const head = element('div', '', 'step-head'), meta = element('span', '', 'step-meta');
-  meta.append(badge('运行中', 'info'), element('span', `最长 ${Math.round((live.timeout_ms || 120000) / 60000)} 分钟${live.keep_background ? ' · 保留后台进程' : ''}`));
+  // Commands run until they end; only a timeout the agent chose for itself is shown.
+  const notes = [live.timeout_ms ? `超时 ${Math.max(1, Math.round(live.timeout_ms / 60000))} 分钟` : '', live.keep_background ? '保留后台进程' : ''].filter(Boolean);
+  meta.append(badge('运行中', 'info'), element('span', notes.join(' · ')));
   head.append(element('strong', '正在执行命令'), meta);
   box.replaceChildren(head, element('pre', '$ ' + live.command, 'command'), element('pre', liveCommand.text || '（还没有输出）', 'output live-output'));
   box.hidden = false; if (atBottom) panel.scrollTop = panel.scrollHeight;
