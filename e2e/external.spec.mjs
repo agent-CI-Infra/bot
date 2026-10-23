@@ -48,8 +48,9 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await page.setViewportSize({width:390,height:844});await noOverflow(page);await visibleButton(page,guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}));
     await page.screenshot({path:'.tmp/external-e2e/global-mobile.png',fullPage:true});
     await panel.getByRole('link',{name:'配置项目外部执行',exact:true}).first().click();await expect(page).toHaveURL(/\/projects\/101\/external$/);
-    await expect(page.locator('#project-page .external-guide')).toHaveCount(0);
-    await page.getByRole('link',{name:'查看全局接入说明与复制指令',exact:true}).click();await expect(guide).toHaveCount(1);
+    await expect(page.locator('#project-page .external-guide')).toHaveCount(1);
+    await expect(page.locator('#project-page .external-guide').getByRole('button',{name:'复制给我的 AI agent',exact:true})).toBeVisible();
+    await page.getByRole('button',{name:'外部执行端',exact:true}).click();await expect(guide).toHaveCount(1);
     h.store.run("DELETE FROM settings WHERE key='external_token_audience'");await page.getByRole('button',{name:'刷新',exact:true}).click();
     await guide.locator('summary').click();await select.selectOption(a.client.id);await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();
     const missing=await page.evaluate(()=>navigator.clipboard.readText());expect(missing).toContain('兑换地址尚未配置');expect(missing).toContain('不要猜测或编造 URL');expect(missing).not.toContain(h.audience);expect(missing).not.toContain('curl --fail-with-body');expect(missing).not.toContain('https://bot.invalid/external/events');
@@ -105,7 +106,40 @@ test('空项目可直接新增，取消不留下草稿，全局仍只有一套�
   const h=await externalFixture();try{
     await login(page,h);await page.getByRole('button',{name:'外部执行端',exact:true}).click();await expect(page.locator('#external-panel .external-guide')).toHaveCount(1);
     await expect(page.locator('#external-panel')).toContainText('尚未配置外部客户端');await project(page,h);await expect(page.locator('#project-page')).toContainText('尚未配置外部客户端');
+    await expect(page.locator('#project-page .external-guide')).toContainText('在本项目新增个人电脑客户端后');
     await page.getByRole('button',{name:'新增客户端',exact:true}).click();await page.getByLabel('客户端名称',{exact:true}).fill('Discarded draft');await page.getByRole('button',{name:'取消',exact:true}).click();
     await expect(page.locator('#project-page')).not.toContainText('Discarded draft');expect((await h.admin('/api/repositories/101/external/clients')).value.clients).toEqual([]);
+  }finally{await cleanup(h);}
+});
+
+test('项目链接直接展开说明并复制当前项目客户端，刷新读取最新地址，窄屏也能直接复制',async({page,context})=>{
+  const h=await externalFixture(),requests=[];
+  try{
+    const a=await h.client('101',{name:'First workstation'}),b=await h.client('101',{name:'Second workstation'}),foreign=await h.client('202',{name:'Foreign workstation'});
+    const audience='https://executor.invalid/external/token';await h.admin('/api/external/settings','PUT',{token_audience:audience});
+    await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:h.adminBase});
+    page.on('request',request=>requests.push(new URL(request.url()).pathname));
+    // Start from the project URL without ever visiting the global external page.
+    await page.goto(h.adminBase+'/#/projects/101/external');await page.getByLabel('用户名',{exact:true}).fill('administrator');
+    await page.getByLabel('密码',{exact:true}).fill(h.password);await page.getByRole('button',{name:'登录',exact:true}).click();
+    const panel=page.locator('#project-page'),guide=panel.locator('.external-guide'),select=guide.getByRole('combobox',{name:'复制指令所用客户端',exact:true}),copy=guide.getByRole('button',{name:'复制给我的 AI agent',exact:true});
+    await expect(guide).toHaveCount(1);await expect(guide.locator('summary')).toHaveCount(0);
+    await expect(guide).toContainText(audience);await expect(guide).toContainText('GET https://executor.invalid/external/events');await expect(copy).toBeVisible();
+    await expect(panel.getByRole('link',{name:'查看全局接入说明与复制指令',exact:true})).toHaveCount(0);
+    await expect(select.locator('option')).toHaveCount(2);await expect(select.locator('option[value="'+foreign.client.id+'"]')).toHaveCount(0);
+    await select.selectOption(a.client.id);await copy.click();await expect(guide.getByRole('status')).toHaveText('已复制接入指令');
+    const first=await page.evaluate(()=>navigator.clipboard.readText());expect(first).toContain(a.client.id);expect(first).toContain('绑定仓库 ID：101');expect(first).toContain(audience);expect(first).not.toContain(b.client.id);expect(first).not.toContain(foreign.client.id);
+    await select.selectOption(b.client.id);await copy.click();const second=await page.evaluate(()=>navigator.clipboard.readText());expect(second).toContain(b.client.id);expect(second).not.toContain(a.client.id);
+    expect(requests).toContain('/api/external/settings');expect(requests).not.toContain('/api/external/clients');
+    mkdirSync('.tmp/project-external-guide',{recursive:true});await page.setViewportSize({width:1365,height:1000});await noOverflow(page);
+    await page.screenshot({path:'.tmp/project-external-guide/desktop.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});await noOverflow(page);await visibleButton(page,copy);
+    await page.screenshot({path:'.tmp/project-external-guide/mobile.png',fullPage:true});
+    const updated='https://updated.invalid/external/token';await h.admin('/api/external/settings','PUT',{token_audience:updated});await page.reload();
+    await expect(guide).toContainText(updated);await copy.click();expect(await page.evaluate(()=>navigator.clipboard.readText())).toContain(updated);
+    h.store.run("DELETE FROM settings WHERE key='external_token_audience'");await page.reload();
+    await expect(guide).toContainText('兑换地址尚未配置');await copy.click();const missing=await page.evaluate(()=>navigator.clipboard.readText());expect(missing).toContain('兑换地址尚未配置');expect(missing).not.toContain(updated);
+    await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async()=>{throw new Error('unavailable');}}}));
+    await copy.click();await expect(guide.getByLabel('可手动复制的接入指令')).toHaveValue(missing);await expect(page).toHaveURL(/\/projects\/101\/external$/);
   }finally{await cleanup(h);}
 });
