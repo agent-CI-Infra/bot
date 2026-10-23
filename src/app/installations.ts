@@ -1,3 +1,4 @@
+import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
 import { fail, fields, text, type Json } from '../core/security.js';
@@ -119,7 +120,7 @@ export async function installationApi(store: Store, sync: InstallationSync | und
 // One row per repository: what GitHub shows as installed, merged with registration, policy and environment.
 function list(store: Store): Json {
   const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.model_id,
-    e.state AS environment_state FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id`).map(r => [r.id, r]));
+    e.state AS environment_state,${projectActivityColumns} FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id ${projectActivityJoin}`).map(r => [r.id, r]));
   const scope = new Map<string, Row>();
   for (const row of store.all('SELECT i.*,a.name AS account_name FROM installed_repositories i JOIN accounts a ON a.id=i.account_id ORDER BY i.installed DESC')) {
     const current = scope.get(row.repository_id), owner = registered.get(row.repository_id)?.account_id;
@@ -131,7 +132,8 @@ function list(store: Store): Json {
     return { id, full_name: reg?.full_name || seen!.full_name, owner_id: reg?.owner_id || seen!.owner_id, owner_login: seen?.owner_login || '', private: !!seen?.private,
       account_id: reg?.account_id || seen!.account_id, account_name: seen?.account_name || null, installation_id: seen?.installation_id || null,
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
-      review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null };
+      review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
+      running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0 };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));
   return { repositories, syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
 }

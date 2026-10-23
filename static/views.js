@@ -255,6 +255,61 @@ function resultCard(task) {
 taskView.addEventListener('close', () => { clearTimeout(taskTimer); openTaskId = null; });
 $('logout').addEventListener('click', () => { if (taskView.open) taskView.close(); });
 
+// Add future project feature switches here; each one updates only its own policy field.
+const projectFeatures = [['review_enabled', '检视'], ['development_enabled', '开发']];
+function updateProjectTaskPreview(preview, row) {
+  preview.replaceChildren(element('span', `执行中 ${row.running_tasks}`, row.running_tasks ? 'task-count-active' : ''));
+  if (row.queued_tasks) preview.append(element('span', `排队 ${row.queued_tasks}`, 'muted'));
+  preview.title = `正在执行 ${row.running_tasks} 个任务，排队 ${row.queued_tasks} 个任务`;
+  preview.setAttribute('aria-label', `${row.full_name}：${preview.title}，查看运行记录`);
+}
+function projectListControls(row) {
+  const registered = row.registered !== false, group = element('div', '', 'project-controls'), features = element('div', '', 'project-features');
+  group.setAttribute('role', 'group'); group.setAttribute('aria-label', row.full_name + ' 功能与任务');
+  const availability = badge(!registered ? '未启动' : row.enabled ? '已启用' : '已禁用', !registered ? 'info' : row.enabled ? 'success' : 'warning');
+  features.append(availability);
+  if (row.installed === false) features.append(badge('已移出安装', 'danger'));
+  else if (row.installed === null) features.append(badge('不在安装列表'));
+  const feedback = element('p', '', 'project-control-feedback'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
+  let pending = false; const switches = [];
+  const sync = () => switches.forEach(({control, value, key, caption}) => {
+    const on = !!row[key]; control.setAttribute('aria-checked', String(on)); value.textContent = on ? '开' : '关';
+    control.disabled = pending || !registered;
+    control.title = !registered ? '请先启动项目' : !row.enabled ? '项目已禁用；此开关只保存配置，重新启用项目后才会生效' : row.installed === false ? '项目已移出安装范围；此开关只保存配置' : caption === '开发' ? 'Issue 明确要求改代码时自动开发；只修改 bot 自己的分支' : '检视这个项目的 Issue 和 PR';
+  });
+  for (const [key, caption] of projectFeatures) {
+    const control = button('', async () => {
+      if (pending) return; pending = true; sync(); features.setAttribute('aria-busy', 'true'); feedback.className = 'project-control-feedback'; feedback.textContent = `正在保存${caption}…`;
+      try {
+        const {policy} = await api(`/api/repositories/${row.id}/policy`, 'PATCH', {[key]: !row[key]});
+        Object.assign(row, policy); feedback.textContent = `${caption}已${row[key] ? '开启' : '关闭'}${!row.enabled ? '；项目仍已禁用' : ''}`;
+      } catch (err) { feedback.classList.add('control-error'); feedback.textContent = `${caption}保存失败：${err.message}`; }
+      finally { pending = false; features.removeAttribute('aria-busy'); sync(); }
+    }, 'project-feature-switch');
+    control.setAttribute('role', 'switch'); control.setAttribute('aria-label', row.full_name + ' ' + caption);
+    const track = element('span', '', 'switch-track'), value = element('span', '', 'switch-value'); track.setAttribute('aria-hidden', 'true');
+    control.append(element('span', caption), track, value); features.append(control); switches.push({control, value, key, caption});
+  }
+  sync();
+  const preview = element(registered ? 'a' : 'span', '', 'project-task-preview');
+  if (registered) preview.href = `#/projects/${row.id}/activity`;
+  updateProjectTaskPreview(preview, row); features.append(preview); group.append(features, feedback); return group;
+}
+let projectActivityPending = false;
+async function refreshProjectActivity() {
+  if (projectActivityPending) return; projectActivityPending = true; const request = renderVersion;
+  try {
+    const {repositories} = await api(me.role === 'super_admin' ? '/api/installations' : '/api/repositories');
+    if (request !== renderVersion || tab !== 'projects' || projectRoute()) return;
+    const rows = new Map(repositories.map(row => [row.id, row]));
+    for (const line of document.querySelectorAll('#rows .project-list-row')) {
+      const row = rows.get(line.dataset.repositoryId); if (row) updateProjectTaskPreview(line.querySelector('.project-task-preview'), row);
+    }
+  } catch (err) {
+    if (request === renderVersion) for (const preview of document.querySelectorAll('#rows .project-task-preview')) preview.title = `任务数更新失败：${err.message}；点击刷新重试`;
+  } finally { projectActivityPending = false; }
+}
+
 // Installed repositories (super administrator): GitHub shows what is installed; nothing works until it is started here.
 function syncSummary(syncs = []) {
   if (!syncs.length) return '尚未同步';
@@ -264,7 +319,7 @@ function installedDetail(row) {
   const parts = [row.owner_login || '所有者 ' + row.owner_id, row.private ? '私有' : '公开'];
   if (row.account_name) parts.push(row.account_name + (row.installation_id ? ' 安装 ' + row.installation_id : ''));
   parts.push('仓库 ID ' + row.id);
-  if (row.registered) parts.push(`检视${row.review_enabled ? '开' : '关'} · 开发${row.development_enabled ? '开' : '关'}${row.model_id ? '' : ' · 未选模型'}`);
+  if (row.registered && !row.model_id) parts.push('未选模型');
   return parts.join(' · ');
 }
 function installedBadges(row) {
@@ -281,8 +336,8 @@ function installedActions(row, after) {
     await after();
   };
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
-  // Enabling also turns review on, so a manually registered repository starts working too.
-  if (row.registered && (!row.enabled || !row.review_enabled)) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
+  // Review has its own switch; this action resumes a disabled project.
+  if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
   if (row.registered && row.enabled) actions.append(button('禁用', () => {
     if (confirm(`禁用 ${row.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) call('disable', {}, `正在禁用 ${row.full_name}…`);
   }));

@@ -34,3 +34,5 @@
 | `/hooks/github/:account/:endpoint` | POST | 仅 Webhook 端口，按已登记入口验签和归档 |
 
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置、未启动或已禁用的仓库只归档，不生成任务。
+
+项目列表接口 `GET /api/repositories` 与超级管理员的 `GET /api/installations` 在每个仓库上返回 `running_tasks` 和 `queued_tasks`。前者仅统计实际执行阶段，后者统计 queued；配置等待、环境等待与已结束任务不计入执行中。返回范围沿用项目管理员的仓库权限。列表开关调用 `PATCH /api/repositories/{id}/policy`，仅提交本次切换的 `review_enabled` 或 `development_enabled`，不更改项目总启用状态。
