@@ -55,8 +55,8 @@ async function render() {
   const request=++renderVersion, taskTab = !!taskKinds[tab];
   $('message').textContent = ''; $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  $('add').hidden = listTabs.includes(tab) || me.role !== 'super_admin';
-  $('add').textContent = tab === 'projects' ? '手动登记仓库' : '新增';
+  // Repositories come from installation sync and are started from the list, so the projects page has no add form.
+  $('add').hidden = listTabs.includes(tab) || tab === 'projects' || me.role !== 'super_admin';
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
   $('rows').hidden=['external','onboarding'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('sync').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
@@ -113,11 +113,10 @@ async function render() {
 }
 const forms = {
   accounts: [['name', '账号名称'], ['type', '账号类型', [['bot_account', '机器人账号'], ['github_app', 'GitHub App']]], ['app_id', 'App ID（仅 GitHub App）'], ['private_key', 'App 私钥（仅 GitHub App）', 'textarea'], ['token', '机器人 Token（仅机器人账号）', 'password'], ['webhook_secret', 'Webhook 签名凭据', 'password']],
-  projects: [['id', 'GitHub 仓库 ID'], ['full_name', '仓库 owner/repo'], ['owner_id', '组织或所有者 ID'], ['account_id', '关联账号', () => accounts.map(a => [a.id, a.name])]],
   users: [['username', '用户名'], ['password', '初始密码（至少 12 位）', 'password'], ['role', '角色', [['project_admin', '项目管理员'], ['super_admin', '超级管理员']]], ['repository_ids', '分配仓库 ID（逗号分隔，可留空）']]
 };
 $('add').addEventListener('click', () => {
-  $('editor-title').textContent = tab === 'projects' ? '手动登记仓库' : '新增' + titles[tab]; $('editor-fields').replaceChildren(); $('editor-error').textContent = '';
+  $('editor-title').textContent = '新增' + titles[tab]; $('editor-fields').replaceChildren(); $('editor-error').textContent = '';
   for (const [name, title, kind] of forms[tab]) {
     const label = element('label', title), choices = typeof kind === 'function' ? kind() : kind;
     const input = document.createElement(Array.isArray(choices) ? 'select' : kind === 'textarea' ? 'textarea' : 'input'); input.name = name;
@@ -133,7 +132,7 @@ $('editor-form').addEventListener('submit', async event => {
   if (tab === 'accounts') { if (data.type === 'github_app') delete data.token; else { delete data.private_key; delete data.app_id; } }
   if (tab === 'users') data.repository_ids = data.repository_ids.split(',').map(s => s.trim()).filter(Boolean);
   const submit = form.querySelector('[type=submit]'); submit.disabled = true;
-  try { await api('/api/' + (tab === 'projects' ? 'repositories' : tab), 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
+  try { await api('/api/' + tab, 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
 });
 $('cancel').addEventListener('click', () => { $('editor').close(); $('editor-form').reset(); });
 $('close-detail').addEventListener('click', () => $('detail').close());

@@ -25,13 +25,14 @@ export async function harness(t, manager, options = {}) {
   h.stop = async () => { await h.external?.forwarder.close(); await Promise.all(Object.values(servers).map(server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }))); store.close(); };
   h.client = () => {
     let cookie = '', csrf = '';
-    return async (path, method = 'GET', data, headers = {}) => {
+    const client = async (path, method = 'GET', data, headers = {}) => {
       const r = await fetch(h.admin + path, { method, headers: { 'Content-Type': 'application/json', Cookie: cookie, 'X-CSRF-Token': csrf, ...headers },
         ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
       const value = await r.json(); if (r.headers.get('set-cookie')) cookie = r.headers.get('set-cookie').split(';')[0];
       if (value.csrf_token) csrf = value.csrf_token;
       return { status: r.status, value, headers: r.headers };
     };
+    client.harness = h; return client;
   };
   h.hook = async (endpoint, secret, delivery, payload, headers = {}) => {
     const raw = typeof payload === 'string' ? payload : JSON.stringify(payload);
@@ -55,8 +56,14 @@ export async function account(admin, overrides = {}) {
   if (result.status !== 201) throw new Error(JSON.stringify(result));
   return { ...result.value.account, secret, token, path: result.value.account.endpoints[0].webhook_path };
 }
+// Repositories appear through installation sync and a super administrator starts them; tests take the same path.
 export async function repository(admin, accountId, id) {
-  const result = await admin('/api/repositories', 'POST', { id, full_name: `fixture/project-${id}`, owner_id: '10', account_id: accountId });
+  admin.harness.store.run(`INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,synced_at)
+    VALUES(?,?,?,?,?,0,1,?) ON CONFLICT DO NOTHING`, accountId, id, `fixture/project-${id}`, '10', 'fixture', new Date().toISOString());
+  const result = await admin(`/api/installations/${id}/activate`, 'POST', { account_id: accountId });
   if (result.status !== 201) throw new Error(JSON.stringify(result));
-  return result.value.repository;
+  // Starting turns review on; tests begin from a registered repository with review off.
+  const policy = await admin(`/api/repositories/${id}/policy`, 'PATCH', { review_enabled: false });
+  if (policy.status !== 200) throw new Error(JSON.stringify(policy));
+  return (await admin('/api/repositories/' + id)).value.repository;
 }

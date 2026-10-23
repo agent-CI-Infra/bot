@@ -270,7 +270,7 @@ function installedDetail(row) {
 function installedBadges(row) {
   const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : row.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning')];
   if (row.installed === false) badges.push(badge('已移出安装', 'danger'));
-  else if (row.installed === null) badges.push(badge('手动登记'));
+  else if (row.installed === null) badges.push(badge('不在安装列表'));
   return badges;
 }
 function installedActions(row, after) {
