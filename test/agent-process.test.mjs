@@ -91,14 +91,15 @@ test('a super administrator choosing a shared model grants it to the repository;
   assert.equal((await member('/api/repositories/101/policy', 'PATCH', { model_id: shared.id })).status, 400);
   assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id, test_command: 'npm test', max_revisions: 2 })).value.policy.model_id, shared.id);
   assert.ok(h.store.get('SELECT 1 FROM model_projects WHERE model_id=? AND repository_id=?', shared.id, '101'));
-  assert.equal((await member('/api/repositories/101/policy', 'PATCH', { review_label: 'bot-reviewed' })).value.policy.review_label, 'bot-reviewed');
+  assert.equal((await member('/api/repositories/101/policy', 'PATCH', { review_pr_updates: false })).value.policy.review_pr_updates, 0);
 });
 
 test('review rules choose the triggers, and the comment language and only the effective file text reaches the model, with language as a separate setting', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  for (const body of [{ review_issues: 'yes' }, { review_language: 'fr' }, { review_language: ['zh'] }, { review_instructions: 'x'.repeat(8001) }])
+  // Review guidance and the label are rule files now, so the policy no longer accepts them.
+  for (const body of [{ review_issues: 'yes' }, { review_language: 'fr' }, { review_language: ['zh'] }, { review_instructions: 'x' }, { review_label: 'x' }])
     assert.equal((await admin('/api/repositories/101/policy', 'PATCH', body)).status, 400);
-  const saved = (await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, review_issues: false, review_pr_updates: false, review_language: 'zh', review_instructions: 'Focus on API compatibility.' })).value.policy;
+  const saved = (await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, review_issues: false, review_pr_updates: false, review_language: 'zh' })).value.policy;
   assert.deepEqual([saved.review_issues, saved.review_pull_requests, saved.review_pr_updates, saved.review_language], [0, 1, 0, 'zh']);
   const pr = (action, sha) => ({ repository: { id: 101 }, action, pull_request: { number: 7, draft: false, state: 'open', head: { sha } } });
   assert.equal((await h.hook(a.path, a.secret, 'issue', { repository: { id: 101 }, action: 'opened', issue: { number: 1, title: 'x', body: 'x' } })).value.tasks_created, 0);

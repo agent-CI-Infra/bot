@@ -70,13 +70,13 @@ test('GitHub App tokens are signed in the control plane and restricted to the co
   await github.connect(false);assert.deepEqual(tokenRequest.repository_ids,[101]);assert.equal(tokenRequest.permissions.contents,'read');assert.equal(github.actorId,'999');
   assert.equal(redactor.text(installationToken),'[REDACTED]');assert.equal(redactor.text(privateKey.trim()),'[REDACTED]');
 });
-test('review_label is an optional validated policy string',async t=>{
+test('the review label is declared in labels.md and validated when the console layer is saved',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-  assert.equal((await admin('/api/repositories/101')).value.policy.review_label,'');
-  for(const review_label of [' padded','x'.repeat(51),'tab\tlabel',7])assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label})).status,400);
-  assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label:'bot-reviewed'})).value.policy.review_label,'bot-reviewed');
-  assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_enabled:true})).value.policy.review_label,'bot-reviewed');
-  assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label:''})).value.policy.review_label,'');
+  const label=async()=>(await admin('/api/repositories/101/rules')).value.rules.review_label,put=content=>admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/labels.md',content});
+  assert.equal(await label(),'bot-reviewed');assert.equal((await admin('/api/repositories/101/policy','PATCH',{review_label:'other'})).status,400);
+  for(const name of ['x'.repeat(51),'"tab\\tlabel"','" padded"'])assert.equal((await put('review_label: '+name)).status,400);
+  assert.equal((await put('review_label: project-reviewed')).status,200);assert.equal(await label(),'project-reviewed');
+  assert.equal((await put(null)).status,200);assert.equal(await label(),'bot-reviewed');
 });
 test('reviews always publish one summary comment and the policy label is applied once',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');

@@ -1,6 +1,17 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视规则'], ['development', '开发设置'], ['rules','生效规则'], ['members', '成员', true], ['activity', '运行记录']];
+const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视'], ['development', '开发'], ['rules', '规则总览'], ['members', '成员', true], ['activity', '运行记录']];
+// The bot's rule files: what each one does, which tasks read it, and the section where it is edited.
+// Every file has the same three layers: built-in default, project console override, default-branch repository file.
+const ruleFiles = [
+  ['.bot/guide.md', '行为指南', '全部任务', 'rules'],
+  ['.bot/rules/issue-review.md', 'Issue 检视规则', 'Issue 检视', 'review'],
+  ['.bot/rules/pr-review.md', 'PR 检视规则', 'PR 检视', 'review'],
+  ['.bot/rules/labels.md', '检视标签', 'Issue 与 PR 检视', 'review'],
+  ['.bot/rules/issue-development.md', '开发规则', '开发', 'development'],
+  ['.bot/computer.yaml', '虚拟电脑', '全部任务', 'machine']];
+const layerNames = { builtin: '内置默认', console: '项目控制台', repository: '仓库文件' };
+const ruleInfo = path => ruleFiles.find(([p]) => p === path) || [path, '仓库 skill', '全部任务', 'rules'];
 const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb'];
 const packagesText = list => (list || []).join(' '), envText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
 const bytes = value => value == null ? '—' : value >= 1073741824 ? (value / 1073741824).toFixed(2) + ' GB' : value >= 1048576 ? (value / 1048576).toFixed(1) + ' MB' : Math.round(value / 1024) + ' KB';
@@ -50,6 +61,8 @@ async function renderProject(route) {
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   current.section = section; page.replaceChildren(projectHeader(), projectBody(section));
   if(section==='rules')page.querySelector('.project-nav [aria-current=page]')?.scrollIntoView({block:'nearest',inline:'nearest'});
+  // Opening a rule file from the overview, or saving one, brings its card into view.
+  if (current.focusRule) { page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
 }
 async function loadProject(id) {
@@ -108,9 +121,13 @@ function machineSection() {
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
   const number = (name, step) => input(name, shown[name], { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '' });
-  const sourceLink=element('a','查看生效规则与来源');sourceLink.href=`#/projects/${current.id}/rules`;
+  const sourceLink=element('a','查看规则总览');sourceLink.href=`#/projects/${current.id}/rules`;
+  const sourceActions=element('div','','actions');sourceActions.append(sourceLink);
+  // Tasks apply the repository file when they prepare; a super administrator can apply it right away.
+  if(source?.source==='repository'&&editable){const apply=button('立即应用仓库文件',async()=>{apply.disabled=true;apply.textContent='正在按仓库文件重建虚拟电脑…';
+    try{await api(`/api/repositories/${current.id}/rules/apply-computer`,'POST',{});current.flash='已按仓库 .bot/computer.yaml 重建虚拟电脑';await reloadProject();}catch(err){apply.disabled=false;apply.textContent='立即应用仓库文件';error(err);}});sourceActions.append(apply);}
   const nodes = [
-    note(source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的生效值。这里保存的是控制台配置，下次任务准备时会再次被仓库文件覆盖。':'表单显示当前生效电脑规格；仓库 .bot/computer.yaml 可以覆盖控制台值。'),sourceLink,
+    note(source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的生效值。这里保存的是控制台配置，下次任务准备时会再次被仓库文件覆盖。':'表单显示当前生效电脑规格；仓库 .bot/computer.yaml 可以覆盖控制台值。'),sourceActions,
     note(editable ? '保存后虚拟电脑按新配置重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包时会先构建镜像，首次可能需要几分钟。' : '机器配置由超级管理员设置。'),
     element('h4', '资源'),
     (() => { const grid = element('div', '', 'field-grid'); grid.append(field('CPU（核）', number('cpus', '0.25')), field('内存（MB）', number('memory_mb', '128')), field('进程数上限', number('pids', '1')),
@@ -235,16 +252,13 @@ function reviewSection() {
   language.value = policy.review_language || 'auto';
   const nodes = [checkbox('review_enabled', policy.review_enabled, '检视这个项目的 Issue 和 PR'),
     element('h4', '何时检视'), checkbox('review_issues', policy.review_issues, '新打开的 Issue'), checkbox('review_pull_requests', policy.review_pull_requests, '新打开或从草稿转为可检视的 PR'),
-    checkbox('review_pr_updates', policy.review_pr_updates, 'PR 推送新提交后（bot PR 的自动跟进也依赖它）'), note('草稿 PR 不检视；编辑、评论和重新打开不额外触发。'),
-    element('h4', '怎么写'), field('评论语言', language),
-    field('项目检视指引', textarea('review_instructions', policy.review_instructions, { rows: 7, maxLength: 8000, placeholder: '写给检视 Agent 的项目规则，例如：\n- 重点关注 API 兼容性和数据迁移\n- 新增功能必须有测试，否则作为发现提出\n- 不评论代码格式，由 CI 检查' })),
-    note('项目检视指引属于控制台层，写入 Issue／PR 检视规则；默认分支对应仓库文件生效时整份覆盖，不会额外拼接。请在「生效规则」查看最终文本。行内评论固定 COMMENT，不会批准、请求修改或合并。'),
-    field('检视后打的标签', input('review_label', policy.review_label, { maxLength: 50, placeholder: '未设置时使用生效规则，默认 bot-reviewed' })),note('这里与「生效规则 → .bot/rules/labels.md」是同一控制台标签配置，修改一处会同步另一处。仓库文件优先；清空保存可关闭控制台标签，未设置时使用内置默认。')];
-  return [settingsForm('检视规则', nodes, form => patchPolicy(changed({
+    checkbox('review_pr_updates', policy.review_pr_updates, 'PR 推送新提交后（bot PR 的自动跟进也依赖它）'), note('草稿 PR 不检视；编辑、评论和重新打开不额外触发。行内评论固定 COMMENT，不会批准、请求修改或合并。'),
+    field('评论语言', language)];
+  return [settingsForm('检视开关', nodes, form => patchPolicy(changed({
     review_enabled: form.elements.review_enabled.checked, review_issues: form.elements.review_issues.checked, review_pull_requests: form.elements.review_pull_requests.checked,
-    review_pr_updates: form.elements.review_pr_updates.checked, review_language: form.elements.review_language.value, review_instructions: form.elements.review_instructions.value,
-    review_label: form.elements.review_label.value.trim() }, { review_enabled: !!policy.review_enabled, review_issues: !!policy.review_issues, review_pull_requests: !!policy.review_pull_requests,
-    review_pr_updates: !!policy.review_pr_updates, review_language: policy.review_language || 'auto', review_instructions: policy.review_instructions || '', review_label: policy.review_label || '' })))];
+    review_pr_updates: form.elements.review_pr_updates.checked, review_language: form.elements.review_language.value }, { review_enabled: !!policy.review_enabled,
+    review_issues: !!policy.review_issues, review_pull_requests: !!policy.review_pull_requests, review_pr_updates: !!policy.review_pr_updates, review_language: policy.review_language || 'auto' }))),
+    ...['.bot/rules/issue-review.md', '.bot/rules/pr-review.md', '.bot/rules/labels.md'].map(ruleCard)];
 }
 
 function developmentSection() {
@@ -253,8 +267,9 @@ function developmentSection() {
     field('测试命令', input('test_command', policy.test_command, { maxLength: 2048, placeholder: '如 npm test；留空时使用模型给出的命令' })),
     field('bot PR 自动修订轮数', input('max_revisions', policy.max_revisions, { type: 'number', min: 0, max: 10, step: 1 })),
     note('开发只在检视开启时衔接：Issue 检视认定需要改代码、给出原文依据且不缺信息时才创建开发任务。测试不通过不推分支、不开 PR；别人的 PR 只评论，不会推送到作者分支。')];
-  return [settingsForm('开发设置', nodes, form => patchPolicy(changed({ development_enabled: form.elements.development_enabled.checked, test_command: form.elements.test_command.value,
-    max_revisions: Number(form.elements.max_revisions.value) }, { development_enabled: !!policy.development_enabled, test_command: policy.test_command || '', max_revisions: policy.max_revisions })))];
+  return [settingsForm('开发开关', nodes, form => patchPolicy(changed({ development_enabled: form.elements.development_enabled.checked, test_command: form.elements.test_command.value,
+    max_revisions: Number(form.elements.max_revisions.value) }, { development_enabled: !!policy.development_enabled, test_command: policy.test_command || '', max_revisions: policy.max_revisions }))),
+    ruleCard('.bot/rules/issue-development.md')];
 }
 
 function membersSection() {
@@ -295,35 +310,69 @@ function activityCards() {
   return [work, recent, history];
 }
 
-function rulesSection(){
-  const id=current.id,section=card('生效规则与来源'),intro=note('内置默认 → 项目控制台 → 默认分支仓库文件；PR 中的新行为文件不会直接启用。机器资源沿用「机器配置」。'),source=note('正在读取规则来源…'),message=element('p','','view-error'),head=element('div','','actions'),detail=element('div','','rule-layers');
-  message.setAttribute('role','alert');let busy=false,selected;
-  const refresh=button('刷新默认分支文件',()=>load(true)),select=document.createElement('select');select.setAttribute('aria-label','规则文件');
-  head.append(refresh,button('打开机器配置',()=>openProject(id,'machine')));section.append(intro,source,head,field('规则文件',select),message,detail);
-  async function load(update=false){
-    if(busy)return;busy=true;refresh.disabled=true;refresh.textContent=update?'正在读取默认分支…':'正在读取…';message.textContent='';
-    try{
-      const {rules}=await api(`/api/repositories/${id}/rules${update?'/refresh':''}`,update?'POST':'GET',update?{}:undefined);
-      if(current.id!==id||current.section!=='rules')return;
-      current.rules=rules;source.textContent=rules.sha?`来源提交 ${rules.sha} · ${timestamp(rules.updated_at)}`:'尚未读取默认分支。当前展示内置与控制台配置，请点击刷新。';
-      select.replaceChildren();rules.files.forEach(row=>select.add(new Option(row.path,row.path)));if(rules.files.some(r=>r.path===selected))select.value=selected;
-      function show(){
-        selected=select.value;const row=rules.files.find(item=>item.path===selected),names={builtin:'内置默认',console:'项目控制台',repository:'仓库文件'};
-        detail.replaceChildren(element('p','最终来源：'+names[row.source],'rule-source'),collapsible('最终生效内容',row.effective,true));
-        for(const layer of row.layers)detail.append(collapsible(names[layer.source]+' · '+row.path,layer.content));
-        if(row.path==='.bot/computer.yaml'){
-          detail.append(note('合并到现有项目电脑规格，任务准备时应用默认分支配置；手动应用仅限超级管理员。'));
-          if(me.role==='super_admin')detail.append(button('应用到此项目电脑',async()=>{try{await api(`/api/repositories/${id}/rules/apply-computer`,'POST',{});await load();}catch(e){message.textContent=e.message;}}));
-        }else if(row.path.startsWith('.bot/')){
-          const consoleLayer=row.layers.find(layer=>layer.source==='console'),editor=textarea('rule_content',consoleLayer?.content??'',{rows:6,spellcheck:false}),actions=element('div','','actions');
-          detail.append(field('项目控制台覆盖内容',editor),note(row.source==='repository'?'该文件已被仓库覆盖。控制台保存仍会保留，但最终以仓库文件为准。':'留空也是明确的空内容；恢复默认请使用清除按钮。'));
-          if(row.path==='.bot/rules/labels.md')detail.append(note('与「检视规则 → 检视后打的标签」共用同一控制台层；保存 review_label 声明会同步该表单。默认分支仓库文件仍优先。'));
-          const save=async(content)=>{try{await api(`/api/repositories/${id}/rules`,'PUT',{path:row.path,content});await load();}catch(e){message.textContent=e.message;}};
-          actions.append(button('保存控制台覆盖',()=>save(editor.value)),button('清除控制台覆盖',()=>save(null)));detail.append(actions);
-        }
-      }
-      select.onchange=show;show();
-    }catch(e){message.textContent=e.message;}finally{busy=false;refresh.disabled=false;refresh.textContent='刷新默认分支文件';}
+// One rule file: what it does, where the effective text comes from, and the project console override (edited on demand).
+function ruleCard(path) {
+  const [, purpose, task] = ruleInfo(path), row = current.rules?.files.find(file => file.path === path), section = card(purpose);
+  section.classList.add('rule-card'); section.dataset.rulePath = path;
+  if (!row) { section.append(note(current.rules ? '仓库没有这个文件。' : '暂时读不到规则文件，稍后再试。')); return section; }
+  const meta = element('div', '', 'rule-meta'); meta.append(element('code', path), badge('生效：' + layerNames[row.source], row.source === 'builtin' ? '' : 'info'), element('span', '用于' + (/^[A-Za-z]/.test(task) ? ' ' : '') + task, 'muted'));
+  section.append(meta);
+  if (current.ruleNotice?.path === path) { const done = element('p', current.ruleNotice.text, 'view-success flash'); done.setAttribute('role', 'status'); section.append(done); current.ruleNotice = null; }
+  // Short files are shown open; long ones stay folded with their size so the page remains scannable.
+  const lines = row.effective.split('\n').length;
+  section.append(collapsible(lines > 15 ? `当前生效内容（${lines} 行）` : '当前生效内容', row.effective, lines <= 15));
+  for (const layer of row.layers) if (layer.source !== row.source) section.append(collapsible(`${layerNames[layer.source]}（被覆盖）`, layer.content));
+  if (!path.startsWith('.bot/rules/') && path !== '.bot/guide.md') return section;
+  const consoleLayer = row.layers.find(layer => layer.source === 'console'), actions = element('div', '', 'actions'), message = element('p', '', 'view-error');
+  message.setAttribute('role', 'alert');
+  section.append(note(row.source === 'repository' ? (consoleLayer ? '默认分支的仓库文件整份覆盖控制台内容；控制台覆盖只在仓库删除该文件后生效。' : '默认分支的仓库文件整份覆盖内置默认；在这里添加的控制台覆盖只在仓库删除该文件后生效。')
+    : consoleLayer ? '项目控制台覆盖了内置默认；默认分支加入同名仓库文件后以仓库为准。' : '使用内置默认。保存控制台覆盖后整份替换内置内容；默认分支加入同名仓库文件后以仓库为准。'), actions, message);
+  const save = async content => {
+    try { const { rules } = await api(`/api/repositories/${current.id}/rules`, 'PUT', { path, content }); current.rules = rules;
+      current.ruleNotice = { path, text: content === null ? '已清除控制台覆盖' : '已保存控制台覆盖' }; current.focusRule = path; renderProject({ id: current.id, section: current.section }); }
+    catch (err) { message.textContent = err.message; }
+  };
+  // Browse first, edit on demand: the editor starts from the console text, or from the built-in default when there is none.
+  actions.append(button(consoleLayer ? '编辑控制台覆盖' : '添加控制台覆盖', () => {
+    const form = document.createElement('form'), editor = textarea('rule_content', consoleLayer?.content ?? row.layers[0].content, { rows: 8, spellcheck: false, className: 'code' }), buttons = element('div', '', 'actions');
+    form.className = 'project-form rule-editor'; editor.setAttribute('aria-label', path + ' 控制台覆盖');
+    const submit = element('button', '保存'); submit.type = 'submit'; buttons.append(submit, button('取消', () => { form.remove(); actions.hidden = false; }));
+    form.append(editor, buttons); form.addEventListener('submit', event => { event.preventDefault(); submit.disabled = true; save(editor.value).finally(() => { submit.disabled = false; }); });
+    actions.hidden = true; actions.after(form); editor.focus();
+  }));
+  if (consoleLayer) actions.append(button('清除控制台覆盖', () => { if (confirm(`清除 ${path} 的控制台覆盖？`)) save(null); }));
+  return section;
+}
+
+// One place to see every rule file: purpose, path, tasks, and which layer wins.
+function rulesSection() {
+  const id = current.id, rules = current.rules, overview = card('规则总览'), message = element('p', '', 'view-error'), head = element('div', '', 'actions');
+  overview.classList.add('rule-overview'); message.setAttribute('role', 'alert');
+  overview.append(note('每个任务读取自己的规则文件，行为指南和虚拟电脑对全部任务生效。优先级：内置默认 → 项目控制台 → 默认分支仓库文件，后一层存在时整份覆盖前一层；PR 里改动的规则文件合入默认分支后才生效。'));
+  if (!rules) { overview.append(note('暂时读不到规则文件，稍后再试。')); return [overview]; }
+  const source = note(rules.sha ? `仓库文件来自默认分支提交 ${rules.sha.slice(0, 12)} · ${timestamp(rules.updated_at)}` : '尚未读取默认分支，下表只含内置与控制台配置。'); if (rules.sha) source.title = rules.sha;
+  overview.append(source, head, message);
+  const refresh = button('刷新默认分支文件', async () => {
+    refresh.disabled = true; refresh.textContent = '正在读取默认分支…'; message.textContent = '';
+    try { const result = await api(`/api/repositories/${id}/rules/refresh`, 'POST', {}); current.rules = result.rules; current.flash = `已读取默认分支提交 ${result.rules.sha.slice(0, 12)}`; renderProject({ id, section: 'rules' }); }
+    catch (err) { message.textContent = err.message; refresh.disabled = false; refresh.textContent = '刷新默认分支文件'; }
+  });
+  head.append(refresh);
+  const table = document.createElement('table'), body = document.createElement('tbody'); table.className = 'rule-table';
+  const headRow = document.createElement('tr'); for (const caption of ['作用', '文件', '用于', ...Object.values(layerNames), '']) headRow.append(element('th', caption));
+  table.createTHead().append(headRow); table.append(body);
+  const known = ruleFiles.map(([path]) => path), skills = rules.files.filter(file => !known.includes(file.path));
+  for (const path of [...known, ...skills.map(file => file.path)]) {
+    const [, purpose, task, target] = ruleInfo(path), row = rules.files.find(file => file.path === path), tr = document.createElement('tr');
+    const cell = (label, ...nodes) => { const td = document.createElement('td'); td.dataset.label = label; td.append(...nodes); tr.append(td); };
+    cell('作用', element('strong', purpose)); cell('文件', element('code', path)); cell('用于', task);
+    // Each layer is the winner, present but overridden, or absent.
+    for (const [source, caption] of Object.entries(layerNames)) cell(caption, !row?.layers.some(layer => layer.source === source) ? element('span', '—', 'muted') : row.source === source ? badge('生效', 'success') : badge('被覆盖'));
+    const open = () => { current.focusRule = path; if (current.section === target) renderProject({ id, section: target }); else openProject(id, target); };
+    cell('', button(path.startsWith('.agents/') ? '查看' : '编辑', open));
+    body.append(tr);
   }
-  void load();return [section];
+  const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); overview.append(wrap);
+  // The behavior guide applies to every task, so it is edited here; repository skills are read-only text.
+  return [overview, ruleCard('.bot/guide.md'), ...skills.map(file => ruleCard(file.path))];
 }
