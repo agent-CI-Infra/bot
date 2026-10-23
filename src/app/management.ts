@@ -1,3 +1,4 @@
+import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { createPrivateKey } from 'node:crypto';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
@@ -147,8 +148,8 @@ export async function management(store: Store, user: Actor, method: string, path
   if (path === '/api/repositories') {
     if (method === 'GET') {
       const filter = scope(user, 'r.id');
-      return { repositories: store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled,p.automation FROM repositories r
-        JOIN policies p ON p.repository_id=r.id WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args) };
+      return { repositories: store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled,p.automation,${projectActivityColumns} FROM repositories r
+        JOIN policies p ON p.repository_id=r.id ${projectActivityJoin} WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args) };
     }
   }
   const repoMatch = /^\/api\/repositories\/([^/]+)(\/policy)?$/.exec(path);

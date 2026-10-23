@@ -83,14 +83,13 @@ async function render() {
       : taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+taskErrorText(row.error_code) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
       : tab === 'accounts' ? `${row.type === 'github_app' ? 'GitHub App · App ID '+row.app_id : '机器人账号'}`
       : tab === 'users' ? `${row.role === 'super_admin' ? '超级管理员' : '项目管理员'} · ID ${row.id}`
-      : installedView ? installedDetail(row) : `仓库 ID ${row.id} · 检视${row.review_enabled ? '开' : '关'} · 开发${row.development_enabled ? '开' : '关'}${row.model_id ? '' : ' · 未选模型'}`;
+      : installedView ? installedDetail(row) : `仓库 ID ${row.id}${row.model_id ? '' : ' · 未选模型'}`;
     content.append(element('p', detail)); line.append(content);
     if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     if(tab==='events')for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
     if(tab==='accounts')status.append(element('span',row.credentials_configured?'凭据已配置':'凭据已撤销','status status-'+(row.credentials_configured?'success':'warning')));
     if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
-    if(installedView)status.append(...installedBadges(row));
-    else if(tab==='projects')status.append(!row.enabled?badge('已禁用','warning'):row.review_enabled?badge('工作中','success'):badge('未开检视','warning'));
+    if(tab==='projects'){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(tab==='accounts'&&row.endpoints.length){const endpoints=element('details',''),summary=element('summary',`${row.endpoints.length} 个 Webhook 入口`);endpoints.append(summary);row.endpoints.forEach(e=>endpoints.append(element('code',e.webhook_path)));content.append(endpoints);}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
@@ -154,3 +153,5 @@ $('filters').addEventListener('submit', event => { event.preventDefault(); offse
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
 document.addEventListener('DOMContentLoaded',()=>start().catch(error),{once:true});
 setInterval(()=>{if(me&&['reviews','developments'].includes(tab)&&!projectRoute()&&!document.querySelector('dialog[open]'))render().catch(error);},5000);
+
+setInterval(()=>{if(me&&tab==='projects'&&!projectRoute()&&!document.querySelector('dialog[open]'))refreshProjectActivity();},5000);

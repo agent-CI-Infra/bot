@@ -103,3 +103,17 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
   .rule-table td:last-child{text-align:left}.rule-table td:last-child::before{content:''}
   .rule-table td>.status,.rule-table td>button{justify-self:start}
 }
+
+/* The project row keeps feature status, direct switches and task counts together on the right. */
+#rows[data-view=projects] .project-list-row{grid-template-columns:minmax(200px,1fr) minmax(0,max-content) max-content;gap:10px 16px}
+.project-overview{min-width:0;max-width:none}.project-controls{min-width:0}.project-features{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px 12px}
+.project-feature-switch{display:inline-flex;align-items:center;gap:6px;padding:4px 6px;min-height:32px;border-color:transparent;background:transparent;color:#365564;font-size:12px;white-space:nowrap}
+.project-feature-switch:hover{background:#edf4f6;filter:none}.switch-track{width:28px;height:16px;position:relative;flex-shrink:0;background:#879da7;border-radius:10px}
+.switch-track::after{content:'';position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff}
+.project-feature-switch[aria-checked=true] .switch-track{background:#16636b}.project-feature-switch[aria-checked=true] .switch-track::after{left:14px}.switch-value{min-width:1em}
+.project-task-preview{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;font-size:12px;padding:6px;border-radius:4px;text-decoration:none}
+.project-task-preview:hover{background:#edf4f6;text-decoration:underline}.task-count-active{color:#16636b;font-weight:700}.project-control-feedback{max-width:460px;text-align:right;overflow-wrap:anywhere}.project-control-feedback:empty{display:none}.project-control-feedback.control-error{color:#a2292b}
+@media(max-width:1000px){#rows[data-view=projects] .project-list-row{grid-template-columns:minmax(0,1fr) auto}#rows[data-view=projects] .project-overview{grid-column:1/-1;grid-row:2;justify-content:flex-start}#rows[data-view=projects] .project-list-row>.actions{grid-column:2;grid-row:1;justify-content:flex-end}.project-features{justify-content:flex-start}.project-control-feedback{text-align:left}}
+@media(max-width:760px){.project-feature-switch{min-height:36px}.project-features{gap:6px 8px}.project-task-preview{min-height:36px}}
+
+@media(min-width:1001px){.project-task-preview{min-width:112px;justify-content:flex-end}}
