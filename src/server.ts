@@ -52,6 +52,16 @@ export function createControlPlane(options: Options) {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname;
     if (req.method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'webhook')); return; }
     if (req.method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
+    if(req.method==='GET'&&path==='/external/events'){
+      if(url.search)fail(400,'unexpected_query');
+      await external.events.poll(String(req.headers.authorization||''),value=>new Promise<void>((resolve,reject)=>{
+        if(res.destroyed){reject(new Error('response_closed'));return;}
+        const cleanup=()=>{res.off('finish',finish);res.off('close',close);res.off('error',close);};
+        const finish=()=>{cleanup();resolve();},close=()=>{cleanup();reject(new Error('response_closed'));};
+        res.once('finish',finish);res.once('close',close);res.once('error',close);
+        respond(res,200,value);
+      }));return;
+    }
     if(req.method==='POST'&&['/external/token','/external/revoke'].includes(path)){
       if(!req.headers['content-type']?.startsWith('application/json'))fail(415,'json_required');
       const input=await body(req,16384);if(!input.complete)fail(413,'payload_too_large');

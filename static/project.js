@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视'], ['development', '开发'], ['rules', '规则总览'], ['members', '成员', true], ['activity', '运行记录']];
+const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视'], ['development', '开发'], ['rules', '规则总览'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行记录']];
 // The bot's rule files: what each one does, which tasks read it, and the section where it is edited.
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
 const ruleFiles = [
@@ -56,7 +56,7 @@ let current = null, projectTimer = null, renderToken = 0;
 async function renderProject(route) {
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
   if (current?.id !== route.id) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
-  try { await loadProject(route.id); } catch (err) { if (token === renderToken) page.replaceChildren(element('p', err.message, 'view-error')); return; }
+  try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) page.replaceChildren(element('p', err.message, 'view-error')); return; }
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   current.section = section; page.replaceChildren(projectHeader(), projectBody(section));
@@ -65,10 +65,11 @@ async function renderProject(route) {
   if (current.focusRule) { page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
 }
-async function loadProject(id) {
+async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api('/api/models?repository_id='+id).catch(()=>null)]);
-  Object.assign(current, { repository: repo.repository, policy: repo.policy, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules, models:models?.models||[] });
+  const external=section==='external'?await loadExternalProject(id):null;
+  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules, models:models?.models||[] });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
 function projectStatus() {
@@ -94,7 +95,7 @@ function projectBody(section) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, model: modelSection, review: reviewSection, development: developmentSection, rules: rulesSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ basic: basicSection, machine: machineSection, model: modelSection, review: reviewSection, development: developmentSection, rules: rulesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();

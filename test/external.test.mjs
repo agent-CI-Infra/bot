@@ -54,7 +54,8 @@ test('only matching verified non-draft events enqueue once, in the archive trans
  await h.hook(h.a.path,'incorrect','bad',payload(),{'X-GitHub-Event':'pull_request'});await h.hook(h.a.path,h.a.secret,'draft',payload(101,true),{'X-GitHub-Event':'pull_request'});await h.hook(h.a.path,h.a.secret,'other',payload(202),{'X-GitHub-Event':'pull_request'});await h.hook(h.a.path,h.a.secret,'edited',{...payload(),action:'edited'},{'X-GitHub-Event':'pull_request'});
  assert.equal(h.store.get('SELECT count(*) n FROM external_deliveries').n,1);
  h.store.db.exec("CREATE TRIGGER fail_forward BEFORE INSERT ON external_deliveries BEGIN SELECT RAISE(ABORT,'injected forwarding failure'); END");
- const before=h.store.get('SELECT count(*) n FROM deliveries').n;assert.equal((await h.hook(h.a.path,h.a.secret,'rollback',payload(),{'X-GitHub-Event':'pull_request'})).status,503);assert.equal(h.store.get('SELECT count(*) n FROM deliveries').n,before);
+ const before=h.store.get('SELECT count(*) n FROM deliveries').n,eventsBefore=h.store.get('SELECT count(*) n FROM external_events').n;
+ assert.equal((await h.hook(h.a.path,h.a.secret,'rollback',payload(),{'X-GitHub-Event':'pull_request'})).status,503);assert.equal(h.store.get('SELECT count(*) n FROM deliveries').n,before);assert.equal(h.store.get('SELECT count(*) n FROM external_events').n,eventsBefore);
  h.store.db.exec('DROP TRIGGER fail_forward');assert.equal((await h.hook(h.a.path,h.a.secret,'rollback',payload(),{'X-GitHub-Event':'pull_request'})).status,200);
  assert.ok(!JSON.stringify((await h.admin('/api/external/subscriptions')).value).includes(s.signing_secret));
 });
