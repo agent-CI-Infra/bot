@@ -81,7 +81,9 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 ## 一键接入
 
-「接入门禁／接入看板」分两步：先给源码仓开门禁 PR，人合入后再创建看板仓库并向公共 dashboard（`BOT_DASHBOARD_REPO`，默认 `agent-CI-Infra/dashboard`）提登记 PR。全程只用 GitHub App 安装令牌，由控制面用 App 私钥签 JWT 后按用途分别签发，权限取安装已授予的子集，运行结束时撤销；机器人账号的长期 Token 不用于接入，挂在机器人账号上的仓库停在预检。
+项目页的「公共配置」包含三项，可以逐项执行，也可以一次全部执行：门禁 PR（给源码仓加 CI-workflow 门禁）、看板仓库（建单仓看板并开启 Pages）和 Dashboard 登记（向公共 dashboard `BOT_DASHBOARD_REPO`，默认 `agent-CI-Infra/dashboard`，提登记 PR）。共同的预检只确认仓库挂在 GitHub App 上、App 能读到它、它不是看板仓库；之后每一项只核对自己要用的安装和权限，在自己的第一次写入之前停下，其他项照常执行。只有 Dashboard 登记依赖另一项：它登记的是看板站点，所以看板仓库要先就绪。对话框里每一项显示最近一次执行它的结果。
+
+全程只用 GitHub App 安装令牌，由控制面用 App 私钥签 JWT 后按用途分别签发，权限取安装已授予的子集，运行结束时撤销；机器人账号的长期 Token 不用于接入，挂在机器人账号上的仓库停在预检。
 
 | 令牌 | 范围 | 权限 |
 | --- | --- | --- |
@@ -90,9 +92,9 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 | 看板仓库 | 仅新看板仓库 | contents、workflows、pages、actions 写，metadata 读 |
 | Dashboard | 仅 dashboard 仓库 | contents 写、pull_requests 写、metadata 读（登记文件是 JSON） |
 
-CI-workflow 模板仓库（`BOT_CI_TEMPLATE_REPO`）公开时不带令牌读取，否则用同一 App 在该仓库上的安装读取。看板仓库建在 App 的所属组织（`GET /app` 的 `owner`，必须是 Organization），名字是 `{源码所有者}-{源码仓库名}-board`，站点是 `https://{组织}.github.io/{看板仓库名}/`；源码所有者与该组织相同时也用这个名字。名字超过 100 个字符时停在预检。同名仓库已存在时，只有它的 `board-config.json` 把这个看板指向本源码仓（或它是控制面为本源码仓创建、尚未配置完的仓库）才继续更新，否则停下，不覆盖也不删除。
+模板仓库，即 CI-workflow（`BOT_CI_TEMPLATE_REPO`）和 dashboard 仓库里的 `single-repo/` 看板模板，在 App 装有它们时用只读令牌读取；没装但仓库公开时，用手上的令牌或不带令牌读取，所以 dashboard 仓库没有装 App 时仍能建看板。看板仓库建在 App 的所属组织（`GET /app` 的 `owner`，必须是 Organization），名字是 `{源码所有者}-{源码仓库名}-board`，站点是 `https://{组织}.github.io/{看板仓库名}/`；源码所有者与该组织相同时也用这个名字，名字超过 100 个字符时看板这一项停下。同名仓库已存在时，只有它的 `board-config.json` 把这个看板指向本源码仓（或它是控制面为本源码仓创建、尚未配置完的仓库）才继续更新，否则停下，不覆盖也不删除。
 
-预检在任何写入之前核对每个要用的安装：源码仓、App 所属组织和 dashboard 仓库都要装有同一个 App，并具备上表权限（看板仓库已存在时不需要 repository_creation）。缺少时列出 GitHub 上的权限名（Workflows、Pages、Repository creation、Actions 等，均为 Read and write），由人在 App 设置里新增并在对应安装里同意；dashboard 仓库没有安装时，Dashboard 一步说明需要把同一个 App 安装过去。公共 dashboard 只接受公开源码仓，私有仓库停在预检，不创建公开看板。
+权限不足时，对应项列出 GitHub 上的权限名（Workflows、Pages、Repository creation、Actions 等，均为 Read and write）和缺权限的安装，由人在 App 设置里新增并在该安装里同意；看板仓库已存在时不需要 Repository creation。dashboard 仓库没有安装 App 时，Dashboard 登记说明需要把同一个 App 安装过去。公共 dashboard 只接受公开源码仓：私有仓库仍可开门禁 PR，看板仓库和 Dashboard 登记两项停下，不创建公开看板。
 
 ## 代码快照与发布
 

@@ -347,18 +347,15 @@ function installedIntegration(integration, row) {
   return [integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail),
     integrationChip(dashboard[0], dashboard[1], integration.dashboard_url, integration.dashboard_detail)];
 }
-function installedActions(row, after, integration) {
+function installedActions(row, after) {
   const actions = element('div', '', 'actions');
   const call = async (path, body, caption) => {
     actions.querySelectorAll('button').forEach(b => { b.disabled = true; }); $('message').textContent = caption;
     try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); $('message').textContent = ''; } catch (err) { error(err); }
     await after();
   };
-  const gate = integration?.gate_state, dashboard = integration?.dashboard_state;
-  if (!isBoardRepository(row)) {
-    if (!integration || gate === 'none' || gate === 'unknown' || gate === 'configured') actions.append(button('接入门禁', () => openQuickstart(row, after), ''));
-    else if (dashboard === 'none' || dashboard === 'registered' || dashboard === 'unknown') actions.append(button('接入看板', () => openQuickstart(row, after), ''));
-  }
+  // Gate PR, board repository and dashboard registration live in one dialog and run item by item.
+  if (!isBoardRepository(row)) actions.append(button('公共配置', () => openQuickstart(row, after), ''));
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
   if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
@@ -395,51 +392,69 @@ $('activation-form').addEventListener('submit', async event => {
   } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
 });
 
-// One-click onboarding: gate PR first (the user merges it), then the board repository and the dashboard PR.
+// Shared configuration: the gate PR, the board repository and the dashboard registration. Each item has its own checks
+// and can run alone; running all of them still lets an item that cannot run stop without stopping the others.
 const quickstartView = document.createElement('dialog'); quickstartView.id = 'quickstart-view'; quickstartView.setAttribute('aria-labelledby', 'quickstart-title');
-quickstartView.innerHTML = `<h2 id="quickstart-title">接入门禁</h2>
+quickstartView.innerHTML = `<h2 id="quickstart-title">公共配置</h2>
 <p class="muted" id="quickstart-hint"></p>
+<p id="quickstart-preflight" class="muted"></p>
 <ol id="quickstart-steps" class="quickstart-steps"></ol>
 <p id="quickstart-error" class="view-error" role="alert"></p>
-<div class="actions"><button type="button" id="quickstart-start">开始接入</button><button type="button" class="quiet" id="quickstart-close">关闭</button></div>`;
+<div class="actions"><button type="button" id="quickstart-start">全部执行</button><button type="button" class="quiet" id="quickstart-close">关闭</button></div>`;
 document.body.append(quickstartView);
-let quickstartRow = null, quickstartAfter = null, quickstartTimer = null;
+let quickstartRow = null, quickstartAfter = null, quickstartTimer = null, quickstartState = { run: null, items: {} }, quickstartWasBusy = false;
 const quickstartStepStatus = { pending: '等待', running: '进行中', done: '完成', skipped: '跳过', blocked: '需人工', failed: '失败' };
-function renderQuickstartRun(run) {
-  if (!run) return;
-  const list = $('quickstart-steps'); list.replaceChildren();
-  for (const item of run.steps || []) {
-    const li = element('li', '', 'quickstart-step'), head = element('strong', `${item.title} · ${quickstartStepStatus[item.status] || item.status}`);
-    li.append(head, element('p', item.detail));
-    if (item.url) { const link = element('a', '查看详情', 'result-link'); link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; li.append(link); }
-    list.append(li);
-  }
-  const quickstartErrors = { board_repository: '这是看板仓库，不需要接入；请对源码仓接入。', unsupported_stack: '暂时只支持带 package.json 的 Node 仓库。', private_repository: '公共看板只接受公开仓库，私有仓库只能接门禁。', ci_exists: '仓库已有 CI workflow，需要人工决定是否合并门禁配置。', gate_pr_merged_pending: '门禁 PR 等待你合并；合并后再次点击「接入看板」。', dry_run: '',
-    github_app_required: '一键接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', app_owner_not_organization: '看板仓库建在 GitHub App 所属的组织下，个人账号拥有的 App 不能使用。', app_org_not_installed: 'GitHub App 没有安装到它所属的组织。',
-    app_permissions_missing: 'GitHub App 缺少预检里列出的权限：在 App 设置里新增，并在对应安装里同意后再试。', dashboard_app_not_installed: '需要把同一个 GitHub App 安装到公共 dashboard 仓库。', template_app_not_installed: '需要把同一个 GitHub App 安装到 CI-workflow 模板仓库。',
-    board_repository_conflict: '同名看板仓库已存在，但看不出属于这个源码仓，没有覆盖。', board_name_invalid: '看板仓库名超过 100 个字符，需要人工处理。' };
-  $('quickstart-error').textContent = run.error ? (run.error in quickstartErrors ? quickstartErrors[run.error] : run.error) : '';
-  $('quickstart-start').disabled = ['running', 'queued'].includes(run.state);
-  if (['running', 'queued'].includes(run.state)) {
-    clearTimeout(quickstartTimer); quickstartTimer = setTimeout(async () => {
-      try { const { run: next } = await api(`/api/quickstart/${run.id}`); renderQuickstartRun(next); } catch {}
-    }, 1500);
-  } else if (quickstartAfter) quickstartAfter();
-}
-async function openQuickstart(row, after) {
-  quickstartRow = row; quickstartAfter = after;
-  $('quickstart-title').textContent = '接入 ' + row.full_name;
+const quickstartErrors = { board_repository: '这是看板仓库，不需要配置；请对源码仓操作。', repository_not_found: 'GitHub App 读不到这个仓库。',
+  github_app_required: '公共配置只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', github_credentials_missing: 'GitHub App 账号没有保存私钥。' };
+const quickstartBusy = run => !!run && ['running', 'queued'].includes(run.state);
+function quickstartItemList(row) {
   // The board repository lives in the GitHub App's organization, named after the source owner and repository.
   const boardName = row.full_name.replace('/', '-') + '-board';
-  $('quickstart-hint').textContent = '第一步会给仓库开一个门禁 PR，需要你合入；合入后再次点击「接入看板」，bot 会在 GitHub App 所属组织下创建 ' + boardName + ' 仓库、开启 GitHub Pages（站点形如 https://<App 所属组织>.github.io/' + boardName + '/），并向公共 dashboard 提登记 PR。全程使用 GitHub App 安装令牌，App 需要 Workflows、Pages、Repository creation 的读写权限，缺少时预检会列出并停下。';
-  $('quickstart-steps').replaceChildren(); $('quickstart-error').textContent = '';
-  quickstartView.showModal();
-  try { const { run } = await api(`/api/projects/${row.id}/quickstart`); if (run) renderQuickstartRun(run); } catch {}
+  return [['gate_pr', '门禁 PR', '给源码仓开一个 PR，加入 CI-workflow 门禁和工作流，合入后门禁生效。'],
+    ['board', '看板仓库', `在 GitHub App 所属组织下创建 ${boardName}，开启 GitHub Pages（站点形如 https://<App 所属组织>.github.io/${boardName}/）。只接受公开仓库。`],
+    ['dashboard', 'Dashboard 登记', '向公共 dashboard 提登记 PR。需要同一个 GitHub App 也安装在 dashboard 仓库，并且看板仓库已经就绪。']];
 }
-$('quickstart-close').addEventListener('click', () => { clearTimeout(quickstartTimer); quickstartView.close(); });
-$('quickstart-start').addEventListener('click', async () => {
+function renderQuickstart() {
   if (!quickstartRow) return;
-  const button = $('quickstart-start'); button.disabled = true;
-  try { const { run } = await api(`/api/projects/${quickstartRow.id}/quickstart`, 'POST', {}); renderQuickstartRun(run); }
-  catch (err) { $('quickstart-error').textContent = err.message; button.disabled = false; }
-});
+  const { run, items } = quickstartState, busy = quickstartBusy(run), preflight = run?.steps?.find(item => item.id === 'preflight');
+  $('quickstart-preflight').textContent = preflight && preflight.status !== 'pending' ? `预检 · ${quickstartStepStatus[preflight.status] || preflight.status}：${preflight.detail}` : '';
+  const list = $('quickstart-steps'); list.replaceChildren();
+  for (const [id, title, description] of quickstartItemList(quickstartRow)) {
+    // While a run is active, its own steps show live progress; otherwise each item shows its latest result.
+    const item = (busy && run.steps.find(entry => entry.id === id && entry.selected !== false)) || items[id];
+    const li = element('li', '', 'quickstart-step');
+    li.append(element('strong', `${title} · ${item ? (quickstartStepStatus[item.status] || item.status) : '未执行'}`), element('p', description, 'muted'));
+    if (item) li.append(element('p', item.detail));
+    if (item?.url) { const link = element('a', '查看详情', 'result-link'); link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; li.append(link); }
+    const execute = button('执行', () => startQuickstart([id])); execute.disabled = busy; execute.setAttribute('aria-label', '执行' + title); li.append(execute);
+    list.append(li);
+  }
+  // Item problems are explained on the item; only a run the preflight stopped needs a message here.
+  const stopped = run && preflight && ['blocked', 'failed'].includes(preflight.status);
+  $('quickstart-error').textContent = stopped ? quickstartErrors[run.error] || run.error || '' : '';
+  $('quickstart-start').disabled = busy;
+}
+async function refreshQuickstart() {
+  if (!quickstartRow) return;
+  const value = await api(`/api/projects/${quickstartRow.id}/quickstart`);
+  quickstartState = { run: value.run, items: value.items || {} }; renderQuickstart();
+  clearTimeout(quickstartTimer);
+  if (quickstartBusy(value.run)) { quickstartWasBusy = true; quickstartTimer = setTimeout(() => refreshQuickstart().catch(() => {}), 1500); }
+  else if (quickstartWasBusy) { quickstartWasBusy = false; if (quickstartAfter) quickstartAfter(); }
+}
+async function startQuickstart(steps) {
+  if (!quickstartRow) return;
+  $('quickstart-error').textContent = ''; $('quickstart-start').disabled = true;
+  try { await api(`/api/projects/${quickstartRow.id}/quickstart`, 'POST', steps ? { steps } : {}); quickstartWasBusy = true; await refreshQuickstart(); }
+  catch (err) { $('quickstart-error').textContent = err.message; $('quickstart-start').disabled = false; }
+}
+async function openQuickstart(row, after) {
+  quickstartRow = row; quickstartAfter = after; quickstartState = { run: null, items: {} }; quickstartWasBusy = false;
+  $('quickstart-title').textContent = '公共配置 · ' + row.full_name;
+  $('quickstart-hint').textContent = '三项可以单独执行，也可以全部执行；某一项条件不满足只停这一项，其他照常进行。全程使用 GitHub App 安装令牌，缺少权限时在对应项里列出。';
+  $('quickstart-error').textContent = ''; renderQuickstart();
+  quickstartView.showModal();
+  try { await refreshQuickstart(); } catch {}
+}
+$('quickstart-close').addEventListener('click', () => { clearTimeout(quickstartTimer); quickstartRow = null; quickstartView.close(); });
+$('quickstart-start').addEventListener('click', () => startQuickstart(null));

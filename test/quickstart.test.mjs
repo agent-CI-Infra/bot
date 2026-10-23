@@ -68,12 +68,14 @@ async function fakeGitHub(t) {
     // `hidden` is a repository the App's installation does not cover.
     if (rest === '/installation') return !jwt ? send(401, {}) : target && installation && !target.hidden ? send(200, installation) : send(404, {});
     if (!target) return send(404, {});
+    // Like GitHub, any valid token (or none) can read a public repository; anything else needs a token that covers it.
+    let covered = false;
     if (grant) {
-      const covered = grant.installation === installation?.id && !target.hidden && (!grant.repository_ids || grant.repository_ids.includes(target.id))
+      covered = grant.installation === installation?.id && !target.hidden && (!grant.repository_ids || grant.repository_ids.includes(target.id))
         && (!grant.repositories || grant.repositories.includes(name));
-      if (!covered) return send(404, {});
+      if (!covered && (method !== 'GET' || target.private)) return send(404, {});
     } else if (auth || method !== 'GET' || target.private) return send(auth ? 401 : 404, {});
-    const can = (permission, level = 'write') => grant ? (rank[grant.permissions[permission]] || 0) >= rank[level] : level === 'read';
+    const can = (permission, level = 'write') => covered ? (rank[grant.permissions[permission]] || 0) >= rank[level] : level === 'read';
     const workflowFiles = paths => paths.some(p => p.startsWith('.github/workflows/'));
     if (rest === '' && method === 'GET') return send(200, { id: target.id, full_name: full, private: target.private, default_branch: target.default_branch, description: target.description || null });
     if ((m = /^\/contents\/(.+)$/.exec(rest))) {
@@ -134,14 +136,16 @@ async function fakeGitHub(t) {
 }
 
 async function fixture(t, { type = 'github_app', templateRepo = 'agent-CI-Infra/CI-workflow' } = {}) {
-  const h = await harness(t), { admin } = await setup(h);
+  const github = await fakeGitHub(t);
+  let quickstart;
+  const h = await harness(t, undefined, store => ({ quickstart: quickstart = new Quickstart(store, github.url, templateRepo, 'agent-CI-Infra/dashboard') }));
+  const { admin } = await setup(h);
   const owner = type === 'github_app' ? await account(admin, { type, app_id: '123', private_key: privateKey, token: undefined }) : await account(admin);
   h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
     VALUES(?,?,?,?,?,?,0,1,?)`, owner.id, '101', '1', 'octo/hello', '10', 'octo', new Date().toISOString());
-  const github = await fakeGitHub(t), quickstart = new Quickstart(h.store, github.url, templateRepo, 'agent-CI-Infra/dashboard');
   // Runs execute in the background; wait for the outcome and for every minted token to be revoked.
-  const run = async (dryRun = false) => {
-    const started = quickstart.start('101', dryRun);
+  const run = async (steps, dryRun = false) => {
+    const started = quickstart.start('101', dryRun, steps);
     for (let attempt = 0; attempt < 400; attempt++) {
       const value = quickstart.get(started.id);
       if (!['queued', 'running'].includes(value.state) && github.state.revoked.length === github.state.tokens.size) return value;
@@ -149,13 +153,15 @@ async function fixture(t, { type = 'github_app', templateRepo = 'agent-CI-Infra/
     }
     throw new Error('quickstart did not finish');
   };
-  return { h, owner, github, state: github.state, run };
+  return { h, admin, owner, github, state: github.state, quickstart, run };
 }
 const step = (run, id) => run.steps.find(item => item.id === id);
+const outcome = (run, id) => [step(run, id).status, step(run, id).code || null];
 const grantOf = (state, token) => state.tokens.get(token);
 // Writes to GitHub, leaving out minting and revoking installation tokens.
 const writes = state => state.requests.filter(r => r.method !== 'GET' && !r.path.endsWith('/access_tokens') && r.path !== '/installation/token');
 const tokensFor = (state, installation) => [...state.tokens.values()].filter(grant => grant.installation === installation);
+const gated = state => { state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}'; };
 
 test('the board repository is named after the source owner and repository and lives in the App organization', () => {
   assert.deepEqual(boardRepository('my-org', 'octo/hello'),
@@ -166,29 +172,47 @@ test('the board repository is named after the source owner and repository and li
   assert.equal(boardRepository('my-org', `octo/${'x'.repeat(90)}`).valid, false);
 });
 
-test('the gate PR is opened with a source-only App token that may write workflows, and every token is revoked', async t => {
+test('the gate PR runs on its own with a source-only App token that may write workflows, and every token is revoked', async t => {
   const { state, run } = await fixture(t);
-  const result = await run();
-  assert.equal(result.state, 'awaiting_merge', JSON.stringify(result));
-  assert.match(step(result, 'preflight').detail, /看板仓库 my-org\/octo-hello-board/);
+  const result = await run(['gate_pr']);
+  assert.equal(result.state, 'done', JSON.stringify(result));
   assert.equal(step(result, 'gate_pr').status, 'done');
-  // One token, for the source repository only.
-  assert.deepEqual([...state.tokens.values()], [{ installation: 1, repository_ids: [101], permissions: quickstartPermissions.source }]);
-  const [sourceToken] = state.tokens.keys();
+  assert.deepEqual(['board', 'dashboard'].map(id => [step(result, id).selected, step(result, id).status]), [[false, 'skipped'], [false, 'skipped']]);
+  // A source token, and a read-only token for the template repository the App is installed on.
+  assert.deepEqual([...state.tokens.values()], [{ installation: 1, repository_ids: [101], permissions: quickstartPermissions.source },
+    { installation: 3, repositories: ['CI-workflow'], permissions: quickstartPermissions.template }]);
+  const [sourceToken, templateToken] = state.tokens.keys();
   const pull = state.repos['octo/hello'].pulls[0], branch = state.repos['octo/hello'].branches[pull.head];
   assert.ok(branch['.github/workflows/ci.yml'] && branch['.github/ci-gates.json'] && branch['scripts/gate/gate.mjs']);
   for (const request of state.requests.filter(r => r.path.startsWith('/repos/octo/hello') && !r.path.endsWith('/installation'))) assert.equal(request.auth, sourceToken, request.path);
-  // The public template is read without credentials.
-  assert.ok(state.requests.filter(r => r.path.startsWith('/repos/agent-CI-Infra/CI-workflow') && !r.path.endsWith('/installation')).every(r => r.auth === null));
-  assert.deepEqual(state.revoked, [sourceToken]);
+  assert.ok(state.requests.filter(r => r.path.startsWith('/repos/agent-CI-Infra/CI-workflow/contents')).every(r => r.auth === templateToken));
+  assert.ok(!state.requests.some(r => r.path.startsWith('/repos/agent-CI-Infra/dashboard') && !r.path.endsWith('/installation') || r.path.startsWith('/orgs/')));
+  assert.deepEqual(state.revoked, [sourceToken, templateToken]);
   assert.ok(!JSON.stringify(result).includes('ghs_'));
+});
+
+test('without the App on the dashboard repository only the dashboard item stops; the gate PR and the board still go ahead', async t => {
+  const { state, run } = await fixture(t);
+  delete state.installations['agent-CI-Infra'];
+  const result = await run();
+  assert.equal(result.state, 'partial', JSON.stringify(result));
+  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
+    [['done', null], ['done', null], ['blocked', 'dashboard_app_not_installed']]);
+  assert.match(step(result, 'dashboard').detail, /需要把同一个 GitHub App 安装到 agent-CI-Infra\/dashboard/);
+  // Both public templates are read with the source token; nothing is written to the dashboard.
+  const [sourceToken] = state.tokens.keys();
+  assert.ok(state.requests.filter(r => /^\/repos\/agent-CI-Infra\/(CI-workflow|dashboard)\/(contents|git)/.test(r.path)).every(r => r.auth === sourceToken));
+  assert.ok(!writes(state).some(r => r.path.startsWith('/repos/agent-CI-Infra/')));
+  assert.ok(state.repos['my-org/octo-hello-board'].files['.github/workflows/pages.yml']);
+  assert.match(step(result, 'board').detail, /门禁还没接入/);
 });
 
 test('the board repository is created in the App organization with purpose-scoped tokens, then registered on the dashboard', async t => {
   const { state, run } = await fixture(t);
-  state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}';
+  gated(state);
   const result = await run();
   assert.equal(result.state, 'done', JSON.stringify(result));
+  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')], [['skipped', null], ['done', null], ['done', null]]);
   // Created as my-org/octo-hello-board, never under the source owner.
   const created = state.requests.filter(r => r.method === 'POST' && /^\/(orgs\/[^/]+|user)\/repos$/.test(r.path));
   assert.deepEqual(created.map(r => [r.path, r.body.name, r.body.private]), [['/orgs/my-org/repos', 'octo-hello-board', false]]);
@@ -196,8 +220,8 @@ test('the board repository is created in the App organization with purpose-scope
   assert.deepEqual(grantOf(state, created[0].auth), { installation: 2, permissions: { repository_creation: 'write' } });
   assert.deepEqual(tokensFor(state, 2).map(grant => grant.repositories || null), [null, ['octo-hello-board']]);
   assert.deepEqual(tokensFor(state, 2)[1].permissions, quickstartPermissions.board);
-  assert.deepEqual(tokensFor(state, 3), [{ installation: 3, repositories: ['dashboard'], permissions: quickstartPermissions.dashboard }]);
-  assert.ok(!tokensFor(state, 3)[0].permissions.workflows);
+  assert.deepEqual(tokensFor(state, 3), [{ installation: 3, repositories: ['dashboard'], permissions: quickstartPermissions.template },
+    { installation: 3, repositories: ['dashboard'], permissions: quickstartPermissions.dashboard }]);
   const board = state.repos['my-org/octo-hello-board'];
   assert.equal(JSON.parse(board.files['board-config.json']).deployments['octo/hello'].repository, 'my-org/octo-hello-board');
   assert.ok(board.files['.github/workflows/pages.yml'] && board.dispatched);
@@ -208,70 +232,79 @@ test('the board repository is created in the App organization with purpose-scope
   assert.deepEqual([source.id, source.owner, source.boardUrl, source.url], ['octo/hello', 'octo', 'https://my-org.github.io/octo-hello-board/',
     'https://my-org.github.io/octo-hello-board/data/snapshot.json']);
   assert.ok(!Object.keys(state.repos).some(full => full.startsWith('octo/') && full !== 'octo/hello'));
-  assert.equal(state.revoked.length, 4);
+  assert.equal(state.revoked.length, 5);
   assert.ok(!JSON.stringify(result).includes('ghs_'));
 });
 
-test('missing Workflows, Pages, Repository creation or Actions stop preflight with their GitHub names and nothing is written', async t => {
+test('a missing permission stops only the item that needs it, listed in GitHub names, and that item writes nothing', async t => {
   const { state, run } = await fixture(t);
   delete state.installations.octo.permissions.workflows;
   for (const key of ['pages', 'repository_creation', 'actions']) delete state.installations['my-org'].permissions[key];
-  // Both phases check every installation the whole onboarding needs, so a gate PR is not opened for a board that cannot be built.
-  for (const gated of [false, true]) {
-    if (gated) state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}';
-    const result = await run();
-    assert.deepEqual([result.state, result.error], ['blocked', 'app_permissions_missing']);
-    const detail = step(result, 'preflight').detail;
-    assert.match(detail, /octo 的安装缺 Workflows（Read and write）/);
-    assert.match(detail, /my-org 的安装缺 Repository creation（Read and write）、Pages（Read and write）、Actions（Read and write）/);
-    assert.deepEqual(['gate_pr', 'board', 'dashboard'].map(id => step(result, id).status), ['pending', 'pending', 'pending']);
-  }
+  let result = await run();
+  assert.equal(result.state, 'blocked', JSON.stringify(result));
+  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
+    [['blocked', 'app_permissions_missing'], ['blocked', 'app_permissions_missing'], ['blocked', 'board_not_ready']]);
+  assert.match(step(result, 'gate_pr').detail, /octo 的安装里同意：Workflows（Read and write）$/);
+  assert.match(step(result, 'board').detail, /my-org 的安装里同意：Repository creation（Read and write）、Pages（Read and write）、Actions（Read and write）$/);
   assert.deepEqual(writes(state), []);
+  // With the source permissions back, the gate PR is opened while the board still waits for its own.
+  state.installations.octo.permissions.workflows = 'write';
+  result = await run();
+  assert.equal(result.state, 'partial');
+  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board')], [['done', null], ['blocked', 'app_permissions_missing']]);
+  assert.ok(writes(state).every(r => r.path.startsWith('/repos/octo/hello/')));
 });
 
-test('a private source repository stays at the private-repository gate even before the App has every permission', async t => {
+test('a private source repository can still get the gate PR, but no public board or dashboard registration', async t => {
   const { state, run } = await fixture(t);
   state.repos['octo/hello'].private = true;
-  delete state.installations.octo.permissions.workflows; delete state.installations['my-org'].permissions.pages;
   const result = await run();
-  assert.deepEqual([result.state, result.error], ['blocked', 'private_repository']);
-  assert.deepEqual(writes(state), []);
+  assert.equal(result.state, 'partial', JSON.stringify(result));
+  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
+    [['done', null], ['blocked', 'private_repository'], ['blocked', 'private_repository']]);
   assert.ok(!state.repos['my-org/octo-hello-board']);
-});
-
-test('without the App on the dashboard repository the dashboard step asks to install it and nothing is written', async t => {
-  const { state, run } = await fixture(t);
-  state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}';
-  delete state.installations['agent-CI-Infra'];
-  const result = await run();
-  assert.deepEqual([result.state, result.error], ['blocked', 'dashboard_app_not_installed']);
-  assert.equal(step(result, 'dashboard').status, 'blocked');
-  assert.match(step(result, 'dashboard').detail, /需要把同一个 GitHub App 安装到 agent-CI-Infra\/dashboard/);
-  assert.deepEqual(writes(state), []);
+  assert.ok(writes(state).every(r => r.path.startsWith('/repos/octo/hello/')));
 });
 
 test('a repository on a bot account is not onboarded and its long-lived token is never sent', async t => {
   const { state, run } = await fixture(t, { type: 'bot_account' });
   const result = await run();
   assert.deepEqual([result.state, result.error], ['blocked', 'github_app_required']);
+  assert.deepEqual(['gate_pr', 'board', 'dashboard'].map(id => step(result, id).status), ['blocked', 'blocked', 'blocked']);
   assert.deepEqual(state.requests, []);
 });
 
-test('an App owned by a user cannot host board repositories and stops in preflight', async t => {
+test('an App owned by a user cannot host board repositories, while the gate PR still runs', async t => {
   const { state, run } = await fixture(t);
   state.app.owner = { login: 'someone', type: 'User' };
   const result = await run();
-  assert.deepEqual([result.state, result.error], ['blocked', 'app_owner_not_organization']);
+  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
+    [['done', null], ['blocked', 'app_owner_not_organization'], ['blocked', 'app_owner_not_organization']]);
+  assert.ok(writes(state).every(r => r.path.startsWith('/repos/octo/hello/')));
+});
+
+test('the dashboard item on its own waits for a board repository that belongs to this source', async t => {
+  const { state, run, admin } = await fixture(t);
+  gated(state);
+  let result = await run(['dashboard']);
+  assert.deepEqual([result.state, ...outcome(result, 'dashboard')], ['blocked', 'blocked', 'board_not_ready']);
   assert.deepEqual(writes(state), []);
+  assert.equal((await run(['board'])).state, 'done');
+  result = await run(['dashboard']);
+  assert.deepEqual([result.state, ...outcome(result, 'dashboard')], ['done', 'done', null]);
+  // Each item keeps its latest result from the run that executed it.
+  const latest = (await admin('/api/projects/101/quickstart')).value.items;
+  assert.deepEqual([latest.board.status, latest.dashboard.status, latest.gate_pr], ['done', 'done', undefined]);
+  for (const steps of [[], ['nope'], 'board']) assert.equal((await admin('/api/projects/101/quickstart', 'POST', { steps })).status, 400);
 });
 
 test('an existing board repository is updated only when it belongs to this source', async t => {
   const { state, run } = await fixture(t);
-  state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}';
+  gated(state);
   const pointing = source => JSON.stringify({ deployments: { [source]: { environment: 'production', label: 'x', repository: 'my-org/octo-hello-board' } } });
   state.repos['my-org/octo-hello-board'] = state.repo(500, { files: { 'board-config.json': pointing('someone/else'), '.github/workflows/pages.yml': 'name: Pages\n' } });
-  let result = await run();
-  assert.deepEqual([result.state, result.error], ['blocked', 'board_repository_conflict']);
+  let result = await run(['board']);
+  assert.deepEqual(outcome(result, 'board'), ['blocked', 'board_repository_conflict']);
   assert.equal(JSON.parse(state.repos['my-org/octo-hello-board'].files['board-config.json']).deployments['someone/else'].label, 'x');
   assert.deepEqual(writes(state), []);
   // Present and pointing at this source: no creation permission is needed and the configuration is updated.
@@ -285,24 +318,23 @@ test('an existing board repository is updated only when it belongs to this sourc
 
 test('a same-named repository the App cannot see is not overwritten', async t => {
   const { state, run } = await fixture(t);
-  state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}';
   state.repos['my-org/octo-hello-board'] = state.repo(500, { hidden: true, files: { 'README.md': 'someone else\n' } });
-  const result = await run();
-  assert.deepEqual([result.state, result.error], ['blocked', 'board_repository_conflict']);
+  const result = await run(['board']);
+  assert.deepEqual(outcome(result, 'board'), ['blocked', 'board_repository_conflict']);
   assert.equal(writes(state).filter(r => r.path !== '/orgs/my-org/repos').length, 0);
   assert.deepEqual(state.repos['my-org/octo-hello-board'].files, { 'README.md': 'someone else\n' });
 });
 
-test('a private template repository is read through the App installed on it, or the gate step asks to install it', async t => {
+test('a private template repository is read through the App installed on it, or the gate item asks to install it', async t => {
   const { state, run } = await fixture(t, { templateRepo: 'tmpl-org/CI-workflow' });
   state.repos['tmpl-org/CI-workflow'] = state.repo(202, { private: true, files: { 'template/.github/workflows/ci.yml': 'name: CI\n', 'scripts/gate/gate.mjs': '// gate\n' } });
-  let result = await run();
-  assert.deepEqual([result.state, result.error], ['blocked', 'template_app_not_installed']);
+  let result = await run(['gate_pr']);
+  assert.deepEqual(outcome(result, 'gate_pr'), ['blocked', 'template_app_not_installed']);
   assert.match(step(result, 'gate_pr').detail, /需要把同一个 GitHub App 安装到该仓库/);
   assert.deepEqual(writes(state), []);
   state.installations['tmpl-org'] = { id: 4, account: { id: 40, login: 'tmpl-org' }, permissions: everything() };
-  result = await run();
-  assert.equal(result.state, 'awaiting_merge', JSON.stringify(result));
+  result = await run(['gate_pr']);
+  assert.equal(result.state, 'done', JSON.stringify(result));
   assert.deepEqual(tokensFor(state, 4), [{ installation: 4, repositories: ['CI-workflow'], permissions: quickstartPermissions.template }]);
 });
 
