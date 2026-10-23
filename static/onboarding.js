@@ -9,21 +9,21 @@ function wizardForm(title,fields,submit,save){
   form.onsubmit=async event=>{event.preventDefault();action.disabled=true;message.textContent='';try{if(await save(Object.fromEntries(new FormData(form)),form)!==false)await render();}catch(error){message.textContent=error.message;}finally{action.disabled=false;}};return section;
 }
 function wizardNext(step){onboardingStep=step;void render().catch(error);}
-function organizationInstallationForm(){
-  const target=input('target','',{required:true,placeholder:'组织名、组织链接、仓库链接或 SSH 克隆地址',autocomplete:'off'}),result=element('div','','installation-target-result');
+function accountInstallationForm(){
+  const target=input('target','',{required:true,placeholder:'个人或组织名、账号链接、仓库链接或 SSH 克隆地址',autocomplete:'off'}),result=element('div','','installation-target-result');
   result.setAttribute('role','status');result.setAttribute('aria-live','polite');let version=0;
   target.addEventListener('input',()=>{version++;result.replaceChildren();target.closest('form').querySelector('[role=alert]').textContent='';});
-  const section=wizardForm('指定安装组织',[field('安装组织',target),note('支持组织名、owner/repo、GitHub 组织／仓库／Issue／PR 链接和 SSH 克隆地址。这里只确定安装组织，仓库范围由你在 GitHub 确认。')],'解析组织',async value=>{
-    const request=++version;result.replaceChildren(element('p','正在向 GitHub 核对组织…','muted'));
+  const section=wizardForm('指定安装账号',[field('安装账号',target),note('支持个人或组织名、owner/repo、GitHub 个人／组织／仓库／Issue／PR 链接和 SSH 克隆地址。自动识别账号类型，仓库范围由你在 GitHub 确认。')],'解析账号',async value=>{
+    const request=++version;result.replaceChildren(element('p','正在向 GitHub 核对账号…','muted'));
     try{
       const resolved=await api('/api/onboarding/installation-target','POST',value);if(request!==version)return false;
-      const org=resolved.organization;result.replaceChildren(facts([['已识别组织',link(org.html_url,org.login)]]),
-        note(resolved.installed?'此 App 已安装到该组织，可打开安装设置调整仓库范围。':'请前往此组织的 GitHub 安装页，选择仓库并确认授权。'),
-        link(resolved.install_url,resolved.installed?'打开 '+org.login+' 安装设置':'前往 '+org.login+' 安装','button-link'));
+      const account=resolved.account;result.replaceChildren(facts([['已识别账号',link(account.html_url,account.login)],['账号类型',account.type==='Organization'?'组织':'个人账号']]),
+        note(resolved.installed?'此 App 已安装到该账号，可打开安装设置调整仓库范围。':'请前往此账号的 GitHub 安装页，选择仓库并确认授权。'),
+        link(resolved.install_url,resolved.installed?'打开 '+account.login+' 安装设置':'前往 '+account.login+' 安装','button-link'));
     }catch(error){
       if(request!==version)return false;result.replaceChildren();
       const code=error.message.replace(/^\d+\s*·\s*/,'');
-      throw new Error(({invalid_installation_target:'请填写组织名或有效的 github.com 组织／仓库链接。',installation_target_not_found:'未找到该 GitHub 组织，请检查名称或链接。',installation_target_not_organization:'这个账号是个人用户，不是 GitHub 组织。',installation_target_lookup_failed:'无法读取 GitHub 组织或安装信息，请稍后重试，并检查 App 凭据与 GitHub 访问状态。',github_app_not_selected:'请先在第 2 步选择 GitHub App。',github_app_check_failed:'GitHub App 凭据校验失败，请检查已登记的 App。'})[code]||error.message);
+      throw new Error(({invalid_installation_target:'请填写个人或组织名，或有效的 github.com 账号／仓库链接。',installation_target_not_found:'未找到该 GitHub 账号，请检查名称或链接。',installation_target_not_installable:'仅支持 GitHub 组织或个人账号。',installation_target_lookup_failed:'无法读取 GitHub 账号或安装信息，请稍后重试，并检查 App 凭据与 GitHub 访问状态。',github_app_not_selected:'请先在第 2 步选择 GitHub App。',github_app_check_failed:'GitHub App 凭据校验失败，请检查已登记的 App。'})[code]||error.message);
     }
     return false;
   });
@@ -50,14 +50,14 @@ async function renderOnboarding(request){
     tunnel.append(button('刷新 tunnel 状态',()=>render().catch(error)));if(data.tunnel.token_configured)tunnel.append(button('停用 tunnel',async()=>{await api('/api/onboarding/tunnel','POST',{revoke:true});await render();}));panel.append(tunnel);next();
   }else if(onboardingStep===1){
     const existing=accounts.filter(a=>a.type==='github_app');if(existing.length){const list=card('使用已登记的 App');list.append(note('使用此 App 会将它的 webhook 更新为第 1 步验证过的地址；已有账号凭据保持不变。'));for(const account of existing){const row=element('div','','row');row.append(element('p',account.name+' · App ID '+account.app_id),button('使用此 App',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:account.id,update_webhook:true});wizardNext(2);}catch(e){error(e);}}));list.append(row);}panel.append(list);}
-    const section=wizardForm('创建新的 GitHub App',[note('不填写权限，不使用 PAT。这里生成 manifest；浏览器提交到 GitHub 后，你只需确认创建。已有 App 时优先使用上面的账号。'),field('App 所属组织',input('organization','',{required:true})),field('App 名称',input('name','',{required:true})),checkbox('public',false,'公开 App，允许安装到其他组织'),note('这是 App 的归属组织；实际安装目标在第 3 步选择。不勾选时是组织私有 App；需要一个 App 覆盖多个组织时勾选。权限始终固定。')],'准备 GitHub 确认页',async value=>{
+    const section=wizardForm('创建新的 GitHub App',[note('不填写权限，不使用 PAT。这里生成 manifest；浏览器提交到 GitHub 后，你只需确认创建。已有 App 时优先使用上面的账号。'),field('App 所属组织',input('organization','',{required:true})),field('App 名称',input('name','',{required:true})),checkbox('public',false,'公开 App，允许安装到其他账号'),note('这是 App 的归属组织；实际安装目标在第 3 步选择。不勾选时是组织私有 App；需要安装到其他组织或个人账号时勾选。权限始终固定。')],'准备 GitHub 确认页',async value=>{
       const result=await api('/api/onboarding/manifest','POST',{...value,public:value.public==='on'}),form=element('form','');form.method='POST';form.action=result.create_url;form.target='_blank';
       const manifest=element('textarea','');manifest.name='manifest';manifest.value=JSON.stringify(result.manifest);manifest.hidden=true;form.append(manifest,element('p','固定权限：Contents／Issues／Pull requests 写，Metadata 读；只订阅 issues 和 pull_request。'),element('p','在 GitHub 确认后会回到本机向导。不要关闭本机服务。'));
       const submit=element('button','前往 GitHub 确认创建');submit.type='submit';form.append(submit);section.replaceChildren(element('h3','等待你在 GitHub 确认'),form);return false;
     });if(!data.public_address)section.append(note('先在第 1 步验证公网 HTTPS 地址，才能准备 manifest。'));panel.append(section);if(data.app)next();
   }else if(onboardingStep===2){
-    const install=card('安装到目标组织');if(data.app){install.append(facts([['App',data.app.slug],['App ID',data.app.app_id],['已确认安装数',data.app.installations||0]]),link(data.app.install_url,'在 GitHub 选择组织','button-link'),button('重新检查安装',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:data.app.account_id});await api('/api/installations/sync','POST',{});await start();}catch(e){error(e);}}));}else install.append(note('尚未选择 App。可以返回第 2 步使用已登记的账号，或准备 manifest 后由你在 GitHub 确认。'));
-    install.append(button('暂时跳过安装',async()=>{await api('/api/onboarding/installation','POST',{skip:true});wizardNext(3);}));panel.append(install);if(data.app)panel.append(organizationInstallationForm(),note('跨组织安装要求 App 为公开，且你拥有相应安装权限；最终由 GitHub 校验。安装完成后点「重新检查安装」，再到第 6 步同步并启动仓库。'));next();
+    const install=card('安装到目标账号');if(data.app){install.append(facts([['App',data.app.slug],['App ID',data.app.app_id],['已确认安装数',data.app.installations||0]]),link(data.app.install_url,'在 GitHub 选择账号','button-link'),button('重新检查安装',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:data.app.account_id});await api('/api/installations/sync','POST',{});await start();}catch(e){error(e);}}));}else install.append(note('尚未选择 App。可以返回第 2 步使用已登记的账号，或准备 manifest 后由你在 GitHub 确认。'));
+    install.append(button('暂时跳过安装',async()=>{await api('/api/onboarding/installation','POST',{skip:true});wizardNext(3);}));panel.append(install);if(data.app)panel.append(accountInstallationForm(),note('安装到其他组织或个人账号要求 App 为公开，且你拥有相应安装权限；最终由 GitHub 校验。安装完成后点「重新检查安装」，再到第 6 步同步并启动仓库。'));next();
   }else if(onboardingStep===3){
     const shared=models.filter(model=>!model.repository_id&&model.key_configured),list=card('使用已配置的模型');for(const model of shared){const row=element('div','','row');row.append(element('p',model.model_name+' · '+model.api_url),button('选用此模型',async()=>{await api('/api/onboarding/model','POST',{model_id:model.id});wizardNext(4);}));list.append(row);}if(shared.length)panel.append(list);
     panel.append(wizardForm('添加模型',[note('保存的接口视为可信，可接收启用项目的代码、日志和测试材料。Key 加密保存，不明文回读。'),field('接口 URL',input('api_url','',{type:'url',required:true})),field('API Key',input('api_key','',{type:'password',required:true,autocomplete:'new-password'})),field('模型名',input('model_name','',{required:true}))],'保存并继续',async value=>{const result=await api('/api/models','POST',{...value,repository_id:null});await api('/api/onboarding/model','POST',{model_id:result.model.id});onboardingStep=4;}));next();
