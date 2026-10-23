@@ -10,6 +10,10 @@ test('board deduplicates objects, keeps published PR separate, derives stages an
   const own=result.value.cards.filter(c=>c.repository_id==='101');assert.equal(own.length,6);
   assert.deepEqual(Object.fromEntries(own.map(c=>[c.object_number,c.bot_stage])),{1:'reviewed',2:'reviewing',3:'developing',4:'developed',5:'attention',40:'unreviewed'});
   const combined=own.find(c=>c.object_number===3);assert.equal(combined.review_task_id,'source-review');assert.equal(combined.development_task_id,'developing');
+  assert.equal(own.find(c=>c.object_number===4).development_pr_number,40);assert.equal(combined.development_pr_number,null);
+  assert.deepEqual(result.value.counts,{issue:5,pr:2});
+  const stages=(await admin('/api/board')).value.stages;assert.deepEqual(stages.map(s=>s.id),['unreviewed','reviewing','reviewed','developing','developed','attention']);
+  assert.equal(stages.find(s=>s.id==='developing').pr.name,'正在跟进');assert.ok(stages.every(s=>s.hint));
   assert.equal(own.find(c=>c.object_number===40).object_type,'pr');
   assert.equal(JSON.stringify(result.value).includes('input'),false);assert.equal(JSON.stringify(result.value).includes('result'),false);
   const tasks=(await admin('/api/board/cards/101/issue/3/tasks')).value.tasks;assert.equal(tasks.length,2);
@@ -66,18 +70,22 @@ test('scope is enforced with no filters, explicit filters, saved views, card mut
   const {h,admin}=await fixture(t);boardFixtures(h.store);
   const password=testPassword(),user=(await admin('/api/users','POST',{username:'member',password,repository_ids:['101']})).value.user;
   const member=h.client();await member('/api/auth/login','POST',{username:'member',password});
-  assert.ok((await member('/api/board/cards')).value.cards.every(c=>c.repository_id==='101'));
+  const visible=(await member('/api/board/cards')).value;assert.ok(visible.cards.every(c=>c.repository_id==='101'));assert.deepEqual(visible.counts,{issue:4,pr:2});
   assert.equal((await member(query([{field:'repository_id',value:'202'}]))).status,403);
   assert.equal((await member('/api/board/cards/202/issue/1/tasks')).status,403);
   assert.equal((await member('/api/board/cards/202/issue/1','PATCH',{field_id:'bot_stage',option_id:'developed'})).status,403);
   const view=(await member('/api/board/views','POST',{name:'Own repo',filters:[{field:'repository_id',value:'101'}]})).value.view;
   await admin('/api/project-admin-assignments','PUT',{user_id:user.id,repository_ids:[]});
-  assert.deepEqual((await member('/api/board/cards')).value.cards,[]);
+  assert.deepEqual((await member('/api/board/cards')).value.cards,[]);assert.deepEqual((await member('/api/board/cards')).value.counts,{issue:0,pr:0});
   assert.deepEqual((await member('/api/board/cards?view_id='+view.id)).value.cards,[]);
 });
 test('filters, bounded pagination and personal views persist without affecting another account',async t=>{
   const {h,admin}=await fixture(t);boardFixtures(h.store);
-  assert.equal((await admin(query([{field:'object_type',value:'pr'}]))).value.cards.length,2);
+  const prs=(await admin(query([{field:'object_type',value:'pr'}]))).value;assert.equal(prs.cards.length,2);
+  // Totals for the Issue/PR switch ignore the type condition and keep every other one, including a stage filter.
+  assert.deepEqual(prs.counts,{issue:5,pr:2});
+  assert.deepEqual((await admin(query([{field:'object_type',value:'issue'},{field:'bot_stage',value:'attention'}]))).value.counts,{issue:1,pr:0});
+  assert.deepEqual((await admin(query([{field:'repository_id',value:'202'}]))).value.counts,{issue:1,pr:0});
   assert.equal((await admin(query([{field:'text',value:'successful review'}]))).value.cards.length,1);
   assert.equal((await admin(query([{field:'text',value:'%'}]))).value.cards.length,0);
   assert.equal((await admin(query([{field:'text',value:'#3'}]))).value.cards.length,1);

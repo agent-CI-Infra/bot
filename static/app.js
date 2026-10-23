@@ -25,7 +25,8 @@ function options(select, rows, label) { const selected = select.value; while (se
 async function start() {
   setup = !(await api('/api/setup')).initialized;
   try { me = await api('/api/auth/me'); } catch { me = null; }
-  $('access').hidden = !!me; $('workspace').hidden = !me; $('identity').hidden = !me;
+  $('access').hidden = !!me; $('workspace').hidden = !me; $('identity').hidden = !me; $('tabs').hidden = !me;
+  if (!me) document.body.classList.remove('board-mode');
   $('access-title').textContent = setup ? '创建第一名超级管理员' : '登录';
   $('access-description').textContent = setup ? '初始化只成功一次。请为本部署设置独立的管理员账号。' : '使用本系统账号进入你有权访问的仓库。';
   $('access-submit').textContent = setup ? '初始化并登录' : '登录';
@@ -49,6 +50,8 @@ async function route() {
   if (target) tab = 'projects';
   if(location.hash==='#onboarding'&&me.role==='super_admin')tab='onboarding';
   page.hidden = !target; list.hidden = !!target;
+  // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
+  document.body.classList.toggle('board-mode', !target && tab === 'board');
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   if (target) { $('message').textContent = ''; await renderProject(target); } else await render();
 }

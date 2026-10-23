@@ -28,8 +28,8 @@
 | `/api/events`、`/api/events/:id` | GET | 范围内投递列表／正文和响应；列表可筛选 `repository_id,account_id,owner_id,event,status,delivery_id,limit,offset` |
 | `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
 | `/api/tasks/:id/live` | GET | 运行中任务当前正在执行的命令及其已产生的输出，参数 `offset` 为已读字节数 |
-| `/api/board` | GET | 当前用户的视图、自定义单选字段及选项、六个固定 bot 阶段 |
-| `/api/board/cards` | GET | 按对象去重的卡片，参数 `view_id`（默认 `default`）、`group_by`、`filters`（JSON 数组）、`limit`（1–100）、`offset`（0–100000）；返回 `cards,has_more,limit,offset`，始终限制在当前仓库授权范围 |
+| `/api/board` | GET | 当前用户的视图、自定义单选字段及选项、六个固定 bot 阶段；阶段带 `hint` 说明，PR 看板措辞不同时带 `pr:{name,hint}` |
+| `/api/board/cards` | GET | 按对象去重的卡片，参数 `view_id`（默认 `default`）、`group_by`、`filters`（JSON 数组）、`limit`（1–100）、`offset`（0–100000）；返回 `cards,has_more,limit,offset,counts`，始终限制在当前仓库授权范围。`counts` 为 `{issue,pr}` 总数，忽略 `object_type` 条件、保留其余条件，供 Issue／PR 切换显示；卡片的 `development_pr_number` 是最近开发任务结果里的 PR 编号 |
 | `/api/board/cards/:repository/:type/:number/tasks` | GET | 同一对象的关联任务摘要，`type` 为 `issue` 或 `pr`，支持同样的有界分页；任务详情沿用 `/api/tasks/:id` |
 | `/api/board/cards/:repository/:type/:number` | PATCH | `{field_id,option_id}` 修改当前用户的自定义单选值，`option_id:null` 清空；禁止写执行阶段，不创建或修改任务 |
 | `/api/board/fields`、`/api/board/fields/:id/options` | POST | `{name}` 新建个人单选字段／新增选项（即加列），每用户最多 30 个字段、每字段最多 50 个选项 |
@@ -44,4 +44,4 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 项目列表接口 `GET /api/repositories` 与超级管理员的 `GET /api/installations` 在每个仓库上返回 `running_tasks` 和 `queued_tasks`。前者仅统计实际执行阶段，后者统计 queued；配置等待、环境等待与已结束任务不计入执行中。返回范围沿用项目管理员的仓库权限。列表开关调用 `PATCH /api/repositories/{id}/policy`，仅提交本次切换的 `review_enabled` 或 `development_enabled`，不更改项目总启用状态。
 
-看板筛选格式为 `[{"field":"object_type","value":"pr"},{"field":"text","value":"research"}]`，最多 20 条，条件之间为“且”。支持 `repository_id`（仓库 ID）、`object_type`（`issue`／`pr`，不添加该条件表示全部）、`bot_stage`（`unreviewed,reviewing,reviewed,developing,developed,attention`）、`text`（编号可带 `#`，否则按标题文字匹配）、`include_closed`（布尔，默认 false）。`group_by` 为 `bot_stage` 或当前用户的单选字段 ID；空值列 ID 为 `unassigned`。筛选和隐藏列可在浏览器先预览，点击“保存视图”后持久保存。分页与列计数只表示当前页，不冒充全库总量。
+看板筛选格式为 `[{"field":"object_type","value":"pr"},{"field":"text","value":"research"}]`，最多 20 条，条件之间为“且”。支持 `repository_id`（仓库 ID）、`object_type`（`issue`／`pr`，不添加该条件表示全部）、`bot_stage`（`unreviewed,reviewing,reviewed,developing,developed,attention`）、`text`（编号可带 `#`，否则按标题文字匹配）、`include_closed`（布尔，默认 false）。`group_by` 为 `bot_stage` 或当前用户的单选字段 ID；空值列 ID 为 `unassigned`。筛选和隐藏列可在浏览器先预览，点击“保存视图”后持久保存。分页与列计数只表示已加载的卡片，不冒充全库总量；全量只看 `counts`。
