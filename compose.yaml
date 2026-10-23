@@ -4,7 +4,7 @@
 # the master key, the internal credentials and the databases. compose.build.yaml builds the same services from source.
 services:
   key-init:
-    image: ghcr.io/agent-ci-infra/bot:latest
+    image: ghcr.io/agent-ci-infra/bot-control-plane:latest
     command: ["node", "dist/keygen.js", "/keys/master.key", "/internal/manager.token"]
     network_mode: none
     read_only: true
@@ -17,7 +17,7 @@ services:
       disable: true
     restart: "no"
   bot:
-    image: ghcr.io/agent-ci-infra/bot:latest
+    image: ghcr.io/agent-ci-infra/bot-control-plane:latest
     depends_on:
       key-init:
         condition: service_completed_successfully
@@ -53,7 +53,7 @@ services:
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
   tunnel:
-    image: ghcr.io/agent-ci-infra/bot-tunnel:latest
+    image: ghcr.io/agent-ci-infra/bot-cloudflare-tunnel:latest
     volumes:
       - tunnel-keys:/tunnel:ro
     networks: [edge]
@@ -61,15 +61,20 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
+  # Fixed gateway from the tunnel network to bot:8791. It runs from the control-plane image but stays a separate
+  # container, so the tunnel can never reach the admin listener.
   webhook:
-    image: ghcr.io/agent-ci-infra/bot-webhook:latest
+    image: ghcr.io/agent-ci-infra/bot-control-plane:latest
+    command: ["node", "webhook/main.mjs"]
     networks: [control, edge]
+    healthcheck:
+      disable: true
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
   manager:
-    image: ghcr.io/agent-ci-infra/bot-manager:latest
+    image: ghcr.io/agent-ci-infra/bot-computer-manager:latest
     depends_on:
       key-init:
         condition: service_completed_successfully
@@ -80,7 +85,7 @@ services:
       SQLITE_TMPDIR: /tmp
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       # The manager only inspects this image and never pulls; it must equal the project-image reference below, tag included.
-      BOT_PROJECT_IMAGE: ghcr.io/agent-ci-infra/bot-project:latest
+      BOT_PROJECT_IMAGE: ghcr.io/agent-ci-infra/bot-project-computer:latest
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
       - manager-data:/data
@@ -96,7 +101,7 @@ services:
     restart: unless-stopped
   # Exits at once; it exists so Compose pulls the project image into the local Docker before the manager starts.
   project-image:
-    image: ghcr.io/agent-ci-infra/bot-project:latest
+    image: ghcr.io/agent-ci-infra/bot-project-computer:latest
     command: ["node", "-e", "process.exit(0)"]
     network_mode: none
     read_only: true

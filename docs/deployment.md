@@ -6,15 +6,14 @@
 
 `main` 分支每次推送后，[`.github/workflows/images.yml`](../.github/workflows/images.yml) 构建并发布下列 `linux/amd64` 镜像，标签为 `latest` 和 `sha-<12 位提交>`；Pull request 只构建、不发布。
 
-| 镜像 | Dockerfile | Compose 服务 |
-| --- | --- | --- |
-| `ghcr.io/agent-ci-infra/bot` | `Dockerfile` | `key-init`、`bot` |
-| `ghcr.io/agent-ci-infra/bot-manager` | `manager/Dockerfile` | `manager` |
-| `ghcr.io/agent-ci-infra/bot-project` | `images/project/Dockerfile` | `project-image`，也是每台虚拟电脑的批准镜像 |
-| `ghcr.io/agent-ci-infra/bot-tunnel` | `tunnel/Dockerfile` | `tunnel` |
-| `ghcr.io/agent-ci-infra/bot-webhook` | `webhook/Dockerfile` | `webhook` |
+| 镜像 | 用途 | Dockerfile | Compose 服务 |
+| --- | --- | --- | --- |
+| `ghcr.io/agent-ci-infra/bot-control-plane` | 控制面：管理页、Webhook 接收、任务调度；也用来生成密钥和运行 Webhook 网关 | `Dockerfile` | `bot`、`key-init`、`webhook` |
+| `ghcr.io/agent-ci-infra/bot-computer-manager` | 创建和运行各仓库的虚拟电脑，唯一挂载 Docker socket 的服务 | `manager/Dockerfile` | `manager` |
+| `ghcr.io/agent-ci-infra/bot-project-computer` | 每台虚拟电脑的系统镜像（批准镜像） | `images/project/Dockerfile` | `project-image` |
+| `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选的 Cloudflare Tunnel 连接器 | `tunnel/Dockerfile` | `tunnel` |
 
-`compose.yaml` 使用 `latest`。manager 不拉取镜像，只检查 `BOT_PROJECT_IMAGE` 指向的本机镜像，所以它必须和 `project-image` 服务的镜像引用（含标签）完全一致；一次性的 `project-image` 服务负责让 Compose 把这个镜像拉到本机。
+`webhook` 和 `bot` 用同一个镜像，但仍是单独的容器：只有它同时在 `control` 和 `edge` 两个网络，`tunnel` 只能经它连到 `bot:8791`。`compose.yaml` 使用 `latest`。manager 不拉取镜像，只检查 `BOT_PROJECT_IMAGE` 指向的本机镜像，所以它必须和 `project-image` 服务的镜像引用（含标签）完全一致；一次性的 `project-image` 服务负责让 Compose 把这个镜像拉到本机。
 
 ## 从源码构建
 
