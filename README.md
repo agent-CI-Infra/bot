@@ -35,7 +35,7 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 
 账号凭据、入口签名材料和模型 Key 用 AES-256-GCM 加密，密文绑定记录 ID。读取和写入响应均只返回是否已配置，不返回明文或密文。更新时留空或仅空白的凭据保持原值；撤销使用专用动作，不能靠提交空字符串撤销。模型 PATCH 必须带读取到的 `version`，旧版本返回 409。撤销账号凭据不会连带撤销入口签名；要禁用入口需单独撤销该入口。
 
-浏览器管理入口以项目为单位组织：“项目”页列出已安装和已登记的仓库及“未启动／工作中／已禁用／已移出安装”状态，超级管理员可同步安装列表、启动、启用或禁用；点每行的“设置”进入该项目独立的设置页（`#/projects/<仓库 ID>/<类别>`，可直接分享和刷新），左侧类别为基本设置（仓库信息、处理账号、基准分支）、机器配置（虚拟电脑状态、实时资源、软件安装与初始化结果、启停与重置，以及 CPU、内存、进程数、/tmp、单条命令时长、外网、额外软件包、环境变量和初始化脚本）、使用的模型（选择部署共享或本项目专属模型，添加模型、更换或撤销 Key）、检视规则（检视开关、Issue／PR 打开与 PR 新提交三个触发、评论语言、项目检视指引、检视后标签）、开发设置（自动开发、测试命令、bot PR 修订轮数）、成员（仅超级管理员，分配项目管理员）和运行记录（当前任务、最近任务与命令）。项目管理员只看到自己的项目，机器配置只读。“检视”“开发”两个任务页的任务详情按时间线展示 Agent 工作过程：工作区准备、每一步模型思考与工具选择、读写的文件、在项目容器中执行的命令及退出码和输出、GitHub 发布和故障；运行中每 2 秒刷新，正在执行的命令单独显示并实时追加输出。账号／用户新增在各自页面完成，凭据轮换等其余管理操作通过下列 API 完成。
+浏览器管理入口以项目为单位组织：“项目”页列出已安装和已登记的仓库及“未启动／工作中／已禁用／已移出安装”状态，超级管理员可同步安装列表、启动、启用或禁用；点每行的“设置”进入该项目独立的设置页（`#/projects/<仓库 ID>/<类别>`，可直接分享和刷新），左侧类别为基本设置（仓库信息、处理账号、基准分支）、机器配置（虚拟电脑状态、实时资源、软件安装与初始化结果、启停与重置，以及 CPU、内存、进程数、/tmp、外网、额外软件包、环境变量和初始化脚本）、使用的模型（选择部署共享或本项目专属模型，添加模型、更换或撤销 Key）、检视规则（检视开关、Issue／PR 打开与 PR 新提交三个触发、评论语言、项目检视指引、检视后标签）、开发设置（自动开发、测试命令、bot PR 修订轮数）、成员（仅超级管理员，分配项目管理员）和运行记录（当前任务、最近任务与命令）。项目管理员只看到自己的项目，机器配置只读。“检视”“开发”两个任务页的任务详情按时间线展示 Agent 工作过程：工作区准备、每一步模型思考与工具选择、读写的文件、在项目容器中执行的命令及退出码和输出、GitHub 发布和故障；运行中每 2 秒刷新，正在执行的命令单独显示并实时追加输出。账号／用户新增在各自页面完成，凭据轮换等其余管理操作通过下列 API 完成。
 
 ## 接口
 
@@ -55,7 +55,7 @@ Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` �
 | `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions,review_label`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；`review_label` 为可选标签名（最多 50 字符），留空不打标签；检视规则字段 `review_issues`、`review_pull_requests`、`review_pr_updates`（布尔，分别控制 Issue 打开、PR 打开／转为可检视、PR 新提交是否触发检视）、`review_language`（`auto`／`zh`／`en`）和 `review_instructions`（≤8000 字，作为管理员配置的项目检视指引写入检视 Agent 的系统提示，仓库内容仍按不可信数据处理） |
 | `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库。列表带当前执行任务；详情另含 manager 给出的容器／卷／网络／镜像／资源限制、当前任务、最近 20 个任务和最近 30 条命令 |
 | `/api/environments/:id/start`、`/stop`、`/reset` | POST | 仓库管理员操作；字段 `operation_id,generation`，操作 ID 为 48 位随机十六进制；重试必须复用同一 ID |
-| `/api/environments/:id/configure` | POST | 仅超级管理员；字段 `operation_id,generation,spec`，`spec` 可含 `cpus`（0.25–16，默认 2）、`memory_mb`（256–65536，默认 4096）、`pids`（64–16384，默认 1024）、`tmp_mb`（16–16384，默认 1024）、`max_command_minutes`（1–240，默认 60）、`egress`、`packages`（最多 100 个 Debian 包名）、`env`（最多 64 个非机密变量，`PATH`、`HOME`、`BOT_*`、`GIT_*` 等保留名拒绝）、`setup_script`（≤16 KiB）和一次性的 `rerun_setup`。范围由 manager 校验；规格随项目保存、跨重启和重置保留，保存后在项目锁内重建容器，工作卷和代次不变；软件包镜像构建失败时不改动正在运行的电脑 |
+| `/api/environments/:id/configure` | POST | 仅超级管理员；字段 `operation_id,generation,spec`，`spec` 可含 `cpus`（0.25–16，默认 2）、`memory_mb`（256–65536，默认 4096）、`pids`（64–16384，默认 1024）、`tmp_mb`（16–16384，默认 1024）、`egress`、`packages`（最多 100 个 Debian 包名）、`env`（最多 64 个非机密变量，`PATH`、`HOME`、`BOT_*`、`GIT_*` 等保留名拒绝）、`setup_script`（≤16 KiB）和一次性的 `rerun_setup`。范围由 manager 校验；规格随项目保存、跨重启和重置保留，保存后在项目锁内重建容器，工作卷和代次不变；软件包镜像构建失败时不改动正在运行的电脑 |
 | `/api/environments/:id/stats` | GET | 范围内实时资源：CPU、内存、进程数、网络、磁盘读写和工作区占用（工作区每分钟最多统计一次），不占用项目锁 |
 | `/api/environments/:id/delete` | POST | 仅超级管理员，另需 `confirm:true`；删除容器／网络，保留卷 |
 | `/api/models`、`/api/models/:id` | GET / POST、GET / PATCH | 范围内模型，字段 `repository_id,api_url,api_key,model_name`；PATCH 带 `version` |
@@ -102,7 +102,7 @@ docker compose config --quiet
 
 manager 重启会先停止不确定的执行，标记未完成操作 interrupted，再用同一代容器和卷检查 runner／journal 后恢复 ready；重置中断则保持 reset_failed。运行期发现容器重启或退出同样重新恢复，不以 Docker running 代替 ready。操作 ID 持久化去重，代次检查阻止旧请求写新环境，状态 revision 防止旧响应覆盖新状态。控制面保存操作意图并以原 ID 重试丢失响应，不自动重复重置。
 
-当前 runner 为无网络监听的一次性固定执行入口：manager 通过 Docker exec 发送校验后的请求，返回 JSON 与持久 journal，调用者不能指定 exec argv 或用户。支持工作区相对文件读取／写入和 shell 命令，单条命令时长受项目规格 `max_command_minutes` 限制（runner 绝对上限 4 小时）；单次写入 48 KiB、读取 1 MiB、命令输出 1 MiB。命令运行中输出同步写入 journal 旁的临时文件，manager 的只读 `output` 接口按字节偏移读取，不占用项目锁；命令完成后该文件删除，完整结果保存在 journal。项目运行用户为 10001，根文件系统只读，工作卷可写，CPU、内存、进程数和 /tmp 默认为 2 核、4096 MB、1024、1024 MB，超级管理员可按仓库在 manager 允许的范围内修改。批准的项目镜像自带 Node.js 22（npm、corepack 的 pnpm／yarn）、Python 3.11（pip、venv、uv）、gcc／g++／make、git、git-lfs、curl、wget、jq、ripgrep、sqlite3、zip／unzip，镜像自带包清单在 `/opt/bot/image-packages`。仓库需要的系统软件包由 manager 以批准镜像为底、用固定的 apt 命令构建派生镜像（按底层镜像和包集合缓存，root 只出现在构建阶段）；非机密环境变量注入容器并传给每条命令；初始化脚本以项目用户在 `/workspace` 运行，`HOME=/workspace/home` 在工作卷中，`~/.local/bin`、`~/.cargo/bin`、`~/.npm-global/bin` 在 PATH 上，脚本或代次变化时重新运行，结果和输出在虚拟电脑页可见。Git 操作在容器内执行。任务工具支持隔离工作目录、分块文件与 Git 候选；上游 API 认证始终由控制面代理。执行入口仅供内部控制面和验收调用，管理页面没有通用终端。
+当前 runner 为无网络监听的一次性固定执行入口：manager 通过 Docker exec 发送校验后的请求，返回 JSON 与持久 journal，调用者不能指定 exec argv 或用户。支持工作区相对文件读取／写入和 shell 命令，命令不限时长，运行到结束为止；要中断正在执行的命令，在机器配置中停止或重置虚拟电脑；单次写入 48 KiB、读取 1 MiB、命令输出 1 MiB。命令运行中输出同步写入 journal 旁的临时文件，manager 的只读 `output` 接口按字节偏移读取，不占用项目锁；命令完成后该文件删除，完整结果保存在 journal。项目运行用户为 10001，根文件系统只读，工作卷可写，CPU、内存、进程数和 /tmp 默认为 2 核、4096 MB、1024、1024 MB，超级管理员可按仓库在 manager 允许的范围内修改。批准的项目镜像自带 Node.js 22（npm、corepack 的 pnpm／yarn）、Python 3.11（pip、venv、uv）、gcc／g++／make、git、git-lfs、curl、wget、jq、ripgrep、sqlite3、zip／unzip，镜像自带包清单在 `/opt/bot/image-packages`。仓库需要的系统软件包由 manager 以批准镜像为底、用固定的 apt 命令构建派生镜像（按底层镜像和包集合缓存，root 只出现在构建阶段）；非机密环境变量注入容器并传给每条命令；初始化脚本以项目用户在 `/workspace` 运行，`HOME=/workspace/home` 在工作卷中，`~/.local/bin`、`~/.cargo/bin`、`~/.npm-global/bin` 在 PATH 上，脚本或代次变化时重新运行，结果和输出在虚拟电脑页可见。Git 操作在容器内执行。任务工具支持隔离工作目录、分块文件与 Git 候选；上游 API 认证始终由控制面代理。执行入口仅供内部控制面和验收调用，管理页面没有通用终端。
 
 实际 Docker 验收运行 `npm run test:docker`，需要 Docker 和上述 Playwright 浏览器。它使用独立 Compose 项目和 18881／18882／18883 测试端口，18883 仅在测试覆盖文件里映射 manager；生产 Compose 不发布该端口。测试会检查两个真实环境、串行与并行、文件／卷／网络隔离、无凭据、代次重置、重启和角色页面，并按本次部署标签清理容器、网络及卷。输出保存在 `.tmp/project-env/`。
 
@@ -110,7 +110,7 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的检视规则中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
 
-后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 32 次模型响应；模型调用 run_command 时可设 `timeout_seconds`（默认 120，最多为项目的 `max_command_minutes`）和 `keep_background`，仓库测试验证同样受该上限；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
+后台按仓库串行认领任务，拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务最多 32 次模型响应；模型调用 run_command 时命令不限时长，可选 `timeout_seconds` 为可能卡住的命令自设超时，服务和监视进程用 `keep_background` 放到后台；仓库测试验证同样不限时长；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
 
 每次检视发布一条总结讨论评论，包含总结、非行内 finding 和检视 SHA。Issue 只用普通评论。PR 每条 finding 由模型选择普通评论或行内评论并给出理由，服务端用真实 diff 校验 path／line／side；缺少可核对位置时转普通评论，不猜行号。行内 Review 的 event 恒为 COMMENT，模型不能选择批准或请求变更，没有自动合并接口。发布前重新检查 head，过时任务标为 superseded；评论写明实际检视 SHA，Review 和每条行内评论的 GitHub ID 保存到任务回执。policy 设置了 `review_label` 时，总结评论发布成功后由控制面用同一安装令牌给 Issue／PR 加这一个标签，仓库没有该标签时由 GitHub 创建；标签不由模型选择，重复执行不会重复添加。
 

@@ -6,8 +6,8 @@ import { ManagerError } from './docker.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
-const defaults = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024, max_command_minutes: 60, packages: [], env: {}, setup_script: '' };
-const bounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384], max_command_minutes: [1, 240] };
+const defaults = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024, packages: [], env: {}, setup_script: '' };
+const bounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384] };
 const mib = 1024 * 1024;
 // Debian package names only (no options, files or URLs); environment names that the computer or runner own are refused.
 export const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]{1,99}(?::[a-z0-9-]{1,20})?$/;
@@ -48,7 +48,8 @@ export class Projects {
   get(repo) { return this.db.prepare('SELECT * FROM projects WHERE repository_id=?').get(repo); }
   list() { return this.db.prepare('SELECT * FROM projects ORDER BY repository_id').all(); }
   // A project's saved spec over the defaults; it survives restarts and resets.
-  spec(repo) { const saved = this.get(repo)?.spec; return { ...defaults, egress: this.egress, ...(saved ? JSON.parse(saved) : {}) }; }
+  // Commands have no time limit, so a max_command_minutes saved by an earlier version is dropped.
+  spec(repo) { const saved = this.get(repo)?.spec, { max_command_minutes: _removed, ...spec } = saved ? JSON.parse(saved) : {}; return { ...defaults, egress: this.egress, ...spec }; }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
@@ -164,9 +165,10 @@ export class Projects {
     const previous = JSON.parse(this.get(repo).setup || 'null'), hash = digest(spec.setup_script);
     if (!spec.setup_script.trim()) { if (previous) this.db.prepare('UPDATE projects SET setup=NULL WHERE repository_id=?').run(repo); return; }
     if (!force && previous?.generation === generation && previous.hash === hash) return;
-    const name = this.names(repo, generation).container, timeout = spec.max_command_minutes * 60000, started = new Date().toISOString();
+    const name = this.names(repo, generation).container, started = new Date().toISOString();
     this.db.prepare('UPDATE projects SET setup=? WHERE repository_id=?').run(JSON.stringify({ generation, hash, state: 'running', started_at: started }), repo);
-    const run = await this.docker.runner(name, { operation_id: randomId(), type: 'command', command: spec.setup_script, timeout_ms: timeout }, timeout + 60000).catch(() => null);
+    // The script runs until it ends; stop, reset or delete interrupts it.
+    const run = await this.docker.runner(name, { operation_id: randomId(), type: 'command', command: spec.setup_script, timeout_ms: null }, 0).catch(() => null);
     const result = run?.ok ? run.result : { exit_code: null, output: '', error: run?.error || 'runner_failed' };
     await this.docker.runner(name, { operation_id: randomId(), type: 'reap' }).catch(() => null);
     this.db.prepare('UPDATE projects SET setup=? WHERE repository_id=?').run(JSON.stringify({ generation, hash, state: result.exit_code === 0 ? 'succeeded' : 'failed',
@@ -258,9 +260,10 @@ export class Projects {
           if (owner && owner !== call.workspace_id) { this.background.delete(repo); await this.reap(repo, project.generation); }
           if (call.type === 'reap') { this.background.delete(repo); result = { ok: true, result: await this.reap(repo, project.generation) }; }
           else {
-            // Commands are capped by the project's own limit, which an administrator sets in the computer spec.
-            const limit = Math.min(Math.max(Number(call.timeout_ms) || 10000, 100), this.spec(repo).max_command_minutes * 60000);
-            const request = commandTypes.includes(call.type) ? { ...call, timeout_ms: limit } : call, timeout = commandTypes.includes(call.type) ? limit + 60000 : 90000;
+            // Commands run until they end unless the caller sets its own timeout_ms; stop, reset or delete interrupts them.
+            if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
+            const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
+            const request = command ? { ...call, timeout_ms: limit } : call, timeout = command ? (limit === null ? 0 : limit + 60000) : 90000;
             this.executing.add(repo);
             try { result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout); }
             finally { this.executing.delete(repo); }

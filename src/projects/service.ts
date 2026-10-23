@@ -1,18 +1,30 @@
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 
+// timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
 export class ManagerClient implements Manager {
   constructor(private readonly url: string, private readonly token: Buffer) {}
   async call(method: string, path: string, input?: Json, timeoutMs = 90000) {
-    let response;
-    try { response = await fetch(this.url + path, { method, signal: AbortSignal.timeout(timeoutMs),
-      headers: { Authorization: 'Bearer ' + this.token.toString('base64'), 'Content-Type': 'application/json' },
-      ...(input ? { body: JSON.stringify(input) } : {}) }); }
-    catch { return fail(503, 'manager_unavailable'); }
-    const value = await response.json() as Json;
-    if (!response.ok) fail(response.status, typeof value.error === 'string' ? value.error : 'manager_unavailable');
+    // node:http rather than fetch: fetch stops waiting for response headers after 5 minutes, and the manager answers a command only when it ends.
+    const url = new URL(this.url + path), body = input ? JSON.stringify(input) : undefined;
+    let status: number, text: string;
+    try {
+      ({ status, text } = await new Promise<{ status: number, text: string }>((resolve, reject) => {
+        const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, { method,
+          headers: { Authorization: 'Bearer ' + this.token.toString('base64'), 'Content-Type': 'application/json', ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}) } }, res => {
+          const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk)); res.on('error', reject);
+          res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode || 0, text: Buffer.concat(chunks).toString() }); });
+        });
+        const timer = timeoutMs ? setTimeout(() => req.destroy(new Error('manager_timeout')), timeoutMs) : undefined;
+        req.on('error', error => { clearTimeout(timer); reject(error); }); req.end(body);
+      }));
+    } catch { return fail(503, 'manager_unavailable'); }
+    let value: Json; try { value = JSON.parse(text); } catch { return fail(503, 'manager_unavailable'); }
+    if (status < 200 || status >= 300) fail(status, typeof value.error === 'string' ? value.error : 'manager_unavailable');
     return value.result;
   }
 }
@@ -132,7 +144,7 @@ export class ProjectService {
     const state = await this.manager.call('GET', '/v1/projects/' + id) || await this.manager.call('PUT', '/v1/projects/' + id);
     this.save(state);
     if(match[2]==='configure'&&!previous){
-      const names=['cpus','memory_mb','pids','tmp_mb','max_command_minutes','egress','packages','env','setup_script'];
+      const names=['cpus','memory_mb','pids','tmp_mb','egress','packages','env','setup_script'];
       this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(Object.fromEntries(names.filter(key=>state.computer?.[key]!==undefined).map(key=>[key,state.computer[key]]))));
     }
     if (!previous && input.generation !== state.generation) fail(409, 'stale_generation');

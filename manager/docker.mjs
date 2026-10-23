@@ -20,7 +20,8 @@ export class Docker {
         });
         res.on('error', reject);
       });
-      req.setTimeout(timeout, () => req.destroy(new Error('docker_timeout'))); req.on('error', reject); req.end(bytes);
+      // A timeout of 0 waits until Docker answers, for commands that have no time limit.
+      if (timeout) req.setTimeout(timeout, () => req.destroy(new Error('docker_timeout'))); req.on('error', reject); req.end(bytes);
     });
   }
   // Builds an image from a generated Dockerfile (a one-file tar context). Only the manager writes the Dockerfile.

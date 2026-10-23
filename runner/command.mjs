@@ -7,16 +7,15 @@ const projectEnvironment = Object.fromEntries(String(process.env.BOT_PROJECT_ENV
   .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
 export const environment = { LANG:'C.UTF-8', ...projectEnvironment, PATH:`${userBins}:/usr/local/bin:/usr/bin:/bin`, HOME:home, TMPDIR:'/tmp',
   NPM_CONFIG_PREFIX:`${home}/.npm-global`, GIT_CONFIG_GLOBAL:'/dev/null', GIT_CONFIG_NOSYSTEM:'1', GIT_TERMINAL_PROMPT:'0' };
-// Absolute ceiling; each project's own limit (set by an administrator) is enforced by the manager.
-export const maxCommandMs = 4 * 60 * 60 * 1000;
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
+// timeoutMs null runs the command until it ends (stopping the project computer still ends it); omitted means 10 seconds.
 export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false}={}) {
   if(typeof value!=='string'||!value||value.length>32768)throw new Error('invalid_command');
   return new Promise((resolve,reject)=>{
     const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:environment,stdio:['ignore','pipe','pipe']});
     let output='',timedOut=false,truncated=false,done=false;
     const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
-    const timer=setTimeout(()=>{timedOut=true;kill();},Math.min(maxCommandMs,Math.max(100,Number(timeoutMs)||10000)));
+    const timer=timeoutMs===null?null:setTimeout(()=>{timedOut=true;kill();},Math.max(100,Number(timeoutMs)||10000));
     const collect=data=>{
       if(Buffer.byteLength(output)+data.length>1024*1024){truncated=true;kill();return;}
       output+=data.toString();if(outputFile)try{appendFileSync(outputFile,data,{mode:0o600});}catch{/* Live output is best effort. */}

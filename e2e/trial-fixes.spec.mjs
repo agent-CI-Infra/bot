@@ -1,7 +1,7 @@
 import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../test/helpers.mjs';import{RuleService}from'../dist/rules/service.js';import{Onboarding}from'../dist/onboarding/service.js';
 
 test('项目保存、规则刷新、未启动仓库、任务过程及390px导航提供可核验反馈',async({page})=>{
- const computer={cpus:2,memory_mb:4096,pids:512,tmp_mb:128,max_command_minutes:15,egress:true,packages:[],env:{},setup_script:'',network_policy:'internet egress'};
+ const computer={cpus:2,memory_mb:4096,pids:512,tmp_mb:128,egress:true,packages:[],env:{},setup_script:'',network_policy:'internet egress'};
  const manager={call:async()=>({repository_id:'101',generation:1,state:'ready',desired:'ready',revision:1,computer})};let onboard;
  const h=await harness(undefined,manager,store=>({onboarding:onboard=new Onboarding(store)})),{admin,password}=await setup(h),a=await account(admin),errors=[];page.on('pageerror',e=>errors.push(e.message));
  try{
@@ -22,7 +22,7 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await page.getByRole('link',{name:'开发设置',exact:true}).click();await page.getByLabel('测试命令',{exact:true}).fill('npm test');await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.locator('.flash')).toHaveText('已保存');
   await page.route('**/api/repositories/101/policy',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'invalid_test_command'})}));await page.getByLabel('测试命令',{exact:true}).fill('invalid');await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.locator('.project-form [role=alert]')).toContainText('invalid_test_command');await page.unroute('**/api/repositories/101/policy');
   await page.getByRole('link',{name:'基本设置',exact:true}).click();await expect(page.locator('#project-page')).toContainText('Visible model name');await expect(page.locator('#project-page')).toContainText('1.5 CPU · 2048 MB');
-  await page.getByRole('link',{name:'机器配置',exact:true}).click();await expect(page.getByText('这里保存的是控制台配置',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('1.5');
+  await page.getByRole('link',{name:'机器配置',exact:true}).click();await expect(page.getByText('这里保存的是控制台配置',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('1.5');await expect(page.locator('#project-page')).not.toContainText('单条命令最长时间');
   await page.getByRole('link',{name:'生效规则',exact:true}).click();const refresh=page.getByRole('button',{name:'刷新默认分支文件',exact:true});await expect(refresh).toBeEnabled();
   let release,count=0;const blocked=new Promise(resolve=>release=resolve);
   await page.route('**/api/repositories/101/rules/refresh',async route=>{count++;await blocked;rules.cache('101','b'.repeat(40),{'.bot/guide.md':'Refreshed repository guide\n'.repeat(50),'.bot/computer.yaml':'cpus: 1.5\nmemory_mb: 2048'});await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify((await admin('/api/repositories/101/rules')).value)});});

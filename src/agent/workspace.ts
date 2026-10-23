@@ -15,8 +15,9 @@ export class Workspace {
     if(row?.state==='completed')return JSON.parse(row.result);
     if(!row)this.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,this.task.id,JSON.stringify(input));
     let response;
-    // A command may run for up to 30 minutes; the manager answers only when it ends.
-    try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,request.type==='workspace_command'?Number(request.timeout_ms||10000)+120000:90000);}
+    // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
+    const wait=request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
     catch{return stop('execution_interrupted','waiting_environment');}
     await this.guard();
     const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed'});
