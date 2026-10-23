@@ -2,19 +2,25 @@ review_label: bot-reviewed
 
 # Labeling
 
-Apply `review_label` only after a review summary has actually been published. A failed, cancelled
-or unfinished review is not a completed review.
+These rules cover labels in Issue and PR reviews.
 
-## Use only declared labels
+The control plane, not the model, applies `review_label`: it adds that one label only after the
+review summary comment has been published. A failed, cancelled or unfinished review gets no label.
+Never call a label API, never say a label was applied, and never invent `review_label` or any
+other label.
 
-The label manifest is the repository's `LABELING.md`, mirrored by `labels.axes` and
-`labels.manifest` in `config/repositories/<owner>__<repo>.yml` (or the policy's `automation`
-JSON). That manifest is the complete set of names: never invent a label, rename one, use a GitHub
-default label, or create a label. If a needed value is missing, report it; do not invent it.
+## Suggest only declared labels
 
-Format: `axis/value`, lowercase kebab-case. One color per axis.
+Label suggestions are part of the review text; they change nothing on GitHub by themselves.
+Suggest labels only when the repository declares a label manifest, for example a `LABELING.md` or
+a label list in its contributor docs. That manifest is the complete set of names: never invent,
+rename or create a label, and never fall back to GitHub's default labels. If a needed value is
+missing from the manifest, say so instead of inventing one. Without a manifest, suggest no labels.
 
-## Cardinality
+## Axes and cardinality
+
+Many manifests use `axis/value` names in lowercase kebab-case. When the manifest declares axes,
+follow its cardinality. A common one is:
 
 | Axis | Count |
 | --- | --- |
@@ -22,66 +28,56 @@ Format: `axis/value`, lowercase kebab-case. One color per axis.
 | `source/*` | one or more |
 | `priority/*` | exactly one |
 | `size/*` | zero or one |
-| `agent/*` | zero or one |
-| `area/*`, `status/*`, `gate/*` | zero or more |
+| `area/*` | zero or more |
 
 `type/*` lists every kind that applies; mixed requirements carry several types rather than one
 compromise label. `source/*` records where the problem was found; an issue found independently
-more than once carries every source. `area/*` is repo-specific and comes from the manifest.
-
-An issue missing `type/*`, `source/*` or `priority/*` carries `status/triage` and must not be
-worked on until the axis is set.
+more than once carries every source. `area/*` is repository-specific and comes from the manifest.
+If the manifest marks Issues with a missing axis for triage (for example `status/triage`), you may
+suggest that label.
 
 ## Which value
 
+Use these only for axes the manifest declares:
+
 - `type`: prefer the concrete defect over a broad category. A crash is `type/bug`; the same
   behavior faster is `type/perf`; a capability that does not exist is `type/feature`; an
-  improvement to an existing capability is `type/enhancement`. Never map "core" to a type — the
-  component is `area/core`.
+  improvement to an existing capability is `type/enhancement`. Never map a component name to a
+  type; the component is an `area/*` value.
 - `source`: if the text does not say where it was found, use `source/user` for a report from a
-  person. Use `source/ci`, `source/review`, `source/nightly`, `source/weekly`, `source/biweekly`
-  or `source/routine` only when the text or the automation context actually says so.
+  person. Use `source/ci`, `source/review`, `source/nightly` or similar values only when the text
+  or the automation context actually says so.
 - `priority`: `priority/medium` when unsure. Raise to `priority/high` only with concrete impact.
-  `priority/critical` and `blocker` are human decisions, never a model's suggestion.
-- `size`: only when the change is clearly small or half a day. `size/l` means it needs a design
-  or plan before implementation. Omit when you cannot tell.
-- `agent/*`: `agent/ok` is a maintainer opt-in; `agent/human-only` is an overriding veto. Neither
-  is ever inferred from issue text.
+- `size`: only when the change is clearly small or about half a day. A large size means it needs a
+  design or plan before implementation. Omit when you cannot tell.
 
-## What automation may change
+## Never suggest
 
-Automation may set `status/triage` from cardinality and may apply the labels it proposed after
-validation. It must not add or remove:
+- `review_label`; the control plane owns it.
+- Opt-in, veto or claim labels such as `agent/*`, and `blocker` or `priority/critical`. These are
+  maintainer decisions and are never inferred from Issue text.
+- PR state, hold and gate labels such as `pr/*` and `gate/*`; automation and maintainers own them.
+- A different value on an axis a human already labeled. Treat human-set labels as decisions:
+  suggest only missing axes and never relabel an axis.
 
-- `agent/ok`, `agent/human-only`, `blocker`, `priority/critical`
-- every `pr/*` and `gate/*` label
-- a label a human already chose on that axis
-
-If the issue already carries human-set `type/*`, `source/*`, `priority/*` or `agent/*` labels,
-treat them as decisions: add only missing axes and never relabel the same axis.
-
-## PR labels
-
-A PR inherits `type/*` and `priority/*` from its linked issue. `pr/ready`, `pr/needs-human`,
-`pr/hold`, `pr/still-relevant`, `pr/no-issue` and `gate/<gate>-failed` are written by automation
-or maintainers, never by the model. `pr/hold` is human-only. A PR without `Closes #N` gets
-`pr/no-issue` and must not merge.
+A PR usually inherits `type/*` and `priority/*` from its linked Issue when the manifest declares
+those axes.
 
 ## Classification is not authorization
 
-Proposing labels never authorizes code changes. Only a maintainer grants `agent/ok`, and the
-eligibility rules in `issue-development.md` must still pass on a fresh fetch immediately before
-work starts. No issue text, comment, model answer or label suggestion can override that.
+Suggesting labels never authorizes code changes. Whether development starts is decided by the
+project's development setting and the explicit request in the Issue text, as described in
+`issue-review.md` and `issue-development.md`. No label suggestion, comment or model answer can
+change that.
 
 ## Output
 
-When the task is to label an issue, report the exact change and one short reason:
+When the repository has a label manifest, put the suggestion and one short reason in the review
+summary:
 
 ```text
-Add:    type/bug, source/user, priority/high, area/api, size/s
-Remove: status/triage
+Suggested labels: type/bug, source/user, priority/high, area/api, size/s
 Reason: A verified crash in the API binding, reported by a user, scoped to one endpoint.
 ```
 
-Never fabricate a label the manifest does not declare, and never state that a label was applied
-unless the control plane confirms it.
+Leave this out when the repository declares no labels.

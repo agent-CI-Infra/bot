@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { parse } from 'yaml';
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, superAdmin } from '../app/auth.js';
@@ -6,12 +8,15 @@ import { GitHub } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
 import type { Manager } from '../projects/service.js';
 
+// The scenario rules are the Markdown files in docs/prompts, read once at startup so the documented text and the
+// text the model receives cannot drift apart. The runtime image copies that directory next to dist.
+const prompt = (name: string) => readFileSync(resolve(import.meta.dirname, '../../docs/prompts', name), 'utf8');
 export const defaults: Record<string, string> = {
   '.bot/guide.md': 'Act on the stated Issue or PR. Inspect relevant code and tests. Keep conclusions concise and evidence-based. Never invent test results. GitHub publication and authorization belong to the control plane. Do not merge PRs or expose credentials.',
-  '.bot/rules/labels.md': 'review_label: bot-reviewed\n\nAfter successfully publishing the review summary, apply the review label. Do not label an unfinished or failed review as completed.',
-  '.bot/rules/issue-review.md': 'Review a newly opened Issue once. Summarize intent, missing information and code evidence. Distinguish a request for review from an explicit request to change code. Quote the exact authorization before proposing development.',
-  '.bot/rules/pr-review.md': 'Review non-draft PRs on opened, ready_for_review and head updates. Explain actionable findings with verified diff positions; otherwise use discussion comments. Review event is COMMENT only. Changes to .bot or .agents/skills change bot behavior and require a human decision.',
-  '.bot/rules/issue-development.md': 'Develop only when project development is enabled and the Issue explicitly requests code changes. Implement and execute meaningful tests. The control plane publishes only an owned bot branch and opens a PR. Never push to another author\'s branch or merge a PR.',
+  '.bot/rules/labels.md': prompt('labels.md'),
+  '.bot/rules/issue-review.md': prompt('issue-review.md'),
+  '.bot/rules/pr-review.md': prompt('pr-review.md'),
+  '.bot/rules/issue-development.md': prompt('issue-development.md'),
   '.bot/computer.yaml': '{}\n'
 };
 export const behaviorPath = (path: string) => path === '.bot' || path.startsWith('.bot/') || path === '.agents/skills' || path.startsWith('.agents/skills/');
