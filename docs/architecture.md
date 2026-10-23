@@ -77,7 +77,22 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 令牌经 manager 直接交给 runner，不写入 `task_tools` 或任务日志；runner 只把它放进该任务之后的 `run_command` 环境变量 `GH_TOKEN`、`GITHUB_TOKEN`，并在命令输出中替换为 `[REDACTED]`。模型拿到的工具结果只有变量名、仓库、权限和到期时间，看不到令牌本身。令牌加入任务的脱敏表，发往模型服务商的请求也会先脱敏。同一任务最多签发 10 次；模型阶段结束（完成、失败或被中止）时，控制面逐个调用 `DELETE /installation/token` 撤销。
 
-令牌和 PR 检视时运行的仓库测试处在同一台虚拟电脑里，测试代码能读到这些环境变量，所以令牌被设计成只读、只覆盖本仓库，并在模型阶段结束时撤销；GitHub 安装令牌最长有效一小时。评论、标签、行内检视、分支和 PR 仍只由控制面用自己的令牌发布。读取 Actions 和检查状态需要 App 授予 Actions、Checks、Commit statuses 权限；接入向导生成的 manifest 申请 Actions、Checks、Commit statuses 写（写权限留给控制面发布 commit status、检查结果和重跑 CI；任务令牌仍一律降为读）。之前创建的 App 需要在 GitHub 上补加这三项权限，并由安装方同意。App 刻意不申请 workflows：开发任务改到 `.github/workflows/` 时 GitHub 会拒绝发布。也不申请 administration、secrets、security_events、vulnerability_alerts、secret_scanning_alerts：任务令牌对 PR 代码可见，不能让它读到仓库设置、密钥或未公开的漏洞告警。
+令牌和 PR 检视时运行的仓库测试处在同一台虚拟电脑里，测试代码能读到这些环境变量，所以令牌被设计成只读、只覆盖本仓库，并在模型阶段结束时撤销；GitHub 安装令牌最长有效一小时。评论、标签、行内检视、分支和 PR 仍只由控制面用自己的令牌发布。读取 Actions 和检查状态需要 App 授予 Actions、Checks、Commit statuses 权限；接入向导生成的 manifest 申请 Actions、Checks、Commit statuses 写（写权限留给控制面发布 commit status、检查结果和重跑 CI；任务令牌仍一律降为读）。之前创建的 App 需要在 GitHub 上补加这三项权限，并由安装方同意。检视和开发的令牌刻意不申请 workflows：开发任务改到 `.github/workflows/` 时 GitHub 会拒绝发布。App 本身可以为一键接入获得 Workflows，但它只出现在接入专用的令牌里（见下文「一键接入」），检视、开发和只读令牌都不申请。也不申请 administration、secrets、security_events、vulnerability_alerts、secret_scanning_alerts：任务令牌对 PR 代码可见，不能让它读到仓库设置、密钥或未公开的漏洞告警。
+
+## 一键接入
+
+「接入门禁／接入看板」分两步：先给源码仓开门禁 PR，人合入后再创建看板仓库并向公共 dashboard（`BOT_DASHBOARD_REPO`，默认 `agent-CI-Infra/dashboard`）提登记 PR。全程只用 GitHub App 安装令牌，由控制面用 App 私钥签 JWT 后按用途分别签发，权限取安装已授予的子集，运行结束时撤销；机器人账号的长期 Token 不用于接入，挂在机器人账号上的仓库停在预检。
+
+| 令牌 | 范围 | 权限 |
+| --- | --- | --- |
+| 源码仓 | 仅该仓库 | contents 写、pull_requests 写、workflows 写、metadata 读（门禁 PR 要提交 `.github/workflows/`） |
+| 创建看板仓库 | App 所属组织的安装，不指定仓库 | repository_creation 写（`POST /orgs/{org}/repos`；不用 administration） |
+| 看板仓库 | 仅新看板仓库 | contents、workflows、pages、actions 写，metadata 读 |
+| Dashboard | 仅 dashboard 仓库 | contents 写、pull_requests 写、metadata 读（登记文件是 JSON） |
+
+CI-workflow 模板仓库（`BOT_CI_TEMPLATE_REPO`）公开时不带令牌读取，否则用同一 App 在该仓库上的安装读取。看板仓库建在 App 的所属组织（`GET /app` 的 `owner`，必须是 Organization），名字是 `{源码所有者}-{源码仓库名}-board`，站点是 `https://{组织}.github.io/{看板仓库名}/`；源码所有者与该组织相同时也用这个名字。名字超过 100 个字符时停在预检。同名仓库已存在时，只有它的 `board-config.json` 把这个看板指向本源码仓（或它是控制面为本源码仓创建、尚未配置完的仓库）才继续更新，否则停下，不覆盖也不删除。
+
+预检在任何写入之前核对每个要用的安装：源码仓、App 所属组织和 dashboard 仓库都要装有同一个 App，并具备上表权限（看板仓库已存在时不需要 repository_creation）。缺少时列出 GitHub 上的权限名（Workflows、Pages、Repository creation、Actions 等，均为 Read and write），由人在 App 设置里新增并在对应安装里同意；dashboard 仓库没有安装时，Dashboard 一步说明需要把同一个 App 安装过去。公共 dashboard 只接受公开源码仓，私有仓库停在预检，不创建公开看板。
 
 ## 代码快照与发布
 

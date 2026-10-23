@@ -428,7 +428,10 @@ function renderQuickstartRun(run) {
     if (item.url) { const link = element('a', '查看详情', 'result-link'); link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; li.append(link); }
     list.append(li);
   }
-  const quickstartErrors = { board_repository: '这是看板仓库，不需要接入；请对源码仓接入。', unsupported_stack: '暂时只支持带 package.json 的 Node 仓库。', private_repository: '公共看板只接受公开仓库，私有仓库只能接门禁。', ci_exists: '仓库已有 CI workflow，需要人工决定是否合并门禁配置。', gate_pr_merged_pending: '门禁 PR 等待你合并；合并后再次点击「接入看板」。', dry_run: '' };
+  const quickstartErrors = { board_repository: '这是看板仓库，不需要接入；请对源码仓接入。', unsupported_stack: '暂时只支持带 package.json 的 Node 仓库。', private_repository: '公共看板只接受公开仓库，私有仓库只能接门禁。', ci_exists: '仓库已有 CI workflow，需要人工决定是否合并门禁配置。', gate_pr_merged_pending: '门禁 PR 等待你合并；合并后再次点击「接入看板」。', dry_run: '',
+    github_app_required: '一键接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', app_owner_not_organization: '看板仓库建在 GitHub App 所属的组织下，个人账号拥有的 App 不能使用。', app_org_not_installed: 'GitHub App 没有安装到它所属的组织。',
+    app_permissions_missing: 'GitHub App 缺少预检里列出的权限：在 App 设置里新增，并在对应安装里同意后再试。', dashboard_app_not_installed: '需要把同一个 GitHub App 安装到公共 dashboard 仓库。', template_app_not_installed: '需要把同一个 GitHub App 安装到 CI-workflow 模板仓库。',
+    board_repository_conflict: '同名看板仓库已存在，但看不出属于这个源码仓，没有覆盖。', board_name_invalid: '看板仓库名超过 100 个字符，需要人工处理。' };
   $('quickstart-error').textContent = run.error ? (run.error in quickstartErrors ? quickstartErrors[run.error] : run.error) : '';
   $('quickstart-start').disabled = ['running', 'queued'].includes(run.state);
   if (['running', 'queued'].includes(run.state)) {
@@ -440,7 +443,9 @@ function renderQuickstartRun(run) {
 async function openQuickstart(row, after) {
   quickstartRow = row; quickstartAfter = after;
   $('quickstart-title').textContent = '接入 ' + row.full_name;
-  $('quickstart-hint').textContent = '第一步会给仓库开一个门禁 PR，需要你合入；合入后再次点击「接入看板」，bot 会创建 ' + row.full_name.split('/')[1] + '-board 仓库、开启 GitHub Pages（站点形如 https://' + row.full_name.split('/')[0] + '.github.io/' + row.full_name.split('/')[1] + '-board/），并向公共 dashboard 提登记 PR。';
+  // The board repository lives in the GitHub App's organization, named after the source owner and repository.
+  const boardName = row.full_name.replace('/', '-') + '-board';
+  $('quickstart-hint').textContent = '第一步会给仓库开一个门禁 PR，需要你合入；合入后再次点击「接入看板」，bot 会在 GitHub App 所属组织下创建 ' + boardName + ' 仓库、开启 GitHub Pages（站点形如 https://<App 所属组织>.github.io/' + boardName + '/），并向公共 dashboard 提登记 PR。全程使用 GitHub App 安装令牌，App 需要 Workflows、Pages、Repository creation 的读写权限，缺少时预检会列出并停下。';
   $('quickstart-steps').replaceChildren(); $('quickstart-error').textContent = '';
   quickstartView.showModal();
   try { const { run } = await api(`/api/projects/${row.id}/quickstart`); if (run) renderQuickstartRun(run); } catch {}
