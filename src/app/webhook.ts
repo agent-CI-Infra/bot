@@ -65,6 +65,8 @@ export function ingest(
         store.run('UPDATE policies SET enabled=0 WHERE repository_id IN (SELECT id FROM repositories WHERE account_id=? AND id=?)', accountId, String(removed.id || ''));
     }
     if (status === 200 && !duplicate && owner && payload) {
+      const policy=store.get('SELECT * FROM policies WHERE repository_id=?',String(owner.id)),pr=payload.pull_request as Json|undefined;
+      Object.assign(response,{review_outcome:pr?.draft===true?'draft':!policy?.enabled||!policy.review_enabled?'review_disabled':'not_trigger'});
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id);
       // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
       const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());

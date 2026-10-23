@@ -9,7 +9,7 @@ export function appJwt(appId: string, privateKey: string): string {
   return unsigned + '.' + createSign('RSA-SHA256').update(unsigned).sign(privateKey).toString('base64url');
 }
 export class GitHub {
-  token = ''; actorId = ''; fullName = ''; defaultBranch = ''; expiresAt = '';
+  token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = '';
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
@@ -45,7 +45,7 @@ export class GitHub {
     this.fullName = this.repository.full_name;
     if (account!.type === 'bot_account') {
       if (!secrets.token) stop('github_credentials_missing', 'waiting_configuration'); this.token = String(secrets.token); this.redactor.add(this.token);
-      this.actorId = String((await this.request('GET','/user')).id);
+      const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || '');
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration');
       this.redactor.add(secrets.private_key);
@@ -60,13 +60,19 @@ export class GitHub {
       const access = await this.request('POST',`/app/installations/${installation.id}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions }, false,jwt);
       this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission'); this.redactor.add(this.token);
       this.expiresAt=String(access.expires_at||'');
-      this.actorId = String((await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'))).id);
+      const actor = await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'));
+      this.actorId = String(actor.id); this.actorLogin = String(actor.login || app.slug + '[bot]');
     }
     const repo = await this.request('GET','/repositories/' + this.repository.id);
     if (String(repo.id) !== this.repository.id || String(repo.owner?.id) !== this.repository.owner_id) stop('github_repository_scope_changed','waiting_permission');
     this.fullName = repo.full_name; this.defaultBranch = repo.default_branch;
     if (!this.actorId || !this.defaultBranch || !/^[\w.-]+\/[\w.-]+$/.test(this.fullName)) stop('github_repository_invalid');
     return repo;
+  }
+  authorEmail(): string {
+    // The installation token's actor, not a hard-coded user or organization.
+    if (!/^[1-9]\d*$/.test(this.actorId) || !/^[a-zA-Z0-9-]+(?:\[bot\])?$/.test(this.actorLogin)) stop('github_actor_invalid','waiting_configuration');
+    return `${this.actorId}+${this.actorLogin}@users.noreply.github.com`;
   }
   async object(kind: string, number: number): Promise<any> { return this.request('GET',this.path(`/${kind.endsWith('.pr') ? 'pulls':'issues'}/${number}`)); }
   async ref(branch: string): Promise<any> { return this.request('GET',this.path('/git/ref/heads/' + encodeURIComponent(branch)), undefined, true); }

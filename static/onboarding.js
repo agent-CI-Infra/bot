@@ -18,7 +18,9 @@ async function renderOnboarding(request){
   if(onboardingStep===0){
     panel.append(note('需要你拥有的公网域名。HTTPS 地址只连接 webhook 8791，管理端口 8792 保持本机或独立管理入口；检查会拒绝管理页面和其他实例。'));
     if(data.public_address)panel.append(facts([['已验证地址',data.public_address.origin],['检查时间',timestamp(data.public_address.checked_at)]]));
-    const mode=card('选择连接方式'),choices=element('div','','actions');choices.append(button('自建 HTTPS 中转',()=>{onboardingTunnel=false;$('wizard-proxy').hidden=false;$('wizard-tunnel').hidden=true;}),button('Cloudflare Tunnel',()=>{onboardingTunnel=true;$('wizard-proxy').hidden=true;$('wizard-tunnel').hidden=false;}));mode.append(choices);panel.append(mode);
+    const mode=card('选择连接方式'),choices=element('div','','actions');
+    const choose=value=>{onboardingTunnel=value;$('wizard-proxy').hidden=value;$('wizard-tunnel').hidden=!value;mode.querySelector('p').textContent='已选：'+(value?'Cloudflare Tunnel':'自建 HTTPS 中转');for(const b of choices.children){const chosen=(b.textContent==='Cloudflare Tunnel')===value;b.setAttribute('aria-pressed',String(chosen));b.className=chosen?'':'quiet';}};
+    const proxyChoice=button('自建 HTTPS 中转',()=>choose(false)),tunnelChoice=button('Cloudflare Tunnel',()=>choose(true));proxyChoice.setAttribute('aria-pressed',String(!onboardingTunnel));tunnelChoice.setAttribute('aria-pressed',String(onboardingTunnel));proxyChoice.className=onboardingTunnel?'quiet':'';tunnelChoice.className=onboardingTunnel?'':'quiet';choices.append(proxyChoice,tunnelChoice);mode.append(choices,note('已选：'+(onboardingTunnel?'Cloudflare Tunnel':'自建 HTTPS 中转')));panel.append(mode);
     const proxy=wizardForm('自建中转',[note('将专用域名反向代理到 http://本机:8791，整个域名只转发 webhook，不要转发管理页面。准备证书后在这里检查。'),field('公网 HTTPS 地址',input('origin',data.public_address?.origin||'',{type:'url',required:true,placeholder:'填写你自己的域名，不带路径'}))],'检查并使用',value=>api('/api/onboarding/address','POST',value));proxy.id='wizard-proxy';panel.append(proxy);
     proxy.hidden=onboardingTunnel;const tunnel=card('Cloudflare Tunnel');tunnel.id='wizard-tunnel';tunnel.hidden=!onboardingTunnel;
     tunnel.append(note('在 Cloudflare 中创建 tunnel 并配置自有域名，粘贴 token 后由独立 Docker tunnel 服务连接，不需要把 token 写入 Compose。'),link('https://one.dash.cloudflare.com/','打开 Cloudflare → Networks → Tunnels'));
@@ -45,7 +47,18 @@ async function renderOnboarding(request){
     panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目 → 生效规则 可查看每份文件的来源、覆盖层和最终内容；computer.yaml 接到现有机器配置，不另建资源系统。'));next();
   }else{
     const summary=card('接入状态');summary.append(facts([['公网地址',data.public_address?.origin||'待验证'],['App',data.app?.slug||'待选择'],['安装',data.installation_skipped?'已跳过':data.app?.installations?'已确认':'待安装'],['默认模型',models.find(m=>m.id===data.model_id)?.model_name||'待配置'],['Agent','Pi 1.4.0 · 每仓库长期容器 · 模型请求经控制面代理']]));panel.append(summary);
-    const projects=card('选择项目开始检视');for(const repo of repositories){const row=element('div','','row');row.append(element('p',repo.full_name),button('打开项目设置',()=>openProject(repo.id)),button('启用此项目检视',async()=>{try{if(!data.model_id)throw new Error('请先在第 4 步选用模型');await api('/api/repositories/'+repo.id+'/policy','PATCH',{model_id:data.model_id,enabled:true,review_enabled:true,development_enabled:false});openProject(repo.id,'review');}catch(e){error(e);}}));row.querySelector('button:last-child').disabled=!data.public_address||!data.app?.installations||data.installation_skipped;projects.append(row);}projects.append(note('自动开发默认关闭。需要时在对应项目的开发设置中单独开启。尚未安装时不开始检视。'));panel.append(projects,button('完成向导',async()=>{await api('/api/onboarding/complete','POST',{});tab='projects';history.replaceState(null,'',location.pathname);await start();},''));
+    const projects=card('选择项目开始检视'),sync=button('同步已安装仓库',async()=>{sync.disabled=true;sync.textContent='正在同步安装范围…';try{const result=await api('/api/installations/sync','POST',{});if(result.results.some(r=>r.error))throw new Error('安装同步失败：'+result.results.filter(r=>r.error).map(r=>r.error).join('，'));await render();}catch(e){error(e);}finally{sync.disabled=false;sync.textContent='同步已安装仓库';}});projects.append(sync);
+    const installed=await api('/api/installations');if(request!==renderVersion)return;
+    for(const repo of installed.repositories){
+      const row=element('div','','row');row.append(element('p',repo.full_name),...installedBadges(repo));
+      if(repo.registered)row.append(button('打开项目设置',()=>openProject(repo.id)));
+      if(!repo.registered||!repo.enabled||!repo.review_enabled){
+        const activate=button(!repo.registered?'启动并启用检视':!repo.enabled?'重新启用检视':'启用检视',async()=>{activate.disabled=true;try{if(!data.model_id)throw new Error('请先在第 4 步选用模型');await api('/api/installations/'+repo.id+'/activate','POST',{model_id:data.model_id,development_enabled:false});await start();}catch(e){error(e);activate.disabled=false;}});
+        activate.disabled=!data.public_address||!data.app?.installations||data.installation_skipped||repo.installed===false;row.append(activate);
+      }
+      projects.append(row);
+    }
+    projects.append(note('这里包括已安装但尚未启动的仓库。未看到新仓时点击同步。自动开发默认关闭，在对应项目的开发设置中单独开启；尚未安装时不开始检视。'));panel.append(projects,button('完成向导',async()=>{await api('/api/onboarding/complete','POST',{});tab='projects';history.replaceState(null,'',location.pathname);await start();},''));
   }
   nav.querySelector('[aria-current=step]')?.scrollIntoView({block:'nearest',inline:'nearest'});
 }

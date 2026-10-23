@@ -69,3 +69,15 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
   .project-content{padding:12px}.status-grid{grid-template-columns:minmax(0,1fr)}
   .project-head .title-group{flex-basis:100%;flex-direction:row;align-items:center}.project-head h1{font-size:17px;flex-basis:100%}
 }
+
+/* Navigation stays fully named and reachable on phones; rules use the page scroll. */
+.model-list,.choice,.choice .muted{min-width:0;overflow-wrap:anywhere}
+.rule-layers pre.output{max-height:none;overflow:visible}
+@media(max-width:760px){
+  #tabs,.project-nav,.wizard-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));overflow:visible;gap:4px}
+  #tabs button,.project-nav a,.wizard-steps button{white-space:normal;text-align:center;padding:8px 4px;min-width:0;line-height:1.35;overflow-wrap:anywhere}
+  .choice .muted{flex-basis:100%}
+}
+
+.model-address{display:block;min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
+@media(max-width:760px){.history .model-entry{grid-template-columns:minmax(0,1fr)}.model-entry>.actions{grid-column:1;justify-content:flex-start;flex-wrap:wrap}}

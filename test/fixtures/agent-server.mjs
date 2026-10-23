@@ -40,7 +40,7 @@ function model(input){
       current.head.sha=commit(files,current.head.sha,'new head');
     }
     result={summary:number===8?'Do not echo '+config.model_key:'Reviewed project material',requires_code_change:requested||!issue,issue_requests_code:requested,clarification_required:false,implementation_goal:'Fix addition and document numeric behavior',request_quote:requested?context.object.body:'',
-      findings:[{body:'The arithmetic implementation requires attention.',format:issue?'discussion':'inline',selection_reason:issue?'Issue has no inline diff.':'Evidence is on the changed arithmetic line.',path:'calc.mjs',line:number===44?999:1,side:'RIGHT'}]};
+      findings:[{body:'The arithmetic implementation requires attention.',format:issue?'discussion':'inline',actionable:true,within_goal:true,requires_human_decision:false,selection_reason:issue?'Issue has no inline diff.':'Evidence is on the changed arithmetic line.',path:'calc.mjs',line:number===44?999:1,side:'RIGHT'}]};
     return call('finish_review',result,'finish');
   }
   if(!names.includes('write_file')){
@@ -48,7 +48,7 @@ function model(input){
     return call('write_file',{path:'calc.mjs',content},'write');
   }
   if(!names.includes('run_command'))return call('run_command',{command:'node --test'},'test');
-  return call('finish_development',{summary:'Fix addition behavior',test_command:'node --test'},'finish');
+  return call('finish_development',{summary:'Fix addition behavior',change_title:'Fix addition behavior',test_command:'node --test'},'finish');
 }
 const publicRepo=repo=>({id:repo.id,full_name:repo.full_name,owner:repo.owner,default_branch:repo.default_branch});
 const server=createServer(async(req,res)=>{
@@ -99,7 +99,7 @@ const server=createServer(async(req,res)=>{
       const review=(repo.reviews.get(Number(m[1]))||[]).find(r=>r.id===Number(m[2]));
       return send(Number(url.searchParams.get('page')||1)===1?(review?.comments||[]).map((c,index)=>({...c,id:Number(m[2])*1000+index,html_url:'https://github.invalid/review-comment/'+index,commit_id:review.commit_id})):[]);
     }
-    if((m=/^\/pulls\/(\d+)$/.exec(suffix)))return send(repo.pulls.get(Number(m[1]))||{},repo.pulls.has(Number(m[1]))?200:404);
+    if((m=/^\/pulls\/(\d+)$/.exec(suffix))){const pr=repo.pulls.get(Number(m[1]));if(pr&&method==='PATCH')Object.assign(pr,body);return send(pr||{},pr?200:404);}
     if(suffix==='/pulls'){
       if(method==='GET'){const branch=(url.searchParams.get('head')||'').split(':')[1];return send(Number(url.searchParams.get('page')||1)===1?[...repo.pulls.values()].filter(p=>!branch||p.head.ref===branch):[]);}
       const number=repo.nextPr++,value={id:5000+number,number,title:body.title,body:body.body,state:'open',draft:false,user:{id:999},

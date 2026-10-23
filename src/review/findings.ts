@@ -5,6 +5,7 @@ export function validateReview(value: any) {
     || typeof value.implementation_goal !== 'string' || typeof value.request_quote !== 'string' || value.event !== undefined) stop('model_review_invalid');
   for (const finding of value.findings) if (!finding || typeof finding.body !== 'string' || finding.body.length > 16000 || !['discussion','inline'].includes(finding.format)
     || typeof finding.selection_reason !== 'string' || finding.selection_reason.length > 2000 || finding.event !== undefined) stop('model_finding_invalid');
+  for(const finding of value.findings)if(['actionable','within_goal','requires_human_decision'].some(key=>finding[key]!==undefined&&typeof finding[key]!=='boolean'))stop('model_finding_invalid');
   return value;
 }
 function positions(patch: string): Set<string> {

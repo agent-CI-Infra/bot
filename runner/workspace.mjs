@@ -15,13 +15,16 @@ export async function workspace(input){
     if(create)await mkdir(dirname(target),{recursive:true});
     const parent=await realpath(dirname(target));if(parent!==repo&&!parent.startsWith(repo+sep))throw new Error('invalid_parent');return target;
   };
+  const authorFile=root+'/author.json';
+  const author=await readFile(authorFile,'utf8').then(JSON.parse).catch(()=>({email:'department-bot@invalid.local'}));
   const git=(args,data)=>new Promise((res,rej)=>{
     const child=execFile('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgsign=false',...args],
-      {cwd:repo,env:{...environment,GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:'bot@users.noreply.github.com',GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:'bot@users.noreply.github.com'},encoding:'buffer',maxBuffer:4*1024*1024,timeout:60000},(e,out)=>e?rej(e):res(out));
+      {cwd:repo,env:{...environment,GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},encoding:'buffer',maxBuffer:4*1024*1024,timeout:60000},(e,out)=>e?rej(e):res(out));
     child.stdin.on('error',()=>{});child.stdin.end(data);
   });
   if(input.type==='workspace_init'){
     await mkdir(repo,{recursive:true});
+    if(input.author_email){if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(input.author_email))throw new Error('invalid_author_email');await writeFile(authorFile,JSON.stringify({email:input.author_email}),{mode:0o600});author.email=input.author_email;}
     try{await writeFile(root+'/snapshot.json','{}',{flag:'wx',mode:0o600});}catch(e){if(e.code!=='EEXIST')throw e;}
     return {initialized:true};
   }

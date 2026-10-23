@@ -1,10 +1,11 @@
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
 import { blobSha, operationId, stop, TaskError } from '../agent/common.js';
+import { implementationText, reviewText } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 
 export class Publisher {
-  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>){}
+  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly onHeadWait:(value:any)=>void=()=>{}){}
   // replayable effects (such as adding a label) are idempotent on GitHub, so an unknown response may be sent again.
   async effect(key:string,kind:string,request:any,send:()=>Promise<any>,find:()=>Promise<any>,replayable=false){
     const id=operationId(this.task.id+':'+key),marker=`<!-- dept-bot:${id} -->`;
@@ -26,11 +27,12 @@ export class Publisher {
       (await this.github.pages(path)).find(c=>String(c.user?.id)===this.github.actorId&&String(c.body).includes(marker)));
   }
   async review(result:any,files:any[]){
-    const inline:any[]=[],discussion:string[]=[];
-    for(const finding of result.findings){
-      const location=this.task.kind==='review.pr'&&finding.format==='inline'?inlineLocation(finding,files):null;
-      if(location)inline.push({body:finding.body+'\n\nSelection: '+finding.selection_reason+`\n\n<!-- dept-bot-finding:${finding.id} -->`,...location});
-      else discussion.push(finding.body+'\n\nSelection: '+finding.selection_reason+(finding.format==='inline'?' (No verifiable diff location; posted as discussion.)':''));
+    const inline:any[]=[], locations = new Map<string, any>();
+    for (const finding of result.findings) { const location = this.task.kind==='review.pr' && finding.format==='inline' ? inlineLocation(finding,files) : null; if(location)locations.set(finding.id,location); }
+    const text = reviewText(result.summary, result.findings, new Set(locations.keys()));
+    for(const finding of text.findings){
+      const location=locations.get(finding.id);
+      if(location)inline.push({body:finding.body+`\n\n<!-- dept-bot-finding:${finding.id} -->`,...location});
     }
     const coverage=`Reviewed commit: ${result.reviewed_sha}\nCoverage: ${result.coverage.join('; ')}`;
     const outputs:any[]=[];
@@ -45,7 +47,7 @@ export class Publisher {
       this.store.run('UPDATE github_effects SET response=? WHERE id=?',JSON.stringify(output),operationId(this.task.id+':inline'));outputs.push(output);
     }
     // Every review publishes one summary discussion comment, even when all findings are inline.
-    outputs.push(await this.discussion('discussion',[result.summary,discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
+    outputs.push(await this.discussion('discussion',[text.overview,text.discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
     await this.validate();return outputs;
   }
   async label(name:string){
@@ -59,6 +61,10 @@ export class Publisher {
     const branch=this.store.get('SELECT * FROM bot_branches WHERE repository_id=? AND branch=?',this.task.repository_id,candidate.branch);
     if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-'))stop('branch_not_owned','waiting_permission');
     await this.validate();
+    if(candidate.remote_sha && this.store.get("SELECT state FROM github_effects WHERE id=?",operationId(this.task.id+':branch'))?.state==='sent'){
+      if((await this.github.ref(candidate.branch))?.object?.sha!==candidate.remote_sha)stop('branch_head_changed','superseded');
+      return candidate.remote_sha;
+    }
     for(const file of candidate.files){
       const data=Buffer.from(file.base64,'base64');if(blobSha(data)!==file.sha)stop('candidate_blob_mismatch');
       const blob=await this.github.request('POST',this.github.path('/git/blobs'),{content:file.base64,encoding:'base64'});
@@ -66,8 +72,8 @@ export class Publisher {
     }
     const tree=await this.github.request('POST',this.github.path('/git/trees'),{tree:candidate.files.map((f:any)=>({path:f.path,mode:f.mode,type:'blob',sha:f.sha}))});
     if(tree.sha!==candidate.tree_sha)stop('github_tree_mismatch');
-    const author={name:'Department Bot',email:'bot@users.noreply.github.com',date:candidate.date};
-    const commit=await this.github.request('POST',this.github.path('/git/commits'),{message:candidate.summary+'\n\nDept-Bot-Task: '+this.task.id,
+    const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
+    const commit=await this.github.request('POST',this.github.path('/git/commits'),{message:implementationText(candidate,this.task.object_number).title,
       tree:candidate.tree_sha,parents:[candidate.base_sha],author,committer:author});
     if(commit.tree?.sha!==candidate.tree_sha)stop('github_commit_tree_mismatch');
     candidate.remote_sha=commit.sha;
@@ -87,17 +93,40 @@ export class Publisher {
   async pullRequest(candidate:any,sha:string){
     if(candidate.pr_number){
       const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',this.task.repository_id,candidate.pr_number);
-      const pr=await this.github.object('review.pr',candidate.pr_number);
-      if(!owned||String(pr.id)!==owned.pr_id||String(pr.user?.id)!==owned.author_id||String(pr.head?.repo?.id)!==owned.head_repository_id||pr.head.ref!==owned.branch||pr.head.sha!==sha)stop('bot_pr_ownership_changed','waiting_permission');
+      let pr:any;
+      for(const delay of this.headDelays){
+        if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
+        await this.validate(); pr=await this.github.object('review.pr',candidate.pr_number);
+        assertOwnedPR(owned,pr,this.github.actorId,this.task.repository_id);
+        if(pr.head.sha===sha)break;
+        this.onHeadWait({type:'pr_head_wait',expected_sha:sha,observed_sha:pr.head.sha,pr_number:candidate.pr_number});
+      }
+      if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head');
+      const source=this.store.get('SELECT object_number FROM tasks WHERE id=?',owned!.source_task_id);
+      const content=implementationText(candidate,Number(source?.object_number||this.task.object_number));
+      const marker=this.marker('pr-update'),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
+      await this.effect('pr-update','pull_request',payload,()=>this.github.request('PATCH',this.github.path('/pulls/'+pr.number),payload),async()=>{
+        const current=await this.github.object('review.pr',pr.number);assertOwnedPR(owned,current,this.github.actorId,this.task.repository_id);
+        return current.head.sha===sha&&current.title===payload.title&&current.body===payload.body?current:null;
+      },true);
+      // Only count a confirmed head and its refreshed description, once across retries.
       this.store.run('UPDATE bot_pull_requests SET revisions=revisions+CASE WHEN sha<>? THEN 1 ELSE 0 END,sha=? WHERE repository_id=? AND number=?',sha,sha,this.task.repository_id,candidate.pr_number);
-      return pr;
+      return {...pr,...payload};
     }
-    const marker=this.marker('pr'),path=this.github.path('/pulls'),body=`${candidate.summary}\n\nCloses #${this.task.object_number}\n\nTests: ${candidate.validation.command}\nExit code: ${candidate.validation.exit_code}\n\n${marker}`;
-    const request={head:candidate.branch,base:candidate.base_branch,title:`Implement #${this.task.object_number}: ${candidate.summary.slice(0,160)}`,body};
+    const marker=this.marker('pr'),path=this.github.path('/pulls'),body=implementationText(candidate,this.task.object_number).body+'\n\n'+marker;
+    const request={head:candidate.branch,base:candidate.base_branch,...implementationText(candidate,this.task.object_number),body};
     const pr=await this.effect('pr','pull_request',request,()=>this.github.request('POST',path,request),async()=>
       (await this.github.pages(path+'?state=all&head='+encodeURIComponent(this.github.fullName.split('/')[0]+':'+candidate.branch))).find(p=>p.head?.ref===candidate.branch&&String(p.head?.repo?.id)===this.task.repository_id&&String(p.body).includes(marker)));
     if(String(pr.user?.id)!==this.github.actorId||String(pr.head?.repo?.id)!==this.task.repository_id||pr.head?.ref!==candidate.branch||pr.head.sha!==sha)stop('bot_pr_ownership_unconfirmed','waiting_permission');
     this.store.run(`INSERT INTO bot_pull_requests VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(repository_id,number) DO NOTHING`,this.task.repository_id,pr.number,String(pr.id),String(pr.user.id),String(pr.head.repo.id),candidate.branch,sha,this.task.id);
     return pr;
   }
+}
+
+export function assertOwnedPR(owned:Row|undefined,pr:any,actorId:string,repositoryId:string): asserts owned is Row {
+  if(!owned)throw new TaskError('bot_pr_identity_changed','waiting_permission');
+  if(String(pr.id)!==owned.pr_id)stop('bot_pr_identity_changed','waiting_permission');
+  if(String(pr.user?.id)!==owned.author_id||owned.author_id!==actorId)stop('bot_pr_author_changed','waiting_permission');
+  if(String(pr.head?.repo?.id)!==owned.head_repository_id||owned.head_repository_id!==repositoryId)stop('bot_pr_head_repository_changed','waiting_permission');
+  if(pr.head?.ref!==owned.branch)stop('bot_pr_branch_changed','waiting_permission');
 }
