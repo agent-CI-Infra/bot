@@ -22,6 +22,8 @@ services:
       manager:
         condition: service_started
     environment:
+      TMPDIR: /tmp
+      SQLITE_TMPDIR: /tmp
       BOT_DATABASE_PATH: /data/control.sqlite
       BOT_MASTER_KEY_FILE: /keys/master.key
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
@@ -43,6 +45,8 @@ services:
       - tunnel-keys:/tunnel
     networks: [control]
     read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
@@ -79,6 +83,8 @@ services:
       project-image:
         condition: service_completed_successfully
     environment:
+      TMPDIR: /tmp
+      SQLITE_TMPDIR: /tmp
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
       BOT_PROJECT_IMAGE: department-bot-project:local
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
@@ -88,6 +94,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [control]
     read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 100s

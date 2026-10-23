@@ -185,8 +185,7 @@ test('the manager client waits as long as a command runs when no timeout is give
   await assert.rejects(client.call('POST', '/v1/projects/101/fail', {}), /stale_generation/);
 });
 
-test('both databases keep temporary sort data in memory, since the containers have read-only root filesystems', async t => {
-  // Sorting large task rows otherwise spills to a temporary file and fails with "disk I/O error" in the container.
-  const h = await harness(t); assert.equal(h.store.get('PRAGMA temp_store').temp_store, 2);
-  const f = fixture(t); assert.equal(f.projects.db.prepare('PRAGMA temp_store').get().temp_store, 2);
+test('both databases use default temporary storage so large sorts can spill to the container tmpfs', async t => {
+  const h = await harness(t); assert.equal(h.store.get('PRAGMA temp_store').temp_store, 0);
+  const f = fixture(t); assert.equal(f.projects.db.prepare('PRAGMA temp_store').get().temp_store, 0);
 });
