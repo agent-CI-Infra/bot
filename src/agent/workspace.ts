@@ -26,6 +26,14 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
     return result;
   }
+  // Hands a credential to the task agent. Unlike call(), the request is not recorded in task_tools, so the token is
+  // never stored; a lost answer only means the agent asks again.
+  async deliver(request:any){
+    await this.guard();
+    const response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
+      request:{...request,workspace_id:this.task.workspace_id}},90000).catch(()=>null);
+    return response?.ok?response.result:{error:response?.error||'runner_operation_failed'};
+  }
   // Ends background processes this task kept so the next task starts on a clean project computer.
   async release(){
     if(!this.task.generation||!this.task.workspace_id)return;

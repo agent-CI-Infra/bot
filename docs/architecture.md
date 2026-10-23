@@ -8,7 +8,7 @@
 
 当前提供多账号控制面、每仓库一个长期 Docker 环境，以及可读代码、运行命令和修改文件的检视／开发 Agent。没有内置账号或仓库；开启仓库检视后接收事件并创建任务，满足开发条件时自动实现、测试、发布 bot 分支和 PR。`/api/status` 的项目环境、检视、开发及模型调用能力均可用；具体任务缺配置或失败会显示故障状态。
 
-检视和开发由固定版本 Pi SDK 在项目长期容器内运行。真实 GitHub 凭据和模型 Key 仅在控制面；Pi 的 loopback 模型入口通过任务专属 runner 邮箱请求控制面代理，没有跨项目共享服务或新增公网端口。控制面继续独立验证测试、diff 位置、head、bot 分支归属并负责发布，Review 只允许 COMMENT，不自动合并。
+检视和开发由固定版本 Pi SDK 在项目长期容器内运行。能写 GitHub 的凭据和模型 Key 仅在控制面；Pi 的 loopback 模型入口通过任务专属 runner 邮箱请求控制面代理，没有跨项目共享服务或新增公网端口。模型需要自己读 GitHub 时（Issue、PR、评论、行内检视、Actions 运行、检查状态等），调用 `github_read_token` 经同一邮箱向控制面兑换只读令牌，见下文「任务只读令牌」。控制面继续独立验证测试、diff 位置、head、bot 分支归属并负责发布，Review 只允许 COMMENT，不自动合并。
 
 ## 使用与权限
 
@@ -56,7 +56,15 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 别人的 PR 只检视，不产生向作者分支提交的任务；分支名或机器人名称不能代替归属记录。由本系统创建的 PR 保存不可变 PR ID、作者、head 仓库、分支和发布 SHA，只有这些身份仍匹配、策略允许且确有修改项时才在原分支跟进。跟进默认最多 3 轮，可在 policy 的 max_revisions 中设置 0–10；不另开 PR，不强推，不自动合并。
 
-## 无凭据代码代理与发布
+## 任务只读令牌
+
+模型调用 `github_read_token` 时，runner 在任务邮箱写入请求，控制面轮询到后为本仓库签发一个 GitHub App 安装令牌：`repository_ids` 只含当前仓库，权限只取 `metadata`、`contents`、`issues`、`pull_requests`、`actions`、`checks`、`statuses` 中安装已授予的项，并一律降为 read；签发结果里只要有任何一项不是 read 就拒绝。机器人账号只有一个能写的长期 Token，不能派生更窄的令牌，所以不提供只读令牌，模型会收到 `github_app_required`。
+
+令牌经 manager 直接交给 runner，不写入 `task_tools` 或任务日志；runner 只把它放进该任务之后的 `run_command` 环境变量 `GH_TOKEN`、`GITHUB_TOKEN`，并在命令输出中替换为 `[REDACTED]`。模型拿到的工具结果只有变量名、仓库、权限和到期时间，看不到令牌本身。令牌加入任务的脱敏表，发往模型服务商的请求也会先脱敏。同一任务最多签发 10 次；模型阶段结束（完成、失败或被中止）时，控制面逐个调用 `DELETE /installation/token` 撤销。
+
+令牌和 PR 检视时运行的仓库测试处在同一台虚拟电脑里，测试代码能读到这些环境变量，所以令牌被设计成只读、只覆盖本仓库，并在模型阶段结束时撤销；GitHub 安装令牌最长有效一小时。评论、标签、行内检视、分支和 PR 仍只由控制面用自己的令牌发布。读取 Actions 和检查状态需要 App 授予 Actions、Checks、Commit statuses 的 read 权限；接入向导生成的 manifest 已包含这三项，之前创建的 App 需要在 GitHub 上补加这三项权限，并由安装方同意。
+
+## 代码快照与发布
 
 当前采用 Git 数据 API 的有界快照传输：控制面读取固定 commit 的 tree/blob，经 manager 将文件分块交给 runner；runner 校验 blob 与源 tree，构建本地 Git 快照。它不是完整上游历史克隆，模型上下文和评论覆盖说明明确标识这一点。单文件最多 1 MiB，快照最多 2000 文件／32 MiB，超限、子模块或截断 tree 进入明确故障，不用不完整工作区开发。二进制和符号链接按 Git 对象处理，相对文件工具不跟随越界符号链接。
 
