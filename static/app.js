@@ -78,18 +78,16 @@ async function render() {
   // Super administrators see every installed repository; project administrators see their registered ones.
   const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView; $('check').hidden = !installedView;
   // Gate / dashboard connection status (cached; refreshed on demand).
-  const integrationMap = new Map();
+  const integrationMap = new Map(); let staleIntegrations = false;
   if (installedView) {
-    let integrations = []; try { integrations = (await api('/api/integrations')).integrations || []; } catch {}
+    let integrations = [], checked = false; try { integrations = (await api('/api/integrations')).integrations || []; } catch {}
     if (!integrations.length || forceIntegrationCheck) {
-      forceIntegrationCheck = false;
+      forceIntegrationCheck = false; checked = true;
       try { $('count').textContent = '正在检查门禁和看板的接入状态…'; integrations = (await api('/api/integrations/check', 'POST', {})).integrations || []; } catch {}
     }
     integrations.forEach(item => integrationMap.set(item.repository_id, item));
-    if (integrations.some(item => item.stale) && !integrationAutoRefresh) {
-      integrationAutoRefresh = true;
-      api('/api/integrations/check', 'POST', {}).then(() => { integrationAutoRefresh = false; return start(); }).catch(() => { integrationAutoRefresh = false; });
-    }
+    // What a check just returned is not checked again here, even if part of it is still stale.
+    staleIntegrations = !checked && integrations.some(item => item.stale);
   }
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
   let result;try{result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
@@ -133,6 +131,14 @@ async function render() {
     if(taskTab)content.append(taskMetricsLine(row));
     line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));$('rows').append(line);
   });
+  if(staleIntegrations)refreshStaleIntegrations();
+}
+// Stale chips are checked once in the background and only the chips change; the list is neither reloaded nor cleared.
+// A result that is still stale (a failed check, or more repositories than one check covers) waits for a manual refresh.
+async function refreshStaleIntegrations() {
+  if (integrationAutoRefresh) return; integrationAutoRefresh = true;
+  try { updateIntegrationChips((await api('/api/integrations/check', 'POST', {})).integrations || []); } catch {}
+  finally { integrationAutoRefresh = false; }
 }
 const forms = {
   accounts: [['name', '账号名称'], ['type', '账号类型', [['bot_account', '机器人账号'], ['github_app', 'GitHub App']]], ['app_id', 'App ID（仅 GitHub App）'], ['private_key', 'App 私钥（仅 GitHub App）', 'textarea'], ['token', '机器人 Token（仅机器人账号）', 'password'], ['webhook_secret', 'Webhook 签名凭据', 'password']],

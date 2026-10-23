@@ -7,6 +7,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { join, resolve } from 'node:path';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { InstallationSync } from '../dist/app/installations.js';
+import { IntegrationChecker } from '../dist/projects/integrations.js';
+import { loadConsole } from './console-page.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { command } from '../runner/command.mjs';
 
@@ -49,7 +51,11 @@ test('repositories cannot be registered by hand; they come from installation syn
 test('a full sync lists every installation repository and marks the rest as no longer installed', async t => {
   const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
-  await h.hook(a.path, a.secret, 'old', added(303), { 'X-GitHub-Event': 'installation_repositories' });
+  await h.hook(a.path, a.secret, 'old', added(303, 101), { 'X-GitHub-Event': 'installation_repositories' });
+  // GitHub App accounts are not checked yet; the answer is still cached with the time of the check.
+  const checker = new IntegrationChecker(h.store, 'http://127.0.0.1:9'), cached = id => h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', id);
+  await checker.check('303'); await checker.check('101');
+  assert.deepEqual([cached('303').gate_detail, cached('101').dashboard_detail], ['GitHub App 账号暂不支持自动检查', 'GitHub App 账号暂不支持自动检查']);
   const requests = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://fake'); requests.push(req.method + ' ' + url.pathname); res.setHeader('Content-Type', 'application/json');
@@ -69,6 +75,86 @@ test('a full sync lists every installation repository and marks the rest as no l
   const rows = h.store.all('SELECT repository_id,installed FROM installed_repositories WHERE account_id=?', a.id);
   assert.equal(rows.filter(r => r.installed).length, 101); assert.equal(rows.find(r => r.repository_id === '303').installed, 0);
   assert.match(String((await admin('/api/installations')).value.syncs[0].synced_at), /^20/);
+  // The repository the listing no longer has loses its cached status in the same write; the one still listed keeps it.
+  assert.equal(cached('303'), undefined); assert.ok(cached('101'));
+  const expired = '2026-01-01T00:00:00.000Z';
+  h.store.run('UPDATE repo_integrations SET checked_at=? WHERE repository_id=?', expired, '101');
+  await checker.check('101');
+  assert.equal(cached('101').gate_detail, 'GitHub App 账号暂不支持自动检查'); assert.ok(cached('101').checked_at > expired);
+  assert.equal(await checker.check('303'), null); assert.equal(cached('303'), undefined);
+});
+
+// A GitHub without any files: gates come back as not connected and the dashboard source list as unreadable.
+async function emptyGitHub(t) {
+  const requests = [], server = createServer((req, res) => {
+    requests.push(new URL(req.url, 'http://fake').pathname); res.statusCode = 404; res.setHeader('Content-Type', 'application/json'); res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  return { url: `http://127.0.0.1:${server.address().port}`, requests };
+}
+
+test('a repository that leaves the installation drops its cached integration status and is not checked again', async t => {
+  const github = await emptyGitHub(t);
+  const h = await harness(t, undefined, store => ({ integrations: new IntegrationChecker(store, github.url, 'fixture/dashboard') }));
+  const { admin } = await setup(h), a = await account(admin), events = { 'X-GitHub-Event': 'installation_repositories' };
+  const cached = id => h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', id), ids = list => list.map(item => item.repository_id);
+  const checks = id => github.requests.filter(path => path === `/repos/fixture/project-${id}/contents/.github/ci-gates.json`).length;
+  await h.hook(a.path, a.secret, 'install', added(101, 202, 303), events);
+  assert.equal((await admin('/api/installations/202/activate', 'POST', {})).status, 201);
+  assert.deepEqual(ids((await admin('/api/integrations/check', 'POST', {})).value.integrations), ['101', '202', '303']);
+  assert.deepEqual([checks('101'), checks('202')], [1, 1]);
+  // 101 stays installed with a status older than the cache allows; the started project 202 leaves the installation.
+  const expired = '2026-01-01T00:00:00.000Z';
+  h.store.run('UPDATE repo_integrations SET checked_at=? WHERE repository_id=?', expired, '101');
+  await h.hook(a.path, a.secret, 'remove-202', { ...added(), action: 'removed', repositories_removed: [{ id: 202, full_name: 'fixture/project-202' }] }, events);
+  assert.equal(cached('202'), undefined);
+  assert.deepEqual((await admin('/api/integrations')).value.integrations.map(i => [i.repository_id, i.stale]), [['101', true], ['303', false]]);
+  const integrations = (await admin('/api/integrations/check', 'POST', {})).value.integrations;
+  assert.deepEqual(integrations.map(i => [i.repository_id, i.stale]), [['101', false], ['303', false]]);
+  assert.ok(integrations[0].checked_at > expired);
+  assert.deepEqual([checks('101'), checks('202')], [2, 1]); assert.equal(cached('202'), undefined);
+  assert.equal((await admin('/api/integrations/check', 'POST', { repository_id: '202' })).value.integrations.length, 2); assert.equal(cached('202'), undefined);
+  // The project keeps its registration and policy; only the cached status went.
+  assert.ok(h.store.get('SELECT 1 FROM policies WHERE repository_id=?', '202'));
+  const removed = (await admin('/api/installations')).value.repositories.find(r => r.id === '202');
+  assert.deepEqual([removed.registered, removed.installed], [true, false]);
+  // A row an older version left behind is not listed, and the next check drops it.
+  h.store.run('INSERT INTO repo_integrations(repository_id,checked_at) VALUES(?,?)', '202', expired);
+  assert.deepEqual(ids((await admin('/api/integrations')).value.integrations), ['101', '303']);
+  await admin('/api/integrations/check', 'POST', {}); assert.equal(cached('202'), undefined);
+  // Deleting or suspending the installation drops every repository it covered.
+  await h.hook(a.path, a.secret, 'suspend', { action: 'suspend', installation }, { 'X-GitHub-Event': 'installation' });
+  assert.deepEqual([cached('101'), cached('303')], [undefined, undefined]);
+  assert.deepEqual((await admin('/api/integrations')).value.integrations, []);
+});
+
+test('a background check of stale integration chips updates them in place and never reloads the project list', async () => {
+  const integration = (gate_state, stale) => ({ repository_id: '101', gate_state, gate_detail: '', dashboard_state: 'none', dashboard_detail: '', checked_at: '', stale });
+  let check = () => [200, { integrations: [integration('live', true)] }];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations') return [200, { integrations: [integration('configured', true)] }];
+    if (path === '/api/installations') return [200, { syncs: [], repositories: [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true,
+      registered: true, enabled: true, review_enabled: true, development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0 }] }];
+    if (method === 'POST' && path === '/api/integrations/check') return check();
+    return [404, { error: 'not_found' }];
+  });
+  page.run("var startCalls = 0; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
+  const settle = () => new Promise(r => setTimeout(r, 50)), gate = line => line.querySelectorAll('[data-integration]').map(chip => chip.textContent);
+  const once = ['GET /api/integrations', 'GET /api/installations', 'POST /api/integrations/check'];
+  await page.run('render()'); const [line] = page.$('rows').children;
+  assert.deepEqual(gate(line), ['门禁已配置', '看板未接入']);
+  await settle();
+  // The check ran once and only the chips changed, although the answer is still stale: the same row stays on the list.
+  assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
+  assert.equal(page.$('rows').children[0], line); assert.deepEqual(gate(line), ['门禁已生效', '看板未接入']);
+  // A failed check leaves the chips as they are and is not retried either.
+  check = () => [502, { error: 'github_unavailable' }]; page.requests.length = 0;
+  await page.run('render()'); const [next] = page.$('rows').children; await settle();
+  assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
+  assert.equal(page.$('rows').children[0], next); assert.deepEqual(gate(next), ['门禁已配置', '看板未接入']);
+  // Refresh and "check integrations" still reload the page.
+  page.$('refresh').listeners.click[0](); page.$('check').listeners.click[0]();
+  assert.equal(page.run('startCalls'), 2);
 });
 
 test('the console reads the output of the command a running task is executing', async t => {

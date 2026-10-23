@@ -342,10 +342,24 @@ function installedIntegration(integration, row) {
     const [owner = '', name = ''] = String(row.full_name).split('/');
     return [integrationChip('看板仓', 'info', `https://${owner}.github.io/${name}/`, '接入流程生成的看板仓库，不需要再接入')];
   }
-  if (!integration) return [badge('接入未检查', 'info')];
-  const gate = gateLabels[integration.gate_state] || gateLabels.unknown, dashboard = dashboardLabels[integration.dashboard_state] || dashboardLabels.unknown;
-  return [integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail),
-    integrationChip(dashboard[0], dashboard[1], integration.dashboard_url, integration.dashboard_detail)];
+  let chips = [badge('接入未检查', 'info')];
+  if (integration) {
+    const gate = gateLabels[integration.gate_state] || gateLabels.unknown, dashboard = dashboardLabels[integration.dashboard_state] || dashboardLabels.unknown;
+    chips = [integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail),
+      integrationChip(dashboard[0], dashboard[1], integration.dashboard_url, integration.dashboard_detail)];
+  }
+  // Marked so that updateIntegrationChips can swap them in place.
+  chips.forEach(chip => { chip.dataset.integration = ''; });
+  return chips;
+}
+// Replaces the gate and dashboard chips of rows already on the list; nothing else in a row is redrawn.
+function updateIntegrationChips(integrations) {
+  const byId = new Map(integrations.map(item => [item.repository_id, item]));
+  for (const line of document.querySelectorAll('#rows .project-list-row')) {
+    const integration = byId.get(line.dataset.repositoryId), chips = [...line.querySelectorAll('[data-integration]')];
+    if (!integration || !chips.length) continue;
+    chips[0].replaceWith(...installedIntegration(integration)); chips.slice(1).forEach(chip => chip.remove());
+  }
 }
 function installedActions(row, after, integration) {
   const actions = element('div', '', 'actions');

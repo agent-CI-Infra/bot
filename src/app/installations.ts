@@ -3,6 +3,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
 import { fail, fields, text, type Json } from '../core/security.js';
 import { appJwt, appPermissions, missingPermissions } from '../github/client.js';
+import { dropUninstalledIntegrations } from '../projects/integrations.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
 // enables it; an administrator starts it in the console, and can disable it again.
@@ -35,6 +36,8 @@ export function recordInstallationEvent(store: Store, accountId: string, event: 
   } else if (['created', 'new_permissions_accepted', 'unsuspend'].includes(String(payload.action))) upsert(store, accountId, rows(payload.repositories), now);
   else if (['deleted', 'suspend'].includes(String(payload.action)) && installationId)
     store.run('UPDATE installed_repositories SET installed=0 WHERE account_id=? AND installation_id=?', accountId, installationId);
+  // A repository that left every installation is no longer checked, so its cached status would stay stale for good.
+  dropUninstalledIntegrations(store);
   return true;
 }
 
@@ -124,6 +127,7 @@ export class InstallationSync {
       upsert(this.store, accountId, rows, now);
       // A full listing is authoritative: anything not seen is no longer installed. Enabled repositories stay as they are.
       this.store.run('UPDATE installed_repositories SET installed=0 WHERE account_id=? AND synced_at<>?', accountId, now);
+      dropUninstalledIntegrations(this.store);
       this.store.run(`INSERT INTO installation_syncs VALUES(?,?,NULL,?) ON CONFLICT(account_id) DO UPDATE SET synced_at=excluded.synced_at,error=NULL,
         repositories=excluded.repositories`, accountId, now, rows.length);
     });

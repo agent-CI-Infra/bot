@@ -17,6 +17,15 @@ export function accountToken(store: Store, accountId: string): string | null {
   return typeof secrets.token === 'string' && secrets.token ? secrets.token : null;
 }
 
+const INSTALLED = 'SELECT repository_id FROM installed_repositories WHERE installed=1';
+/**
+ * Drops the cached status of repositories no installation lists any more. Callers run it in the same write that marks
+ * repositories as uninstalled; the check also runs it to clear rows an older version left behind.
+ */
+export function dropUninstalledIntegrations(store: Store): void {
+  store.run(`DELETE FROM repo_integrations WHERE repository_id NOT IN (${INSTALLED})`);
+}
+
 /**
  * Whether a repository is connected to the CI gates (CI-workflow) and to the public
  * dashboard. Read-only: it inspects files on the default branch, the latest CI run and
@@ -76,21 +85,18 @@ export class IntegrationChecker {
     } catch (error) { return { state: 'unknown', detail: (error as Error).message }; }
   }
 
-  async check(repositoryId: string): Promise<Json> {
-    const registered = this.store.get('SELECT * FROM repositories WHERE id=?', repositoryId);
-    const installed = registered ? null : this.store.get('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', repositoryId);
-    const full = String((registered || installed)?.full_name || ''), accountId = String((registered || installed)?.account_id || '');
-    const now = new Date().toISOString();
-    let gate: { state: GateState; detail: string } = { state: 'unknown', detail: '仓库不在安装列表中' };
-    let dashboard: { state: DashboardState; detail: string } = { state: 'unknown', detail: '仓库不在安装列表中' };
-    if (full) {
-      const token = accountToken(this.store, accountId);
-      if (!token) {
-        gate = { state: 'unknown', detail: 'GitHub App 账号暂不支持自动检查' };
-        dashboard = { state: 'unknown', detail: 'GitHub App 账号暂不支持自动检查' };
-      } else {
-        [gate, dashboard] = await Promise.all([this.gate(full, token), this.dashboard(full, token)]);
-      }
+  /** Checks one installed repository; a repository no installation lists is not checked and loses its cached row. */
+  async check(repositoryId: string): Promise<Json | null> {
+    const installed = this.store.get('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', repositoryId);
+    if (!installed) { this.store.run('DELETE FROM repo_integrations WHERE repository_id=?', repositoryId); return null; }
+    const source = this.store.get('SELECT * FROM repositories WHERE id=?', repositoryId) || installed;
+    const full = String(source.full_name), token = accountToken(this.store, String(source.account_id)), now = new Date().toISOString();
+    let gate: { state: GateState; detail: string }, dashboard: { state: DashboardState; detail: string };
+    if (!token) {
+      gate = { state: 'unknown', detail: 'GitHub App 账号暂不支持自动检查' };
+      dashboard = { state: 'unknown', detail: 'GitHub App 账号暂不支持自动检查' };
+    } else {
+      [gate, dashboard] = await Promise.all([this.gate(full, token), this.dashboard(full, token)]);
     }
     this.store.run(`INSERT INTO repo_integrations(repository_id,gate_state,gate_detail,dashboard_state,dashboard_detail,checked_at)
       VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET gate_state=excluded.gate_state,gate_detail=excluded.gate_detail,
@@ -107,8 +113,9 @@ export class IntegrationChecker {
       stale: Date.now() - Date.parse(String(row.checked_at)) > CACHE_MS };
   }
 
+  /** Cached status of installed repositories only; a repository without a row shows as not checked yet. */
   cached(): Json[] {
-    return this.store.all('SELECT repository_id FROM repo_integrations ORDER BY repository_id')
+    return this.store.all(`SELECT repository_id FROM repo_integrations WHERE repository_id IN (${INSTALLED}) ORDER BY repository_id`)
       .map(row => this.view(String(row.repository_id))).filter((row): row is Json => !!row);
   }
 }
