@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false;
-const titles = { projects: '项目', board: '看板', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
+const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
@@ -61,9 +61,9 @@ async function render() {
   $('message').textContent = ''; $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   // Repositories come from installation sync and are started from the list, so the projects page has no add form.
-  $('add').hidden = listTabs.includes(tab) || ['projects','board'].includes(tab) || me.role !== 'super_admin';
+  $('add').hidden = listTabs.includes(tab) || ['projects','board','costs'].includes(tab) || me.role !== 'super_admin';
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=['external','onboarding','board'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('sync').hidden=true;
+  $('rows').hidden=['external','onboarding','board','costs'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('sync').hidden=true;$('check').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
@@ -71,6 +71,7 @@ async function render() {
   if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
   $('rows').replaceChildren();$('rows').dataset.view=tab;$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
+  if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='onboarding'){$('filters').hidden=true;$('paging').hidden=true;try{await renderOnboarding(request);}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
@@ -129,6 +130,7 @@ async function render() {
         const retry=element('button','重试','quiet');retry.addEventListener('click',async()=>{retry.disabled=true;try{await api('/api/tasks/'+row.id+'/retry','POST',{});await render();}catch(err){error(err);retry.disabled=false;}});actions.append(retry);
       }line.append(actions);
     }
+    if(taskTab)content.append(taskMetricsLine(row));
     line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));$('rows').append(line);
   });
 }

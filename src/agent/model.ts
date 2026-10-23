@@ -1,11 +1,12 @@
 import { type Store } from '../storage/database.js';
 import { stop } from './common.js';
+import { pricingFor } from '../metrics/accounting.js';
 export function selectedModel(store: Store, repositoryId: string) {
   const row=store.get(`SELECT m.* FROM policies p JOIN models m ON m.id=p.model_id WHERE p.repository_id=? AND
     (m.repository_id=p.repository_id OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=p.repository_id)))`,repositoryId);
   if(!row?.api_key)return stop('model_not_configured','waiting_configuration');
   const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration');
-  return {url:String(row.api_url),key,model:String(row.model_name)};
+  return {id:String(row.id),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id))};
 }
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};

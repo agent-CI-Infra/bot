@@ -38,6 +38,7 @@
 | `/api/installations/:id/activate`、`/api/installations/:id/disable` | POST | 仅超级管理员；启动（可带 `model_id,development_enabled,account_id`）或再次启用／禁用一个仓库 |
 | `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
+| `/api/costs` | GET | 范围内按 UTC 日期、项目聚合的模型估算费用。参数 `from,to` 为 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。最多 5000 个日期／项目分组，超限要求缩小范围；返回 `days,summary,collection_started_at`，不返回模型密钥或原始请求 |
 | `/hooks/github/:account/:endpoint` | POST | 仅 Webhook 端口，按已登记入口验签和归档 |
 
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置、未启动或已禁用的仓库只归档，不生成任务。
@@ -45,3 +46,7 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 项目列表接口 `GET /api/repositories` 与超级管理员的 `GET /api/installations` 在每个仓库上返回 `running_tasks` 和 `queued_tasks`。前者仅统计实际执行阶段，后者统计 queued；配置等待、环境等待与已结束任务不计入执行中。返回范围沿用项目管理员的仓库权限。列表开关调用 `PATCH /api/repositories/{id}/policy`，仅提交本次切换的 `review_enabled` 或 `development_enabled`，不更改项目总启用状态。
 
 看板筛选格式为 `[{"field":"object_type","value":"pr"},{"field":"text","value":"research"}]`，最多 20 条，条件之间为“且”。支持 `repository_id`（仓库 ID）、`object_type`（`issue`／`pr`，不添加该条件表示全部）、`bot_stage`（`unreviewed,reviewing,reviewed,developing,developed,attention`）、`text`（编号可带 `#`，否则按标题文字匹配）、`include_closed`（布尔，默认 false）。`group_by` 为 `bot_stage` 或当前用户的单选字段 ID；空值列 ID 为 `unassigned`。筛选和隐藏列可在浏览器先预览，点击“保存视图”后持久保存。分页与列计数只表示已加载的卡片，不冒充全库总量；全量只看 `counts`。
+
+任务列表、任务详情、项目最近任务和看板关联任务现在带 `metrics`：`runtime_ms`（累计已观测执行时长，不含排队／等待）、`running`、`complete`（历史或进程中断时可能不完整）、`input_tokens,output_tokens,cached_input_tokens,cache_hit_rate`、`requests,usage_missing_requests,cache_missing_requests,unpriced_requests` 和按币种分开的 `costs`。缓存是输入的子集，命中率用累计缓存 token 除以累计输入 token；缺少必要统计时返回 null，不用 0 冒充。`complete:false` 时显示的是已经观测到的部分。
+
+模型创建和带 `version` 的 PATCH 还可提交 `pricing:{currency,input_per_million,output_per_million,cache_per_million}`，单价为每百万 token 的非负数（最多 1000000）。`pricing:null` 清除单价；读模型时返回当前单价，原有模型凭据及共享模型编辑权限不变。每次模型请求保存价格快照，费用为 `((输入-缓存)×输入单价 + 缓存×缓存单价 + 输出×输出单价) / 1000000`。缺少用量或单价时费用为 null；未返回缓存数据且缓存价不同于普通输入价时，也不能完整计价。费用页只汇总所选币种及尚未定价的请求，币种之间不作换算。

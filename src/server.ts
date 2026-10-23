@@ -7,6 +7,7 @@ import { management } from './app/management.js';
 import { models } from './app/models.js';
 import { queries } from './app/queries.js';
 import { boardApi } from './board/api.js';
+import { costsApi } from './metrics/api.js';
 import { ingest } from './app/webhook.js';
 import { type ProjectService } from './projects/service.js';
 import { type TaskEngine } from './agent/engine.js';
@@ -91,7 +92,7 @@ export function createControlPlane(options: Options) {
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
-      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
+      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
@@ -158,7 +159,7 @@ export function createControlPlane(options: Options) {
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
     const result = boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? (options.quickstart ? await quickstartApi(options.quickstart, user, method, url, input) : undefined) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
-      ?? (method === 'GET' ? queries(store, user, url) : undefined);
+      ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     if (mutation && (path.startsWith('/api/repositories') || path.startsWith('/api/installations'))) void options.projects?.reconcile().catch(() => {});
     respond(res, method === 'POST' ? 201 : 200, result);
