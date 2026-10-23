@@ -187,7 +187,9 @@ export class TaskEngine {
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,attempt:task.attempt+1});
       }
-      log({type:'fault',state:failure.state,code:failure.code});
+      // Keep polling for the first commit without repeating the same waiting entry every 30 seconds.
+      if(!(failure.code==='repository_has_no_commit'&&state==='waiting_configuration'&&current?.error_code===failure.code))
+        log({type:'fault',state:failure.state,code:failure.code});
     }
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.

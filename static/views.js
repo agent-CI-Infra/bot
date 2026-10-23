@@ -6,6 +6,9 @@ const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'developme
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', publish: '发布', done: '完成' };
 const publicationLabels = { comment: '总结评论', review: '行内检视（COMMENT）', label: '标签', branch: 'bot 分支', pull_request: 'PR' };
 const publicationStates = { sent: ['已发布', 'success'], pending: ['待发布', 'info'], inflight: ['发布中', 'info'], unknown: ['结果待确认', 'warning'] };
+const emptyRepositoryMessage = '仓库还没有提交；默认分支出现提交后会自动继续。';
+function taskErrorText(code) { return code === 'repository_has_no_commit' ? emptyRepositoryMessage : code; }
+function taskState(task) { return task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit' ? badge('仓库还没有提交', 'warning') : state(task.status); }
 
 function objectLabel(task) { return `${task.kind.endsWith('.pr') ? 'PR' : 'Issue'} #${task.object_number}`; }
 function githubUrl(task) {
@@ -95,7 +98,7 @@ async function refreshTask() {
 }
 function renderTaskHeader(task) {
   $('task-title').textContent = `${modeLabels[task.kind] || task.kind} · ${objectLabel(task)}`;
-  $('task-badges').replaceChildren(state(task.status), element('span', task.full_name || '仓库 ' + task.repository_id, 'muted'));
+  $('task-badges').replaceChildren(taskState(task), element('span', task.full_name || '仓库 ' + task.repository_id, 'muted'));
   const actions = $('task-actions'), url = githubUrl(task); actions.replaceChildren();
   if (url) actions.append(link(url, '在 GitHub 打开', 'button-link'));
   if (retryableStates.includes(task.status)) actions.append(button('重试', async event => {
@@ -127,6 +130,7 @@ const ownershipErrors={bot_pr_identity_changed:'PR 身份改变，需要核对�
 function liveText(task) {
   if (terminalStates.includes(task.status)) return null;
   if (task.status === 'queued') return '排队中，等待这个仓库的虚拟电脑空闲…';
+  if (task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit') return emptyRepositoryMessage;
   if(task.status==='waiting_pr_head')return `PR 尚未指向刚推送的提交 ${task.pushed_sha||'（读取中）'}；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。`;
   if (task.status === 'publishing') return '正在发布到 GitHub…';
   if(ownershipErrors[task.error_code])return ownershipErrors[task.error_code]+'；已暂停，不会推送其他作者或分支。';
@@ -185,7 +189,12 @@ function step(log) {
   } else if(value.type==='pr_head_wait'){
     title.textContent='等待 GitHub 更新 PR head';add(element('p','已推送 '+value.expected_sha),element('p','当前 PR '+value.observed_sha+'；自动重读，确认后继续。','muted'));
   } else if (value.type === 'completed') { title.textContent = '任务结束'; meta.prepend(state(value.status)); }
-  else if (value.type === 'fault') { title.textContent = '任务暂停或失败'; meta.prepend(state(value.state)); add(element('p', value.code, 'muted')); }
+  else if (value.type === 'fault') {
+    const empty = value.code === 'repository_has_no_commit' && value.state === 'waiting_configuration';
+    if (empty) item.classList.replace('step-fault', 'step-waiting');
+    title.textContent = empty ? '仓库还没有提交' : '任务暂停或失败'; meta.prepend(empty ? badge('等待首次提交', 'warning') : state(value.state));
+    add(element('p', taskErrorText(value.code), 'muted'));
+  }
   else if (value.type === 'restart_attempt') { title.textContent = '重新开始一次尝试'; add(element('p', '中断的工作目录保留，新的尝试使用新目录。', 'muted')); }
   else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); }
   else { title.textContent = value.type === 'tool' ? '工具 ' + value.name : '记录'; add(element('pre', log.content, 'output')); }
@@ -195,7 +204,7 @@ function renderTaskSide(detail, environment) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const info = card('任务');
   info.append(facts([['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
-    ['故障', task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||task.error_code], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
+    [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code)], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
   side.append(info, computerCard(task, environment));
   const result = resultCard(task); if (result) side.append(result);
