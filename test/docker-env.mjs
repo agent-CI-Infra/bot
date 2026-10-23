@@ -9,7 +9,7 @@ mkdirSync('.tmp/project-env', { recursive: true });
 const project = 'dept-bot-env-e2e-' + randomBytes(4).toString('hex');
 const override = resolve('.tmp/project-env/compose.test.yaml');
 writeFileSync(override, 'services:\n  manager:\n    ports: ["127.0.0.1:18883:8793"]\n');
-const composeArgs = ['compose','-f','compose.yaml','-f',override,'-p',project];
+const composeArgs = ['compose','-f','compose.yaml','-f','compose.build.yaml','-f',override,'-p',project];
 const env = { ...process.env, BOT_WEBHOOK_PORT: '18881', BOT_ADMIN_PORT: '18882', DOCKER_CONFIG: resolve('.cache/docker'), BUILDX_CONFIG: resolve('.cache/buildx') };
 const docker = args => execFileSync('docker', args, { env, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
 const compose = args => docker([...composeArgs, ...args]);

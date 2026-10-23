@@ -1,0 +1,33 @@
+# Builds every image from this checkout instead of pulling the published ones. It only overrides image names and
+# adds build contexts, so use it on top of compose.yaml, which holds the rest of the deployment:
+#   docker compose -f compose.yaml -f compose.build.yaml up -d --build
+services:
+  key-init:
+    image: department-bot:local
+    build: .
+  bot:
+    image: department-bot:local
+    build: .
+  tunnel:
+    image: department-bot-tunnel:local
+    build:
+      context: .
+      dockerfile: tunnel/Dockerfile
+  webhook:
+    image: department-bot-webhook:local
+    build:
+      context: .
+      dockerfile: webhook/Dockerfile
+  manager:
+    image: department-bot-manager:local
+    build:
+      context: .
+      dockerfile: manager/Dockerfile
+    environment:
+      # Must stay equal to the project-image reference below.
+      BOT_PROJECT_IMAGE: department-bot-project:local
+  project-image:
+    image: department-bot-project:local
+    build:
+      context: .
+      dockerfile: images/project/Dockerfile

@@ -1,6 +1,6 @@
 name: Images
 
-# Builds the deployment images that compose.pull.yaml runs. Pull requests only build them; pushes to main publish
+# Builds the deployment images that compose.yaml runs. Pull requests only build them; pushes to main publish
 # ghcr.io/agent-ci-infra/<name> with the tags sha-<12-character commit> and latest.
 on:
   push:
