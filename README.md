@@ -28,7 +28,7 @@ docker compose up -d
 1. **创建超级管理员。** 首页显示「创建第一名超级管理员」：填用户名和 12–256 位密码，点「初始化并登录」。初始化只成功一次，之后这里只有登录。
 2. **走完接入向导。** 首次登录会自动打开「接入向导」（之后从顶部导航进入），按顶部的六步走：
    1. 公网 HTTPS：选「自建 HTTPS 中转」，把一个专用域名整个反向代理到 `http://<这台机器>:8791`，填 `https://<你的域名>`，点「检查并使用」。或者选「Cloudflare Tunnel」，粘贴 tunnel token 点「保存 token」，在 Cloudflare 的 Published application 把 Service URL 设为 `http://webhook:8791`，回到向导点该路由的「检查并使用此域名」。两种方式都不要把 8792 转出去，管理页留在本机 `127.0.0.1:8792`。
-   2. GitHub App：填「目标组织」和「App 名称」，点「准备 GitHub 确认页」→「前往 GitHub 确认创建」，在 GitHub 上确认后会回到向导。权限固定为 Contents、Issues、Pull requests、Commit statuses 写，Metadata、Actions、Checks 读（Actions、Checks、Commit statuses 让检视和开发任务能用只读令牌查看 CI 状态，Commit statuses 写留给合并门禁发布状态；之前创建的 App 要在 GitHub 上补加），只订阅 `issues` 和 `pull_request`；Webhook 地址 `https://<你的域名>/hooks/github/<account_id>/<endpoint_id>` 由向导写进 App，不用手填。已在「机器人账号」登记过的 App 点「使用此 App」。
+   2. GitHub App：填「目标组织」和「App 名称」，点「准备 GitHub 确认页」→「前往 GitHub 确认创建」，在 GitHub 上确认后会回到向导。权限固定为 Contents、Issues、Pull requests、Commit statuses、Actions、Checks 写，Metadata 读（Actions、Checks、Commit statuses 让检视和开发任务能用只读令牌查看 CI 状态，这三项的写权限留给控制面发布状态、检查结果和重跑 CI；之前创建的 App 要在 GitHub 上补加），只订阅 `issues` 和 `pull_request`；Webhook 地址 `https://<你的域名>/hooks/github/<account_id>/<endpoint_id>` 由向导写进 App，不用手填。已在「机器人账号」登记过的 App 点「使用此 App」。
    3. 安装：点「在 GitHub 安装此 App」，选好仓库后回来点「重新检查安装」。
    4. 模型：在「添加模型」填接口 URL、API Key、模型名，点「保存并继续」。
    5. 规则：看一下内置规则，点「下一步」。
