@@ -159,7 +159,7 @@ try {
     await page.getByRole('button',{name:'项目',exact:true}).click();await page.locator('#rows .row').first().waitFor();assert.equal(await page.locator('#rows .row').count(),1);
     assert.ok((await page.locator('#rows').innerText()).includes('project-101'));assert.ok(!(await page.locator('#rows').innerText()).includes('project-202'));
     // The project page's machine section carries the computer's lifecycle actions.
-    await page.locator('#rows .row').first().getByRole('button',{name:'打开',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'机器配置',exact:true}).click();
+    await page.locator('#rows .row').first().getByRole('button',{name:'设置',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'机器配置',exact:true}).click();
     const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),6);
     await machine.getByRole('button',{name:'停止',exact:true}).click();await machine.locator('.status',{hasText:'已停止'}).waitFor();
     await machine.getByRole('button',{name:'启动',exact:true}).click();await machine.locator('.status',{hasText:'就绪'}).waitFor();

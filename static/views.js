@@ -275,7 +275,7 @@ function installedActions(row, after) {
   if (row.registered && row.enabled) actions.append(button('禁用', () => {
     if (confirm(`禁用 ${row.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) call('disable', {}, `正在禁用 ${row.full_name}…`);
   }));
-  if (row.registered) actions.append(button('打开', () => openProject(row.id)));
+  if (row.registered) actions.append(button('设置', () => openProject(row.id)));
   return actions;
 }
 const activationView = document.createElement('dialog'); activationView.id = 'activation-view'; activationView.setAttribute('aria-labelledby', 'activation-title');
