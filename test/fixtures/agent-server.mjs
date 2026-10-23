@@ -18,7 +18,7 @@ function makeRepo(id){
     {path:'README.md',mode:'100644',type:'blob',sha:blob(`REPO_${id}_ONLY. Run tests with node --test. Fix implementation; preserve tests.\n`)}];
   const base=commit(files),foreign=commit(files.map(f=>f.path==='calc.mjs'?{...f,sha:blob(baseBody(id).trim()+' // contributor\n')}:f),base,'contributor');
   const repo={id:Number(id),full_name:'fixture/project-'+id,owner:{id:10,login:'fixture'},default_branch:'trunk',refs:{trunk:base,contributor:foreign},issues:new Map(),pulls:new Map(),comments:new Map(),reviews:new Map(),labels:new Map(),refWrites:[],createdPrs:[],nextPr:70};
-  for(const [number,body] of [[1,'Fix add to sum both numbers.'],[2,'Explain the addition implementation.'],[3,'Fix add to sum both numbers.'],[4,'Explain the addition implementation.'],[6,'Fix add to sum both numbers.'],[8,'Explain the addition implementation.'],[10,'Explain recovery behavior.'],[12,'Fix add to sum both numbers.']])repo.issues.set(number,{id:1000+number,number,title:body,body,state:'open'});
+  for(const [number,body] of [[1,'Fix add to sum both numbers.'],[2,'Explain the addition implementation.'],[3,'Fix add to sum both numbers.'],[4,'Explain the addition implementation.'],[6,'Fix add to sum both numbers.'],[8,'Explain the addition implementation.'],[10,'Explain recovery behavior.'],[12,'Fix add to sum both numbers.']])repo.issues.set(number,{id:1000+number,number,title:body,body,state:'open',assignees:[],labels:body.startsWith('Fix')?[{name:'bot-develop'}]:[]});
   for(const number of [42,43,44,99])repo.pulls.set(number,{id:4000+number,number,title:'Review contributor change',body:'Please review this pull request.',state:'open',draft:number===99,user:{id:800,login:'contributor'},head:{sha:foreign,ref:'contributor',repo:{id:Number(id)}},base:{sha:base,ref:'trunk',repo:{id:Number(id)}},html_url:`https://github.invalid/${id}/pull/${number}`});
   return repo;
 }
@@ -86,6 +86,8 @@ const server=createServer(async(req,res)=>{
       if(method==='POST'){for(const name of body.labels)if(!labels.includes(name))labels.push(name);repo.labels.set(number,labels);stats.labels.push({repository_id:repo.id,number,labels:body.labels});}
       return send(method==='POST'||Number(url.searchParams.get('page')||1)===1?labels.map(name=>({name})):[]);
     }
+    // A maintainer added the development label to every Issue that asks for a fix.
+    if((m=/^\/issues\/(\d+)\/events$/.exec(suffix))){const labels=repo.issues.get(Number(m[1]))?.labels||[];return send(Number(url.searchParams.get('page')||1)===1?labels.map(label=>({event:'labeled',label,actor:{id:700,login:'maintainer',type:'User'}})):[]);}
     if((m=/^\/issues\/(\d+)$/.exec(suffix)))return send(repo.issues.get(Number(m[1]))||{},repo.issues.has(Number(m[1]))?200:404);
     if((m=/^\/pulls\/(\d+)\/files$/.exec(suffix))){
       if(Number(url.searchParams.get('page')||1)>1)return send([]);

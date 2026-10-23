@@ -52,7 +52,7 @@ GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管
 | `.bot/rules/labels.md` | 检视成功后的标签，使用 `review_label: bot-reviewed` 声明标签名 |
 | `.bot/rules/issue-review.md` | 新 Issue 检视与授权意图判断 |
 | `.bot/rules/pr-review.md` | PR 检视、证据位置与 COMMENT 输出 |
-| `.bot/rules/issue-development.md` | 明确要求改代码时的实现与测试 |
+| `.bot/rules/issue-development.md` | 明确要求改代码时的实现与测试；第一行 `development_label: bot-develop` 声明人加上后才开始开发的标签 |
 | `.bot/computer.yaml` | 合并到现有项目电脑规格的资源、软件包、环境与初始化配置 |
 | `.agents/skills/**/SKILL.md` | 仓库追加的简单 skill，仅加载文本，不加载 JS 扩展 |
 

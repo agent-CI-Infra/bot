@@ -42,7 +42,11 @@ test('the built-in scenario rules are the docs/prompts files, and saved override
   assert.equal(defaults['.bot/rules/'+name],text);assert.ok(Buffer.byteLength(text)<=16384);
   assert.deepEqual(row.layers.map(l=>l.source),['builtin']);assert.equal(row.effective,text);
  }
- assert.equal(plain.review_label,'bot-reviewed');
+ assert.equal(plain.review_label,'bot-reviewed');assert.equal(plain.development_label,'bot-develop');
+ // A development rule without the label line keeps the requirement with the built-in name.
+ assert.equal(resolveRules({rule_overrides:JSON.stringify({'.bot/rules/issue-development.md':'Develop carefully.'})},{}).development_label,'bot-develop');
+ assert.equal(resolveRules({},{'.bot/rules/issue-development.md':'development_label: "team go"\n'}).development_label,'team go');
+ assert.throws(()=>resolveRules({},{'.bot/rules/issue-development.md':'development_label: '+'x'.repeat(51)}));
  // Only PR review forbids touching the working tree; the guide applies to development too. No organization is built in.
  assert.match(defaults['.bot/rules/pr-review.md'],/never modify the working tree while reviewing a PR/);assert.match(defaults['.bot/rules/pr-review.md'],/Review event is COMMENT only/);
  assert.doesNotMatch(defaults['.bot/guide.md']+defaults['.bot/rules/issue-development.md'],/modify the working tree/i);

@@ -4,12 +4,12 @@ import { randomId, fields, fail, type Json } from '../core/security.js';
 import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
-import { enqueue } from '../review/queue.js';
+import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
 import { agentLoop } from './loop.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
 import { Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, developmentLabel } from '../rules/service.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
@@ -75,6 +75,8 @@ export class TaskEngine {
             stop('pull_request_head_changed','superseded');
           }
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan');
+        // The go-ahead must still hold until publication: the label stays on and nobody else has taken the Issue.
+        if(task.kind==='development.issue'&&!developmentReady(current,this.label(task)))stop('development_not_approved','needs_replan');
         if(development){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=saved?JSON.parse(saved.data):null;
           if(candidate&&!candidate.pr_number&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan');
@@ -162,9 +164,17 @@ export class TaskEngine {
           if(label)outputs.push({labels:(await publisher.label(label)).map((l:any)=>l.name)});
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
           result={...result,outputs};
+          // A review that finds a code request starts development only with a person's go-ahead already on the Issue;
+          // otherwise the labeled webhook starts it later. A failed check counts as no go-ahead.
+          const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
+          let approved=false;
+          if(task.kind==='review.issue'&&policy?.development_enabled&&reviewRequestsCode(input.object,result)){
+            approved=await this.developmentApproved(github,task).catch(()=>false);
+            if(!approved)log({type:'development_waiting_for_label'});
+          }
           this.store.transaction(()=>{
             update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null});
-            this.queueDevelopment(github,task,input,result);
+            this.queueDevelopment(github,task,input,result,approved);
           });
         }
         else{
@@ -213,12 +223,19 @@ export class TaskEngine {
     assertOwnedPR(row,pr,github.actorId,task.repository_id);
     return row!;
   }
-  queueDevelopment(github:GitHub,task:Row,input:any,result:any){
+  label(task:Row){try{return developmentLabel(this.store,task.repository_id);}catch{return stop('invalid_bot_label','waiting_configuration');}}
+  // The latest time the development label was added must be by a user account, not an app, and nobody may be assigned.
+  async developmentApproved(github:GitHub,task:Row){
+    const label=this.label(task);
+    if(!developmentReady(await github.object(task.kind,task.object_number),label))return false;
+    const events=await github.pages(github.path(`/issues/${task.object_number}/events`));
+    return events.filter((e:any)=>e.event==='labeled'&&sameLabel(e.label?.name,label)).at(-1)?.actor?.type==='User';
+  }
+  queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved=false){
     const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
     if(!policy?.enabled||!policy.development_enabled||!result.requires_code_change||result.clarification_required)return;
     if(task.kind==='review.issue'){
-      const text=String(input.object.title)+'\n'+String(input.object.body||'');
-      if(!result.implementation_goal.trim()||!result.issue_requests_code||!result.request_quote.trim()||!text.includes(result.request_quote))return;
+      if(!approved||!reviewRequestsCode(input.object,result))return;
       enqueue(this.store,task.repository_id,'development.issue',task.object_number,null,{review:result,object_hash:input.object_hash},task.source_delivery_id,task.id);
     }else{
       let owned:Row;try{owned=this.owned(github,task,input.object);}catch{return;}
