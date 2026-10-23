@@ -27,6 +27,12 @@
 | `/api/events`、`/api/events/:id` | GET | 范围内投递列表／正文和响应；列表可筛选 `repository_id,account_id,owner_id,event,status,delivery_id,limit,offset` |
 | `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
 | `/api/tasks/:id/live` | GET | 运行中任务当前正在执行的命令及其已产生的输出，参数 `offset` 为已读字节数 |
+| `/api/board` | GET | 当前用户的视图、自定义单选字段及选项、六个固定 bot 阶段 |
+| `/api/board/cards` | GET | 按对象去重的卡片，参数 `view_id`（默认 `default`）、`group_by`、`filters`（JSON 数组）、`limit`（1–100）、`offset`（0–100000）；返回 `cards,has_more,limit,offset`，始终限制在当前仓库授权范围 |
+| `/api/board/cards/:repository/:type/:number/tasks` | GET | 同一对象的关联任务摘要，`type` 为 `issue` 或 `pr`，支持同样的有界分页；任务详情沿用 `/api/tasks/:id` |
+| `/api/board/cards/:repository/:type/:number` | PATCH | `{field_id,option_id}` 修改当前用户的自定义单选值，`option_id:null` 清空；禁止写执行阶段，不创建或修改任务 |
+| `/api/board/fields`、`/api/board/fields/:id/options` | POST | `{name}` 新建个人单选字段／新增选项（即加列），每用户最多 30 个字段、每字段最多 50 个选项 |
+| `/api/board/views`、`/api/board/views/:id` | POST、PATCH / DELETE | 个人视图，字段 `name,group_by,filters,hidden_columns`；最多 50 个自建视图。内置 `default` 仅允许保存筛选和隐藏列，不能删除、改名或切换分组字段 |
 | `/api/installations`、`/api/installations/sync` | GET、POST | 仅超级管理员；每个仓库一行，合并 GitHub 安装范围、登记、启用和环境状态，以及各账号最近同步结果；POST 立即全量同步 |
 | `/api/installations/:id/activate`、`/api/installations/:id/disable` | POST | 仅超级管理员；启动（可带 `model_id,development_enabled,account_id`）或再次启用／禁用一个仓库 |
 | `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST |
@@ -36,3 +42,5 @@
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置、未启动或已禁用的仓库只归档，不生成任务。
 
 项目列表接口 `GET /api/repositories` 与超级管理员的 `GET /api/installations` 在每个仓库上返回 `running_tasks` 和 `queued_tasks`。前者仅统计实际执行阶段，后者统计 queued；配置等待、环境等待与已结束任务不计入执行中。返回范围沿用项目管理员的仓库权限。列表开关调用 `PATCH /api/repositories/{id}/policy`，仅提交本次切换的 `review_enabled` 或 `development_enabled`，不更改项目总启用状态。
+
+看板筛选格式为 `[{"field":"object_type","value":"pr"},{"field":"text","value":"research"}]`，最多 20 条，条件之间为“且”。支持 `repository_id`（仓库 ID）、`object_type`（`issue`／`pr`，不添加该条件表示全部）、`bot_stage`（`unreviewed,reviewing,reviewed,developing,developed,attention`）、`text`（编号可带 `#`，否则按标题文字匹配）、`include_closed`（布尔，默认 false）。`group_by` 为 `bot_stage` 或当前用户的单选字段 ID；空值列 ID 为 `unassigned`。筛选和隐藏列可在浏览器先预览，点击“保存视图”后持久保存。分页与列计数只表示当前页，不冒充全库总量。
