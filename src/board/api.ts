@@ -2,9 +2,14 @@ import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 
+// `pr` overrides the wording on the PR board: development of a PR is the bot revising its own PR after a review.
 export const boardStages = [
-  { id: 'unreviewed', name: '未检视' }, { id: 'reviewing', name: '正在检视' }, { id: 'reviewed', name: '已检视' },
-  { id: 'developing', name: '正在开发' }, { id: 'developed', name: '已开发' }, { id: 'attention', name: '需要处理' },
+  { id: 'unreviewed', name: '未检视', hint: 'bot 还没有检视过', pr: { hint: 'bot 还没有检视过；草稿 PR 不触发检视' } },
+  { id: 'reviewing', name: '正在检视', hint: '检视任务正在排队或执行' },
+  { id: 'reviewed', name: '已检视', hint: '最近一次检视已完成' },
+  { id: 'developing', name: '正在开发', hint: '开发任务正在准备、实现、测试或发布', pr: { name: '正在跟进', hint: 'bot 正按检视意见修改自己开出的 PR' } },
+  { id: 'developed', name: '已开发', hint: '开发已完成或已开出 PR', pr: { name: '已跟进', hint: '按检视意见的修改已完成' } },
+  { id: 'attention', name: '需要处理', hint: '最近一次任务失败、被取消，或在等待配置、权限、重试、重新规划' },
 ];
 const successes = "('pr_opened','succeeded','completed')";
 const attention = "('failed','cancelled','waiting_configuration','waiting_permission','needs_replan','retry_wait')";
@@ -81,28 +86,36 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     const view = viewFor(store, user, url.searchParams.get('view_id') || 'default');
     const conditions = url.searchParams.has('filters') ? filters(parse(url.searchParams.get('filters')!),store,user) : view.filters as Filter[];
     // Saved repository filters can outlive a grant. Scope is always applied independently, on every request.
-    const access = scope(user,'o.repository_id'), clauses = [access.sql], args: (string | number)[] = [...access.args];
-    if (!conditions.some(f => f.field === 'include_closed' && f.value === true)) clauses.push("coalesce(o.github_state,'open')<>'closed'");
+    const access = scope(user,'o.repository_id');
+    const clauses: { sql: string; args: (string | number)[]; type?: boolean; stage?: boolean }[] = [{ sql: access.sql, args: access.args }];
+    if (!conditions.some(f => f.field === 'include_closed' && f.value === true)) clauses.push({ sql: "coalesce(o.github_state,'open')<>'closed'", args: [] });
     for (const f of conditions) {
-      if (f.field === 'repository_id' || f.field === 'object_type') { clauses.push(`o.${f.field}=?`); args.push(String(f.value)); }
-      if (f.field === 'bot_stage') { clauses.push(`(${stage})=?`); args.push(String(f.value)); }
+      if (f.field === 'repository_id' || f.field === 'object_type') clauses.push({ sql: `o.${f.field}=?`, args: [String(f.value)], type: f.field === 'object_type' });
+      if (f.field === 'bot_stage') clauses.push({ sql: `(${stage})=?`, args: [String(f.value)], stage: true });
       if (f.field === 'text') {
         const term = String(f.value), number = /^#?([1-9]\d*)$/.exec(term);
-        if (number && Number.isSafeInteger(Number(number[1]))) { clauses.push('o.object_number=?'); args.push(Number(number[1])); }
-        else { clauses.push("o.title LIKE ? ESCAPE '\\'"); args.push('%' + term.replace(/[\\%_]/g,'\\$&') + '%'); }
+        if (number && Number.isSafeInteger(Number(number[1]))) clauses.push({ sql: 'o.object_number=?', args: [Number(number[1])] });
+        else clauses.push({ sql: "o.title LIKE ? ESCAPE '\\'", args: ['%' + term.replace(/[\\%_]/g,'\\$&') + '%'] });
       }
     }
+    const where = (list: typeof clauses) => ({ sql: list.map(c => c.sql).join(' AND '), args: list.flatMap(c => c.args) });
     const { limit, offset } = pagination(url);
-    const group = grouping(store,user,url.searchParams.get('group_by') || view.group_by);
+    const group = grouping(store,user,url.searchParams.get('group_by') || view.group_by), all = where(clauses);
     const rows = store.all(`SELECT o.repository_id,o.object_type,o.object_number,o.title,o.github_state,o.draft,o.last_seen,
       repos.full_name,${stage} AS bot_stage,r.id AS review_task_id,r.status AS review_status,
       d.id AS development_task_id,d.status AS development_status,
+      CASE WHEN json_valid(d.result) AND typeof(json_extract(d.result,'$.pr_number'))='integer' THEN json_extract(d.result,'$.pr_number') END AS development_pr_number,
       (SELECT option_id FROM board_values v WHERE v.user_id=? AND v.repository_id=o.repository_id
         AND v.object_type=o.object_type AND v.object_number=o.object_number AND v.field_id=?) AS field_value
       FROM board_objects o JOIN repositories repos ON repos.id=o.repository_id ${taskJoin('r','review')} ${taskJoin('d','development')}
-      WHERE ${clauses.join(' AND ')} ORDER BY o.last_seen DESC,o.repository_id,o.object_type,o.object_number LIMIT ? OFFSET ?`,
-      user.id,group,...args,limit+1,offset);
-    return { cards: rows.slice(0,limit), has_more: rows.length>limit, limit, offset };
+      WHERE ${all.sql} ORDER BY o.last_seen DESC,o.repository_id,o.object_type,o.object_number LIMIT ? OFFSET ?`,
+      user.id,group,...all.args,limit+1,offset);
+    // The Issue and PR boards are switched on the page, so both totals ignore the type condition but keep every other one.
+    const untyped = clauses.filter(c => !c.type), counted = where(untyped);
+    const joins = untyped.some(c => c.stage) ? `${taskJoin('r','review')} ${taskJoin('d','development')}` : '';
+    const totals = new Map(store.all(`SELECT o.object_type,count(*) n FROM board_objects o JOIN repositories repos ON repos.id=o.repository_id ${joins}
+      WHERE ${counted.sql} GROUP BY o.object_type`, ...counted.args).map(row => [row.object_type, Number(row.n)]));
+    return { cards: rows.slice(0,limit), has_more: rows.length>limit, limit, offset, counts: { issue: totals.get('issue') || 0, pr: totals.get('pr') || 0 } };
   }
   const card = /^\/api\/board\/cards\/([^/]+)\/(issue|pr)\/([1-9]\d*)(\/tasks)?$/.exec(path);
   if (card) {
