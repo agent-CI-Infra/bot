@@ -1,7 +1,10 @@
+# Runs the images published from main; nothing is built on this machine.
+#   docker compose up -d
+# Upgrade with `docker compose pull` and `docker compose up -d`. Never add --volumes (-v) to `down`: that deletes
+# the master key, the internal credentials and the databases. compose.build.yaml builds the same services from source.
 services:
   key-init:
-    image: department-bot:local
-    build: .
+    image: ghcr.io/agent-ci-infra/bot:latest
     command: ["node", "dist/keygen.js", "/keys/master.key", "/internal/manager.token"]
     network_mode: none
     read_only: true
@@ -14,8 +17,7 @@ services:
       disable: true
     restart: "no"
   bot:
-    image: department-bot:local
-    build: .
+    image: ghcr.io/agent-ci-infra/bot:latest
     depends_on:
       key-init:
         condition: service_completed_successfully
@@ -51,10 +53,7 @@ services:
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
   tunnel:
-    image: department-bot-tunnel:local
-    build:
-      context: .
-      dockerfile: tunnel/Dockerfile
+    image: ghcr.io/agent-ci-infra/bot-tunnel:latest
     volumes:
       - tunnel-keys:/tunnel:ro
     networks: [edge]
@@ -63,20 +62,14 @@ services:
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
   webhook:
-    image: department-bot-webhook:local
-    build:
-      context: .
-      dockerfile: webhook/Dockerfile
+    image: ghcr.io/agent-ci-infra/bot-webhook:latest
     networks: [control, edge]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
   manager:
-    image: department-bot-manager:local
-    build:
-      context: .
-      dockerfile: manager/Dockerfile
+    image: ghcr.io/agent-ci-infra/bot-manager:latest
     depends_on:
       key-init:
         condition: service_completed_successfully
@@ -86,7 +79,8 @@ services:
       TMPDIR: /tmp
       SQLITE_TMPDIR: /tmp
       BOT_MANAGER_TOKEN_FILE: /internal/manager.token
-      BOT_PROJECT_IMAGE: department-bot-project:local
+      # The manager only inspects this image and never pulls; it must equal the project-image reference below, tag included.
+      BOT_PROJECT_IMAGE: ghcr.io/agent-ci-infra/bot-project:latest
       BOT_PROJECT_EGRESS: "${BOT_PROJECT_EGRESS:-true}"
     volumes:
       - manager-data:/data
@@ -100,11 +94,9 @@ services:
     security_opt: [no-new-privileges:true]
     stop_grace_period: 100s
     restart: unless-stopped
+  # Exits at once; it exists so Compose pulls the project image into the local Docker before the manager starts.
   project-image:
-    image: department-bot-project:local
-    build:
-      context: .
-      dockerfile: images/project/Dockerfile
+    image: ghcr.io/agent-ci-infra/bot-project:latest
     command: ["node", "-e", "process.exit(0)"]
     network_mode: none
     read_only: true
