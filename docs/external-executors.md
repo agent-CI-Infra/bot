@@ -36,18 +36,9 @@ openssl pkey -in bot-client.pem -pubout -out bot-client.pub.pem
 
 支持 RSA 2048–4096 位、SPKI PEM 公钥（`BEGIN PUBLIC KEY`），不接受私钥或 SSH 格式。Bot 保存公钥与指纹，不生成、接收或分发客户端私钥。每个客户端仍绑定一个仓库。
 
-取得页面中的客户端 ID 后，在个人电脑用仓库提供的 Node.js 22+ 小工具兑换；URL 必须与管理页登记的兑换地址完全一致：
+取得页面中的客户端 ID 后，用任意语言或 HTTP 工具按下述接口规则兑换，不要求 Node.js 或下载项目脚本。完整的[接口说明与 OpenSSL＋curl 示例](external-token-api.md)包含本机签名、POST 兑换、调用 GitHub 和撤销；URL 必须与管理页登记的兑换地址完全一致。`scripts/external-token.mjs` 仅作为可选实现保留。
 
-```sh
-node scripts/external-token.mjs \
-  --url https://bot.example/external/token \
-  --client-id '<客户端ID>' \
-  --key ./bot-client.pem
-```
-
-示例域名仅作占位，实际使用管理页中的地址。工具检查私钥文件权限，在内存中签名并发送证明，不上传私钥；成功时 stdout 为含 GitHub Token 的 JSON，可直接交给检视工具，避免写入公共日志。除 Node.js 自带模块外无需安装额外客户端依赖。
-
-自行接入时使用 RS256 签名 JWT，header 为 `alg: RS256`、`typ: JWT`，payload：
+使用 RS256 签名 JWT，header 为 `alg: RS256`、`typ: JWT`，payload：
 
 ```json
 {
