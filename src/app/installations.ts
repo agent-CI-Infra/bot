@@ -2,7 +2,7 @@ import { projectActivityColumns, projectActivityJoin } from './project-activity.
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
 import { fail, fields, text, type Json } from '../core/security.js';
-import { appJwt } from '../github/client.js';
+import { appJwt, appPermissions, missingPermissions } from '../github/client.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
 // enables it; an administrator starts it in the console, and can disable it again.
@@ -38,6 +38,13 @@ export function recordInstallationEvent(store: Store, accountId: string, event: 
   return true;
 }
 
+// Links shown to the administrator stay on the GitHub host the App lives on.
+function githubOrigin(value: unknown): string {
+  try { const url = new URL(String(value)); return url.protocol === 'https:' ? url.origin : 'https://github.com'; } catch { return 'https://github.com'; }
+}
+function githubLink(value: unknown, origin: string): string | null {
+  try { const url = new URL(String(value)); return url.origin === origin ? url.href : null; } catch { return null; }
+}
 export class InstallationSync {
   private readonly running = new Map<string, Promise<Json>>();
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
@@ -69,6 +76,23 @@ export class InstallationSync {
       rows.push(...list); if (list.length < 100) return rows;
     }
     throw new Error('github_pagination_limit');
+  }
+  // GitHub has no API that changes an App's permissions, so this only measures the gap and links the two pages that
+  // close it: the App's permission settings (one save by the App owner), then each installation's review of the request.
+  async permissions(accountId: string): Promise<Json> {
+    const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) return fail(404, 'account_not_found');
+    if (account.type !== 'github_app') return fail(409, 'github_app_required');
+    const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`); if (!secrets.private_key) return fail(409, 'github_credentials_missing');
+    const jwt = appJwt(String(account.app_id), String(secrets.private_key));
+    let app: any, installations: Json[];
+    try { app = await this.request('/app', jwt); installations = await this.pages('/app/installations', jwt); }
+    catch (error) { return fail(502, /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'github_unavailable'); }
+    const slug = encodeURIComponent(String(app.slug || '')), owner = app.owner as Json | undefined, origin = githubOrigin(app.html_url);
+    const settings = owner?.type === 'Organization' ? `${origin}/organizations/${encodeURIComponent(String(owner.login))}/settings/apps/${slug}/permissions` : `${origin}/settings/apps/${slug}/permissions`;
+    const appMissing = missingPermissions(app.permissions), rows = installations.map(i => ({ id: String(i.id), account: String((i.account as Json | undefined)?.login || ''),
+      suspended: !!i.suspended_at, missing: missingPermissions(i.permissions), review_url: githubLink(i.html_url, origin) }));
+    return { required: appPermissions, app: { slug: String(app.slug || ''), owner: String(owner?.login || ''), missing: appMissing, settings_url: settings },
+      installations: rows, ok: !appMissing.length && rows.every(row => row.suspended || !row.missing.length) };
   }
   private async run(accountId: string): Promise<Json> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) throw new Error('account_not_found');
@@ -109,7 +133,9 @@ export class InstallationSync {
 
 // Listing, starting and disabling need only the database; a full sync needs the configured GitHub client.
 export async function installationApi(store: Store, sync: InstallationSync | undefined, user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
-  const path = url.pathname; if (!path.startsWith('/api/installations')) return undefined;
+  const path = url.pathname, check = /^\/api\/accounts\/([^/]+)\/permissions$/.exec(path);
+  if (check && method === 'GET') { superAdmin(user); if (!sync) return fail(503, 'sync_not_configured'); return sync.permissions(check[1]!); }
+  if (!path.startsWith('/api/installations')) return undefined;
   superAdmin(user);
   if (path === '/api/installations' && method === 'GET') return list(store);
   if (path === '/api/installations/sync' && method === 'POST') { fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const results = await sync.syncAll(); return { results, ...list(store) }; }

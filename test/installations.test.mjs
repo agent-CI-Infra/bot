@@ -125,3 +125,35 @@ test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKE
   assert.deepEqual(await agentOperation({ type: 'workspace_agent_token', request_id: id, base64 }, dir), { written: true });
   assert.equal(JSON.parse(readFileSync(join(dir, `agent/token-reply-${id}.json`), 'utf8')).token, token);
 });
+
+test('the permission check lists what an App and its installations lack and links the GitHub pages that fix it', async t => {
+  const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
+  const app = { slug: 'fixture-app', html_url: 'https://github.com/apps/fixture-app', owner: { login: 'fixture', type: 'Organization' },
+    permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read', statuses: 'read' } };
+  const installations = [{ id: 7, account: { login: 'fixture' }, html_url: 'https://github.com/organizations/fixture/settings/installations/7', permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read' } },
+    { id: 8, account: { login: 'paused' }, suspended_at: '2026-01-01', permissions: {} }];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://fake'); res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/app') return res.end(JSON.stringify(app));
+    if (url.pathname === '/app/installations') return res.end(JSON.stringify(url.searchParams.get('page') === '1' ? installations : []));
+    res.statusCode = 404; res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  const h = await harness(t, undefined, store => ({ installations: new InstallationSync(store, `http://127.0.0.1:${server.address().port}`) })), { admin } = await setup(h);
+  const keys = generateKeyPairSync('rsa', { modulusLength: 2048 }), bot = await account(admin);
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
+  const check = async () => (await admin(`/api/accounts/${a.id}/permissions`)).value;
+  let report = await check();
+  assert.equal(report.ok, false); assert.deepEqual(report.required, full);
+  assert.deepEqual(report.app.missing.map(m => [m.permission, m.required, m.current]), [['statuses', 'write', 'read'], ['actions', 'write', null], ['checks', 'write', null]]);
+  assert.equal(report.app.settings_url, 'https://github.com/organizations/fixture/settings/apps/fixture-app/permissions');
+  assert.deepEqual(report.installations.map(i => [i.account, i.suspended, i.missing.map(m => m.permission).join(','), i.review_url]),
+    [['fixture', false, 'statuses,actions,checks', 'https://github.com/organizations/fixture/settings/installations/7'], ['paused', true, Object.keys(full).join(','), null]]);
+  // After the App owner saves and the installation accepts, the check passes; a suspended installation does not hold it back.
+  app.permissions = full; installations[0].permissions = full; report = await check();
+  assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []);
+  // A personal App links the personal settings page; a review link on another host is never shown.
+  app.owner = { login: 'someone', type: 'User' }; installations[0].html_url = 'https://elsewhere.example/settings'; report = await check();
+  assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions'); assert.equal(report.installations[0].review_url, null);
+  assert.equal((await admin(`/api/accounts/${bot.id}/permissions`)).status, 409);
+});

@@ -9,6 +9,37 @@ function wizardForm(title,fields,submit,save){
   form.onsubmit=async event=>{event.preventDefault();action.disabled=true;message.textContent='';try{if(await save(Object.fromEntries(new FormData(form)),form)!==false)await render();}catch(error){message.textContent=error.message;}finally{action.disabled=false;}};return section;
 }
 function wizardNext(step){onboardingStep=step;void render().catch(error);}
+// GitHub has no API that changes an App's permissions. The check lists what is missing in GitHub's own wording and links
+// the App's permission page (one save) and each installation's review page (one acceptance each).
+const permissionNames={contents:'Contents',issues:'Issues',pull_requests:'Pull requests',statuses:'Commit statuses',actions:'Actions',checks:'Checks',metadata:'Metadata'};
+const accessNames={read:'Read-only',write:'Read and write',admin:'Admin'};
+function githubLinkElement(text,href){const link=element('a',text);link.href=href;link.target='_blank';link.rel='noopener';return link;}
+function permissionReport(report){
+  if(report.ok)return [element('p',report.installations.length?`权限齐全：App 和 ${report.installations.length} 个安装都已具备所需权限。`:'App 权限齐全，还没有安装。','view-success')];
+  const rows=[],name=item=>permissionNames[item.permission]||item.permission;
+  if(report.app.missing.length){
+    const list=element('ul','');
+    for(const item of report.app.missing)list.append(element('li',`${name(item)}：改为「${accessNames[item.required]}」（当前「${item.current?accessNames[item.current]||item.current:'No access'}」）`));
+    rows.push(element('p','第 1 步：App 所有者打开 Permissions & events，把下列各项改好，然后点一次「Save changes」。'),list,githubLinkElement('打开 App 的 Permissions & events',report.app.settings_url));
+  }
+  const pending=report.installations.filter(item=>!item.suspended&&item.missing.length);
+  if(pending.length){
+    const list=element('ul','');
+    for(const item of pending){const row=element('li',`${item.account||'安装 '+item.id}：${item.missing.map(name).join('、')} `);if(item.review_url)row.append(githubLinkElement('前往接受',item.review_url));list.append(row);}
+    rows.push(element('p',(report.app.missing.length?'第 2 步：':'')+'App 保存后，GitHub 会向下列安装发出权限请求，需要该账号的管理员打开链接接受。'),list);
+  }
+  rows.push(element('p','改完后点「重新检查」。','muted'));return rows;
+}
+function appPermissionCheck(account){
+  const box=element('div','','permission-check'),result=element('div','','permission-result');result.setAttribute('role','status');
+  const check=button('检查权限',async()=>{
+    check.disabled=true;result.replaceChildren(element('p','正在检查…','muted'));
+    try{result.replaceChildren(...permissionReport(await api(`/api/accounts/${encodeURIComponent(account.id)}/permissions`)));check.textContent='重新检查';}
+    catch(err){result.replaceChildren(element('p','检查失败：'+err.message,'view-error'));}
+    finally{check.disabled=false;}
+  });
+  box.append(check,result);return box;
+}
 function accountInstallationForm(){
   const target=input('target','',{required:true,placeholder:'个人或组织名、账号链接、仓库链接或 SSH 克隆地址',autocomplete:'off'}),result=element('div','','installation-target-result');
   result.setAttribute('role','status');result.setAttribute('aria-live','polite');let version=0;
@@ -49,7 +80,7 @@ async function renderOnboarding(request){
     for(const route of data.tunnel.routes){const item=element('div','','row');item.append(element('p',route.hostname+' → '+route.service));if(route.webhook_route)item.append(button('检查并使用此域名',async()=>{try{await api('/api/onboarding/address','POST',{origin:'https://'+route.hostname});await render();}catch(e){error(e);}}));else item.append(badge('不是 webhook 路由','danger'));tunnel.append(item);}
     tunnel.append(button('刷新 tunnel 状态',()=>render().catch(error)));if(data.tunnel.token_configured)tunnel.append(button('停用 tunnel',async()=>{await api('/api/onboarding/tunnel','POST',{revoke:true});await render();}));panel.append(tunnel);next();
   }else if(onboardingStep===1){
-    const existing=accounts.filter(a=>a.type==='github_app');if(existing.length){const list=card('使用已登记的 App');list.append(note('使用此 App 会将它的 webhook 更新为第 1 步验证过的地址；已有账号凭据保持不变。'));for(const account of existing){const row=element('div','','row');row.append(element('p',account.name+' · App ID '+account.app_id),button('使用此 App',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:account.id,update_webhook:true});wizardNext(2);}catch(e){error(e);}}));list.append(row);}panel.append(list);}
+    const existing=accounts.filter(a=>a.type==='github_app');if(existing.length){const list=card('使用已登记的 App');list.append(note('使用此 App 会将它的 webhook 更新为第 1 步验证过的地址；已有账号凭据保持不变。'));for(const account of existing){const row=element('div','','row'),info=element('div','','row-content');info.append(element('p',account.name+' · App ID '+account.app_id),appPermissionCheck(account));row.append(info,button('使用此 App',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:account.id,update_webhook:true});wizardNext(2);}catch(e){error(e);}}));list.append(row);}panel.append(list);}
     const section=wizardForm('创建新的 GitHub App',[note('不填写权限，不使用 PAT。这里生成 manifest；浏览器提交到 GitHub 后，你只需确认创建。已有 App 时优先使用上面的账号。'),field('App 所属组织',input('organization','',{required:true})),field('App 名称',input('name','',{required:true})),checkbox('public',false,'公开 App，允许安装到其他账号'),note('这是 App 的归属组织；实际安装目标在第 3 步选择。不勾选时是组织私有 App；需要安装到其他组织或个人账号时勾选。权限始终固定。')],'准备 GitHub 确认页',async value=>{
       const result=await api('/api/onboarding/manifest','POST',{...value,public:value.public==='on'}),form=element('form','');form.method='POST';form.action=result.create_url;form.target='_blank';
       const manifest=element('textarea','');manifest.name='manifest';manifest.value=JSON.stringify(result.manifest);manifest.hidden=true;form.append(manifest,element('p','固定权限：Contents／Issues／Pull requests／Commit statuses／Actions／Checks 写，Metadata 读；只订阅 issues 和 pull_request。'),element('p','在 GitHub 确认后会回到本机向导。不要关闭本机服务。'));
