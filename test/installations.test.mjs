@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { harness, setup, account, testPassword } from './helpers.mjs';
+import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { InstallationSync } from '../dist/app/installations.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { command } from '../runner/command.mjs';
@@ -39,6 +39,13 @@ test('installed repositories are listed but only work after an administrator sta
   assert.equal((await member('/api/installations')).status, 403);
 });
 
+test('repositories cannot be registered by hand; they come from installation sync and are started from the console', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  const manual = await admin('/api/repositories', 'POST', { id: '101', full_name: 'fixture/project-101', owner_id: '10', account_id: a.id });
+  assert.equal(manual.status, 404); assert.equal(h.store.get('SELECT count(*) AS n FROM repositories').n, 0);
+  assert.equal((await admin('/api/installations/101/activate', 'POST', {})).status, 404);
+});
+
 test('a full sync lists every installation repository and marks the rest as no longer installed', async t => {
   const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
@@ -67,7 +74,7 @@ test('a full sync lists every installation repository and marks the rest as no l
 test('the console reads the output of the command a running task is executing', async t => {
   const calls = [], manager = { call: async (_method, path) => { calls.push(path); return { data: 'step 1\n', offset: 7, size: 7, state: 'running' }; } };
   const h = await harness(t), { admin } = await setup(h), a = await account(admin);
-  await admin('/api/repositories', 'POST', { id: '101', full_name: 'fixture/project-101', owner_id: '10', account_id: a.id });
+  await repository(admin, a.id, '101');
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('t1','101','review.pr','running','pr',4)");
   const op = 'a'.repeat(48);
   h.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')", op, 't1', JSON.stringify({ operation_id: op, generation: 1, request: { type: 'workspace_command', command: 'npm test', timeout_ms: 600000, keep_background: false } }));

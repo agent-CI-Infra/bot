@@ -59,7 +59,9 @@ try{
   deployment=createHash('sha256').update(Buffer.from(managerToken,'base64')).digest('hex').slice(0,16);
   await api('/api/setup','POST',{username:'administrator',password});
   account=(await api('/api/accounts','POST',{name:'Integration fixture',type:'bot_account',token:githubToken,webhook_secret:webhookSecret})).account;
-  for(const repo of ['101','202'])await api('/api/repositories','POST',{id:repo,owner_id:'10',full_name:'fixture/project-'+repo,account_id:account.id});
+  // Repositories come from the account's sync and are started from the console; 202 then has review turned off.
+  await api('/api/installations/sync','POST',{});for(const repo of ['101','202'])await api(`/api/installations/${repo}/activate`,'POST',{account_id:account.id});
+  await api('/api/repositories/202/policy','PATCH',{review_enabled:false});
   await api('/api/users','POST',{username:'member',password:memberPassword,repository_ids:['101']});
   const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
   await api('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2});

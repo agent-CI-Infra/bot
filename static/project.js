@@ -103,7 +103,7 @@ const changed = (values, saved) => Object.fromEntries(Object.entries(values).fil
 function basicSection() {
   const { repository, policy, installed, environment } = current, info = card('仓库');
   info.append(facts([['仓库', link(`https://github.com/${repository.full_name}`, repository.full_name)], ['仓库 ID', repository.id], ['所有者', installed?.owner_login ? `${installed.owner_login}（${repository.owner_id}）` : repository.owner_id],
-    ['处理账号', installed?.account_name || repository.account_id], ['安装', installed ? installed.installation_id ? `安装 ${installed.installation_id}${installed.installed === false ? '（已移出）' : ''}` : '手动登记' : null],
+    ['处理账号', installed?.account_name || repository.account_id], ['安装', !installed ? null : installed.installed === null ? '不在安装列表' : `${installed.installation_id ? '安装 ' + installed.installation_id : '机器人账号可见'}${installed.installed === false ? '（已移出）' : ''}`],
     ['可见性', installed ? installed.private ? '私有' : '公开' : null], ['项目状态', policy.enabled ? '已启用' : '已禁用'], ['虚拟电脑', environment ? (states[environment.environment.state] || [environment.environment.state])[0] : '读取失败']]));
   const summary = card('当前配置一览');
   summary.append(facts([['检视', policy.review_enabled ? '开启' : '关闭'], ['自动开发', policy.development_enabled ? '开启' : '关闭'], ['模型', current.models.find(m=>m.id===policy.model_id)?.model_name || (policy.model_id?'模型不可用':'未选择，任务会等待配置')],

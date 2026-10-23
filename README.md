@@ -103,7 +103,7 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 ## 使用与权限
 
-超级管理员登记 GitHub App（App ID、RSA 私钥）或机器人账号（Token），为入口保存签名凭据，控制面随后自动同步每个账号可见的仓库：GitHub App 列出全部安装及其仓库，机器人账号列出 `/user/repos`；启动时和每 10 分钟全量对账一次，`installation`／`installation_repositories` 投递在同一事务里即时更新，并随后触发一次全量同步。同步只记录“已安装”，不登记、不启用：超级管理员在仓库页点“启动”，选择模型（部署共享模型会同时授权给该仓库）和是否开启自动开发后，才登记仓库、创建虚拟电脑并开始检视；启动前收到的事件只归档，不补跑。已启用的仓库可以“禁用”：停止处理新事件、中止正在执行的任务并停止虚拟电脑，数据保留，之后可再启用。也可以用 `POST /api/repositories` 手动登记。任务执行时校验账号、实际仓库 ID 和所有者；App 在控制面签发 JWT、取得目标仓库安装令牌，机器人账号使用已保存的 Token，均不进入项目环境。仓库 ID 使用字符串提交，避免 JavaScript 大整数丢精度。
+超级管理员登记 GitHub App（App ID、RSA 私钥）或机器人账号（Token），为入口保存签名凭据，控制面随后自动同步每个账号可见的仓库：GitHub App 列出全部安装及其仓库，机器人账号列出 `/user/repos`；启动时和每 10 分钟全量对账一次，`installation`／`installation_repositories` 投递在同一事务里即时更新，并随后触发一次全量同步。同步只记录“已安装”，不登记、不启用：超级管理员在仓库页点“启动”，选择模型（部署共享模型会同时授权给该仓库）和是否开启自动开发后，才登记仓库、创建虚拟电脑并开始检视；启动前收到的事件只归档，不补跑。已启用的仓库可以“禁用”：停止处理新事件、中止正在执行的任务并停止虚拟电脑，数据保留，之后可再启用。仓库只能经同步出现、再由超级管理员启动，没有手动登记入口。任务执行时校验账号、实际仓库 ID 和所有者；App 在控制面签发 JWT、取得目标仓库安装令牌，机器人账号使用已保存的 Token，均不进入项目环境。仓库 ID 使用字符串提交，避免 JavaScript 大整数丢精度。
 
 超级管理员可创建用户和分配项目管理员。每名项目管理员可分配多个仓库，每个仓库可有多名项目管理员。项目管理员只看到并操作自己的仓库、投递、模型、策略及任务读取接口；无筛选查询同样受限，未关联仓库或验签失败的投递仅超级管理员可见。账号凭据、全局用户和授权关系接口只允许超级管理员调用。用户停用会撤销已有会话，仓库分配调整在后续请求立即生效；不能停用最后一名超级管理员。
 
@@ -127,7 +127,7 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 | `/api/accounts`、`/api/accounts/:id` | GET / POST、GET / PATCH | 超级管理员管理 GitHub App／机器人账号；POST 字段 `name,type,app_id,private_key,token,webhook_secret` 按账号类型选用 |
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
-| `/api/repositories`、`/api/repositories/:id` | GET / POST、GET | 范围内列表／详情；创建仅超级管理员，字段 `id,full_name,owner_id,account_id` |
+| `/api/repositories`、`/api/repositories/:id` | GET | 范围内列表／详情；仓库由安装同步发现，经 `POST /api/installations/:id/activate` 启动后登记 |
 | `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；检视规则字段 `review_issues`、`review_pull_requests`、`review_pr_updates`（布尔，分别控制 Issue 打开、PR 打开／转为可检视、PR 新提交是否触发检视）和 `review_language`（`auto`／`zh`／`en`）。检视指引和检视标签不是策略字段，写在规则文件里，见下一行 |
 | `/api/repositories/:id/rules` | GET / PUT | 每份规则文件的内置默认、项目控制台、仓库文件三层和最终内容；PUT `{path,content}` 保存或（`content: null`）清除某个 `.bot/` 规则文件的控制台覆盖。`POST …/rules/refresh` 重新读取默认分支文件，`POST …/rules/apply-computer` 由超级管理员立即应用 `.bot/computer.yaml` |
 | `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库。列表带当前执行任务；详情另含 manager 给出的容器／卷／网络／镜像／资源限制、当前任务、最近 20 个任务和最近 30 条命令 |

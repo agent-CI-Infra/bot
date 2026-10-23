@@ -47,7 +47,10 @@ try {
   await api('/api/setup','POST',{ username:'administrator',password });
   await api('/api/accounts','POST',{ name:'Token fixture',type:'bot_account',token:githubToken,webhook_secret:id() });
   const a = (await api('/api/accounts','POST',{ name:'Environment fixture',type:'github_app',app_id:'123',private_key:privateKey,webhook_secret:webhookSecret })).account;
-  for (const repo of ['101','202']) await api('/api/repositories','POST',{ id:repo, full_name:'fixture/project-' + repo,owner_id:'10',account_id:a.id });
+  // Repositories come only from installation sync. This suite has no GitHub, so it records them as installed the way a sync would, then starts them.
+  const installed = repo => compose(['exec','-T','bot','node','-e',`const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.env.BOT_DATABASE_PATH);db.exec('PRAGMA busy_timeout=5000');
+    db.prepare("INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,synced_at) VALUES(?,?,?,?,?,0,1,?) ON CONFLICT DO NOTHING").run(${JSON.stringify(a.id)},'${repo}','fixture/project-${repo}','10','fixture',new Date().toISOString());db.close();`]);
+  for (const repo of ['101','202']) { installed(repo); await api(`/api/installations/${repo}/activate`,'POST',{ account_id:a.id }); }
   await api('/api/models','POST',{ repository_id:'101',api_url:'https://model.invalid',api_key:modelKey,model_name:'fixture' });
   await api('/api/users','POST',{ username:'member',password:memberPassword,repository_ids:['101'] });
   await wait(async () => { const list=(await api('/api/environments')).environments;return list.length===2 && list.every(e=>e.state==='ready'); },'two project environments');

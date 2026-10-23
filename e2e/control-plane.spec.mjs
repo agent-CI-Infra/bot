@@ -15,6 +15,8 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await page.getByRole('button', { name: '初始化并登录' }).click();
     await page.getByRole('button', { name: '项目', exact: true }).click();
     await expect(page.getByRole('heading', { name: '项目' })).toBeVisible();
+    // Repositories come only from installation sync; there is no manual registration form.
+    await expect(page.locator('#add')).toBeHidden(); await expect(page.getByRole('button', { name: '手动登记仓库' })).toHaveCount(0);
     await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
     await expect(page.getByText('本页 0 条投递')).toBeVisible();
     await admin('/api/auth/login', 'POST', { username: 'administrator', password });

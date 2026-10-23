@@ -150,19 +150,6 @@ export async function management(store: Store, user: Actor, method: string, path
       return { repositories: store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled,p.automation FROM repositories r
         JOIN policies p ON p.repository_id=r.id WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args) };
     }
-    if (method === 'POST') {
-      superAdmin(user); fields(body, ['id', 'full_name', 'owner_id', 'account_id']);
-      const id = text(body.id), name = text(body.full_name), owner = text(body.owner_id), account = text(body.account_id);
-      if (!/^[1-9]\d*$/.test(id) || !/^[1-9]\d*$/.test(owner) || !/^[\w.-]+\/[\w.-]+$/.test(name)) fail(400, 'invalid_repository');
-      if (!store.get('SELECT id FROM accounts WHERE id=?', account)) fail(400, 'account_not_found');
-      return store.transaction(() => {
-        if (store.get('SELECT id FROM repositories WHERE id=? OR full_name=?', id, name)) fail(409, 'repository_exists');
-        store.run('INSERT INTO repositories VALUES(?,?,?,?)', id, name, owner, account);
-        store.run('INSERT INTO policies(repository_id) VALUES(?)', id);
-        store.audit(user.id, 'repository.created', id, id);
-        return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)! };
-      });
-    }
   }
   const repoMatch = /^\/api\/repositories\/([^/]+)(\/policy)?$/.exec(path);
   if (repoMatch) {
