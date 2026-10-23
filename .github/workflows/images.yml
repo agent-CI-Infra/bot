@@ -1,0 +1,90 @@
+name: Images
+
+# Builds the deployment images that compose.pull.yaml runs. Pull requests only build them; pushes to main publish
+# ghcr.io/agent-ci-infra/<name> with the tags sha-<12-character commit> and latest.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+# A newer push to main cancels the older run, so latest never moves back to an earlier commit.
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: bot
+            dockerfile: Dockerfile
+            description: Control plane (admin console, webhook receiver, task engine); also runs key-init.
+          - name: bot-manager
+            dockerfile: manager/Dockerfile
+            description: Manager of the per-repository project containers; the only service with the Docker socket.
+          - name: bot-project
+            dockerfile: images/project/Dockerfile
+            description: Approved image of the per-repository project computers.
+          - name: bot-tunnel
+            dockerfile: tunnel/Dockerfile
+            description: Optional Cloudflare Tunnel connector for the webhook listener.
+          - name: bot-webhook
+            dockerfile: webhook/Dockerfile
+            description: Fixed gateway from the tunnel network to the webhook listener.
+    env:
+      IMAGE: ghcr.io/agent-ci-infra/${{ matrix.name }}
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: tags
+        if: env.PUBLISH == 'true'
+        run: echo "list=$IMAGE:sha-${GITHUB_SHA::12},$IMAGE:latest" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.tags.outputs.list }}
+          # The source label links the package to this repository.
+          labels: |
+            org.opencontainers.image.source=https://github.com/agent-CI-Infra/bot
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=${{ matrix.description }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }}
+
+      # A new GHCR package starts private and the REST API cannot change that; an organization owner makes it public
+      # once in the package settings. Until then anonymous pulls fail, so say so in the run instead of failing it.
+      - name: Check anonymous pull
+        if: env.PUBLISH == 'true'
+        run: |
+          if DOCKER_CONFIG="$(mktemp -d)" docker manifest inspect "$IMAGE:latest" > /dev/null 2>&1; then
+            echo "$IMAGE:latest can be pulled anonymously."
+          else
+            echo "::warning title=$IMAGE is not public::Anonymous pulls fail until an organization owner sets the package visibility to Public (package settings, Danger Zone)."
+          fi
