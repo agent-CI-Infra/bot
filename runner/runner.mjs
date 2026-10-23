@@ -70,11 +70,15 @@ function usage() {
     resolve({ workspace_bytes: Number(String(stdout).split('\t')[0]) || null, complete: !error })));
 }
 // Ends every project process except init, the idle keeper and this runner. The container itself keeps running.
-async function reap() {
+async function reap(workspaceId) {
   const keep = new Set([1, process.pid]);
   // The idle keeper is the first child of the container init; later processes cannot take a lower PID.
   const idle = (await processes()).filter(p => p.ppid === 1 && p.cmdline === 'node /opt/runner/idle.mjs').sort((a, b) => a.pid - b.pid)[0];
   if (idle) keep.add(idle.pid);
+  if(idPattern.test(workspaceId||'')){
+    const {waitingAgent}=await import('./agent.mjs'),pid=await waitingAgent(`/workspace/tasks/${workspaceId}`,await processes());
+    if(pid)keep.add(pid);
+  }
   let killed = 0;
   for (let round = 0; round < 20; round++) {
     const live = (await processes()).filter(p => !keep.has(p.pid) && p.state !== 'Z');
@@ -90,7 +94,7 @@ if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operat
 let result;
 if (['tail', 'reap', 'usage'].includes(request.type)) {
   // Reading progress or usage and stopping leftovers are repeatable and never journaled.
-  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : await reap() }; } catch { result = { ok: false, error: request.type + '_failed' }; }
+  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : await reap(request.workspace_id) }; } catch { result = { ok: false, error: request.type + '_failed' }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };

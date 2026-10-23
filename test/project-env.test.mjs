@@ -189,3 +189,14 @@ test('both databases use default temporary storage so large sorts can spill to t
   const h = await harness(t); assert.equal(h.store.get('PRAGMA temp_store').temp_store, 0);
   const f = fixture(t); assert.equal(f.projects.db.prepare('PRAGMA temp_store').get().temp_store, 0);
 });
+
+test('publication replies are allowed and policy cleanup preserves the waiting agent until task release', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
+  await execute({ type: 'workspace_agent_pull_request', workspace_id, request_id: id(), base64: Buffer.from('{}').toString('base64'), offset: 0, final: true });
+  assert.ok(f.docker.runs.some(r => r.type === 'workspace_agent_pull_request'));
+  await execute({ type: 'workspace_command', workspace_id, command: 'node --test', timeout_ms: null });
+  assert.equal(f.docker.runs.at(-1).type, 'reap'); assert.equal(f.docker.runs.at(-1).workspace_id, workspace_id);
+  await execute({ type: 'reap', workspace_id });
+  assert.equal(f.docker.runs.at(-1).type, 'reap'); assert.equal(f.docker.runs.at(-1).workspace_id, undefined);
+});

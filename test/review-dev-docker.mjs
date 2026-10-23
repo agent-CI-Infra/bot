@@ -108,8 +108,9 @@ try{
   await hook('101',owned.number,'pull_request','synchronize',id(),ownPayload);await done('101',owned.number,'development.pr','completed');
   state=await fake('state');assert.equal(state.prs.length,1);assert.ok(state.refWrites.some(r=>r.method==='PATCH'&&r.branch===owned.head.ref&&r.force===false));passed('owned bot PR is followed on its registered branch without opening a second PR');
   await hook('101',4);await done('101',4,'review.issue','succeeded');state=await fake('state');assert.equal(state.comments.filter(r=>r.number===4).length,1);passed('unknown comment response reconciles by marker instead of posting twice');
-  await hook('101',6);const failed=await wait(async()=>(await tasks('101',6,'development.issue')).find(t=>t.status==='failed'),'test failure');assert.equal(failed.error_code,'validation_failed');
-  state=await fake('state');assert.equal(state.prs.length,1);passed('failed tests block branch publication and PR creation');
+  await hook('101',6);const repaired=await done('101',6,'development.issue','pr_opened');
+  const repairLogs=await api('/api/tasks/'+repaired.id+'/logs');assert.ok(JSON.stringify(repairLogs).includes('validation_failed'));
+  state=await fake('state');assert.equal(state.prs.length,2);passed('failed policy tests return to Pi, which repairs and creates the PR on a later call');
   await api('/api/repositories/202/policy','PATCH',{review_enabled:true});await hook('202',2);
   const missing=await done('202',2,'review.issue','waiting_configuration');assert.equal(missing.error_code,'model_not_configured');
   const model2=(await api('/api/models','POST',{repository_id:'202',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;

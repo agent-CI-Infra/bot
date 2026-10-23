@@ -2,6 +2,13 @@ import {mkdir,readFile,writeFile,rename,open} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {environment} from './command.mjs';
 
+// Policy commands run while Pi waits for publication. Reap command leftovers without killing
+// that exact agent; an explicit task release still reaps everything.
+export async function waitingAgent(root,processes){
+  const state=await readFile(root+'/agent/state.json','utf8').then(JSON.parse).catch(()=>null);
+  return state?.state==='running'&&processes.some(p=>p.pid===state.pid&&p.cmdline==='node /opt/runner/pi-entry.mjs '+root)?state.pid:null;
+}
+
 // The project has no path to the control network. A task-owned mailbox transports model data, never provider keys.
 export async function agentOperation(input,root){
   const dir=root+'/agent';await mkdir(dir,{recursive:true,mode:0o700});
@@ -33,9 +40,10 @@ export async function agentOperation(input,root){
     if(state.state==='running')try{if(state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
     const request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
     const token_request=await readFile(dir+'/token-request.json','utf8').then(JSON.parse).catch(()=>null);
+    const pull_request=await readFile(dir+'/pr-request.json','utf8').then(JSON.parse).catch(()=>null);
     const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').filter(Boolean);
     const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-    return {...state,request,token_request,events,offset:offset+events.length};
+    return {...state,request,token_request,pull_request,events,offset:offset+events.length};
   }
   // The answer to the agent's github_read_token request: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){
@@ -44,12 +52,14 @@ export async function agentOperation(input,root){
     const path=dir+'/token-reply-'+input.request_id;
     await writeFile(path+'.tmp',Buffer.from(input.base64,'base64'),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
   }
-  if(input.type==='workspace_agent_reply'){
+  if(input.type==='workspace_agent_reply'||input.type==='workspace_agent_pull_request'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
-    const current=JSON.parse(await readFile(dir+'/request.json','utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
-    const path=dir+'/reply-'+input.request_id+'.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
+    const pr=input.type==='workspace_agent_pull_request';
+    const current=JSON.parse(await readFile(dir+(pr?'/pr-request.json':'/request.json'),'utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
+    const prefix=dir+(pr?'/pr-reply-':'/reply-')+input.request_id;
+    const path=prefix+'.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');await file.write(Buffer.from(input.base64,'base64'),0,Buffer.from(input.base64,'base64').length,input.offset);}finally{await file.close();}
-    if(input.final)await rename(path,dir+'/reply-'+input.request_id+'.json');return {written:true};
+    if(input.final)await rename(path,prefix+'.json');return {written:true};
   }
   throw new Error('unknown_agent_operation');
 }

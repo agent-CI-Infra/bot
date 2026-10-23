@@ -148,7 +148,7 @@ function renderTimeline(task, logs) {
 function toolCaption(call) {
   let args = {}; try { args = JSON.parse(call.arguments); } catch { /* Long arguments are clipped in the log. */ }
   return { run_command: '执行命令：' + clipText(args.command, 80), read_file: '读取 ' + (args.path || '文件'), write_file: '写入 ' + (args.path || '文件'),
-    finish_review: '提交检视结论', finish_development: '提交开发结果' }[call.name] || call.name;
+    finish_review: '提交检视结论', create_pull_request: '创建 PR' }[call.name] || call.name;
 }
 function step(log) {
   let value; try { value = JSON.parse(log.content); } catch { value = { type: 'raw' }; }
@@ -174,8 +174,8 @@ function step(log) {
     if (result.content) add(collapsible('文件内容', result.content));
   } else if (value.type === 'tool' && value.name === 'write_file') {
     title.textContent = '写入文件'; add(element('p', `${args.path} · ${args.bytes??new TextEncoder().encode(args.content||'').length} 字节`));
-  } else if (value.type==='tool' && ['finish_review','finish_development'].includes(value.name)) {
-    title.textContent=value.name==='finish_review'?'提交检视结论':'提交开发结果';
+  } else if (value.type==='tool' && ['finish_review','create_pull_request'].includes(value.name)) {
+    title.textContent=value.name==='finish_review'?'提交检视结论':'创建 PR';
     if(args.summary)add(element('p',clipText(args.summary,240)));
     if(args.test_command)add(element('p','测试：'+args.test_command,'muted'));
     add(collapsible('原始 JSON',JSON.stringify({arguments:args,result},null,2)));

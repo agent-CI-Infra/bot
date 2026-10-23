@@ -19,6 +19,18 @@ async function exchange(){
     return {error:'github_read_token_timeout'};
   }finally{await unlink(dir+'/token-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
 }
+// Publication can include a long-running policy command. Wait for the control plane instead of
+// ending the session or imposing the model proxy's two-minute request timeout.
+async function createPullRequest(args){
+  const id=randomBytes(24).toString('hex'),reply=dir+'/pr-reply-'+id+'.json';
+  await writeFile(dir+'/pr-request.tmp',JSON.stringify({id,arguments:args}),{mode:0o600});await rename(dir+'/pr-request.tmp',dir+'/pr-request.json');
+  try{
+    for(;;){
+      const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+  }finally{await unlink(dir+'/pr-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
+}
 const server=createServer(async(req,res)=>{
   try{
     // Any number of model requests per task; only the chat completion endpoint is proxied.
@@ -40,7 +52,11 @@ try{
   const tools=config.tools.map(tool=>({name:tool.function.name,label:tool.function.name,description:tool.function.description,parameters:tool.function.parameters,
     async execute(id,args){
       let result;
-      if(tool.function.name.startsWith('finish_')){finished=args;setTimeout(()=>void session.abort(),10);result={finished:true};}
+      if(tool.function.name==='finish_review'){finished=args;setTimeout(()=>void session.abort(),10);result={finished:true};}
+      else if(tool.function.name==='create_pull_request'){
+        result=await createPullRequest(args);
+        if(result.pr||result.status==='no_changes'){finished={...args,...result};setTimeout(()=>void session.abort(),10);}
+      }
       else if(tool.function.name==='read_file')result=await workspace({type:'workspace_read',workspace_id:config.workspace_id,path:args.path});
       else if(tool.function.name==='write_file'){
         const data=Buffer.from(args.content);if(data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:config.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});

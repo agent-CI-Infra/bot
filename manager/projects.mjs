@@ -197,8 +197,8 @@ export class Projects {
     });
   }
   // Stops leftover processes without restarting the container; falls back to a restart if any survive.
-  async reap(repo, generation) {
-    const result = await this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'reap' }).catch(() => null);
+  async reap(repo, generation, workspaceId) {
+    const result = await this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'reap', ...(workspaceId?{workspace_id:workspaceId}:{}) }).catch(() => null);
     if (result?.ok) return result.result;
     await this.stopGeneration(repo, generation); await this.provision(repo); return { restarted: true };
   }
@@ -252,7 +252,7 @@ export class Projects {
           const container = await this.inspect(repo, project.generation, 'container');
           if (!container?.State.Running || container.State.StartedAt !== project.started_at) throw new ManagerError('recovery_required');
           const call = input.request;
-          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_token','workspace_agent_live','reap'];
+          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_token','workspace_agent_pull_request','workspace_agent_live','reap'];
           const keys=['type','command','path','content','timeout_ms','keep_background','workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id'];
           if (!call || !types.includes(call.type) || Object.keys(call).some(k => !keys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
           // Kept background processes belong to one task workspace; any other work stops them first.
@@ -270,7 +270,7 @@ export class Projects {
             if (commandTypes.includes(call.type)) {
               if (call.type === 'workspace_command' && call.keep_background === true && result.ok) this.background.set(repo, call.workspace_id);
               // Processes that escaped the command's process group end here unless this task keeps background work.
-              else if (!call.workspace_id || this.background.get(repo) !== call.workspace_id) await this.reap(repo, project.generation);
+              else if (!call.workspace_id || this.background.get(repo) !== call.workspace_id) await this.reap(repo, project.generation, call.workspace_id);
             }
           }
           this.update(repo, 'ready', 'ready', null, this.get(repo).started_at);
