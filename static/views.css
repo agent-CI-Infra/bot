@@ -117,3 +117,4 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 @media(max-width:760px){.project-feature-switch{min-height:36px}.project-features{gap:6px 8px}.project-task-preview{min-height:36px}}
 
 @media(min-width:1001px){.project-task-preview{min-width:112px;justify-content:flex-end}}
+.permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color:#16636b;text-underline-offset:3px}
