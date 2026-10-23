@@ -1,27 +1,103 @@
 # 部门公共 Bot
 
-一个 Node.js 22.13+ / TypeScript 控制面，使用系统内账号管理多个 GitHub App、机器人账号、仓库权限、模型配置和 Webhook 投递。许可证为 Apache-2.0。
+部门公共的 GitHub App 检视和开发 bot。一个控制面负责管理页面、接收 GitHub Webhook 和调度任务；每个启用的仓库各有一台长期运行的 Docker 容器（下文称“虚拟电脑”），bot 在里面读代码、跑命令。新开的 Issue 和 PR 会收到一条检视总结评论；打开自动开发后，明确要求改代码的 Issue 由 bot 实现、测试并开 PR。许可证为 Apache-2.0。
+
+## 快速上手
+
+准备：
+
+- Docker Engine 和 Docker Compose v2（`docker compose version` 能输出版本）。
+- 一个 GitHub 组织，以及能在其中创建和安装 GitHub App 的账号（组织所有者或 GitHub App 管理员）。
+- 一个公网 HTTPS 入口，让 GitHub 能把 Webhook 送到这台机器：自己的域名加 HTTPS 反向代理，或者 Cloudflare Tunnel。
+- 一个兼容 Chat Completions 的模型：接口 URL、API Key 和模型名。
+
+**1. 启动。** 不需要克隆仓库，也不在本机构建：
+
+```sh
+mkdir department-bot && cd department-bot
+curl -fsSLO https://raw.githubusercontent.com/agent-CI-Infra/bot/main/compose.pull.yaml
+docker compose -f compose.pull.yaml up -d
+```
+
+然后在这台机器的浏览器打开 <http://127.0.0.1:8792/>。Bot 装在远程服务器上时，先 `ssh -L 8792:127.0.0.1:8792 <服务器>`，再在自己电脑上打开同一地址；需要长期远程管理时，另做一个 HTTPS 反向代理，并设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN`（见[端口与环境变量](#端口与环境变量)）。镜像发布在 GHCR，匿名拉取要求这些包已公开；如果拉取报 `denied` 或 `unauthorized`，可以克隆本仓库，在根目录用 `docker compose up --build -d` 从源码构建（见[镜像与两份 Compose](#镜像与两份-compose)）。
+
+**2. 创建超级管理员。** 首页显示「创建第一名超级管理员」：填用户名和 12–256 位密码，点「初始化并登录」。初始化只成功一次，之后这里只有登录。
+
+**3. 接上 GitHub。** 首次登录会自动打开「接入向导」（之后从顶部导航进入），按顶部的六步走：
+
+1. 公网 HTTPS：选「自建 HTTPS 中转」，把一个专用域名整个反向代理到 `http://<这台机器>:8791`，填 `https://<你的域名>`，点「检查并使用」。或者选「Cloudflare Tunnel」，粘贴 tunnel token 点「保存 token」，在 Cloudflare 的 Published application 把 Service URL 设为 `http://webhook:8791`，回到向导点该路由的「检查并使用此域名」。两种方式都不要把 8792 转出去，管理页留在本机 `127.0.0.1:8792`。
+2. GitHub App：填「目标组织」和「App 名称」，点「准备 GitHub 确认页」→「前往 GitHub 确认创建」，在 GitHub 上确认后会回到向导。权限固定为 Contents、Issues、Pull requests 写和 Metadata 读，只订阅 `issues` 和 `pull_request`；Webhook 地址 `https://<你的域名>/hooks/github/<account_id>/<endpoint_id>` 由向导写进 App，不用手填。已在「机器人账号」登记过的 App 点「使用此 App」。
+3. 安装：点「在 GitHub 安装此 App」，选好仓库后回来点「重新检查安装」。
+4. 模型：在「添加模型」填接口 URL、API Key、模型名，点「保存并继续」。
+5. 规则：看一下内置规则，点「下一步」。
+6. 完成：点「同步已安装仓库」，在要用的仓库那一行点「启动并启用检视」，最后点「完成向导」。
+
+**4. 启用更多仓库。** 在「项目」页点「同步安装列表」，在仓库行点「启动」，选好模型后确认。只有需要 bot 自动改代码时才勾选自动开发，也可以以后在该仓库的「设置」→「开发」打开。仓库启动前收到的事件只存档，不会补跑。
+
+**5. 确认跑通。** 在已启用的仓库新开一个 Issue，bot 会在上面回复一条检视总结评论；第一次要先启动该仓库的虚拟电脑，会慢一些。没等到时，先在「Webhook 投递」页看投递是否到达、验签是否通过，再在「检视」页看任务状态。
+
+**升级和数据。** 在同一目录运行：
+
+```sh
+docker compose -f compose.pull.yaml pull
+docker compose -f compose.pull.yaml up -d
+```
+
+数据在四个部署卷里：`bot-data`（控制面数据库）、`bot-keys`（加密凭据的主密钥）、`internal-keys`（bot 与 manager 的内部认证）和 `manager-data`（虚拟电脑账本）；`tunnel-keys` 只放 Cloudflare Tunnel token。丢了主密钥，已保存的 App 私钥和模型 Key 都解不开。`docker compose -f compose.pull.yaml down` 会保留卷；日常升级不要加 `-v`（`--volumes`），它会删掉这些卷。备份见[备份与恢复](#备份与恢复)。
+
+## 概览
+
+一个 Node.js 22.13+ / TypeScript 控制面，使用系统内账号管理多个 GitHub App、机器人账号、仓库权限、模型配置和 Webhook 投递。
 
 当前提供多账号控制面、每仓库一个长期 Docker 环境，以及可读代码、运行命令和修改文件的检视／开发 Agent。没有内置账号或仓库；开启仓库检视后接收事件并创建任务，满足开发条件时自动实现、测试、发布 bot 分支和 PR。`/api/status` 的项目环境、检视、开发及模型调用能力均可用；具体任务缺配置或失败会显示故障状态。
 
-## Docker 部署
+## 部署细节
 
-安装 Docker Engine 和 Compose，然后在仓库根目录运行：
+### 镜像与两份 Compose
+
+`main` 分支每次推送后，[`.github/workflows/images.yml`](.github/workflows/images.yml) 构建并发布下列 `linux/amd64` 镜像，标签为 `latest` 和 `sha-<12 位提交>`；Pull request 只构建、不发布。
+
+| 镜像 | Dockerfile | Compose 服务 |
+| --- | --- | --- |
+| `ghcr.io/agent-ci-infra/bot` | `Dockerfile` | `key-init`、`bot` |
+| `ghcr.io/agent-ci-infra/bot-manager` | `manager/Dockerfile` | `manager` |
+| `ghcr.io/agent-ci-infra/bot-project` | `images/project/Dockerfile` | `project-image`，也是每台虚拟电脑的批准镜像 |
+| `ghcr.io/agent-ci-infra/bot-tunnel` | `tunnel/Dockerfile` | `tunnel` |
+| `ghcr.io/agent-ci-infra/bot-webhook` | `webhook/Dockerfile` | `webhook` |
+
+`compose.pull.yaml` 直接运行这些镜像。`compose.yaml` 用同样的服务、卷和网络从源码构建，本地标签为 `department-bot*:local`，供开发或镜像不可用时在仓库根目录使用：
 
 ```sh
 docker compose up --build -d
-docker compose ps
 ```
 
-打开 <http://127.0.0.1:8792/>，创建第一名超级管理员。初始化只允许成功一次，重启不会重新开放。用户名和密码属于本系统；密码长度为 12–256 字符，使用随机盐的 scrypt 慢哈希保存。先完成初始化，再将入口开放给其他人。
+两份文件的 Compose 项目名都取所在目录名，所以在同一目录里从 `compose.yaml` 换成 `compose.pull.yaml`（或反过来）会沿用原来的卷；虚拟电脑在下次准备时换成新的批准镜像，工作卷和代次不变。manager 不拉取镜像，只检查 `BOT_PROJECT_IMAGE` 指向的本机镜像，所以它必须和 `project-image` 服务的镜像引用（含标签）完全一致。
 
-`8791` 是 Webhook 接收入口，宿主端口默认绑定 `0.0.0.0`，对所有 IPv4 网卡开放；`8792` 是管理页面和管理 API，仍仅绑定宿主回环地址 `127.0.0.1`，只在本机访问。管理员可在机器人账号页面登记账号，取得 `/hooks/github/<account_id>/<endpoint_id>`，通过自己的 HTTPS 反向代理将 GitHub Webhook 路由到 `8791`。不要把两个监听端口混接。可用 `BOT_WEBHOOK_PORT`、`BOT_ADMIN_PORT` 调整宿主端口。需要远程访问管理页面时，另行配置独立的 HTTPS 反向代理，并设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN` 为自己的管理站 origin；这些变量通过 Compose 环境传入，不包含上游凭据。管理 API 不开放跨域访问。
+### 端口与环境变量
 
-Compose 包含长运行的 `bot` 和 `manager`，以及一次性的 `key-init` 与 `project-image`。`project-image` 仅确保批准的项目镜像已构建，不是某个仓库的长期环境。manager 按仓库创建动态项目容器，项目容器不属于 Compose 静态服务，不对宿主或公网发布端口。
+`8791` 是 Webhook 接收入口，宿主端口默认绑定 `0.0.0.0`，对所有 IPv4 网卡开放；`8792` 是管理页面和管理 API，仍仅绑定宿主回环地址 `127.0.0.1`，只在本机访问。公网域名整个转发到 `8791`：除了 GitHub Webhook 的 `/hooks/github/<account_id>/<endpoint_id>`，向导检查地址用 `/.well-known/bot-webhook-probe`，外部执行端兑换令牌也走这个入口。不要把两个监听端口混接。需要远程访问管理页面时，另行配置独立的 HTTPS 反向代理（与 Webhook 用不同域名），并设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN` 为自己的管理站 origin。管理 API 不开放跨域访问。
+
+下列变量从启动 Compose 的 shell 环境或 Compose 文件同目录的 `.env` 读取，都不包含上游凭据：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `BOT_WEBHOOK_PORT` | `8791` | Webhook 的宿主端口，绑定 `0.0.0.0` |
+| `BOT_ADMIN_PORT` | `8792` | 管理页的宿主端口，只绑定 `127.0.0.1` |
+| `BOT_COOKIE_SECURE` | `false` | 管理页经 HTTPS 反向代理访问时设为 `true` |
+| `BOT_ADMIN_ORIGIN` | 空 | 管理站的 HTTPS origin；创建 GitHub App 后 GitHub 也回调到这里 |
+| `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 时虚拟电脑没有外网出口 |
+| `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
+| `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许转发到的内网主机名，逗号分隔，见[外部执行端](docs/external-executors.md) |
+
+### 服务、卷与隔离
+
+Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一次性的 `key-init` 与 `project-image`。`key-init` 首次启动时生成主密钥和内部认证。`project-image` 仅确保批准的项目镜像已在本机 Docker 中（`compose.pull.yaml` 拉取，`compose.yaml` 构建），不是某个仓库的长期环境。`tunnel` 在向导保存 Cloudflare Tunnel token 之前不连接任何账号；它只在独立的 `edge` 网络，经 `webhook` 网关固定转发到 `bot:8791`，不能连接管理端口。manager 按仓库创建动态项目容器，项目容器不属于 Compose 静态服务，不对宿主或公网发布端口。
 
 `bot-data` 保存控制面 SQLite，`bot-keys` 保存加密主密钥，仅 bot 可读；`internal-keys` 保存 bot 与 manager 的内部认证，manager 不挂载上游凭据或控制面数据库。`manager-data` 保存环境和操作账本。每个环境代次拥有独立具名工作卷和内部网络，标签同时绑定部署、仓库 ID、代次和资源类型。部署 ID 从独立内部认证材料派生，不同部署不会共用资源名。
 
 只有 manager 挂载 Docker socket；它以 UID 0、GID 10001 访问 socket 和只读内部认证卷，丢弃所有 capabilities、禁止提权、根文件系统只读。Docker socket 本身仍赋予 manager 管理宿主 Docker 的能力，因此不对宿主发布 manager 端口，也不向项目网络提供该接口。它只接受登记项目的固定生命周期和 runner 请求，不能指定任意镜像、挂载、容器 ID 或 Docker API。bot 和项目容器没有 socket，项目容器也不挂载任何认证卷。bot／manager 使用独立控制网络，每个项目使用自己的 bridge 网络，项目之间互不可达。项目容器默认可以访问外网，用于安装依赖和访问测试地址；设置 `BOT_PROJECT_EGRESS=false` 可改回无出口的内部网络。外网出口意味着仓库代码也能访问宿主在 `0.0.0.0` 上发布的端口（例如 Webhook `8791`），管理端口只绑定回环地址，不受影响；GitHub 和模型凭据仍不进入项目容器。
+
+### 备份与恢复
 
 备份前停止 bot 和 manager，并备份四个部署卷及项目具名卷；数据库停止写入后再复制，恢复时使用同一套内部认证和管理账本。丢失主密钥会无法解密凭据，丢失内部认证会改变部署 ID，不能用新的空账本直接接管旧容器。`docker compose down` 保留卷；`--volumes` 会删除部署认证和账本，日常升级不要使用。动态项目资源需要通过环境接口管理，Compose down 不会直接删除它们。
 
@@ -87,6 +163,7 @@ npm ci
 npm run check
 npm test
 docker compose config --quiet
+docker compose -f compose.pull.yaml config --quiet
 ```
 
 `npm test` 覆盖并发初始化只成功一次、重启、权限收回、跨项目列表／详情／日志／模型隔离、凭据加密及不回显、验签、事务回滚重试、重复投递、先落库再确认和空配置不执行。SQLite 使用 Node 内置 `node:sqlite`，Node 22 会显示实验特性提示。
