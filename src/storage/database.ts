@@ -86,6 +86,14 @@ export class Store {
         installation_id TEXT,full_name TEXT NOT NULL,owner_id TEXT NOT NULL,owner_login TEXT NOT NULL DEFAULT '',private INTEGER NOT NULL DEFAULT 0,
         installed INTEGER NOT NULL DEFAULT 1,synced_at TEXT NOT NULL,PRIMARY KEY(account_id,repository_id));
       CREATE TABLE IF NOT EXISTS installation_syncs(account_id TEXT PRIMARY KEY REFERENCES accounts(id),synced_at TEXT,error TEXT,repositories INTEGER);`);
+    // Gate/dashboard connection status per repository and one-click onboarding runs.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS repo_integrations(repository_id TEXT PRIMARY KEY,
+        gate_state TEXT NOT NULL DEFAULT 'unknown',gate_detail TEXT NOT NULL DEFAULT '',
+        dashboard_state TEXT NOT NULL DEFAULT 'unknown',dashboard_detail TEXT NOT NULL DEFAULT '',checked_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS quickstart_runs(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,state TEXT NOT NULL,steps TEXT NOT NULL,
+        pr_url TEXT,error TEXT,dry_run INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS quickstart_repo_time ON quickstart_runs(repository_id,created_at);
+      PRAGMA user_version=5;`);
     externalStorage(this);
     boardStorage(this);
   }

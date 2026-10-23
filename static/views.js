@@ -328,13 +328,37 @@ function installedBadges(row) {
   else if (row.installed === null) badges.push(badge('不在安装列表'));
   return badges;
 }
-function installedActions(row, after) {
+const gateLabels = { none: ['门禁未接入', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
+const dashboardLabels = { none: ['看板未接入', 'info'], registered: ['看板待发布', 'warning'], published: ['看板已接入', 'success'], unknown: ['看板未知', 'info'] };
+function integrationChip(caption, tone, href, title) {
+  if (!href) { const chip = badge(caption, tone); if (title) chip.title = title; return chip; }
+  const link = element('a', caption, `status status-${tone} status-link`);
+  link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = title || href;
+  return link;
+}
+function isBoardRepository(row) { return /-board$/.test(String(row?.full_name || '').split('/')[1] || ''); }
+function installedIntegration(integration, row) {
+  if (row && isBoardRepository(row)) {
+    const [owner = '', name = ''] = String(row.full_name).split('/');
+    return [integrationChip('看板仓', 'info', `https://${owner}.github.io/${name}/`, '接入流程生成的看板仓库，不需要再接入')];
+  }
+  if (!integration) return [badge('接入未检查', 'info')];
+  const gate = gateLabels[integration.gate_state] || gateLabels.unknown, dashboard = dashboardLabels[integration.dashboard_state] || dashboardLabels.unknown;
+  return [integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail),
+    integrationChip(dashboard[0], dashboard[1], integration.dashboard_url, integration.dashboard_detail)];
+}
+function installedActions(row, after, integration) {
   const actions = element('div', '', 'actions');
   const call = async (path, body, caption) => {
     actions.querySelectorAll('button').forEach(b => { b.disabled = true; }); $('message').textContent = caption;
     try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); $('message').textContent = ''; } catch (err) { error(err); }
     await after();
   };
+  const gate = integration?.gate_state, dashboard = integration?.dashboard_state;
+  if (!isBoardRepository(row)) {
+    if (!integration || gate === 'none' || gate === 'unknown' || gate === 'configured') actions.append(button('接入门禁', () => openQuickstart(row, after), ''));
+    else if (dashboard === 'none' || dashboard === 'registered' || dashboard === 'unknown') actions.append(button('接入看板', () => openQuickstart(row, after), ''));
+  }
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
   if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
@@ -369,4 +393,48 @@ $('activation-form').addEventListener('submit', async event => {
     await api(`/api/installations/${target.row.id}/activate`, 'POST', { model_id: form.elements.model_id.value || null, development_enabled: form.elements.development_enabled.checked });
     activationView.close(); await target.after();
   } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
+});
+
+// One-click onboarding: gate PR first (the user merges it), then the board repository and the dashboard PR.
+const quickstartView = document.createElement('dialog'); quickstartView.id = 'quickstart-view'; quickstartView.setAttribute('aria-labelledby', 'quickstart-title');
+quickstartView.innerHTML = `<h2 id="quickstart-title">接入门禁</h2>
+<p class="muted" id="quickstart-hint"></p>
+<ol id="quickstart-steps" class="quickstart-steps"></ol>
+<p id="quickstart-error" class="view-error" role="alert"></p>
+<div class="actions"><button type="button" id="quickstart-start">开始接入</button><button type="button" class="quiet" id="quickstart-close">关闭</button></div>`;
+document.body.append(quickstartView);
+let quickstartRow = null, quickstartAfter = null, quickstartTimer = null;
+const quickstartStepStatus = { pending: '等待', running: '进行中', done: '完成', skipped: '跳过', blocked: '需人工', failed: '失败' };
+function renderQuickstartRun(run) {
+  if (!run) return;
+  const list = $('quickstart-steps'); list.replaceChildren();
+  for (const item of run.steps || []) {
+    const li = element('li', '', 'quickstart-step'), head = element('strong', `${item.title} · ${quickstartStepStatus[item.status] || item.status}`);
+    li.append(head, element('p', item.detail));
+    if (item.url) { const link = element('a', '查看详情', 'result-link'); link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; li.append(link); }
+    list.append(li);
+  }
+  const quickstartErrors = { board_repository: '这是看板仓库，不需要接入；请对源码仓接入。', unsupported_stack: '暂时只支持带 package.json 的 Node 仓库。', private_repository: '公共看板只接受公开仓库，私有仓库只能接门禁。', ci_exists: '仓库已有 CI workflow，需要人工决定是否合并门禁配置。', gate_pr_merged_pending: '门禁 PR 等待你合并；合并后再次点击「接入看板」。', dry_run: '' };
+  $('quickstart-error').textContent = run.error ? (run.error in quickstartErrors ? quickstartErrors[run.error] : run.error) : '';
+  $('quickstart-start').disabled = ['running', 'queued'].includes(run.state);
+  if (['running', 'queued'].includes(run.state)) {
+    clearTimeout(quickstartTimer); quickstartTimer = setTimeout(async () => {
+      try { const { run: next } = await api(`/api/quickstart/${run.id}`); renderQuickstartRun(next); } catch {}
+    }, 1500);
+  } else if (quickstartAfter) quickstartAfter();
+}
+async function openQuickstart(row, after) {
+  quickstartRow = row; quickstartAfter = after;
+  $('quickstart-title').textContent = '接入 ' + row.full_name;
+  $('quickstart-hint').textContent = '第一步会给仓库开一个门禁 PR，需要你合入；合入后再次点击「接入看板」，bot 会创建 ' + row.full_name.split('/')[1] + '-board 仓库、开启 GitHub Pages（站点形如 https://' + row.full_name.split('/')[0] + '.github.io/' + row.full_name.split('/')[1] + '-board/），并向公共 dashboard 提登记 PR。';
+  $('quickstart-steps').replaceChildren(); $('quickstart-error').textContent = '';
+  quickstartView.showModal();
+  try { const { run } = await api(`/api/projects/${row.id}/quickstart`); if (run) renderQuickstartRun(run); } catch {}
+}
+$('quickstart-close').addEventListener('click', () => { clearTimeout(quickstartTimer); quickstartView.close(); });
+$('quickstart-start').addEventListener('click', async () => {
+  if (!quickstartRow) return;
+  const button = $('quickstart-start'); button.disabled = true;
+  try { const { run } = await api(`/api/projects/${quickstartRow.id}/quickstart`, 'POST', {}); renderQuickstartRun(run); }
+  catch (err) { $('quickstart-error').textContent = err.message; button.disabled = false; }
 });

@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0;
+let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false;
 const titles = { projects: '项目', board: '看板', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -72,7 +72,21 @@ async function render() {
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.
-  const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView;
+  const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView; $('check').hidden = !installedView;
+  // Gate / dashboard connection status (cached; refreshed on demand).
+  const integrationMap = new Map();
+  if (installedView) {
+    let integrations = []; try { integrations = (await api('/api/integrations')).integrations || []; } catch {}
+    if (!integrations.length || forceIntegrationCheck) {
+      forceIntegrationCheck = false;
+      try { $('count').textContent = '正在检查门禁和看板的接入状态…'; integrations = (await api('/api/integrations/check', 'POST', {})).integrations || []; } catch {}
+    }
+    integrations.forEach(item => integrationMap.set(item.repository_id, item));
+    if (integrations.some(item => item.stale) && !integrationAutoRefresh) {
+      integrationAutoRefresh = true;
+      api('/api/integrations/check', 'POST', {}).then(() => { integrationAutoRefresh = false; return start(); }).catch(() => { integrationAutoRefresh = false; });
+    }
+  }
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
   let result;try{result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
   if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
@@ -93,11 +107,12 @@ async function render() {
     if(tab==='accounts')status.append(element('span',row.credentials_configured?'凭据已配置':'凭据已撤销','status status-'+(row.credentials_configured?'success':'warning')));
     if(tab==='accounts'&&row.type==='github_app'&&row.credentials_configured)content.append(appPermissionCheck(row));
     if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
+    if(installedView){status.append(...installedBadges(row),...installedIntegration(integrationMap.get(row.id),row));}
     if(tab==='projects'){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(tab==='accounts'&&row.endpoints.length){const endpoints=element('details',''),summary=element('summary',`${row.endpoints.length} 个 Webhook 入口`);endpoints.append(summary);row.endpoints.forEach(e=>endpoints.append(element('code',e.webhook_path)));content.append(endpoints);}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
-    if(installedView){const actions=installedActions(row,()=>start());if(actions.childElementCount)line.append(actions);}
+    if(installedView){const actions=installedActions(row,()=>start(),integrationMap.get(row.id));if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
@@ -147,6 +162,9 @@ $('logout').addEventListener('click', async () => { try { await api('/api/auth/l
 $('tabs').addEventListener('click', event => { if (!event.target.dataset.tab) return; tab = event.target.dataset.tab; offset = 0;
   if (location.hash) history.pushState(null, '', location.pathname); route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));
+$('check').addEventListener('click', () => { forceIntegrationCheck = true; start().catch(error); });
+// The onboarding dialog calls this once a run reaches a terminal state.
+window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).then(() => start()).catch(() => {});
 $('sync').addEventListener('click', async () => {
   $('sync').disabled = true; $('message').textContent = '正在从 GitHub 同步安装列表…';
   try { const { results } = await api('/api/installations/sync', 'POST', {}); await start(); const failed = results.filter(r => r.error);

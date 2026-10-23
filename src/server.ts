@@ -14,11 +14,16 @@ import type { AutomationConfig } from './automation/config.js';
 import { ExternalService } from './external/service.js';
 import { type InstallationSync, installationApi } from './app/installations.js';
 import { Onboarding } from './onboarding/service.js';
+import { type IntegrationChecker } from './projects/integrations.js';
+import { type Quickstart } from './projects/quickstart.js';
+import { integrationsApi } from './app/integrations.js';
+import { quickstartApi } from './app/quickstart.js';
 import { RuleService } from './rules/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
-  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding; }
+  repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
+  integrations?: IntegrationChecker; quickstart?: Quickstart; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -152,7 +157,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
+    const result = boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? (options.quickstart ? await quickstartApi(options.quickstart, user, method, url, input) : undefined) ?? await management(store, user, method, path, input) ?? models(store, user, method, url, input)
       ?? (method === 'GET' ? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     if (mutation && (path.startsWith('/api/repositories') || path.startsWith('/api/installations'))) void options.projects?.reconcile().catch(() => {});
