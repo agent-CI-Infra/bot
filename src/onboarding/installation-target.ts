@@ -1,7 +1,7 @@
 import {fail} from '../core/security.js';
 
 // Parse only GitHub identifiers; pasted URLs are never requested by the server.
-export function installationOrganization(input:unknown):string{
+export function installationAccount(input:unknown):string{
   if(typeof input!=='string'||!input.trim()||input.length>2048||/[\s\u0000-\u001f\u007f]/.test(input.trim()))return fail(400,'invalid_installation_target');
   let value=input.trim(),name:string|undefined;
   if(value.startsWith('@'))value=value.slice(1);
@@ -20,7 +20,7 @@ export function installationOrganization(input:unknown):string{
   return name;
 }
 
-export function organizationInstallUrl(slug:string,id:number):string{
+export function accountInstallUrl(slug:string,id:number):string{
   // GitHub documents suggested_target_id for preselecting an account on the permissions page.
   const url=new URL(`https://github.com/apps/${encodeURIComponent(slug)}/installations/new/permissions`);
   url.searchParams.set('suggested_target_id',String(id));return url.href;

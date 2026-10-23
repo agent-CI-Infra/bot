@@ -7,7 +7,7 @@ import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { publicOrigin, probeGet } from './public-url.js';
 import { appJwt } from '../github/client.js';
 import { defaults } from '../rules/service.js';
-import { installationOrganization, organizationInstallUrl } from './installation-target.js';
+import { installationAccount, accountInstallUrl } from './installation-target.js';
 
 interface Options { tunnelFile?: string; tunnelMetrics?: string; githubUrl?: string; fetcher?: typeof fetch; probe?: typeof probeGet; }
 export class Onboarding {
@@ -56,7 +56,7 @@ export class Onboarding {
     this.save('tunnel', this.store.secrets.seal({ value }, 'onboarding:tunnel'));
   }
   async installationTarget(target:unknown):Promise<Json>{
-    const name=installationOrganization(target),app=this.saved('app');
+    const name=installationAccount(target),app=this.saved('app');
     const account=app&&this.store.get("SELECT * FROM accounts WHERE id=? AND type='github_app'",app.account_id);
     if(!account||!app.slug)return fail(409,'github_app_not_selected');
     const get=async(path:string,authorization?:string):Promise<any>=>{
@@ -68,17 +68,18 @@ export class Onboarding {
       if(!response.ok)return fail(response.status===403||response.status===429?503:502,'installation_target_lookup_failed');
       try{return await response.json();}catch{return fail(502,'installation_target_lookup_failed');}
     };
-    const org=await get('/users/'+encodeURIComponent(name));
-    if(!org)return fail(404,'installation_target_not_found');
-    if(org.type!=='Organization')return fail(400,'installation_target_not_organization');
-    if(!Number.isSafeInteger(org.id)||org.id<=0||typeof org.login!=='string'||installationOrganization(org.login)!==org.login)return fail(502,'installation_target_lookup_failed');
+    const targetAccount=await get('/users/'+encodeURIComponent(name));
+    if(!targetAccount)return fail(404,'installation_target_not_found');
+    if(!['Organization','User'].includes(targetAccount.type))return fail(400,'installation_target_not_installable');
+    if(!Number.isSafeInteger(targetAccount.id)||targetAccount.id<=0||typeof targetAccount.login!=='string'||installationAccount(targetAccount.login)!==targetAccount.login)return fail(502,'installation_target_lookup_failed');
     let jwt:string;
     try{const secrets=this.store.secrets.open(account.credentials,'account:'+account.id);jwt=appJwt(String(account.app_id),String(secrets.private_key||''));}
     catch{return fail(502,'github_app_check_failed');}
-    const installed=await get('/orgs/'+encodeURIComponent(org.login)+'/installation','Bearer '+jwt);
-    if(installed&&(!Number.isSafeInteger(installed.id)||installed.id<=0||String(installed.account?.id)!==String(org.id)||String(installed.app_id)!==String(account.app_id)))return fail(502,'installation_target_lookup_failed');
-    return {organization:{id:String(org.id),login:org.login,html_url:'https://github.com/'+org.login},installed:!!installed,
-      install_url:installed?`https://github.com/organizations/${encodeURIComponent(org.login)}/settings/installations/${installed.id}`:organizationInstallUrl(app.slug,org.id)};
+    const organization=targetAccount.type==='Organization';
+    const installed=await get((organization?'/orgs/':'/users/')+encodeURIComponent(targetAccount.login)+'/installation','Bearer '+jwt);
+    if(installed&&(!Number.isSafeInteger(installed.id)||installed.id<=0||String(installed.account?.id)!==String(targetAccount.id)||String(installed.app_id)!==String(account.app_id)))return fail(502,'installation_target_lookup_failed');
+    return {account:{id:String(targetAccount.id),login:targetAccount.login,type:targetAccount.type,html_url:'https://github.com/'+targetAccount.login},installed:!!installed,
+      install_url:installed?(organization?`https://github.com/organizations/${encodeURIComponent(targetAccount.login)}/settings/installations/${installed.id}`:`https://github.com/settings/installations/${installed.id}`):accountInstallUrl(app.slug,targetAccount.id)};
   }
   async api(user: Actor, method: string, url: URL, input: Json, adminOrigin: string): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/onboarding')) return undefined; superAdmin(user);
