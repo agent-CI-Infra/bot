@@ -4,6 +4,7 @@ import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
 import { fail, fields, hashPassword, password, randomId, text, type Json } from '../core/security.js';
 import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
+import { dropUninstalledIntegrations } from '../projects/integrations.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 function repoIds(store: Store, value: unknown): string[] {
@@ -64,6 +65,23 @@ export async function management(store: Store, user: Actor, method: string, path
         return { user: publicUser(store.get('SELECT * FROM users WHERE id=?', id)!) };
       });
     }
+    // Deleting a user ends its sessions, drops its project assignments and personal board, and frees the login name.
+    // The audit keeps its records; deleting yourself needs another active super administrator, as disabling does.
+    if (method === 'DELETE' && path === `/api/users/${id}`) {
+      fields(body, ['confirm']); if (body.confirm !== true) fail(400, 'confirmation_required');
+      return store.transaction(() => {
+        const row = store.get('SELECT * FROM users WHERE id=?', id);
+        if (!row) return fail(404, 'user_not_found');
+        if (row.role === 'super_admin' && row.active && store.get("SELECT count(*) AS n FROM users WHERE role='super_admin' AND active=1")!.n <= 1) fail(409, 'last_super_admin');
+        const boardFields = 'SELECT id FROM board_fields WHERE user_id=?';
+        for (const [sql, count] of [['DELETE FROM sessions WHERE user_id=?', 1], ['DELETE FROM project_admin_assignments WHERE user_id=?', 1],
+          [`DELETE FROM board_values WHERE user_id=? OR field_id IN (${boardFields})`, 2], [`DELETE FROM board_options WHERE field_id IN (${boardFields})`, 1],
+          ['DELETE FROM board_fields WHERE user_id=?', 1], ['DELETE FROM board_views WHERE user_id=?', 1], ['DELETE FROM users WHERE id=?', 1]] as const) store.run(sql, ...Array<string>(count).fill(id));
+        if (store.hasTable('app_manifest_states')) store.run('DELETE FROM app_manifest_states WHERE user_id=?', id);
+        store.audit(user.id, 'user.deleted', id);
+        return { deleted: true, id, self: id === user.id };
+      });
+    }
   }
   if (path === '/api/project-admin-assignments') {
     superAdmin(user);
@@ -112,6 +130,22 @@ export async function management(store: Store, user: Actor, method: string, path
         store.run('UPDATE accounts SET name=?,credentials=? WHERE id=?', body.name === undefined ? row.name : text(body.name), store.secrets.seal(secrets, `account:${id}`), id);
         store.audit(user.id, 'account.updated', id);
         return { account: accountView(store, store.get('SELECT * FROM accounts WHERE id=?', id)!) };
+      });
+    }
+    // Removes the account from this system only: GitHub keeps the App installed and every repository as it is.
+    // Projects on the account must be deleted first; its webhook endpoints, installation listing and sealed credentials go with it.
+    if (path === `/api/accounts/${id}` && method === 'DELETE') {
+      fields(body, ['confirm']); if (body.confirm !== true) fail(400, 'confirmation_required');
+      return store.transaction(() => {
+        if (store.get('SELECT 1 FROM repositories WHERE account_id=?', id)) fail(409, 'account_has_projects');
+        for (const table of ['endpoints', 'installation_syncs', 'installed_repositories', 'processed_deliveries']) store.run(`DELETE FROM ${table} WHERE account_id=?`, id);
+        if (store.hasTable('app_manifest_states')) store.run('DELETE FROM app_manifest_states WHERE account_id=?', id);
+        // The onboarding wizard must not keep offering an App that is gone.
+        store.run("DELETE FROM settings WHERE key='onboarding.app' AND json_valid(value) AND json_extract(value,'$.account_id')=?", id);
+        dropUninstalledIntegrations(store);
+        store.run('DELETE FROM accounts WHERE id=?', id);
+        store.audit(user.id, 'account.deleted', id);
+        return { deleted: true, id };
       });
     }
     if (path === `/api/accounts/${id}/credentials/revoke` && method === 'POST') {

@@ -14,11 +14,11 @@
 
 ## 管理页中的接入说明
 
-全局「外部执行端」只管理兑换地址、展示一套完整接入说明，并列出已配置外部客户端的项目链接。超级管理员可以设置兑换地址，项目管理员只读。展开说明后选择个人电脑客户端，点击「复制给我的 AI agent」，取得含客户端 ID、绑定仓库 ID、兑换／轮询地址的纯文本指令；地址未配置时不会编造 URL。客户端行和公钥登记表单不重复完整步骤，新增客户端对话框只保留简短的 OpenSSL 帮助。GitHub Actions OIDC 客户端不套用个人电脑公钥流程。
+全局「外部执行端」只管理兑换地址、展示一套完整接入说明，列出已配置外部客户端的项目链接，以及可在这里删除的各个客户端。超级管理员可以设置兑换地址，项目管理员只读。展开说明后选择个人电脑客户端，点击「复制给我的 AI agent」，取得含客户端 ID、绑定仓库 ID、兑换／轮询地址的纯文本指令；地址未配置时不会编造 URL。客户端行和公钥登记表单不重复完整步骤，新增客户端对话框只保留简短的 OpenSSL 帮助。GitHub Actions OIDC 客户端不套用个人电脑公钥流程。
 
 项目的「外部执行」页默认展开同一套接入说明，点击说明标题可在原页收起或再次展开，并提供「复制给我的 AI agent」按钮，无需跳转全局页。客户端选择只包含当前项目的个人电脑客户端，复制的指令使用所选客户端 ID、当前项目仓库 ID 和最新全局兑换地址。即使直接打开项目链接，也能读取完整说明并复制；没有个人电脑客户端时提示在本项目新增。
 
-客户端、公钥、Webhook 订阅、转发状态和令牌记录在所属项目的「外部执行」类别管理。项目管理员只能查看和修改分配给自己的项目；超级管理员在某个项目中也只能操作该项目的资源。创建客户端自动绑定当前仓库，订阅不能引用其他仓库的客户端，令牌权限始终固定。
+客户端、公钥、Webhook 订阅、转发状态和令牌记录在所属项目的「外部执行」类别管理。项目管理员只能查看和修改分配给自己的项目；超级管理员在某个项目中也只能操作该项目的资源。客户端可以在项目的「外部执行」或全局「外部执行端」删除：超级管理员可删任何项目的客户端，项目管理员只能删分配给自己的项目。删除客户端同时删除它的临时授权记录、转发订阅（转发记录引用订阅，随订阅一起删除）、事件轮询进度和尚未发出的转发，项目本身不受影响；已兑换的 GitHub 令牌按原到期时间失效。创建客户端自动绑定当前仓库，订阅不能引用其他仓库的客户端，令牌权限始终固定。
 
 ## 个人电脑认证与兑换
 
@@ -115,7 +115,7 @@ DNS 检查在每次投递前执行，连接固定使用已验证的地址；不�
 | --- | --- | --- |
 | `/api/external/settings` | GET / PUT | 读取固定 token_audience；只有超级管理员可保存完整 HTTPS 兑换地址 |
 | `/api/repositories/:repository/external/clients` | GET / POST | 客户端列表／创建；字段 name、auth_type；repository_id 从路径确定，正文若提供必须一致；private_key_jwt 必须提供 public_key，OIDC 提供 trust |
-| `/api/repositories/:repository/external/clients/:id` | GET / PATCH | 读取元数据、公钥与指纹；enabled 启停、public_key 登记或更换公钥 |
+| `/api/repositories/:repository/external/clients/:id` | GET / PATCH / DELETE | 读取元数据、公钥与指纹；enabled 启停、public_key 登记或更换公钥；DELETE 需 `confirm:true`，连同授权记录、订阅、轮询进度和转发一起删除（全局 `/api/external/clients/:id` 同样可删，按分配范围限制） |
 | `/api/repositories/:repository/external/subscriptions` | GET / POST | 列表／创建，字段 client_id、name、url、filters；签名密钥只在创建时返回 |
 | `/api/repositories/:repository/external/subscriptions/:id` | GET / PATCH | 更新 name、url、filters、enabled 或 rotate_secret；读取不含密钥 |
 | `/api/repositories/:repository/external/deliveries` | GET | 最近 100 条转发状态、尝试次数与错误码 |

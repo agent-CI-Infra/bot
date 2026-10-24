@@ -1,25 +1,50 @@
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
-import { fail, fields, text, type Json } from '../core/security.js';
+import { HttpError, fail, fields, text, type Json } from '../core/security.js';
 import { appJwt, appPermissions, missingPermissions } from '../github/client.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
 // enables it; an administrator starts it in the console, and can disable it again.
-interface Installed { repository_id: string; installation_id: string | null; full_name: string; owner_id: string; owner_login: string; private: boolean }
+interface Installed { repository_id: string; installation_id: string | null; full_name: string; owner_id: string; owner_login: string; private: boolean; permissions: string | null }
+export type PermissionGap = ReturnType<typeof missingPermissions>;
+// GitHub's answer, read just now, on whether an account still reaches a repository. 'gone': no access at all;
+// 'limited': still reachable, with less than the bot needs; 'full': reachable with everything it needs.
+export interface Access { state: 'gone' | 'limited' | 'full'; reason: string; missing: PermissionGap }
+const gone = (reason: string): Access => ({ state: 'gone', reason, missing: [] });
+const reachable = (missing: PermissionGap): Access => ({ state: missing.length ? 'limited' : 'full', reason: missing.length ? 'permissions_insufficient' : 'accessible', missing });
+const PERMISSIONS_FRESH_MS = 10 * 60_000;
 
-function installed(repo: Json, installationId: string | null): Installed | null {
+const granted = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? JSON.stringify(value) : null;
+// What the account was granted against what the bot needs; null while the grant has not been read. An App compares the
+// installation's permissions with appPermissions. A bot account works through its own role, so anything below write is short.
+export function permissionGap(accountType: string, value: string | null): PermissionGap | null {
+  let grant: unknown; try { grant = value ? JSON.parse(value) : null; } catch { return null; }
+  if (!grant || typeof grant !== 'object') return null;
+  if (accountType === 'github_app') return missingPermissions(grant);
+  const role = grant as Record<string, unknown>;
+  if (role.admin === true || role.maintain === true || role.push === true) return [];
+  return [{ permission: 'repository_role', required: 'write', current: role.triage === true ? 'triage' : role.pull === true ? 'read' : null }];
+}
+function installed(repo: Json, installationId: string | null, permissions?: unknown): Installed | null {
   const owner = repo.owner as Json | undefined;
   if (!/^[1-9]\d*$/.test(String(repo.id || '')) || !/^[\w.-]+\/[\w.-]+$/.test(String(repo.full_name || '')) || !/^[1-9]\d*$/.test(String(owner?.id || ''))) return null;
   return { repository_id: String(repo.id), installation_id: installationId, full_name: String(repo.full_name), owner_id: String(owner!.id),
-    owner_login: String(owner!.login || ''), private: repo.private === true };
+    owner_login: String(owner!.login || ''), private: repo.private === true, permissions: granted(permissions) };
 }
+// A listing without permissions (an event that does not carry them) keeps the grant read before.
 function upsert(store: Store, accountId: string, rows: Installed[], now: string): void {
-  for (const r of rows) store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
-    VALUES(?,?,?,?,?,?,?,1,?) ON CONFLICT(account_id,repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,
-    owner_id=excluded.owner_id,owner_login=excluded.owner_login,private=excluded.private,installed=1,synced_at=excluded.synced_at`,
-  accountId, r.repository_id, r.installation_id, r.full_name, r.owner_id, r.owner_login, Number(r.private), now);
+  for (const r of rows) store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at,permissions,permissions_at)
+    VALUES(?,?,?,?,?,?,?,1,?,?,?) ON CONFLICT(account_id,repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,
+    owner_id=excluded.owner_id,owner_login=excluded.owner_login,private=excluded.private,installed=1,synced_at=excluded.synced_at,
+    permissions=coalesce(excluded.permissions,installed_repositories.permissions),
+    permissions_at=CASE WHEN excluded.permissions IS NULL THEN installed_repositories.permissions_at ELSE excluded.permissions_at END`,
+  accountId, r.repository_id, r.installation_id, r.full_name, r.owner_id, r.owner_login, Number(r.private), now, r.permissions, r.permissions ? now : null);
+}
+function grantInstallation(store: Store, accountId: string, installationId: string, permissions: unknown, now: string): void {
+  const value = granted(permissions);
+  if (value) store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND installation_id=?', value, now, accountId, installationId);
 }
 
 // Applied inside the signed delivery's transaction. Returns whether a full sync should follow.
@@ -27,8 +52,10 @@ export function recordInstallationEvent(store: Store, accountId: string, event: 
   if (event !== 'installation' && event !== 'installation_repositories') return false;
   const installation = payload.installation as Json | undefined, account = installation?.account as Json | undefined;
   const installationId = installation?.id ? String(installation.id) : null, now = new Date().toISOString();
-  // Repository items in these events carry no owner; it is the installation account.
-  const rows = (list: unknown) => (Array.isArray(list) ? list : []).map(r => installed({ ...(r as Json), owner: account }, installationId)).filter((r): r is Installed => !!r);
+  // Repository items in these events carry no owner; it is the installation account. The installation object carries
+  // what it currently grants, which applies to every repository it covers.
+  const rows = (list: unknown) => (Array.isArray(list) ? list : []).map(r => installed({ ...(r as Json), owner: account }, installationId, installation?.permissions)).filter((r): r is Installed => !!r);
+  if (installationId) grantInstallation(store, accountId, installationId, installation?.permissions, now);
   if (event === 'installation_repositories') {
     upsert(store, accountId, rows(payload.repositories_added), now);
     for (const r of Array.isArray(payload.repositories_removed) ? payload.repositories_removed : [])
@@ -62,12 +89,14 @@ export class InstallationSync {
     const current = this.running.get(accountId); if (current) return current;
     const run = this.run(accountId).finally(() => this.running.delete(accountId)); this.running.set(accountId, run); return run;
   }
-  private async request(path: string, token: string, method = 'GET', body?: Json): Promise<any> {
-    let response: Response;
-    try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
+  private async send(path: string, token: string, method = 'GET', body?: Json): Promise<Response> {
+    try { return await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}) }); }
     catch { throw new Error('github_unavailable'); }
+  }
+  private async request(path: string, token: string, method = 'GET', body?: Json): Promise<any> {
+    const response = await this.send(path, token, method, body);
     if (!response.ok) throw new Error('github_http_' + response.status);
     return response.json();
   }
@@ -97,6 +126,75 @@ export class InstallationSync {
     return { required: appPermissions, app: { slug: String(app.slug || ''), owner: String(owner?.login || ''), missing: appMissing, settings_url: settings },
       installations: rows, ok: !appMissing.length && rows.every(row => row.suspended || !row.missing.length) };
   }
+  // Asked before a project is deleted, because the list's flags may be stale. 'gone' covers a deleted repository, one no
+  // longer in the installation (even when it is public and anyone can still read it), a suspended or missing installation,
+  // and a read answered with 404 or 403. Anything uncertain (GitHub unreachable, missing credentials, a rate limit or an
+  // unexpected answer) throws instead of answering.
+  async access(accountId: string, repositoryId: string): Promise<Access> {
+    const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) return fail(404, 'account_not_found');
+    const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`);
+    try { return account.type === 'github_app' ? await this.appAccess(account, secrets, repositoryId) : await this.botAccess(secrets, repositoryId); }
+    catch (error) {
+      if (error instanceof HttpError) throw error;
+      const code = (error as Error).message;
+      return fail(code === 'github_credentials_missing' ? 409 : 502, /^[a-z_0-9]+$/.test(code) ? code : 'github_unavailable');
+    }
+  }
+  private async read(repositoryId: string, token: string): Promise<'ok' | 'repository_not_found' | 'repository_forbidden'> {
+    const response = await this.send('/repositories/' + repositoryId, token);
+    if (response.ok) { if (String((await response.json())?.id) !== repositoryId) throw new Error('github_invalid_response'); return 'ok'; }
+    if (response.status === 404) return 'repository_not_found';
+    // GitHub also answers a rate limit with 403; that says nothing about access.
+    const limited = response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after');
+    if (response.status === 403 && !limited) return 'repository_forbidden';
+    throw new Error(response.status === 403 || response.status === 429 ? 'github_rate_limited' : 'github_http_' + response.status);
+  }
+  private async appAccess(account: Row, secrets: Json, repositoryId: string): Promise<Access> {
+    if (!secrets.private_key) throw new Error('github_credentials_missing');
+    const jwt = appJwt(String(account.app_id), String(secrets.private_key)), installations = await this.pages('/app/installations', jwt);
+    // An App is installed at most once per GitHub account: the owner's installation, or the one the repository was last listed in.
+    const seen = this.store.all('SELECT installation_id,owner_id FROM installed_repositories WHERE account_id=? AND repository_id=?', account.id, repositoryId);
+    const owners = new Set([this.store.get('SELECT owner_id FROM repositories WHERE id=?', repositoryId)?.owner_id, ...seen.map(r => r.owner_id)].filter(Boolean).map(String));
+    const ids = new Set(seen.map(r => String(r.installation_id || '')).filter(Boolean));
+    const candidates = installations.filter(i => ids.has(String(i.id)) || owners.has(String((i.account as Json | undefined)?.id)));
+    if (!candidates.length) return gone('installation_missing');
+    for (const installation of candidates.filter(i => !i.suspended_at)) {
+      const access = await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } });
+      const token = String(access.token || ''); if (!token) throw new Error('github_token_missing');
+      // Membership comes from the installation's own listing: an installation token can still read a public repository it does not cover.
+      if (!(await this.pages('/installation/repositories', token, 'repositories')).some(r => String(r.id) === repositoryId)) continue;
+      const read = await this.read(repositoryId, token);
+      return read === 'ok' ? reachable(missingPermissions(installation.permissions)) : gone(read);
+    }
+    return gone(candidates.every(i => i.suspended_at) ? 'installation_suspended' : 'repository_not_in_installation');
+  }
+  private async botAccess(secrets: Json, repositoryId: string): Promise<Access> {
+    if (!secrets.token) throw new Error('github_credentials_missing');
+    const token = String(secrets.token), read = await this.read(repositoryId, token); if (read !== 'ok') return gone(read);
+    // A public repository stays readable to anyone; only the account's own listing says whether it still has access.
+    const row = (await this.pages('/user/repos', token)).find(r => String(r.id) === repositoryId);
+    return row ? reachable(permissionGap('bot_account', granted(row.permissions)) || []) : gone('repository_not_in_installation');
+  }
+  // Re-reads what each account was granted, for the project list's permission badges. It changes no installed flags.
+  async refreshPermissions(): Promise<Json[]> {
+    const errors: Json[] = [];
+    for (const account of this.store.all('SELECT * FROM accounts ORDER BY created_at')) {
+      try {
+        const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`), now = new Date().toISOString();
+        if (account.type === 'github_app') {
+          if (!secrets.private_key) throw new Error('github_credentials_missing');
+          const installations = await this.pages('/app/installations', appJwt(String(account.app_id), String(secrets.private_key)));
+          this.store.transaction(() => { for (const i of installations) grantInstallation(this.store, account.id, String(i.id), i.permissions, now); });
+        } else {
+          if (!secrets.token) throw new Error('github_credentials_missing');
+          const repos = await this.pages('/user/repos', String(secrets.token));
+          this.store.transaction(() => { for (const repo of repos) { const value = granted(repo.permissions);
+            if (value) this.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', value, now, account.id, String(repo.id)); } });
+        }
+      } catch (error) { errors.push({ account_id: account.id, error: /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'github_unavailable' }); }
+    }
+    return errors;
+  }
   private async run(accountId: string): Promise<Json> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) throw new Error('account_not_found');
     const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`), rows: Installed[] = [];
@@ -109,12 +207,12 @@ export class InstallationSync {
           // A metadata-only token is enough to list the installation's repositories.
           const access = await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } });
           for (const repo of await this.pages('/installation/repositories', String(access.token || ''), 'repositories')) {
-            const row = installed(repo, String(installation.id)); if (row) rows.push(row);
+            const row = installed(repo, String(installation.id), installation.permissions); if (row) rows.push(row);
           }
         }
       } else {
         if (!secrets.token) throw new Error('github_credentials_missing');
-        for (const repo of await this.pages('/user/repos', String(secrets.token))) { const row = installed(repo, null); if (row) rows.push(row); }
+        for (const repo of await this.pages('/user/repos', String(secrets.token))) { const row = installed(repo, null, repo.permissions); if (row) rows.push(row); }
       }
     } catch (error) {
       const code = /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'sync_failed';
@@ -143,6 +241,12 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   superAdmin(user);
   if (path === '/api/installations' && method === 'GET') return list(store);
   if (path === '/api/installations/sync' && method === 'POST') { fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const results = await sync.syncAll(); return { results, ...list(store) }; }
+  // The list asks for this when it opens with stale grants and swaps only the permission badges with the answer.
+  if (path === '/api/installations/permissions/check' && method === 'POST') {
+    fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const errors = await sync.refreshPermissions();
+    return { errors, repositories: (list(store).repositories as Json[]).map(r => ({ id: r.id, permission_missing: r.permission_missing,
+      permissions_checked_at: r.permissions_checked_at, permissions_stale: r.permissions_stale })) };
+  }
   const match = /^\/api\/installations\/([1-9]\d*)\/(activate|disable)$/.exec(path);
   if (!match || method !== 'POST') return fail(404, 'not_found');
   return match[2] === 'activate' ? activate(store, user, match[1]!, input) : disable(store, user, match[1]!, input);
@@ -152,18 +256,21 @@ function list(store: Store): Json {
   const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.model_id,
     e.state AS environment_state,${projectActivityColumns} FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id ${projectActivityJoin}`).map(r => [r.id, r]));
   const scope = new Map<string, Row>();
-  for (const row of store.all('SELECT i.*,a.name AS account_name FROM installed_repositories i JOIN accounts a ON a.id=i.account_id ORDER BY i.installed DESC')) {
+  for (const row of store.all('SELECT i.*,a.name AS account_name,a.type AS account_type FROM installed_repositories i JOIN accounts a ON a.id=i.account_id ORDER BY i.installed DESC')) {
     const current = scope.get(row.repository_id), owner = registered.get(row.repository_id)?.account_id;
     if (!current || !current.installed && row.installed || row.account_id === owner && row.installed >= current.installed) scope.set(row.repository_id, row);
   }
-  const ids = [...new Set([...scope.keys(), ...registered.keys()])];
+  const ids = [...new Set([...scope.keys(), ...registered.keys()])], now = Date.now();
   const repositories = ids.map(id => {
-    const seen = scope.get(id), reg = registered.get(id);
+    const seen = scope.get(id), reg = registered.get(id), listed = !!seen?.installed;
+    // Only a repository the account still lists can be short of permissions; one that left the installation has its own badge.
+    const permissions = { permission_missing: listed ? permissionGap(seen!.account_type, seen!.permissions) : null, permissions_checked_at: listed ? seen!.permissions_at || null : null,
+      permissions_stale: listed && (!seen!.permissions_at || now - Date.parse(seen!.permissions_at) > PERMISSIONS_FRESH_MS) };
     return { id, full_name: reg?.full_name || seen!.full_name, owner_id: reg?.owner_id || seen!.owner_id, owner_login: seen?.owner_login || '', private: !!seen?.private,
       account_id: reg?.account_id || seen!.account_id, account_name: seen?.account_name || null, installation_id: seen?.installation_id || null,
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
       review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
-      running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0 };
+      running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));
   return { repositories, syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
 }

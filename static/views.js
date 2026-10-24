@@ -326,7 +326,59 @@ function installedBadges(row) {
   const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : row.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning')];
   if (row.installed === false) badges.push(badge('已移出安装', 'danger'));
   else if (row.installed === null) badges.push(badge('不在安装列表'));
+  badges.push(permissionBadge(row));
   return badges;
+}
+// GitHub's own wording for App permissions, shared by the project list and the App permission check.
+const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests: 'Pull requests', statuses: 'Commit statuses', actions: 'Actions', checks: 'Checks', metadata: 'Metadata' };
+const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
+function permissionGapText(missing) {
+  return missing.map(item => item.permission === 'repository_role' ? `仓库角色需要「${roleNames.write}」，现在「${roleNames[item.current] || item.current || '无'}」`
+    : `${permissionNames[item.permission] || item.permission} 需要「${accessNames[item.required] || item.required}」，现在「${item.current ? accessNames[item.current] || item.current : 'No access'}」`).join('；');
+}
+// A repository the account still lists but with less than the bot needs. Always drawn (hidden when nothing is missing) so
+// that a later permission check can swap it in place.
+function permissionBadge(row) {
+  const missing = row.permission_missing?.length ? row.permission_missing : null, chip = missing ? badge('权限不足', 'warning') : element('span', '');
+  if (missing) chip.title = `仍能看到这个仓库，但授予的权限低于所需：${permissionGapText(missing)}。这种仓库不能删除。`; else chip.hidden = true;
+  chip.dataset.permission = ''; return chip;
+}
+// Replaces the permission badge of rows already on the list; nothing else in a row is redrawn.
+function updatePermissionBadges(rows) {
+  const byId = new Map(rows.map(row => [row.id, row]));
+  for (const line of document.querySelectorAll('#rows .project-list-row')) {
+    const row = byId.get(line.dataset.repositoryId), chip = line.querySelector('[data-permission]');
+    if (row && chip) chip.replaceWith(permissionBadge(row));
+  }
+}
+// Deletions answer with a stable code; the ones a person can act on get a sentence.
+const removalErrors = {
+  repository_still_accessible: '当前账号仍能访问这个仓库，权限也齐全，不能删除。',
+  repository_permissions_insufficient: '当前账号仍能看到这个仓库，只是权限不足，不能删除。',
+  github_credentials_missing: '账号没有保存凭据，无法向 GitHub 核对，记录保留，没有删除。',
+  github_rate_limited: 'GitHub 限流，暂时无法核对，记录保留，没有删除。',
+  sync_not_configured: '控制面没有配置 GitHub 访问，无法核对，记录保留。',
+  tasks_still_stopping: '项目已禁用，但正在执行的任务还没停下；稍后再删除。',
+  manager_unavailable: '虚拟电脑管理服务不可用，容器和网络没能去掉；项目已禁用，记录保留，稍后再删除。',
+  repository_deleting: '这个项目正在删除。',
+  last_super_admin: '不能删除最后一名活跃的超级管理员。',
+  account_has_projects: '还有项目使用这个账号，请先删除这些项目。',
+};
+function removalMessage(err) {
+  const code = String(err.message).replace(/^\d+\s*·\s*/, '');
+  return removalErrors[code] || (code.startsWith('github_') ? `无法向 GitHub 核对（${code}），记录保留，没有删除。` : err.message);
+}
+// The server asks GitHub again before deleting; the badges on the list are never enough.
+async function deleteProject(row, after) {
+  const check = '删除前会当场向 GitHub 核对：只有仓库已删除，或当前账号已完全不能访问它（已移出安装、安装被暂停、读取返回 404 或 403）时才会删除。仍能访问（包括权限不足），或 GitHub 暂时无法核对时，记录保留。';
+  const text = row.registered === false
+    ? `从项目列表删除 ${row.full_name}？\n\n${check}\n\n这个仓库从未启动，只去掉安装列表里的这一行。以后安装同步如果又看到它，会像新仓库一样出现。`
+    : `删除项目 ${row.full_name}？\n\n${check}\n\n删除后：\n· 这个项目从项目列表消失；\n· 正在执行的任务会停止；\n· 虚拟电脑的容器和网络会去掉；\n· 工作卷按现有环境删除保留，重置留下的旧代次卷也保留；\n· 项目的策略、成员分配、专属模型、外部执行客户端、任务记录、投递和看板数据一并删除，操作审计保留。\n\n以后安装同步如果又看到这个仓库，它会像新仓库一样出现。`;
+  if (!confirm(text)) return false;
+  $('message').textContent = `正在向 GitHub 核对 ${row.full_name}…`;
+  try { await api(`/api/installations/${row.id}`, 'DELETE', { confirm: true }); }
+  catch (err) { $('message').textContent = removalMessage(err); return false; }
+  $('message').textContent = `已删除 ${row.full_name}`; await after(); return true;
 }
 const gateLabels = { none: ['门禁未接入', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
 const dashboardLabels = { none: ['看板未接入', 'info'], registered: ['看板待发布', 'warning'], published: ['看板已接入', 'success'], unknown: ['看板未知', 'info'] };
@@ -377,6 +429,11 @@ function installedActions(row, after) {
     if (confirm(`禁用 ${row.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) call('disable', {}, `正在禁用 ${row.full_name}…`);
   }));
   if (row.registered) actions.append(button('设置', () => openProject(row.id)));
+  // Only a repository the list no longer shows as installed can be deleted; the server checks with GitHub again.
+  if (row.installed !== true) actions.append(button('删除', async () => {
+    actions.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    if (!await deleteProject(row, after)) actions.querySelectorAll('button').forEach(b => { b.disabled = false; });
+  }, 'quiet destructive'));
   return actions;
 }
 const activationView = document.createElement('dialog'); activationView.id = 'activation-view'; activationView.setAttribute('aria-labelledby', 'activation-title');
