@@ -102,6 +102,12 @@ function editSubscription(repositoryId,clients,row=null){
 function externalGroup(title,action){const group=element('section','','external-group'),head=element('div','','heading');head.append(element('h2',title));if(action)head.append(action);group.append(head);return group;}
 function externalRow(name,detail,stateLabel,actions=[]){const row=element('div','','row'+(actions.length?' has-actions':'')),content=element('div','','row-content');content.append(element('strong',name),element('p',detail));row.append(content,element('span',stateLabel,'status'));if(actions.length){const group=element('div','','actions');group.append(...actions);row.append(group);}return row;}
 const externalProjectApi=(repositoryId,path,method='GET',body)=>api('/api/repositories/'+repositoryId+'/external'+path,method,body);
+// Deletes one client with its grants, subscriptions, event progress and pending forwards; the project itself stays.
+async function deleteExternalClient(client){
+  if(!confirm('删除外部客户端 '+client.name+'？\n\n它的临时授权记录、Webhook 转发订阅（含转发记录）、事件轮询进度和尚未发出的转发一并删除；之后不能再用它兑换令牌或轮询事件，已兑换的 GitHub 令牌按原到期时间失效。项目本身不受影响。'))return;
+  try{await externalProjectApi(client.repository_id,'/clients/'+client.id,'DELETE',{confirm:true});}catch(err){error(err);return;}
+  await route();
+}
 async function loadExternalProject(repositoryId){
   const [{clients},{subscriptions},{deliveries},{grants},{settings}]=await Promise.all([
     ...['clients','subscriptions','deliveries','grants'].map(type=>externalProjectApi(repositoryId,'/'+type)),api('/api/external/settings')]);
@@ -119,6 +125,11 @@ async function renderExternal(params,request){
     projects.append(externalRow(repo?.full_name||'仓库 '+id,'客户端、公钥、Webhook 订阅和状态在项目内配置',clients.filter(c=>c.repository_id===id).length+' 个客户端',[open]));
   }
   if(!clients.length)projects.append(element('p','尚未配置外部客户端，请到项目设置 → 外部执行添加。','muted'));panel.append(projects);
+  if(clients.length){
+    const list=externalGroup('外部客户端');
+    for(const c of clients)list.append(externalRow(c.name,`${repositories.find(r=>r.id===c.repository_id)?.full_name||'仓库 '+c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,c.enabled?'已启用':'已停用',[button('删除',()=>deleteExternalClient(c),'quiet destructive')]));
+    panel.append(list);
+  }
 }
 function externalSection(){
   const repositoryId=current.id,{clients,subscriptions,deliveries,grants,settings}=current.external;
@@ -126,7 +137,7 @@ function externalSection(){
   const intro=externalGroup('当前项目的外部执行');
   intro.append(element('p','客户端只授权当前仓库，固定权限为 '+externalTokenPermissions+'。Webhook 推送和事件轮询可同时使用。','muted'),externalPublicKeyGuide(clients,settings.token_audience||'',{expanded:true}));
   const group=externalGroup('客户端',button('新增客户端',()=>addClient(repositoryId)));
-  for(const c of clients){const actions=[button(c.enabled?'停用':'启用',()=>mutate('/clients/'+c.id,{enabled:!c.enabled}).catch(error))];if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));
+  for(const c of clients){const actions=[button(c.enabled?'停用':'启用',()=>mutate('/clients/'+c.id,{enabled:!c.enabled}).catch(error))];if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));actions.push(button('删除',()=>deleteExternalClient(c),'quiet destructive'));
     const pending=c.auth_type==='private_key_jwt'&&!c.key_configured,row=externalRow(c.name,`仓库 ${c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,pending?'待登记公钥':c.enabled?'已启用':'已停用',actions);
     if(c.key_fingerprint)row.querySelector('.row-content').append(element('p','公钥指纹 SHA256 '+c.key_fingerprint));
     if(pending)row.querySelector('.row-content').append(element('p','旧客户端凭据已停用，请在个人电脑生成密钥后登记公钥。'));group.append(row);

@@ -9,9 +9,9 @@
 | `/healthz` | GET | 两个监听端口的数据库健康检查 |
 | `/api/setup` | GET / POST | 初始化状态／仅首次创建超级管理员，POST 字段 `username,password` |
 | `/api/auth/login`、`/api/auth/logout`、`/api/auth/me` | POST / POST / GET | 登录、退出、会话与仓库权限 |
-| `/api/users`、`/api/users/:id` | GET / POST、PATCH | 超级管理员列出／创建用户、停用或启用；创建可带 `role,repository_ids` |
+| `/api/users`、`/api/users/:id` | GET / POST、PATCH / DELETE | 超级管理员列出／创建用户、停用或启用；创建可带 `role,repository_ids`。DELETE 需 `confirm:true`，删除会话、项目成员分配和个人看板设置，审计保留；最后一名活跃超级管理员返回 409 `last_super_admin`，删除自己成功后会话失效 |
 | `/api/project-admin-assignments` | GET / PUT | 超级管理员查询／替换用户仓库分配，PUT 字段 `user_id,repository_ids` |
-| `/api/accounts`、`/api/accounts/:id` | GET / POST、GET / PATCH | 超级管理员管理 GitHub App／机器人账号；POST 字段 `name,type,app_id,private_key,token,webhook_secret` 按账号类型选用 |
+| `/api/accounts`、`/api/accounts/:id` | GET / POST、GET / PATCH / DELETE | 超级管理员管理 GitHub App／机器人账号；POST 字段 `name,type,app_id,private_key,token,webhook_secret` 按账号类型选用。DELETE 需 `confirm:true`，仍有项目使用该账号时返回 409 `account_has_projects`；只从本系统删除账号、Webhook 入口、安装同步记录和凭据，不调用 GitHub |
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/permissions` | GET | 超级管理员检查 GitHub App 权限：返回所需权限 `required`、App 缺少的项 `app.missing` 与 App 权限设置页 `app.settings_url`、每个安装缺少的项 `installations[].missing` 与确认页 `review_url`，全部满足时 `ok:true`；机器人账号返回 409 |
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
@@ -36,6 +36,8 @@
 | `/api/board/views`、`/api/board/views/:id` | POST、PATCH / DELETE | 个人视图，字段 `name,group_by,filters,hidden_columns`；最多 50 个自建视图。内置 `default` 仅允许保存筛选和隐藏列，不能删除、改名或切换分组字段 |
 | `/api/installations`、`/api/installations/sync` | GET、POST | 仅超级管理员；每个仓库一行，合并 GitHub 安装范围、登记、启用和环境状态，以及各账号最近同步结果；POST 立即全量同步 |
 | `/api/installations/:id/activate`、`/api/installations/:id/disable` | POST | 仅超级管理员；启动（可带 `model_id,development_enabled,account_id`）或再次启用／禁用一个仓库 |
+| `/api/installations/:id` | DELETE | 仅超级管理员，需 `confirm:true`；当场向 GitHub 核对后删除项目（未启动的仓库只删安装列表行）。仍能访问返回 409 `repository_still_accessible`，权限不足返回 409 `repository_permissions_insufficient`，GitHub 不可用、限流或答复不确定返回 502，凭据缺失返回 409 `github_credentials_missing`，以上都不删除；容器和网络删除失败或任务未停下时项目保持禁用、记录保留 |
+| `/api/installations/permissions/check` | POST | 仅超级管理员；重读各账号授予的权限，返回每行的 `permission_missing,permissions_checked_at,permissions_stale` 和各账号错误，不改变安装状态 |
 | `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
 | `/api/costs` | GET | 范围内按 UTC 日期、项目聚合的模型估算费用。参数 `from,to` 为 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。最多 5000 个日期／项目分组，超限要求缩小范围；返回 `days,summary,collection_started_at`，不返回模型密钥或原始请求 |
@@ -43,7 +45,7 @@
 
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置、未启动或已禁用的仓库只归档，不生成任务。
 
-项目列表接口 `GET /api/repositories` 与超级管理员的 `GET /api/installations` 在每个仓库上返回 `running_tasks` 和 `queued_tasks`。前者仅统计实际执行阶段，后者统计 queued；配置等待、环境等待与已结束任务不计入执行中。返回范围沿用项目管理员的仓库权限。列表开关调用 `PATCH /api/repositories/{id}/policy`，仅提交本次切换的 `review_enabled` 或 `development_enabled`，不更改项目总启用状态。
+项目列表接口 `GET /api/repositories` 与超级管理员的 `GET /api/installations` 在每个仓库上返回 `running_tasks` 和 `queued_tasks`。`GET /api/installations` 另返回 `permission_missing`：仍在安装列表中的仓库所缺权限（`permission,required,current`；机器人账号为 `repository_role`），未读到授予权限或不在安装列表时为 null；`permissions_stale` 表示授予权限已超过 10 分钟未重读。前者仅统计实际执行阶段，后者统计 queued；配置等待、环境等待与已结束任务不计入执行中。返回范围沿用项目管理员的仓库权限。列表开关调用 `PATCH /api/repositories/{id}/policy`，仅提交本次切换的 `review_enabled` 或 `development_enabled`，不更改项目总启用状态。
 
 看板筛选格式为 `[{"field":"object_type","value":"pr"},{"field":"text","value":"research"}]`，最多 20 条，条件之间为“且”。支持 `repository_id`（仓库 ID）、`object_type`（`issue`／`pr`，不添加该条件表示全部）、`bot_stage`（`unreviewed,reviewing,reviewed,developing,developed,attention`）、`text`（编号可带 `#`，否则按标题文字匹配）、`include_closed`（布尔，默认 false）。`group_by` 为 `bot_stage` 或当前用户的单选字段 ID；空值列 ID 为 `unassigned`。筛选和隐藏列可在浏览器先预览，点击“保存视图”后持久保存。分页与列计数只表示已加载的卡片，不冒充全库总量；全量只看 `counts`。
 

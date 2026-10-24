@@ -43,10 +43,15 @@ export class Store {
         PRIMARY KEY(account_id,endpoint_id,delivery_id));
       CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES repositories(id), kind TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_logs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), content TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT REFERENCES repositories(id),
+      CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, repository_id TEXT,
         action TEXT NOT NULL, resource_id TEXT NOT NULL, created_at TEXT NOT NULL);
       PRAGMA user_version=1;
     `);
+    // The audit outlives the users and repositories it names: deleting either must neither fail on nor remove its records.
+    if (this.all('PRAGMA foreign_key_list(audit)').length) this.transaction(() => this.db.exec(`
+      CREATE TABLE audit_records(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, repository_id TEXT, action TEXT NOT NULL, resource_id TEXT NOT NULL, created_at TEXT NOT NULL);
+      INSERT INTO audit_records SELECT id,user_id,repository_id,action,resource_id,created_at FROM audit;
+      DROP TABLE audit; ALTER TABLE audit_records RENAME TO audit;`));
     if (!this.all('PRAGMA table_info(policies)').some(row => row.name === 'enabled')) this.db.exec('ALTER TABLE policies ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
     this.db.exec(`CREATE TABLE IF NOT EXISTS project_environments(repository_id TEXT PRIMARY KEY REFERENCES repositories(id),
       generation INTEGER NOT NULL DEFAULT 1,state TEXT NOT NULL DEFAULT 'provisioning',desired TEXT NOT NULL DEFAULT 'ready',error TEXT,started_at TEXT);
@@ -87,6 +92,9 @@ export class Store {
         installation_id TEXT,full_name TEXT NOT NULL,owner_id TEXT NOT NULL,owner_login TEXT NOT NULL DEFAULT '',private INTEGER NOT NULL DEFAULT 0,
         installed INTEGER NOT NULL DEFAULT 1,synced_at TEXT NOT NULL,PRIMARY KEY(account_id,repository_id));
       CREATE TABLE IF NOT EXISTS installation_syncs(account_id TEXT PRIMARY KEY REFERENCES accounts(id),synced_at TEXT,error TEXT,repositories INTEGER);`);
+    // What GitHub granted on the repository as last read: the installation's permissions for an App, the account's role
+    // flags for a bot account. NULL until a sync or permission check has read it.
+    extend('installed_repositories', { permissions: 'TEXT', permissions_at: 'TEXT' });
     // Gate/dashboard connection status per repository and one-click onboarding runs.
     this.db.exec(`CREATE TABLE IF NOT EXISTS repo_integrations(repository_id TEXT PRIMARY KEY,
         gate_state TEXT NOT NULL DEFAULT 'unknown',gate_detail TEXT NOT NULL DEFAULT '',
@@ -107,6 +115,8 @@ export class Store {
     try { const result = fn(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
+  // Some tables belong to services that create them on construction; deletions skip the ones this process has not made.
+  hasTable(name: string): boolean { return !!this.get("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", name); }
   audit(user: string, action: string, resource: string, repo: string | null = null): void {
     this.run('INSERT INTO audit VALUES(?,?,?,?,?,?)', randomId(), user, repo, action, resource, new Date().toISOString());
   }
