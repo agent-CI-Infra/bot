@@ -118,3 +118,5 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 
 @media(min-width:1001px){.project-task-preview{min-width:112px;justify-content:flex-end}}
 .permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color:#16636b;text-underline-offset:3px}
+button.quiet.destructive{color:#a02b31}
+@media(min-width:761px){.external-group .row.has-actions{grid-template-columns:minmax(0,1fr) auto max-content}}

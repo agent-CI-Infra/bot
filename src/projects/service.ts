@@ -31,6 +31,10 @@ export class ManagerClient implements Manager {
 }
 export class ProjectService {
   private syncing: Promise<void> | null = null;
+  // Projects being deleted, and the reconciliation step running for a project right now. Reconciliation leaves a project
+  // that is being deleted alone, so it cannot start or recreate its computer while the deletion runs.
+  private readonly removing = new Set<string>();
+  private readonly working = new Map<string, Promise<void>>();
   constructor(readonly store: Store, readonly manager: Manager) {store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');}
   save(row: Row): void {
     if (!row) return;
@@ -47,27 +51,49 @@ export class ProjectService {
   private async sync(): Promise<void> {
     // Retry persisted intentions with their original id, never create another reset after a lost response.
     for (const op of this.store.all("SELECT * FROM environment_operations WHERE state='pending'")) {
+      if (this.removing.has(op.repository_id)) continue;
       try { await this.send(op); } catch { /* Keep the last durable manager state; the operation API exposes failure. */ }
     }
     for (const repo of this.store.all('SELECT r.id,p.enabled FROM repositories r JOIN policies p ON p.repository_id=r.id')) {
-      try {
-        let state = await this.manager.call('GET', '/v1/projects/' + repo.id);
-        if (!state && repo.enabled) state = await this.manager.call('PUT', '/v1/projects/' + repo.id);
-        if (!state) continue;
-        this.save(state);
-        const action = !repo.enabled && !['stopped','deleted'].includes(state.desired) ? 'stop'
-          : repo.enabled && ['stopped','deleted'].includes(state.state) ? 'start' : null;
-        if (action) {
-          const input = { operation_id: randomId(), generation: state.generation };
-          this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, action, JSON.stringify(input));
-          await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
-        }
-      } catch { /* The environment page retains a visible fault instead of claiming readiness. */
-        this.store.run(`INSERT INTO project_environments(repository_id,state,error) VALUES(?,'unavailable','manager_unavailable')
-          ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error='manager_unavailable'`, repo.id);
-      }
+      if (this.removing.has(repo.id)) continue;
+      const step = this.reconcileProject(repo); this.working.set(repo.id, step);
+      try { await step; } finally { this.working.delete(repo.id); }
     }
   }
+  private async reconcileProject(repo: Row): Promise<void> {
+    try {
+      let state = await this.manager.call('GET', '/v1/projects/' + repo.id);
+      if (this.removing.has(repo.id)) return;
+      if (!state && repo.enabled) state = await this.manager.call('PUT', '/v1/projects/' + repo.id);
+      if (!state || this.removing.has(repo.id)) return;
+      this.save(state);
+      const action = !repo.enabled && !['stopped','deleted'].includes(state.desired) ? 'stop'
+        : repo.enabled && ['stopped','deleted'].includes(state.state) ? 'start' : null;
+      if (action) {
+        const input = { operation_id: randomId(), generation: state.generation };
+        this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, action, JSON.stringify(input));
+        await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
+      }
+    } catch { /* The environment page retains a visible fault instead of claiming readiness. */
+      if (this.removing.has(repo.id) || !this.store.get('SELECT 1 FROM repositories WHERE id=?', repo.id)) return;
+      this.store.run(`INSERT INTO project_environments(repository_id,state,error) VALUES(?,'unavailable','manager_unavailable')
+        ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error='manager_unavailable'`, repo.id);
+    }
+  }
+  // Deleting a project runs the existing environment deletion: the containers and networks of every generation go, and the
+  // work volumes stay, including those an earlier reset left behind. A project without a manager record has nothing to delete.
+  // The project stays marked as being deleted until endRemoval, also when this throws.
+  async removeEnvironment(id: string, waitMs = 120_000): Promise<void> {
+    this.removing.add(id);
+    const step = this.working.get(id);
+    if (step) { let timer: ReturnType<typeof setTimeout> | undefined; await Promise.race([step.catch(() => {}), new Promise(r => { timer = setTimeout(r, waitMs); })]); clearTimeout(timer); }
+    const state = await this.manager.call('GET', '/v1/projects/' + id);
+    if (!state || state.state === 'deleted') return;
+    const input = { operation_id: randomId(), generation: state.generation };
+    this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, id, 'delete', JSON.stringify(input));
+    await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
+  }
+  endRemoval(id: string): void { this.removing.delete(id); }
   private async send(op: Row): Promise<Json> {
     try {
       // Starting, resetting or reconfiguring may build a package image and run the setup script: allow up to 35 minutes.
@@ -129,6 +155,7 @@ export class ProjectService {
     if (!match) return fail(404, 'not_found');
     const id = match[1]!; repository(this.store, user, id);
     if (!match[2] && method === 'GET') return this.detail(id);
+    if (this.removing.has(id) && method !== 'GET') fail(409, 'repository_deleting');
     if (match[2] === 'stats' && method === 'GET') return { stats: await this.manager.call('GET', `/v1/projects/${id}/stats`) };
     if (method !== 'POST' || !match[2]) return fail(404, 'not_found');
     fields(input, ['operation_id','generation','confirm','spec']);

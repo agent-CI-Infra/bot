@@ -75,7 +75,8 @@ async function reloadProject() { await loadProject(current.id); renderProject({ 
 function projectStatus() {
   const { policy, installed } = current;
   const status = !policy.enabled ? badge('已禁用', 'warning') : policy.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning');
-  return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...(current.environment ? [state(current.environment.environment.state)] : [])];
+  const permission = installed?.permission_missing?.length ? [permissionBadge(installed)] : [];
+  return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...permission, ...(current.environment ? [state(current.environment.environment.state)] : [])];
 }
 function projectHeader() {
   const { repository, policy } = current, head = element('div', '', 'project-head'), title = element('div', '', 'title-group'), actions = element('div', '', 'actions');
@@ -85,6 +86,11 @@ function projectHeader() {
   if (me.role === 'super_admin') actions.append(policy.enabled
     ? button('禁用项目', async () => { if (confirm(`禁用 ${repository.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) { await api(`/api/installations/${current.id}/disable`, 'POST', {}).catch(error); await reloadProject(); } })
     : button('启用项目', async () => { await api(`/api/installations/${current.id}/activate`, 'POST', {}).catch(error); await reloadProject(); }, ''));
+  // Always offered here; the server deletes only when GitHub, asked right now, says the account lost the repository.
+  if (me.role === 'super_admin') actions.append(button('删除项目', async event => {
+    const control = event.currentTarget; control.disabled = true;
+    if (!await deleteProject({ id: current.id, full_name: repository.full_name, registered: true }, async () => { current = null; location.hash = '#/projects'; })) control.disabled = false;
+  }, 'quiet destructive'));
   head.append(back, title, actions); return head;
 }
 function projectBody(section) {

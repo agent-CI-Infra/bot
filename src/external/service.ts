@@ -74,6 +74,17 @@ export class ExternalService{
           this.store.run("UPDATE external_deliveries SET state='cancelled',error='client_changed' WHERE state IN ('pending','retry') AND subscription_id IN (SELECT id FROM external_subscriptions WHERE client_id=?)",row.id);
           this.store.audit(user.id,'external.client.updated',row.id,row.repository_id);return {client:clientView(this.row(user,'external_clients',row.id))};});
       }
+      // Deleting a client takes its grants, subscriptions, event cursor and forwards with it; the project stays. Delivery rows
+      // reference their subscription, so the forwarding history of its subscriptions goes too.
+      if(method==='DELETE'){
+        fields(body,['confirm']);if(body.confirm!==true)fail(400,'confirmation_required');
+        return this.store.transaction(()=>{
+          const subscriptions='SELECT id FROM external_subscriptions WHERE client_id=?';
+          for(const sql of ['DELETE FROM external_event_cursors WHERE client_id=?','DELETE FROM external_grants WHERE client_id=?',`DELETE FROM external_deliveries WHERE subscription_id IN (${subscriptions})`,
+            'DELETE FROM external_subscriptions WHERE client_id=?','DELETE FROM external_clients WHERE id=?'])this.store.run(sql,row.id);
+          this.store.audit(user.id,'external.client.deleted',row.id,row.repository_id);return {deleted:true,id:row.id};
+        });
+      }
     }
     if(path==='/api/external/subscriptions'&&method==='POST'){
       fields(body,['client_id','name','url','filters']);const client=this.row(user,'external_clients',text(body.client_id),repo),url=targetUrl(body.url,this.options.privateHosts||[]).href,filter=filters(body.filters),id=randomId(),secret=randomId();

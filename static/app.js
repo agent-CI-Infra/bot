@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false;
+let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false, permissionAutoRefresh = false;
 const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -116,6 +116,7 @@ async function render() {
     if(status.childElementCount)line.append(status);
     if(installedView){const actions=installedActions(row,()=>start());if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}
+    if(tab==='users'||tab==='accounts'){const actions=element('div','','actions');actions.append(button('删除',()=>(tab==='users'?deleteUser:deleteAccount)(row).catch(error),'quiet destructive'));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').textContent = JSON.stringify(await api('/api/events/' + row.id), null, 2); $('detail').showModal(); } catch (err) { error(err); }
@@ -132,6 +133,7 @@ async function render() {
     line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));$('rows').append(line);
   });
   if(staleIntegrations)refreshStaleIntegrations();
+  if(installedView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
 }
 // Stale chips are checked once in the background and only the chips change; the list is neither reloaded nor cleared.
 // A result that is still stale (a failed check, or more repositories than one check covers) waits for a manual refresh.
@@ -139,6 +141,32 @@ async function refreshStaleIntegrations() {
   if (integrationAutoRefresh) return; integrationAutoRefresh = true;
   try { updateIntegrationChips((await api('/api/integrations/check', 'POST', {})).integrations || []); } catch {}
   finally { integrationAutoRefresh = false; }
+}
+// Grants older than the cache are read again once when the list opens; only the permission badges change. They are not
+// part of the five-second task refresh, and a failed check waits for the next visit or a manual sync.
+async function refreshStalePermissions() {
+  if (permissionAutoRefresh) return; permissionAutoRefresh = true;
+  try { updatePermissionBadges((await api('/api/installations/permissions/check', 'POST', {})).repositories || []); } catch {}
+  finally { permissionAutoRefresh = false; }
+}
+async function deleteUser(row) {
+  const self = row.id === me.id, common = '项目成员分配和个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
+  if (!confirm(self ? `删除你自己的账号 ${row.username}？\n\n只有还剩另一名活跃的超级管理员时才能删除。删除后当前会话立即失效，${common}`
+    : `删除用户 ${row.username}？\n\n它的会话立即失效，${common}不能删除最后一名活跃的超级管理员。`)) return;
+  try { await api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }); } catch (err) { $('message').textContent = removalMessage(err); return; }
+  // The session ended with the user; show the login page without calling logout.
+  if (self) { renderVersion++; me = null; tab = 'projects'; repositories = []; accounts = []; $('rows').replaceChildren(); }
+  await start();
+}
+async function deleteAccount(row) {
+  const kind = row.type === 'github_app' ? 'GitHub App' : '机器人账号';
+  if (!confirm(`删除${kind} ${row.name}？\n\n只从本系统移除：它的 Webhook 入口、安装同步记录和封存的凭据一并删除。不会在 GitHub 上卸载 App，也不会删除任何 GitHub 仓库。\n\n还有项目使用这个账号时不能删除，需要先删除这些项目。`)) return;
+  try { await api('/api/accounts/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }); }
+  catch (err) {
+    const used = repositories.filter(repo => repo.account_id === row.id).map(repo => repo.full_name);
+    $('message').textContent = removalMessage(err) + (/account_has_projects/.test(err.message) && used.length ? `（${used.join('、')}）` : ''); return;
+  }
+  await start();
 }
 const forms = {
   accounts: [['name', '账号名称'], ['type', '账号类型', [['bot_account', '机器人账号'], ['github_app', 'GitHub App']]], ['app_id', 'App ID（仅 GitHub App）'], ['private_key', 'App 私钥（仅 GitHub App）', 'textarea'], ['token', '机器人 Token（仅机器人账号）', 'password'], ['webhook_secret', 'Webhook 签名凭据', 'password']],

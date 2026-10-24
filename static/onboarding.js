@@ -10,9 +10,7 @@ function wizardForm(title,fields,submit,save){
 }
 function wizardNext(step){onboardingStep=step;void render().catch(error);}
 // GitHub has no API that changes an App's permissions. The check lists what is missing in GitHub's own wording and links
-// the App's permission page (one save) and each installation's review page (one acceptance each).
-const permissionNames={contents:'Contents',issues:'Issues',pull_requests:'Pull requests',statuses:'Commit statuses',actions:'Actions',checks:'Checks',metadata:'Metadata'};
-const accessNames={read:'Read-only',write:'Read and write',admin:'Admin'};
+// the App's permission page (one save) and each installation's review page (one acceptance each). Names come from views.js.
 function githubLinkElement(text,href){const link=element('a',text);link.href=href;link.target='_blank';link.rel='noopener';return link;}
 function permissionReport(report){
   if(report.ok)return [element('p',report.installations.length?`权限齐全：App 和 ${report.installations.length} 个安装都已具备所需权限。`:'App 权限齐全，还没有安装。','view-success')];
