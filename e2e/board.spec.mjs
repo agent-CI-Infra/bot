@@ -18,7 +18,8 @@ test('Issue 和 PR 分开成两块全屏看板，保存筛选和个人视图，�
     await h.hook(a.path,a.secret,'draft',{repository:{id:101},pull_request:{number:60,title:'Draft molecular simulation',draft:true,state:'open'}},{'X-GitHub-Event':'pull_request'});
     await h.hook(a.path,a.secret,'closed',{repository:{id:101},issue:{number:70,title:'Closed experiment',state:'closed'}});
     await page.setViewportSize({width:1600,height:900});await login(page,h.admin,'administrator',password);
-    const columns=page.locator('.board-column'),issues=page.getByRole('button',{name:/^Issue/}),prs=page.getByRole('button',{name:/^PR/});
+    // Scoped to the type switcher: card titles such as "PR #40" are buttons too.
+    const columns=page.locator('.board-column'),types=page.getByRole('group',{name:'对象类型'}),issues=types.getByRole('button',{name:/^Issue/}),prs=types.getByRole('button',{name:/^PR/});
     await expect(issues).toHaveAttribute('aria-pressed','true');await expect(issues).toHaveText('Issue 25');await expect(prs).toHaveText('PR 3');
     await expect(columns).toHaveCount(6);expect(await columns.locator('h2').allTextContents()).toEqual(['未检视','正在检视','已检视','正在开发','已开发','需要处理']);
     await expect(page.locator('.board-card')).toHaveCount(25);await expect(page.locator('[data-card-key*="/pr/"]')).toHaveCount(0);
