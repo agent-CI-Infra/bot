@@ -104,9 +104,10 @@ function externalRow(name,detail,stateLabel,actions=[]){const row=element('div',
 const externalProjectApi=(repositoryId,path,method='GET',body)=>api('/api/repositories/'+repositoryId+'/external'+path,method,body);
 // Deletes one client with its grants, subscriptions, event progress and pending forwards; the project itself stays.
 async function deleteExternalClient(client){
-  if(!confirm('删除外部客户端 '+client.name+'？\n\n它的临时授权记录、Webhook 转发订阅（含转发记录）、事件轮询进度和尚未发出的转发一并删除；之后不能再用它兑换令牌或轮询事件，已兑换的 GitHub 令牌按原到期时间失效。项目本身不受影响。'))return;
-  try{await externalProjectApi(client.repository_id,'/clients/'+client.id,'DELETE',{confirm:true});}catch(err){error(err);return;}
-  await route();
+  const deleted=await askConfirm({title:'删除外部客户端 '+client.name+'？',action:'删除',danger:true,
+    body:['一并删除：',['临时授权记录','Webhook 转发订阅及其转发记录','事件轮询进度','尚未发出的转发'],'之后不能再用它兑换令牌或轮询事件，已兑换的 GitHub 令牌按原到期时间失效。项目本身不受影响。'],
+    run:()=>externalProjectApi(client.repository_id,'/clients/'+client.id,'DELETE',{confirm:true})});
+  if(deleted)await route();
 }
 async function loadExternalProject(repositoryId){
   const [{clients},{subscriptions},{deliveries},{grants},{settings}]=await Promise.all([

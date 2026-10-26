@@ -120,3 +120,20 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color:#16636b;text-underline-offset:3px}
 button.quiet.destructive{color:#a02b31}
 @media(min-width:761px){.external-group .row.has-actions{grid-template-columns:minmax(0,1fr) auto max-content}}
+/* In-page confirmation (confirmDialog in views.js) */
+dialog.confirm-dialog{width:min(500px,calc(100vw - 24px));padding:0;border:0;border-radius:10px;box-shadow:0 20px 56px #0f2f3b47;overflow:hidden}
+dialog.confirm-dialog::backdrop{background:#16374485}
+.confirm-form{gap:0}
+.confirm-head{display:flex;align-items:center;gap:12px;padding:22px 24px 8px}
+.confirm-head h2{font-size:16px;line-height:1.45;overflow-wrap:anywhere}
+.confirm-icon{flex:none;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:16px;font-weight:700;background:#e8f0fb;color:#2c5791}
+.confirm-icon.danger{background:#fbeaea;color:#a02b31}
+.confirm-body{display:grid;gap:8px;padding:2px 24px 16px 68px;color:#365564;font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+.confirm-body p,.confirm-body ul{margin:0}.confirm-body ul{padding-left:18px}.confirm-body li+li{margin-top:2px}
+.confirm-body label{margin-top:4px;color:#22313a}
+.confirm-status{margin:0;padding:0 24px 14px 68px;font-size:13px;line-height:1.6}.confirm-status:empty{display:none}
+.confirm-status.progress{color:#2c5791}.confirm-status.error{color:#a02b31}
+.confirm-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 24px;background:#f6f9fa;border-top:1px solid #e3eaf0}
+.confirm-actions button{min-width:76px;justify-content:center}
+button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
+@media(max-width:760px){.confirm-head{padding:18px 18px 6px}.confirm-body,.confirm-status{padding-left:18px;padding-right:18px}.confirm-actions{padding:12px 18px}.confirm-actions button{flex:1}}

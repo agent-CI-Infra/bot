@@ -56,8 +56,8 @@ function operationId() { return [...crypto.getRandomValues(new Uint8Array(24))].
 function environmentButtons(environment, task, after, report) {
   return [['start', '启动'], ['stop', '停止'], ['reset', '重置']].map(([action, caption]) => {
     const b = button(caption, async () => {
-      if (action === 'reset' && !confirm(`重置 ${environment.full_name} 的虚拟电脑？旧工作卷会保留，新环境从空工作卷开始。`)) return;
-      if (action === 'stop' && task && !confirm(`停止 ${environment.full_name} 的虚拟电脑？仓库会被停用，正在执行的任务会中止。`)) return;
+      if (action === 'reset' && !await askConfirm({ title: `重置 ${environment.full_name} 的虚拟电脑？`, body: ['旧工作卷会保留，新环境从空工作卷开始。'], action: '重置', danger: true })) return;
+      if (action === 'stop' && task && !await askConfirm({ title: `停止 ${environment.full_name} 的虚拟电脑？`, body: ['仓库会被停用，正在执行的任务会中止。'], action: '停止', danger: true })) return;
       b.disabled = true;
       try { await api(`/api/environments/${environment.repository_id}/${action}`, 'POST', { operation_id: operationId(), generation: environment.generation }); }
       catch (err) { report(err); }
@@ -72,6 +72,50 @@ function environmentButtons(environment, task, after, report) {
 function dialog(id, markup) {
   const view = document.createElement('dialog'); view.id = id; view.className = 'wide'; view.innerHTML = markup; document.body.append(view); return view;
 }
+// The console's own confirmation, in place of the browser's confirm() and prompt(). `body` items are paragraphs; an array
+// item is a bulleted list. With `input` the dialog asks for one value and resolves to it. With `run` the dialog stays open
+// while the action runs, shows `progress`, and shows the action's error in place so it can be tried again. Resolves the
+// confirmed value (true without input) or null when cancelled, closed with Esc, or replaced by a newer request.
+const confirmView = document.createElement('dialog'); confirmView.className = 'confirm-dialog'; confirmView.setAttribute('aria-labelledby', 'confirm-title');
+document.body.append(confirmView);
+let settleConfirm = null, confirmBusy = false;
+function confirmDialog({ title, body = [], action = '确认', danger = false, input = null, run = null, progress = '正在处理…' }) {
+  settleConfirm?.(null);
+  return new Promise(resolve => {
+    const settle = value => { if (settleConfirm !== settle) return; settleConfirm = null; confirmBusy = false; if (confirmView.open) confirmView.close(); resolve(value); };
+    settleConfirm = settle;
+    const form = element('form', '', 'confirm-form'), head = element('div', '', 'confirm-head'), text = element('div', '', 'confirm-body');
+    const heading = element('h2', title); heading.id = 'confirm-title';
+    head.append(element('span', danger ? '!' : '?', 'confirm-icon' + (danger ? ' danger' : '')), heading);
+    for (const item of body) {
+      if (!Array.isArray(item)) { text.append(element('p', item)); continue; }
+      const list = element('ul', ''); item.forEach(line => list.append(element('li', line))); text.append(list);
+    }
+    let field = null;
+    if (input) {
+      field = document.createElement('input'); Object.assign(field, { type: input.type || 'text', name: 'value', autocomplete: input.type === 'password' ? 'new-password' : 'off', spellcheck: false });
+      const label = element('label', input.label); label.append(field); text.append(label);
+    }
+    const status = element('p', '', 'confirm-status'), actions = element('div', '', 'confirm-actions');
+    status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+    const cancel = button('取消', () => settle(null)), submit = element('button', action, danger ? 'danger' : ''); submit.type = 'submit';
+    actions.append(cancel, submit); form.append(head, text, status, actions);
+    form.addEventListener('submit', async event => {
+      event.preventDefault(); if (confirmBusy) return;
+      const value = field ? field.value.trim() : true;
+      if (field && !value) { status.className = 'confirm-status error'; status.textContent = `请填写${input.label}`; field.focus(); return; }
+      if (!run) { settle(value); return; }
+      confirmBusy = true; cancel.disabled = submit.disabled = true; status.className = 'confirm-status progress'; status.textContent = progress;
+      try { await run(value); settle(value); }
+      catch (err) { if (settleConfirm !== settle) return; confirmBusy = false; cancel.disabled = submit.disabled = false; status.className = 'confirm-status error'; status.textContent = err.message; }
+    });
+    confirmView.replaceChildren(form); confirmView.showModal(); (field || cancel).focus();
+  });
+}
+const askConfirm = options => confirmDialog(options).then(value => value === true);
+// Esc closes the dialog as a cancel, except while its action is running.
+confirmView.addEventListener('cancel', event => { if (confirmBusy) event.preventDefault(); });
+confirmView.addEventListener('close', () => { if (!confirmView.open) settleConfirm?.(null); });
 const taskView = dialog('task-view', `<div class="view-head"><div class="title-group"><h2 id="task-title"></h2><span id="task-badges" class="actions"></span></div><div id="task-actions" class="actions"></div></div>
 <p id="task-error" class="view-error" role="alert"></p>
 <div class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
@@ -368,17 +412,16 @@ function removalMessage(err) {
   const code = String(err.message).replace(/^\d+\s*·\s*/, '');
   return removalErrors[code] || (code.startsWith('github_') ? `无法向 GitHub 核对（${code}），记录保留，没有删除。` : err.message);
 }
-// The server asks GitHub again before deleting; the badges on the list are never enough.
+// The server asks GitHub again before deleting; the badges on the list are never enough. A refusal stays in the dialog.
 async function deleteProject(row, after) {
   const check = '删除前会当场向 GitHub 核对：只有仓库已删除，或当前账号已完全不能访问它（已移出安装、安装被暂停、读取返回 404 或 403）时才会删除。仍能访问（包括权限不足），或 GitHub 暂时无法核对时，记录保留。';
-  const text = row.registered === false
-    ? `从项目列表删除 ${row.full_name}？\n\n${check}\n\n这个仓库从未启动，只去掉安装列表里的这一行。以后安装同步如果又看到它，会像新仓库一样出现。`
-    : `删除项目 ${row.full_name}？\n\n${check}\n\n删除后：\n· 这个项目从项目列表消失；\n· 正在执行的任务会停止；\n· 虚拟电脑的容器和网络会去掉；\n· 工作卷按现有环境删除保留，重置留下的旧代次卷也保留；\n· 项目的策略、成员分配、专属模型、外部执行客户端、任务记录、投递和看板数据一并删除，操作审计保留。\n\n以后安装同步如果又看到这个仓库，它会像新仓库一样出现。`;
-  if (!confirm(text)) return false;
-  $('message').textContent = `正在向 GitHub 核对 ${row.full_name}…`;
-  try { await api(`/api/installations/${row.id}`, 'DELETE', { confirm: true }); }
-  catch (err) { $('message').textContent = removalMessage(err); return false; }
-  $('message').textContent = `已删除 ${row.full_name}`; await after(); return true;
+  const body = row.registered === false ? [check, '这个仓库从未启动，只去掉安装列表里的这一行。以后安装同步如果又看到它，会像新仓库一样出现。']
+    : [check, '删除后：', ['这个项目从项目列表消失', '正在执行的任务会停止', '虚拟电脑的容器和网络会去掉', '工作卷按现有环境删除保留，重置留下的旧代次卷也保留',
+      '项目的策略、成员分配、专属模型、外部执行客户端、任务记录、投递和看板数据一并删除，操作审计保留'], '以后安装同步如果又看到这个仓库，它会像新仓库一样出现。'];
+  const deleted = await askConfirm({ title: `${row.registered === false ? '从项目列表删除' : '删除项目'} ${row.full_name}？`, body, action: '删除', danger: true,
+    progress: `正在向 GitHub 核对 ${row.full_name}…`, run: () => api(`/api/installations/${row.id}`, 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
+  if (deleted) await after();
+  return deleted;
 }
 const gateLabels = { none: ['门禁未接入', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
 const dashboardLabels = { none: ['看板未接入', 'info'], registered: ['看板待发布', 'warning'], published: ['看板已接入', 'success'], unknown: ['看板未知', 'info'] };
@@ -425,15 +468,13 @@ function installedActions(row, after) {
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
   if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
-  if (row.registered && row.enabled) actions.append(button('禁用', () => {
-    if (confirm(`禁用 ${row.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) call('disable', {}, `正在禁用 ${row.full_name}…`);
+  if (row.registered && row.enabled) actions.append(button('禁用', async () => {
+    if (await askConfirm({ title: `禁用 ${row.full_name}？`, body: ['新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留，之后可以再启用。'], action: '禁用', danger: true }))
+      call('disable', {}, `正在禁用 ${row.full_name}…`);
   }));
   if (row.registered) actions.append(button('设置', () => openProject(row.id)));
   // Only a repository the list no longer shows as installed can be deleted; the server checks with GitHub again.
-  if (row.installed !== true) actions.append(button('删除', async () => {
-    actions.querySelectorAll('button').forEach(b => { b.disabled = true; });
-    if (!await deleteProject(row, after)) actions.querySelectorAll('button').forEach(b => { b.disabled = false; });
-  }, 'quiet destructive'));
+  if (row.installed !== true) actions.append(button('删除', () => deleteProject(row, after), 'quiet destructive'));
   return actions;
 }
 const activationView = document.createElement('dialog'); activationView.id = 'activation-view'; activationView.setAttribute('aria-labelledby', 'activation-title');

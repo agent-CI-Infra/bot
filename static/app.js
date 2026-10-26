@@ -150,23 +150,24 @@ async function refreshStalePermissions() {
   finally { permissionAutoRefresh = false; }
 }
 async function deleteUser(row) {
-  const self = row.id === me.id, common = '项目成员分配和个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
-  if (!confirm(self ? `删除你自己的账号 ${row.username}？\n\n只有还剩另一名活跃的超级管理员时才能删除。删除后当前会话立即失效，${common}`
-    : `删除用户 ${row.username}？\n\n它的会话立即失效，${common}不能删除最后一名活跃的超级管理员。`)) return;
-  try { await api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }); } catch (err) { $('message').textContent = removalMessage(err); return; }
+  const self = row.id === me.id, kept = '项目成员分配和个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
+  const deleted = await askConfirm({ title: self ? `删除你自己的账号 ${row.username}？` : `删除用户 ${row.username}？`, action: '删除', danger: true,
+    body: self ? ['只有还剩另一名活跃的超级管理员时才能删除。删除后当前会话立即失效，需要用其他超级管理员登录。', kept] : ['它的会话立即失效。', kept, '不能删除最后一名活跃的超级管理员。'],
+    run: () => api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
+  if (!deleted) return;
   // The session ended with the user; show the login page without calling logout.
   if (self) { renderVersion++; me = null; tab = 'projects'; repositories = []; accounts = []; $('rows').replaceChildren(); }
   await start();
 }
 async function deleteAccount(row) {
   const kind = row.type === 'github_app' ? 'GitHub App' : '机器人账号';
-  if (!confirm(`删除${kind} ${row.name}？\n\n只从本系统移除：它的 Webhook 入口、安装同步记录和封存的凭据一并删除。不会在 GitHub 上卸载 App，也不会删除任何 GitHub 仓库。\n\n还有项目使用这个账号时不能删除，需要先删除这些项目。`)) return;
-  try { await api('/api/accounts/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }); }
-  catch (err) {
-    const used = repositories.filter(repo => repo.account_id === row.id).map(repo => repo.full_name);
-    $('message').textContent = removalMessage(err) + (/account_has_projects/.test(err.message) && used.length ? `（${used.join('、')}）` : ''); return;
-  }
-  await start();
+  const deleted = await askConfirm({ title: `删除${kind} ${row.name}？`, action: '删除', danger: true,
+    body: ['只从本系统移除：它的 Webhook 入口、安装同步记录和封存的凭据一并删除。', '不会在 GitHub 上卸载 App，也不会删除任何 GitHub 仓库。', '还有项目使用这个账号时不能删除，需要先删除这些项目。'],
+    run: () => api('/api/accounts/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }).catch(err => {
+      const used = repositories.filter(repo => repo.account_id === row.id).map(repo => repo.full_name);
+      throw new Error(removalMessage(err) + (/account_has_projects/.test(err.message) && used.length ? `（${used.join('、')}）` : ''));
+    }) });
+  if (deleted) await start();
 }
 const forms = {
   accounts: [['name', '账号名称'], ['type', '账号类型', [['bot_account', '机器人账号'], ['github_app', 'GitHub App']]], ['app_id', 'App ID（仅 GitHub App）'], ['private_key', 'App 私钥（仅 GitHub App）', 'textarea'], ['token', '机器人 Token（仅机器人账号）', 'password'], ['webhook_secret', 'Webhook 签名凭据', 'password']],

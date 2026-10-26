@@ -84,13 +84,14 @@ function projectHeader() {
   title.append(element('h1', repository.full_name), ...projectStatus());
   actions.append(link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
   if (me.role === 'super_admin') actions.append(policy.enabled
-    ? button('禁用项目', async () => { if (confirm(`禁用 ${repository.full_name}？新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留。`)) { await api(`/api/installations/${current.id}/disable`, 'POST', {}).catch(error); await reloadProject(); } })
+    ? button('禁用项目', async () => {
+      if (!await askConfirm({ title: `禁用 ${repository.full_name}？`, body: ['新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留，之后可以再启用。'], action: '禁用', danger: true })) return;
+      await api(`/api/installations/${current.id}/disable`, 'POST', {}).catch(error); await reloadProject();
+    })
     : button('启用项目', async () => { await api(`/api/installations/${current.id}/activate`, 'POST', {}).catch(error); await reloadProject(); }, ''));
   // Always offered here; the server deletes only when GitHub, asked right now, says the account lost the repository.
-  if (me.role === 'super_admin') actions.append(button('删除项目', async event => {
-    const control = event.currentTarget; control.disabled = true;
-    if (!await deleteProject({ id: current.id, full_name: repository.full_name, registered: true }, async () => { current = null; location.hash = '#/projects'; })) control.disabled = false;
-  }, 'quiet destructive'));
+  if (me.role === 'super_admin') actions.append(button('删除项目',
+    () => deleteProject({ id: current.id, full_name: repository.full_name, registered: true }, async () => { current = null; location.hash = '#/projects'; }), 'quiet destructive'));
   head.append(back, title, actions); return head;
 }
 function projectBody(section) {
@@ -235,11 +236,12 @@ function modelActions(model) {
   if (!editable) return actions;
   actions.append(button('计费单价',()=>modelPricing(model)));
   actions.append(button('更换 Key', async () => {
-    const key = prompt(`为 ${model.model_name} 输入新的 API Key（不会回显）`); if (!key?.trim()) return;
-    await api('/api/models/' + model.id, 'PATCH', { version: model.version, api_key: key.trim() }).catch(error); await reloadProject();
+    const saved = await confirmDialog({ title: `更换 ${model.model_name} 的 API Key`, body: ['保存后立即生效；页面和接口都不会再显示这个 Key。'], action: '保存',
+      input: { label: '新的 API Key', type: 'password' }, run: key => api('/api/models/' + model.id, 'PATCH', { version: model.version, api_key: key }) });
+    if (saved) await reloadProject();
   }));
   if (model.key_configured) actions.append(button('撤销 Key', async () => {
-    if (!confirm(`撤销 ${model.model_name} 的 API Key？使用它的项目会停在“配置待补”。`)) return;
+    if (!await askConfirm({ title: `撤销 ${model.model_name} 的 API Key？`, body: ['使用它的项目会停在“配置待补”，直到换上新的 Key。'], action: '撤销', danger: true })) return;
     await api(`/api/models/${model.id}/credentials/revoke`, 'POST', {}).catch(error); await reloadProject();
   }));
   return actions;
@@ -348,7 +350,9 @@ function ruleCard(path) {
     form.append(editor, buttons); form.addEventListener('submit', event => { event.preventDefault(); submit.disabled = true; save(editor.value).finally(() => { submit.disabled = false; }); });
     actions.hidden = true; actions.after(form); editor.focus();
   }));
-  if (consoleLayer) actions.append(button('清除控制台覆盖', () => { if (confirm(`清除 ${path} 的控制台覆盖？`)) save(null); }));
+  if (consoleLayer) actions.append(button('清除控制台覆盖', async () => {
+    if (await askConfirm({ title: `清除 ${path} 的控制台覆盖？`, body: ['清除后回到仓库文件或内置默认的内容。'], action: '清除', danger: true })) save(null);
+  }));
   return section;
 }
 
