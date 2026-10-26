@@ -369,3 +369,41 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   page.requests.length = 0; await page.run('render()'); await settle();
   assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations']);
 });
+
+test('deletions confirm in the console dialog, which shows the check and a refusal in place instead of a browser popup', async () => {
+  let answer = [409, { error: 'repository_still_accessible' }];
+  const listing = [{ id: '202', full_name: 'fixture/project-202', owner_id: '10', installed: false, registered: true, enabled: false, review_enabled: false,
+    development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: null, permissions_stale: false }];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations') return [200, { integrations: [] }];
+    if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
+    if (method === 'DELETE' && path === '/api/installations/202') return answer;
+    return [404, { error: 'not_found' }];
+  });
+  // A browser popup would fail here: the page has no confirm() or prompt().
+  page.run("var startCalls = 0; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
+  await page.run('render()');
+  const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20)), deletes = () => page.requests.filter(r => r.startsWith('DELETE')).length;
+  const remove = () => page.$('rows').children[0].querySelectorAll('button').find(b => b.textContent === '删除').listeners.click[0]();
+  const buttons = () => view.querySelectorAll('.confirm-actions button'), submit = () => view.querySelector('form').listeners.submit[0]({ preventDefault() {} });
+  const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
+  // Cancel sends nothing.
+  remove();
+  assert.equal(view.open, true);
+  assert.deepEqual(texts('h2'), ['删除项目 fixture/project-202？']);
+  assert.ok(texts('li').includes('虚拟电脑的容器和网络会去掉')); assert.ok(texts('li').some(line => line.startsWith('工作卷按现有环境删除保留')));
+  assert.deepEqual([buttons().map(b => b.textContent), buttons()[1].className], [['取消', '删除'], 'danger']);
+  assert.equal(buttons()[0].ownerFocus, true);
+  buttons()[0].listeners.click[0](); await settle();
+  assert.equal(view.open, false); assert.equal(deletes(), 0);
+  // A refusal stays in the dialog, which can be tried again; success closes it and reloads the list.
+  remove(); submit(); await settle();
+  assert.equal(view.open, true); assert.equal(deletes(), 1);
+  assert.equal(view.querySelector('.confirm-status').textContent, '当前账号仍能访问这个仓库，权限也齐全，不能删除。');
+  assert.deepEqual(buttons().map(b => b.disabled), [false, false]);
+  answer = [200, { deleted: true }]; submit(); await settle();
+  assert.equal(view.open, false); assert.equal(deletes(), 2); assert.equal(page.run('startCalls'), 1);
+  // Closing with Esc cancels too.
+  remove(); view.close(); await settle();
+  assert.equal(deletes(), 2);
+});

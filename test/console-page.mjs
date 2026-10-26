@@ -35,6 +35,10 @@ class FakeElement {
     for (const node of nodes) node.remove();
     parent.children.splice(parent.children.indexOf(this), 1, ...nodes); nodes.forEach(node => { node.parentElement = parent; }); this.parentElement = null;
   }
+  // Dialogs open and close as in a browser, except that `close` is dispatched at once.
+  showModal() { this.open = true; }
+  close() { if (!this.open) return; this.open = false; for (const listener of this.listeners.close || []) listener({ type: 'close' }); }
+  focus() { this.ownerFocus = true; }
   remove() { if (this.parentElement) { this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1); this.parentElement = null; } }
   querySelectorAll(selector) { return select(this, selector); }
   querySelector(selector) { return select(this, selector)[0] || null; }
