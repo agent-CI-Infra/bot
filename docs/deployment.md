@@ -1,10 +1,10 @@
 # 部署细节
 
-日常部署只需要仓库根目录的 `compose.yaml`，上手步骤见 [README](../README.md)。本文说明镜像、从源码构建、端口与环境变量、服务隔离和备份。
+日常部署只需要仓库根目录的 `compose.yaml`，上手步骤见 [README](../README.md)。本文说明镜像、从源码构建、版本发布与服务器部署、端口与环境变量、服务隔离和备份。
 
 ## 镜像
 
-`main` 分支每次推送后，[`.github/workflows/images.yml`](../.github/workflows/images.yml) 构建并发布下列 `linux/amd64` 镜像，标签为 `latest` 和 `sha-<12 位提交>`；Pull request 只构建、不发布。
+`main` 分支每次推送后，[`.github/workflows/images.yml`](../.github/workflows/images.yml) 构建并发布下列 `linux/amd64` 镜像，标签为 `latest` 和 `sha-<12 位提交>`；Pull request 和合并队列只构建、不发布。发布版本时这些镜像再加上版本标签，见[版本发布与服务器部署](#版本发布与服务器部署)。
 
 | 镜像 | 用途 | Dockerfile | Compose 服务 |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@
 | `ghcr.io/agent-ci-infra/bot-project-computer` | 每台虚拟电脑的系统镜像（批准镜像） | `images/project/Dockerfile` | `project-image` |
 | `ghcr.io/agent-ci-infra/bot-cloudflare-tunnel` | 可选的 Cloudflare Tunnel 连接器 | `tunnel/Dockerfile` | `tunnel` |
 
-`webhook` 和 `bot` 用同一个镜像，但仍是单独的容器：只有它同时在 `control` 和 `edge` 两个网络，`tunnel` 只能经它连到 `bot:8791`。`compose.yaml` 使用 `latest`。manager 不拉取镜像，只检查 `BOT_PROJECT_IMAGE` 指向的本机镜像，所以它必须和 `project-image` 服务的镜像引用（含标签）完全一致；一次性的 `project-image` 服务负责让 Compose 把这个镜像拉到本机。
+`webhook` 和 `bot` 用同一个镜像，但仍是单独的容器：只有它同时在 `control` 和 `edge` 两个网络，`tunnel` 只能经它连到 `bot:8791`。`compose.yaml` 默认使用 `latest`，在 `.env` 设置 `BOT_IMAGE_TAG` 可以把所有镜像固定到某个版本（如 `v1.2.0`）或 `sha-<12 位提交>`。manager 不拉取镜像，只检查 `BOT_PROJECT_IMAGE` 指向的本机镜像，所以它必须和 `project-image` 服务的镜像引用（含标签）完全一致；一次性的 `project-image` 服务负责让 Compose 把这个镜像拉到本机。
 
 ## 从源码构建
 
@@ -25,6 +25,30 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 
 需要验证未发布的改动、GHCR 包还没公开或者机器拉不到 GHCR 时用它。Compose 项目名取第一个文件所在的目录名，同一目录里在两种方式之间切换会沿用原来的卷；虚拟电脑在下次准备时换成新的批准镜像，工作卷和代次不变。以前在仓库根目录用 `docker compose up --build -d` 部署的实例，更新代码后如果只运行 `docker compose up -d`，会改为拉取已发布镜像；要继续从源码构建，就用上面的命令。
 
+## 版本发布与服务器部署
+
+在 `main` 的提交上打 `v*` 标签并推送（例如 `git tag v1.2.0 origin/main && git push origin v1.2.0`），[`.github/workflows/release.yml`](../.github/workflows/release.yml) 依次：
+
+1. 确认该提交在 `main` 上，并等待 `main` 为它发布 `sha-<12 位提交>` 镜像；
+2. 不重新构建，给这四个镜像加上同名版本标签，所以版本运行的正是合并队列检查过的镜像；
+3. 创建 GitHub Release，列出镜像并附自动生成的变更说明；带后缀的标签（如 `v1.2.0-rc.1`）是预发布；
+4. 部署到 `production` 环境配置的服务器；还没配置服务器时跳过并在运行页提示。
+
+要给某次推送到 `main` 的最新提交打标签：合并队列一次合入多个 PR 时只有最后一个提交发布镜像，`main` 的新推送也会取消旧提交还没完成的发布，这些提交打标签会失败。
+
+部署经 SSH 把该版本的 `compose.yaml` 写到服务器目录，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull` 和 `docker compose up -d`，等 `bot` 的健康检查通过。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。在仓库 Settings → Environments → `production` 中配置：
+
+| 名称 | 类型 | 作用 |
+| --- | --- | --- |
+| `DEPLOY_HOST` | 变量 | 服务器地址；不设置时只发布、不部署 |
+| `DEPLOY_PORT` | 变量 | SSH 端口，默认 `22` |
+| `DEPLOY_USER` | 变量 | SSH 用户，需要能运行 `docker compose` |
+| `DEPLOY_PATH` | 变量 | 服务器上放 `compose.yaml` 的目录。目录名就是 Compose 项目名，接管已有部署时用它原来的目录，才会沿用原来的卷 |
+| `DEPLOY_KNOWN_HOSTS` | 变量 | 服务器的 `known_hosts` 行，可用 `ssh-keyscan -p <端口> <地址>` 获取，核对指纹后填写；主机密钥不符时部署停止 |
+| `DEPLOY_SSH_KEY` | Secret | 部署用 SSH 私钥 |
+
+GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令牌运行一次 `docker login ghcr.io`。
+
 ## 端口与环境变量
 
 `8791` 是 Webhook 接收入口，宿主端口默认绑定 `0.0.0.0`，对所有 IPv4 网卡开放；`8792` 是管理页面和管理 API，仍仅绑定宿主回环地址 `127.0.0.1`，只在本机访问。公网域名整个转发到 `8791`：除了 GitHub Webhook 的 `/hooks/github/<account_id>/<endpoint_id>`，向导检查地址用 `/.well-known/bot-webhook-probe`，外部执行端兑换令牌也走这个入口。不要把两个监听端口混接。需要远程访问管理页面时，另行配置独立的 HTTPS 反向代理（与 Webhook 用不同域名），并设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN` 为自己的管理站 origin。管理 API 不开放跨域访问。
@@ -33,6 +57,7 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
+| `BOT_IMAGE_TAG` | `latest` | 所有镜像的标签：版本（如 `v1.2.0`）或 `sha-<12 位提交>`；叠加 `compose.build.yaml` 时不起作用 |
 | `BOT_WEBHOOK_PORT` | `8791` | Webhook 的宿主端口，绑定 `0.0.0.0` |
 | `BOT_ADMIN_PORT` | `8792` | 管理页的宿主端口，只绑定 `127.0.0.1` |
 | `BOT_COOKIE_SECURE` | `false` | 管理页经 HTTPS 反向代理访问时设为 `true` |
