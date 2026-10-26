@@ -79,10 +79,13 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       if (!body || !Array.isArray(body.messages) || JSON.stringify(body).length > 2 * 1024 * 1024) stop('model_request_invalid');
       const endpoint = model.url.replace(/\/$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
       let response: Response;
-      const { stream_options: _streamOptions, ...requestBody } = body;
+      const { stream_options: _streamOptions, max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...requestBody } = body;
+      // Providers reject a request that sets both output limits, so send exactly one: keep the runner's own field,
+      // preferring max_completion_tokens (the current OpenAI name) when it sent both or neither.
+      const limit = 'max_tokens' in body && !('max_completion_tokens' in body) ? 'max_tokens' : 'max_completion_tokens';
       const requestLog=beginModelRequest(store,task,String(state.request.id),model);
       // Anything the task's redactor knows, such as an exchanged GitHub token echoed by a command, never reaches the provider.
-      try { response = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(90000), headers: { Authorization: 'Bearer ' + model.key, 'Content-Type': 'application/json' }, body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, max_tokens: 8192, stream: false })) }); }
+      try { response = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(90000), headers: { Authorization: 'Bearer ' + model.key, 'Content-Type': 'application/json' }, body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, [limit]: 8192, stream: false })) }); }
       catch { finishModelRequest(store,requestLog,null,null,'transport_error');return stop('model_unavailable', 'retry_wait'); }
       if (!response.ok) {
         finishModelRequest(store,requestLog,null,response.status,'http_error');

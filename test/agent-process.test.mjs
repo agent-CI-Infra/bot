@@ -74,6 +74,32 @@ test('a task may make any number of model requests, and a request still visible 
   assert.ok(Date.now()-started<total*500,'polls right after a reply');
 });
 
+test('a relayed model request carries exactly one output limit, the field the runner chose', async t => {
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const finish={summary:'Done.',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
+  const received=[];const server=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;received.push(JSON.parse(raw));res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'ok'}}]}));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:'limit-fixture-key',model_name:'fixture'})).value.model;
+  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token) VALUES('limit','101','review.pr','running','pr',4,'claim')");
+  // Inbound limit fields and the single field expected on the wire.
+  const shapes=[[{max_completion_tokens:8192,max_tokens:8192},'max_completion_tokens'],[{max_completion_tokens:1024},'max_completion_tokens'],[{max_tokens:1024},'max_tokens'],[{},'max_completion_tokens']];
+  let step=0;const workspace={log:()=>{},call:async(_key,input)=>{
+    if(input.type==='workspace_agent_poll')return step<shapes.length
+      ?{state:'running',request:{id:String(++step).padStart(48,'0'),body:{model:'runner-model',stream:true,stream_options:{include_usage:true},messages:[{role:'user',content:'step '+step}],...shapes[step-1][0]}},events:[],offset:0}
+      :{state:'completed',result:finish,events:[],offset:0};
+    return {written:true,started:true};
+  }};
+  await agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='limit'"),workspace,new Redactor(),async()=>{},{mode:'review'});
+  assert.equal(received.length,shapes.length);
+  received.forEach((body,i)=>{
+    const field=shapes[i][1],other=field==='max_tokens'?'max_completion_tokens':'max_tokens';
+    assert.equal(body[field],8192,`request ${i+1} sets ${field}`);assert.ok(!(other in body),`request ${i+1} omits ${other}`);
+    assert.equal(body.stream,false);assert.ok(!('stream_options' in body));assert.equal(body.model,'fixture');
+  });
+});
+
 test('task lists split review and development work, and logs carry their time', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   for (const [id, kind] of [['r1', 'review.issue'], ['r2', 'review.pr'], ['d1', 'development.issue']])
