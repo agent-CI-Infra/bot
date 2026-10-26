@@ -37,3 +37,7 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 `npm run test:agent` 同样从源码构建，使用假 GitHub、假模型和真实项目容器验收完整旅程，包括 Issue 到 bot PR、草稿忽略、COMMENT 行内评论、别人 PR 不推送、bot PR 跟进、重复投递／未知响应对账、测试失败、tree 不一致、配置故障、manager 中断恢复、凭据隔离及任务页面角色范围。浏览器使用 lockfile 中的 Playwright。测试端口 18891–18894，与部署和人类试用数据隔离，结束后清理测试容器、网络和卷；产物放 `.tmp/review-dev/`。
 
 `npm run test:external:docker` 使用独立临时镜像和无外网容器验证签名转发、兑换临时令牌和 Bot 身份评论；GitHub 为本地测试服务，结束后清理本次镜像及容器，不修改运行实例。
+
+## CI 与合入
+
+`main` 只能经 Pull request 合入，合入方式只有 rebase，并且经合并队列（merge queue）排队，不能强推或删除。必需检查在 Pull request 和合并队列上都运行：[`checks.yml`](../.github/workflows/checks.yml) 的 `unit`（`npm run check`、`npm test` 和两个 Compose 文件的校验）与 `e2e`（`npm run test:e2e`，失败时上传 `.tmp/e2e-results`），以及 [`images.yml`](../.github/workflows/images.yml) 构建的四个镜像。新增必需检查的工作流要同时监听 `pull_request` 和 `merge_group`，否则合并队列等不到结果。版本发布见[版本发布与服务器部署](deployment.md#版本发布与服务器部署)。

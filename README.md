@@ -65,15 +65,16 @@ docker compose up -d
 - 改宿主端口：`BOT_WEBHOOK_PORT`（默认 `8791`）、`BOT_ADMIN_PORT`（默认 `8792`）。
 - 远程管理：另做一个 HTTPS 反向代理到 `127.0.0.1:8792`（和 Webhook 用不同域名），设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN=https://<管理站域名>`。
 - 虚拟电脑不访问外网：`BOT_PROJECT_EGRESS=false`。
+- 固定版本：`BOT_IMAGE_TAG=v<版本>`（见 Releases；默认 `latest`，即 `main` 最新发布的镜像）。
 
 全部变量见[端口与环境变量](docs/deployment.md#端口与环境变量)。
 
 ## 文档
 
 - [接入向导与规则文件](docs/onboarding.md)：向导每一步的细节、`.bot/` 规则文件和 `computer.yaml`
-- [部署细节](docs/deployment.md)：镜像、从源码构建、端口与环境变量、服务隔离、备份与恢复
+- [部署细节](docs/deployment.md)：镜像、从源码构建、版本发布与服务器部署、端口与环境变量、服务隔离、备份与恢复
 - [外部执行端](docs/external-executors.md)：在个人电脑或 GitHub Actions 里检视，再以 Bot 身份回复
 - [仓库自动化规则](docs/automation.md)：标签、门禁、合并队列和 CI 阶段
 - [架构与行为](docs/architecture.md)：权限模型、虚拟电脑生命周期、检视与开发数据流、当前限制
 - [管理 API](docs/api.md)
-- [开发与验证](docs/development.md)：代码结构、测试命令和 Docker 验收
+- [开发与验证](docs/development.md)：代码结构、测试命令、Docker 验收、CI 与合入
