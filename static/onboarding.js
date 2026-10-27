@@ -84,10 +84,22 @@ async function renderOnboarding(request){
     const proxyChoice=button('自建 HTTPS 中转',()=>choose(false)),tunnelChoice=button('Cloudflare Tunnel',()=>choose(true));proxyChoice.setAttribute('aria-pressed',String(!onboardingTunnel));tunnelChoice.setAttribute('aria-pressed',String(onboardingTunnel));proxyChoice.className=onboardingTunnel?'quiet':'';tunnelChoice.className=onboardingTunnel?'':'quiet';choices.append(proxyChoice,tunnelChoice);mode.append(choices,note('已选：'+(onboardingTunnel?'Cloudflare Tunnel':'自建 HTTPS 中转')));panel.append(mode);
     const proxy=wizardForm('自建中转',[note('将专用域名反向代理到 http://本机:8791，整个域名只转发 webhook，不要转发管理页面。准备证书后在这里检查。'),field('公网 HTTPS 地址',input('origin',data.public_address?.origin||'',{type:'url',required:true,placeholder:'填写你自己的域名，不带路径'}))],'检查并使用',value=>api('/api/onboarding/address','POST',value));proxy.id='wizard-proxy';panel.append(proxy);
     proxy.hidden=onboardingTunnel;const tunnel=card('Cloudflare Tunnel');tunnel.id='wizard-tunnel';tunnel.hidden=!onboardingTunnel;
-    tunnel.append(note('在 Cloudflare 中创建 tunnel 并配置自有域名，粘贴 token 后由独立 Docker tunnel 服务连接，不需要把 token 写入 Compose。'),link('https://one.dash.cloudflare.com/','打开 Cloudflare → Networks → Tunnels'));
-    tunnel.append(wizardForm('连接凭据',[field('Tunnel token（只保存，不回读）',input('token','',{type:'password',autocomplete:'new-password',placeholder:data.tunnel.token_configured?'已保存；留空保持原值':'粘贴 tunnel token'}))],'保存 token',value=>api('/api/onboarding/tunnel','POST',value)));
+    tunnel.append(note('在 Cloudflare 中创建 tunnel 并配置自有域名，可以粘贴 token 或包含 token 的完整安装、运行命令。保存后由独立 Docker tunnel 服务连接，不需要把 token 写入 Compose。'),link('https://one.dash.cloudflare.com/','打开 Cloudflare → Networks → Tunnels'));
+    const credential=input('token','',{type:'password',autocomplete:'new-password',maxLength:131072,placeholder:data.tunnel.token_configured?'已保存；留空保持原值':'粘贴 tunnel token 或 Cloudflare 完整命令'});
+    credential.addEventListener('paste',event=>{
+      const pasted=event.clipboardData?.getData('text/plain');if(!pasted||!/[\r\n]/.test(pasted))return;
+      // Password inputs strip newlines; preserve word boundaries when pasting multi-line instructions.
+      event.preventDefault();const start=credential.selectionStart,end=credential.selectionEnd,room=credential.maxLength-credential.value.length+end-start;
+      credential.setRangeText(pasted.replace(/\\\r?\n/g,'').replace(/[\r\n]+/g,' ').slice(0,Math.max(0,room)),start,end,'end');
+    });
+    tunnel.append(wizardForm('连接凭据',[field('Tunnel token 或完整命令（只保存 token，不回读）',credential)],'保存 token',value=>api('/api/onboarding/tunnel','POST',value)));
     tunnel.append(facts([['连接状态',data.tunnel.state],['Published application 的 Service URL',data.tunnel.origin]]),note('在 tunnel 的 Routes → Published application 配置自己的域名，Service URL 必须是 http://webhook:8791。不要填管理端口 8792。'));
-    for(const route of data.tunnel.routes){const item=element('div','','row');item.append(element('p',route.hostname+' → '+route.service));if(route.webhook_route)item.append(button('检查并使用此域名',async()=>{try{await api('/api/onboarding/address','POST',{origin:'https://'+route.hostname});await render();}catch(e){error(e);}}));else item.append(badge('不是 webhook 路由','danger'));tunnel.append(item);}
+    let fallback=false;
+    for(const route of data.tunnel.routes){
+      if(!route.hostname&&/^http_status:\d{3}$/.test(route.service)){fallback=true;continue;}
+      const item=element('div','','row');item.append(element('p',route.hostname+' → '+route.service));if(route.webhook_route)item.append(button('检查并使用此域名',async()=>{try{await api('/api/onboarding/address','POST',{origin:'https://'+route.hostname});await render();}catch(e){error(e);}}));else item.append(badge('不是 webhook 路由','danger'));tunnel.append(item);
+    }
+    if(fallback)tunnel.append(note('没有匹配到已发布域名的请求会返回 404。这是 Cloudflare Tunnel 自带的兜底规则，不是连接故障。'));
     tunnel.append(button('刷新 tunnel 状态',()=>render().catch(error)));if(data.tunnel.token_configured)tunnel.append(button('停用 tunnel',async()=>{await api('/api/onboarding/tunnel','POST',{revoke:true});await render();}));panel.append(tunnel);next();
   }else if(onboardingStep===1){
     const existing=accounts.filter(a=>a.type==='github_app');if(existing.length){const list=card('使用已登记的 App');list.append(note('使用此 App 会将它的 webhook 更新为第 1 步验证过的地址；已有账号凭据保持不变。'));for(const account of existing){const row=element('div','','row'),info=element('div','','row-content');info.append(element('p',account.name+' · App ID '+account.app_id),appPermissionCheck(account));row.append(info,button('使用此 App',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:account.id,update_webhook:true});wizardNext(2);}catch(e){error(e);}}));list.append(row);}panel.append(list);}

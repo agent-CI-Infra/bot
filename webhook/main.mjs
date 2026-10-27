@@ -15,9 +15,11 @@ http.createServer(async(req,res)=>{
     if(!['/ready','/config'].includes(req.url)||req.method!=='GET'){res.writeHead(404);res.end();return;}
     const response=await fetch('http://tunnel:2000'+req.url,{signal:AbortSignal.timeout(2500),redirect:'error'});
     if(req.url==='/ready'){res.writeHead(response.ok?200:503);res.end();return;}
-    const config=await response.json(),ingress=(config.config?.ingress||[]).filter(r=>typeof r.hostname==='string').map(r=>{
-      let service='invalid route';try{const url=new URL(r.service);if(['http:','https:'].includes(url.protocol))service=url.origin;}catch{}
-      return {hostname:r.hostname,service};
+    const config=await response.json(),ingress=(config.config?.ingress||[]).filter(r=>r.hostname==null||typeof r.hostname==='string').map(r=>{
+      let service='unsupported service';
+      if(typeof r.service==='string'&&/^http_status:\d{3}$/.test(r.service))service=r.service;
+      else try{const url=new URL(r.service);if(['http:','https:'].includes(url.protocol))service=url.origin;}catch{}
+      return {hostname:r.hostname||'',service};
     });res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({config:{ingress}}));
   }catch{res.writeHead(503);res.end();}
 }).listen(8794,'0.0.0.0');

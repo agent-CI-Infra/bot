@@ -10,9 +10,11 @@
 
 先准备自己的域名。自建中转需配置有效证书，整个域名只转发到 webhook 8791；管理页面 8792 保持环回绑定或独立管理入口。填写 HTTPS origin 后点击「检查并使用」。检查使用当前实例的一次性 nonce／proof，拒绝 HTTP、重定向、其他实例和管理监听，同时检查根路径、管理 API 与脚本不会被公开。DNS 地址在每次连接时校验并固定，不能指向私网。
 
-Cloudflare Tunnel 是 Compose 中独立的 `tunnel` 服务。初始没有 token，不连接任何账号；在向导中保存 token 后自动连接。token 不进入 Compose 环境变量、命令参数或读取接口：数据库加密保存，专用凭据卷中以 0600 文件交给非 root tunnel 进程读取。更换后自动重连，停用会移除文件并断开。该服务不发布宿主端口。Tunnel 位于独立 edge 网络，只能经过固定转发到 bot:8791 的 webhook 网关；控制面和 manager 不加入 edge 网络。即使远端路由填错，Tunnel 也不能直接连接管理端口。
+Cloudflare Tunnel 是 Compose 中独立的 `tunnel` 服务。初始没有 token，不连接任何账号；在向导中保存 token 后自动连接。输入框支持直接粘贴 token，也支持 Cloudflare 给出的完整安装、运行命令（含引号或多行说明，最多 131072 个字符）；系统只提取并保存唯一的合法 token，不执行命令。没有合法 token 或包含多个不同合法 token 时会拒绝保存。token 不进入 Compose 环境变量、命令参数或读取接口：数据库加密保存，专用凭据卷中以 0600 文件交给非 root tunnel 进程读取。更换后自动重连，停用会移除文件并断开。该服务不发布宿主端口。Tunnel 位于独立 edge 网络，只能经过固定转发到 bot:8791 的 webhook 网关；控制面和 manager 不加入 edge 网络。即使远端路由填错，Tunnel 也不能直接连接管理端口。
 
 在 Cloudflare 控制台的 Networks → Tunnels 创建 tunnel，在 Routes → Published application 选择自有域名，Service URL 填 `http://webhook:8791`。向导读取 tunnel 的路由和连接状态，指向管理端口的路由会标错；点击正确路由的「检查并使用此域名」后才保存公网地址。域名配置和 GitHub 确认由账号所有者在对应页面完成，Bot 不替用户点击。
+
+Cloudflare 自带的无主机名 `http_status:404` 兜底规则表示：未匹配已发布域名的请求返回 404。向导只显示普通说明，不把它标成连接故障；具名域名若指向其他服务，仍显示「不是 webhook 路由」。
 
 ## GitHub App 与安装
 

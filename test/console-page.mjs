@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 // Loads console scripts from static/ into a sandbox with a small stand-in DOM: enough to load the scripts and draw
-// lists, so page logic can be tested without a browser. Selectors support tags, #id, .class, [attr], descendant and
+// lists, so page logic can be tested without a browser. Selectors support tags, #id, .class, [attr], [attr=value], descendant and
 // `:scope >` steps.
 class FakeElement {
   constructor(tagName) {
@@ -39,17 +39,18 @@ class FakeElement {
   showModal() { this.open = true; }
   close() { if (!this.open) return; this.open = false; for (const listener of this.listeners.close || []) listener({ type: 'close' }); }
   focus() { this.ownerFocus = true; }
+  scrollIntoView() {}
   remove() { if (this.parentElement) { this.parentElement.children.splice(this.parentElement.children.indexOf(this), 1); this.parentElement = null; } }
   querySelectorAll(selector) { return select(this, selector); }
   querySelector(selector) { return select(this, selector)[0] || null; }
 }
 const camel = name => name.slice(5).replace(/-(\w)/g, (_, c) => c.toUpperCase());
 function simple(element, part) {
-  const [, tag, id, classes, attributes] = /^(\w+)?(?:#([\w-]+))?((?:\.[\w-]+)*)((?:\[[\w-]+\])*)$/.exec(part) || [];
+  const [, tag, id, classes, attributes] = /^(\w+)?(?:#([\w-]+))?((?:\.[\w-]+)*)((?:\[[\w-]+(?:=[\w-]+)?\])*)$/.exec(part) || [];
   if (classes === undefined) throw new Error('unsupported selector: ' + part);
   return (!tag || element.tagName === tag.toUpperCase()) && (!id || element.id === id)
     && classes.split('.').filter(Boolean).every(name => element.classList.contains(name))
-    && (attributes.match(/[\w-]+/g) || []).every(name => element.hasAttribute(name));
+    && [...attributes.matchAll(/\[([\w-]+)(?:=([\w-]+))?\]/g)].every(([, name, value]) => element.hasAttribute(name) && (value === undefined || element.getAttribute(name) === value));
 }
 function select(root, selector) {
   const parts = selector.trim().split(/\s+/), found = [];
@@ -79,7 +80,7 @@ export function loadConsole(files, respond) {
     const [status, value] = await respond(method, path, init.body && JSON.parse(init.body));
     return { ok: status < 400, status, json: async () => value };
   };
-  const context = vm.createContext({ document, fetch, location: { hash: '', pathname: '/' }, history: { pushState() {} }, addEventListener() {},
+  const context = vm.createContext({ document, Node: FakeElement, fetch, location: { hash: '', pathname: '/' }, history: { pushState() {} }, addEventListener() {},
     setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams, console });
   context.window = context;
   for (const file of files) vm.runInContext(readFileSync(file, 'utf8'), context, { filename: file });

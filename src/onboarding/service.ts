@@ -8,6 +8,7 @@ import { publicOrigin, probeGet } from './public-url.js';
 import { appJwt, appPermissions } from '../github/client.js';
 import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
+import { tunnelToken } from './tunnel-token.js';
 
 interface Options { tunnelFile?: string; tunnelMetrics?: string; githubUrl?: string; fetcher?: typeof fetch; probe?: typeof probeGet; }
 export class Onboarding {
@@ -115,8 +116,7 @@ export class Onboarding {
       fields(input, ['token', 'revoke']);
       if (input.revoke === true) await this.writeTunnel(null);
       else if (typeof input.token === 'string' && input.token.trim()) {
-        const token = text(input.token, 16384).trim();
-        try { const value = JSON.parse(Buffer.from(token, 'base64').toString()); if (!value.a || !value.t || !value.s) throw new Error(); } catch { return fail(400, 'invalid_tunnel_token'); }
+        const token = tunnelToken(text(input.token, 128 * 1024));
         await this.writeTunnel(token);
       }
       this.store.audit(user.id, 'onboarding.tunnel_updated', 'tunnel'); return { tunnel: await this.tunnelStatus() };
