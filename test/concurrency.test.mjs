@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { treeSha } from '../dist/agent/common.js';
+import { Onboarding } from '../dist/onboarding/service.js';
 import { loadConsole } from './console-page.mjs';
 
 const commit = 'a'.repeat(40), tree = treeSha([]);
@@ -159,12 +161,20 @@ test('the version comes from the image tag; a source run reports no tag instead 
   }
 });
 
+const settingsScripts = ['static/app.js', 'static/views.js', 'static/project.js', 'static/settings.js', 'static/onboarding.js'];
+// What a fresh deployment answers: nothing verified, no tunnel token, no App and no models.
+function emptyDeployment(path) {
+  if (path === '/api/onboarding') return [200, { public_address: null, tunnel: { available: true, token_configured: false, origin: 'http://webhook:8791', state: 'waiting_token', routes: [] }, app: null, model_id: null }];
+  if (path === '/api/accounts') return [200, { accounts: [] }];
+  if (path === '/api/models') return [200, { models: [] }];
+  throw new Error('Unexpected request: ' + path);
+}
 test('the global settings page shows the running tag or a source run and saves the default concurrency', async () => {
   let version = { image_tag: 'v9.9.9', source: 'image' }, saved = null;
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/settings.js'], (method, path, body) => {
+  const page = loadConsole(settingsScripts, (method, path, body) => {
     if (path === '/api/settings' && method === 'PATCH') { saved = body; return [200, { settings: { task_concurrency: body.task_concurrency, task_concurrency_bounds: [1, 32] }, version }]; }
     if (path === '/api/settings') return [200, { settings: { task_concurrency: 1, task_concurrency_bounds: [1, 32] }, version }];
-    throw new Error('Unexpected request: ' + path);
+    return emptyDeployment(path);
   });
   const text = node => [node.textContent, ...node.children.flatMap(text)].join(' ');
   await page.run('renderSettings(renderVersion)');
@@ -175,4 +185,136 @@ test('the global settings page shows the running tag or a source run and saves t
   assert.deepEqual(saved, { task_concurrency: 3 });
   version = { image_tag: null, source: 'source' }; await page.run('renderSettings(renderVersion)');
   assert.match(text(page.$('settings-panel')), /源码运行/); assert.doesNotMatch(text(page.$('settings-panel')), /0\.1\.0|v0\.1\.3/);
+});
+
+test('global settings switch to a registered App through the wizard API, updating its webhook without returning credentials', async t => {
+  let hook = null;
+  const fetcher = async (url, init = {}) => {
+    const path = new URL(url).pathname;
+    if (path === '/app/hook/config' && init.method === 'PATCH') { hook = JSON.parse(init.body); return new Response('{}'); }
+    if (path === '/app/hook/config') return new Response(JSON.stringify(hook));
+    if (path === '/app') return new Response(JSON.stringify({ id: 456, slug: 'second-app' }));
+    if (path === '/app/installations') return new Response(JSON.stringify([{ id: 1 }, { id: 2 }]));
+    return new Response('{}', { status: 404 });
+  };
+  const h = await harness(t, undefined, store => ({ onboarding: new Onboarding(store, { fetcher }) })), { admin } = await setup(h);
+  const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), webhookSecret = randomBytes(24).toString('hex');
+  const app = (await admin('/api/accounts', 'POST', { name: 'Second App', type: 'github_app', app_id: '456', private_key: privateKey, webhook_secret: webhookSecret })).value.account;
+  // The webhook goes to the verified address, so an App is not switched before one exists.
+  assert.notEqual((await admin('/api/onboarding/use-app', 'POST', { account_id: app.id, update_webhook: true })).status, 201);
+  assert.equal((await admin('/api/onboarding')).value.app, null); assert.equal(hook, null);
+  h.store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: 'https://hooks.example.com', checked_at: new Date().toISOString() }));
+  const used = await admin('/api/onboarding/use-app', 'POST', { account_id: app.id, update_webhook: true });
+  assert.equal(used.status, 201);
+  assert.deepEqual(hook, { url: `https://hooks.example.com${app.endpoints[0].webhook_path}`, content_type: 'json' });
+  assert.deepEqual(used.value.app, { account_id: app.id, app_id: '456', slug: 'second-app', installations: 2, webhook_url: hook.url, install_url: 'https://github.com/apps/second-app/installations/new' });
+  const visible = JSON.stringify([used.value, (await admin('/api/onboarding')).value, (await admin('/api/accounts')).value]);
+  for (const secret of [privateKey, webhookSecret]) assert.ok(!visible.includes(secret));
+});
+
+// One deployment as the global settings page sees it; every request that changes something is recorded in `sent`.
+function deployment() {
+  const state = {
+    onboarding: { public_address: { origin: 'https://hooks.example.com', checked_at: '2026-10-27T00:00:00.000Z' },
+      tunnel: { available: true, token_configured: true, origin: 'http://webhook:8791', state: 'connected', routes: [] },
+      app: { account_id: 'a1', app_id: '123', slug: 'first-app', installations: 1, webhook_url: 'https://old.example.com/hooks/github/a1/e1' }, model_id: 'm1' },
+    accounts: [{ id: 'a1', name: 'First App', type: 'github_app', app_id: '123' }, { id: 'a2', name: 'Second App', type: 'github_app', app_id: '456' },
+      { id: 'b1', name: 'Token account', type: 'bot_account', app_id: null }],
+    models: [{ id: 'm1', repository_id: null, model_name: 'default-model', api_url: 'https://one.example.com/v1', key_configured: true, version: 1 },
+      { id: 'm2', repository_id: null, model_name: 'second-model', api_url: 'https://two.example.com/v1', key_configured: true, version: 1 },
+      { id: 'p1', repository_id: '101', model_name: 'project-model', api_url: 'https://three.example.com/v1', key_configured: true, version: 1 }] };
+  const sent = [];
+  const respond = (method, path, body) => {
+    if (method !== 'GET') sent.push([method, path, body]);
+    const { onboarding } = state;
+    if (path === '/api/settings') return [200, { settings: { task_concurrency: 2, task_concurrency_bounds: [1, 32] }, version: { image_tag: 'v9.9.9', source: 'image' } }];
+    if (path === '/api/onboarding') return [200, onboarding];
+    if (path === '/api/accounts') return [200, { accounts: state.accounts }];
+    if (path === '/api/models' && method === 'GET') return [200, { models: state.models }];
+    if (path === '/api/onboarding/address') { onboarding.public_address = { origin: body.origin, checked_at: '2026-10-27T01:00:00.000Z' }; return [201, { public_address: onboarding.public_address }]; }
+    if (path === '/api/onboarding/tunnel') { onboarding.tunnel = { ...onboarding.tunnel, token_configured: !body.revoke, state: body.revoke ? 'waiting_token' : 'connected' }; return [201, { tunnel: onboarding.tunnel }]; }
+    if (path === '/api/onboarding/use-app') { onboarding.app = { account_id: body.account_id, app_id: '456', slug: 'second-app', installations: 2, webhook_url: onboarding.public_address.origin + '/hooks/github/a2/e2' }; return [201, { app: onboarding.app }]; }
+    if (path === '/api/onboarding/model') { onboarding.model_id = body.model_id; return [201, { model_id: body.model_id }]; }
+    if (path === '/api/models' && method === 'POST') { const model = { id: 'm3', ...body, key_configured: true, version: 1 }; delete model.api_key; state.models.push(model); return [201, { model }]; }
+    const id = /^\/api\/models\/(\w+)$/.exec(path)?.[1], model = state.models.find(row => row.id === id);
+    if (model && method === 'GET') return [200, { model: { ...model, used_by: [{ repository_id: '101', full_name: 'fixture/one' }] } }];
+    if (model && method === 'PATCH') { Object.assign(model, { api_url: body.api_url, model_name: body.model_name, version: model.version + 1 }); return [200, { model }]; }
+    if (model && method === 'DELETE') {
+      state.models = state.models.filter(row => row !== model); if (onboarding.model_id === id) onboarding.model_id = null;
+      return [200, { ok: true, cleared_repository_ids: ['101'] }];
+    }
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  };
+  return { state, sent, respond };
+}
+
+test('global settings change the wizard settings and shared models without a project page or token echo', async () => {
+  const { sent, respond } = deployment(), page = loadConsole(settingsScripts, respond);
+  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; var reloads = 0; reloadProject = async () => { reloads++; };");
+  await page.run('renderSettings(renderVersion)');
+  const panel = page.$('settings-panel'), text = node => [node.textContent, ...node.children.flatMap(text)].join(' ');
+  const section = title => panel.children.find(node => node.querySelector('h3').textContent === title);
+  const buttons = (node, caption) => node.querySelectorAll('button').filter(b => b.textContent === caption);
+  const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');
+  const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
+  assert.deepEqual(panel.querySelectorAll('h3').map(node => node.textContent), ['当前运行版本', '同时运行的任务', '公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub App', '默认共享模型', '部署共享模型']);
+  assert.match(text(section('当前运行版本')), /v9\.9\.9/);
+  assert.equal(String(section('同时运行的任务').querySelector('input').value), '2');
+  // One-time wizard steps stay in the wizard: nothing here creates an App or installs one.
+  assert.ok(!panel.querySelectorAll('button').some(b => /创建|安装|跳过|manifest/i.test(b.textContent)));
+
+  // The public address is checked again through the wizard API; the App card then flags the webhook left on the old address.
+  const origin = section('公网 HTTPS 地址').querySelector('input'); origin.value = 'https://new.example.com';
+  await submit(section('公网 HTTPS 地址').querySelector('form'));
+  assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/address', { origin: 'https://new.example.com' }]);
+  assert.match(text(section('公网 HTTPS 地址')), /已检查并保存 https:\/\/new\.example\.com/);
+  assert.match(text(section('GitHub App')), /webhook 不在当前公网地址下/);
+
+  // A pasted command is sent once and never drawn back; revoking asks first.
+  const token = Buffer.from(JSON.stringify({ a: 'account', t: 'tunnel', s: 'secret-part' })).toString('base64');
+  section('Cloudflare Tunnel').querySelector('input').value = `cloudflared tunnel run --token ${token}`;
+  await submit(section('Cloudflare Tunnel').querySelector('form'));
+  assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/tunnel', { token: `cloudflared tunnel run --token ${token}` }]);
+  assert.ok(!text(panel).includes(token)); assert.ok(panel.querySelectorAll('input').every(node => !String(node.value).includes(token)));
+  assert.match(text(section('Cloudflare Tunnel')), /已保存 tunnel token/);
+  await confirm(buttons(section('Cloudflare Tunnel'), '撤销 token')[0].listeners.click[0]());
+  assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/tunnel', { revoke: true }]);
+  assert.match(text(section('Cloudflare Tunnel')), /未配置/); assert.equal(buttons(section('Cloudflare Tunnel'), '撤销 token').length, 0);
+
+  // Only registered GitHub Apps are offered; switching writes the webhook to the verified address.
+  const apps = section('GitHub App').querySelectorAll('li');
+  assert.deepEqual(apps.map(row => row.querySelector('button').textContent), ['重新检查', '改用此 App']);
+  await confirm(apps[1].querySelector('button').listeners.click[0]());
+  assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/use-app', { account_id: 'a2', update_webhook: true }]);
+  assert.match(text(section('GitHub App')), /已改用 Second App/); assert.match(text(section('GitHub App')), /second-app/);
+  assert.doesNotMatch(text(section('GitHub App')), /webhook 不在当前公网地址下/);
+
+  // The default is picked among shared models with a key; project models are not offered or listed.
+  const choices = () => section('默认共享模型').querySelector('select').children.map(option => option.value);
+  assert.deepEqual(choices(), ['', 'm1', 'm2']); assert.doesNotMatch(text(panel), /project-model/);
+  section('默认共享模型').querySelector('select').value = 'm2'; await submit(section('默认共享模型').querySelector('form'));
+  assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/model', { model_id: 'm2' }]);
+  assert.match(text(section('默认共享模型')), /second-model · https:\/\/two\.example\.com\/v1/);
+
+  // Shared model rows edit, delete and add in place: no project is loaded or reloaded.
+  const row = name => section('部署共享模型').querySelectorAll('li').find(node => text(node).includes(name));
+  buttons(row('second-model'), '修改 URL 和模型名')[0].listeners.click[0]();
+  const edit = page.run("document.body.querySelector('#model-edit')"), [url, name] = edit.querySelectorAll('input');
+  url.value = 'https://two.example.com/v2'; name.value = 'renamed-model'; await submit(edit.querySelector('form'));
+  assert.deepEqual(sent.at(-1), ['PATCH', '/api/models/m2', { version: 1, api_url: 'https://two.example.com/v2', model_name: 'renamed-model' }]);
+  assert.match(text(section('部署共享模型')), /已保存 renamed-model 的接口 URL 和模型名/);
+  const deleting = buttons(row('renamed-model'), '删除')[0].listeners.click[0](); await settle();
+  assert.match(view.querySelectorAll('p').map(node => node.textContent).join('\n'), /所有项目都不能再选/);
+  assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one']);
+  await confirm(deleting);
+  assert.deepEqual(sent.at(-1), ['DELETE', '/api/models/m2', {}]);
+  assert.match(text(section('部署共享模型')), /已删除模型 renamed-model/); assert.doesNotMatch(text(section('部署共享模型')), /renamed-model ·/);
+  assert.match(text(section('默认共享模型')), /未设置/);
+  const add = section('部署共享模型').querySelector('details form'), fields = Object.fromEntries(add.querySelectorAll('input').map(node => [node.name, node]));
+  fields.api_url.value = 'https://four.example.com/v1'; fields.api_key.value = 'sk-fixture'; fields.model_name.value = 'added-model';
+  add.querySelectorAll('input').forEach(node => { node.checkValidity = () => true; }); add.elements = fields;
+  await submit(add);
+  assert.deepEqual(sent.at(-1), ['POST', '/api/models', { repository_id: null, api_url: 'https://four.example.com/v1', model_name: 'added-model', api_key: 'sk-fixture' }]);
+  assert.match(text(section('部署共享模型')), /已添加 added-model/); assert.ok(row('added-model'));
+  assert.equal(page.run('reloads'), 0); assert.equal(page.run('current'), null);
 });

@@ -76,6 +76,8 @@ export async function models(store: Store, user: Actor, method: string, url: URL
       store.run('UPDATE policies SET model_id=NULL WHERE model_id=?', id);
       store.run('DELETE FROM model_pricing WHERE model_id=?', id);
       store.run('DELETE FROM model_projects WHERE model_id=?', id);
+      // The wizard's default shared model is a settings pointer, not a foreign key: it must not outlive the model.
+      store.run("DELETE FROM settings WHERE key='onboarding.model' AND json_valid(value) AND json_extract(value,'$')=?", id);
       store.run('DELETE FROM models WHERE id=?', id);
       store.audit(user.id, 'model.deleted', id, row.repository_id);
       return { ok: true, cleared_repository_ids: cleared.map(row => row.repository_id) };

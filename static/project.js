@@ -31,7 +31,8 @@ function textarea(name, value, attributes = {}) { const el = document.createElem
 function checkbox(name, checked, caption) { const box = input(name, '', { type: 'checkbox', checked: !!checked }), wrap = element('label', '', 'check'); wrap.append(box, ' ' + caption); return wrap; }
 function note(text) { return element('p', text, 'muted'); }
 // A settings form: fields, an error line and a save button; `save` receives the form and reports through the error line.
-function settingsForm(title, nodes, save, { editable = true, caption = '保存' } = {}) {
+// `after` receives the result text; without it the project page shows the text and reloads.
+function settingsForm(title, nodes, save, { editable = true, caption = '保存', after = null } = {}) {
   const section = card(title), form = document.createElement('form'), message = element('p', '', 'view-error'), submit = element('button', caption);
   form.className = 'project-form'; form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'alert');
   const set = element('fieldset', ''); set.disabled = !editable; set.append(...nodes); form.append(set, message);
@@ -45,7 +46,10 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存' 
     }
     submit.disabled = true;
     // The page re-renders after saving, so the result is shown at the top of the refreshed section.
-    try { const done = await save(form, text => { message.className = 'view-progress'; message.textContent = text; }); current.flash = typeof done === 'string' && done ? done : '已保存'; await reloadProject(); }
+    try {
+      const done = await save(form, text => { message.className = 'view-progress'; message.textContent = text; }), text = typeof done === 'string' && done ? done : '已保存';
+      if (after) await after(text); else { current.flash = text; await reloadProject(); }
+    }
     catch (err) { message.className = 'view-error'; message.textContent = err.message; } finally { submit.disabled = false; }
   });
   section.append(form); return section;
@@ -240,22 +244,26 @@ function modelSection() {
 }
 function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
 // Rotating or revoking a key never shows it; an empty key field keeps the current one. Listing and testing use the
-// saved URL, key and name and need the same right as editing; their outcome goes to the row's result line.
-function modelActions(model, result) {
-  const actions = element('div', '', 'actions'), editable = me.role === 'super_admin' || model.repository_id === current.id;
+// saved URL, key and name and need the same right as editing; their outcome goes to the row's result line. `after`
+// redraws the list once a change is saved: the project page reloads, global settings redraws only its model cards.
+function modelActions(model, result, after = reloadProject) {
+  const actions = element('div', '', 'actions'), editable = me.role === 'super_admin' || model.repository_id === current?.id;
   if (!editable) return actions;
   if (model.key_configured) actions.append(
     probeButton('获取模型列表', result, () => api(`/api/models/${model.id}/upstream`, 'POST', {}), value => listOutcome(value, model.model_name)),
     probeButton('测试模型', result, () => api(`/api/models/${model.id}/test`, 'POST', {}), testOutcome));
-  actions.append(button('计费单价',()=>modelPricing(model)));
+  actions.append(button('修改 URL 和模型名', () => modelEdit(model, after)));
+  actions.append(button('计费单价',()=>modelPricing(model, after)));
   actions.append(button('更换 Key', async () => {
     const saved = await confirmDialog({ title: `更换 ${model.model_name} 的 API Key`, body: ['保存后立即生效；页面和接口都不会再显示这个 Key。'], action: '保存',
       input: { label: '新的 API Key', type: 'password' }, run: key => api('/api/models/' + model.id, 'PATCH', { version: model.version, api_key: key }) });
-    if (saved) await reloadProject();
+    if (saved) await after(`已更换 ${model.model_name} 的 API Key`);
   }));
   if (model.key_configured) actions.append(button('撤销 Key', async () => {
     if (!await askConfirm({ title: `撤销 ${model.model_name} 的 API Key？`, body: ['使用它的项目会停在“配置待补”，直到换上新的 Key。'], action: '撤销', danger: true })) return;
-    await api(`/api/models/${model.id}/credentials/revoke`, 'POST', {}).catch(error); await reloadProject();
+    let notice;
+    try { await api(`/api/models/${model.id}/credentials/revoke`, 'POST', {}); notice = `已撤销 ${model.model_name} 的 API Key`; } catch (err) { error(err); }
+    await after(notice);
   }));
   actions.append(button('删除', async () => {
     let detail;
@@ -269,21 +277,44 @@ function modelActions(model, result) {
     if (detail.repository_id === null) body.push('这是部署共享模型，删除后所有项目都不能再选它。');
     const deleted = await confirmDialog({ title: `删除模型 ${detail.model_name}？`, body, action: '删除', danger: true,
       progress: '正在删除模型…', run: () => api(`/api/models/${model.id}`, 'DELETE', {}) });
-    if (deleted) await reloadProject();
+    if (deleted) await after(`已删除模型 ${detail.model_name}`);
   }, 'quiet destructive'));
   return actions;
 }
-function modelForm(title, repositoryId) {
+// Changes where a saved model is reached and which model it asks for; the sealed key stays as it is.
+function modelEdit(model, after) {
+  const modal = document.createElement('dialog'), form = document.createElement('form'), heading = element('h2', `修改 ${model.model_name} 的接口 URL 和模型名`);
+  modal.id = 'model-edit'; heading.id = 'model-edit-title'; modal.setAttribute('aria-labelledby', heading.id);
+  const url = input('api_url', model.api_url, { type: 'url', required: true }), name = input('model_name', model.model_name, { required: true, maxLength: 200 });
+  const preview = element('div', '', 'endpoint-preview'), message = element('p', '', 'view-error'), actions = element('div', '', 'actions'), save = element('button', '保存');
+  preview.setAttribute('aria-live', 'polite'); message.setAttribute('role', 'alert'); save.type = 'submit';
+  if (model.endpoints) preview.append(...endpointFacts(model.endpoints));
+  watchEndpoint(url, preview);
+  actions.append(button('取消', () => modal.close()), save);
+  form.append(heading, field('接口 URL', url), note(modelUrlRule), preview, field('模型名', name), note('API Key 保持不变。保存后新的模型请求按这里的地址和模型名发送。'), message, actions);
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); message.textContent = '';
+    const changes = { api_url: url.value.trim(), model_name: name.value.trim() };
+    if (!changes.api_url || !changes.model_name) { message.textContent = '接口 URL 和模型名都需要填写'; return; }
+    if (changes.api_url === model.api_url && changes.model_name === model.model_name) { modal.close(); return; }
+    save.disabled = true;
+    try { await api('/api/models/' + model.id, 'PATCH', { version: model.version, ...changes }); modal.close(); await after(`已保存 ${changes.model_name} 的接口 URL 和模型名`); }
+    catch (err) { message.textContent = err.message; } finally { save.disabled = false; }
+  });
+  modal.append(form); document.body.append(modal); modal.addEventListener('close', () => modal.remove(), { once: true }); modal.showModal();
+}
+function modelForm(title, repositoryId, after = null) {
   const details = element('details', '', 'fold add-model'); details.append(element('summary', title));
   const form = settingsForm(title, [...modelFields(repositoryId),
     note('兼容 Chat Completions 的接口；Key 加密保存，不会再显示。保存即视为可信接口，可接收本项目的代码和日志。')],
   async form => { const created = (await api('/api/models', 'POST', { repository_id: repositoryId, api_url: form.elements.api_url.value.trim(), model_name: form.elements.model_name.value.trim(), api_key: form.elements.api_key.value }));
-    return `已添加 ${created.model.model_name}，可在“使用的模型”里选择`; }, { caption: '添加' });
+    return `已添加 ${created.model.model_name}，可在“使用的模型”里选择`; }, { caption: '添加', after });
   form.querySelector('h3').remove(); details.append(form); return details;
 }
 
-// Model address, upstream list and test, shared by the project page and the onboarding wizard (onboarding.js loads
-// after this file). The server resolves addresses, so the page shows exactly where tasks will send their requests.
+// Model address, upstream list and test, shared by the project page, global settings and the onboarding wizard
+// (settings.js and onboarding.js load after this file). The server resolves addresses, so the page shows exactly where
+// tasks will send their requests.
 const modelUrlRule = '地址按填写的路径使用：去掉末尾的 / 和 /chat/completions 后，接上 /chat/completions 发送对话，接上 /models 获取模型列表；不会自动添加或删除 /v1。';
 const modelV1Warning = '当前地址不含末尾的 /v1；多数兼容接口需要它，只有上游确认不用时才这样填写。';
 function endpointFacts(endpoints) {
@@ -329,6 +360,18 @@ function probeButton(caption, result, call, render, check = () => '') {
   });
   return run;
 }
+// The address preview follows the typing; `changed` runs on every edit of the URL.
+function watchEndpoint(url, preview, changed = () => {}) {
+  let previewRequest = 0, timer = null;
+  url.addEventListener('input', () => {
+    changed(); clearTimeout(timer); const value = url.value.trim(), request = ++previewRequest;
+    if (!value) { preview.replaceChildren(); return; }
+    timer = setTimeout(async () => {
+      try { const endpoints = await api('/api/models/endpoints?api_url=' + encodeURIComponent(value)); if (request === previewRequest) preview.replaceChildren(...endpointFacts(endpoints)); }
+      catch { if (request === previewRequest) preview.replaceChildren(element('p', '地址无效：需要 http:// 或 https://，不能包含用户名、密码、? 或 #。', 'endpoint-warning')); }
+    }, 250);
+  });
+}
 // Fields of an unsaved model: URL with its resolved addresses, key, name with an optional pick from the upstream list.
 function modelFields(repositoryId) {
   const url = input('api_url', '', { type: 'url', required: true, placeholder: 'https://example.com/v1' }), key = input('api_key', '', { type: 'password', required: true, autocomplete: 'new-password' });
@@ -336,17 +379,9 @@ function modelFields(repositoryId) {
   const preview = element('div', '', 'endpoint-preview'), result = probeResult(), actions = element('div', '', 'actions probe-actions');
   preview.setAttribute('aria-live', 'polite'); pick.hidden = true;
   picker.addEventListener('change', () => { if (picker.value) name.value = picker.value; });
-  // A changed address or key makes earlier upstream answers stale; the address preview follows the typing.
-  let previewRequest = 0, timer = null;
+  // A changed address or key makes earlier upstream answers stale.
   const stale = () => { result.dataset.request = String(Number(result.dataset.request || 0) + 1); result.replaceChildren(); pick.hidden = true; picker.replaceChildren(); };
-  url.addEventListener('input', () => {
-    stale(); clearTimeout(timer); const value = url.value.trim(), request = ++previewRequest;
-    if (!value) { preview.replaceChildren(); return; }
-    timer = setTimeout(async () => {
-      try { const endpoints = await api('/api/models/endpoints?api_url=' + encodeURIComponent(value)); if (request === previewRequest) preview.replaceChildren(...endpointFacts(endpoints)); }
-      catch { if (request === previewRequest) preview.replaceChildren(element('p', '地址无效：需要 http:// 或 https://，不能包含用户名、密码、? 或 #。', 'endpoint-warning')); }
-    }, 250);
-  });
+  watchEndpoint(url, preview, stale);
   key.addEventListener('input', stale);
   const missing = labels => () => { const empty = labels.filter(([el]) => !el.value.trim()).map(([, label]) => label); return empty.length ? `先填写${empty.join('、')}` : ''; };
   const target = () => ({ repository_id: repositoryId, api_url: url.value.trim(), api_key: key.value });

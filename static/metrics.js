@@ -24,7 +24,8 @@ function taskMetricsCard(task) {
   if(m.complete===false)section.append(note('历史执行或中断期间的统计不完整，这里只显示已观测的记录。'));
   return section;
 }
-function modelPricing(model) {
+// `after` redraws the model list once the prices are saved or cleared (see modelActions).
+function modelPricing(model, after = reloadProject) {
   const modal=document.createElement('dialog');modal.id='model-pricing';
   const heading=element('h2',model.model_name+' · 计费单价');heading.id='model-pricing-title';modal.setAttribute('aria-labelledby',heading.id);
   const form=document.createElement('form');form.append(heading,note('每百万 token 的单价，仅用于估算费用。输入单价用于未命中的输入；缓存命中 token 单独计价。保存后只影响新请求。'));
@@ -35,9 +36,9 @@ function modelPricing(model) {
   }
   const message=element('p','','view-error');message.setAttribute('role','alert');
   const actions=element('div','','actions'),save=element('button','保存单价');save.type='submit';actions.append(button('取消',()=>modal.close()),save);
-  if(model.pricing)actions.append(button('清除单价',async()=>{try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:null});modal.close();await reloadProject();}catch(err){message.textContent=err.message;}}));
+  if(model.pricing)actions.append(button('清除单价',async()=>{try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:null});modal.close();await after(`已清除 ${model.model_name} 的计费单价`);}catch(err){message.textContent=err.message;}}));
   form.append(message,actions);form.addEventListener('submit',async event=>{event.preventDefault();save.disabled=true;const data=Object.fromEntries(new FormData(form));
-    try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:{currency:data.currency,input_per_million:Number(data.input_per_million),output_per_million:Number(data.output_per_million),cache_per_million:Number(data.cache_per_million)}});modal.close();await reloadProject();}
+    try{await api('/api/models/'+model.id,'PATCH',{version:model.version,pricing:{currency:data.currency,input_per_million:Number(data.input_per_million),output_per_million:Number(data.output_per_million),cache_per_million:Number(data.cache_per_million)}});modal.close();await after(`已保存 ${model.model_name} 的计费单价`);}
     catch(err){message.textContent=err.message;}finally{save.disabled=false;}
   });modal.append(form);document.body.append(modal);modal.addEventListener('close',()=>modal.remove(),{once:true});modal.showModal();
 }

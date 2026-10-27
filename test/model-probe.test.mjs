@@ -159,6 +159,21 @@ test('a saved model is listed and tested with its stored key under the editing r
   assert.deepEqual((await member(`/api/models/${own.id}/test`, 'POST', {})).value, { error: 'model_key_missing' });
 });
 
+test('with no repository at all a super administrator adds, tests and deletes a shared model', async t => {
+  const h = await harness(t), { admin } = await setup(h), fake = await upstream(t), key = 'sk-' + randomBytes(24).toString('hex');
+  assert.equal(h.store.get('SELECT count(*) n FROM repositories').n, 0);
+  const created = await admin('/api/models', 'POST', { repository_id: null, api_url: fake.origin + '/v1/', api_key: key, model_name: 'fixture' });
+  assert.equal(created.status, 201); const { id } = created.value.model;
+  const tested = await admin(`/api/models/${id}/test`, 'POST', {});
+  assert.equal(tested.value.ok, true); assert.equal(tested.value.chat_url, fake.origin + '/v1/chat/completions');
+  // The URL is used as written, without its trailing slash, and the request carries one output limit.
+  const sentBody = fake.requests.at(-1).body; assert.equal(fake.requests.at(-1).path, '/v1/chat/completions');
+  assert.equal(sentBody.max_completion_tokens, 32); assert.ok(!('max_tokens' in sentBody));
+  assert.deepEqual((await admin(`/api/models/${id}`, 'DELETE', {})).value, { ok: true, cleared_repository_ids: [] });
+  assert.deepEqual((await admin('/api/models')).value.models, []);
+  assert.ok(!JSON.stringify([created.value, tested.value, h.store.all('SELECT * FROM audit')]).includes(key));
+});
+
 test('task model calls use the shared address rule and keep their single 8192 output limit', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin), fake = await upstream(t); await repository(admin, a.id, '101');
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: fake.origin + '/v1/chat/completions/', api_key: 'task-fixture-key', model_name: 'fixture' })).value.model;
