@@ -9,10 +9,10 @@
 | `/healthz` | GET | 两个监听端口的数据库健康检查 |
 | `/api/setup` | GET / POST | 初始化状态／仅首次创建超级管理员，POST 字段 `username,password` |
 | `/api/auth/login`、`/api/auth/logout`、`/api/auth/me` | POST / POST / GET | 登录、退出、会话与仓库权限 |
-| `/api/users`、`/api/users/:id` | GET / POST、PATCH / DELETE | 超级管理员列出／创建用户、停用或启用；创建可带 `role,repository_ids`。DELETE 需 `confirm:true`，删除会话、项目成员分配和个人看板设置，审计保留；最后一名活跃超级管理员返回 409 `last_super_admin`，删除自己成功后会话失效 |
+| `/api/users`、`/api/users/:id` | GET / POST、PATCH / DELETE | 超级管理员列出／创建用户、停用或启用；创建可带 `role,repository_ids,organization_ids`，含义同下行，超级管理员忽略这两项。DELETE 需 `confirm:true`，删除会话、仓库和组织授权、个人看板设置，审计保留；最后一名活跃超级管理员返回 409 `last_super_admin`，删除自己成功后会话失效 |
 | `/api/settings` | GET / PATCH | 仅超级管理员，项目管理员得到 403。返回 `settings:{task_concurrency,task_concurrency_bounds}` 和 `version`；PATCH 字段 `task_concurrency`，是每台虚拟电脑默认同时运行的任务数，1–32 的整数，未设置时为 1，超出范围返回 400 `invalid_task_concurrency` |
 | `/api/version` | GET | 仅超级管理员；控制面进程环境 `BOT_IMAGE_TAG` 给出的镜像标签 `{image_tag,source:"image"}`，源码直接运行、变量为空时为 `{image_tag:null,source:"source"}` |
-| `/api/project-admin-assignments` | GET / PUT | 超级管理员查询／替换用户仓库分配，PUT 字段 `user_id,repository_ids` |
+| `/api/project-admin-assignments` | GET / PUT | 超级管理员查询／替换项目管理员的授权。GET 返回 `assignments`（单个仓库）、`organization_assignments`（整个组织，`user_id,owner_id`）和 `organizations`：当前已安装仓库按 `owner_id` 分组，每组带 `owner_login` 和仓库 `id,full_name,registered`。PUT 字段 `user_id,repository_ids,organization_ids`，给出的那份整份替换、省略的那份不变，空数组表示不授权。仓库 ID 须是已安装或已启用的仓库（已安装未启用的仓库启用后授权生效），否则 400 `repository_not_found`；组织 ID 须是某个已安装仓库的 `owner_id`，否则 400 `organization_not_found`。项目管理员的仓库范围是单个仓库加上这些组织下的全部项目，每次请求重新计算 |
 | `/api/accounts`、`/api/accounts/:id` | GET / POST、GET / PATCH / DELETE | 超级管理员管理 GitHub App／机器人账号；POST 字段 `name,type,app_id,private_key,token,webhook_secret` 按账号类型选用。DELETE 需 `confirm:true`，仍有项目使用该账号时返回 409 `account_has_projects`；只从本系统删除账号、Webhook 入口、安装同步记录和凭据，不调用 GitHub |
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/permissions` | GET | 超级管理员检查 GitHub App 权限：返回所需权限 `required`、App 缺少的项 `app.missing` 与 App 权限设置页 `app.settings_url`、每个安装缺少的项 `installations[].missing` 与确认页 `review_url`，全部满足时 `ok:true`；机器人账号返回 409 |

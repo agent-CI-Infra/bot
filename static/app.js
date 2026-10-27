@@ -1,5 +1,7 @@
 const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false, permissionAutoRefresh = false;
+// Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
+let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null;
 const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
 const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
@@ -107,7 +109,7 @@ async function render() {
     staleIntegrations = !checked && integrations.some(item => item.stale);
   }
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
-  let result;try{result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
+  let result;try{if(tab==='users')grants=await api('/api/project-admin-assignments');result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
   if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
   $('rows').replaceChildren(); $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目` : `${rows.length} 条记录`;
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
@@ -121,6 +123,7 @@ async function render() {
       : tab === 'users' ? `${row.role === 'super_admin' ? '超级管理员' : '项目管理员'} · ID ${row.id}`
       : installedView ? installedDetail(row) : `仓库 ID ${row.id}${row.model_id ? '' : ' · 未选模型'}`;
     content.append(element('p', detail)); line.append(content);
+    if(tab==='users'&&row.role==='project_admin')content.append(element('p',grantSummary(row)));
     if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     if(tab==='events')for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
     if(tab==='accounts')status.append(element('span',row.credentials_configured?'凭据已配置':'凭据已撤销','status status-'+(row.credentials_configured?'success':'warning')));
@@ -133,7 +136,7 @@ async function render() {
     if(status.childElementCount)line.append(status);
     if(installedView){const actions=installedActions(row,()=>start());if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}
-    if(tab==='users'||tab==='accounts'){const actions=element('div','','actions');actions.append(button('删除',()=>(tab==='users'?deleteUser:deleteAccount)(row).catch(error),'quiet destructive'));line.append(actions);}
+    if(tab==='users'||tab==='accounts'){const actions=element('div','','actions');if(tab==='users'&&row.role==='project_admin')actions.append(button('修改仓库权限',()=>editGrants(row)));actions.append(button('删除',()=>(tab==='users'?deleteUser:deleteAccount)(row).catch(error),'quiet destructive'));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').textContent = JSON.stringify(await api('/api/events/' + row.id), null, 2); $('detail').showModal(); } catch (err) { error(err); }
@@ -171,7 +174,7 @@ async function refreshStalePermissions() {
   finally { permissionAutoRefresh = false; }
 }
 async function deleteUser(row) {
-  const self = row.id === me.id, kept = '项目成员分配和个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
+  const self = row.id === me.id, kept = '仓库和组织授权、个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
   const deleted = await askConfirm({ title: self ? `删除你自己的账号 ${row.username}？` : `删除用户 ${row.username}？`, action: '删除', danger: true,
     body: self ? ['只有还剩另一名活跃的超级管理员时才能删除。删除后当前会话立即失效，需要用其他超级管理员登录。', kept] : ['它的会话立即失效。', kept, '不能删除最后一名活跃的超级管理员。'],
     run: () => api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
@@ -192,11 +195,13 @@ async function deleteAccount(row) {
 }
 const forms = {
   accounts: [['name', '账号名称'], ['type', '账号类型', [['bot_account', '机器人账号'], ['github_app', 'GitHub App']]], ['app_id', 'App ID（仅 GitHub App）'], ['private_key', 'App 私钥（仅 GitHub App）', 'textarea'], ['token', '机器人 Token（仅机器人账号）', 'password'], ['webhook_secret', 'Webhook 签名凭据', 'password']],
-  users: [['username', '用户名'], ['password', '初始密码（至少 12 位）', 'password'], ['role', '角色', [['project_admin', '项目管理员'], ['super_admin', '超级管理员']]], ['repository_ids', '分配仓库 ID（逗号分隔，可留空）']]
+  users: [['username', '用户名'], ['password', '初始密码（至少 12 位）', 'password'], ['role', '角色', [['project_admin', '项目管理员'], ['super_admin', '超级管理员']]], ['grants', '仓库权限', 'grants']]
 };
 $('add').addEventListener('click', () => {
+  editingUser = null; $('editor-note').hidden = false;
   $('editor-title').textContent = '新增' + titles[tab]; $('editor-fields').replaceChildren(); $('editor-error').textContent = '';
   for (const [name, title, kind] of forms[tab]) {
+    if (kind === 'grants') { $('editor-fields').append(grantField(null)); continue; }
     const label = element('label', title), choices = typeof kind === 'function' ? kind() : kind;
     const input = document.createElement(Array.isArray(choices) ? 'select' : kind === 'textarea' ? 'textarea' : 'input'); input.name = name;
     if (Array.isArray(choices)) choices.forEach(([value, caption]) => input.add(new Option(caption, value)));
@@ -204,14 +209,50 @@ $('add').addEventListener('click', () => {
     if (name === 'password') input.minLength = 12;
     label.append(input); $('editor-fields').append(label);
   }
+  // A super administrator sees every project and holds no grants, so the choice is only offered for project administrators.
+  if (tab === 'users') { const role = $('editor-form').elements.role, field = $('editor-fields').querySelector('[data-grants]'); role.addEventListener('change', () => { field.hidden = role.value === 'super_admin'; }); }
   $('editor').showModal();
 });
+// Installed repositories grouped by owner. A group's first option grants the whole organization, which also covers repositories
+// enabled there later; the other options grant one repository each and nothing the organization adds afterwards.
+function grantField(user) {
+  const label = element('label', '仓库权限'), select = document.createElement('select'); label.dataset.grants = ''; select.name = 'grants'; select.multiple = true;
+  const held = (rows, key) => new Set(user ? rows.filter(row => row.user_id === user.id).map(row => row[key]) : []);
+  const organizations = held(grants.organization_assignments, 'owner_id'), repos = held(grants.assignments, 'repository_id');
+  const group = (caption, items) => { const node = document.createElement('optgroup'); node.label = caption; items.forEach(([text, value, chosen]) => node.append(new Option(text, value, chosen, chosen))); select.append(node); };
+  for (const org of grants.organizations) group(org.owner_login, [[`整个组织 ${org.owner_login}（含以后启用的仓库）`, 'organization:' + org.owner_id, organizations.has(org.owner_id)],
+    ...org.repositories.map(repo => [repo.full_name + (repo.registered ? '' : '（未启动）'), 'repository:' + repo.id, repos.has(repo.id)])]);
+  // A project this user holds that no installation lists any more stays selected, so saving other changes keeps it.
+  const listed = new Set(grants.organizations.flatMap(org => org.repositories.map(repo => repo.id))), kept = repositories.filter(repo => repos.has(repo.id) && !listed.has(repo.id));
+  if (kept.length) group('不在安装列表的项目', kept.map(repo => [repo.full_name, 'repository:' + repo.id, true]));
+  select.size = Math.min(12, select.options.length + select.querySelectorAll('optgroup').length);
+  label.append(select, element('span', grants.organizations.length ? '按住 Ctrl（macOS 为 ⌘）可选多项。不选表示不授权，看不到任何项目。' : '还没有已安装的仓库，先在「项目」页同步安装列表。', 'muted'));
+  return label;
+}
+function chosenGrants(form) {
+  const chosen = [...form.elements.grants.selectedOptions].map(option => option.value.split(':')), ids = kind => chosen.filter(([value]) => value === kind).map(([, id]) => id);
+  return { repository_ids: ids('repository'), organization_ids: ids('organization') };
+}
+// What a project administrator holds, as chosen: whole organizations and single repositories.
+function grantSummary(user) {
+  const installed = new Map(grants.organizations.flatMap(org => org.repositories.map(repo => [repo.id, repo])));
+  const organizations = grants.organization_assignments.filter(row => row.user_id === user.id)
+    .map(row => grants.organizations.find(org => org.owner_id === row.owner_id)?.owner_login || `组织 ID ${row.owner_id}（不在安装列表）`);
+  const repos = grants.assignments.filter(row => row.user_id === user.id).map(({ repository_id: id }) => { const repo = installed.get(id);
+    return repo ? repo.full_name + (repo.registered ? '' : '（未启动）') : (repositories.find(project => project.id === id)?.full_name || '仓库 ID ' + id) + '（不在安装列表）'; });
+  if (!organizations.length && !repos.length) return '未分配仓库，看不到任何项目';
+  return [organizations.length ? '整个组织：' + organizations.join('、') : '', repos.length ? '仓库：' + repos.join('、') : ''].filter(Boolean).join(' · ');
+}
+function editGrants(user) {
+  editingUser = user; $('editor-note').hidden = true; $('editor-title').textContent = `修改 ${user.username} 的仓库权限`;
+  $('editor-fields').replaceChildren(grantField(user)); $('editor-error').textContent = ''; $('editor').showModal();
+}
 $('editor-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, data = Object.fromEntries(new FormData(form));
   if (tab === 'accounts') { if (data.type === 'github_app') delete data.token; else { delete data.private_key; delete data.app_id; } }
-  if (tab === 'users') data.repository_ids = data.repository_ids.split(',').map(s => s.trim()).filter(Boolean);
+  if (tab === 'users') { delete data.grants; if (data.role !== 'super_admin') Object.assign(data, chosenGrants(form)); }
   const submit = form.querySelector('[type=submit]'); submit.disabled = true;
-  try { await api('/api/' + tab, 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
+  try { if (editingUser) await api('/api/project-admin-assignments', 'PUT', { user_id: editingUser.id, ...chosenGrants(form) }); else await api('/api/' + tab, 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
 });
 $('cancel').addEventListener('click', () => { $('editor').close(); $('editor-form').reset(); });
 $('close-detail').addEventListener('click', () => $('detail').close());

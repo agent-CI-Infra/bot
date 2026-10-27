@@ -188,14 +188,16 @@ test('a GitHub App project is deleted only when GitHub, asked right then, says t
   await admin(`/api/accounts/${a.id}`, 'PATCH', { private_key: a.privateKey });
   github.installations = [];
   assert.equal((await remove(admin, '303')).status, 200);
-  // A repository that was never started loses only its installation row, once GitHub answers 404 for it.
+  // A repository that was never started loses only its installation row and a grant made before it was enabled, once GitHub answers 404 for it.
   assert.deepEqual((await row('505')).registered, false);
+  const early = (await admin('/api/users', 'POST', { username: 'early', password: testPassword(), repository_ids: ['505'] })).value.user;
   github.installations = [installation(77)]; github.listed[77] = ['505'];
   assert.equal((await remove(admin, '505')).value.error, 'repository_still_accessible');
   github.listed[77] = []; delete github.repos['505'];
   result = await remove(admin, '505');
   assert.deepEqual([result.status, result.value.registered], [200, false]);
   assert.equal(h.store.get("SELECT count(*) n FROM installed_repositories WHERE repository_id='505'").n, 0);
+  assert.equal(h.store.get('SELECT count(*) n FROM project_admin_assignments WHERE user_id=?', early.id).n, 0);
   assert.deepEqual(await listedIds(admin), []);
   assert.equal((await remove(admin, '505')).status, 404);
   // Only super administrators delete projects.
@@ -251,12 +253,13 @@ test('users are deleted with their sessions and assignments, but never the last 
   assert.equal((await admin(`/api/users/${self.id}`, 'DELETE', {})).status, 400);
   let result = await admin(`/api/users/${self.id}`, 'DELETE', { confirm: true });
   assert.deepEqual([result.status, result.value.error], [409, 'last_super_admin']);
-  const member = (await admin('/api/users', 'POST', { username: 'member', password, repository_ids: ['101'] })).value.user, memberClient = h.client();
+  const member = (await admin('/api/users', 'POST', { username: 'member', password, repository_ids: ['101'], organization_ids: ['10'] })).value.user, memberClient = h.client();
   await memberClient('/api/auth/login', 'POST', { username: 'member', password });
   assert.equal((await memberClient(`/api/users/${member.id}`, 'DELETE', { confirm: true })).status, 403);
   assert.equal((await admin(`/api/users/${member.id}`, 'DELETE', { confirm: true })).status, 200);
   assert.equal((await memberClient('/api/auth/me')).status, 401);
   assert.equal(h.store.get('SELECT count(*) n FROM project_admin_assignments WHERE user_id=?', member.id).n, 0);
+  assert.equal(h.store.get('SELECT count(*) n FROM project_admin_organizations WHERE user_id=?', member.id).n, 0);
   assert.equal((await admin('/api/users', 'POST', { username: 'member', password, repository_ids: [] })).status, 201);
   assert.equal((await admin('/api/users/missing', 'DELETE', { confirm: true })).status, 404);
   // With a second active super administrator, the first may delete itself; its session ends and its audit records stay.
