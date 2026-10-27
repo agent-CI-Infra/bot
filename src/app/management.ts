@@ -15,13 +15,15 @@ function grantIds(value: unknown, code: string): string[] {
 }
 // A project administrator holds single repositories and whole organizations (owner_id); the two are independent and add up.
 // A repository may still be installed but not enabled: enabling keeps its id, so the grant applies then. An organization
-// must own a repository that is installed now. A list left out stays as it is.
-function grants(store: Store, body: Json): Grants {
+// must own a repository that is installed now, or already be granted to the user being edited: one whose repositories all
+// left the installation is kept until an administrator deselects it. A list left out stays as it is.
+function grants(store: Store, body: Json, userId: string | null = null): Grants {
   const repositories = body.repository_ids === undefined ? undefined : grantIds(body.repository_ids, 'invalid_repository_ids');
   const organizations = body.organization_ids === undefined ? undefined : grantIds(body.organization_ids, 'invalid_organization_ids');
   if (repositories?.some(id => !store.get(`SELECT 1 FROM installed_repositories WHERE repository_id=? AND installed=1
     UNION ALL SELECT 1 FROM repositories WHERE id=?`, id, id))) fail(400, 'repository_not_found');
-  if (organizations?.some(id => !store.get('SELECT 1 FROM installed_repositories WHERE owner_id=? AND installed=1', id))) fail(400, 'organization_not_found');
+  if (organizations?.some(id => !store.get(`SELECT 1 FROM installed_repositories WHERE owner_id=? AND installed=1
+    UNION ALL SELECT 1 FROM project_admin_organizations WHERE owner_id=? AND user_id=?`, id, id, userId))) fail(400, 'organization_not_found');
   return { repositories, organizations };
 }
 function saveGrants(store: Store, userId: string, { repositories, organizations }: Grants): void {
@@ -131,7 +133,7 @@ export async function management(store: Store, user: Actor, method: string, path
       if (body.repository_ids === undefined && body.organization_ids === undefined) fail(400, 'invalid_repository_ids');
       if (!store.get("SELECT id FROM users WHERE id=? AND role='project_admin'", id)) fail(400, 'project_admin_not_found');
       return store.transaction(() => {
-        saveGrants(store, id, grants(store, body));
+        saveGrants(store, id, grants(store, body, id));
         store.audit(user.id, 'assignments.updated', id);
         return { ok: true };
       });

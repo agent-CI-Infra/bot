@@ -225,8 +225,11 @@ function grantField(user) {
   // A project this user holds that no installation lists any more stays selected, so saving other changes keeps it.
   const listed = new Set(grants.organizations.flatMap(org => org.repositories.map(repo => repo.id))), kept = repositories.filter(repo => repos.has(repo.id) && !listed.has(repo.id));
   if (kept.length) group('不在安装列表的项目', kept.map(repo => [repo.full_name, 'repository:' + repo.id, true]));
+  // So does a whole organization this user holds whose repositories all left the installation; deselecting it drops the grant.
+  const owners = new Set(grants.organizations.map(org => org.owner_id)), keptOwners = [...organizations].filter(id => !owners.has(id));
+  if (keptOwners.length) group('不在安装列表的组织', keptOwners.map(id => [`组织 ID ${id}（不在安装列表）`, 'organization:' + id, true]));
   select.size = Math.min(12, select.options.length + select.querySelectorAll('optgroup').length);
-  label.append(select, element('span', grants.organizations.length ? '按住 Ctrl（macOS 为 ⌘）可选多项。不选表示不授权，看不到任何项目。' : '还没有已安装的仓库，先在「项目」页同步安装列表。', 'muted'));
+  label.append(select, element('span', select.options.length ? '按住 Ctrl（macOS 为 ⌘）可选多项。不选表示不授权，看不到任何项目。' : '还没有已安装的仓库，先在「项目」页同步安装列表。', 'muted'));
   return label;
 }
 function chosenGrants(form) {

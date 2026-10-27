@@ -77,6 +77,31 @@ test('a repository can be granted while installed but not enabled; unknown repos
   assert.equal((await grant(admin, chief.value.user, { organization_ids: ['10'] })).value.error, 'project_admin_not_found');
 });
 
+test('a whole organization whose repositories all left the installation stays granted until it is left out', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  install(h, a.id, '201', 'other/app', '20', 'other'); install(h, a.id, '303', 'gone/left', '30', 'gone', 0);
+  const whole = await member(h, admin, 'whole', { organization_ids: ['10'] }), other = await member(h, admin, 'other', { organization_ids: ['20'] });
+  const held = user => h.store.all('SELECT owner_id FROM project_admin_organizations WHERE user_id=? ORDER BY owner_id', user.id).map(row => row.owner_id);
+  h.store.run("UPDATE installed_repositories SET installed=0 WHERE owner_id='10'");
+  // Scope still follows the projects' owner, and the installed list no longer offers the organization.
+  assert.deepEqual(await whole.scope(), ['101']);
+  assert.deepEqual((await admin('/api/project-admin-assignments')).value.organizations.map(org => org.owner_id), ['20']);
+  // Sent back with other changes, the grant this user already holds is kept.
+  assert.equal((await grant(admin, whole.user, { repository_ids: ['201'], organization_ids: ['10', '20'] })).status, 200);
+  assert.deepEqual(held(whole.user), ['10', '20']); assert.deepEqual(await whole.scope(), ['101']);
+  // An uninstalled organization nobody granted, or one granted only to someone else, is refused and changes nothing.
+  for (const [user, owners, before] of [[whole.user, ['10', '30'], ['10', '20']], [other.user, ['10'], ['20']]]) {
+    const refused = await grant(admin, user, { repository_ids: [], organization_ids: owners });
+    assert.deepEqual([refused.status, refused.value.error], [400, 'organization_not_found']); assert.deepEqual(held(user), before);
+  }
+  const created = await admin('/api/users', 'POST', { username: 'late', password: testPassword(), organization_ids: ['10'] });
+  assert.deepEqual([created.status, created.value.error], [400, 'organization_not_found']);
+  // Left out of the list, it is deselected: the row goes and the project leaves the scope.
+  assert.equal((await grant(admin, whole.user, { repository_ids: ['201'], organization_ids: ['20'] })).status, 200);
+  assert.deepEqual(held(whole.user), ['20']); assert.deepEqual(await whole.scope(), []);
+});
+
 test('an older database keeps its repository grants and stops requiring them to name a project', async t => {
   mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/grants-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
   t.after(() => rmSync(directory, { recursive: true, force: true }));
