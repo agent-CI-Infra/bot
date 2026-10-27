@@ -48,6 +48,17 @@ function appPermissionCheck(account){
   });
   box.append(check,result);return box;
 }
+// The tunnel token field, also used by global settings: the server keeps only the token found in what is pasted.
+function tunnelCredential(placeholder){
+  const credential=input('token','',{type:'password',autocomplete:'new-password',maxLength:131072,placeholder});
+  credential.addEventListener('paste',event=>{
+    const pasted=event.clipboardData?.getData('text/plain');if(!pasted||!/[\r\n]/.test(pasted))return;
+    // Password inputs strip newlines; preserve word boundaries when pasting multi-line instructions.
+    event.preventDefault();const start=credential.selectionStart,end=credential.selectionEnd,room=credential.maxLength-credential.value.length+end-start;
+    credential.setRangeText(pasted.replace(/\\\r?\n/g,'').replace(/[\r\n]+/g,' ').slice(0,Math.max(0,room)),start,end,'end');
+  });
+  return credential;
+}
 function accountInstallationForm(){
   const target=input('target','',{required:true,placeholder:'个人或组织名、账号链接、仓库链接或 SSH 克隆地址',autocomplete:'off'}),result=element('div','','installation-target-result');
   result.setAttribute('role','status');result.setAttribute('aria-live','polite');let version=0;
@@ -85,13 +96,7 @@ async function renderOnboarding(request){
     const proxy=wizardForm('自建中转',[note('将专用域名反向代理到 http://本机:8791，整个域名只转发 webhook，不要转发管理页面。准备证书后在这里检查。'),field('公网 HTTPS 地址',input('origin',data.public_address?.origin||'',{type:'url',required:true,placeholder:'填写你自己的域名，不带路径'}))],'检查并使用',value=>api('/api/onboarding/address','POST',value));proxy.id='wizard-proxy';panel.append(proxy);
     proxy.hidden=onboardingTunnel;const tunnel=card('Cloudflare Tunnel');tunnel.id='wizard-tunnel';tunnel.hidden=!onboardingTunnel;
     tunnel.append(note('在 Cloudflare 中创建 tunnel 并配置自有域名，可以粘贴 token 或包含 token 的完整安装、运行命令。保存后由独立 Docker tunnel 服务连接，不需要把 token 写入 Compose。'),link('https://one.dash.cloudflare.com/','打开 Cloudflare → Networks → Tunnels'));
-    const credential=input('token','',{type:'password',autocomplete:'new-password',maxLength:131072,placeholder:data.tunnel.token_configured?'已保存；留空保持原值':'粘贴 tunnel token 或 Cloudflare 完整命令'});
-    credential.addEventListener('paste',event=>{
-      const pasted=event.clipboardData?.getData('text/plain');if(!pasted||!/[\r\n]/.test(pasted))return;
-      // Password inputs strip newlines; preserve word boundaries when pasting multi-line instructions.
-      event.preventDefault();const start=credential.selectionStart,end=credential.selectionEnd,room=credential.maxLength-credential.value.length+end-start;
-      credential.setRangeText(pasted.replace(/\\\r?\n/g,'').replace(/[\r\n]+/g,' ').slice(0,Math.max(0,room)),start,end,'end');
-    });
+    const credential=tunnelCredential(data.tunnel.token_configured?'已保存；留空保持原值':'粘贴 tunnel token 或 Cloudflare 完整命令');
     tunnel.append(wizardForm('连接凭据',[field('Tunnel token 或完整命令（只保存 token，不回读）',credential)],'保存 token',value=>api('/api/onboarding/tunnel','POST',value)));
     tunnel.append(facts([['连接状态',data.tunnel.state],['Published application 的 Service URL',data.tunnel.origin]]),note('在 tunnel 的 Routes → Published application 配置自己的域名，Service URL 必须是 http://webhook:8791。不要填管理端口 8792。'));
     let fallback=false;

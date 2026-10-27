@@ -26,7 +26,7 @@
 | `/api/environments/:id/stats` | GET | 范围内实时资源：CPU、内存、进程数、网络、磁盘读写和工作区占用（工作区每分钟最多统计一次），不占用项目锁 |
 | `/api/environments/:id/delete` | POST | 仅超级管理员，另需 `confirm:true`；删除容器／网络，保留卷 |
 | `/api/models`、`/api/models/:id` | GET / POST、GET / PATCH / DELETE | 范围内模型，字段 `repository_id,api_url,api_key,model_name`；PATCH 带 `version`；详情中的 `model.used_by` 仅向有删除权限者返回实际选用仓库 `[{repository_id,full_name}]` |
-| `/api/models/:id` | DELETE | 权限同 PATCH：项目管理员可删本项目专属模型，共享模型仅超级管理员可删；不可见或未知模型返回 404 `model_not_found`，可见共享模型被项目管理员删除返回 403。正文 `{}`，无需 `version`；事务内清空选用策略、删除单价和共享关系及模型配置，销毁封存的 Key，审计 `model.deleted`。响应 `{ok:true,cleared_repository_ids:[...]}`，不含 Key；保留历史模型请求和成本快照，不取消已运行任务，之后找不到模型沿用 `model_not_configured`／`waiting_configuration` |
+| `/api/models/:id` | DELETE | 权限同 PATCH：项目管理员可删本项目专属模型，共享模型仅超级管理员可删；不可见或未知模型返回 404 `model_not_found`，可见共享模型被项目管理员删除返回 403。正文 `{}`，无需 `version`；事务内清空选用策略、删除单价和共享关系及模型配置，销毁封存的 Key；它是接入向导的默认模型时一并清除该默认（`/api/onboarding` 的 `model_id` 变为 null），审计 `model.deleted`。响应 `{ok:true,cleared_repository_ids:[...]}`，不含 Key；保留历史模型请求和成本快照，不取消已运行任务，之后找不到模型沿用 `model_not_configured`／`waiting_configuration` |
 | `/api/models/:id/projects`、`/api/models/:id/credentials/revoke` | PUT、POST | 超级管理员分配共享模型；有权编辑者撤销模型 Key |
 | `/api/models/endpoints?api_url=` | GET | 不需要 Key 的地址解析：返回 `chat_url`、`models_url` 和 `has_v1`（去掉末尾 `/` 和 `/chat/completions` 后，路径是否以 `/v1` 结尾）；不会添加或删除 `/v1`。模型的读写响应也带同样内容的 `endpoints` |
 | `/api/models/upstream`、`/api/models/test` | POST | 未保存的模型：用提交的 `api_url,api_key` 获取上游模型列表；测试另带 `model_name`，发一次最小的 Chat Completions 请求。带 `repository_id` 时要求该项目的管理权限，为 null 时只允许超级管理员；不写数据库 |

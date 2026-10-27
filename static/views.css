@@ -143,5 +143,5 @@ dialog.confirm-dialog::backdrop{background:#16374485}
 .confirm-actions button{min-width:76px;justify-content:center}
 button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:760px){.confirm-head{padding:18px 18px 6px}.confirm-body,.confirm-status{padding-left:18px;padding-right:18px}.confirm-actions{padding:12px 18px}.confirm-actions button{flex:1}}
-/* Global settings: version and deployment-wide defaults side by side, stacking on narrow screens. */
-.settings-panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;padding:14px;align-items:start}.settings-panel .side-card h3{font-size:15px}
+/* Global settings: version, deployment-wide defaults and wizard settings side by side, stacking on narrow screens; the shared model list spans the full width. */
+.settings-panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;padding:14px;align-items:start}.settings-panel .side-card h3{font-size:15px}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}

@@ -75,6 +75,21 @@ test('only a super administrator deletes a shared model and clears every selecte
   assert.ok(h.store.get('SELECT 1 FROM models WHERE id=?', outside.id));
 });
 
+test('deleting the wizard\'s default shared model clears the default, and only that model does', async t => {
+  const { h, admin, create } = await fixture(t), chosen = await create(admin, null), other = await create(admin, null);
+  const pointer = async () => (await admin('/api/onboarding')).value.model_id;
+  assert.equal((await admin('/api/onboarding/model', 'POST', { model_id: chosen.id })).status, 201);
+  assert.equal((await admin(`/api/models/${other.id}`, 'DELETE', {})).status, 200); assert.equal(await pointer(), chosen.id);
+  // A refused deletion keeps the model and the default together.
+  h.store.db.exec("CREATE TRIGGER fail_model_audit BEFORE INSERT ON audit WHEN NEW.action='model.deleted' BEGIN SELECT RAISE(ABORT,'fixture failure'); END");
+  assert.equal((await admin(`/api/models/${chosen.id}`, 'DELETE', {})).status, 503); assert.equal(await pointer(), chosen.id);
+  h.store.db.exec('DROP TRIGGER fail_model_audit');
+  assert.equal((await admin(`/api/models/${chosen.id}`, 'DELETE', {})).status, 200);
+  assert.equal(await pointer(), null); assert.equal(h.store.get("SELECT count(*) n FROM settings WHERE key='onboarding.model'").n, 0);
+  // The wizard's own rule still applies: only a shared model with a key can become the default again.
+  assert.deepEqual((await admin('/api/onboarding/model', 'POST', { model_id: chosen.id })).value, { error: 'shared_model_required' });
+});
+
 test('deletion rolls every change back when its audit fails, and an unused model needs no version', async t => {
   const { h, admin, member, create } = await fixture(t), model = await create(member, '101');
   await member('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
@@ -147,4 +162,14 @@ test('a model detail failure stays on the row through a status refresh without s
   const failure = page.run('outcome').querySelector('p'); assert.equal(failure.textContent, '404 · model_not_found');
   await page.run('refreshProjectStatus(renderToken)');
   assert.equal(page.run('outcome').querySelector('p'), failure); assert.deepEqual(page.requests, ['GET /api/models/m']); assert.equal(page.run('reloads'), 0);
+});
+
+test('the project model page keeps the shared model card for super administrators', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], () => [200, { models: [{ id: 's', repository_id: null, model_name: 'shared', api_url: 'https://model.invalid/v1', key_configured: true }] }]);
+  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; current = { id: '101', section: 'model', policy: { model_id: null } };");
+  const cards = page.run('modelSection()'); await settle();
+  const shared = cards.find(card => card.querySelector('h3').textContent === '部署共享模型');
+  assert.deepEqual(shared.querySelectorAll('.model-address').map(node => node.textContent), ['shared · https://model.invalid/v1']);
+  assert.equal(shared.querySelector('details summary').textContent, '添加部署共享模型');
+  page.run("me.role = 'project_admin';"); assert.ok(!page.run('modelSection()').some(card => card.querySelector('h3').textContent === '部署共享模型'));
 });
