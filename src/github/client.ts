@@ -56,6 +56,8 @@ export async function revokeInstallationToken(apiUrl: string, token: string) {
 }
 export class GitHub {
   token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = ''; permissions: Record<string,string> = {};
+  // The repository's HTTPS clone URL as GitHub reports it; the Git cache fetches from it without putting the token in it.
+  cloneUrl = '';
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
@@ -127,7 +129,7 @@ export class GitHub {
     }
     const repo = await this.request('GET','/repositories/' + this.repository.id);
     if (String(repo.id) !== this.repository.id || String(repo.owner?.id) !== this.repository.owner_id) stop('github_repository_scope_changed','waiting_permission');
-    this.fullName = repo.full_name; this.defaultBranch = repo.default_branch;
+    this.fullName = repo.full_name; this.defaultBranch = repo.default_branch; this.cloneUrl = typeof repo.clone_url === 'string' ? repo.clone_url : '';
     if (!this.actorId || !this.defaultBranch || !/^[\w.-]+\/[\w.-]+$/.test(this.fullName)) stop('github_repository_invalid');
     return repo;
   }

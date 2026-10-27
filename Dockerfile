@@ -14,6 +14,8 @@ RUN npm ci --omit=dev --ignore-scripts
 
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
+# git keeps the repository mirrors (/data/git-cache) that tasks copy their files from.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --no-create-home bot \
     && mkdir /data /keys /internal /tunnel && chown bot:bot /data /keys /internal /tunnel && chmod 700 /data /keys /tunnel && chmod 750 /internal
 COPY --from=dependencies /app/node_modules ./node_modules

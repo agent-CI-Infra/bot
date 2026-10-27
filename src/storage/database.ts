@@ -69,8 +69,12 @@ export class Store {
       object_number: 'INTEGER', head_sha: 'TEXT', source_task_id: 'TEXT', source_delivery_id: 'TEXT', generation: 'INTEGER',
       workspace_id: 'TEXT', messages: 'TEXT', claim_token: 'TEXT', error_code: 'TEXT', attempt: 'INTEGER NOT NULL DEFAULT 1',
       next_run_at: 'INTEGER NOT NULL DEFAULT 0',retry_count:'INTEGER NOT NULL DEFAULT 0', created_at: "TEXT NOT NULL DEFAULT ''", updated_at: "TEXT NOT NULL DEFAULT ''" });
+    // A running task holds its own claim; a repository may hold several, up to its concurrency. The earlier
+    // one-row-per-repository lock table is replaced (claims never survive a restart, so nothing is migrated).
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS task_unique_key ON tasks(unique_key);
-      CREATE TABLE IF NOT EXISTS task_locks(repository_id TEXT PRIMARY KEY,task_id TEXT,token TEXT,fence INTEGER NOT NULL DEFAULT 0);
+      DROP TABLE IF EXISTS task_locks;
+      CREATE TABLE IF NOT EXISTS task_claims(task_id TEXT PRIMARY KEY REFERENCES tasks(id),repository_id TEXT NOT NULL,token TEXT NOT NULL,claimed_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS task_claims_repository ON task_claims(repository_id);
       CREATE TABLE IF NOT EXISTS task_tools(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),request TEXT NOT NULL,result TEXT,state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS github_effects(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),kind TEXT NOT NULL,request TEXT NOT NULL,
         state TEXT NOT NULL,response TEXT,marker TEXT NOT NULL);
@@ -87,6 +91,8 @@ export class Store {
     // Review rules: which events start a review, the comment language and the administrator's project-specific guidance.
     extend('policies', { review_issues: 'INTEGER NOT NULL DEFAULT 1', review_pull_requests: 'INTEGER NOT NULL DEFAULT 1', review_pr_updates: 'INTEGER NOT NULL DEFAULT 1',
       review_language: "TEXT NOT NULL DEFAULT 'auto'", review_instructions: "TEXT NOT NULL DEFAULT ''", rule_overrides: "TEXT NOT NULL DEFAULT '{}'" });
+    // How many tasks the project computer runs at once; NULL follows the global default in settings.
+    extend('policies', { task_concurrency: 'INTEGER' });
     // Repositories each account can see on GitHub. Seeing a repository does not register or enable it.
     this.db.exec(`CREATE TABLE IF NOT EXISTS installed_repositories(account_id TEXT NOT NULL REFERENCES accounts(id),repository_id TEXT NOT NULL,
         installation_id TEXT,full_name TEXT NOT NULL,owner_id TEXT NOT NULL,owner_login TEXT NOT NULL DEFAULT '',private INTEGER NOT NULL DEFAULT 0,

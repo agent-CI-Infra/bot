@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Projects } from '../manager/projects.mjs';
+import { ManagerError } from '../manager/docker.mjs';
 import { FakeDocker } from './fake-docker.mjs';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { createServer } from 'node:http';
@@ -135,7 +136,7 @@ test('packages build a derived image once, variables reach the container, and th
   // Commands are not capped by the project: a caller's own timeout is kept, and none means the command runs until it ends.
   await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'command', command: 'sleep 1', timeout_ms: 3600000 } });
   assert.deepEqual(['timeout_ms', 'wait'].map(k => f.docker.runs.find(r => r.command === 'sleep 1')[k]), [3600000, 3600000 + 60000]);
-  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: 'w1', command: 'npm test' } });
+  await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: id(), command: 'npm test' } });
   assert.deepEqual(['timeout_ms', 'wait'].map(k => f.docker.runs.find(r => r.command === 'npm test')[k]), [null, 0]);
   await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'command', command: 'true', timeout_ms: -1 } }), /invalid_runner_request/);
   // A max_command_minutes saved by an earlier version is no longer part of the spec.
@@ -162,14 +163,17 @@ test('both databases use default temporary storage so large sorts can spill to t
 });
 
 test('publication replies are allowed and policy cleanup preserves the waiting agent until task release', async t => {
+  // Cleanup after a policy command and a task's release end only that task's processes; the last task clears the computer.
   const f = fixture(t); await f.projects.register('101');
   const workspace_id = id(), execute = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
   await execute({ type: 'workspace_agent_pull_request', workspace_id, request_id: id(), base64: Buffer.from('{}').toString('base64'), offset: 0, final: true });
   assert.ok(f.docker.runs.some(r => r.type === 'workspace_agent_pull_request'));
   await execute({ type: 'workspace_command', workspace_id, command: 'node --test', timeout_ms: null });
-  assert.equal(f.docker.runs.at(-1).type, 'reap'); assert.equal(f.docker.runs.at(-1).workspace_id, workspace_id);
+  assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).workspace_id, f.docker.runs.at(-1).keep_agent], ['reap', workspace_id, true]);
   await execute({ type: 'reap', workspace_id });
-  assert.equal(f.docker.runs.at(-1).type, 'reap'); assert.equal(f.docker.runs.at(-1).workspace_id, undefined);
+  assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).workspace_id, f.docker.runs.at(-1).keep_agent], ['reap', workspace_id, undefined]);
+  await execute({ type: 'reap', workspace_id, idle: true });
+  assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).workspace_id], ['reap', undefined]);
 });
 
 test('Git snapshot plumbing waits for completion without changing other runner operation timeouts', async t => {
@@ -178,4 +182,73 @@ test('Git snapshot plumbing waits for completion without changing other runner o
     await f.projects.operate('101','execute',{operation_id:id(),generation:1,request:{type,workspace_id:id()}});
     assert.equal(f.docker.runs.at(-1).wait,type==='workspace_read'?90000:0);
   }
+});
+
+// Task commands that wait until the test finishes them; a stopped container fails the ones still running, as Docker does.
+function gatedRunner(docker) {
+  const waiting = new Map(), started = [], runner = docker.runner.bind(docker), request = docker.request.bind(docker);
+  docker.runner = async (container, input, wait) => {
+    if (input.type !== 'workspace_command') return runner(container, input, wait);
+    docker.runs.push({ ...input, wait }); started.push(input.command);
+    if (input.command === 'boom') throw new ManagerError('runner_failed');
+    await new Promise((resolve, reject) => waiting.set(input.command, { resolve, reject }));
+    return { ok: true, result: { exit_code: 0, output: input.command } };
+  };
+  docker.request = async (method, path, body) => {
+    if (path.endsWith('/stop?t=2')) for (const [command, call] of waiting) { waiting.delete(command); call.reject(new ManagerError('runner_failed')); }
+    return request(method, path, body);
+  };
+  return { started, finish: command => { waiting.get(command).resolve(); waiting.delete(command); } };
+}
+const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+
+test('runner calls share a computer up to its parallel setting; a busy computer still takes calls and extra ones wait', async t => {
+  const f = fixture(t); await f.projects.register('101'); const g = gatedRunner(f.docker);
+  const run = command => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: id(), command } });
+  assert.equal(f.projects.describe('101').parallel, 1);
+  // Unchanged settings keep one call at a time, as before.
+  const a = run('a'), b = run('b'); await settle();
+  assert.deepEqual(g.started, ['a']); assert.equal(f.projects.get('101').state, 'busy');
+  g.finish('a'); await a; await settle(); assert.deepEqual(g.started, ['a', 'b']);
+  // Raising the limit admits a waiting call at once; a busy computer does not refuse new calls.
+  const c = run('c'); await settle(); assert.deepEqual(g.started, ['a', 'b']);
+  assert.equal(f.projects.parallelism('101', 2).parallel, 2); await settle(); assert.deepEqual(g.started, ['a', 'b', 'c']);
+  const d = run('d'); await settle(); assert.deepEqual(g.started, ['a', 'b', 'c']);
+  g.finish('b'); await b; await settle(); assert.deepEqual(g.started, ['a', 'b', 'c', 'd']); assert.equal(f.projects.get('101').state, 'busy');
+  g.finish('c'); g.finish('d'); await Promise.all([c, d]); assert.equal(f.projects.get('101').state, 'ready');
+  for (const value of [0, 33, 1.5, '2']) assert.throws(() => f.projects.parallelism('101', value), /invalid_parallel/);
+  assert.throws(() => f.projects.parallelism('202', 2), /project_not_registered/);
+  // A malformed request is refused before it can touch the computer.
+  await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: 'w1', command: 'x' } }), /invalid_runner_request/);
+  assert.equal(f.projects.get('101').state, 'ready');
+});
+
+test('a stop interrupts every running command and runs alone; a configure waits for running commands and holds back new ones', async t => {
+  const f = fixture(t); await f.projects.register('101'); f.projects.parallelism('101', 3); const g = gatedRunner(f.docker);
+  const run = command => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: id(), command } });
+  const configured = [];
+  const first = run('first'); await settle();
+  const configure = f.projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { cpus: 3 } }).then(value => { configured.push('configure'); return value; });
+  const later = run('later'); await settle();
+  // The configure waits for the running command; the call that came after it waits behind the configure.
+  assert.deepEqual(g.started, ['first']); assert.deepEqual(configured, []);
+  g.finish('first'); await first; await configure; await settle(); assert.deepEqual(configured, ['configure']);
+  assert.deepEqual(g.started, ['first', 'later']); g.finish('later'); await later;
+  const one = run('one'), two = run('two'); await settle(); assert.deepEqual(g.started.slice(-2), ['one', 'two']);
+  const stopped = await f.projects.operate('101', 'stop', { operation_id: id(), generation: 1 });
+  await assert.rejects(one, /runner_failed/); await assert.rejects(two, /runner_failed/);
+  assert.equal(stopped.state, 'stopped'); assert.equal(f.projects.get('101').state, 'stopped');
+  await assert.rejects(run('after'), /environment_not_ready/);
+});
+
+test('a failed runner call ends only its own task workspace; the computer and the other task keep running', async t => {
+  const f = fixture(t); await f.projects.register('101'); f.projects.parallelism('101', 2); const g = gatedRunner(f.docker);
+  const mine = id(), other = id(), started = f.projects.get('101').started_at;
+  const long = f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: other, command: 'long' } });
+  await settle();
+  await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: mine, command: 'boom' } }), /runner_failed/);
+  const reaps = f.docker.runs.filter(r => r.type === 'reap');
+  assert.deepEqual(reaps.map(r => r.workspace_id), [mine]); assert.equal(f.projects.get('101').state, 'busy'); assert.equal(f.projects.get('101').started_at, started);
+  assert.equal(f.docker.containers.get(f.projects.names('101', 1).container).State.Running, true);
+  g.finish('long'); assert.equal((await long).ok, true); assert.equal(f.projects.get('101').state, 'ready');
 });

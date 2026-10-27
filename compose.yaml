@@ -37,6 +37,8 @@ services:
       BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
       BOT_TUNNEL_TOKEN_FILE: /tunnel/token
       BOT_TUNNEL_METRICS_URL: http://webhook:8794
+      # The version the global settings page shows: the tag these images were pulled with.
+      BOT_IMAGE_TAG: "${BOT_IMAGE_TAG:-latest}"
     stop_grace_period: 100s
     ports:
       - "0.0.0.0:${BOT_WEBHOOK_PORT:-8791}:8791"

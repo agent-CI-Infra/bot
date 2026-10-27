@@ -31,7 +31,7 @@ test('pushed bot PR waits for its delayed head, completes automatically, pushes 
  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true});
  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,phase,head_sha) VALUES('original','101','development.issue','pr_opened','original',?,1,'done',?)",JSON.stringify({review:{implementation_goal:'Implement the requested fix'}}),old);
  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number,phase,head_sha,claim_token,result) VALUES('revision','101','development.pr','running','revision',?,7,'publish',?,'claim','{}')",JSON.stringify({object:pr}),old);
- h.store.run("INSERT INTO task_locks(repository_id,task_id,token) VALUES('101','revision','claim')");
+ h.store.run("INSERT INTO task_claims VALUES('revision','101','claim',?)",new Date().toISOString());
  h.store.run("INSERT INTO bot_branches VALUES('101','bot/issue-1-original','original')");
  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1-original',?,'original',0)",old);
  const candidate={files:[{path:'fix.js',sha:blobSha(data),base64:data.toString('base64'),mode:'100644'}],tree_sha:tree,branch:pr.head.ref,owner_task_id:'original',expected_sha:old,base_sha:old,base_branch:'main',pr_number:7,date:'2026-10-23T00:00:00Z',summary:'Updated the implementation and ran ten tests.',change_title:'Fix requested behavior',validation:{command:'node --test',exit_code:0}};

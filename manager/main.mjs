@@ -10,6 +10,13 @@ const projects = new Projects({ database: process.env.BOT_MANAGER_DATABASE || '/
   deployment: createHash('sha256').update(token).digest('hex').slice(0, 16), image: process.env.BOT_PROJECT_IMAGE || 'department-bot-project-computer:local',
   egress: process.env.BOT_PROJECT_EGRESS !== 'false' });
 await projects.recover();
+// A JSON object request body of at most 1.5 MB.
+async function json(req) {
+  let bytes = ''; for await (const chunk of req) { bytes += chunk; if (Buffer.byteLength(bytes) > 1500000) throw new ManagerError('payload_too_large', 413); }
+  let input; try { input = JSON.parse(bytes); } catch { throw new ManagerError('invalid_json', 400); }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ManagerError('invalid_input', 400);
+  return input;
+}
 let checking = false;
 const timer = setInterval(async () => { if (checking) return; checking = true; try { await projects.check(); } finally { checking = false; } }, 5000);
 const server = createServer(async (req, res) => {
@@ -22,15 +29,18 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/v1/projects') result = projects.list();
     else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
     else if (req.method === 'GET' && /^\/v1\/projects\/[1-9]\d{0,19}\/stats$/.test(path)) result = await projects.stats(path.split('/')[3]);
-    else {
+    else if (req.method === 'PUT' && /^\/v1\/projects\/[1-9]\d{0,19}\/parallel$/.test(path)) {
+      const input = await json(req);
+      if (Object.keys(input).some(k => k !== 'tasks')) throw new ManagerError('invalid_input', 400);
+      result = projects.parallelism(path.split('/')[3], input.tasks);
+    } else {
       const match = /^\/v1\/projects\/([1-9]\d{0,19})(?:\/(start|stop|reset|delete|execute|configure))?$/.exec(path);
       if (!match) throw new ManagerError('not_found', 404);
       if (req.method === 'GET' && !match[2]) result = projects.describe(match[1]);
       else if (req.method === 'PUT' && !match[2]) result = await projects.register(match[1]);
       else if (req.method === 'POST' && match[2]) {
-        let bytes = ''; for await (const chunk of req) { bytes += chunk; if (Buffer.byteLength(bytes) > 1500000) throw new ManagerError('payload_too_large', 413); }
-        let input; try { input = JSON.parse(bytes); } catch { throw new ManagerError('invalid_json', 400); }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['operation_id','generation','request'].includes(k))) throw new ManagerError('invalid_input', 400);
+        const input = await json(req);
+        if (Object.keys(input).some(k => !['operation_id','generation','request'].includes(k))) throw new ManagerError('invalid_input', 400);
         result = await projects.operate(match[1], match[2], input);
       } else throw new ManagerError('not_found', 404);
     }
