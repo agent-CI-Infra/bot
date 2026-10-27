@@ -49,7 +49,9 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   if (task) {
     const row = store.get(`SELECT *,${repositoryName},${pushedSha} FROM tasks WHERE id=? AND ${filter.sql}`, task[1]!, ...filter.args);
     if (!row) return fail(404, 'task_not_found');
-    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id) } : { task: withTaskMetrics(store,[publicTask(row)])[0],publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
+    const fault=row.error_code&&!task[2]?store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='fault' AND json_extract(content,'$.code')=? ORDER BY rowid DESC LIMIT 1",row.id,row.error_code):null;
+    const errorDetail=fault?JSON.parse(fault.content).detail:null;
+    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],error_detail:errorDetail||null},publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
   }
   if (path === '/api/audit') return { audit: store.all(`SELECT * FROM audit WHERE ${filter.sql}${repo ? ' AND repository_id=?' : ''}
     ORDER BY created_at DESC LIMIT 100`, ...filter.args, ...(repo ? [repo] : [])) };

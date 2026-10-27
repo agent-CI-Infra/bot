@@ -1,7 +1,7 @@
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
-import { GitHub } from '../github/client.js';
-import { blobSha, clip, operationId, Redactor, safePath, stop } from './common.js';
+import { GitHub, repositoryTree } from '../github/client.js';
+import { blobSha, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha } from './common.js';
 import { randomId } from '../core/security.js';
 
 export class Workspace {
@@ -16,11 +16,11 @@ export class Workspace {
     if(!row)this.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,this.task.id,JSON.stringify(input));
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_snapshot','workspace_finalize','workspace_blob'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
-    catch{return stop('execution_interrupted','waiting_environment');}
+    catch{return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${request.type}${request.path?' '+request.path:''}`);}
     await this.guard();
-    const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed'});
+    const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
     this.store.run("UPDATE task_tools SET state='completed',result=? WHERE id=?",JSON.stringify(result),id);
     // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
@@ -41,54 +41,69 @@ export class Workspace {
       request:{type:'reap',workspace_id:this.task.workspace_id}}).catch(()=>{});
   }
   async write(key:string,path:string,data:Buffer,mode='100644',snapshot=false,hash?:string){
-    safePath(path);if(this.redactor.contains(data))stop('credential_in_repository');
+    safePath(path);if(this.redactor.contains(data))stop('credential_in_repository',undefined,`Credential found in repository file: ${path}`);
     for(let offset=0;offset<data.length||offset===0;offset+=30000){
       const result=await this.call(key+':'+offset,{type:'workspace_write',path,base64:data.subarray(offset,offset+30000).toString('base64'),offset,
         final:offset+30000>=data.length,mode,snapshot,...(hash?{sha:hash}:{})});
-      if(result.error)stop('workspace_write_failed','waiting_environment');
+      if(result.error)stop('workspace_write_failed','waiting_environment',`Could not write ${path} at offset ${offset}: ${result.detail||result.error}`);
     }
   }
   async prepare(github:GitHub,commitSha:string){
-    const commit=await github.request('GET',github.path('/git/commits/'+commitSha));
-    const tree=await github.request('GET',github.path('/git/trees/'+commit.tree.sha+'?recursive=1'));
-    if(tree.truncated||!Array.isArray(tree.tree))stop('repository_tree_truncated','waiting_environment');
-    const files=tree.tree.filter((f:any)=>f.type!=='tree');
-    if(files.length>2000||files.some((f:any)=>f.type!=='blob'||!['100644','100755','120000'].includes(f.mode)||Number(f.size)>1024*1024))stop('repository_snapshot_limit','waiting_environment');
-    // Bot behavior files are never symlinks. Checked before anything is written, so the retry after a fix starts clean.
-    if(files.some((f:any)=>f.mode==='120000'&&(f.path.startsWith('.bot/')||/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(f.path))))stop('unsafe_bot_rule','waiting_configuration');
-    const init=await this.call('prepare:init',{type:'workspace_init',author_email:github.authorEmail()});if(init.error)stop('workspace_init_failed','waiting_environment');
-    let bytes=0,contextBytes=0;const materials:any[]=[];
-    for(const file of files){
-      safePath(file.path);
-      const blob=await github.request('GET',github.path('/git/blobs/'+file.sha));
-      if(blob.encoding!=='base64')stop('unsupported_blob_encoding');
-      const data=Buffer.from(blob.content,'base64');bytes+=data.length;
-      if(bytes>32*1024*1024||data.length>1024*1024||blobSha(data)!==file.sha)stop('repository_blob_limit_or_hash');
-      await this.write('prepare:'+file.path,file.path,data,file.mode,true,file.sha);
-      if(contextBytes<100000&&!data.includes(0)){
-        const text=data.toString('utf8').slice(0,12000);contextBytes+=text.length;materials.push({path:file.path,content:text,truncated:text.length<data.length});
+    let bytes=0,contextBytes=0,fallback=false;const accepted:any[]=[],skipped:any[]=[],notes:string[]=[],materials:any[]=[];
+    try{
+      const commit=await github.request('GET',github.path('/git/commits/'+commitSha));
+      const tree=await repositoryTree(github,commit.tree.sha),files=tree.tree.filter((f:any)=>f.type!=='tree');fallback=tree.directory_fallback;
+      // Preserve rule symlink preflight before any workspace writes, including after a truncated-tree fallback.
+      const unsafe=files.find((f:any)=>f.mode==='120000'&&(f.path.startsWith('.bot/')||/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(f.path)));
+      if(unsafe)stop('unsafe_bot_rule','waiting_configuration',`Repository rule is a symbolic link: ${unsafe.path}`);
+      const init=await this.call('prepare:init',{type:'workspace_init',author_email:github.authorEmail()});
+      if(init.error)stop('workspace_init_failed','waiting_environment',`Could not initialize workspace: ${init.detail||init.error}`);
+      for(const file of files){
+        safePath(file.path);
+        if(file.type!=='blob'||!['100644','100755','120000'].includes(file.mode)){
+          skipped.push(file);notes.push(`Skipped ${file.path}: type ${file.type}, mode ${file.mode}; entry is not downloaded (submodules are not cloned).`);continue;
+        }
+        const blob=await github.snapshotBlob(file.sha);
+        if(blob.skipped){
+          skipped.push(file);notes.push(`Skipped ${file.path}: GitHub blob API HTTP ${blob.status}, size ${blob.size??file.size??'unknown'} bytes; ${clip(blob.message,2000)}`);continue;
+        }
+        if(blob.encoding!=='base64')stop('unsupported_blob_encoding',undefined,`Unsupported blob encoding for ${file.path}: ${blob.encoding}`);
+        const data=Buffer.from(blob.content,'base64'),actual=blobSha(data);
+        if(actual!==file.sha)stop('repository_blob_limit_or_hash',undefined,`Blob hash mismatch for ${file.path}: expected ${file.sha}, actual ${actual}`);
+        await this.write('prepare:'+file.path,file.path,data,file.mode,true,file.sha);
+        accepted.push({path:file.path,sha:file.sha,mode:file.mode});bytes+=data.length;
+        if(contextBytes<100000&&!data.includes(0)){
+          const text=data.toString('utf8').slice(0,12000);contextBytes+=text.length;materials.push({path:file.path,content:text,truncated:text.length<data.length});
+        }
       }
+      // Skipped entries remain upstream. Validate the local tree against precisely the accepted manifest.
+      const expected=skipped.length?treeSha(accepted):commit.tree.sha;
+      const ready=await this.call('prepare:git',{type:'workspace_snapshot',tree_sha:expected});
+      if(ready.error||ready.tree_sha!==expected)stop('workspace_snapshot_mismatch','waiting_environment',`Snapshot tree mismatch: expected ${expected}, actual ${ready.tree_sha||'unavailable'}; ${ready.detail||ready.error||'runner returned a different tree'}`);
+      return {files:accepted,skipped_files:skipped.map(({path,sha,mode}:any)=>({path,sha,mode})),materials,tree_sha:expected,source_tree_sha:commit.tree.sha,
+        coverage:[`Snapshot: ${accepted.length} files, ${bytes} bytes; skipped ${skipped.length} entries`,`Initial model context: ${materials.length} files; other accepted files available through tools`,'Git workspace contains a fixed snapshot, not full upstream history']};
+    }finally{
+      this.log({type:'snapshot',sha:commitSha,files:accepted.length,bytes,skipped:skipped.length,directory_fallback:fallback,detail:describeEntries(notes)});
     }
-    const ready=await this.call('prepare:git',{type:'workspace_snapshot',tree_sha:commit.tree.sha});
-    if(ready.error||ready.tree_sha!==commit.tree.sha)stop('workspace_snapshot_mismatch','waiting_environment');
-    return {files:files.map((f:any)=>({path:f.path,sha:f.sha,mode:f.mode})),materials,tree_sha:commit.tree.sha,
-      coverage:[`Snapshot: ${files.length} files, ${bytes} bytes`,`Initial model context: ${materials.length} files; other files available through tools`,'Git workspace contains a fixed snapshot, not full upstream history' ]};
   }
   async artifact(key:string){
     const result=await this.call(key,{type:'workspace_finalize'});
-    if(result.error||!result.tree_sha||!Array.isArray(result.files))stop('candidate_unavailable','waiting_environment');
+    if(result.error||!result.tree_sha||!Array.isArray(result.files))stop('candidate_unavailable','waiting_environment',`Could not finalize workspace: ${result.detail||result.error||'missing manifest'}`);
     return result;
   }
-  async contents(manifest:any[]){
-    const files:any[]=[];let total=0;
+  async contents(manifest:any[],upstream:any[]=[]){
+    const files:any[]=[],original=new Map(upstream.map(file=>[file.path,file]));
     for(const file of manifest){
-      safePath(file.path);const chunks:Buffer[]=[];
+      safePath(file.path);
+      // Existing upstream objects need no round trip through a base64 candidate buffer.
+      if(original.get(file.path)?.sha===file.sha){files.push({path:file.path,mode:file.mode,sha:file.sha});continue;}
+      const chunks:Buffer[]=[];
       for(let offset=0;offset<file.size||offset===0;offset+=30000){
         const part=await this.call(`candidate:blob:${file.sha}:${offset}`,{type:'workspace_blob',sha:file.sha,offset});
-        if(part.error)stop('candidate_blob_unavailable','waiting_environment');chunks.push(Buffer.from(part.base64,'base64'));
+        if(part.error)stop('candidate_blob_unavailable','waiting_environment',`Could not read candidate ${file.path} at offset ${offset}: ${part.detail||part.error}`);chunks.push(Buffer.from(part.base64,'base64'));
       }
-      const bytes=Buffer.concat(chunks);total+=bytes.length;
-      if(total>32*1024*1024||blobSha(bytes)!==file.sha||this.redactor.contains(bytes))stop('candidate_blob_invalid');
+      const bytes=Buffer.concat(chunks);
+      if(blobSha(bytes)!==file.sha||this.redactor.contains(bytes))stop('candidate_blob_invalid',undefined,`Candidate blob hash or credential check failed: ${file.path}`);
       files.push({path:file.path,mode:file.mode,sha:file.sha,base64:bytes.toString('base64')});
     }
     return files;

@@ -1,6 +1,35 @@
 import { createSign } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
-import { Redactor, stop, TaskError } from '../agent/common.js';
+import { Redactor, safePath, stop, TaskError } from '../agent/common.js';
+
+type SnapshotTree = {tree:any[],directory_fallback:boolean};
+const treeCache=new WeakMap<object,Map<string,Promise<SnapshotTree>>>();
+// Rule preflight and workspace preparation share the same complete listing for an immutable tree.
+export function repositoryTree(github:Pick<GitHub,'request'|'path'>,sha:string):Promise<SnapshotTree>{
+  let cache=treeCache.get(github);if(!cache){cache=new Map();treeCache.set(github,cache);}
+  const saved=cache.get(sha);if(saved)return saved;
+  const load=async():Promise<SnapshotTree>=>{
+    const recursive=await github.request('GET',github.path('/git/trees/'+sha+'?recursive=1'));
+    if(!recursive.truncated){
+      if(!Array.isArray(recursive.tree))stop('repository_tree_invalid','waiting_environment',`Missing tree entries: ${sha}`);
+      for(const entry of recursive.tree)safePath(entry.path);
+      return {tree:recursive.tree,directory_fallback:false};
+    }
+    // Discard the partial recursive response and walk each directory from the fixed tree.
+    const tree:any[]=[],pending=[{path:'',sha}];
+    while(pending.length){
+      const dir=pending.pop()!,part=await github.request('GET',github.path('/git/trees/'+dir.sha));
+      if(part.truncated||!Array.isArray(part.tree))stop('repository_tree_invalid','waiting_environment',`Incomplete directory listing: ${dir.path||'/'} (${dir.sha})`);
+      for(const entry of part.tree){
+        safePath(entry.path);if(entry.path.includes('/'))stop('unsafe_repository_path',undefined,`Invalid directory entry: ${dir.path}/${entry.path}`);
+        const path=dir.path?dir.path+'/'+entry.path:entry.path;safePath(path);tree.push({...entry,path});
+        if(entry.type==='tree')pending.push({path,sha:entry.sha});
+      }
+    }
+    return {tree,directory_fallback:true};
+  };
+  const result=load();cache.set(sha,result);result.catch(()=>cache!.delete(sha));return result;
+}
 
 // A GitHub App JWT signed in the control plane; it never leaves this process.
 export function appJwt(appId: string, privateKey: string): string {
@@ -30,7 +59,7 @@ export class GitHub {
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
-  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false): Promise<any> {
+  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false): Promise<any> {
     await this.guard();
     let response: Response;
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
@@ -44,12 +73,22 @@ export class GitHub {
       if (error?.message === 'Git Repository is empty.' || error?.message === 'Git Repository is empty') return null;
     }
     if (!response.ok) {
+      if(snapshotBlob&&[403,413,422].includes(response.status)){
+        const error=await response.json().catch(()=>null);
+        // Do not mistake denied permissions or rate limiting for a file-size exclusion.
+        if(error?.errors?.some?.((e:any)=>e.code==='too_large')||/\b(?:blob|file)\b.*\btoo large\b/i.test(error?.message||''))
+          return {skipped:true,status:response.status,size:error?.size,message:error?.message||'Blob too large for GitHub API'};
+      }
       if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission');
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait');
       stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed');
     }
-    const value = await response.text(); if (value.length > 48 * 1024 * 1024) stop('github_response_too_large');
+    const value = await response.text(); if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large');
     try { return value ? JSON.parse(value) : {}; } catch { return stop('github_invalid_response'); }
+  }
+  async snapshotBlob(sha:string):Promise<any>{
+    if(!/^[a-f0-9]{40}$/.test(sha))stop('repository_blob_invalid',undefined,`Invalid blob SHA: ${sha}`);
+    return this.request('GET',this.path('/git/blobs/'+sha),undefined,false,this.token,false,true);
   }
   async pages(path: string): Promise<any[]> {
     const rows: any[] = [];

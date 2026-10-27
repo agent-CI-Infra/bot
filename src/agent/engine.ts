@@ -11,7 +11,7 @@ import { agentLoop } from './loop.js';
 import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
-import { Redactor, sha, operationId, stop, TaskError } from './common.js';
+import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors } from '../rules/service.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
@@ -51,7 +51,15 @@ export class TaskEngine {
   async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled(this.active.values());}
   async run(id:string,token:string){
     const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const redactor=new Redactor();
-    const log=(value:unknown)=>this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,JSON.stringify(redactor.clean(value)).slice(0,70000),new Date().toISOString());
+    const log=(value:any)=>{
+      const clean=redactor.clean(value);let content=JSON.stringify(clean);
+      // Never slice serialized JSON: that used to hide the entire reason in the console.
+      if(content.length>70000)content=JSON.stringify({type:clean.type,state:clean.state,code:clean.code,step:clean.step,detail_sha:clean.detail_sha,
+        sha:clean.sha,files:clean.files,bytes:clean.bytes,skipped:clean.skipped,directory_fallback:clean.directory_fallback,
+        detail:clip(clean.detail,6000),output:clip(content,6000),truncated:true});
+      if(value.type==='snapshot'&&this.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='snapshot' ORDER BY rowid DESC LIMIT 1",id)?.content===content)return;
+      this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,content,new Date().toISOString());
+    };
     const guard=async()=>{
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),lock=this.store.get('SELECT * FROM task_locks WHERE repository_id=?',task.repository_id);
       if(current?.claim_token!==token||lock?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled');
@@ -102,7 +110,7 @@ export class TaskEngine {
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
         await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
-        update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
+        update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
       };
       if(task.phase==='prepare'){
@@ -153,7 +161,6 @@ export class TaskEngine {
           effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
         }catch(error){
           if(error instanceof HttpError&&ruleErrors.has(error.code))stop(error.code,'waiting_configuration');
-          if(error instanceof HttpError&&error.code==='rule_tree_truncated')stop('repository_tree_truncated','waiting_environment');
           throw error;
         }
         const snapshot=await workspace.prepare(github,ref.object.sha);
@@ -168,6 +175,7 @@ export class TaskEngine {
         // Classification is optional: a repository whose labels cannot be read is reviewed without them.
         const labels=development?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         input={...input,object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
+          source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
           files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             comments:development&&task.kind.endsWith('.pr')?[]:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(development?{}:{repository_labels:labels}),
@@ -197,7 +205,7 @@ export class TaskEngine {
             const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-          const candidate={...snapshot,files:await workspace!.contents(snapshot.files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,
+          const candidate={...snapshot,files:await workspace!.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,summary:args.summary,change_title:args.change_title,test_command:args.test_command,
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
             branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
@@ -248,9 +256,11 @@ export class TaskEngine {
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,attempt:task.attempt+1});
       }
-      // Keep polling for the first commit or a fixed rule file without repeating the same waiting entry every 30 seconds.
-      if(!((failure.code==='repository_has_no_commit'||ruleErrors.has(failure.code))&&state==='waiting_configuration'&&current?.error_code===failure.code))
-        log({type:'fault',state:failure.state,code:failure.code});
+      // Waiting conditions can be polled every five seconds; retain one copy of an unchanged reason.
+      const previous=this.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='fault' ORDER BY rowid DESC LIMIT 1",id);
+      const last=previous?JSON.parse(previous.content):null,detail=redactor.clean(failure.detail);
+      if(current?.error_code!==failure.code||last?.code!==failure.code||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
+        log({type:'fault',state:failure.state,code:failure.code,...(detail?{detail,detail_sha:sha(detail)}:{})});
     }
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.

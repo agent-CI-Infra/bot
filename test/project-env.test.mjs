@@ -171,3 +171,11 @@ test('publication replies are allowed and policy cleanup preserves the waiting a
   await execute({ type: 'reap', workspace_id });
   assert.equal(f.docker.runs.at(-1).type, 'reap'); assert.equal(f.docker.runs.at(-1).workspace_id, undefined);
 });
+
+test('Git snapshot plumbing waits for completion without changing other runner operation timeouts', async t => {
+  const f=fixture(t);await f.projects.register('101');
+  for(const type of ['workspace_snapshot','workspace_finalize','workspace_blob','workspace_read']){
+    await f.projects.operate('101','execute',{operation_id:id(),generation:1,request:{type,workspace_id:id()}});
+    assert.equal(f.docker.runs.at(-1).wait,type==='workspace_read'?90000:0);
+  }
+});

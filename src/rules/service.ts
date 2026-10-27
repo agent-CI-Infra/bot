@@ -4,7 +4,7 @@ import { parse } from 'yaml';
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, superAdmin } from '../app/auth.js';
 import { fail, fields, type Json } from '../core/security.js';
-import { GitHub } from '../github/client.js';
+import { GitHub, repositoryTree } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
 import type { Manager } from '../projects/service.js';
 
@@ -101,8 +101,7 @@ export class RuleService {
   rememberComputer(id:string,live:any){this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(resolveRules({}, {}, live).computer));}
   cache(id: string, sha: string, files: Record<string, string>) { this.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,files=excluded.files,updated_at=excluded.updated_at', id, sha, JSON.stringify(files), new Date().toISOString()); }
   async fetch(github: GitHub, sha: string) {
-    const commit = await github.request('GET', github.path('/git/commits/' + sha)), tree = await github.request('GET', github.path('/git/trees/' + commit.tree.sha + '?recursive=1'));
-    if (tree.truncated) fail(409, 'rule_tree_truncated');
+    const commit = await github.request('GET', github.path('/git/commits/' + sha)), tree = await repositoryTree(github,commit.tree.sha);
     const entries = tree.tree.filter((f: any) => rulePath(f.path));
     if (entries.length > 38) fail(400, 'too_many_bot_skills'); const files: Record<string, string> = {};
     for (const file of entries) {

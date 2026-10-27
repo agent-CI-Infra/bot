@@ -1,6 +1,6 @@
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
-import { blobSha, operationId, stop, TaskError } from '../agent/common.js';
+import { blobSha, operationId, stop, TaskError, treeSha } from '../agent/common.js';
 import { implementationText, reviewText } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 
@@ -68,16 +68,27 @@ export class Publisher {
       return candidate.remote_sha;
     }
     for(const file of candidate.files){
+      if(file.base64===undefined)continue; // Verified object already belongs to the source snapshot.
       const data=Buffer.from(file.base64,'base64');if(blobSha(data)!==file.sha)stop('candidate_blob_mismatch');
       const blob=await this.github.request('POST',this.github.path('/git/blobs'),{content:file.base64,encoding:'base64'});
       if(blob.sha!==file.sha)stop('github_blob_mismatch');
     }
-    const tree=await this.github.request('POST',this.github.path('/git/trees'),{tree:candidate.files.map((f:any)=>({path:f.path,mode:f.mode,type:'blob',sha:f.sha}))});
-    if(tree.sha!==candidate.tree_sha)stop('github_tree_mismatch');
+    const entries=candidate.files.map((f:any)=>({path:f.path,mode:f.mode,type:'blob',sha:f.sha}));
+    let expected=candidate.tree_sha;
+    if(candidate.skipped_files?.length){
+      // Keep excluded upstream entries, including blobs GitHub will not let us download.
+      // Hashing the merged manifest also rejects a candidate that overwrites an excluded path.
+      expected=treeSha([...candidate.files,...candidate.skipped_files]);
+      const paths=new Set(candidate.files.map((f:any)=>f.path));
+      for(const file of candidate.snapshot_files)if(!paths.has(file.path))entries.push({path:file.path,mode:file.mode,type:'blob',sha:null});
+    }
+    const tree=await this.github.request('POST',this.github.path('/git/trees'),{...(candidate.skipped_files?.length?{base_tree:candidate.source_tree}:{}),tree:entries});
+    if(tree.sha!==expected)stop('github_tree_mismatch');
+    candidate.published_tree_sha=expected;
     const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
     const commit=await this.github.request('POST',this.github.path('/git/commits'),{message:implementationText(candidate,this.task.object_number).title,
-      tree:candidate.tree_sha,parents:[candidate.base_sha],author,committer:author});
-    if(commit.tree?.sha!==candidate.tree_sha)stop('github_commit_tree_mismatch');
+      tree:expected,parents:[candidate.base_sha],author,committer:author});
+    if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch');
     candidate.remote_sha=commit.sha;
     this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
     await this.validate();
