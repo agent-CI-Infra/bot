@@ -10,7 +10,8 @@ import { loadConsole } from './console-page.mjs';
 const commit = 'a'.repeat(40), tree = treeSha([]);
 const settle = () => new Promise(resolve => setTimeout(resolve, 30));
 // Issue reviews on one repository whose agents keep working until the test lets each one finish.
-async function fixture(t) {
+// holdReaps: release requests wait until that many have arrived, so tasks finishing together overlap in their release.
+async function fixture(t, { holdReaps = 0 } = {}) {
   const comments = new Map();
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -34,7 +35,7 @@ async function fixture(t) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
   // Each task's first agent poll waits for finish(issue); reached(issue) resolves once that task's agent is working.
   const gates = new Map(), gate = number => { if (!gates.has(number)) { let reach, release; gates.set(number, { reached: new Promise(r => { reach = r; }), released: new Promise(r => { release = r; }), reach, release }); } return gates.get(number); };
-  const calls = [];
+  const calls = [], heldReaps = [];
   let h;
   const manager = { call: async (method, path, body) => {
     calls.push({ method, path, body });
@@ -46,6 +47,9 @@ async function fixture(t) {
       const number = h.store.get('SELECT object_number FROM tasks WHERE workspace_id=?', request.workspace_id).object_number, g = gate(number);
       g.reach(); await g.released;
       return { ok: true, result: { state: 'completed', result: { summary: 'Reviewed.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } } };
+    }
+    if (request.type === 'reap' && holdReaps) {
+      await new Promise(resolve => { heldReaps.push(resolve); if (heldReaps.length >= holdReaps) heldReaps.forEach(release => release()); setTimeout(resolve, 3000); });
     }
     return { ok: true, result: {} };
   } };
@@ -96,6 +100,18 @@ test('a project concurrency of 2 runs two tasks at once in their own workspaces 
   await f.finish(2); await f.finish(3);
   assert.deepEqual(f.calls.filter(c => c.body?.request?.type === 'reap').map(c => c.body.request.idle), [undefined, undefined, true]);
   assert.equal(f.h.store.get('SELECT count(*) AS n FROM task_claims').n, 0);
+});
+
+test('of two tasks that finish together, exactly one clears the computer', async t => {
+  const f = await fixture(t, { holdReaps: 2 });
+  assert.equal((await f.admin('/api/repositories/101/policy', 'PATCH', { task_concurrency: 2 })).status, 200);
+  f.engine.tick(); await Promise.all([f.reached(1), f.reached(2)]);
+  // Both releases are in flight at the same time: each task still sees the other as running.
+  await Promise.all([f.finish(1), f.finish(2)]);
+  const reaps = f.calls.filter(c => c.body?.request?.type === 'reap').map(c => c.body.request);
+  assert.equal(reaps.length, 2); assert.deepEqual(reaps.map(r => r.idle).sort(), [true, undefined]);
+  assert.deepEqual(reaps.map(r => r.workspace_id).sort(), [f.task(1).workspace_id, f.task(2).workspace_id].sort());
+  assert.deepEqual(f.statuses(), ['succeeded', 'succeeded', 'queued']);
 });
 
 test('a project without its own value follows the global default, and each task checks only its own claim', async t => {

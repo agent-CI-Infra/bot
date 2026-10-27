@@ -46,6 +46,13 @@ function task(root, reads, mirrorTree) {
   return { id, logs, workspace, github, repo: join(root, 'tasks', id, 'repo'), snapshot: () => logs.find(entry => entry.type === 'snapshot') };
 }
 const files = directory => readdirSync(directory, { recursive: true }).map(name => join(directory, name)).filter(path => statSync(path).isFile());
+// GitHub's Git data API for the upstream commit, answered from the bare repository.
+function restApi(u) {
+  const tree = git(u.bare, 'rev-parse', u.second + '^{tree}');
+  const listing = git(u.bare, 'ls-tree', '-r', '-l', u.second).split('\n').map(row => { const [meta, path] = row.split('\t'), [mode, type, sha, size] = meta.split(/\s+/); return { path, mode, type, sha, ...(size !== '-' ? { size: Number(size) } : {}) }; });
+  const blob = sha => execFileSync('git', ['cat-file', 'blob', sha], { cwd: u.bare }).toString('base64');
+  return path => path.startsWith('/git/commits/') ? { tree: { sha: tree } } : path.startsWith('/git/trees/') ? { tree: listing, truncated: false } : { encoding: 'base64', content: blob(path.split('/').at(-1)) };
+}
 
 test('a mirror fetches a task commit once with a one-time token; later tasks copy it without asking GitHub again', async t => {
   const u = await upstream(t), reads = [];
@@ -98,14 +105,22 @@ test('a commit GitHub will not send by SHA comes through its named ref; an unrea
   const wrong = await new GitCache(join(u.root, 'other-cache')).open('101', { url: u.url, token: 'ghs_' + 'b'.repeat(36), commits: [u.second] });
   assert.equal(wrong.state, 'unavailable'); assert.ok(!wrong.has(u.second)); assert.doesNotMatch(wrong.error, /ghs_b{36}/);
   // Without the mirror the snapshot reads the listing and blobs through the GitHub API, as before, and says why.
-  const reads = [], tree = git(u.bare, 'rev-parse', u.second + '^{tree}');
-  const listing = git(u.bare, 'ls-tree', '-r', '-l', u.second).split('\n').map(row => { const [meta, path] = row.split('\t'), [mode, type, sha, size] = meta.split(/\s+/); return { path, mode, type, sha, ...(size !== '-' ? { size: Number(size) } : {}) }; });
-  const blob = sha => execFileSync('git', ['cat-file', 'blob', sha], { cwd: u.bare }).toString('base64');
-  const fallback = task(u.root, reads, path => path.startsWith('/git/commits/') ? { tree: { sha: tree } } : path.startsWith('/git/trees/') ? { tree: listing, truncated: false }
-    : { encoding: 'base64', content: blob(path.split('/').at(-1)) });
+  const reads = [], fallback = task(u.root, reads, restApi(u));
   await fallback.workspace.prepare(fallback.github, u.second, wrong);
   assert.equal(reads.filter(path => path.startsWith('/git/blobs/')).length, 3);
   assert.deepEqual([fallback.snapshot().source, fallback.snapshot().cache], ['github_api', 'unavailable']); assert.match(fallback.snapshot().detail, /Git 缓存不可用/);
+});
+
+test('a mirror that holds the commit but cannot be read any more falls back to the GitHub API instead of failing the task', async t => {
+  const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.second] });
+  assert.ok(mirror.has(u.second));
+  // The cache directory disappears between open() and the copy (cleaned by hand, disk failure).
+  rmSync(u.cache.path('101'), { recursive: true, force: true });
+  const reads = [], copy = task(u.root, reads, restApi(u)), snapshot = await copy.workspace.prepare(copy.github, u.second, mirror);
+  assert.equal(snapshot.files.length, 3); assert.equal(reads.filter(path => path.startsWith('/git/blobs/')).length, 3);
+  const log = copy.logs.find(entry => entry.type === 'snapshot');
+  assert.deepEqual([log.source, log.cache], ['github_api', 'unavailable']); assert.match(log.detail, /Git 缓存读不出（.+），文件改经 GitHub API 读取/);
+  assert.equal(readFileSync(join(copy.repo, 'README.md'), 'utf8'), 'second\n');
 });
 
 test('review tasks on one commit share the mirror: the second fetches nothing and neither reads files through the API', async t => {

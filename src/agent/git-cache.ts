@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir, rm, access } from 'node:fs/promises';
 import { join } from 'node:path';
-import { safePath } from './common.js';
+import { safePath, TaskError } from './common.js';
 
 // Bare mirrors of enabled repositories on the control plane's own volume (<root>/<repository id>.git). A task first
 // makes the mirror hold its commit, then copies files out of it at that fixed commit; nothing is checked out here and
@@ -9,10 +9,17 @@ import { safePath } from './common.js';
 // it is never part of a remote URL, a config file, FETCH_HEAD or an error message.
 export interface MirrorEntry { path: string; mode: string; type: string; sha: string; size?: number }
 export class Mirror {
+  // Why the mirror could not be read after open() found the commit; callers then read through the GitHub API.
+  unreadable?: string;
   constructor(readonly cache: GitCache, readonly repository: string, readonly present: ReadonlySet<string>,
     readonly state: 'hit' | 'fetched' | 'unavailable', readonly error?: string) {}
   has(commit: string): boolean { return this.present.has(commit); }
-  listing(commit: string) { return this.cache.listing(this.repository, commit); }
+  // The commit's listing, or null when the mirror cannot be read (I/O error, removed directory, no git). An unsafe path
+  // still stops the task, as it does through the API.
+  async listing(commit: string) {
+    try { return await this.cache.listing(this.repository, commit); }
+    catch (error) { if (error instanceof TaskError) throw error; this.unreadable = String((error as Error)?.message || error).slice(0, 2000); return null; }
+  }
   blob(sha: string) { return this.cache.blob(this.repository, sha); }
 }
 type Run = { stdout: Buffer; stderr: string; code: number | null };
@@ -106,10 +113,10 @@ export class GitCache {
     }
     return { tree_sha: tree, tree: entries };
   }
-  // A blob's bytes, or null when the mirror does not have it.
+  // A blob's bytes, or null when the mirror does not have it or cannot be read.
   async blob(repository: string, sha: string): Promise<Buffer | null> {
     if (!objectId.test(sha)) return null;
-    const run = await this.git(['cat-file', 'blob', sha], { cwd: this.path(repository) });
-    return run.code === 0 ? run.stdout : null;
+    const run = await this.git(['cat-file', 'blob', sha], { cwd: this.path(repository) }).catch(() => null);
+    return run?.code === 0 ? run.stdout : null;
   }
 }

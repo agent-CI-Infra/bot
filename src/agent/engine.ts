@@ -26,6 +26,9 @@ export class TaskEngine {
   readonly active=new Map<string,Promise<void>>();private readonly running=new Map<string,Set<string>>();
   // Repositories whose last running task is clearing the computer; nothing starts there until it is done.
   private readonly clearing=new Set<string>();
+  // Running tasks that have reached their release: they need the computer no longer, so they never keep another task's
+  // release from being the last one. They leave this set when they leave `running`.
+  private readonly finishing=new Set<string>();
   // The parallel runner calls last granted by the manager, per repository.
   private readonly granted=new Map<string,number>();
   private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
@@ -62,7 +65,7 @@ export class TaskEngine {
       running.add(task.id);this.running.set(repo,running);
       const work=this.run(task.id,token).finally(()=>{
         this.store.run('DELETE FROM task_claims WHERE task_id=? AND token=?',task.id,token);
-        this.active.delete(task.id);running.delete(task.id);if(!running.size&&this.running.get(repo)===running)this.running.delete(repo);
+        this.active.delete(task.id);this.finishing.delete(task.id);running.delete(task.id);if(!running.size&&this.running.get(repo)===running)this.running.delete(repo);
       });this.active.set(task.id,work);
     }
   }
@@ -74,10 +77,13 @@ export class TaskEngine {
     await this.manager.call('PUT',`/v1/projects/${repositoryId}/parallel`,{tasks}).then(()=>this.granted.set(repositoryId,tasks),()=>{});
   }
   // A task that is not the last one on its computer ends only its own processes; the last one clears the computer and
-  // holds back new work on it until that is done.
+  // holds back new work on it until that is done. Tasks finishing together each count the others as finishing, so the
+  // last of them to get here still clears the computer.
   private async release(workspace:Workspace|undefined,task:Row){
     if(!workspace)return;
-    const repo=String(task.repository_id),idle=![...this.running.get(repo)||[]].some(other=>other!==task.id);
+    const repo=String(task.repository_id),running=this.running.get(repo);
+    const idle=![...running||[]].some(other=>other!==task.id&&!this.finishing.has(other));
+    if(running?.has(task.id))this.finishing.add(task.id);
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }

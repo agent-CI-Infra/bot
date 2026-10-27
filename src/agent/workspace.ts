@@ -60,11 +60,13 @@ export class Workspace {
       skipped.push(file);notes.push(`Skipped ${file.path}: ${reason}`);
       this.log({type:'snapshot_skipped',sha:commitSha,path:file.path,reason,detail:`已跳过路径 ${file.path}：${reason}`});
     };
-    const cached=!!mirror?.has(commitSha);
-    if(mirror&&!cached)notes.push(`Git 缓存不可用（${mirror.error||'镜像里没有这个提交'}），文件改经 GitHub API 读取。`);
+    let cached=false;
     try{
       let commit:{tree:{sha:string}},tree:{tree:any[],directory_fallback:boolean};
-      if(cached){const listing=await mirror!.listing(commitSha);commit={tree:{sha:listing.tree_sha}};tree={tree:listing.tree,directory_fallback:false};}
+      const listing=mirror?.has(commitSha)?await mirror.listing(commitSha):null;cached=!!listing;
+      if(mirror&&!cached)notes.push(mirror.has(commitSha)?`Git 缓存读不出（${mirror.unreadable}），文件改经 GitHub API 读取。`
+        :`Git 缓存不可用（${mirror.error||'镜像里没有这个提交'}），文件改经 GitHub API 读取。`);
+      if(listing){commit={tree:{sha:listing.tree_sha}};tree={tree:listing.tree,directory_fallback:false};}
       else{commit=await github.request('GET',github.path('/git/commits/'+commitSha));tree=await repositoryTree(github,commit.tree.sha);}
       const files=tree.tree.filter((f:any)=>f.type!=='tree');fallback=tree.directory_fallback;
       // Preserve rule symlink preflight before any workspace writes, including after a truncated-tree fallback.
