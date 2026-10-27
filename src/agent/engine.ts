@@ -108,10 +108,10 @@ export class TaskEngine {
     const guard=async()=>{
       // Only this task's own claim counts; other tasks on the same computer hold their own.
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
-      if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled');
+      if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
       const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-      if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled');
-      if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment');if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment');}
+      if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
+      if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
     const update=(values:Record<string,unknown>)=>{
       Object.assign(task,values);const keys=Object.keys(values);
@@ -124,28 +124,28 @@ export class TaskEngine {
       const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.'));
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.');
-      if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan');
+      if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
       const validate=async()=>{
         await guard();const current=await github.object(task.kind,task.object_number);
-        if(current.state!=='open'||current.draft===true)stop('object_closed_or_draft','cancelled');
+        if(current.state!=='open'||current.draft===true)stop('object_closed_or_draft','cancelled',`任务目标 #${task.object_number} 已关闭或变为草稿，state=${current.state}，draft=${current.draft===true}。`);
         if(task.kind.endsWith('.pr')){
           if(development)this.owned(github,task,current);
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
           if(current.head?.sha!==task.head_sha&&!(development&&candidate?.remote_sha===current.head?.sha)){
             this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
-            stop('pull_request_head_changed','superseded');
+            stop('pull_request_head_changed','superseded',`PR #${task.object_number} 的 head 已变化：预期 ${task.head_sha}，当前 ${current.head?.sha}。`);
           }
-        }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan');
+        }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
         // The go-ahead must still hold until publication: the label stays on and nobody else has taken the Issue.
-        if(task.kind==='development.issue'&&!developmentReady(current,this.label(task)))stop('development_not_approved','needs_replan');
+        if(task.kind==='development.issue'&&!developmentReady(current,this.label(task)))stop('development_not_approved','needs_replan',`Issue #${task.object_number} 不再满足开发条件：开发标签缺失或已有人接手。`);
         if(development){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=saved?JSON.parse(saved.data):null;
-          if(candidate&&!candidate.pr_number&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan');
+          if(candidate&&!candidate.pr_number&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan',`基础分支 ${candidate.base_branch} 已偏离提交 ${candidate.base_sha}，需要重新规划。`);
           if(input.bot_pr){
             const pr=await github.object('review.pr',input.bot_pr.number),owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);
-            if(pr.state!=='open'||pr.draft===true)stop('object_closed_or_draft','cancelled');
-            if(pr.head.sha!==task.head_sha&&pr.head.sha!==candidate?.remote_sha)stop('pull_request_head_changed','superseded');
+            if(pr.state!=='open'||pr.draft===true)stop('object_closed_or_draft','cancelled',`PR #${pr.number} 已关闭或变为草稿，state=${pr.state}，draft=${pr.draft===true}。`);
+            if(pr.head.sha!==task.head_sha&&pr.head.sha!==candidate?.remote_sha)stop('pull_request_head_changed','superseded',`PR #${pr.number} 的 head 已变化：任务提交 ${task.head_sha}，当前 ${pr.head.sha}。`);
           }
         }
       };
@@ -163,11 +163,11 @@ export class TaskEngine {
       if(task.phase==='prepare'){
         let environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
-        if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment');
+        if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         const object=await github.object(task.kind,task.object_number);await validate();
         let implementationGoal=input.review?.implementation_goal||'',actionableFindings:any[]=[];
-        if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan');
+        if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
         if(task.kind.endsWith('.pr')){
           const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number);
           if(owned){
@@ -175,7 +175,7 @@ export class TaskEngine {
             implementationGoal=source?JSON.parse(source.input).review?.implementation_goal||'':'';
             if(development){
               actionableFindings=(input.review?.findings||[]).filter(actionableFinding);
-              if(!implementationGoal||!actionableFindings.length)stop('revision_scope_unconfirmed','needs_replan');
+              if(!implementationGoal||!actionableFindings.length)stop('revision_scope_unconfirmed','needs_replan',`PR #${task.object_number} 缺少已确认的实现目标或可执行检视意见。`);
             }
           }
         }
@@ -190,10 +190,10 @@ export class TaskEngine {
         }
         const baseBranch=input.bot_pr?.base?.ref||policy.base_branch||github.defaultBranch;
         const ref=task.kind.endsWith('.pr')||input.bot_pr?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
-        if(!ref?.object?.sha)stop('repository_has_no_commit','waiting_configuration');
+        if(!ref?.object?.sha)stop('repository_has_no_commit','waiting_configuration',`基础分支 ${baseBranch} 没有可读取的提交，请先初始化仓库或检查分支配置。`);
         if(development&&task.kind.endsWith('.pr')){
           const owned=this.owned(github,task,object);
-          if(owned.sha!==task.head_sha){const compare=await github.request('GET',github.path('/compare/'+owned.sha+'...'+task.head_sha));if(!['ahead','identical'].includes(compare.status))stop('bot_branch_history_changed','needs_replan');}
+          if(owned.sha!==task.head_sha){const compare=await github.request('GET',github.path('/compare/'+owned.sha+'...'+task.head_sha));if(!['ahead','identical'].includes(compare.status))stop('bot_branch_history_changed','needs_replan',`分支 ${owned.branch} 的提交历史已变化，比较状态=${compare.status}，需要重新规划。`);}
         }
         // Rules never come from a pull request's own commits: PR tasks read the default branch, an Issue development that
         // continues the bot's PR reads that PR's base branch, and other Issue tasks read the commit they check out.
@@ -210,12 +210,12 @@ export class TaskEngine {
           this.rules.cache(task.repository_id,ruleSha,ruleFiles);
           effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
         }catch(error){
-          if(error instanceof HttpError&&ruleErrors.has(error.code))stop(error.code,'waiting_configuration');
+          if(error instanceof HttpError&&ruleErrors.has(error.code))stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}），请检查 .bot/ 和 .agents/skills/ 配置。`);
           throw error;
         }
         const snapshot=await workspace.prepare(github,ref.object.sha,mirror);
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
-        if(files.length>=3000)stop('pull_request_file_limit','waiting_environment');
+        if(files.length>=3000)stop('pull_request_file_limit','waiting_environment',`PR #${task.object_number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
         if(Object.entries(effectiveRules.computer).some(([key,value])=>JSON.stringify(environment.computer?.[key])!==JSON.stringify(value))){
           this.rules.rememberComputer(task.repository_id,environment.computer);
           environment=await this.manager.call('POST',`/v1/projects/${task.repository_id}/configure`,{operation_id:randomId(),generation:environment.generation,request:redactor.clean(effectiveRules.computer)},35*60000);
@@ -233,7 +233,7 @@ export class TaskEngine {
             computer:computerSummary(environment.computer)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
       }
-      if(task.phase==='validate')stop('create_pull_request_required','needs_replan');
+      if(task.phase==='validate')stop('create_pull_request_required','needs_replan','任务停在 validate 阶段，需要重新规划并通过 create_pull_request 提交候选修改。');
       if(task.phase==='model'){
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl),development?async(requestId,args)=>{
@@ -267,7 +267,7 @@ export class TaskEngine {
           if(input.behavior_changes?.length){result.summary+='\n\n这些文件改变了 bot 的行为，需要人来决定：'+input.behavior_changes.join('、');result.clarification_required=true;}
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};
           update({result:JSON.stringify(result),phase:'publish'});
-        }else if(task.phase!=='done')stop('create_pull_request_required');
+        }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
       }
       if(task.phase==='publish'){
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log);
@@ -300,7 +300,7 @@ export class TaskEngine {
     }catch(error){
       if(!(error instanceof TaskError))log({type:'runtime_fault',message:redactor.text(String((error as Error)?.message||'runtime failure')).slice(0,2000)});
       await this.release(workspace,task);
-      const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed');
+      const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常，请查看此前的运行错误日志。`);
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
       const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
       const delay=failure.code==='github_rate_limited'?(failure.retryAfterMs??60000):state==='waiting_configuration'?30000:5000;
@@ -337,7 +337,7 @@ export class TaskEngine {
     assertOwnedPR(row,pr,github.actorId,task.repository_id);
     return row!;
   }
-  label(task:Row){try{return developmentLabel(this.store,task.repository_id);}catch(error){return stop(error instanceof HttpError&&ruleErrors.has(error.code)?error.code:'invalid_bot_label','waiting_configuration');}}
+  label(task:Row){try{return developmentLabel(this.store,task.repository_id);}catch(error){return stop(error instanceof HttpError&&ruleErrors.has(error.code)?error.code:'invalid_bot_label','waiting_configuration',`仓库 ${task.repository_id} 的开发标签配置无效，请检查行为规则。`);}}
   // The latest time the development label was added must be by a user account, not an app, and nobody may be assigned.
   async developmentApproved(github:GitHub,task:Row){
     const label=this.label(task);

@@ -15,7 +15,7 @@ export class Publisher {
     await this.validate();
     const existing=await find();
     if(existing){this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(existing),id);return existing;}
-    if(!replayable&&['unknown','inflight'].includes(row!.state))return stop('github_publication_unknown','waiting_publication');
+    if(!replayable&&['unknown','inflight'].includes(row!.state))return stop('github_publication_unknown','waiting_publication',`GitHub 发布操作 ${key}（${kind}）状态=${row!.state}，尚未确认结果，暂停以避免重复发布。`);
     this.store.run("UPDATE github_effects SET state='inflight' WHERE id=?",id);
     try{await this.validate();const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
     catch(error){this.store.run('UPDATE github_effects SET state=? WHERE id=?',error instanceof TaskError&&error.code==='github_response_unknown'?'unknown':'pending',id);throw error;}
@@ -61,17 +61,17 @@ export class Publisher {
   }
   async branch(candidate:any){
     const branch=this.store.get('SELECT * FROM bot_branches WHERE repository_id=? AND branch=?',this.task.repository_id,candidate.branch);
-    if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-'))stop('branch_not_owned','waiting_permission');
+    if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-'))stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
     if(candidate.remote_sha && this.store.get("SELECT state FROM github_effects WHERE id=?",operationId(this.task.id+':branch'))?.state==='sent'){
-      if((await this.github.ref(candidate.branch))?.object?.sha!==candidate.remote_sha)stop('branch_head_changed','superseded');
+      if((await this.github.ref(candidate.branch))?.object?.sha!==candidate.remote_sha)stop('branch_head_changed','superseded',`分支 ${candidate.branch} 已偏离已发布提交 ${candidate.remote_sha}。`);
       return candidate.remote_sha;
     }
     for(const file of candidate.files){
       if(file.base64===undefined)continue; // Verified object already belongs to the source snapshot.
-      const data=Buffer.from(file.base64,'base64');if(blobSha(data)!==file.sha)stop('candidate_blob_mismatch');
+      const data=Buffer.from(file.base64,'base64');if(blobSha(data)!==file.sha)stop('candidate_blob_mismatch',undefined,`发布前校验候选文件 ${file.path} 失败，内容与预期 SHA ${file.sha} 不一致。`);
       const blob=await this.github.request('POST',this.github.path('/git/blobs'),{content:file.base64,encoding:'base64'});
-      if(blob.sha!==file.sha)stop('github_blob_mismatch');
+      if(blob.sha!==file.sha)stop('github_blob_mismatch',undefined,`GitHub 写入文件 ${file.path} 后返回的 SHA 不一致：预期 ${file.sha}，实际 ${blob.sha}。`);
     }
     const entries=candidate.files.map((f:any)=>({path:f.path,mode:f.mode,type:'blob',sha:f.sha}));
     let expected=candidate.tree_sha;
@@ -83,24 +83,24 @@ export class Publisher {
       for(const file of candidate.snapshot_files)if(!paths.has(file.path))entries.push({path:file.path,mode:file.mode,type:'blob',sha:null});
     }
     const tree=await this.github.request('POST',this.github.path('/git/trees'),{...(candidate.skipped_files?.length?{base_tree:candidate.source_tree}:{}),tree:entries});
-    if(tree.sha!==expected)stop('github_tree_mismatch');
+    if(tree.sha!==expected)stop('github_tree_mismatch',undefined,`GitHub 创建的文件树不一致：预期 ${expected}，实际 ${tree.sha}。`);
     candidate.published_tree_sha=expected;
     const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
     const commit=await this.github.request('POST',this.github.path('/git/commits'),{message:implementationText(candidate,this.task.object_number).title,
       tree:expected,parents:[candidate.base_sha],author,committer:author});
-    if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch');
+    if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch',undefined,`GitHub 提交 ${commit.sha} 的文件树不一致：预期 ${expected}，实际 ${commit.tree?.sha}。`);
     candidate.remote_sha=commit.sha;
     this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
     await this.validate();
     const current=await this.github.ref(candidate.branch);
-    if(current&&current.object.sha!==commit.sha&&current.object.sha!==candidate.expected_sha)stop('branch_head_changed','superseded');
-    if(!current&&candidate.expected_sha)stop('branch_disappeared','superseded');
+    if(current&&current.object.sha!==commit.sha&&current.object.sha!==candidate.expected_sha)stop('branch_head_changed','superseded',`发布分支 ${candidate.branch} 前发现 head 已变化，当前提交=${current.object.sha}。`);
+    if(!current&&candidate.expected_sha)stop('branch_disappeared','superseded',`待更新的分支 ${candidate.branch} 已不存在。`);
     const path=this.github.path('/git/refs'+(candidate.expected_sha?'/heads/'+encodeURIComponent(candidate.branch):''));
     const request=candidate.expected_sha?{sha:commit.sha,force:false}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
     const ref=await this.effect('branch','branch',request,()=>this.github.request(candidate.expected_sha?'PATCH':'POST',path,request),async()=>{
       const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;
     });
-    if(ref.object?.sha!==commit.sha)stop('branch_not_confirmed');
+    if(ref.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,`分支 ${candidate.branch} 发布未确认：预期提交 ${commit.sha}，返回 ${ref.object?.sha||'无提交'}。`);
     return commit.sha;
   }
   async pullRequest(candidate:any,sha:string){
@@ -114,7 +114,7 @@ export class Publisher {
         if(pr.head.sha===sha)break;
         this.onHeadWait({type:'pr_head_wait',expected_sha:sha,observed_sha:pr.head.sha,pr_number:candidate.pr_number});
       }
-      if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head');
+      if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head',`PR #${candidate.pr_number} 尚未更新到提交 ${sha}，当前 head=${pr?.head.sha||'未知'}。`);
       const source=this.store.get('SELECT object_number FROM tasks WHERE id=?',owned!.source_task_id);
       const content=implementationText(candidate,Number(source?.object_number||this.task.object_number));
       const marker=this.marker('pr-update'),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
@@ -130,16 +130,16 @@ export class Publisher {
     const request={head:candidate.branch,base:candidate.base_branch,...implementationText(candidate,this.task.object_number),body};
     const pr=await this.effect('pr','pull_request',request,()=>this.github.request('POST',path,request),async()=>
       (await this.github.pages(path+'?state=all&head='+encodeURIComponent(this.github.fullName.split('/')[0]+':'+candidate.branch))).find(p=>p.head?.ref===candidate.branch&&String(p.head?.repo?.id)===this.task.repository_id&&String(p.body).includes(marker)));
-    if(String(pr.user?.id)!==this.github.actorId||String(pr.head?.repo?.id)!==this.task.repository_id||pr.head?.ref!==candidate.branch||pr.head.sha!==sha)stop('bot_pr_ownership_unconfirmed','waiting_permission');
+    if(String(pr.user?.id)!==this.github.actorId||String(pr.head?.repo?.id)!==this.task.repository_id||pr.head?.ref!==candidate.branch||pr.head.sha!==sha)stop('bot_pr_ownership_unconfirmed','waiting_permission',`新建 PR #${pr.number} 的作者、来源仓库、分支或提交与候选分支 ${candidate.branch} 不一致。`);
     this.store.run(`INSERT INTO bot_pull_requests VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(repository_id,number) DO NOTHING`,this.task.repository_id,pr.number,String(pr.id),String(pr.user.id),String(pr.head.repo.id),candidate.branch,sha,this.task.id);
     return pr;
   }
 }
 
 export function assertOwnedPR(owned:Row|undefined,pr:any,actorId:string,repositoryId:string): asserts owned is Row {
-  if(!owned)throw new TaskError('bot_pr_identity_changed','waiting_permission');
-  if(String(pr.id)!==owned.pr_id)stop('bot_pr_identity_changed','waiting_permission');
-  if(String(pr.user?.id)!==owned.author_id||owned.author_id!==actorId)stop('bot_pr_author_changed','waiting_permission');
-  if(String(pr.head?.repo?.id)!==owned.head_repository_id||owned.head_repository_id!==repositoryId)stop('bot_pr_head_repository_changed','waiting_permission');
-  if(pr.head?.ref!==owned.branch)stop('bot_pr_branch_changed','waiting_permission');
+  if(!owned)throw new TaskError('bot_pr_identity_changed','waiting_permission',`PR #${pr.number} 没有对应的机器人归属记录。`);
+  if(String(pr.id)!==owned.pr_id)stop('bot_pr_identity_changed','waiting_permission',`PR #${pr.number} 的标识与已登记的 PR ${owned.pr_id} 不一致。`);
+  if(String(pr.user?.id)!==owned.author_id||owned.author_id!==actorId)stop('bot_pr_author_changed','waiting_permission',`PR #${pr.number} 的作者与登记作者或当前机器人账号不一致。`);
+  if(String(pr.head?.repo?.id)!==owned.head_repository_id||owned.head_repository_id!==repositoryId)stop('bot_pr_head_repository_changed','waiting_permission',`PR #${pr.number} 的来源仓库与登记仓库 ${owned.head_repository_id} 或目标仓库 ${repositoryId} 不一致。`);
+  if(pr.head?.ref!==owned.branch)stop('bot_pr_branch_changed','waiting_permission',`PR #${pr.number} 的来源分支已变化：预期 ${owned.branch}，当前 ${pr.head?.ref}。`);
 }
