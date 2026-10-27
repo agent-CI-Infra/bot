@@ -121,9 +121,9 @@ const taskView = dialog('task-view', `<div class="view-head"><div class="title-g
 <div class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
 taskView.setAttribute('aria-labelledby', 'task-title');
 
-let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null;
+let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null;
 async function openTask(id) {
-  openTaskId = id; renderedLogs = new Set(); liveCommand = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
+  openTaskId = id; renderedLogs = new Set(); liveCommand = null; snapshotProgress = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
   if (!taskView.open) taskView.showModal();
@@ -184,10 +184,58 @@ function liveText(task) {
 function renderTimeline(task, logs) {
   let modelStep=0;
   const list = $('timeline'), box = scroller(list.parentElement), first = !list.childElementCount, atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  for (let log of logs) {let value;try{value=JSON.parse(log.content);}catch{}if(value?.type==='model'){modelStep++;if(!Number.isSafeInteger(value.step))log={...log,content:JSON.stringify({...value,step:modelStep})};}if(!renderedLogs.has(log.id)){renderedLogs.add(log.id);list.append(step(log));}}
+  for (let log of logs) {
+    let value;try{value=JSON.parse(log.content);}catch{}
+    if(value?.type==='model'){modelStep++;if(!Number.isSafeInteger(value.step))log={...log,content:JSON.stringify({...value,step:modelStep})};}
+    if(renderedLogs.has(log.id))continue;
+    renderedLogs.add(log.id);
+    if(value?.type==='phase'&&value.phase==='prepare'||['snapshot_progress','snapshot_skipped','snapshot_git','snapshot'].includes(value?.type)){
+      appendSnapshotProgress(list,log,value);continue;
+    }
+    if(snapshotProgress){
+      if(value?.type==='prepared'||value?.type==='phase'&&value.phase!=='prepare'){
+        snapshotProgress.prepared=true;setSnapshotStatus(snapshotProgress,'succeeded');
+      }else if(value?.type==='fault'&&!snapshotProgress.prepared)setSnapshotStatus(snapshotProgress,value.state);
+    }
+    list.append(step(log));
+  }
+  if(snapshotProgress)setSnapshotStatus(snapshotProgress,snapshotProgress.prepared?'succeeded':task.status);
   const live = liveText(task); $('timeline-live').hidden = !live; $('timeline-live').textContent = live || '';
   // A finished task opens at its first step; a running one follows the newest step unless the reader scrolled up.
   if (first ? !!live : atBottom) box.scrollTop = box.scrollHeight;
+}
+function setSnapshotStatus(progress,status) {
+  const waiting=status?.startsWith('waiting_')||status==='retry_wait'||status==='needs_replan';
+  progress.status.replaceChildren(waiting?badge('已暂停','warning'):state(status));
+}
+function snapshotMessage(value) {
+  if(value.type!=='snapshot')return value.detail||({snapshot_progress:`已写入 ${value.files} 个文件，${value.bytes} 字节；刚写完 ${value.path}`,
+    snapshot_skipped:`已跳过路径 ${value.path}：${value.reason}`,snapshot_git:`正在构建本地 Git 树：${value.tree_sha}`}[value.type]||'正在准备仓库快照…');
+  const lines=[`提交 ${value.sha} · 已接收 ${value.files} 个文件，${value.bytes} 字节 · 跳过 ${value.skipped} 项`];
+  if(value.source)lines.push(value.source==='git_cache'?(value.cache==='hit'?'文件来自仓库 Git 缓存，这个提交已缓存，没有访问 GitHub。':'文件来自仓库 Git 缓存，本次从 GitHub 拉取了这个提交。')
+    :value.cache==='unavailable'?'Git 缓存不可用，文件经 GitHub API 逐个读取。':'文件经 GitHub API 逐个读取。');
+  if(value.directory_fallback)lines.push('递归树被截断，已改为逐目录列举。');
+  if(value.detail)lines.push(value.detail);
+  return lines.join('\n');
+}
+function appendSnapshotProgress(list,log,value) {
+  // One DOM node per preparation keeps the reader's fold and scroll position across polling updates.
+  if(!snapshotProgress||value.type==='phase'||value.sha&&snapshotProgress.sha&&value.sha!==snapshotProgress.sha){
+    const item=element('li','','step step-snapshot'),details=element('details','','snapshot-progress'),summary=element('summary','');
+    const head=element('span','','snapshot-heading'),status=element('span','','step-meta'),time=element('time',''),latest=element('span','','snapshot-latest');
+    const output=element('pre','','output snapshot-output');output.tabIndex=0;output.setAttribute('aria-label','仓库快照实时日志');
+    details.open=false;head.append(element('strong','仓库快照进度'),status,time);summary.append(head,latest);details.append(summary,output);item.append(details);list.append(item);
+    details.addEventListener('toggle',()=>{if(details.open)output.scrollTop=output.scrollHeight;});
+    snapshotProgress={details,status,time,latest,output,prepared:false};setSnapshotStatus(snapshotProgress,'running');
+  }
+  if(value.sha)snapshotProgress.sha=value.sha;
+  const {output,latest,time}=snapshotProgress,follow=output.scrollHeight-output.scrollTop-output.clientHeight<60,message=snapshotMessage(value);
+  if(log.created_at){time.textContent=log.created_at.slice(11,19);time.dateTime=log.created_at;time.title=timestamp(log.created_at);}
+  latest.textContent=value.type==='snapshot'?`已接收 ${value.files} 个文件 · ${value.bytes} 字节 · 跳过 ${value.skipped} 项`
+    :value.type==='snapshot_progress'&&value.files!==undefined?`已写入 ${value.files} 个文件 · ${value.bytes} 字节`
+    :value.type==='snapshot_git'?'正在构建本地 Git 树…':message.split('\n')[0];
+  output.append((log.created_at?'['+time.textContent+'] ':'')+message+'\n');
+  if(follow)output.scrollTop=output.scrollHeight;
 }
 function toolCaption(call) {
   let args = {}; try { args = JSON.parse(call.arguments); } catch { /* Long arguments are clipped in the log. */ }
@@ -205,20 +253,10 @@ function step(log) {
   } else if (value.type === 'phase') {
     title.textContent = {prepare:'工作区准备日志',model:'Agent 执行日志',validate:'仓库测试日志',publish:'GitHub 发布日志'}[value.phase] || '运行阶段日志';
     add(element('p', value.detail));
-  } else if (['snapshot_progress','snapshot_skipped','snapshot_git'].includes(value.type)) {
-    title.textContent = {snapshot_progress:'仓库快照进度日志',snapshot_skipped:'仓库快照跳过日志',snapshot_git:'本地 Git 树日志'}[value.type];
-    add(element('p', value.detail));
   } else if (value.type === 'tool_start') {
     title.textContent = '工具开始日志';
     const action={read_file:'读取文件',write_file:'写入文件',run_command:'执行命令',finish_review:'提交检视结论',create_pull_request:'创建 PR',github_read_token:'申请 GitHub 只读令牌'}[value.name] || value.name;
     add(element('p', `正在${action}：${value.path || value.command || value.name}`));
-  } else if (value.type === 'snapshot') {
-    title.textContent = '仓库快照日志';
-    add(element('p', `提交 ${value.sha} · 已接收 ${value.files} 个文件，${value.bytes} 字节 · 跳过 ${value.skipped} 项`));
-    if (value.source) add(element('p', value.source === 'git_cache' ? (value.cache === 'hit' ? '文件来自仓库 Git 缓存，这个提交已缓存，没有访问 GitHub。' : '文件来自仓库 Git 缓存，本次从 GitHub 拉取了这个提交。')
-      : value.cache === 'unavailable' ? 'Git 缓存不可用，文件经 GitHub API 逐个读取。' : '文件经 GitHub API 逐个读取。', 'muted'));
-    if (value.directory_fallback) add(element('p', '递归树被截断，已改为逐目录列举。', 'muted'));
-    if (value.detail) add(element('p', value.detail, 'say'));
   } else if (value.type === 'prepared') {
     title.textContent = '准备项目工作区'; add(element('p', `固定提交 ${String(value.sha || '').slice(0, 12)}`));
     for (const line of value.coverage || []) add(element('p', line, 'muted'));
