@@ -35,6 +35,8 @@ export function enqueue(store: Store, repositoryId: string, kind: string, number
   const id = randomId(), now = new Date().toISOString();
   store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,head_sha,source_task_id,source_delivery_id,created_at,updated_at)
     VALUES(?,?,?,'queued',?,?,?,?,?,?,?,?,?)`, id, repositoryId, kind, `${kind} #${number}`, key, JSON.stringify(input), number, head, sourceTask, delivery, now, now);
+  store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,
+    JSON.stringify({type:'queued',repository_id:repositoryId,detail:`排队中，等待仓库 ${repositoryId} 的虚拟电脑空闲…`}),now);
   return id;
 }
 export function queueWebhook(store: Store, repositoryId: string, event: string, payload: Json, delivery: string): number {

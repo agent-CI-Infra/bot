@@ -33,6 +33,7 @@ function fixture(files,blobs,options={}){
   const workspace=new Workspace(null,null,{},new Redactor(),async()=>{},value=>logs.push(value));
   let hash;
   workspace.call=async(_key,request)=>{
+    await options.execute?.(request);
     if(request.type==='workspace_write'){
       const file=files.find(file=>file.path===request.path),chunk=Buffer.from(request.base64,'base64');
       if(request.offset===0)hash=createHash('sha1').update(`blob ${file.size}\0`);
@@ -48,15 +49,17 @@ test('prepare accepts 2001 files and logs the commit, file count and bytes',asyn
   const data=Buffer.from('small\n'),files=Array.from({length:2001},(_,i)=>entry(`files/${i}.txt`,data));
   const f=fixture(files,new Map([[blobSha(data),data]])),snapshot=await f.prepare();
   assert.equal(snapshot.files.length,2001);assert.equal(snapshot.tree_sha,treeHash(files));
-  assert.deepEqual(f.logs,[{type:'snapshot',sha:commit,files:2001,bytes:2001*data.length,skipped:0,directory_fallback:false,detail:''}]);
+  assert.deepEqual(f.logs.filter(log=>log.type==='snapshot'),[{type:'snapshot',sha:commit,files:2001,bytes:2001*data.length,skipped:0,directory_fallback:false,detail:''}]);
+  assert.equal(f.logs.filter(log=>log.type==='snapshot_progress').length,20);
 });
 
 test('prepare writes blobs over 1 MiB and totals over 32 MiB with the original context budget',async()=>{
   const binary=Buffer.alloc(5*1024*1024),text=Buffer.alloc(1024*1024+1,120);
   const files=[entry('large.txt',text),...Array.from({length:7},(_,i)=>entry(`binary/${i}`,binary))];
   const f=fixture(files,new Map([[blobSha(binary),binary],[blobSha(text),text]])),snapshot=await f.prepare();
-  assert.equal(snapshot.files.length,8);assert.equal(f.logs[0].bytes,7*binary.length+text.length);
-  assert.ok(f.logs[0].bytes>32*1024*1024);assert.ok(f.writes.some(write=>write.offset>1024*1024));
+  const summary=f.logs.find(log=>log.type==='snapshot');
+  assert.equal(snapshot.files.length,8);assert.equal(summary.bytes,7*binary.length+text.length);
+  assert.ok(summary.bytes>32*1024*1024);assert.ok(f.writes.some(write=>write.offset>1024*1024));
   assert.ok(f.writes.every(write=>write.bytes<=30000));assert.equal(snapshot.materials[0].content.length,12000);
   assert.equal(snapshot.materials.length,1);assert.equal(snapshot.materials[0].truncated,true);
 });
@@ -71,7 +74,7 @@ test('a truncated recursive tree is discarded and every directory is listed nonr
     assert.fail('Unexpected tree request '+path);
   }});
   const snapshot=await f.prepare();assert.deepEqual(snapshot.files.map(file=>file.path),files.map(file=>file.path));
-  assert.equal(f.reads.filter(path=>path.includes('/git/trees/')).length,4);assert.equal(f.logs[0].directory_fallback,true);
+  assert.equal(f.reads.filter(path=>path.includes('/git/trees/')).length,4);assert.equal(f.logs.find(log=>log.type==='snapshot').directory_fallback,true);
 });
 
 test('submodules, unsupported modes and API-rejected huge blobs are skipped with coverage and reasons',async()=>{
@@ -81,8 +84,10 @@ test('submodules, unsupported modes and API-rejected huge blobs are skipped with
   const snapshot=await f.prepare();assert.deepEqual(snapshot.files,[{path:accepted.path,mode:accepted.mode,sha:accepted.sha}]);
   assert.equal(snapshot.skipped_files.length,3);assert.equal(snapshot.tree_sha,treeHash([accepted]));
   assert.ok(snapshot.coverage.some(line=>line.includes('skipped 3')));
-  assert.match(f.logs[0].detail,/vendor\/module.*160000/);assert.match(f.logs[0].detail,/odd-mode.*100664/);
-  assert.match(f.logs[0].detail,/weights\/model.bin.*HTTP 403.*115343360 bytes/);
+  const summary=f.logs.find(log=>log.type==='snapshot');
+  assert.match(summary.detail,/vendor\/module.*160000/);assert.match(summary.detail,/odd-mode.*100664/);
+  assert.match(summary.detail,/weights\/model.bin.*HTTP 403.*115343360 bytes/);
+  assert.equal(f.logs.filter(log=>log.type==='snapshot_skipped').length,3);
   assert.ok(!f.reads.includes('/git/blobs/'+submodule.sha));assert.equal(f.writes.length,1);
 });
 
@@ -90,7 +95,7 @@ test('hash mismatches and unsafe paths still stop preparation with a locatable r
   const data=Buffer.from('expected'),file=entry('src/mismatch.txt',data),actual=Buffer.from('different');
   const f=fixture([file],new Map([[file.sha,actual]]));
   await assert.rejects(f.prepare(),error=>error instanceof TaskError&&error.code==='repository_blob_limit_or_hash'&&error.detail.includes(file.path)&&error.detail.includes(file.sha)&&error.detail.includes(blobSha(actual)));
-  assert.equal(f.logs[0].files,0);assert.equal(f.logs[0].sha,commit);
+  assert.equal(f.logs.find(log=>log.type==='snapshot').files,0);assert.equal(f.logs[0].sha,commit);
   const unsafe=fixture([{...file,path:'../outside'}],new Map([[file.sha,data]]));
   await assert.rejects(unsafe.prepare(),error=>error.code==='unsafe_repository_path'&&error.detail.includes('../outside'));
   assert.equal(unsafe.writes.length,0);
@@ -100,6 +105,25 @@ test('skip descriptions report exactly how many entries were omitted',()=>{
   const lines=Array.from({length:2000},(_,i)=>`Skipped path/${i}: mode 160000`),detail=describeEntries(lines,1000);
   const kept=detail.split('\n').filter(line=>line.startsWith('Skipped')).length;
   assert.match(detail,new RegExp(`${lines.length-kept} entries omitted`));assert.ok(detail.length<1100);
+});
+
+test('preparing 250 files records starts, progress and skipped paths before finalization returns',async()=>{
+  const data=Buffer.from('snapshot body stays out of progress'),files=Array.from({length:250},(_,i)=>entry(`src/${i}.txt`,data));
+  const submodule={path:'vendor/module',type:'commit',mode:'160000',sha:'c'.repeat(40)};
+  const entered=Promise.withResolvers(),release=Promise.withResolvers();
+  const f=fixture([...files,submodule],new Map([[blobSha(data),data]]),{async execute(request){
+    if(request.type==='workspace_snapshot'){entered.resolve();await release.promise;}
+  }});
+  const preparing=f.prepare();await entered.promise;
+  try{
+    assert.equal(f.logs[0].phase,'prepare');assert.equal(f.logs[0].sha,commit);assert.match(f.logs[0].detail,/正在准备工作区/);
+    assert.deepEqual(f.logs.filter(log=>log.type==='snapshot_progress').map(({files,bytes,path})=>({files,bytes,path})),[
+      {files:100,bytes:100*data.length,path:'src/99.txt'},{files:200,bytes:200*data.length,path:'src/199.txt'}]);
+    const skipped=f.logs.find(log=>log.type==='snapshot_skipped');assert.equal(skipped.path,submodule.path);assert.match(skipped.reason,/160000.*子模块/);
+    assert.equal(f.logs.at(-1).type,'snapshot_git');assert.equal(f.logs.some(log=>log.type==='snapshot'),false);
+    assert.ok(!JSON.stringify(f.logs).includes(data.toString()));
+  }finally{release.resolve();await preparing;}
+  assert.equal(f.logs.at(-1).type,'snapshot');assert.equal(f.logs.at(-1).files,250);
 });
 
 test('candidate transfer reuses unchanged upstream blobs and has no 32 MiB total cap',async()=>{
@@ -165,6 +189,9 @@ test('rule preflight and preparation both use the complete directory fallback in
   h.setBranch('ready');const task=await h.run();assert.equal(task.status,'succeeded');
   const logs=h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.taskId).map(row=>JSON.parse(row.content));
   const snapshot=logs.find(log=>log.type==='snapshot');assert.equal(snapshot.files,1);assert.equal(snapshot.directory_fallback,true);
+  assert.equal(logs[0].type,'queued');
+  const phases=logs.filter(log=>log.type==='phase');assert.deepEqual(phases.map(log=>log.phase),['prepare','model','publish']);
+  assert.equal(phases[1].mode,'review');assert.equal(phases[2].target,'review');
   assert.ok(!logs.some(log=>log.code==='repository_tree_truncated'));
 });
 
@@ -177,9 +204,39 @@ test('automatic waiting retries deduplicate equal details but retain changed rea
   let fault=logs().find(log=>log.type==='fault');assert.match(fault.detail,/workspace_replaced/);assert.match(fault.detail,/tail\/path/);assert.match(fault.detail,/omitted/);assert.ok(!fault.detail.includes('fixture-key'));
   for(let i=0;i<3;i++){h.due();task=await h.run();assert.equal(task.status,'waiting_environment');}
   assert.equal(logs().filter(log=>log.type==='fault').length,1);assert.equal(logs().filter(log=>log.type==='snapshot').length,1);
+  assert.equal(logs().filter(log=>log.type==='phase'&&log.phase==='prepare').length,1,'waiting retries retain one phase start');
   // The journal replays the failed operation; simulate a refreshed response for a newly diagnosed cause.
   h.store.run('DELETE FROM task_tools WHERE task_id=?',h.taskId);reason='invalid_parent: changed/path';h.due();await h.run();
   assert.equal(logs().filter(log=>log.type==='fault').length,2);
+});
+
+test('new logs render during execution, survive terminal states and do not duplicate on refresh',async()=>{
+  const task={id:'task',repository_id:'101',kind:'review.issue',object_number:1,status:'running',phase:'prepare'};
+  const values=[
+    {type:'queued',detail:'排队中，等待仓库 101 的虚拟电脑空闲…'},
+    {type:'phase',phase:'prepare',detail:`正在准备工作区：拉取固定提交 ${commit} 并写入虚拟电脑…`},
+    {type:'snapshot_progress',detail:'正在写入仓库快照：已写入 100 个文件，600 字节；刚写完 src/99.txt'},
+    {type:'snapshot_skipped',detail:'已跳过路径 vendor/module：mode 160000；子模块不克隆。'},
+    {type:'snapshot_git',detail:'正在构建本地 Git 树：abc'},
+    {type:'phase',phase:'model',detail:'Agent 开始执行：检视…'},
+    {type:'tool_start',name:'run_command',command:'npm test'},
+    {type:'tool_start',name:'write_file',path:'src/main.js'},
+    {type:'tool_start',name:'finish_review'},
+    {type:'tool_start',name:'create_pull_request'},
+    {type:'phase',phase:'validate',detail:'正在运行测试：npm test'},
+    {type:'phase',phase:'publish',detail:'正在发布到 GitHub：发送检视评论…'}];
+  const logs=values.map((value,i)=>({id:String(i),content:JSON.stringify(value)}));
+  const page=loadConsole(['static/app.js','static/views.js'],(_method,path)=>path.endsWith('/logs')?[200,{logs}]:path==='/api/tasks/task'?[200,{task,publications:[]}]:[404,{}]);
+  page.run("scroller = node => node; taskMetricsCard = () => element('section',''); openTaskId = 'task'; taskView.showModal();");
+  try{
+    for(const status of ['running','failed','succeeded']){
+      task.status=status;
+      await page.run('(async () => { await refreshTask(); clearTimeout(taskTimer); })()');
+      assert.equal(page.$('timeline').children.length,logs.length);
+      const text=node=>[node.textContent,...node.children.flatMap(text)].join('\n'),visible=text(page.$('timeline'));
+      for(const expected of ['工作区准备日志','仓库快照进度日志','仓库快照跳过日志','本地 Git 树日志','Agent 执行日志','工具开始日志','仓库测试日志','GitHub 发布日志','src/99.txt','vendor/module','npm test','src/main.js','finish_review','create_pull_request',commit])assert.ok(visible.includes(expected),expected);
+    }
+  }finally{page.run('taskView.close(); clearTimeout(taskTimer);');}
 });
 
 test('failed, waiting and retry-wait details show reasons in the timeline and sidebar without raw data',async()=>{

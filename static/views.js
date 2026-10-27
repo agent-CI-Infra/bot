@@ -200,7 +200,19 @@ function step(log) {
   head.append(title, meta); item.append(head);
   if (log.created_at) { const time = element('time', log.created_at.slice(11, 19)); time.dateTime = log.created_at; time.title = timestamp(log.created_at); meta.append(time); }
   const add = (...nodes) => item.append(...nodes), args = value.arguments || {}, result = value.result || {};
-  if (value.type === 'snapshot') {
+  if (value.type === 'queued') {
+    title.textContent = '任务排队日志'; add(element('p', value.detail));
+  } else if (value.type === 'phase') {
+    title.textContent = {prepare:'工作区准备日志',model:'Agent 执行日志',validate:'仓库测试日志',publish:'GitHub 发布日志'}[value.phase] || '运行阶段日志';
+    add(element('p', value.detail));
+  } else if (['snapshot_progress','snapshot_skipped','snapshot_git'].includes(value.type)) {
+    title.textContent = {snapshot_progress:'仓库快照进度日志',snapshot_skipped:'仓库快照跳过日志',snapshot_git:'本地 Git 树日志'}[value.type];
+    add(element('p', value.detail));
+  } else if (value.type === 'tool_start') {
+    title.textContent = '工具开始日志';
+    const action={read_file:'读取文件',write_file:'写入文件',run_command:'执行命令',finish_review:'提交检视结论',create_pull_request:'创建 PR',github_read_token:'申请 GitHub 只读令牌'}[value.name] || value.name;
+    add(element('p', `正在${action}：${value.path || value.command || value.name}`));
+  } else if (value.type === 'snapshot') {
     title.textContent = '仓库快照日志';
     add(element('p', `提交 ${value.sha} · 已接收 ${value.files} 个文件，${value.bytes} 字节 · 跳过 ${value.skipped} 项`));
     if (value.directory_fallback) add(element('p', '递归树被截断，已改为逐目录列举。', 'muted'));

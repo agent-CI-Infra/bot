@@ -8,6 +8,10 @@ import {workspace} from './workspace.mjs';
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const save=async value=>{await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
 let steps=0,session,finished,grant=null;
+// Serialize model and tool events in execution order; mask every issued token before it reaches disk.
+const secrets=new Set();let events=Promise.resolve();
+const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
+const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
 async function exchange(){
   const id=randomBytes(24).toString('hex'),reply=dir+'/token-reply-'+id+'.json';
@@ -51,6 +55,9 @@ try{
   const loader={getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>config.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
   const tools=config.tools.map(tool=>({name:tool.function.name,label:tool.function.name,description:tool.function.description,parameters:tool.function.parameters,
     async execute(id,args){
+      const name=tool.function.name;
+      // Start metadata deliberately excludes file contents and publication payloads.
+      await writeEvent({type:'tool_start',name,call_id:id,...(['read_file','write_file'].includes(name)?{path:args.path}:name==='run_command'?{command:args.command}:{})});
       let result;
       if(tool.function.name==='finish_review'){finished=args;setTimeout(()=>void session.abort(),10);result={finished:true};}
       else if(tool.function.name==='create_pull_request'){
@@ -63,22 +70,23 @@ try{
       }else if(tool.function.name==='run_command'){
         // Commands have no time limit; the model may still bound one that could hang.
         const timeout=args.timeout_seconds>0?args.timeout_seconds*1000:null;
-        await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify({operation_id:id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true}),{mode:0o600});
+        await writeFile(dir+'/command.out','',{mode:0o600});await writeFile(dir+'/live.json',JSON.stringify(clean({operation_id:id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true})),{mode:0o600});
         const secret_env=grant?{GH_TOKEN:grant.token,GITHUB_TOKEN:grant.token}:undefined;
         try{result=await workspace({type:'workspace_command',workspace_id:config.workspace_id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true,output_file:dir+'/command.out',secret_env});}finally{await unlink(dir+'/live.json').catch(()=>{});}
       }else if(tool.function.name==='github_read_token'){
         // The token stays in this process and reaches later commands only as environment variables; the model sees what it can do, not the value.
-        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange();if(reply.error)result={error:reply.error};else grant=reply;}
+        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange();if(reply.error)result={error:reply.error};else {grant=reply;secrets.add(grant.token);}}
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else throw new Error('tool_not_allowed');
-      await appendFile(dir+'/events.jsonl',JSON.stringify({type:'tool',name:tool.function.name,call_id:id,arguments:args,result})+'\n',{mode:0o600});return {content:[{type:'text',text:JSON.stringify(result)}],details:{}};
+      await writeEvent({type:'tool',name:tool.function.name,call_id:id,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{}};
     }}));
   ({session}=await createAgentSession({cwd,agentDir:dir,modelRuntime:runtime,model:runtime.getModel('department-proxy','selected'),thinkingLevel:'off',resourceLoader:loader,
     tools:tools.map(tool=>tool.name),customTools:tools,sessionManager:SessionManager.inMemory(cwd),settingsManager:SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false}})}));
   session.subscribe(event=>{if(event.type==='message_end'&&event.message.role==='assistant'){
-    const m=event.message;void appendFile(dir+'/events.jsonl',JSON.stringify({type:'model',step:++steps,reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))})+'\n',{mode:0o600});
+    const m=event.message;void writeEvent({type:'model',step:++steps,reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
   }});
   try{await session.prompt(config.prompt);}catch(error){if(!finished)throw error;}
+  await events;
   const result=finished||JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,''));await save({state:'completed',result,agent:'pi',version:'1.4.0'});
-}catch{await save({state:'failed',error:'pi_execution_failed'});}
+}catch{await events.catch(()=>{});await save({state:'failed',error:'pi_execution_failed'});}
 finally{session?.dispose();server.closeAllConnections();server.close();}

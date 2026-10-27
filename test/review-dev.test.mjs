@@ -133,6 +133,7 @@ test('development needs the development label from a person and no assignee, whe
   await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});assert.equal(count(),0);
   // A person's label after the review starts the development the review found requested, once.
   assert.equal(await labeled('l6','BOT-develop','User',['bot-develop']),1);assert.equal(await labeled('l7','bot-develop','User',['bot-develop']),0);
+  assert.equal(h.store.get("SELECT count(*) n FROM task_logs l JOIN tasks t ON t.id=l.task_id WHERE t.kind='development.issue' AND json_extract(l.content,'$.type')='queued'").n,1);
   const input=JSON.parse(h.store.get("SELECT input FROM tasks WHERE kind='development.issue'").input);assert.deepEqual([input.review.request_quote,input.object_hash],['Fix add.','h']);
   // A label already on the Issue when the review is published is accepted only if a user account added it last.
   const engine=new TaskEngine(h.store,{}),task=h.store.get("SELECT * FROM tasks WHERE id='rv'"),user={event:'labeled',label:{name:'bot-develop'},actor:{type:'User'}};
@@ -141,6 +142,7 @@ test('development needs the development label from a person and no assignee, whe
   assert.equal(await engine.developmentApproved(github(issue(['bot-develop']),[user,{...user,actor:{type:'Bot'}}]),task),false);
   assert.equal(await engine.developmentApproved(github(issue(['bot-develop'],[{login:'x'}]),[user]),task),false);
   assert.equal(await engine.developmentApproved(github(issue([]),[user]),task),false);
+  h.store.run("DELETE FROM task_logs WHERE task_id IN (SELECT id FROM tasks WHERE kind='development.issue')");
   h.store.run("DELETE FROM tasks WHERE kind='development.issue'");
   engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,false);assert.equal(count(),0);
   engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,true);assert.equal(count(),1);

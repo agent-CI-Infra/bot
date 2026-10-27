@@ -14,6 +14,7 @@ export class Workspace {
     if(row&&row.request!==JSON.stringify(input))stop('tool_operation_conflict');
     if(row?.state==='completed')return JSON.parse(row.result);
     if(!row)this.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,this.task.id,JSON.stringify(input));
+    if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
     const wait=['workspace_snapshot','workspace_finalize','workspace_blob'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
@@ -50,6 +51,11 @@ export class Workspace {
   }
   async prepare(github:GitHub,commitSha:string){
     let bytes=0,contextBytes=0,fallback=false;const accepted:any[]=[],skipped:any[]=[],notes:string[]=[],materials:any[]=[];
+    this.log({type:'phase',phase:'prepare',sha:commitSha,detail:`正在准备工作区：拉取固定提交 ${commitSha} 并写入虚拟电脑…`});
+    const skip=(file:any,reason:string)=>{
+      skipped.push(file);notes.push(`Skipped ${file.path}: ${reason}`);
+      this.log({type:'snapshot_skipped',sha:commitSha,path:file.path,reason,detail:`已跳过路径 ${file.path}：${reason}`});
+    };
     try{
       const commit=await github.request('GET',github.path('/git/commits/'+commitSha));
       const tree=await repositoryTree(github,commit.tree.sha),files=tree.tree.filter((f:any)=>f.type!=='tree');fallback=tree.directory_fallback;
@@ -61,23 +67,26 @@ export class Workspace {
       for(const file of files){
         safePath(file.path);
         if(file.type!=='blob'||!['100644','100755','120000'].includes(file.mode)){
-          skipped.push(file);notes.push(`Skipped ${file.path}: type ${file.type}, mode ${file.mode}; entry is not downloaded (submodules are not cloned).`);continue;
+          skip(file,`类型 ${file.type}，mode ${file.mode}；不下载此条目（子模块不克隆）。`);continue;
         }
         const blob=await github.snapshotBlob(file.sha);
         if(blob.skipped){
-          skipped.push(file);notes.push(`Skipped ${file.path}: GitHub blob API HTTP ${blob.status}, size ${blob.size??file.size??'unknown'} bytes; ${clip(blob.message,2000)}`);continue;
+          skip(file,`GitHub blob API HTTP ${blob.status}，大小 ${blob.size??file.size??'unknown'} bytes；${clip(blob.message,2000)}`);continue;
         }
         if(blob.encoding!=='base64')stop('unsupported_blob_encoding',undefined,`Unsupported blob encoding for ${file.path}: ${blob.encoding}`);
         const data=Buffer.from(blob.content,'base64'),actual=blobSha(data);
         if(actual!==file.sha)stop('repository_blob_limit_or_hash',undefined,`Blob hash mismatch for ${file.path}: expected ${file.sha}, actual ${actual}`);
         await this.write('prepare:'+file.path,file.path,data,file.mode,true,file.sha);
         accepted.push({path:file.path,sha:file.sha,mode:file.mode});bytes+=data.length;
+        if(accepted.length%100===0)this.log({type:'snapshot_progress',sha:commitSha,files:accepted.length,bytes,path:file.path,
+          detail:`正在写入仓库快照：已写入 ${accepted.length} 个文件，${bytes} 字节；刚写完 ${file.path}`});
         if(contextBytes<100000&&!data.includes(0)){
           const text=data.toString('utf8').slice(0,12000);contextBytes+=text.length;materials.push({path:file.path,content:text,truncated:text.length<data.length});
         }
       }
       // Skipped entries remain upstream. Validate the local tree against precisely the accepted manifest.
       const expected=skipped.length?treeSha(accepted):commit.tree.sha;
+      this.log({type:'snapshot_git',sha:commitSha,tree_sha:expected,detail:`正在构建本地 Git 树：${expected}`});
       const ready=await this.call('prepare:git',{type:'workspace_snapshot',tree_sha:expected});
       if(ready.error||ready.tree_sha!==expected)stop('workspace_snapshot_mismatch','waiting_environment',`Snapshot tree mismatch: expected ${expected}, actual ${ready.tree_sha||'unavailable'}; ${ready.detail||ready.error||'runner returned a different tree'}`);
       return {files:accepted,skipped_files:skipped.map(({path,sha,mode}:any)=>({path,sha,mode})),materials,tree_sha:expected,source_tree_sha:commit.tree.sha,

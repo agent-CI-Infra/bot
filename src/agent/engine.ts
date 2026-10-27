@@ -52,10 +52,16 @@ export class TaskEngine {
   async run(id:string,token:string){
     const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const redactor=new Redactor();
     const log=(value:any)=>{
-      const clean=redactor.clean(value);let content=JSON.stringify(clean);
+      const clean=redactor.clean(value);
+      // A waiting retry can re-enter a phase. Keep one start per attempt (or policy operation).
+      if(value.type==='phase'){
+        clean.phase_key=operationId(`${task.attempt}:${value.phase}:${value.operation_id||''}`);
+        if(this.store.get("SELECT id FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.phase_key')=?",id,clean.phase_key))return;
+      }
+      let content=JSON.stringify(clean);
       // Never slice serialized JSON: that used to hide the entire reason in the console.
       if(content.length>70000)content=JSON.stringify({type:clean.type,state:clean.state,code:clean.code,step:clean.step,detail_sha:clean.detail_sha,
-        sha:clean.sha,files:clean.files,bytes:clean.bytes,skipped:clean.skipped,directory_fallback:clean.directory_fallback,
+        phase:clean.phase,phase_key:clean.phase_key,sha:clean.sha,files:clean.files,bytes:clean.bytes,skipped:clean.skipped,directory_fallback:clean.directory_fallback,
         detail:clip(clean.detail,6000),output:clip(content,6000),truncated:true});
       if(value.type==='snapshot'&&this.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='snapshot' ORDER BY rowid DESC LIMIT 1",id)?.content===content)return;
       this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,content,new Date().toISOString());
@@ -105,7 +111,8 @@ export class TaskEngine {
       };
       workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
       const publishDevelopment=async()=>{
-        update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log);
+        update({status:'publishing'});log({type:'phase',phase:'publish',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
+        const publisher=new Publisher(this.store,github,task,validate,undefined,log);
         const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
@@ -185,6 +192,7 @@ export class TaskEngine {
       }
       if(task.phase==='validate')stop('create_pull_request_required','needs_replan');
       if(task.phase==='model'){
+        log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl),development?async(requestId,args)=>{
           // Fix the only candidate snapshot before any policy command can create or modify files.
           const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
@@ -221,6 +229,7 @@ export class TaskEngine {
       if(task.phase==='publish'){
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log);
         if(!development){
+          log({type:'phase',phase:'publish',target:'review',detail:'正在发布到 GitHub：发送检视评论…'});
           const outputs=await publisher.review(result,input.files);
           // Labels go on only after the summary comment was published: the policy's review label, plus the classification
           // labels the model named that pass classificationLabels against the repository and the object's current labels.
