@@ -15,7 +15,10 @@ test('manifest creates fixed permissions and events, converts once without a PAT
  assert.equal((await admin('/api/onboarding/manifest','POST',{organization:'fixture',name:'Fixture'})).status,409);onboarding.save('public',{origin:'https://hooks.invalid'});
  const prepared=(await admin('/api/onboarding/manifest','POST',{organization:'fixture',name:'Fixture'})).value;
  assert.deepEqual(prepared.manifest.default_events,['issues','pull_request']);assert.deepEqual(prepared.manifest.default_permissions,{contents:'write',issues:'write',pull_requests:'write',statuses:'write',actions:'write',checks:'write',metadata:'read'});assert.equal(prepared.manifest.hook_attributes.active,true);assert.match(prepared.manifest.hook_attributes.url,/^https:\/\/hooks.invalid\/hooks\/github\//);
- const state=new URL(prepared.create_url).searchParams.get('state');await onboarding.callback('manifest-fixture-code',state);await assert.rejects(onboarding.callback('manifest-fixture-code',state));assert.equal(calls.length,1);assert.equal(calls[0].options.headers.Authorization,undefined);
+ // GitHub sends the browser to redirect_url; the console reopens the wizard at the install step (index 2).
+ assert.match(prepared.manifest.redirect_url,/\/onboarding\/github\/callback$/);
+ const state=new URL(prepared.create_url).searchParams.get('state'),returned=await fetch(`${h.admin}/onboarding/github/callback?code=manifest-fixture-code&state=${state}`,{redirect:'manual'});
+ assert.equal(returned.status,303);assert.equal(returned.headers.get('location'),'/#onboarding/2');await assert.rejects(onboarding.callback('manifest-fixture-code',state));assert.equal(calls.length,1);assert.equal(calls[0].options.headers.Authorization,undefined);
  const view=JSON.stringify((await admin('/api/accounts')).value);assert.ok(!view.includes(secret)&&!view.includes(pem));assert.ok(!JSON.stringify((await admin('/api/onboarding')).value).includes(secret));assert.ok(!JSON.stringify(h.store.all('SELECT * FROM accounts')).includes(pem));
 });
 test('tunnel token is private and write-only; skip installation does not enable review; project admins cannot change onboarding',async t=>{

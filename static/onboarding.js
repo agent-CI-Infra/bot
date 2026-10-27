@@ -1,14 +1,24 @@
 titles.onboarding='接入向导';
 let onboardingStep=0;
-let onboardingTunnel=false;
+// Null until step 1 is drawn, which then picks Cloudflare Tunnel when a tunnel token is saved; leaving step 1 resets it.
+let onboardingTunnel=null;
 const onboardingSteps=['公网 HTTPS','GitHub App','安装','模型','规则','完成'];
-$('logout').addEventListener('click',()=>{$('onboarding-panel').replaceChildren();onboardingStep=0;onboardingTunnel=false;});
+$('logout').addEventListener('click',()=>{$('onboarding-panel').replaceChildren();onboardingStep=0;onboardingTunnel=null;if(location.hash.startsWith('#onboarding/'))history.replaceState(null,'','#onboarding');});
 function wizardForm(title,fields,submit,save){
   const section=card(title),form=element('form','','project-form'),message=element('p','','view-error');message.setAttribute('role','alert');
   const action=element('button',submit);action.type='submit';form.append(...fields,message,action);section.append(form);
   form.onsubmit=async event=>{event.preventDefault();action.disabled=true;message.textContent='';try{if(await save(Object.fromEntries(new FormData(form)),form)!==false)await render();}catch(error){message.textContent=error.message;}finally{action.disabled=false;}};return section;
 }
-function wizardNext(step){onboardingStep=step;void render().catch(error);}
+// The step lives in the address (#onboarding/<index>) so a reload stays on it. replaceState adds no history entry and
+// fires no hashchange; the caller draws the step.
+function wizardStep(step){history.replaceState(null,'','#onboarding/'+step);}
+function wizardNext(step){wizardStep(step);void render().catch(error);}
+// #onboarding/<0-5> names a step; #onboarding or an unknown step is the first. Without a wizard address (the tab
+// button, the first login) the wizard stays on its current step.
+function addressedStep(){
+  if(!/^#onboarding(?:\/|$)/.test(location.hash))return onboardingStep;
+  return Number(onboardingAddress.exec(location.hash)?.[1]||0);
+}
 // GitHub has no API that changes an App's permissions. The check lists what is missing in GitHub's own wording and links
 // the App's permission page (one save) and each installation's review page (one acceptance each). Names come from views.js.
 function githubLinkElement(text,href){const link=element('a',text);link.href=href;link.target='_blank';link.rel='noopener';return link;}
@@ -60,6 +70,7 @@ function accountInstallationForm(){
 }
 async function renderOnboarding(request){
   const data=await api('/api/onboarding'),{models}=await api('/api/models');if(request!==renderVersion)return;
+  const step=addressedStep();if(step!==onboardingStep)onboardingTunnel=null;onboardingStep=step;
   const panel=$('onboarding-panel');panel.replaceChildren();$('count').textContent=`第 ${onboardingStep+1} / ${onboardingSteps.length} 步`;
   const nav=element('nav','','wizard-steps');nav.setAttribute('aria-label','接入步骤');onboardingSteps.forEach((title,index)=>{const b=button(`${index+1}. ${title}`,()=>wizardNext(index));if(index===onboardingStep)b.setAttribute('aria-current','step');nav.append(b);});panel.append(nav);
   if(data.installation_skipped||data.app&&!data.app.installations)panel.append(element('p','尚未确认 App 安装。可以继续配置模型和规则；安装并启用项目之前，仓库检视不会开始。','wizard-notice'));
@@ -67,6 +78,7 @@ async function renderOnboarding(request){
   if(onboardingStep===0){
     panel.append(note('需要你拥有的公网域名。HTTPS 地址只连接 webhook 8791，管理端口 8792 保持本机或独立管理入口；检查会拒绝管理页面和其他实例。'));
     if(data.public_address)panel.append(facts([['已验证地址',data.public_address.origin],['检查时间',timestamp(data.public_address.checked_at)]]));
+    onboardingTunnel??=data.tunnel.token_configured;
     const mode=card('选择连接方式'),choices=element('div','','actions');
     const choose=value=>{onboardingTunnel=value;$('wizard-proxy').hidden=value;$('wizard-tunnel').hidden=!value;mode.querySelector('p').textContent='已选：'+(value?'Cloudflare Tunnel':'自建 HTTPS 中转');for(const b of choices.children){const chosen=(b.textContent==='Cloudflare Tunnel')===value;b.setAttribute('aria-pressed',String(chosen));b.className=chosen?'':'quiet';}};
     const proxyChoice=button('自建 HTTPS 中转',()=>choose(false)),tunnelChoice=button('Cloudflare Tunnel',()=>choose(true));proxyChoice.setAttribute('aria-pressed',String(!onboardingTunnel));tunnelChoice.setAttribute('aria-pressed',String(onboardingTunnel));proxyChoice.className=onboardingTunnel?'quiet':'';tunnelChoice.className=onboardingTunnel?'':'quiet';choices.append(proxyChoice,tunnelChoice);mode.append(choices,note('已选：'+(onboardingTunnel?'Cloudflare Tunnel':'自建 HTTPS 中转')));panel.append(mode);
@@ -89,7 +101,7 @@ async function renderOnboarding(request){
     install.append(button('暂时跳过安装',async()=>{await api('/api/onboarding/installation','POST',{skip:true});wizardNext(3);}));panel.append(install);if(data.app)panel.append(accountInstallationForm(),note('安装到其他组织或个人账号要求 App 为公开，且你拥有相应安装权限；最终由 GitHub 校验。安装完成后点「重新检查安装」，再到第 6 步同步并启动仓库。'));next();
   }else if(onboardingStep===3){
     const shared=models.filter(model=>!model.repository_id&&model.key_configured),list=card('使用已配置的模型');for(const model of shared){const row=element('div','','row');row.append(element('p',model.model_name+' · '+model.api_url),button('选用此模型',async()=>{await api('/api/onboarding/model','POST',{model_id:model.id});wizardNext(4);}));list.append(row);}if(shared.length)panel.append(list);
-    panel.append(wizardForm('添加模型',[note('保存的接口视为可信，可接收启用项目的代码、日志和测试材料。Key 加密保存，不明文回读。'),field('接口 URL',input('api_url','',{type:'url',required:true})),field('API Key',input('api_key','',{type:'password',required:true,autocomplete:'new-password'})),field('模型名',input('model_name','',{required:true}))],'保存并继续',async value=>{const result=await api('/api/models','POST',{...value,repository_id:null});await api('/api/onboarding/model','POST',{model_id:result.model.id});onboardingStep=4;}));next();
+    panel.append(wizardForm('添加模型',[note('保存的接口视为可信，可接收启用项目的代码、日志和测试材料。Key 加密保存，不明文回读。'),field('接口 URL',input('api_url','',{type:'url',required:true})),field('API Key',input('api_key','',{type:'password',required:true,autocomplete:'new-password'})),field('模型名',input('model_name','',{required:true}))],'保存并继续',async value=>{const result=await api('/api/models','POST',{...value,repository_id:null});await api('/api/onboarding/model','POST',{model_id:result.model.id});wizardStep(4);}));next();
   }else if(onboardingStep===4){
     panel.append(note('四个内置 skill 覆盖标签、Issue 检视、PR 检视和明确要求改代码时的开发。优先级：内置默认 → 项目控制台 → 默认分支仓库文件。PR 修改行为文件时必须由人决定，不能自动合并。'));
     for(const [path,content]of Object.entries(data.defaults))panel.append(collapsible(path+' · 内置默认',content));

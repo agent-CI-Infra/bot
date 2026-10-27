@@ -2,6 +2,8 @@
 
 本部署继续只使用 Docker Compose。超级管理员进入「接入向导」；项目管理员在自己项目的「检视」「开发」「规则总览」中查看和编辑权限范围内的规则。账号、模型、安装、项目电脑与数据卷复用原控制面，不创建另一套资源系统。
 
+向导地址记录当前步骤（`#onboarding/<0-5>`），刷新后仍停在该步；退出登录后从第 1 步开始。打开第 1 步时，已保存 tunnel token 则默认选中 Cloudflare Tunnel，否则默认自建 HTTPS 中转。
+
 ![接入向导（桌面）](images/onboarding-desktop.png)
 
 ## 公网 HTTPS 与域名
@@ -18,7 +20,7 @@ Cloudflare Tunnel 是 Compose 中独立的 `tunnel` 服务。初始没有 token�
 
 没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 3 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 读（之前创建的 App 在「机器人账号」页或本步「使用已登记的 App」下点「检查权限」：页面列出 App 和各安装缺少的权限，链接到 App 的 Permissions & events 页和各安装的确认页；GitHub 不提供修改 App 权限的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 只有 issues、pull_request。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
 
-GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥与 webhook secret 只在控制面加密保存，client secret 不需要则丢弃。
+GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥与 webhook secret 只在控制面加密保存，client secret 不需要则丢弃。回调成功后，浏览器打开向导第 3 步「安装」，显示刚创建的 App 和安装入口。
 
 第 3 步的「安装账号」支持个人账号名、组织名、`owner/repo`、GitHub 个人主页、组织或仓库链接（包括 Issue、PR、代码目录链接），以及 `git@github.com:owner/repo.git`、`ssh://git@github.com/owner/repo.git`。点击「解析账号」，控制面从链接提取 owner，再通过 GitHub 核对并显示规范名称和账号类型（组织或个人账号）；无效链接、不存在的账号和不能安装的账号类型会显示原因。解析时不连接粘贴的网址，不读取仓库内容，也不会安装 App 或启用仓库。
 
