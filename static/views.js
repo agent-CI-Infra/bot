@@ -1,6 +1,5 @@
 // Task process and project computer views. Loaded after app.js and reuses its helpers ($, api, element, state, states, timestamp).
 const terminalStates = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
-const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 const kindLabels = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', publish: '发布', done: '完成' };
@@ -126,7 +125,7 @@ let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand =
 async function openTask(id) {
   openTaskId = id; renderedLogs = new Set(); liveCommand = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
-  $('task-title').textContent = '正在加载…'; $('task-error').textContent = ''; $('timeline-live').hidden = true;
+  $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
   if (!taskView.open) taskView.showModal();
   await refreshTask();
 }
@@ -136,10 +135,9 @@ async function refreshTask() {
     const [detail, { logs }] = await Promise.all([api('/api/tasks/' + id), api('/api/tasks/' + id + '/logs')]);
     const environment = await api('/api/environments/' + detail.task.repository_id).catch(() => null);
     if (openTaskId !== id || !taskView.open) return;
-    $('task-error').textContent = '';
     renderTaskHeader(detail.task); renderTimeline(detail.task, logs); await refreshLive(detail.task); keepOpen($('task-side'), () => renderTaskSide(detail, environment));
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
-  } catch (err) { $('task-error').textContent = err.message; taskTimer = setTimeout(refreshTask, 5000); }
+  } catch (err) { if(openTaskId!==id||!taskView.open)return;if(!$('task-error').childElementCount)notice('task-error',err.message);taskTimer = setTimeout(refreshTask, 5000); }
 }
 function renderTaskHeader(task) {
   $('task-title').textContent = `${modeLabels[task.kind] || task.kind} · ${objectLabel(task)}`;
@@ -148,7 +146,8 @@ function renderTaskHeader(task) {
   if (url) actions.append(link(url, '在 GitHub 打开', 'button-link'));
   if (retryableStates.includes(task.status)) actions.append(button('重试', async event => {
     event.currentTarget.disabled = true;
-    try { await api('/api/tasks/' + task.id + '/retry', 'POST', {}); } catch (err) { $('task-error').textContent = err.message; }
+    try { await api('/api/tasks/' + task.id + '/retry', 'POST', {}); if(openTaskId===task.id){notice('task-error');notice('message');} }
+    catch (err) { if(openTaskId===task.id)notice('task-error',retryErrorText(err)); }
     await refreshTask();
   }));
   actions.append(button('关闭', () => taskView.close()));
@@ -294,7 +293,7 @@ function computerCard(task, environment) {
   section.append(facts([['容器', pc.container], ['代次', task.generation && env.generation && task.generation !== env.generation ? `当前 g${env.generation}，本任务用 g${task.generation}` : env.generation ? 'g' + env.generation : '待创建'],
     ['资源', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程` : null], ['网络', networkText(pc)]]));
   const actions = element('div', '', 'actions');
-  actions.append(button('打开项目机器配置', () => { taskView.close(); openProject(task.repository_id, 'machine'); }), ...environmentButtons(env, running.length > 0, refreshTask, err => { $('task-error').textContent = err.message; }));
+  actions.append(button('打开项目机器配置', () => { taskView.close(); openProject(task.repository_id, 'machine'); }), ...environmentButtons(env, running.length > 0, refreshTask, err => notice('task-error',err.message)));
   section.append(actions); return section;
 }
 function resultCard(task) {

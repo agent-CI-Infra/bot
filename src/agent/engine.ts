@@ -303,7 +303,8 @@ export class TaskEngine {
       const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed');
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
       const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
-      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,next_run_at:Date.now()+(state==='waiting_configuration'?30000:5000)});
+      const delay=failure.code==='github_rate_limited'?(failure.retryAfterMs??60000):state==='waiting_configuration'?30000:5000;
+      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,next_run_at:Date.now()+delay});
       if(failure.code==='execution_interrupted'&&task.phase!=='publish'&&task.attempt<3){
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,attempt:task.attempt+1});
@@ -364,7 +365,8 @@ export class TaskEngine {
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
     fields(input,[]);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
     if(!task)return fail(404,'task_not_found');
-    if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status)||this.active.has(task.id))fail(409,'task_not_retryable');
+    if(this.active.has(task.id)||['queued','running','preparing','implementing','validating','publishing','result_ready'].includes(task.status))fail(409,'task_already_running');
+    if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status))fail(409,'task_not_retryable');
     this.store.transaction(()=>{
       if(task.phase!=='publish'&&['failed','waiting_environment','needs_replan'].includes(task.status)){
         this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,attempt=attempt+1 WHERE id=?",task.id);

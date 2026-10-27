@@ -10,6 +10,7 @@ export async function emptyRepositoryFixture(t,options={}){
   const server=createServer(async(req,res)=>{
     let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},path=new URL(req.url,'http://fixture').pathname;
     const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
+    if(await options.github?.(path,send,res))return;
     if(path==='/user')return send({id:999,login:'fixture-bot'});
     if(path==='/repositories/101')return send({id:101,owner:{id:10},full_name:'fixture/project-101',default_branch:'main'});
     if(path.endsWith('/issues/1'))return send({id:1,number:1,state:'open',title:'First issue',body:'Please review this project.'});

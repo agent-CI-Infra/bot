@@ -2,6 +2,9 @@ let costState=null,costRequest=0;
 const money=(value,currency)=>currency+' '+(value>0&&value<0.000001?'< 0.000001':Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:6}));
 function costColor(id) { let hash=0;for(const char of id)hash=(hash*31+char.charCodeAt(0))>>>0;hash=Math.imul(hash^(hash>>>16),0x45d9f3b)>>>0;return `hsl(${hash%360} 57% 44%)`; }
 function costControl(caption,control) { const label=element('label',caption);label.append(control);return label; }
+const costTokenFields=[['input_tokens','输入 token'],['output_tokens','输出 token'],['cached_input_tokens','缓存命中 token']];
+function addCostTokens(total,row) { for(const [key]of costTokenFields)if(row[key]!=null)total[key]=(total[key]??0)+row[key]; }
+function costTokenCells(row) { return costTokenFields.map(([key])=>element('td',metricNumber(row[key]))); }
 async function renderCosts(request) {
   const owner=me.id,panel=$('costs-panel');panel.replaceChildren();
   if(costState?.owner!==owner){const to=new Date().toISOString().slice(0,10);costState={owner,to,from:new Date(Date.parse(to+'T00:00:00Z')-29*86400000).toISOString().slice(0,10),currency:'USD',repository_id:''};}
@@ -29,28 +32,36 @@ async function loadCosts(version) {
   for(const [label,value]of [['已计价费用',known||!data.summary.requests?money(data.summary.cost,data.currency):'暂无可计价记录'],['模型请求',metricNumber(data.summary.requests)],['未计价请求',metricNumber(data.summary.unpriced_requests)],['用量不完整请求',metricNumber(data.summary.usage_missing_requests)]]){
     const item=element('div','','cost-stat');item.append(element('span',label,'muted'),element('strong',value));summary.append(item);
   }
-  body.append(summary,element('p','按 UTC 请求日期汇总。费用按请求发生时保存的模型单价估算；不同币种分别展示，不作汇率换算。单价可在项目“使用的模型”中配置。','cost-note'));
+  const tokens=element('div','','cost-token-summary');
+  for(const [key,label]of costTokenFields){const item=element('div','','cost-stat');item.append(element('span',label,'muted'),element('strong',metricNumber(data.summary[key])));tokens.append(item);}
+  body.append(summary,tokens,element('p','输入包含缓存命中 token。— 表示没有可靠记录；用量不完整时仅汇总已记录的 token。','cost-note'),element('p','按 UTC 请求日期汇总。费用按请求发生时保存的模型单价估算；不同币种分别展示，不作汇率换算。单价可在项目“使用的模型”中配置。','cost-note'));
   if(data.summary.unpriced_requests)body.append(element('p',`有 ${data.summary.unpriced_requests} 次请求缺少单价或完整用量，未计入柱状图金额。占比仅针对已计价费用。`,'cost-incomplete'));
   body.append(element('p','统计开始于 '+timestamp(data.collection_started_at)+'；此前未记录的用量与费用无法补算。','cost-note'));
   const byProject=new Map(),byDate=new Map();
   for(let time=Date.parse(data.from+'T00:00:00Z');time<=Date.parse(data.to+'T00:00:00Z');time+=86400000)byDate.set(new Date(time).toISOString().slice(0,10),{cost:0,requests:0,unpriced_requests:0,rows:[]});
   for(const row of data.days){
-    const day=byDate.get(row.date);day.cost+=row.cost||0;day.requests+=row.requests;day.unpriced_requests+=row.unpriced_requests;day.rows.push(row);
-    const project=byProject.get(row.repository_id)||{...row,cost:0,requests:0,unpriced_requests:0};project.cost+=row.cost||0;project.requests+=row.requests;project.unpriced_requests+=row.unpriced_requests;byProject.set(row.repository_id,project);
+    const day=byDate.get(row.date);day.cost+=row.cost||0;day.requests+=row.requests;day.unpriced_requests+=row.unpriced_requests;day.rows.push(row);addCostTokens(day,row);
+    const project=byProject.get(row.repository_id)||{...row,cost:0,requests:0,unpriced_requests:0,input_tokens:null,output_tokens:null,cached_input_tokens:null};project.cost+=row.cost||0;project.requests+=row.requests;project.unpriced_requests+=row.unpriced_requests;addCostTokens(project,row);byProject.set(row.repository_id,project);
   }
   const projects=[...byProject.values()].sort((a,b)=>b.cost-a.cost||a.full_name.localeCompare(b.full_name));
   const chart=element('section','','cost-chart-section');chart.append(element('h2','每日费用 · 按项目堆叠'));
   if(!data.summary.requests)chart.append(element('p','这个日期范围内没有模型请求记录。','cost-empty'));
   else if(!known)chart.append(element('p','该范围内的请求暂时无法计价。配置模型单价后，新请求会产生费用记录。','cost-empty'));
   costChart(chart,byDate,projects,data.currency);body.append(chart);
-  const projectTable=costTable(['项目','已计价费用','已计价费用占比','未计价请求']);
+  if(data.prices?.length){
+    const prices=element('section','','cost-breakdown'),table=costTable(['模型','币种','输入 / 百万 token','输出 / 百万 token','缓存命中 / 百万 token']);
+    prices.append(element('h2','范围内已保存的单价'),element('p','按请求发生时的单价逐组列出；同一模型的多组单价分别展示。','cost-note'));
+    for(const price of data.prices){const row=document.createElement('tr');row.append(element('td',price.model_name),element('td',price.currency),...['input_per_million','output_per_million','cache_per_million'].map(key=>element('td',Number(price[key]).toLocaleString('zh-CN',{maximumFractionDigits:20}))));table.body.append(row);}
+    prices.append(table.wrap);body.append(prices);
+  }
+  const projectTable=costTable(['项目','已计价费用','已计价费用占比',...costTokenFields.map(([,label])=>label),'未计价请求']);
   for(const project of projects){
     const row=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,document.createTextNode(project.full_name));
-    row.append(name,element('td',project.requests===project.unpriced_requests?'—':money(project.cost,data.currency)),element('td',data.summary.cost>0?(project.cost/data.summary.cost*100).toFixed(1)+'%':'—'),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
+    row.append(name,element('td',project.requests===project.unpriced_requests?'—':money(project.cost,data.currency)),element('td',data.summary.cost>0?(project.cost/data.summary.cost*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
   }
   const breakdown=element('section','','cost-breakdown');breakdown.append(element('h2','项目占比'),projectTable.wrap);if(!projects.length)breakdown.append(element('p','暂无项目费用记录。','muted'));body.append(breakdown);
-  const detail=element('details','','cost-breakdown'),daily=costTable(['日期（UTC）','已计价费用','模型请求','未计价请求']);detail.append(element('summary','每日明细'));
-  for(const [date,day]of byDate){const row=document.createElement('tr');row.append(element('td',date),element('td',day.requests&&day.requests===day.unpriced_requests?'—':money(day.cost,data.currency)),element('td',String(day.requests)),element('td',String(day.unpriced_requests)));daily.body.append(row);}detail.append(daily.wrap);body.append(detail);
+  const detail=element('details','','cost-breakdown'),daily=costTable(['日期（UTC）','已计价费用','模型请求',...costTokenFields.map(([,label])=>label),'未计价请求']);detail.append(element('summary','每日明细'));
+  for(const [date,day]of byDate){const row=document.createElement('tr');row.append(element('td',date),element('td',day.requests&&day.requests===day.unpriced_requests?'—':money(day.cost,data.currency)),element('td',String(day.requests)),...costTokenCells(day),element('td',String(day.unpriced_requests)));daily.body.append(row);}detail.append(daily.wrap);body.append(detail);
 }
 function costTable(headers) {
   const wrap=element('div','','cost-table-scroll'),table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');headers.forEach(name=>{const th=element('th',name);th.scope='col';row.append(th);});head.append(row);const body=document.createElement('tbody');table.append(head,body);wrap.append(table);return {wrap,body};

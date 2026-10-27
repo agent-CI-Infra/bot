@@ -54,13 +54,32 @@ test('daily costs separate UTC dates, currencies, unknown charges and projects w
   usageRequest(h.store,'a',model.id,{currency:'CNY',cost:20});usageRequest(h.store,'a',model.id,{priced:false});
   const query='/api/costs?from=2026-10-22&to=2026-10-23';let result=(await admin(query)).value;
   assert.equal(result.summary.cost,9);assert.equal(result.summary.requests,4);assert.equal(result.summary.unpriced_requests,1);assert.equal(result.days.length,3);assert.equal(result.timezone,'UTC');
+  assert.deepEqual([result.summary.input_tokens,result.summary.output_tokens,result.summary.cached_input_tokens],[4000000,0,0]);
   assert.equal((await admin(query+'&currency=CNY')).value.summary.cost,20);
   const password=testPassword();await admin('/api/users','POST',{username:'cost-member',password,repository_ids:['101']});
   const member=h.client();await member('/api/auth/login','POST',{username:'cost-member',password});result=(await member(query)).value;
   assert.equal(result.summary.cost,6);assert.ok(result.days.every(r=>r.repository_id==='101'));assert.ok(!JSON.stringify(result).includes('project-202'));
+  assert.deepEqual(result.prices.map(p=>p.input_per_million),[2,4]);
   assert.equal((await member(query+'&repository_id=202')).status,403);assert.equal((await member('/api/tasks/b')).status,404);
   for(const suffix of ['from=bad','from=2026-02-30','from=2020-01-01&to=2026-01-01','from=2026-10-24&to=2026-10-23','currency=EUR'])assert.equal((await admin('/api/costs?'+suffix)).status,400);
   const plan=h.store.all('EXPLAIN QUERY PLAN SELECT id FROM model_requests WHERE repository_id=? AND requested_at>=? AND requested_at<?','101','2026-10-22','2026-10-24');assert.ok(plan.some(r=>r.detail.includes('model_request_repo_date')));
+});
+test('costs return distinct saved prices within the selected scope, without inventing prices for unpriced requests',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'prices');metricTask(h.store,'other-prices','202');
+  usageRequest(h.store,'prices',model.id,{cost:2,id:'price-a',usage:{prompt_tokens:1000,completion_tokens:20,prompt_cache_hit_tokens:750}});
+  usageRequest(h.store,'prices',model.id,{cost:3,id:'price-b',usage:{prompt_tokens:2000,completion_tokens:30,prompt_cache_hit_tokens:1000}});
+  usageRequest(h.store,'prices',model.id,{cost:2,id:'price-a-again'});
+  usageRequest(h.store,'prices',model.id,{priced:false,id:'unpriced',date:'2026-10-23'});
+  usageRequest(h.store,'other-prices',model.id,{cost:9,id:'other-repository'});
+  usageRequest(h.store,'prices',model.id,{cost:8,id:'other-date',date:'2026-10-21'});
+  usageRequest(h.store,'prices',model.id,{cost:7,id:'other-currency',currency:'CNY'});
+  const query='/api/costs?from=2026-10-22&to=2026-10-23&repository_id=101',result=(await admin(query)).value;
+  assert.deepEqual([result.summary.input_tokens,result.summary.output_tokens,result.summary.cached_input_tokens],[2003000,50,1750]);
+  assert.deepEqual(result.prices,[2,3].map(input=>({model_name:'fixture',currency:'USD',input_per_million:input,output_per_million:10,cache_per_million:0.2})));
+  assert.equal(result.summary.unpriced_requests,1);
+  const noPrice=(await admin('/api/costs?from=2026-10-23&to=2026-10-23&repository_id=101')).value;
+  assert.deepEqual(noPrice.prices,[]);assert.equal(noPrice.summary.unpriced_requests,1);
+  assert.deepEqual((await admin(query+'&currency=CNY')).value.prices,[{model_name:'fixture',currency:'CNY',input_per_million:7,output_per_million:10,cache_per_million:0.2}]);
 });
 test('pricing uses existing model ownership and version guards and can be cleared without losing history',async t=>{
   const {h,admin,model}=await fixture(t);metricTask(h.store,'history');usageRequest(h.store,'history',model.id);

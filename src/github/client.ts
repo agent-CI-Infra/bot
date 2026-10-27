@@ -4,6 +4,32 @@ import { Redactor, safePath, stop, TaskError } from '../agent/common.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
 const treeCache=new WeakMap<object,Map<string,Promise<SnapshotTree>>>();
+// Error responses are untrusted: keep only a short message, never headers or the whole payload.
+async function githubError(response:Response):Promise<any>{
+  const reader=response.body?.getReader();if(!reader)return null;
+  const chunks:Uint8Array[]=[];let length=0;
+  try{
+    while(length<16384){const {done,value}=await reader.read();if(done)break;chunks.push(value.subarray(0,16384-length));length+=value.length;}
+  }catch{/* Preserve the HTTP failure when the error body cannot be read. */}
+  finally{await reader.cancel().catch(()=>{});}
+  const text=Buffer.concat(chunks).toString('utf8');
+  try{return JSON.parse(text);}catch{return response.headers.get('content-type')?.startsWith('text/plain')?{message:text.split(/[\r\n]/)[0]}:null;}
+}
+function errorDetail(message:unknown,redactor:Redactor,token:string,status:number):string{
+  let detail=typeof message==='string'?message:`GitHub HTTP ${status}`;
+  if(token)detail=detail.replaceAll(token,'[REDACTED]');
+  return redactor.text(detail)
+    .replace(/authorization[^\r\n]*/gi,'[REDACTED]')
+    .replace(/\b(?:Bearer|Basic)\s+\S+/gi,'[REDACTED]')
+    .replace(/\b(?:github_pat_|gh[pousr]_)[a-zA-Z0-9_]+/g,'[REDACTED]')
+    .replace(/\b(?:access_token|token|api_key)\s*[:=]\s*[^\s,;]+/gi,'[REDACTED]')
+    .replace(/\s+/g,' ').trim().slice(0,320)||`GitHub HTTP ${status}`;
+}
+function retryAfterMs(value:string|null):number{
+  // GitHub sends seconds. Also accept HTTP dates; invalid or excessive waits use the one-minute fallback.
+  const delay=value&&/^\d+$/.test(value)?Number(value)*1000:value?Date.parse(value)-Date.now():NaN;
+  return Number.isFinite(delay)&&delay>=0&&delay<=900000?delay:60000;
+}
 // Rule preflight and workspace preparation share the same complete listing for an immutable tree.
 export function repositoryTree(github:Pick<GitHub,'request'|'path'>,sha:string):Promise<SnapshotTree>{
   let cache=treeCache.get(github);if(!cache){cache=new Map();treeCache.set(github,cache);}
@@ -69,21 +95,21 @@ export class GitHub {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
     catch { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait'); }
     if (response.status === 404 && allow404) return null;
-    // Ref reads report an empty repository as 409; writes and other conflicts must still fail.
-    if (response.status === 409 && allowEmptyRepository) {
-      let error; try { error = await response.json(); } catch { /* Keep the original HTTP failure for other responses. */ }
-      if (error?.message === 'Git Repository is empty.' || error?.message === 'Git Repository is empty') return null;
-    }
     if (!response.ok) {
+      const error=await githubError(response),detail=errorDetail(error?.message,this.redactor,token,response.status);
+      // Ref reads report an empty repository as 409; writes and other conflicts must still fail.
+      if(response.status===409&&allowEmptyRepository&&['Git Repository is empty.','Git Repository is empty'].includes(error?.message))return null;
       if(snapshotBlob&&[403,413,422].includes(response.status)){
-        const error=await response.json().catch(()=>null);
         // Do not mistake denied permissions or rate limiting for a file-size exclusion.
         if(error?.errors?.some?.((e:any)=>e.code==='too_large')||/\b(?:blob|file)\b.*\btoo large\b/i.test(error?.message||''))
-          return {skipped:true,status:response.status,size:error?.size,message:error?.message||'Blob too large for GitHub API'};
+          return {skipped:true,status:response.status,size:error?.size,message:error?.message?detail:'Blob too large for GitHub API'};
       }
-      if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission');
-      if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait');
-      stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed');
+      const retryAfter=response.headers.get('retry-after'),limited=[403,429].includes(response.status)&&
+        (retryAfter!==null||response.headers.get('x-ratelimit-remaining')==='0'||/rate[\s_-]*limit|abuse[\s_-]*(?:detection|detected)/i.test(String(error?.message||'')+' '+String(error?.documentation_url||'')));
+      if(limited)stop('github_rate_limited','retry_wait',detail===`GitHub HTTP ${response.status}`?detail+': rate limit exceeded':detail,retryAfterMs(retryAfter));
+      if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission',detail);
+      if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',detail);
+      stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',detail);
     }
     const value = await response.text(); if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large');
     try { return value ? JSON.parse(value) : {}; } catch { return stop('github_invalid_response'); }

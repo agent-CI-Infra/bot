@@ -24,8 +24,16 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
     FROM model_requests q JOIN repositories r ON r.id=q.repository_id WHERE ${clauses.join(' AND ')}
     GROUP BY date,q.repository_id ORDER BY date,q.repository_id LIMIT 5001`,...args);
   if(rows.length>5000)fail(400,'cost_range_too_large');
+  // Read the historical price snapshots, including priced requests whose usage is missing.
+  const prices=store.all(`SELECT DISTINCT q.model_name,q.currency,q.input_per_million,q.output_per_million,q.cache_per_million
+    FROM model_requests q WHERE ${clauses.join(' AND ')} AND q.currency IS NOT NULL
+    AND q.input_per_million IS NOT NULL AND q.output_per_million IS NOT NULL AND q.cache_per_million IS NOT NULL
+    ORDER BY q.model_name,q.currency,q.input_per_million,q.output_per_million,q.cache_per_million`,...args);
   return {from:start,to:end,currency,timezone:'UTC',days:rows,
+    prices,
     collection_started_at:store.get("SELECT value FROM settings WHERE key='task_metrics_v1'")?.value||null,
     summary:{cost:rows.reduce((n,r)=>n+Number(r.cost||0),0),requests:rows.reduce((n,r)=>n+r.requests,0),
-      unpriced_requests:rows.reduce((n,r)=>n+r.unpriced_requests,0),usage_missing_requests:rows.reduce((n,r)=>n+r.usage_missing_requests,0)}};
+      unpriced_requests:rows.reduce((n,r)=>n+r.unpriced_requests,0),usage_missing_requests:rows.reduce((n,r)=>n+r.usage_missing_requests,0),
+      ...Object.fromEntries(['input_tokens','output_tokens','cached_input_tokens'].map(key=>[key,
+        rows.some(r=>r[key]!==null)?rows.reduce((n,r)=>n+Number(r[key]||0),0):null]))}};
 }
