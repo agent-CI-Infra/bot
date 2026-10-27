@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 export class TaskError extends Error {
-  constructor(readonly code: string, readonly state = 'failed', readonly detail?: string) { super(code); }
+  constructor(readonly code: string, readonly state = 'failed', readonly detail?: string, readonly retryAfterMs?: number) { super(code); }
 }
-export const stop = (code: string, state?: string, detail?: string): never => { throw new TaskError(code, state, detail); };
+export const stop = (code: string, state?: string, detail?: string, retryAfterMs?: number): never => { throw new TaskError(code, state, detail, retryAfterMs); };
 export const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 export const operationId = (value: string) => sha(value).slice(0, 48);
 export const blobSha = (data: Buffer) => createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');

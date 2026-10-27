@@ -20,3 +20,4 @@ a.status-link:hover{text-decoration:underline}
 
 /* Shared configuration dialog: one row per item with its own action. */
 .quickstart-steps{display:grid;margin:10px 0;padding:0;list-style:none}.quickstart-step{display:grid;padding:10px 0;border-top:1px solid #e8eef2;grid-template-columns:minmax(0,1fr) auto;column-gap:16px;align-items:start}.quickstart-step>:not(button){grid-column:1}.quickstart-step>button{grid-column:2;grid-row:1/span 4}.quickstart-step p{margin:3px 0;overflow-wrap:anywhere;font-size:13px}.quickstart-step .result-link{font-size:13px;color:#16636b;text-underline-offset:3px;width:fit-content}
+#message:not(:empty),#task-error:not(:empty){display:flex;align-items:center;justify-content:space-between;gap:12px}#message>span,#task-error>span{min-width:0;overflow-wrap:anywhere}#message>button,#task-error>button{flex-shrink:0}

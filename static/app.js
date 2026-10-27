@@ -1,13 +1,26 @@
 const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false, permissionAutoRefresh = false;
 const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
+const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
+let messagePage = null;
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
   if (!response.ok) throw new Error(`${response.status} · ${value.error}`);
   return value;
 }
-function error(err) { $('message').textContent = err.message; if ($('editor').open) $('editor-error').textContent = err.message; }
+function notice(id, text = '') {
+  const box = $(id); box.replaceChildren();
+  if (!text) return;
+  const close = element('button', '关闭提示', 'quiet'); close.type = 'button'; close.addEventListener('click', () => notice(id));
+  box.append(element('span', text), close);
+}
+function retryErrorText(err) {
+  if (/\btask_already_running\b/.test(err.message)) return '这个任务已经在执行或排队，不用再次重试。';
+  if (/\btask_not_retryable\b/.test(err.message)) return '这个任务已经结束，不能重试。';
+  return err.message;
+}
+function error(err) { if (!$('message').childElementCount) notice('message', err.message); if ($('editor').open) $('editor-error').textContent = err.message; }
 function element(tag, text, className) { const el = document.createElement(tag); el.textContent = text; if (className) el.className = className; return el; }
 const states = {
   accepted:['已接收','success'], invalid_signature:['签名无效','danger'], invalid_payload:['正文无效','danger'], payload_too_large:['正文过大','danger'],
@@ -51,16 +64,17 @@ async function route() {
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   if (target) tab = 'projects';
   if(onboardingAddress.test(location.hash)&&me.role==='super_admin')tab='onboarding';
+  const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   page.hidden = !target; list.hidden = !!target;
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  if (target) { $('message').textContent = ''; await renderProject(target); } else await render();
+  if (target) await renderProject(target); else await render();
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });
 async function render() {
   const request=++renderVersion, taskTab = !!taskKinds[tab];
-  $('message').textContent = ''; $('page-title').textContent = titles[tab];
+  $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   // Repositories come from installation sync and are started from the list, so the projects page has no add form.
   $('add').hidden = listTabs.includes(tab) || ['projects','board','costs','settings'].includes(tab) || me.role !== 'super_admin';
@@ -128,8 +142,12 @@ async function render() {
     if(taskTab){
       const actions=element('div','','actions'),detail=element('button','查看过程','quiet');
       detail.addEventListener('click',()=>openTask(row.id).catch(error));actions.append(detail);
-      if(['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','retry_wait','needs_replan'].includes(row.status)){
-        const retry=element('button','重试','quiet');retry.addEventListener('click',async()=>{retry.disabled=true;try{await api('/api/tasks/'+row.id+'/retry','POST',{});await render();}catch(err){error(err);retry.disabled=false;}});actions.append(retry);
+      if(retryableStates.includes(row.status)){
+        const retry=element('button','重试','quiet');retry.addEventListener('click',async()=>{
+          retry.disabled=true;const address=tab+':'+location.hash;
+          try{await api('/api/tasks/'+row.id+'/retry','POST',{});if(address!==tab+':'+location.hash)return;notice('message');await render();}
+          catch(err){if(address===tab+':'+location.hash)notice('message',retryErrorText(err));retry.disabled=false;}
+        });actions.append(retry);
       }line.append(actions);
     }
     if(taskTab)content.append(taskMetricsLine(row));
