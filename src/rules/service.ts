@@ -21,9 +21,17 @@ export const defaults: Record<string, string> = {
 };
 export const behaviorPath = (path: string) => path === '.bot' || path.startsWith('.bot/') || path === '.agents/skills' || path.startsWith('.agents/skills/');
 const skillPath = (path: string) => /^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path);
+const rulePath = (path: string) => Object.hasOwn(defaults, path) || skillPath(path);
+// One rule file holds at most this many UTF-8 bytes, whether it comes from the console or the repository.
+export const maxRuleBytes = 16384;
+// Rule file errors a person has to fix; a task that meets one waits for configuration instead of failing.
+export const ruleErrors = new Set(['bot_rule_too_large', 'invalid_bot_label', 'invalid_bot_computer', 'invalid_bot_rule_file', 'invalid_rule_content', 'too_many_bot_skills', 'unsafe_bot_rule']);
 export function resolveRules(policy: Row, files: Record<string, string>, computer: any = {}) {
   if(Object.keys(files).filter(skillPath).length>32)fail(400,'too_many_bot_skills');
-  if(Object.entries(files).some(([path,content])=>(Object.hasOwn(defaults,path)||skillPath(path))&&Buffer.byteLength(content)>16384))fail(400,'bot_rule_too_large');
+  const repositoryRules=Object.entries(files).filter(([path])=>rulePath(path));
+  // A NUL byte means the file is not text; it is rejected, not read as missing, also when an older version cached it.
+  if(repositoryRules.some(([,content])=>content.includes('\0')))fail(400,'invalid_rule_content');
+  if(repositoryRules.some(([,content])=>Buffer.byteLength(content)>maxRuleBytes))fail(400,'bot_rule_too_large');
   const overrides = JSON.parse(policy.rule_overrides || '{}'), rows: any[] = [];
   const consoleRules: Record<string, string> = { ...overrides };
   // The existing manager computer is the console layer, not a new resource system.
@@ -55,9 +63,10 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
 // Automatic development needs this label on the Issue, applied by a person. A development rule without the line keeps
 // the built-in name, so replacing the rule text can never switch the requirement off.
 export const defaultDevelopmentLabel = 'bot-develop';
-// The first `key: value` line of a rule file; a JSON string keeps the exact characters.
+// The first `key: value` line of a rule file; a JSON string keeps the exact characters. The value ends with its line:
+// `key:` alone declares an empty label rather than taking the next line.
 function declaredLabel(text: string, key: string) {
-  const raw = new RegExp(`^${key}:\\s*(.+)$`, 'm').exec(text)?.[1]?.trim();
+  const raw = new RegExp(`^${key}:[ \\t]*(.*)$`, 'm').exec(text)?.[1]?.trim();
   let label = raw || '';
   try { if (raw?.startsWith('"')) label = JSON.parse(raw); } catch { return fail(400, 'invalid_bot_label'); }
   if (label.length > 50 || label !== label.trim() || /\p{Cc}/u.test(label)) fail(400, 'invalid_bot_label');
@@ -69,6 +78,7 @@ export function developmentLabel(store: Store, repositoryId: string) {
   const saved = store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?', repositoryId);
   const files = saved ? JSON.parse(saved.files) : {}, overrides = JSON.parse(policy?.rule_overrides || '{}');
   const text = Object.hasOwn(files, path) ? files[path] : Object.hasOwn(overrides, path) ? overrides[path] : defaults[path]!;
+  if (text.includes('\0')) fail(400, 'invalid_rule_content');
   return declaredLabel(text, 'development_label') || defaultDevelopmentLabel;
 }
 export class RuleService {
@@ -93,12 +103,14 @@ export class RuleService {
   async fetch(github: GitHub, sha: string) {
     const commit = await github.request('GET', github.path('/git/commits/' + sha)), tree = await github.request('GET', github.path('/git/trees/' + commit.tree.sha + '?recursive=1'));
     if (tree.truncated) fail(409, 'rule_tree_truncated');
-    const entries = tree.tree.filter((f: any) => Object.hasOwn(defaults, f.path) || skillPath(f.path));
+    const entries = tree.tree.filter((f: any) => rulePath(f.path));
     if (entries.length > 38) fail(400, 'too_many_bot_skills'); const files: Record<string, string> = {};
     for (const file of entries) {
-      if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode) || file.size > 16384) fail(400, 'invalid_bot_rule_file');
-      const blob = await github.request('GET', github.path('/git/blobs/' + file.sha));
-      const content = Buffer.from(blob.content, 'base64').toString('utf8'); if (Buffer.byteLength(content) > 16384) fail(400, 'bot_rule_too_large'); files[file.path] = content;
+      if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode)) fail(400, 'invalid_bot_rule_file');
+      if (file.size > maxRuleBytes) fail(400, 'bot_rule_too_large');
+      const blob = await github.request('GET', github.path('/git/blobs/' + file.sha)), data = Buffer.from(blob.content, 'base64');
+      if (data.includes(0)) fail(400, 'invalid_rule_content');
+      const content = data.toString('utf8'); if (Buffer.byteLength(content) > maxRuleBytes) fail(400, 'bot_rule_too_large'); files[file.path] = content;
     }
     return files;
   }
@@ -113,7 +125,8 @@ export class RuleService {
     if (method === 'GET' && !match[2]) return { rules: await this.view(id) };
     if (method === 'PUT' && !match[2]) {
       fields(input, ['path', 'content']); if (!Object.hasOwn(defaults, String(input.path)) || input.path === '.bot/computer.yaml') fail(400, 'invalid_rule_path');
-      if (input.content !== null && (typeof input.content !== 'string' || input.content.length > 16384 || input.content.includes('\0'))) fail(400, 'invalid_rule_content');
+      // The limit counts UTF-8 bytes, as for repository files; longer text is rejected, never cut.
+      if (input.content !== null && (typeof input.content !== 'string' || Buffer.byteLength(input.content) > maxRuleBytes || input.content.includes('\0'))) fail(400, 'invalid_rule_content');
       const row = this.store.get('SELECT * FROM policies WHERE repository_id=?', id)!, values = JSON.parse(row.rule_overrides || '{}');
       if (input.content === null) delete values[String(input.path)]; else values[String(input.path)] = input.content;
       resolveRules({ ...row, rule_overrides: JSON.stringify(values) }, {});

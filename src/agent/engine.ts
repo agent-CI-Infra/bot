@@ -1,6 +1,6 @@
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
-import { randomId, fields, fail, type Json } from '../core/security.js';
+import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
@@ -12,7 +12,7 @@ import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
 import { Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath, developmentLabel } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors } from '../rules/service.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
@@ -140,13 +140,25 @@ export class TaskEngine {
           const owned=this.owned(github,task,object);
           if(owned.sha!==task.head_sha){const compare=await github.request('GET',github.path('/compare/'+owned.sha+'...'+task.head_sha));if(!['ahead','identical'].includes(compare.status))stop('bot_branch_history_changed','needs_replan');}
         }
+        // Rules never come from a pull request's own commits: PR tasks read the default branch, an Issue development that
+        // continues the bot's PR reads that PR's base branch, and other Issue tasks read the commit they check out.
+        const ruleBranch=task.kind.endsWith('.pr')?github.defaultBranch:input.bot_pr?baseBranch:null;
+        const ruleSha=ruleBranch?(await github.ref(ruleBranch))?.object.sha:ref.object.sha;
+        // Rules are checked before the workspace is written. A bad rule file waits for a person with its own code and
+        // nothing is published; the retry after the fix then prepares the new commit without earlier writes in the way.
+        let effectiveRules:ReturnType<typeof resolveRules>;
+        try{
+          const ruleFiles=await this.rules.fetch(github,ruleSha);
+          this.rules.cache(task.repository_id,ruleSha,ruleFiles);
+          effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
+        }catch(error){
+          if(error instanceof HttpError&&ruleErrors.has(error.code))stop(error.code,'waiting_configuration');
+          if(error instanceof HttpError&&error.code==='rule_tree_truncated')stop('repository_tree_truncated','waiting_environment');
+          throw error;
+        }
         const snapshot=await workspace.prepare(github,ref.object.sha);
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
         if(files.length>=3000)stop('pull_request_file_limit','waiting_environment');
-        const ruleSha=task.kind.endsWith('.pr')?(await github.ref(github.defaultBranch))?.object.sha:ref.object.sha;
-        const ruleFiles=ruleSha===ref.object.sha?snapshot.rule_files:await this.rules.fetch(github,ruleSha);
-        this.rules.cache(task.repository_id,ruleSha,ruleFiles);
-        const effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
         if(Object.entries(effectiveRules.computer).some(([key,value])=>JSON.stringify(environment.computer?.[key])!==JSON.stringify(value))){
           this.rules.rememberComputer(task.repository_id,environment.computer);
           environment=await this.manager.call('POST',`/v1/projects/${task.repository_id}/configure`,{operation_id:randomId(),generation:environment.generation,request:redactor.clean(effectiveRules.computer)},35*60000);
@@ -236,8 +248,8 @@ export class TaskEngine {
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,attempt:task.attempt+1});
       }
-      // Keep polling for the first commit without repeating the same waiting entry every 30 seconds.
-      if(!(failure.code==='repository_has_no_commit'&&state==='waiting_configuration'&&current?.error_code===failure.code))
+      // Keep polling for the first commit or a fixed rule file without repeating the same waiting entry every 30 seconds.
+      if(!((failure.code==='repository_has_no_commit'||ruleErrors.has(failure.code))&&state==='waiting_configuration'&&current?.error_code===failure.code))
         log({type:'fault',state:failure.state,code:failure.code});
     }
   }
@@ -262,7 +274,7 @@ export class TaskEngine {
     assertOwnedPR(row,pr,github.actorId,task.repository_id);
     return row!;
   }
-  label(task:Row){try{return developmentLabel(this.store,task.repository_id);}catch{return stop('invalid_bot_label','waiting_configuration');}}
+  label(task:Row){try{return developmentLabel(this.store,task.repository_id);}catch(error){return stop(error instanceof HttpError&&ruleErrors.has(error.code)?error.code:'invalid_bot_label','waiting_configuration');}}
   // The latest time the development label was added must be by a user account, not an app, and nobody may be assigned.
   async developmentApproved(github:GitHub,task:Row){
     const label=this.label(task);
