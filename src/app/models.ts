@@ -58,8 +58,29 @@ export async function models(store: Store, user: Actor, method: string, url: URL
   const id = path.split('/')[3] || '';
   const row = store.get(`SELECT m.* FROM models m WHERE m.id=? AND ${visible.sql}`, id, ...visible.args);
   if (!row) return fail(404, 'model_not_found');
-  if (path === `/api/models/${id}` && method === 'GET') return { model: publicModel(store,row) };
+  if (path === `/api/models/${id}` && method === 'GET') {
+    const model = publicModel(store,row);
+    if (user.role === 'super_admin' || row.repository_id && user.repositories.includes(row.repository_id)) {
+      const usedScope = scope(user, 'p.repository_id');
+      model.used_by = store.all(`SELECT p.repository_id,r.full_name FROM policies p JOIN repositories r ON r.id=p.repository_id
+        WHERE p.model_id=? AND ${usedScope.sql} ORDER BY p.repository_id`, id, ...usedScope.args);
+    }
+    return { model };
+  }
   if (row.repository_id) repository(store, user, row.repository_id); else superAdmin(user);
+  if (path === `/api/models/${id}` && method === 'DELETE') {
+    fields(body, []);
+    return store.transaction(() => {
+      const cleared = store.all('SELECT repository_id FROM policies WHERE model_id=? ORDER BY repository_id', id);
+      // Clear every foreign key before destroying the sealed key; historical requests keep their own snapshots.
+      store.run('UPDATE policies SET model_id=NULL WHERE model_id=?', id);
+      store.run('DELETE FROM model_pricing WHERE model_id=?', id);
+      store.run('DELETE FROM model_projects WHERE model_id=?', id);
+      store.run('DELETE FROM models WHERE id=?', id);
+      store.audit(user.id, 'model.deleted', id, row.repository_id);
+      return { ok: true, cleared_repository_ids: cleared.map(row => row.repository_id) };
+    });
+  }
   if (path === `/api/models/${id}` && method === 'PATCH') {
     fields(body, ['api_url', 'api_key', 'model_name', 'version', 'pricing']);
     if (body.version !== row.version) fail(409, 'version_conflict');

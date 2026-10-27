@@ -257,6 +257,20 @@ function modelActions(model, result) {
     if (!await askConfirm({ title: `撤销 ${model.model_name} 的 API Key？`, body: ['使用它的项目会停在“配置待补”，直到换上新的 Key。'], action: '撤销', danger: true })) return;
     await api(`/api/models/${model.id}/credentials/revoke`, 'POST', {}).catch(error); await reloadProject();
   }));
+  actions.append(button('删除', async () => {
+    let detail;
+    try { detail = (await api(`/api/models/${model.id}`)).model; }
+    catch (err) { result.hidden = false; result.replaceChildren(element('p', err.message, 'view-error')); return; }
+    const used = detail.used_by, body = [
+      '只从本系统删除这条模型配置，并销毁封存的 API Key；页面和日志都不会显示它。',
+      '不会删除 GitHub 上的任何东西。已有成本记录保留，仍使用当时记下的模型名和单价。'];
+    if (used.length) body.push('以下项目会改回“不使用模型”，之后的检视和开发会停在“配置待补”：', used.map(repo => repo.full_name));
+    else body.push('当前没有项目选用它。');
+    if (detail.repository_id === null) body.push('这是部署共享模型，删除后所有项目都不能再选它。');
+    const deleted = await confirmDialog({ title: `删除模型 ${detail.model_name}？`, body, action: '删除', danger: true,
+      progress: '正在删除模型…', run: () => api(`/api/models/${model.id}`, 'DELETE', {}) });
+    if (deleted) await reloadProject();
+  }, 'quiet destructive'));
   return actions;
 }
 function modelForm(title, repositoryId) {
