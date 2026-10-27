@@ -26,7 +26,7 @@ import { HttpError, digest, fail, fields, hashPassword, object, password, random
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
-  integrations?: IntegrationChecker; quickstart?: Quickstart;
+  integrations?: IntegrationChecker; quickstart?: Quickstart; githubUrl?: string;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
   imageTag?: string; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -83,7 +83,7 @@ export function createControlPlane(options: Options) {
     const match = /^\/hooks\/github\/([a-f0-9]{48})\/([a-f0-9]{48})$/.exec(path);
     if (req.method !== 'POST' || !match) return fail(404, 'not_found');
     const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
-    const result = ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.repositoryConfigs);
+    const result = await ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.repositoryConfigs, options.githubUrl);
     respond(res, result.status, result.response);
     // Installation changes are already recorded; a full listing follows outside the delivery path.
     if (result.status === 200 && 'sync' in result && result.sync) options.installations?.schedule(match[1]!);

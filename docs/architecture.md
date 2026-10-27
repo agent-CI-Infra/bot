@@ -56,7 +56,11 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 
 ## 检视与开发数据流
 
-在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 只在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的「检视」中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。普通评论、编辑和重新打开不额外触发。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
+在仓库 policy 中选择 `model_id`，打开 `review_enabled`，需要自动实现时再打开 `development_enabled`，建议设置可信的 `test_command`。Issue 在 opened 时检视一次；PR 在 opened、ready_for_review、synchronize 且非草稿时检视当前 head。这三类触发可在项目的「检视」中分别关闭（关闭 PR 新提交触发后，bot PR 的自动跟进也随之停止）。未启用检视的仓库只归档，草稿不建检视任务。投递去重和任务逻辑去重独立；归档、去重与入队在同一事务提交后才确认成功。
+
+打开的 Issue 或 PR 对话中新发布的评论（`issue_comment.created`）提到配置名字时，再入队一次检视。`BOT_MENTION_NAMES` 未设置时为 `bot,agent-ci-infra-bot`；设置后按逗号分隔替换默认名字，忽略大小写和名字两侧空白，整个值为 `off` 时关闭评论触发。匹配纯文本 `@名字`，无需该 GitHub 账号存在或属于本部署，也不查询用户接口；`@` 前须为开头或非字母数字，名字后不能紧跟字母、数字或连字符，因此 `@bot-extra` 不匹配 `bot`。Bot 发送的评论、其他评论、编辑、删除和重新打开仍不触发；PR review 和行内评论事件也不触发。评论遵守 Issue／PR 的检视开关，PR 评论读取当前 head，草稿或已关闭对象不入队。每条评论按 `repositoryId:kind:number:comment:commentId` 去重，PR 的 `head_sha` 仍为当前 40 位 SHA；不同评论可以再次检视同一 head，原有 opened／head 去重键不变。任务保留触发评论的 ID、正文和链接，并把它作为 `trigger_comment` 交给检视上下文。
+
+新建 App 的 manifest 订阅 `issues`、`pull_request`、`issue_comment`，不包含由 GitHub 自动投递的 `installation` 或 `installation_repositories`。已创建的 App 不会随代码更新自动新增订阅：App 所有者需要在 GitHub App 的 Permissions & events 设置中勾选 **Issue comment** 并保存；用令牌登记仓库 webhook 的部署也需要把 `issue_comment` 加入订阅。
 
 后台按项目并发度认领任务。全局设置给出默认并发度，未设置时为 1，所以不改设置时同一仓库仍一次只运行一个任务；项目可以在「机器配置」里覆盖，留空时用全局默认，两者都是 1–32 的整数，项目值就是这台电脑同时运行的任务数。超级管理员在「全局设置」改默认值；项目管理员只能改自己项目的覆盖值，不能读写全局设置。超出并发度的任务按创建顺序继续排队，不会因此失败。每个任务持有自己的认领（`task_claims`），检查点只核对本任务的认领，并使用自己的 `/workspace/tasks/<workspace_id>`；文件工具和 runner 写入只落在本任务目录内，越界路径和指向目录外的符号链接被拒绝，各任务的命令都从自己的仓库目录开始运行。命令仍以同一项目用户运行，共用 `HOME=/workspace/home`。停止、重置、代次变化和禁用项目仍会中止这台电脑上所有进行中的任务；修改电脑配置会重建容器，正在运行的任务被中断后重新准备。任务拉取本仓 Issue／PR、讨论、完整分页 diff 与固定 SHA 的代码材料。已保存模型只收到这个项目的上下文，并可调用 read_file、write_file、run_command 等受任务约束的工具。仓库材料属于不可信输入，不能修改权限、镜像、发布目标或认证。单个任务不限模型调用次数，也没有总时长上限，禁用项目或停止虚拟电脑可以中止正在执行的任务；模型调用 run_command 时命令不限时长，可选 `timeout_seconds` 为可能卡住的命令自设超时，服务和监视进程用 `keep_background` 放到后台；仓库测试验证同样不限时长；任务上下文包含虚拟电脑的资源、工具链、额外软件包和环境变量名；临时调用失败最多重试 5 次，配置故障单独显示。
 
@@ -68,6 +72,8 @@ manager 重启会先停止不确定的执行，标记未完成操作 interrupted
 模型不调用标签接口，也不能让 GitHub 新建标签。
 
 Issue 检视结果明确要求代码变更、存在原文证据且无需补充信息时，若仓库打开开发，并且有人（不是 App）在该 Issue 上加了开发标签（`.bot/rules/issue-development.md` 第一行 `development_label:`，默认 `bot-develop`）、Issue 没有指派人，创建关联开发任务。标签可以在检视前或检视后加：检视发布时已满足就立即创建，否则由之后的 `issues.labeled` 事件创建；发布前再次确认标签仍在、仍无指派人。在同一项目容器的新任务工作目录中修改代码，模型完成后服务端再次运行仓库指定测试；未配置固定测试时使用模型给出的测试命令，不能没有测试。失败不会推分支或开 PR。成功后检查测试前后候选 tree 一致，再由控制面发布唯一 `bot/issue-...` 分支，并创建 PR、回填链接。默认分支从 GitHub 元数据或仓库 policy 获取，不写死。
+
+评论触发的 Issue 检视也必须先成功发布评论，再通过上述开发授权检查；webhook 不直接创建开发任务。同一 Issue 已有排队、重试、等待配置／环境／权限／PR head／发布或执行中的 `development.issue` 时，不再创建第二条开发任务。PR 对话里的 `@` 只再次检视当前 head，包括 bot 自己创建的 PR，也不会启动开发或推送提交；入队后 head 变化时，这条评论检视标为 superseded，不衍生普通 head 检视任务。
 
 别人的 PR 只检视，不产生向作者分支提交的任务；分支名或机器人名称不能代替归属记录。由本系统创建的 PR 保存不可变 PR ID、作者、head 仓库、分支和发布 SHA，只有这些身份仍匹配、策略允许且确有修改项时才在原分支跟进。跟进默认最多 3 轮，可在 policy 的 max_revisions 中设置 0–10；不另开 PR，不强推，不自动合并。
 

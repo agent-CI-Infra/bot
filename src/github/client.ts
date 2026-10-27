@@ -128,19 +128,20 @@ export class GitHub {
     return stop('github_pagination_limit', 'waiting_configuration', `GitHub 分页 ${path} 已读取 100 页，仍未结束，无法确认完整结果。`);
   }
   // requiredPermissions must all be granted; requestedPermissions are taken where the installation has them.
-  async connect(development: boolean, requiredPermissions?: Record<string,string>, requestedPermissions?: Record<string,string>): Promise<any> {
+  // Read-only webhook preflight can skip actor identity; task publication keeps the default identity checks.
+  async connect(development: boolean, requiredPermissions?: Record<string,string>, requestedPermissions?: Record<string,string>, identifyActor = true): Promise<any> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', this.repository.account_id);
     if (!account) stop('github_account_missing', 'waiting_configuration', `仓库 ${this.repository.id} 关联的 GitHub 账号不存在，请重新配置账号。`);
     const secrets = this.store.secrets.open(account!.credentials, `account:${account!.id}`);
     this.fullName = this.repository.full_name;
     if (account!.type === 'bot_account') {
       if (!secrets.token) stop('github_credentials_missing', 'waiting_configuration', 'GitHub 机器人账号未保存访问令牌，请重新配置凭据。'); this.token = String(secrets.token); this.redactor.add(this.token);
-      const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || '');
+      if (identifyActor) { const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || ''); }
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');
       this.redactor.add(secrets.private_key);
       const jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.redactor.add(jwt);
-      const app = await this.request('GET','/app', undefined, false, jwt);
+      const app = identifyActor ? await this.request('GET','/app', undefined, false, jwt) : null;
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission', `GitHub App 安装 ${installation.id} 的所属账号与仓库登记的所有者不一致。`);
       const requested: Record<string,string> = requiredPermissions || requestedPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
@@ -150,13 +151,15 @@ export class GitHub {
       const access = await this.request('POST',`/app/installations/${installation.id}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions }, false,jwt);
       this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission', `GitHub 未返回安装 ${installation.id} 的访问令牌。`); this.redactor.add(this.token);
       this.expiresAt=String(access.expires_at||'');this.permissions=access.permissions&&typeof access.permissions==='object'?access.permissions:permissions;
-      const actor = await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'));
-      this.actorId = String(actor.id); this.actorLogin = String(actor.login || app.slug + '[bot]');
+      if (identifyActor) {
+        const actor = await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'));
+        this.actorId = String(actor.id); this.actorLogin = String(actor.login || app.slug + '[bot]');
+      }
     }
     const repo = await this.request('GET','/repositories/' + this.repository.id);
     if (String(repo.id) !== this.repository.id || String(repo.owner?.id) !== this.repository.owner_id) stop('github_repository_scope_changed','waiting_permission', `GitHub 返回的仓库身份或所有者与登记仓库 ${this.repository.id} 不一致。`);
     this.fullName = repo.full_name; this.defaultBranch = repo.default_branch; this.cloneUrl = typeof repo.clone_url === 'string' ? repo.clone_url : '';
-    if (!this.actorId || !this.defaultBranch || !/^[\w.-]+\/[\w.-]+$/.test(this.fullName)) stop('github_repository_invalid',undefined,`GitHub 仓库 ${this.repository.id} 缺少有效的机器人身份、默认分支或仓库全名。`);
+    if ((identifyActor && !this.actorId) || !this.defaultBranch || !/^[\w.-]+\/[\w.-]+$/.test(this.fullName)) stop('github_repository_invalid',undefined,`GitHub 仓库 ${this.repository.id} 缺少有效的机器人身份、默认分支或仓库全名。`);
     return repo;
   }
   authorEmail(): string {

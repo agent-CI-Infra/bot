@@ -132,7 +132,8 @@ export class TaskEngine {
           if(development)this.owned(github,task,current);
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
           if(current.head?.sha!==task.head_sha&&!(development&&candidate?.remote_sha===current.head?.sha)){
-            this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
+            // A stale comment review must not turn into a head-triggered review that could start a bot PR revision.
+            if(!input.comment)this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
             stop('pull_request_head_changed','superseded',`PR #${task.object_number} 的 head 已变化：预期 ${task.head_sha}，当前 ${current.head?.sha}。`);
           }
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
@@ -227,7 +228,7 @@ export class TaskEngine {
         input={...input,object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
           files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
-            comments:development&&task.kind.endsWith('.pr')?[]:comments.slice(-50),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
+            comments:development&&task.kind.endsWith('.pr')?[]:comments.slice(-50),...(input.comment?{trigger_comment:input.comment}:{}),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(development?{}:{repository_labels:labels}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
@@ -348,6 +349,8 @@ export class TaskEngine {
   queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved=false){
     const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
     if(!policy?.enabled||!policy.development_enabled||!result.requires_code_change||result.clarification_required)return;
+    // A PR conversation mention requests another review, including on a bot-owned PR, never a revision.
+    if(task.kind==='review.pr'&&input.comment)return;
     if(task.kind==='review.issue'){
       if(!approved||!reviewRequestsCode(input.object,result))return;
       enqueue(this.store,task.repository_id,'development.issue',task.object_number,null,{review:result,object_hash:input.object_hash},task.source_delivery_id,task.id);

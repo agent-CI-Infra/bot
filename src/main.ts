@@ -40,7 +40,7 @@ const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_UR
 const quickstart = new Quickstart(store, process.env.BOT_GITHUB_API_URL || undefined);
 const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, quickstart,
-  imageTag: process.env.BOT_IMAGE_TAG });
+  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL });
 for (const [name, port] of [['webhook', 8791], ['admin', 8792]] as const) {
   const server = servers[name];
   server.on('error', () => { console.error(`${name} listener failed`); process.exit(1); });

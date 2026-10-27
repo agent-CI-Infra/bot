@@ -1,13 +1,15 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
-import { queueWebhook } from '../review/queue.js';
+import { commentReviewKind, queueWebhook } from '../review/queue.js';
+import { GitHub } from '../github/client.js';
+import { Redactor } from '../agent/common.js';
 import { recordAutomation } from '../automation/runner.js';
 import type { AutomationConfig } from '../automation/config.js';
 import { recordInstallationEvent } from './installations.js';
 import { enqueueForwards } from '../external/forward.js';
 
-export function ingest(
+export async function ingest(
   store: Store,
   accountId: string,
   endpointId: string,
@@ -16,6 +18,7 @@ export function ingest(
   complete: boolean,
   /** Repository YAML configs, keyed by lower-cased `owner/repo` (#1). */
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>,
+  githubUrl?: string,
 ) {
   const endpoint = store.get('SELECT id,account_id,secret FROM endpoints WHERE id=? AND account_id=?', endpointId, accountId);
   const secret = endpoint ? store.secrets.open(endpoint.secret, `endpoint:${endpointId}`).value : '';
@@ -38,12 +41,20 @@ export function ingest(
   const candidate = payload?.repository;
   const repoId = candidate && typeof candidate === 'object' ? String((candidate as Json).id || '') : '';
   const owner = status === 200 && event !== 'installation' && event !== 'installation_repositories'
-    ? store.get('SELECT id,full_name FROM repositories WHERE id=? AND account_id=?', repoId, accountId) : undefined;
+    ? store.get('SELECT * FROM repositories WHERE id=? AND account_id=?', repoId, accountId) : undefined;
   const action = typeof payload?.action === 'string' ? payload.action.slice(0, 100) : '';
   const kind = event === 'issues' ? 'issue' : event;
   const route = kind + (action ? `.${action}` : '');
   const safeHeaders = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key,
     /authorization|cookie|token|secret|signature|key/i.test(key) ? '[REDACTED]' : value]));
+  let currentPullRequest: Json | undefined;
+  if (status === 200 && owner && payload && commentReviewKind(store, repoId, event, payload) === 'review.pr'
+    && !store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId)) {
+    // Read before the synchronous archive transaction; actor lookup is unnecessary for this read-only request.
+    const github = new GitHub(store, owner, new Redactor(), async () => {}, githubUrl);
+    await github.connect(false, { pull_requests: 'read' }, undefined, false);
+    currentPullRequest = await github.object('review.pr', Number((payload.issue as Json).number));
+  }
   return store.transaction(() => {
     const duplicate = status === 200 && !!store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId);
     const id = randomId();
@@ -75,7 +86,7 @@ export function ingest(
       }
       const policy=store.get('SELECT * FROM policies WHERE repository_id=?',String(owner.id)),pr=payload.pull_request as Json|undefined;
       Object.assign(response,{review_outcome:pr?.draft===true?'draft':!policy?.enabled||!policy.review_enabled?'review_disabled':'not_trigger'});
-      response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id);
+      response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id, currentPullRequest);
       // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
       const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());
       try { recordAutomation(store, String(owner.id), event, action, payload, id, {}, fallback); } catch { /* a rule cannot fail ingestion */ }
