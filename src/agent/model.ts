@@ -8,6 +8,14 @@ export function selectedModel(store: Store, repositoryId: string) {
   const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration');
   return {id:String(row.id),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id))};
 }
+// The one place a saved model URL becomes request addresses (tasks, model listing and model tests all use it).
+// Only a trailing slash and a trailing /chat/completions are removed; /v1 is never added or removed, so the base the
+// administrator wrote decides whether requests carry it. has_v1 reports whether that base path ends in /v1.
+export function modelEndpoints(url:string){
+  const base=url.replace(/\/$/,'').replace(/\/chat\/completions$/,'');
+  let path='';try{path=new URL(base).pathname;}catch{/* A saved URL was validated on write; an unparsable one simply has no /v1. */}
+  return {chat_url:base+'/chat/completions',models_url:base+'/models',has_v1:/\/v1$/.test(path)};
+}
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};
 export function tools(development:boolean){

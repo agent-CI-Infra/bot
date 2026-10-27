@@ -2,10 +2,13 @@ import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { pricingFor, savePricing, validatePricing } from '../metrics/accounting.js';
+import { modelEndpoints } from '../agent/model.js';
+import { listUpstreamModels, testUpstreamModel } from './model-probe.js';
 
 function publicModel(store: Store, row: Row): Json {
   return { id: row.id, repository_id: row.repository_id, api_url: row.api_url, model_name: row.model_name,
-    key_configured: row.api_key !== null, trusted: true, version: row.version, updated_at: row.updated_at, pricing: pricingFor(store,String(row.id)) };
+    key_configured: row.api_key !== null, trusted: true, version: row.version, updated_at: row.updated_at, pricing: pricingFor(store,String(row.id)),
+    endpoints: modelEndpoints(String(row.api_url)) };
 }
 function apiUrl(value: unknown): string {
   const result = text(value, 2048);
@@ -13,7 +16,7 @@ function apiUrl(value: unknown): string {
   catch { return fail(400, 'invalid_api_url'); }
   return result;
 }
-export function models(store: Store, user: Actor, method: string, url: URL, body: Json): Json | undefined {
+export async function models(store: Store, user: Actor, method: string, url: URL, body: Json): Promise<Json | undefined> {
   const path = url.pathname;
   if (!path.startsWith('/api/models')) return undefined;
   const modelScope = scope(user, 'm.repository_id'), sharedScope = scope(user, 'mp.repository_id');
@@ -39,6 +42,17 @@ export function models(store: Store, user: Actor, method: string, url: URL, body
       return { model: publicModel(store,store.get('SELECT * FROM models WHERE id=?', id)!) };
     });
   }
+  // Where a URL sends requests; it needs no key, so the forms can show it while the address is typed.
+  if (path === '/api/models/endpoints' && method === 'GET') return modelEndpoints(apiUrl(url.searchParams.get('api_url')));
+  // Listing and testing an unsaved model need the right to create it there. Nothing is stored and nothing is audited.
+  if (['/api/models/upstream', '/api/models/test'].includes(path) && method === 'POST') {
+    const test = path.endsWith('/test');
+    fields(body, ['repository_id', 'api_url', 'api_key', ...(test ? ['model_name'] : [])]);
+    const repo = body.repository_id == null ? null : text(body.repository_id);
+    if (repo) repository(store, user, repo); else superAdmin(user);
+    const endpoint = apiUrl(body.api_url), key = text(body.api_key, 32768);
+    return test ? testUpstreamModel(endpoint, key, text(body.model_name)) : listUpstreamModels(endpoint, key);
+  }
   const id = path.split('/')[3] || '';
   const row = store.get(`SELECT m.* FROM models m WHERE m.id=? AND ${visible.sql}`, id, ...visible.args);
   if (!row) return fail(404, 'model_not_found');
@@ -58,6 +72,14 @@ export function models(store: Store, user: Actor, method: string, url: URL, body
       store.audit(user.id, 'model.updated', id, row.repository_id);
       return { model: publicModel(store,store.get('SELECT * FROM models WHERE id=?', id)!) };
     });
+  }
+  // A saved model is listed and tested with its own URL, key and name, under the same right as editing it.
+  if ([`/api/models/${id}/upstream`, `/api/models/${id}/test`].includes(path) && method === 'POST') {
+    fields(body, []);
+    const test = path.endsWith('/test'), key = row.api_key === null ? '' : String(store.secrets.open(row.api_key, `model:${id}`).value || '');
+    if (!key) return fail(409, 'model_key_missing');
+    store.audit(user.id, test ? 'model.tested' : 'model.upstream_listed', id, row.repository_id);
+    return test ? testUpstreamModel(row.api_url, key, row.model_name) : listUpstreamModels(row.api_url, key);
   }
   if (path === `/api/models/${id}/credentials/revoke` && method === 'POST') {
     fields(body, []);

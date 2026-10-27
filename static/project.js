@@ -220,7 +220,7 @@ function modelSection() {
       try { await patchPolicy(changed({ model_id: value }, { model_id: policy.model_id || null })); await reloadProject(); } catch (err) { message.textContent = err.message; save.disabled = false; }
     });
     const actions = element('div', '', 'actions form-actions'); actions.append(save); list.replaceChildren(choices, message, actions);
-    const row = (m, target) => { const li = element('li', '', 'model-entry'); li.append(element('span', `${m.model_name} · ${m.api_url}`, 'model-address'), modelActions(m)); target.append(li); };
+    const row = (m, target) => { const li = element('li', '', 'model-entry'), result = probeResult('wide-cell'); li.append(modelAddress(m), modelActions(m, result), result); target.append(li); };
     models.filter(m => m.repository_id === current.id).forEach(m => row(m, ownList)); if (!ownList.childElementCount) ownList.append(element('li', '还没有专属模型。', 'muted'));
     models.filter(m => m.repository_id === null).forEach(m => row(m, sharedList)); if (!sharedList.childElementCount) sharedList.append(element('li', '还没有共享模型。', 'muted'));
   })().catch(err => list.replaceChildren(element('p', err.message, 'view-error')));
@@ -230,10 +230,14 @@ function modelSection() {
   return sections;
 }
 function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
-// Rotating or revoking a key never shows it; an empty key field keeps the current one.
-function modelActions(model) {
+// Rotating or revoking a key never shows it; an empty key field keeps the current one. Listing and testing use the
+// saved URL, key and name and need the same right as editing; their outcome goes to the row's result line.
+function modelActions(model, result) {
   const actions = element('div', '', 'actions'), editable = me.role === 'super_admin' || model.repository_id === current.id;
   if (!editable) return actions;
+  if (model.key_configured) actions.append(
+    probeButton('获取模型列表', result, () => api(`/api/models/${model.id}/upstream`, 'POST', {}), value => listOutcome(value, model.model_name)),
+    probeButton('测试模型', result, () => api(`/api/models/${model.id}/test`, 'POST', {}), testOutcome));
   actions.append(button('计费单价',()=>modelPricing(model)));
   actions.append(button('更换 Key', async () => {
     const saved = await confirmDialog({ title: `更换 ${model.model_name} 的 API Key`, body: ['保存后立即生效；页面和接口都不会再显示这个 Key。'], action: '保存',
@@ -248,12 +252,90 @@ function modelActions(model) {
 }
 function modelForm(title, repositoryId) {
   const details = element('details', '', 'fold add-model'); details.append(element('summary', title));
-  const form = settingsForm(title, [field('接口 URL', input('api_url', '', { type: 'url', required: true, placeholder: 'https://example.com/v1' })),
-    field('模型名', input('model_name', '', { required: true, maxLength: 200 })), field('API Key', input('api_key', '', { type: 'password', required: true, autocomplete: 'new-password' })),
+  const form = settingsForm(title, [...modelFields(repositoryId),
     note('兼容 Chat Completions 的接口；Key 加密保存，不会再显示。保存即视为可信接口，可接收本项目的代码和日志。')],
   async form => { const created = (await api('/api/models', 'POST', { repository_id: repositoryId, api_url: form.elements.api_url.value.trim(), model_name: form.elements.model_name.value.trim(), api_key: form.elements.api_key.value }));
     return `已添加 ${created.model.model_name}，可在“使用的模型”里选择`; }, { caption: '添加' });
   form.querySelector('h3').remove(); details.append(form); return details;
+}
+
+// Model address, upstream list and test, shared by the project page and the onboarding wizard (onboarding.js loads
+// after this file). The server resolves addresses, so the page shows exactly where tasks will send their requests.
+const modelUrlRule = '地址按填写的路径使用：去掉末尾的 / 和 /chat/completions 后，接上 /chat/completions 发送对话，接上 /models 获取模型列表；不会自动添加或删除 /v1。';
+const modelV1Warning = '当前地址不含末尾的 /v1；多数兼容接口需要它，只有上游确认不用时才这样填写。';
+function endpointFacts(endpoints) {
+  const nodes = [facts([['对话地址', endpoints.chat_url], ['模型列表地址', endpoints.models_url]])];
+  if (!endpoints.has_v1) nodes.push(element('p', modelV1Warning, 'endpoint-warning'));
+  return nodes;
+}
+function modelAddress(model) {
+  const address = element('span', `${model.model_name} · ${model.api_url}`, 'model-address');
+  if (model.endpoints && !model.endpoints.has_v1) { const flag = badge('地址不含 /v1', 'warning'); flag.title = modelV1Warning; address.append(' ', flag); }
+  return address;
+}
+function probeResult(className = '') { const box = element('div', '', ('probe-result ' + className).trim()); box.setAttribute('role', 'status'); return box; }
+const probeErrors = { upstream_timeout: '上游 15 秒内没有响应', upstream_unreachable: '无法连接上游', upstream_redirect: '上游要求重定向，请改填最终地址',
+  upstream_http_error: '上游返回错误', upstream_response_invalid: '上游返回的内容无法识别', upstream_response_too_large: '上游返回的内容过大' };
+function probeFailure(value) {
+  const reason = (probeErrors[value.error] || value.error) + (value.status ? `（HTTP ${value.status}）` : '') + (value.message ? '：' + value.message : '');
+  return [element('p', reason, 'view-error'), facts([['请求地址', value.chat_url || value.models_url]])];
+}
+// `current` is the saved model's name; an unsaved form passes nothing and offers the ids in its own picker.
+function listOutcome(value, current) {
+  if (!value.ok) return probeFailure(value);
+  const nodes = [element('p', `上游返回 ${value.total} 个模型${value.truncated ? `，只列出按名称排序的前 ${value.models.length} 个` : ''}。`, 'view-success')];
+  if (current !== undefined) nodes.push(note(value.models.includes(current) ? `当前模型名 ${current} 在列表中。`
+    : `当前模型名 ${current} 不在${value.truncated ? '列出的部分' : '列表'}中；上游没有列出的名字也可能可用，可以用「测试模型」确认。`));
+  if (value.models.length) nodes.push(collapsible(`模型 id（${value.models.length}）`, value.models.join('\n')));
+  return nodes;
+}
+function testOutcome(value) {
+  if (!value.ok) return probeFailure(value);
+  const reply = value.reply || (value.finish_reason === 'length' ? '（空，已达到测试的输出上限）' : '（空）');
+  return [element('p', `测试通过 · HTTP ${value.status} · ${value.elapsed_ms} ms`, 'view-success'), facts([['上游返回的模型', value.model || '（未返回）'], ['回复摘录', reply]])];
+}
+// A button that runs one upstream call and writes its outcome to `result`; a newer call or `stale()` discards older answers.
+function probeButton(caption, result, call, render, check = () => '') {
+  const run = button(caption, async () => {
+    const problem = check(); if (problem) { result.replaceChildren(element('p', problem, 'view-error')); return; }
+    const request = result.dataset.request = String(Number(result.dataset.request || 0) + 1);
+    run.disabled = true; result.replaceChildren(element('p', `正在${caption}…`, 'view-progress'));
+    try { const value = await call(); if (result.dataset.request === request) result.replaceChildren(...render(value)); }
+    catch (err) { if (result.dataset.request === request) result.replaceChildren(element('p', err.message, 'view-error')); }
+    finally { run.disabled = false; }
+  });
+  return run;
+}
+// Fields of an unsaved model: URL with its resolved addresses, key, name with an optional pick from the upstream list.
+function modelFields(repositoryId) {
+  const url = input('api_url', '', { type: 'url', required: true, placeholder: 'https://example.com/v1' }), key = input('api_key', '', { type: 'password', required: true, autocomplete: 'new-password' });
+  const name = input('model_name', '', { required: true, maxLength: 200 }), picker = document.createElement('select'), pick = field('从上游列表选用', picker);
+  const preview = element('div', '', 'endpoint-preview'), result = probeResult(), actions = element('div', '', 'actions probe-actions');
+  preview.setAttribute('aria-live', 'polite'); pick.hidden = true;
+  picker.addEventListener('change', () => { if (picker.value) name.value = picker.value; });
+  // A changed address or key makes earlier upstream answers stale; the address preview follows the typing.
+  let previewRequest = 0, timer = null;
+  const stale = () => { result.dataset.request = String(Number(result.dataset.request || 0) + 1); result.replaceChildren(); pick.hidden = true; picker.replaceChildren(); };
+  url.addEventListener('input', () => {
+    stale(); clearTimeout(timer); const value = url.value.trim(), request = ++previewRequest;
+    if (!value) { preview.replaceChildren(); return; }
+    timer = setTimeout(async () => {
+      try { const endpoints = await api('/api/models/endpoints?api_url=' + encodeURIComponent(value)); if (request === previewRequest) preview.replaceChildren(...endpointFacts(endpoints)); }
+      catch { if (request === previewRequest) preview.replaceChildren(element('p', '地址无效：需要 http:// 或 https://，不能包含用户名、密码或 #。', 'endpoint-warning')); }
+    }, 250);
+  });
+  key.addEventListener('input', stale);
+  const missing = labels => () => { const empty = labels.filter(([el]) => !el.value.trim()).map(([, label]) => label); return empty.length ? `先填写${empty.join('、')}` : ''; };
+  const target = () => ({ repository_id: repositoryId, api_url: url.value.trim(), api_key: key.value });
+  actions.append(
+    probeButton('获取模型列表', result, () => api('/api/models/upstream', 'POST', target()), value => {
+      if (!value.ok) return listOutcome(value);
+      picker.replaceChildren(new Option(value.models.length ? '选择一个模型 id' : '上游没有列出模型', ''), ...value.models.map(id => new Option(id, id)));
+      pick.hidden = !value.models.length;
+      return [...listOutcome(value).slice(0, 1), note('可以在「从上游列表选用」中选择，也可以在「模型名」里直接填写列表外的名字。')];
+    }, missing([[url, '接口 URL'], [key, 'API Key']])),
+    probeButton('测试模型', result, () => api('/api/models/test', 'POST', { ...target(), model_name: name.value.trim() }), testOutcome, missing([[url, '接口 URL'], [key, 'API Key'], [name, '模型名']])));
+  return [field('接口 URL', url), note(modelUrlRule), preview, field('API Key', key), field('模型名', name), pick, actions, result];
 }
 
 function reviewSection() {

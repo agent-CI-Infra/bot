@@ -1,6 +1,6 @@
 import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
-import { selectedModel, tools } from './model.js';
+import { modelEndpoints, selectedModel, tools } from './model.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { validateReview } from '../review/findings.js';
 import { randomId } from '../core/security.js';
@@ -77,7 +77,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       const model = selectedModel(store, task.repository_id); redactor.add(model.key);
       const body = state.request.body;
       if (!body || !Array.isArray(body.messages) || JSON.stringify(body).length > 2 * 1024 * 1024) stop('model_request_invalid');
-      const endpoint = model.url.replace(/\/$/, '').replace(/\/chat\/completions$/, '') + '/chat/completions';
+      const endpoint = modelEndpoints(model.url).chat_url;
       let response: Response;
       const { stream_options: _streamOptions, max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...requestBody } = body;
       // Providers reject a request that sets both output limits, so send exactly one: keep the runner's own field,

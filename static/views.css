@@ -82,6 +82,11 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 }
 
 .model-address{display:block;min-width:0;max-width:100%;overflow-wrap:anywhere;word-break:break-word}
+/* Model forms and saved models: resolved addresses, the missing-/v1 warning and upstream list/test outcomes. */
+.endpoint-preview,.probe-result{display:flex;flex-direction:column;gap:4px;min-width:0;font-size:12px}.endpoint-preview:empty,.probe-result:empty{display:none}
+.endpoint-preview .facts,.probe-result .facts{margin:0}.probe-result .view-error{padding:6px 10px}.probe-result .fold{margin-top:0}
+.endpoint-warning{margin:0;padding:6px 10px;border-radius:5px;background:#fff2d9;color:#875a0a;font-size:12px;line-height:1.5}
+.model-address .status{vertical-align:1px}
 @media(max-width:760px){.history .model-entry{grid-template-columns:minmax(0,1fr)}.model-entry>.actions{grid-column:1;justify-content:flex-start;flex-wrap:wrap}}
 
 /* Rule files (static/project.js): the overview table and one card per file. */
