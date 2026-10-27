@@ -100,7 +100,8 @@ if (['tail', 'reap', 'usage'].includes(request.type)) {
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };
   else {
     await save(request.operation_id, { state: 'running' });
-    try { result = { ok: true, result: await execute(request) }; } catch { result = { ok: false, error: 'runner_operation_failed' }; }
+    try { result = { ok: true, result: await execute(request) }; }
+    catch(error) { result = { ok: false, error: 'runner_operation_failed', ...(request.type.startsWith('workspace_')?{detail:`${request.type}${request.path?' '+request.path:''}: ${String(error?.message||'operation failed').slice(0,8000)}`}:{}) }; }
     await save(request.operation_id, { state: 'completed', result });
     // The journal now holds the full result; the live copy is no longer needed.
     await unlink(`${journal}/${request.operation_id}.out`).catch(() => {});

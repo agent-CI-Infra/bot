@@ -13,6 +13,7 @@ class FakeElement {
       contains: name => names().includes(name),
       add: (...add) => { this.className = [...new Set([...names(), ...add])].join(' '); },
       remove: (...remove) => { this.className = names().filter(name => !remove.includes(name)).join(' '); },
+      replace: (before, after) => { this.className = names().map(name => name === before ? after : name).join(' '); },
       toggle: (name, force = !names().includes(name)) => { force ? this.classList.add(name) : this.classList.remove(name); return force; },
     };
   }
@@ -30,6 +31,7 @@ class FakeElement {
     }
   }
   replaceChildren(...nodes) { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
+  prepend(...nodes) { const previous=[...this.children]; this.replaceChildren(...nodes, ...previous); }
   replaceWith(...nodes) {
     const parent = this.parentElement; if (!parent) return;
     for (const node of nodes) node.remove();

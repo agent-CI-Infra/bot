@@ -14,6 +14,7 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .step::before{content:"";position:absolute;left:-26px;top:13px;width:10px;height:10px;border-radius:50%;background:#9fb6c1;box-shadow:0 0 0 3px #fff}
 .step-model::before{background:#2c5791}.step-tool::before,.step-command::before{background:#16636b}.step-published::before,.step-completed::before{background:#24603d}.step-fault::before,.step-runtime_fault::before{background:#a02b31}
 .step-waiting::before{background:#b37b1a}
+.task-side .facts dd{white-space:pre-wrap;overflow-wrap:anywhere}
 .step-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.step-head strong{font-size:13px}
 .step-meta{display:flex;align-items:center;gap:6px;color:#637c89;font-size:12px}.step p{margin:5px 0 0;font-size:13px;overflow-wrap:anywhere}.say{white-space:pre-wrap}
 pre.command{margin:7px 0 0;padding:7px 10px;border-radius:5px;background:#13394b;color:#e8f3f6;max-height:none}

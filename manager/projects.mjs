@@ -263,7 +263,8 @@ export class Projects {
             // Commands run until they end unless the caller sets its own timeout_ms; stop, reset or delete interrupts them.
             if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
             const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
-            const request = command ? { ...call, timeout_ms: limit } : call, timeout = command ? (limit === null ? 0 : limit + 60000) : 90000;
+            const request = command ? { ...call, timeout_ms: limit } : call,
+              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_snapshot','workspace_finalize','workspace_blob'].includes(call.type) ? 0 : 90000;
             this.executing.add(repo);
             try { result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout); }
             finally { this.executing.delete(repo); }

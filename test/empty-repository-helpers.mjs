@@ -3,9 +3,10 @@ import {once} from 'node:events';
 import {rmSync} from 'node:fs';
 import {harness,setup,account,repository} from './helpers.mjs';
 import {TaskEngine} from '../dist/agent/engine.js';
+import {treeSha} from '../dist/agent/common.js';
 
-export async function emptyRepositoryFixture(t){
-  let branch='empty',engine;const comments=[],operations=[],commit='a'.repeat(40),tree='b'.repeat(40);
+export async function emptyRepositoryFixture(t,options={}){
+  let branch='empty',engine;const comments=[],operations=[],commit='a'.repeat(40),tree=options.files?treeSha(options.files):'b'.repeat(40);
   const server=createServer(async(req,res)=>{
     let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},path=new URL(req.url,'http://fixture').pathname;
     const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
@@ -15,7 +16,8 @@ export async function emptyRepositoryFixture(t){
     if(path.endsWith('/git/ref/heads/main'))return branch==='ready'?send({object:{sha:commit}}):send({message:branch==='empty'?'Git Repository is empty.':'Reference conflict'},409);
     if(path.endsWith('/git/refs/heads/main'))return send({message:'Git Repository is empty.'},409);
     if(path.endsWith('/git/commits/'+commit))return send({sha:commit,tree:{sha:tree}});
-    if(path.endsWith('/git/trees/'+tree))return send({sha:tree,tree:[],truncated:false});
+    if(path.endsWith('/git/trees/'+tree))return send(options.truncated&&req.url.includes('recursive=1')?{sha:tree,tree:[],truncated:true}:{sha:tree,tree:options.files||[],truncated:false});
+    if(path.includes('/git/blobs/'))return send(options.blob||{encoding:'base64',content:Buffer.from('unexpected content').toString('base64')});
     if(path.endsWith('/issues/1/comments')){
       if(req.method==='POST'){const value={id:comments.length+1,body:body.body,user:{id:999},html_url:'https://github.invalid/comment/1'};comments.push(value);return send(value,201);}
       return send(comments);
@@ -27,7 +29,8 @@ export async function emptyRepositoryFixture(t){
   const manager={call:async(method,path,body)=>{
     if(path.endsWith('/execute')){
       operations.push(body.request.type);
-      const result=body.request.type==='workspace_snapshot'?{tree_sha:tree}:body.request.type==='workspace_agent_poll'?{state:'completed',result:{summary:'Reviewed the initial commit.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}}:{};
+      if(options.execute){const result=await options.execute(body.request);if(result)return result;}
+      const result=body.request.type==='workspace_snapshot'?{tree_sha:body.request.tree_sha}:body.request.type==='workspace_agent_poll'?{state:'completed',result:{summary:'Reviewed the initial commit.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}}:{};
       return {ok:true,result};
     }
     return {repository_id:'101',state:'ready',generation:1,desired:'ready',revision:1};
