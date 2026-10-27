@@ -321,7 +321,7 @@ function modelFields(repositoryId) {
     if (!value) { preview.replaceChildren(); return; }
     timer = setTimeout(async () => {
       try { const endpoints = await api('/api/models/endpoints?api_url=' + encodeURIComponent(value)); if (request === previewRequest) preview.replaceChildren(...endpointFacts(endpoints)); }
-      catch { if (request === previewRequest) preview.replaceChildren(element('p', '地址无效：需要 http:// 或 https://，不能包含用户名、密码或 #。', 'endpoint-warning')); }
+      catch { if (request === previewRequest) preview.replaceChildren(element('p', '地址无效：需要 http:// 或 https://，不能包含用户名、密码、? 或 #。', 'endpoint-warning')); }
     }, 250);
   });
   key.addEventListener('input', stale);

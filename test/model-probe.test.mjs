@@ -9,14 +9,19 @@ import { Redactor } from '../dist/agent/common.js';
 import { testPrompt } from '../dist/app/model-probe.js';
 
 // A fake OpenAI-compatible upstream. /v1 answers normally; /echo answers 401 and repeats the key it was given,
-// the way a careless proxy might; every request is recorded.
+// the way a careless proxy might, and /reply-echo puts it in a successful reply. /creds and /text stand for internal
+// services that are not model servers. Every request is recorded.
 async function upstream(t) {
   const requests = [], ids = Array.from({ length: 250 }, (_, i) => `model-${String(249 - i).padStart(3, '0')}`);
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const request = { method: req.method, path: req.url, authorization: req.headers.authorization, body: raw ? JSON.parse(raw) : null }; requests.push(request);
     res.setHeader('Content-Type', 'application/json');
-    if (req.url.startsWith('/echo/')) { res.statusCode = 401; res.end(JSON.stringify({ error: { message: `Incorrect API key provided: ${req.headers.authorization.slice(7)}` } })); return; }
+    const echoed = req.headers.authorization?.slice(7);
+    if (req.url.startsWith('/echo/')) { res.statusCode = 401; res.end(JSON.stringify({ error: { message: `Incorrect API key provided: ${echoed}` } })); return; }
+    if (req.url.startsWith('/reply-echo/')) { res.end(JSON.stringify({ model: echoed, choices: [{ message: { role: 'assistant', content: 'ok ' + echoed }, finish_reason: 'stop' }] })); return; }
+    if (req.url.startsWith('/creds/')) { res.end(JSON.stringify({ AccessKeyId: 'AKIA_INTERNAL', SecretAccessKey: 'top-secret' })); return; }
+    if (req.url.startsWith('/text/')) { res.statusCode = 500; res.setHeader('Content-Type', 'text/plain'); res.end('internal page with top-secret content'); return; }
     if (req.url === '/v1/models') { res.end(JSON.stringify({ object: 'list', data: ids.map(id => ({ id, object: 'model' })) })); return; }
     if (req.url === '/v1/chat/completions') { res.end(JSON.stringify({ model: request.body.model + '-2026-01-01', choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] })); return; }
     res.statusCode = 404; res.end(JSON.stringify({ error: { message: 'Not found' } }));
@@ -78,6 +83,38 @@ test('listing and testing an unsaved model call the upstream with the submitted 
   // Unsaved probes write nothing.
   assert.deepEqual(rows(), before);
   assert.ok(!JSON.stringify((await admin('/api/audit')).value).includes(key));
+});
+
+test('probes keep the model route in the path, never echo other bodies and scrub a long key before clipping', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin), fake = await upstream(t); await repository(admin, a.id, '101');
+  // A query or fragment, even an empty one, would swallow the appended route and let the URL pick any path.
+  const key = 'sk-' + randomBytes(200).toString('hex'), calls = fake.requests.length;
+  for (const suffix of ['?x', '?', '#']) {
+    const api_url = fake.origin + '/creds/latest/meta-data/role' + suffix;
+    assert.deepEqual((await admin('/api/models/upstream', 'POST', { repository_id: null, api_url, api_key: key })).value, { error: 'invalid_api_url' }, suffix);
+    assert.equal((await admin('/api/models/test', 'POST', { repository_id: null, api_url, api_key: key, model_name: 'x' })).status, 400, suffix);
+    assert.equal((await admin('/api/models', 'POST', { repository_id: '101', api_url, api_key: key, model_name: 'x' })).status, 400, suffix);
+    assert.equal((await admin('/api/models/endpoints?api_url=' + encodeURIComponent(api_url))).status, 400, suffix);
+  }
+  // A URL saved before that rule is checked again and not probed.
+  const legacy = (await admin('/api/models', 'POST', { repository_id: '101', api_url: fake.origin + '/creds/v1', api_key: key, model_name: 'legacy' })).value.model;
+  h.store.run('UPDATE models SET api_url=? WHERE id=?', fake.origin + '/creds/latest/meta-data/role?x', legacy.id);
+  for (const action of ['upstream', 'test']) assert.deepEqual((await admin(`/api/models/${legacy.id}/${action}`, 'POST', {})).value, { error: 'invalid_api_url' });
+  assert.equal(fake.requests.length, calls);
+
+  // Bodies that are not model answers come back as a status and code only, without their content.
+  for (const path of ['/creds/v1', '/text/v1']) {
+    const result = (await admin('/api/models/upstream', 'POST', { repository_id: null, api_url: fake.origin + path, api_key: key })).value;
+    assert.equal(result.ok, false); assert.equal(result.message, null, path); assert.ok(!JSON.stringify(result).includes('top-secret'), path);
+  }
+  assert.equal((await admin('/api/models/upstream', 'POST', { repository_id: null, api_url: fake.origin + '/creds/v1', api_key: key })).value.error, 'upstream_response_invalid');
+
+  // A 403-character key echoed past the clip limits is replaced whole; no prefix of it survives.
+  const echoed = [(await admin('/api/models/upstream', 'POST', { repository_id: null, api_url: fake.origin + '/echo/v1', api_key: key })).value,
+    (await admin('/api/models/test', 'POST', { repository_id: null, api_url: fake.origin + '/reply-echo/v1', api_key: key, model_name: 'x' })).value];
+  assert.equal(echoed[0].message, 'Incorrect API key provided: [REDACTED]');
+  assert.equal(echoed[1].reply, 'ok [REDACTED]'); assert.equal(echoed[1].model, '[REDACTED]');
+  for (const value of echoed) assert.ok(!JSON.stringify(value).includes(key.slice(0, 12)));
 });
 
 test('a saved model is listed and tested with its stored key under the editing right, and audited without the key', async t => {

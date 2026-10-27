@@ -13,17 +13,16 @@ function scrub<T>(value: T, key: string): T {
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, scrub(item, key)])) as T;
   return value;
 }
-const short = (value: string, limit = 300) => { const text = value.replace(/\s+/g, ' ').trim(); return text.length > limit ? text.slice(0, limit) + '…' : text; };
-// The upstream's own short explanation: an OpenAI-style error.message, a plain error/message/detail string, or a page title.
-function explanation(raw: string): string | null {
+// Scrub before clipping: a clip that fell inside an echoed key would otherwise leave the key's prefix behind.
+const short = (value: string, key: string, limit = 300) => { const text = scrub(value, key).replace(/\s+/g, ' ').trim(); return text.length > limit ? text.slice(0, limit) + '…' : text; };
+// The upstream's own short explanation, taken only from the usual JSON error fields (error.message, or an error,
+// message or detail string). Any other body is never echoed, so a probe cannot read whatever an address returns.
+function explanation(raw: string, key: string): string | null {
   try {
     const value = JSON.parse(raw), error = value?.error;
     const found = [error?.message, error, value?.message, value?.detail, value?.msg].find(item => typeof item === 'string' && item.trim());
-    if (found) return short(found);
-  } catch { /* Not JSON: fall back to the text itself. */ }
-  const title = /<title[^>]*>([^<]*)<\/title>/i.exec(raw)?.[1];
-  if (title?.trim()) return short(title);
-  return raw.trim() && !raw.trimStart().startsWith('<') ? short(raw) : null;
+    return found ? short(found, key) : null;
+  } catch { return null; }
 }
 // Reads at most `limit` bytes, so an endless or huge body is reported rather than buffered.
 async function read(response: Response, limit: number): Promise<string | null> {
@@ -46,12 +45,12 @@ async function send(url: string, key: string, init: RequestInit, limit: number):
   try { response = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(timeout), headers: { Authorization: 'Bearer ' + key, Accept: 'application/json', ...init.headers as Record<string, string> } }); }
   catch (error) { return transport(error); }
   // A redirect usually means the address is not the final one; say where it points instead of following it with the key.
-  if (response.status >= 300 && response.status < 400) { await response.body?.cancel().catch(() => {}); return failure(response.status, 'upstream_redirect', short(response.headers.get('location') || '', 300) || null); }
+  if (response.status >= 300 && response.status < 400) { await response.body?.cancel().catch(() => {}); return failure(response.status, 'upstream_redirect', short(response.headers.get('location') || '', key) || null); }
   let raw: string | null;
   try { raw = await read(response, limit); } catch (error) { return transport(error); }
   if (raw === null) return failure(response.status, 'upstream_response_too_large');
-  if (!response.ok) return failure(response.status, 'upstream_http_error', explanation(raw));
-  let json: any; try { json = JSON.parse(raw); } catch { return failure(response.status, 'upstream_response_invalid', explanation(raw)); }
+  if (!response.ok) return failure(response.status, 'upstream_http_error', explanation(raw, key));
+  let json: any; try { json = JSON.parse(raw); } catch { return failure(response.status, 'upstream_response_invalid', explanation(raw, key)); }
   return { ok: true, status: response.status, raw, json };
 }
 
@@ -61,7 +60,7 @@ export async function listUpstreamModels(apiUrl: string, key: string): Promise<J
   if (!reply.ok) return scrub({ models_url, ...reply.failure }, key);
   // OpenAI-compatible servers answer {data:[{id}]}; a few answer {models:[...]} or a bare array, with ids or names.
   const items = [reply.json?.data, reply.json?.models, reply.json].find(Array.isArray);
-  if (!items) return scrub({ models_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw) }, key);
+  if (!items) return scrub({ models_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw, key) }, key);
   const ids = [...new Set(items.map((item: any) => typeof item === 'string' ? item : typeof item?.id === 'string' ? item.id : item?.name)
     .filter((id: unknown): id is string => typeof id === 'string' && !!id.trim() && id.length <= 256))].sort();
   return scrub({ models_url, ok: true, status: reply.status, total: ids.length, truncated: ids.length > listLimit, models: ids.slice(0, listLimit) }, key);
@@ -74,9 +73,9 @@ export async function testUpstreamModel(apiUrl: string, key: string, model: stri
   const reply = await send(chat_url, key, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, bodyLimit.test);
   if (!reply.ok) return scrub({ chat_url, ...reply.failure }, key);
   const choice = reply.json?.choices?.[0];
-  if (!choice) return scrub({ chat_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw) }, key);
+  if (!choice) return scrub({ chat_url, ok: false, status: reply.status, error: 'upstream_response_invalid', message: explanation(reply.raw, key) }, key);
   const content = choice.message?.content;
   const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('') : '';
-  return scrub({ chat_url, ok: true, status: reply.status, model: typeof reply.json.model === 'string' ? short(reply.json.model, 200) : null,
-    reply: short(text, 200), finish_reason: typeof choice.finish_reason === 'string' ? choice.finish_reason : null, elapsed_ms: Date.now() - started }, key);
+  return scrub({ chat_url, ok: true, status: reply.status, model: typeof reply.json.model === 'string' ? short(reply.json.model, key, 200) : null,
+    reply: short(text, key, 200), finish_reason: typeof choice.finish_reason === 'string' ? choice.finish_reason : null, elapsed_ms: Date.now() - started }, key);
 }
