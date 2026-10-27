@@ -232,9 +232,9 @@ test('new logs render during execution, survive terminal states and do not dupli
     for(const status of ['running','failed','succeeded']){
       task.status=status;
       await page.run('(async () => { await refreshTask(); clearTimeout(taskTimer); })()');
-      assert.equal(page.$('timeline').children.length,logs.length);
+      assert.equal(page.$('timeline').children.length,logs.length-3);
       const text=node=>[node.textContent,...node.children.flatMap(text)].join('\n'),visible=text(page.$('timeline'));
-      for(const expected of ['工作区准备日志','仓库快照进度日志','仓库快照跳过日志','本地 Git 树日志','Agent 执行日志','工具开始日志','仓库测试日志','GitHub 发布日志','src/99.txt','vendor/module','npm test','src/main.js','finish_review','create_pull_request',commit])assert.ok(visible.includes(expected),expected);
+      for(const expected of ['仓库快照进度','Agent 执行日志','工具开始日志','仓库测试日志','GitHub 发布日志','src/99.txt','vendor/module','npm test','src/main.js','finish_review','create_pull_request',commit])assert.ok(visible.includes(expected),expected);
     }
   }finally{page.run('taskView.close(); clearTimeout(taskTimer);');}
 });
@@ -249,7 +249,9 @@ test('failed, waiting and retry-wait details show reasons in the timeline and si
     await page.run('(async () => { await refreshTask(); clearTimeout(taskTimer); })()');
     const visible=node=>node.tagName==='DETAILS'?[]:[node.textContent,...node.children.flatMap(visible)];
     assert.ok(visible(page.$('timeline')).includes(detail));assert.ok(visible(page.$('task-side')).includes(detail));
-    assert.ok(visible(page.$('timeline')).includes('Skipped vendor/module: mode 160000'));assert.equal(page.$('timeline').children.length,2);
+    const progress=page.$('timeline').querySelector('details.snapshot-progress');assert.equal(progress.open,false);
+    const text=node=>[node.textContent,...node.children.flatMap(text)].join('\n');
+    assert.ok(text(progress).includes('Skipped vendor/module: mode 160000'));assert.equal(page.$('timeline').children.length,2);
     page.run('taskView.close(); clearTimeout(taskTimer);');
   }
 });
