@@ -10,9 +10,11 @@ function publicModel(store: Store, row: Row): Json {
     key_configured: row.api_key !== null, trusted: true, version: row.version, updated_at: row.updated_at, pricing: pricingFor(store,String(row.id)),
     endpoints: modelEndpoints(String(row.api_url)) };
 }
+// Routes are appended to the URL text, so a query or fragment, even an empty "?" or "#", would swallow the route and
+// leave the requested path to whoever wrote the URL. Such a URL never reached a model route, so it is refused.
 function apiUrl(value: unknown): string {
   const result = text(value, 2048);
-  try { const url = new URL(result); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error(); }
+  try { const url = new URL(result); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || /[?#]/.test(result)) throw new Error(); }
   catch { return fail(400, 'invalid_api_url'); }
   return result;
 }
@@ -78,8 +80,10 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     fields(body, []);
     const test = path.endsWith('/test'), key = row.api_key === null ? '' : String(store.secrets.open(row.api_key, `model:${id}`).value || '');
     if (!key) return fail(409, 'model_key_missing');
+    // A URL saved before the query/fragment rule is checked again rather than probed as written.
+    const endpoint = apiUrl(row.api_url);
     store.audit(user.id, test ? 'model.tested' : 'model.upstream_listed', id, row.repository_id);
-    return test ? testUpstreamModel(row.api_url, key, row.model_name) : listUpstreamModels(row.api_url, key);
+    return test ? testUpstreamModel(endpoint, key, row.model_name) : listUpstreamModels(endpoint, key);
   }
   if (path === `/api/models/${id}/credentials/revoke` && method === 'POST') {
     fields(body, []);
