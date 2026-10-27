@@ -57,7 +57,7 @@ GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令�
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `BOT_IMAGE_TAG` | `latest` | 所有镜像的标签：版本（如 `v1.2.0`）或 `sha-<12 位提交>`；叠加 `compose.build.yaml` 时不起作用 |
+| `BOT_IMAGE_TAG` | `latest` | 所有镜像的标签：版本（如 `v1.2.0`）或 `sha-<12 位提交>`；也传给控制面进程，「全局设置」显示它作为当前运行版本。叠加 `compose.build.yaml` 时不选择镜像，控制面收到空值，页面显示源码运行 |
 | `BOT_WEBHOOK_PORT` | `8791` | Webhook 的宿主端口，绑定 `0.0.0.0` |
 | `BOT_ADMIN_PORT` | `8792` | 管理页的宿主端口，只绑定 `127.0.0.1` |
 | `BOT_COOKIE_SECURE` | `false` | 管理页经 HTTPS 反向代理访问时设为 `true` |
@@ -70,7 +70,7 @@ GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令�
 
 Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一次性的 `key-init` 与 `project-image`。`key-init` 首次启动时生成主密钥和内部认证。`project-image` 仅确保批准的项目镜像已在本机 Docker 中（`compose.yaml` 拉取，加上 `compose.build.yaml` 时构建），不是某个仓库的长期环境。`tunnel` 在向导保存 Cloudflare Tunnel token 之前不连接任何账号；它只在独立的 `edge` 网络，经 `webhook` 网关固定转发到 `bot:8791`，不能连接管理端口。manager 按仓库创建动态项目容器，项目容器不属于 Compose 静态服务，不对宿主或公网发布端口。
 
-`bot-data` 保存控制面 SQLite，`bot-keys` 保存加密主密钥，仅 bot 可读；`internal-keys` 保存 bot 与 manager 的内部认证，manager 不挂载上游凭据或控制面数据库。`manager-data` 保存环境和操作账本。`tunnel-keys` 只放 Cloudflare Tunnel token 文件。每个环境代次拥有独立具名工作卷和内部网络，标签同时绑定部署、仓库 ID、代次和资源类型。部署 ID 从独立内部认证材料派生，不同部署不会共用资源名。
+`bot-data` 保存控制面 SQLite 和仓库 Git 镜像（`/data/git-cache`，只是缓存，删掉后任务会重新从 GitHub 拉取；控制面进程的 `BOT_GIT_CACHE_DIR` 可改位置），`bot-keys` 保存加密主密钥，仅 bot 可读；`internal-keys` 保存 bot 与 manager 的内部认证，manager 不挂载上游凭据或控制面数据库。`manager-data` 保存环境和操作账本。`tunnel-keys` 只放 Cloudflare Tunnel token 文件。每个环境代次拥有独立具名工作卷和内部网络，标签同时绑定部署、仓库 ID、代次和资源类型。部署 ID 从独立内部认证材料派生，不同部署不会共用资源名。
 
 只有 manager 挂载 Docker socket；它以 UID 0、GID 10001 访问 socket 和只读内部认证卷，丢弃所有 capabilities、禁止提权、根文件系统只读。Docker socket 本身仍赋予 manager 管理宿主 Docker 的能力，因此不对宿主发布 manager 端口，也不向项目网络提供该接口。它只接受登记项目的固定生命周期和 runner 请求，不能指定任意镜像、挂载、容器 ID 或 Docker API。bot 和项目容器没有 socket，项目容器也不挂载任何认证卷。bot／manager 使用独立控制网络，每个项目使用自己的 bridge 网络，项目之间互不可达。项目容器默认可以访问外网，用于安装依赖和访问测试地址；设置 `BOT_PROJECT_EGRESS=false` 可改回无出口的内部网络。外网出口意味着仓库代码也能访问宿主在 `0.0.0.0` 上发布的端口（例如 Webhook `8791`），管理端口只绑定回环地址，不受影响；GitHub 和模型凭据仍不进入项目容器。
 
