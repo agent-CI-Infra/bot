@@ -42,13 +42,15 @@ async function start() {
 }
 // Review and development are separate pages over the same task API.
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'reviews', 'developments', 'external','onboarding'];
+// The wizard's address may name a step by index (#onboarding/2), so GitHub's return and a reload open that step.
+const onboardingAddress = /^#onboarding(?:\/([0-5]))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 async function route() {
   renderVersion++;
   if(location.hash==='#external')tab='external';
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   if (target) tab = 'projects';
-  if(location.hash==='#onboarding'&&me.role==='super_admin')tab='onboarding';
+  if(onboardingAddress.test(location.hash)&&me.role==='super_admin')tab='onboarding';
   page.hidden = !target; list.hidden = !!target;
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');

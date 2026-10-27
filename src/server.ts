@@ -90,7 +90,8 @@ export function createControlPlane(options: Options) {
     if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'admin')); return; }
     if (method === 'GET' && path === '/onboarding/github/callback') {
       await onboarding.callback(url.searchParams.get('code') || '', url.searchParams.get('state') || '');
-      res.writeHead(303, { Location: '/#onboarding' }); res.end(); return;
+      // The App now exists, so the wizard reopens at its install step (index 2) rather than the first step.
+      res.writeHead(303, { Location: '/#onboarding/2' }); res.end(); return;
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
