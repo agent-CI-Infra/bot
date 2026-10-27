@@ -10,15 +10,17 @@
 | `/api/setup` | GET / POST | 初始化状态／仅首次创建超级管理员，POST 字段 `username,password` |
 | `/api/auth/login`、`/api/auth/logout`、`/api/auth/me` | POST / POST / GET | 登录、退出、会话与仓库权限 |
 | `/api/users`、`/api/users/:id` | GET / POST、PATCH / DELETE | 超级管理员列出／创建用户、停用或启用；创建可带 `role,repository_ids`。DELETE 需 `confirm:true`，删除会话、项目成员分配和个人看板设置，审计保留；最后一名活跃超级管理员返回 409 `last_super_admin`，删除自己成功后会话失效 |
+| `/api/settings` | GET / PATCH | 仅超级管理员，项目管理员得到 403。返回 `settings:{task_concurrency,task_concurrency_bounds}` 和 `version`；PATCH 字段 `task_concurrency`，是每台虚拟电脑默认同时运行的任务数，1–32 的整数，未设置时为 1，超出范围返回 400 `invalid_task_concurrency` |
+| `/api/version` | GET | 仅超级管理员；控制面进程环境 `BOT_IMAGE_TAG` 给出的镜像标签 `{image_tag,source:"image"}`，源码直接运行、变量为空时为 `{image_tag:null,source:"source"}` |
 | `/api/project-admin-assignments` | GET / PUT | 超级管理员查询／替换用户仓库分配，PUT 字段 `user_id,repository_ids` |
 | `/api/accounts`、`/api/accounts/:id` | GET / POST、GET / PATCH / DELETE | 超级管理员管理 GitHub App／机器人账号；POST 字段 `name,type,app_id,private_key,token,webhook_secret` 按账号类型选用。DELETE 需 `confirm:true`，仍有项目使用该账号时返回 409 `account_has_projects`；只从本系统删除账号、Webhook 入口、安装同步记录和凭据，不调用 GitHub |
 | `/api/accounts/:id/credentials/revoke` | POST | 超级管理员撤销账号认证材料 |
 | `/api/accounts/:id/permissions` | GET | 超级管理员检查 GitHub App 权限：返回所需权限 `required`、App 缺少的项 `app.missing` 与 App 权限设置页 `app.settings_url`、每个安装缺少的项 `installations[].missing` 与确认页 `review_url`，全部满足时 `ok:true`；机器人账号返回 409 |
 | `/api/accounts/:id/endpoints`、`/api/accounts/:id/endpoints/:endpoint` | POST、PATCH | 创建签名入口／轮换签名材料；PATCH 带 `webhook_secret` 或 `revoke:true` |
 | `/api/repositories`、`/api/repositories/:id` | GET | 范围内列表／详情；仓库由安装同步发现，经 `POST /api/installations/:id/activate` 启动后登记 |
-| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；检视规则字段 `review_issues`、`review_pull_requests`、`review_pr_updates`（布尔，分别控制 Issue 打开、PR 打开／转为可检视、PR 新提交是否触发检视）和 `review_language`（`auto`／`zh`／`en`）。检视指引和检视标签不是策略字段，写在规则文件里，见下一行 |
+| `/api/repositories/:id/policy` | GET / PATCH | 范围内策略，字段 `model_id,review_enabled,development_enabled,enabled,test_command,base_branch,max_revisions,task_concurrency`；`task_concurrency` 是这台虚拟电脑同时运行的任务数，1–32 的整数，`null` 跟随全局默认，项目管理员可以改自己的项目，响应另带全局默认 `task_concurrency_default`；选择模型、启用检视／开发、指定必需测试和跟进预算；基准分支留空时读取仓库默认分支；检视规则字段 `review_issues`、`review_pull_requests`、`review_pr_updates`（布尔，分别控制 Issue 打开、PR 打开／转为可检视、PR 新提交是否触发检视）和 `review_language`（`auto`／`zh`／`en`）。检视指引和检视标签不是策略字段，写在规则文件里，见下一行 |
 | `/api/repositories/:id/rules` | GET / PUT | 每份规则文件的内置默认、项目控制台、仓库文件三层和最终内容；PUT `{path,content}` 保存或（`content: null`）清除某个 `.bot/` 规则文件的控制台覆盖，`content` 超过 16384 个 UTF-8 字节或含 NUL 时返回 `invalid_rule_content`。`POST …/rules/refresh` 重新读取默认分支文件，`POST …/rules/apply-computer` 由超级管理员立即应用 `.bot/computer.yaml` |
-| `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库。列表带当前执行任务；详情另含 manager 给出的容器／卷／网络／镜像／资源限制、当前任务、最近 20 个任务和最近 30 条命令 |
+| `/api/environments`、`/api/environments/:id` | GET | 按账号、组织 ID、仓库过滤环境；项目管理员无筛选也只见被分配仓库。列表和详情带这台电脑上正在运行的任务 `running_tasks`；详情另含生效并发度 `task_concurrency`、manager 给出的容器／卷／网络／镜像／资源限制、最近 20 个任务和最近 30 条命令 |
 | `/api/environments/:id/start`、`/stop`、`/reset` | POST | 仓库管理员操作；字段 `operation_id,generation`，操作 ID 为 48 位随机十六进制；重试必须复用同一 ID |
 | `/api/environments/:id/configure` | POST | 仅超级管理员；字段 `operation_id,generation,spec`，`spec` 可含 `cpus`（0.25–16，默认 2）、`memory_mb`（256–65536，默认 4096）、`pids`（64–16384，默认 1024）、`tmp_mb`（16–16384，默认 1024）、`egress`、`packages`（最多 100 个 Debian 包名）、`env`（最多 64 个非机密变量，`PATH`、`HOME`、`BOT_*`、`GIT_*` 等保留名拒绝）、`setup_script`（≤16 KiB）和一次性的 `rerun_setup`。范围由 manager 校验；规格随项目保存、跨重启和重置保留，保存后在项目锁内重建容器，工作卷和代次不变；软件包镜像构建失败时不改动正在运行的电脑 |
 | `/api/environments/:id/stats` | GET | 范围内实时资源：CPU、内存、进程数、网络、磁盘读写和工作区占用（工作区每分钟最多统计一次），不占用项目锁 |
