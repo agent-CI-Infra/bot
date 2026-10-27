@@ -103,8 +103,8 @@ export class RuleService {
   cache(id: string, sha: string, files: Record<string, string>) { this.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,files=excluded.files,updated_at=excluded.updated_at', id, sha, JSON.stringify(files), new Date().toISOString()); }
   // A mirror that holds the commit supplies the listing and contents; the files and their checks are the same either way.
   async fetch(github: GitHub, sha: string, mirror?: Mirror) {
-    const cached = !!mirror?.has(sha);
-    const tree = cached ? await mirror!.listing(sha) : await repositoryTree(github, (await github.request('GET', github.path('/git/commits/' + sha))).tree.sha);
+    const listing = mirror?.has(sha) ? await mirror.listing(sha) : null, cached = !!listing;
+    const tree = listing ?? await repositoryTree(github, (await github.request('GET', github.path('/git/commits/' + sha))).tree.sha);
     const entries = tree.tree.filter((f: any) => rulePath(f.path));
     if (entries.length > 38) fail(400, 'too_many_bot_skills'); const files: Record<string, string> = {};
     for (const file of entries) {
