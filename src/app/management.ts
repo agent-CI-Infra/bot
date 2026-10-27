@@ -8,11 +8,45 @@ import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
-function repoIds(store: Store, value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > 1000) return fail(400, 'invalid_repository_ids');
-  const ids = [...new Set(value.map(v => text(v)))];
-  if (ids.some(id => !store.get('SELECT id FROM repositories WHERE id=?', id))) fail(400, 'repository_not_found');
-  return ids;
+interface Grants { repositories?: string[]; organizations?: string[] }
+function grantIds(value: unknown, code: string): string[] {
+  if (!Array.isArray(value) || value.length > 1000) return fail(400, code);
+  return [...new Set(value.map(v => text(v)))];
+}
+// A project administrator holds single repositories and whole organizations (owner_id); the two are independent and add up.
+// A repository may still be installed but not enabled: enabling keeps its id, so the grant applies then. An organization
+// must own a repository that is installed now. A list left out stays as it is.
+function grants(store: Store, body: Json): Grants {
+  const repositories = body.repository_ids === undefined ? undefined : grantIds(body.repository_ids, 'invalid_repository_ids');
+  const organizations = body.organization_ids === undefined ? undefined : grantIds(body.organization_ids, 'invalid_organization_ids');
+  if (repositories?.some(id => !store.get(`SELECT 1 FROM installed_repositories WHERE repository_id=? AND installed=1
+    UNION ALL SELECT 1 FROM repositories WHERE id=?`, id, id))) fail(400, 'repository_not_found');
+  if (organizations?.some(id => !store.get('SELECT 1 FROM installed_repositories WHERE owner_id=? AND installed=1', id))) fail(400, 'organization_not_found');
+  return { repositories, organizations };
+}
+function saveGrants(store: Store, userId: string, { repositories, organizations }: Grants): void {
+  if (repositories) {
+    store.run('DELETE FROM project_admin_assignments WHERE user_id=?', userId);
+    for (const id of repositories) store.run('INSERT INTO project_admin_assignments VALUES(?,?)', userId, id);
+  }
+  if (organizations) {
+    store.run('DELETE FROM project_admin_organizations WHERE user_id=?', userId);
+    for (const id of organizations) store.run('INSERT INTO project_admin_organizations VALUES(?,?)', userId, id);
+  }
+}
+// What grants can be chosen from: installed repositories, one group per owner_id named by the newest login GitHub reported.
+function installedOrganizations(store: Store): Json[] {
+  const groups = new Map<string, { owner_id: string; owner_login: string; repositories: Json[] }>();
+  const registered = new Set(store.all('SELECT id FROM repositories').map(row => String(row.id)));
+  for (const row of store.all('SELECT repository_id,full_name,owner_id,owner_login FROM installed_repositories WHERE installed=1 ORDER BY synced_at DESC')) {
+    const owner = String(row.owner_id), group = groups.get(owner) ?? { owner_id: owner, owner_login: '', repositories: [] };
+    groups.set(owner, group); group.owner_login ||= row.owner_login;
+    // The same repository may be listed by more than one account.
+    if (!group.repositories.some(repo => repo.id === row.repository_id)) group.repositories.push({ id: row.repository_id, full_name: row.full_name, registered: registered.has(row.repository_id) });
+  }
+  const name = (value: Json) => String(value.full_name);
+  return [...groups.values()].map(group => ({ ...group, owner_login: group.owner_login || name(group.repositories[0]!).split('/')[0]!,
+    repositories: group.repositories.sort((a, b) => name(a).localeCompare(name(b))) })).sort((a, b) => a.owner_login.localeCompare(b.owner_login));
 }
 function accountView(store: Store, row: Row): Json {
   const secret = store.secrets.open(row.credentials, `account:${row.id}`);
@@ -36,15 +70,17 @@ export async function management(store: Store, user: Actor, method: string, path
     superAdmin(user);
     if (method === 'GET') return { users: store.all('SELECT id,username,role,active FROM users ORDER BY username').map(publicUser) };
     if (method === 'POST') {
-      fields(body, ['username', 'password', 'role', 'repository_ids']);
+      fields(body, ['username', 'password', 'role', 'repository_ids', 'organization_ids']);
       const username = text(body.username, 100), encoded = await hashPassword(password(body.password));
       const role = body.role ?? 'project_admin';
       if (!['super_admin', 'project_admin'].includes(String(role))) fail(400, 'invalid_role');
-      const ids = repoIds(store, body.repository_ids ?? []), id = randomId();
+      const id = randomId();
       return store.transaction(() => {
+        // A super administrator sees every project, so grants sent with one are ignored.
+        const granted = role === 'project_admin' ? grants(store, { repository_ids: body.repository_ids ?? [], organization_ids: body.organization_ids ?? [] }) : {};
         if (store.get('SELECT id FROM users WHERE username=?', username)) fail(409, 'username_exists');
         store.run('INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,?)', id, username, encoded, String(role));
-        for (const repo of ids) store.run('INSERT INTO project_admin_assignments VALUES(?,?)', id, repo);
+        saveGrants(store, id, granted);
         store.audit(user.id, 'user.created', id);
         return { user: publicUser(store.get('SELECT * FROM users WHERE id=?', id)!) };
       });
@@ -66,7 +102,7 @@ export async function management(store: Store, user: Actor, method: string, path
         return { user: publicUser(store.get('SELECT * FROM users WHERE id=?', id)!) };
       });
     }
-    // Deleting a user ends its sessions, drops its project assignments and personal board, and frees the login name.
+    // Deleting a user ends its sessions, drops its repository and organization grants and personal board, and frees the login name.
     // The audit keeps its records; deleting yourself needs another active super administrator, as disabling does.
     if (method === 'DELETE' && path === `/api/users/${id}`) {
       fields(body, ['confirm']); if (body.confirm !== true) fail(400, 'confirmation_required');
@@ -76,6 +112,7 @@ export async function management(store: Store, user: Actor, method: string, path
         if (row.role === 'super_admin' && row.active && store.get("SELECT count(*) AS n FROM users WHERE role='super_admin' AND active=1")!.n <= 1) fail(409, 'last_super_admin');
         const boardFields = 'SELECT id FROM board_fields WHERE user_id=?';
         for (const [sql, count] of [['DELETE FROM sessions WHERE user_id=?', 1], ['DELETE FROM project_admin_assignments WHERE user_id=?', 1],
+          ['DELETE FROM project_admin_organizations WHERE user_id=?', 1],
           [`DELETE FROM board_values WHERE user_id=? OR field_id IN (${boardFields})`, 2], [`DELETE FROM board_options WHERE field_id IN (${boardFields})`, 1],
           ['DELETE FROM board_fields WHERE user_id=?', 1], ['DELETE FROM board_views WHERE user_id=?', 1], ['DELETE FROM users WHERE id=?', 1]] as const) store.run(sql, ...Array<string>(count).fill(id));
         if (store.hasTable('app_manifest_states')) store.run('DELETE FROM app_manifest_states WHERE user_id=?', id);
@@ -86,14 +123,15 @@ export async function management(store: Store, user: Actor, method: string, path
   }
   if (path === '/api/project-admin-assignments') {
     superAdmin(user);
-    if (method === 'GET') return { assignments: store.all('SELECT * FROM project_admin_assignments ORDER BY user_id,repository_id') };
+    if (method === 'GET') return { assignments: store.all('SELECT * FROM project_admin_assignments ORDER BY user_id,repository_id'),
+      organization_assignments: store.all('SELECT * FROM project_admin_organizations ORDER BY user_id,owner_id'), organizations: installedOrganizations(store) };
     if (method === 'PUT') {
-      fields(body, ['user_id', 'repository_ids']);
-      const id = text(body.user_id), ids = repoIds(store, body.repository_ids);
+      fields(body, ['user_id', 'repository_ids', 'organization_ids']);
+      const id = text(body.user_id);
+      if (body.repository_ids === undefined && body.organization_ids === undefined) fail(400, 'invalid_repository_ids');
       if (!store.get("SELECT id FROM users WHERE id=? AND role='project_admin'", id)) fail(400, 'project_admin_not_found');
       return store.transaction(() => {
-        store.run('DELETE FROM project_admin_assignments WHERE user_id=?', id);
-        for (const repo of ids) store.run('INSERT INTO project_admin_assignments VALUES(?,?)', id, repo);
+        saveGrants(store, id, grants(store, body));
         store.audit(user.id, 'assignments.updated', id);
         return { ok: true };
       });

@@ -391,14 +391,21 @@ function membersSection() {
   const section = card('项目管理员'), list = element('ul', '', 'history'), add = element('div', '', 'actions member-add');
   section.append(note('项目管理员可以管理这个项目的检视、开发、模型和虚拟电脑启停，看到它的任务、日志和投递；不能修改机器配置或其他项目。'), list, add);
   (async () => {
-    const [{ users }, { assignments }] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);
+    const [{ users }, { assignments, organization_assignments: organizations, organizations: installed }] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);
     const assigned = user => assignments.filter(a => a.user_id === user.id).map(a => a.repository_id);
-    const update = async (user, ids) => { await api('/api/project-admin-assignments', 'PUT', { user_id: user.id, repository_ids: ids }).catch(error); await reloadProject(); };
-    for (const user of users.filter(u => u.role === 'project_admin' && assigned(u).includes(current.id))) {
-      const li = element('li', ''); li.append(element('span', user.username + (user.active ? '' : '（已停用）')), button('移除', () => update(user, assigned(user).filter(id => id !== current.id)))); list.append(li);
+    // Only the single-repository grant is changed here; a whole-organization grant is edited on the users page.
+    const wholeOrganization = user => organizations.some(o => o.user_id === user.id && o.owner_id === current.repository.owner_id);
+    // A grant whose repository is neither installed nor a project any more would be refused, so saving here drops it.
+    const grantable = new Set([...installed.flatMap(o => o.repositories.map(r => r.id)), ...repositories.map(r => r.id)]);
+    const update = async (user, ids) => { await api('/api/project-admin-assignments', 'PUT', { user_id: user.id, repository_ids: ids.filter(id => grantable.has(id)) }).catch(error); await reloadProject(); };
+    for (const user of users.filter(u => u.role === 'project_admin' && (assigned(u).includes(current.id) || wholeOrganization(u)))) {
+      const li = element('li', ''); li.append(element('span', user.username + (user.active ? '' : '（已停用）')));
+      if (wholeOrganization(user)) li.append(element('span', '整个组织授权，在「用户」页修改', 'muted'));
+      if (assigned(user).includes(current.id)) li.append(button('移除', () => update(user, assigned(user).filter(id => id !== current.id))));
+      list.append(li);
     }
     if (!list.childElementCount) list.append(element('li', '还没有项目管理员，超级管理员可以管理全部项目。', 'muted'));
-    const candidates = users.filter(u => u.role === 'project_admin' && u.active && !assigned(u).includes(current.id)), select = document.createElement('select');
+    const candidates = users.filter(u => u.role === 'project_admin' && u.active && !assigned(u).includes(current.id) && !wholeOrganization(u)), select = document.createElement('select');
     select.add(new Option(candidates.length ? '选择项目管理员' : '没有可添加的项目管理员（在“用户”页创建）', '')); candidates.forEach(u => select.add(new Option(u.username, u.id)));
     add.append(select, button('添加', () => { const user = candidates.find(u => u.id === select.value); if (user) update(user, [...assigned(user), current.id]); }));
   })().catch(err => list.replaceChildren(element('li', err.message, 'view-error')));

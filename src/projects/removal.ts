@@ -60,6 +60,8 @@ export class ProjectRemoval {
     if (!registered) return this.store.transaction(() => {
       if (this.store.get('SELECT 1 FROM repositories WHERE id=?', id)) fail(409, 'repository_started');
       this.store.run('DELETE FROM installed_repositories WHERE repository_id=?', id); dropUninstalledIntegrations(this.store);
+      // A grant made before the repository was enabled goes with it, as a project's grants go with the project.
+      this.store.run('DELETE FROM project_admin_assignments WHERE repository_id=?', id);
       this.store.audit(user.id, 'repository.removed', id, id);
       return { deleted: true, repository_id: id, registered: false };
     });

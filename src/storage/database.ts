@@ -26,7 +26,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS endpoints(id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id), secret TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS repositories(id TEXT PRIMARY KEY, full_name TEXT NOT NULL COLLATE NOCASE UNIQUE, owner_id TEXT NOT NULL,
         account_id TEXT NOT NULL REFERENCES accounts(id));
-      CREATE TABLE IF NOT EXISTS project_admin_assignments(user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT NOT NULL REFERENCES repositories(id),
+      CREATE TABLE IF NOT EXISTS project_admin_assignments(user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT NOT NULL,
         PRIMARY KEY(user_id,repository_id));
       CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY, repository_id TEXT REFERENCES repositories(id), api_url TEXT NOT NULL, model_name TEXT NOT NULL,
         api_key TEXT, version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
@@ -52,6 +52,15 @@ export class Store {
       CREATE TABLE audit_records(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, repository_id TEXT, action TEXT NOT NULL, resource_id TEXT NOT NULL, created_at TEXT NOT NULL);
       INSERT INTO audit_records SELECT id,user_id,repository_id,action,resource_id,created_at FROM audit;
       DROP TABLE audit; ALTER TABLE audit_records RENAME TO audit;`));
+    // A repository grant may name an installed repository before it is enabled (the project keeps the installation's id),
+    // so grants no longer reference repositories; older databases drop that foreign key once.
+    if (this.all('PRAGMA foreign_key_list(project_admin_assignments)').some(row => row.table === 'repositories')) this.transaction(() => this.db.exec(`
+      CREATE TABLE project_admin_grants(user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT NOT NULL, PRIMARY KEY(user_id,repository_id));
+      INSERT INTO project_admin_grants SELECT user_id,repository_id FROM project_admin_assignments;
+      DROP TABLE project_admin_assignments; ALTER TABLE project_admin_grants RENAME TO project_admin_assignments;`));
+    // A whole organization granted to a project administrator: every project with this owner_id, including ones enabled later.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS project_admin_organizations(user_id TEXT NOT NULL REFERENCES users(id), owner_id TEXT NOT NULL,
+      PRIMARY KEY(user_id,owner_id));`);
     if (!this.all('PRAGMA table_info(policies)').some(row => row.name === 'enabled')) this.db.exec('ALTER TABLE policies ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
     this.db.exec(`CREATE TABLE IF NOT EXISTS project_environments(repository_id TEXT PRIMARY KEY REFERENCES repositories(id),
       generation INTEGER NOT NULL DEFAULT 1,state TEXT NOT NULL DEFAULT 'provisioning',desired TEXT NOT NULL DEFAULT 'ready',error TEXT,started_at TEXT);

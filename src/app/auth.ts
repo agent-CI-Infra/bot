@@ -8,7 +8,10 @@ export function actor(store: Store, req: IncomingMessage): Actor {
   const row = store.get(`SELECT u.id,u.username,u.role,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id
     WHERE token_hash=? AND expires_at>? AND u.active=1`, digest(token), Date.now());
   if (!row) return fail(401, 'login_required');
-  const repositories = store.all('SELECT repository_id FROM project_admin_assignments WHERE user_id=?', row.id).map(r => String(r.repository_id));
+  // Repositories granted one by one, plus every project of an organization granted as a whole. Read on each request, so a
+  // project enabled later is in scope without logging in again.
+  const repositories = store.all(`SELECT repository_id AS id FROM project_admin_assignments WHERE user_id=?
+    UNION SELECT r.id FROM repositories r JOIN project_admin_organizations o ON o.owner_id=r.owner_id WHERE o.user_id=?`, row.id, row.id).map(r => String(r.id));
   return { id: row.id, username: row.username, role: row.role, csrf: row.csrf, repositories };
 }
 export function superAdmin(user: Actor): void { if (user.role !== 'super_admin') fail(403, 'super_admin_required'); }
