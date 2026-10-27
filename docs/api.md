@@ -25,6 +25,9 @@
 | `/api/environments/:id/delete` | POST | 仅超级管理员，另需 `confirm:true`；删除容器／网络，保留卷 |
 | `/api/models`、`/api/models/:id` | GET / POST、GET / PATCH | 范围内模型，字段 `repository_id,api_url,api_key,model_name`；PATCH 带 `version` |
 | `/api/models/:id/projects`、`/api/models/:id/credentials/revoke` | PUT、POST | 超级管理员分配共享模型；有权编辑者撤销模型 Key |
+| `/api/models/endpoints?api_url=` | GET | 不需要 Key 的地址解析：返回 `chat_url`、`models_url` 和 `has_v1`（去掉末尾 `/` 和 `/chat/completions` 后，路径是否以 `/v1` 结尾）；不会添加或删除 `/v1`。模型的读写响应也带同样内容的 `endpoints` |
+| `/api/models/upstream`、`/api/models/test` | POST | 未保存的模型：用提交的 `api_url,api_key` 获取上游模型列表；测试另带 `model_name`，发一次最小的 Chat Completions 请求。带 `repository_id` 时要求该项目的管理权限，为 null 时只允许超级管理员；不写数据库 |
+| `/api/models/:id/upstream`、`/api/models/:id/test` | POST | 已保存的模型用自己的 URL、Key 和模型名获取列表／测试，正文 `{}`；权限与编辑该模型相同（共享模型只允许超级管理员），审计记为 `model.upstream_listed`／`model.tested`；Key 已撤销返回 409 `model_key_missing` |
 | `/api/events`、`/api/events/:id` | GET | 范围内投递列表／正文和响应；列表可筛选 `repository_id,account_id,owner_id,event,status,delivery_id,limit,offset` |
 | `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
 | `/api/tasks/:id/live` | GET | 运行中任务当前正在执行的命令及其已产生的输出，参数 `offset` 为已读字节数 |
@@ -52,3 +55,5 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 任务列表、任务详情、项目最近任务和看板关联任务现在带 `metrics`：`runtime_ms`（累计已观测执行时长，不含排队／等待）、`running`、`complete`（历史或进程中断时可能不完整）、`input_tokens,output_tokens,cached_input_tokens,cache_hit_rate`、`requests,usage_missing_requests,cache_missing_requests,unpriced_requests` 和按币种分开的 `costs`。缓存是输入的子集，命中率用累计缓存 token 除以累计输入 token；缺少必要统计时返回 null，不用 0 冒充。`complete:false` 时显示的是已经观测到的部分。
 
 模型创建和带 `version` 的 PATCH 还可提交 `pricing:{currency,input_per_million,output_per_million,cache_per_million}`，单价为每百万 token 的非负数（最多 1000000）。`pricing:null` 清除单价；读模型时返回当前单价，原有模型凭据及共享模型编辑权限不变。每次模型请求保存价格快照，费用为 `((输入-缓存)×输入单价 + 缓存×缓存单价 + 输出×输出单价) / 1000000`。缺少用量或单价时费用为 null；未返回缓存数据且缓存价不同于普通输入价时，也不能完整计价。费用页只汇总所选币种及尚未定价的请求，币种之间不作换算。
+
+获取模型列表和测试模型的上游结果都在成功响应里返回：`ok` 表示上游是否成功，`status` 是上游的 HTTP 状态码（没有收到响应时为 null）。列表成功时返回 `models_url,total,truncated,models`，按名称排序，最多 200 个 id；测试成功时返回 `chat_url`、`model`（上游答复中的模型名）、`reply`（回复摘录，最多 200 个字符）、`finish_reason` 和 `elapsed_ms`。失败时返回 `error`（`upstream_http_error`、`upstream_timeout`、`upstream_unreachable`、`upstream_redirect`、`upstream_response_invalid`、`upstream_response_too_large`）和上游给出的简短 `message`。两类请求都在 15 秒后超时、不跟随重定向，结果中出现的 Key 一律替换为 `[REDACTED]`。测试请求的内容是一句不含项目数据的探测，只带 `max_completion_tokens: 32`，不带 `max_tokens`；任务中的模型请求不受影响，仍只带一个输出上限字段，数值 8192。
