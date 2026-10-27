@@ -3,10 +3,10 @@ export function validateReview(value: any) {
   if (!value || typeof value.summary !== 'string' || value.summary.length > 16000 || !Array.isArray(value.findings) || value.findings.length > 100
     || ['requires_code_change','issue_requests_code','clarification_required'].some(k => typeof value[k] !== 'boolean')
     || typeof value.implementation_goal !== 'string' || typeof value.request_quote !== 'string' || value.event !== undefined
-    || value.labels !== undefined && (!Array.isArray(value.labels) || value.labels.length > 20 || value.labels.some((l: unknown) => typeof l !== 'string' || l.length > 50))) stop('model_review_invalid');
+    || value.labels !== undefined && (!Array.isArray(value.labels) || value.labels.length > 20 || value.labels.some((l: unknown) => typeof l !== 'string' || l.length > 50))) stop('model_review_invalid', undefined, '检视结果的必填字段、类型或长度无效，请检查 finish_review 输出格式。');
   for (const finding of value.findings) if (!finding || typeof finding.body !== 'string' || finding.body.length > 16000 || !['discussion','inline'].includes(finding.format)
-    || typeof finding.selection_reason !== 'string' || finding.selection_reason.length > 2000 || finding.event !== undefined) stop('model_finding_invalid');
-  for(const finding of value.findings)if(['actionable','within_goal','requires_human_decision'].some(key=>finding[key]!==undefined&&typeof finding[key]!=='boolean'))stop('model_finding_invalid');
+    || typeof finding.selection_reason !== 'string' || finding.selection_reason.length > 2000 || finding.event !== undefined) stop('model_finding_invalid', undefined, '检视意见的正文、位置类型或选择原因格式无效，或包含不允许的 event 字段。');
+  for(const finding of value.findings)if(['actionable','within_goal','requires_human_decision'].some(key=>finding[key]!==undefined&&typeof finding[key]!=='boolean'))stop('model_finding_invalid', undefined, '检视意见中的 actionable、within_goal 和 requires_human_decision 必须为布尔值。');
   return value;
 }
 function positions(patch: string): Set<string> {

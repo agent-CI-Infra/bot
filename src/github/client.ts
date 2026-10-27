@@ -93,7 +93,7 @@ export class GitHub {
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
-    catch { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait'); }
+    catch { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait', this.redactor.text(`GitHub 请求 ${method} ${path} 连接失败或超时${method==='GET'?'，等待重试':'，写入结果尚未确认'}。`)); }
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
       const error=await githubError(response),detail=errorDetail(error?.message,this.redactor,token,response.status);
@@ -111,8 +111,8 @@ export class GitHub {
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',detail);
       stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',detail);
     }
-    const value = await response.text(); if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large');
-    try { return value ? JSON.parse(value) : {}; } catch { return stop('github_invalid_response'); }
+    const value = await response.text(); if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large',undefined,`GitHub 请求 ${method} ${path} 的响应长度 ${value.length}，超过 48 MiB 上限。`);
+    try { return value ? JSON.parse(value) : {}; } catch { return stop('github_invalid_response',undefined,`GitHub 请求 ${method} ${path} 返回无效 JSON，HTTP ${response.status}。`); }
   }
   async snapshotBlob(sha:string):Promise<any>{
     if(!/^[a-f0-9]{40}$/.test(sha))stop('repository_blob_invalid',undefined,`Invalid blob SHA: ${sha}`);
@@ -122,46 +122,46 @@ export class GitHub {
     const rows: any[] = [];
     for (let page = 1; page <= 100; page++) {
       const result = await this.request('GET', path + (path.includes('?') ? '&' : '?') + `per_page=100&page=${page}`);
-      if (!Array.isArray(result)) stop('github_invalid_page'); rows.push(...result);
+      if (!Array.isArray(result)) stop('github_invalid_page',undefined,`GitHub 分页 ${path} 的第 ${page} 页未返回数组。`); rows.push(...result);
       if (result.length < 100) return rows;
     }
-    return stop('github_pagination_limit', 'waiting_configuration');
+    return stop('github_pagination_limit', 'waiting_configuration', `GitHub 分页 ${path} 已读取 100 页，仍未结束，无法确认完整结果。`);
   }
   // requiredPermissions must all be granted; requestedPermissions are taken where the installation has them.
   async connect(development: boolean, requiredPermissions?: Record<string,string>, requestedPermissions?: Record<string,string>): Promise<any> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', this.repository.account_id);
-    if (!account) stop('github_account_missing', 'waiting_configuration');
+    if (!account) stop('github_account_missing', 'waiting_configuration', `仓库 ${this.repository.id} 关联的 GitHub 账号不存在，请重新配置账号。`);
     const secrets = this.store.secrets.open(account!.credentials, `account:${account!.id}`);
     this.fullName = this.repository.full_name;
     if (account!.type === 'bot_account') {
-      if (!secrets.token) stop('github_credentials_missing', 'waiting_configuration'); this.token = String(secrets.token); this.redactor.add(this.token);
+      if (!secrets.token) stop('github_credentials_missing', 'waiting_configuration', 'GitHub 机器人账号未保存访问令牌，请重新配置凭据。'); this.token = String(secrets.token); this.redactor.add(this.token);
       const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || '');
     } else {
-      if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration');
+      if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');
       this.redactor.add(secrets.private_key);
       const jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.redactor.add(jwt);
       const app = await this.request('GET','/app', undefined, false, jwt);
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
-      if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission');
+      if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission', `GitHub App 安装 ${installation.id} 的所属账号与仓库登记的所有者不一致。`);
       const requested: Record<string,string> = requiredPermissions || requestedPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
-      if(requiredPermissions&&Object.entries(requiredPermissions).some(([key,value])=>!installation.permissions?.[key]||value==='write'&&installation.permissions[key]!=='write'))stop('github_permissions_insufficient','waiting_permission');
+      if(requiredPermissions&&Object.entries(requiredPermissions).some(([key,value])=>!installation.permissions?.[key]||value==='write'&&installation.permissions[key]!=='write'))stop('github_permissions_insufficient','waiting_permission', `GitHub App 安装 ${installation.id} 缺少本次操作所需的权限，请检查安装授权。`);
       const permissions: Record<string,string> = {};
       for (const [key,value] of Object.entries(requested)) if (installation.permissions?.[key]) permissions[key] = installation.permissions[key] === 'read' ? 'read':value;
       const access = await this.request('POST',`/app/installations/${installation.id}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions }, false,jwt);
-      this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission'); this.redactor.add(this.token);
+      this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission', `GitHub 未返回安装 ${installation.id} 的访问令牌。`); this.redactor.add(this.token);
       this.expiresAt=String(access.expires_at||'');this.permissions=access.permissions&&typeof access.permissions==='object'?access.permissions:permissions;
       const actor = await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'));
       this.actorId = String(actor.id); this.actorLogin = String(actor.login || app.slug + '[bot]');
     }
     const repo = await this.request('GET','/repositories/' + this.repository.id);
-    if (String(repo.id) !== this.repository.id || String(repo.owner?.id) !== this.repository.owner_id) stop('github_repository_scope_changed','waiting_permission');
+    if (String(repo.id) !== this.repository.id || String(repo.owner?.id) !== this.repository.owner_id) stop('github_repository_scope_changed','waiting_permission', `GitHub 返回的仓库身份或所有者与登记仓库 ${this.repository.id} 不一致。`);
     this.fullName = repo.full_name; this.defaultBranch = repo.default_branch; this.cloneUrl = typeof repo.clone_url === 'string' ? repo.clone_url : '';
-    if (!this.actorId || !this.defaultBranch || !/^[\w.-]+\/[\w.-]+$/.test(this.fullName)) stop('github_repository_invalid');
+    if (!this.actorId || !this.defaultBranch || !/^[\w.-]+\/[\w.-]+$/.test(this.fullName)) stop('github_repository_invalid',undefined,`GitHub 仓库 ${this.repository.id} 缺少有效的机器人身份、默认分支或仓库全名。`);
     return repo;
   }
   authorEmail(): string {
     // The installation token's actor, not a hard-coded user or organization.
-    if (!/^[1-9]\d*$/.test(this.actorId) || !/^[a-zA-Z0-9-]+(?:\[bot\])?$/.test(this.actorLogin)) stop('github_actor_invalid','waiting_configuration');
+    if (!/^[1-9]\d*$/.test(this.actorId) || !/^[a-zA-Z0-9-]+(?:\[bot\])?$/.test(this.actorLogin)) stop('github_actor_invalid','waiting_configuration','生成提交作者邮箱时发现 GitHub 账号 ID 或登录名格式无效。');
     return `${this.actorId}+${this.actorLogin}@users.noreply.github.com`;
   }
   async object(kind: string, number: number): Promise<any> { return this.request('GET',this.path(`/${kind.endsWith('.pr') ? 'pulls':'issues'}/${number}`)); }

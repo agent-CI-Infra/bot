@@ -12,7 +12,12 @@ export class Workspace {
     request=this.redactor.clean(request);
     const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
     let row=this.store.get('SELECT * FROM task_tools WHERE id=?',id);
-    if(row&&row.request!==JSON.stringify(input))stop('tool_operation_conflict');
+    if(row&&row.request!==JSON.stringify(input)){
+      const previous=JSON.parse(row.request),changed=['generation','workspace_id','path','command','offset'].filter(field=>
+        JSON.stringify(field==='generation'?previous.generation:previous.request?.[field])!==JSON.stringify(field==='generation'?input.generation:input.request[field]));
+      // Report field names only: request payloads can contain file contents, tokens and model credentials.
+      stop('tool_operation_conflict',undefined,this.redactor.text(`操作 key=${key}（type=${input.request.type}）与已存请求冲突：${changed.length?changed.join('、')+' 不同':'请求内容不同'}。`));
+    }
     if(row?.state==='completed')return JSON.parse(row.result);
     if(!row)this.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,this.task.id,JSON.stringify(input));
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});

@@ -4,8 +4,8 @@ import { pricingFor } from '../metrics/accounting.js';
 export function selectedModel(store: Store, repositoryId: string) {
   const row=store.get(`SELECT m.* FROM policies p JOIN models m ON m.id=p.model_id WHERE p.repository_id=? AND
     (m.repository_id=p.repository_id OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=p.repository_id)))`,repositoryId);
-  if(!row?.api_key)return stop('model_not_configured','waiting_configuration');
-  const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration');
+  if(!row?.api_key)return stop('model_not_configured','waiting_configuration',`仓库 ${repositoryId} 未配置可用模型或模型凭据。`);
+  const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration',`模型 ${row.id} 的凭据为空，请重新配置。`);
   return {id:String(row.id),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id))};
 }
 // The one place a saved model URL becomes request addresses (tasks, model listing and model tests all use it).
