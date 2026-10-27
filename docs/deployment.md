@@ -64,6 +64,7 @@ GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令�
 | `BOT_ADMIN_ORIGIN` | 空 | 管理站的 HTTPS origin；创建 GitHub App 后 GitHub 也回调到这里 |
 | `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 时虚拟电脑没有外网出口 |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
+| `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 新对话评论触发检视的 `@名字`，逗号分隔、忽略大小写；设置后替换默认值，`off` 关闭评论触发 |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许转发到的内网主机名，逗号分隔，见[外部执行端](external-executors.md) |
 
 ## 服务、卷与隔离

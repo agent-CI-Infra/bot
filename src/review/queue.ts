@@ -14,6 +14,20 @@ export function reviewRequestsCode(issue: any, result: any) {
   return !!result?.requires_code_change && !result.clarification_required && !!result.issue_requests_code
     && !!String(result.implementation_goal || '').trim() && !!quote.trim() && text.includes(quote);
 }
+// Mentions are plain text, independent of GitHub accounts. Escape configured names before matching.
+export function commentReviewKind(store: Store, repositoryId: string, event: string, payload: Json): 'review.issue' | 'review.pr' | null {
+  const issue = payload.issue as any, comment = payload.comment as any, configured = process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot';
+  if (event !== 'issue_comment' || payload.action !== 'created' || (payload.sender as Json | undefined)?.type === 'Bot' || issue?.state !== 'open'
+    || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof comment?.body !== 'string'
+    || !/^[1-9]\d*$/.test(String(comment.id ?? '')) || typeof comment.id === 'number' && !Number.isSafeInteger(comment.id)
+    || configured.trim().toLowerCase() === 'off') return null;
+  const names = configured.split(',').map(name => name.trim()).filter(Boolean);
+  if (!names.some(name => new RegExp(`(^|[^a-z0-9])@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9-])`, 'i').test(comment.body))) return null;
+  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
+  if (!policy?.enabled || !policy.review_enabled) return null;
+  if (issue.pull_request) return policy.review_pull_requests ? 'review.pr' : null;
+  return policy.review_issues ? 'review.issue' : null;
+}
 // A person adding the development label after the review starts the development that review found requested.
 // Labels added before the review finishes are checked when the review is published instead.
 function queueLabeledDevelopment(store: Store, repositoryId: string, policy: any, payload: any, number: number, delivery: string) {
@@ -28,9 +42,13 @@ function queueLabeledDevelopment(store: Store, repositoryId: string, policy: any
 }
 
 export function enqueue(store: Store, repositoryId: string, kind: string, number: number, head: string | null, input: Json,
-  delivery: string | null = null, sourceTask: string | null = null): string | null {
+  delivery: string | null = null, sourceTask: string | null = null, commentId: string | null = null): string | null {
   if (!Number.isSafeInteger(number) || number < 1 || kind.endsWith('.pr') && !/^[a-f0-9]{40}$/.test(head || '')) return null;
-  const key = `${repositoryId}:${kind}:${number}:${kind.endsWith('.pr') ? head : 'opened'}`;
+  if (commentId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[1-9]\d*$/.test(commentId))) return null;
+  if (kind === 'development.issue' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=?
+    AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
+      'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, number)) return null;
+  const key = `${repositoryId}:${kind}:${number}:${commentId !== null ? `comment:${commentId}` : kind.endsWith('.pr') ? head : 'opened'}`;
   const existing = store.get('SELECT id FROM tasks WHERE unique_key=?', key); if (existing) return null;
   const id = randomId(), now = new Date().toISOString();
   store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,head_sha,source_task_id,source_delivery_id,created_at,updated_at)
@@ -39,7 +57,7 @@ export function enqueue(store: Store, repositoryId: string, kind: string, number
     JSON.stringify({type:'queued',repository_id:repositoryId,detail:`排队中，等待仓库 ${repositoryId} 的虚拟电脑空闲…`}),now);
   return id;
 }
-export function queueWebhook(store: Store, repositoryId: string, event: string, payload: Json, delivery: string): number {
+export function queueWebhook(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest?: Json): number {
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   const object = (event === 'issues' ? payload.issue : payload.pull_request) as Json | undefined;
   const number = Number(object?.number || payload.number), action = payload.action;
@@ -48,6 +66,15 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
   }
   if (!policy?.enabled || !policy.review_enabled) return 0;
+  if (event === 'issue_comment') {
+    const kind = commentReviewKind(store, repositoryId, event, payload);
+    if (!kind) return 0;
+    const issue = payload.issue as Json, commentId = String((payload.comment as Json).id), issueNumber = Number(issue.number);
+    if (kind === 'review.issue') return enqueue(store, repositoryId, kind, issueNumber, null, payload, delivery, null, commentId) ? 1 : 0;
+    if (!currentPullRequest || currentPullRequest.number !== issue.number || currentPullRequest.state !== 'open' || currentPullRequest.draft === true) return 0;
+    return enqueue(store, repositoryId, kind, issueNumber, String((currentPullRequest.head as Json | undefined)?.sha || ''),
+      { ...payload, pull_request: currentPullRequest }, delivery, null, commentId) ? 1 : 0;
+  }
   // Each trigger can be turned off per repository; drafts and closed pull requests are never reviewed.
   if (event === 'issues' && action === 'opened' && object && !object.pull_request) return policy.review_issues && enqueue(store, repositoryId, 'review.issue', number, null, payload, delivery) ? 1 : 0;
   if (event === 'issues' && action === 'labeled' && object && !object.pull_request) return queueLabeledDevelopment(store, repositoryId, policy, payload, number, delivery) ? 1 : 0;

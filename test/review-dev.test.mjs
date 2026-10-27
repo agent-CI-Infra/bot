@@ -4,7 +4,8 @@ import { harness,setup,account,repository } from './helpers.mjs';
 import { inlineLocation,validateReview } from '../dist/review/findings.js';
 import { Redactor } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
-import { developmentReady } from '../dist/review/queue.js';
+import { developmentReady, enqueue, queueWebhook } from '../dist/review/queue.js';
+import { emptyRepositoryFixture } from './empty-repository-helpers.mjs';
 import { classificationLabels, repositoryLabels } from '../dist/review/labels.js';
 import { ReadTokens } from '../dist/agent/read-token.js';
 import { GitHub } from '../dist/github/client.js';
@@ -12,6 +13,161 @@ import { Publisher } from '../dist/github/publisher.js';
 import { generateKeyPairSync,createVerify,randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+
+function mentionNames(t,value) {
+  const previous=process.env.BOT_MENTION_NAMES;
+  t.after(()=>{if(previous===undefined)delete process.env.BOT_MENTION_NAMES;else process.env.BOT_MENTION_NAMES=previous;});
+  if(value===undefined)delete process.env.BOT_MENTION_NAMES;else process.env.BOT_MENTION_NAMES=value;
+}
+
+test('Issue comment mentions queue independently of opened events and deduplicate comments and deliveries',async t=>{
+  mentionNames(t,undefined);
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true});
+  const issue={number:1,state:'open',title:'Fix the bug',body:'Fix the bug',labels:[{name:'bot-develop'}],assignees:[]};
+  const opened={repository:{id:101},action:'opened',issue};
+  assert.equal((await h.hook(a.path,a.secret,'opened',opened)).value.tasks_created,1);
+  const comment={id:123,body:'@bot please review this change.',html_url:'https://github.invalid/issue/1#issuecomment-123'};
+  const payload={repository:{id:101},action:'created',sender:{type:'User'},issue,comment};
+  const send=(delivery,value=payload,event='issue_comment')=>h.hook(a.path,a.secret,delivery,value,{'X-GitHub-Event':event});
+  assert.equal((await send('comment')).value.tasks_created,1);
+  const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.issue:1:comment:123'");
+  assert.equal(task.kind,'review.issue');assert.equal(task.head_sha,null);assert.deepEqual(JSON.parse(task.input).comment,comment);
+  const replay=(await send('comment')).value;assert.equal(replay.duplicate,true);assert.equal(replay.tasks_created,0);
+  assert.equal((await send('same-comment-new-delivery')).value.tasks_created,0);
+  assert.equal((await send('another-comment',{...payload,comment:{...comment,id:124,body:'Please, @Agent-CI-Infra-Bot!'}})).value.tasks_created,1);
+  assert.ok(h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:comment:124'"));
+  assert.ok(h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:opened'"));
+  assert.equal((await h.hook(a.path,a.secret,'opened-again',opened)).value.tasks_created,0);
+  for(const [index,body] of ['No mention here','user@bot','1@bot','@bot-extra','@bot2','@botany','@agent-ci-infra-bot-extra'].entries())
+    assert.equal((await send('text-'+index,{...payload,comment:{...comment,id:200+index,body}})).value.tasks_created,0,body);
+  for(const [index,change] of [{sender:{type:'Bot'}},{issue:{...issue,state:'closed'}},{action:'edited'},{action:'deleted'},{action:'reopened'},
+    {comment:{...comment,id:'invalid'}},{comment:{...comment,id:0}},{comment:{...comment,id:Number.MAX_SAFE_INTEGER+1}}].entries())
+    assert.equal((await send('ignored-'+index,{...payload,...change})).value.tasks_created,0);
+  for(const event of ['pull_request_review','pull_request_review_comment'])assert.equal((await send(event,payload,event)).value.tasks_created,0);
+  await admin('/api/repositories/101/policy','PATCH',{review_issues:false});assert.equal((await send('issue-disabled')).value.tasks_created,0);
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
+  // Comment deliveries do not start an external event's 24-hour authorization window.
+  assert.equal(h.store.get('SELECT count(*) n FROM external_events').n,2);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,3);
+});
+
+test('mention configuration can disable comments or replace default names, with literal case-insensitive boundaries',async t=>{
+  mentionNames(t,'off');
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true});
+  let id=300;const send=body=>h.hook(a.path,a.secret,'config-'+(++id),{repository:{id:101},action:'created',sender:{type:'User'},
+    issue:{number:3,state:'open'},comment:{id,body}},{'X-GitHub-Event':'issue_comment'});
+  for(const off of ['off',' OFF ']){process.env.BOT_MENTION_NAMES=off;assert.equal((await send('@bot @agent-ci-infra-bot')).value.tasks_created,0);}
+  process.env.BOT_MENTION_NAMES='  Custom-Reviewer , Robot.v2 , ';
+  for(const body of ['@bot','@agent-ci-infra-bot','@custom-reviewer-extra','mail@custom-reviewer','@robotXv2'])assert.equal((await send(body)).value.tasks_created,0,body);
+  for(const body of ['@CUSTOM-reviewer please','(@Robot.v2)','_@custom-reviewer','-@custom-reviewer'])assert.equal((await send(body)).value.tasks_created,1,body);
+  process.env.BOT_MENTION_NAMES='';assert.equal((await send('@bot')).value.tasks_created,0);
+});
+
+test('PR conversation mentions read the current head with read-only permissions, without looking up users',async t=>{
+  mentionNames(t,undefined);
+  const requests=[],tokens=[];let pull={number:7,state:'open',draft:false,head:{sha:'b'.repeat(40)}},failRead=false;
+  const server=createServer(async(req,res)=>{
+    let raw='';for await(const chunk of req)raw+=chunk;
+    const path=new URL(req.url,'http://fixture').pathname;requests.push(req.method+' '+path);res.setHeader('Content-Type','application/json');
+    if(path.endsWith('/installation'))return res.end(JSON.stringify({id:9,account:{id:10},permissions:{pull_requests:'write',contents:'write',workflows:'write',administration:'write'}}));
+    if(path.endsWith('/access_tokens')){tokens.push(JSON.parse(raw));return res.end(JSON.stringify({token:'comment-read-token'}));}
+    if(path==='/repositories/101')return res.end(JSON.stringify({id:101,owner:{id:10},full_name:'fixture/project-101',default_branch:'main'}));
+    if(path.endsWith('/pulls/7')){res.statusCode=failRead?500:200;return res.end(JSON.stringify(failRead?{message:'Unavailable'}:pull));}
+    res.statusCode=404;res.end('{}');
+  });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const h=await harness(t,undefined,{githubUrl:'http://127.0.0.1:'+server.address().port}),{admin}=await setup(h);
+  const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'});
+  const a=await account(admin,{type:'github_app',app_id:'1',private_key:pem,token:undefined});await repository(admin,a.id,'101');
+  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true});
+  const payload={repository:{id:101},action:'created',sender:{type:'User'},issue:{number:7,state:'open',pull_request:{url:'https://api.github.invalid/repos/fixture/project-101/pulls/7'}},
+    comment:{id:400,body:'@Agent-CI-Infra-Bot please recheck',html_url:'https://github.invalid/issue/7#issuecomment-400'}};
+  const send=(delivery,value=payload)=>h.hook(a.path,a.secret,delivery,value,{'X-GitHub-Event':'issue_comment'});
+  assert.equal((await h.hook(a.path,a.secret,'pr-opened',{repository:{id:101},action:'opened',pull_request:{...pull,head:{sha:'a'.repeat(40)}}},{'X-GitHub-Event':'pull_request'})).value.tasks_created,1);
+  assert.equal((await send('pr-comment')).value.tasks_created,1);
+  const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.pr:7:comment:400'");
+  assert.equal(task.head_sha,pull.head.sha);assert.deepEqual(JSON.parse(task.input).pull_request,pull);assert.deepEqual(JSON.parse(task.input).comment,payload.comment);
+  const count=requests.length;assert.equal((await send('pr-comment')).value.tasks_created,0);assert.equal(requests.length,count);
+  assert.equal((await send('another-pr-comment',{...payload,comment:{...payload.comment,id:'401'}})).value.tasks_created,1);
+  for(const [id,change] of [[402,{draft:true}],[403,{state:'closed'}],[404,{head:{sha:'bad'}}]]){
+    const previous=pull;pull={...pull,...change};assert.equal((await send('skip-'+id,{...payload,comment:{...payload.comment,id}})).value.tasks_created,0);pull=previous;
+  }
+  const before=h.store.get('SELECT count(*) n FROM deliveries').n;failRead=true;
+  assert.equal((await send('retryable-read',{...payload,comment:{...payload.comment,id:405}})).status,503);
+  assert.equal(h.store.get('SELECT count(*) n FROM deliveries').n,before);
+  failRead=false;assert.equal((await send('retryable-read',{...payload,comment:{...payload.comment,id:405}})).value.tasks_created,1);
+  const concurrent=await Promise.all([send('concurrent',{...payload,comment:{...payload.comment,id:406}}),send('concurrent',{...payload,comment:{...payload.comment,id:406}})]);
+  assert.equal(concurrent.reduce((sum,response)=>sum+response.value.tasks_created,0),1);
+  assert.equal(concurrent.filter(response=>response.value.duplicate).length,1);
+  const reads=requests.length;
+  for(const change of [{sender:{type:'Bot'}},{action:'edited'},{comment:{...payload.comment,body:'No mention'}},{issue:{...payload.issue,state:'closed'}}])assert.equal((await send('no-read-'+requests.length+JSON.stringify(change),{...payload,...change})).value.tasks_created,0);
+  await admin('/api/repositories/101/policy','PATCH',{review_pull_requests:false});assert.equal((await send('pr-disabled')).value.tasks_created,0);
+  assert.equal(requests.length,reads);assert.ok(requests.every(request=>!request.includes('/users/')&&!request.endsWith('/user')));
+  assert.ok(tokens.length>0);for(const body of tokens)assert.deepEqual(body,{repository_ids:[101],permissions:{pull_requests:'read'}});
+  assert.doesNotMatch(JSON.stringify(h.store.all('SELECT input FROM tasks')),/comment-read-token|PRIVATE KEY/);
+});
+
+test('comment Issue reviews publish with trigger context before starting authorized development',async t=>{
+  mentionNames(t,undefined);
+  const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[{name:'bot-develop'}],assignees:[]};
+  const review={summary:'A code fix is requested.',findings:[],requires_code_change:true,issue_requests_code:true,clarification_required:false,implementation_goal:'Fix the bug.',request_quote:'Fix the bug.'};
+  const config=[];let failPublication=true;
+  const h=await emptyRepositoryFixture(t,{
+    github:(path,send,res)=>{
+      if(path.endsWith('/issues/1')){send(issue);return true;}
+      if(path.endsWith('/issues/1/events')){send([{event:'labeled',label:{name:'bot-develop'},actor:{type:'User'}}]);return true;}
+      if(path.endsWith('/issues/1/comments')&&res.req.method==='GET'){send(Array.from({length:55},(_,id)=>({id,body:'Later discussion'})));return true;}
+      if(path.endsWith('/issues/1/comments')&&res.req.method==='POST'&&failPublication){send({message:'Permission denied'},403);return true;}
+    },
+    execute:request=>{
+      if(request.type==='workspace_agent_config')config.push(Buffer.from(request.base64,'base64'));
+      if(request.type==='workspace_agent_poll')return {ok:true,result:{state:'completed',result:review}};
+    }
+  });
+  h.setBranch('ready');h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",h.taskId);
+  await h.admin('/api/repositories/101/policy','PATCH',{development_enabled:true});
+  const comment={id:500,body:'@bot review the updated requirements',html_url:'https://github.invalid/issue/1#issuecomment-500'};
+  assert.equal(queueWebhook(h.store,'101','issue_comment',{repository:{id:101},action:'created',sender:{type:'User'},issue,comment},h.store.get('SELECT source_delivery_id FROM tasks WHERE id=?',h.taskId).source_delivery_id),1);
+  const task=h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:comment:500'");
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
+  h.engine.tick();await Promise.all(h.engine.active.values());
+  assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'waiting_permission');
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);assert.equal(h.comments.length,0);
+  const prompt=JSON.parse(JSON.parse(Buffer.concat(config).toString()).prompt);
+  assert.deepEqual(prompt.trigger_comment,comment);assert.equal(prompt.comments.length,50);
+  failPublication=false;assert.equal((await h.admin('/api/tasks/'+task.id+'/retry','POST',{})).status,201);
+  await Promise.all(h.engine.active.values());
+  assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'succeeded');assert.equal(h.comments.length,1);
+  const development=h.store.get("SELECT * FROM tasks WHERE kind='development.issue'");
+  assert.equal(development.source_task_id,task.id);assert.equal(development.status,'queued');assert.equal(development.unique_key,'101:development.issue:1:opened');
+});
+
+test('active Issue development blocks another task and PR comment reviews never start revisions',async t=>{
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true});
+  for(const status of ['queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication','running','preparing','implementing','validating','publishing','result_ready']){
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES(?,'101','development.issue',?,'existing',9)",status,status);
+    assert.equal(enqueue(h.store,'101','development.issue',9,null,{}),null,status);
+    h.store.run('DELETE FROM tasks WHERE id=?',status);
+  }
+  const engine=new TaskEngine(h.store,{}),result={requires_code_change:true,clarification_required:false,findings:[{actionable:true,within_goal:true,requires_human_decision:false}]};
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('source','101','development.issue','succeeded','source',?)",JSON.stringify({review:{implementation_goal:'Fix the bug'}}));
+  let ownershipChecks=0;engine.owned=()=>{ownershipChecks++;return {source_task_id:'source',revisions:0};};
+  const task={id:'review',repository_id:'101',kind:'review.pr',object_number:7,head_sha:'c'.repeat(40),source_delivery_id:null};
+  engine.queueDevelopment({},task,{object:{},comment:{id:501,body:'@bot'}},result,true);
+  assert.equal(ownershipChecks,0);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,0);
+  engine.queueDevelopment({},task,{object:{}},result,true);
+  assert.equal(ownershipChecks,1);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,1);
+});
+
+test('a stale PR comment review cannot become a head-triggered task that starts development',async t=>{
+  const current={number:1,state:'open',draft:false,head:{sha:'d'.repeat(40)}};
+  const h=await emptyRepositoryFixture(t,{github:(path,send)=>{if(path.endsWith('/pulls/1')){send(current);return true;}}});
+  h.store.run("UPDATE tasks SET kind='review.pr',head_sha=?,unique_key='101:review.pr:1:comment:502',input=? WHERE id=?",'c'.repeat(40),JSON.stringify({comment:{id:502,body:'@bot review this PR'}}),h.taskId);
+  const task=await h.run();assert.equal(task.status,'superseded');assert.equal(task.error_code,'pull_request_head_changed');
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,1);assert.equal(h.comments.length,0);
+});
 
 test('review queue is atomic with archive and deduplicates logical events across deliveries',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
