@@ -37,6 +37,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     await guard();
     const state = await workspace.call('pi:poll:' + randomId(), { type: 'workspace_agent_poll', offset });
     for (const event of state.events || []) workspace.log(redactor.clean(event)); offset = state.offset || offset;
+    // A finished agent can leave more than one page of events; retain the tail before exiting.
+    if (state.has_more && ['completed','failed','interrupted'].includes(state.state)) continue;
     if (state.state === 'completed') {
       const result = redactor.clean(state.result);
       if (!development) return validateReview(result);

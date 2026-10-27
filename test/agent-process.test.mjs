@@ -74,6 +74,27 @@ test('a task may make any number of model requests, and a request still visible 
   assert.ok(Date.now()-started<total*500,'polls right after a reply');
 });
 
+test('the control plane drains paged events before returning a completed or failed agent',async t=>{
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:'page-fixture-key',model_name:'fixture'})).value.model;
+  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('pages','101','review.issue','running','pages',1)");
+  const events=Array.from({length:45},(_,index)=>({type:'tool_start',name:'read_file',path:`src/${index}.js`}));
+  const result={summary:'Reviewed.',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
+  for(const state of ['completed','failed']){
+    const logs=[];let polls=0;
+    const workspace={log:event=>logs.push(event),call:async(_key,input)=>{
+      if(input.type!=='workspace_agent_poll')return {};
+      polls++;const offset=input.offset+20;
+      return {state,result,events:events.slice(input.offset,offset),offset:Math.min(offset,events.length),has_more:offset<events.length};
+    }};
+    const running=agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='pages'"),workspace,new Redactor(),async()=>{},{mode:'review'});
+    if(state==='completed')assert.equal((await running).summary,result.summary);
+    else await assert.rejects(running,error=>error.code==='pi_execution_failed');
+    assert.equal(polls,3);assert.deepEqual(logs,events);
+  }
+});
+
 test('a relayed model request carries exactly one output limit, the field the runner chose', async t => {
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const finish={summary:'Done.',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
@@ -258,6 +279,9 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     } else if (r.type === 'workspace_blob') value = { base64: gitBytes('cat-file', 'blob', r.sha).subarray(r.offset, r.offset + 30000).toString('base64') };
     else if (r.type === 'workspace_command') {
       commands.push(r.command);
+      const logs=h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.store.get('SELECT task_id FROM task_locks').task_id).map(row=>JSON.parse(row.content));
+      const starts=logs.filter(log=>log.type==='phase'&&log.phase==='validate');
+      assert.equal(starts.length,commands.length,'each actual policy operation logs its start before execution');assert.equal(starts.at(-1).command,r.command);
       try { value = { exit_code: 0, output: execFileSync('/bin/sh', ['-c', r.command], { cwd: repoDirectory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), timed_out: false, truncated: false }; }
       catch (error) { value = { exit_code: error.status, output: String(error.stdout) + String(error.stderr), timed_out: false, truncated: false }; }
       if (validationResult) value = { ...value, ...validationResult };
@@ -303,6 +327,8 @@ test('create_pull_request with empty policy never reruns agent evidence and retu
   const d = await developmentHarness(t);
   assert.equal(d.task.status, 'pr_opened', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.deepEqual(d.commands, []); assert.equal(d.snapshots, 1);
+  const phases=d.h.store.all('SELECT content FROM task_logs').map(row=>JSON.parse(row.content)).filter(log=>log.type==='phase');
+  assert.deepEqual(phases.map(log=>log.phase),['prepare','model','publish']);assert.equal(phases[1].mode,'development');assert.equal(phases[2].target,'pull_request');
   assert.equal(d.candidate.test_command, 'agent-already-ran-tests');
   assert.deepEqual(d.replies, [{ pr: { number: JSON.parse(d.task.result).pr_number, html_url: JSON.parse(d.task.result).pr_url, sha: d.candidate.remote_sha } }]);
   assert.equal(d.candidate.tree_sha, JSON.parse(d.task.result).tree_sha);

@@ -43,7 +43,7 @@ export async function agentOperation(input,root){
     const pull_request=await readFile(dir+'/pr-request.json','utf8').then(JSON.parse).catch(()=>null);
     const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').filter(Boolean);
     const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-    return {...state,request,token_request,pull_request,events,offset:offset+events.length};
+    return {...state,request,token_request,pull_request,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
   }
   // The answer to the agent's github_read_token request: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){
