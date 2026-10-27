@@ -133,21 +133,22 @@ test('task lists split review and development work, and logs carry their time', 
   assert.deepEqual((await admin('/api/tasks/r1/logs')).value.logs.map(l => l.created_at), ['2026-10-22T12:00:00.000Z']);
 });
 
-test('environment detail shows the project computer, the task holding it and recent commands', async t => {
+test('environment detail shows the project computer, the tasks running on it and recent commands', async t => {
   const computer = { container: 'dbot-x-101-g1', volume: 'dbot-x-101-g1-work', network: 'dbot-x-101-g1-net', memory_mb: 512, cpus: 1, pids: 128 };
   const manager = { call: async (_method, path) => path === '/v1/projects/101' ? { repository_id: '101', generation: 1, state: 'busy', desired: 'ready', revision: 1, computer } : null };
   const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,generation) VALUES('t1','101','review.pr','running','pr',4,1)");
-  h.store.run("INSERT INTO task_locks(repository_id,task_id,token) VALUES('101','t1','claim')");
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,generation) VALUES('t2','101','review.issue','running','issue',5,1)");
+  h.store.run("INSERT INTO task_claims VALUES('t1','101','claim','2026-10-22T12:00:00.000Z'),('t2','101','other','2026-10-22T12:00:03.000Z')");
   h.store.run(`INSERT INTO task_logs(id,task_id,content,created_at) VALUES('c1','t1',?,'2026-10-22T12:00:01.000Z'),('c2','t1',?,'2026-10-22T12:00:02.000Z')`,
     JSON.stringify({ type: 'tool', name: 'run_command', arguments: { command: 'node --test' }, result: { exit_code: 1, output: 'fail' } }), JSON.stringify({ type: 'model', step: 1 }));
   await h.projects.reconcile();
   const detail = (await admin('/api/environments/101')).value;
   assert.deepEqual(detail.environment.computer, computer);
   assert.equal(detail.environment.full_name, 'fixture/project-101');
-  assert.equal(detail.current_task.id, 't1');
+  assert.deepEqual(detail.running_tasks.map(task => [task.id, task.object_number]), [['t1', 4], ['t2', 5]]); assert.equal(detail.task_concurrency, 1);
   assert.deepEqual(detail.commands.map(c => [c.command, c.exit_code, c.object_number]), [['node --test', 1, 4]]);
-  assert.equal((await admin('/api/environments?repository_id=101')).value.environments[0].current_task_id, 't1');
+  assert.deepEqual((await admin('/api/environments?repository_id=101')).value.environments[0].running_tasks.map(task => task.id).sort(), ['t1', 't2']);
 });
 
 test('only super administrators change the computer spec, which is forwarded to the manager without disabling the repository', async t => {
@@ -279,7 +280,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     } else if (r.type === 'workspace_blob') value = { base64: gitBytes('cat-file', 'blob', r.sha).subarray(r.offset, r.offset + 30000).toString('base64') };
     else if (r.type === 'workspace_command') {
       commands.push(r.command);
-      const logs=h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.store.get('SELECT task_id FROM task_locks').task_id).map(row=>JSON.parse(row.content));
+      const logs=h.store.all('SELECT content FROM task_logs WHERE task_id=?',h.store.get('SELECT task_id FROM task_claims').task_id).map(row=>JSON.parse(row.content));
       const starts=logs.filter(log=>log.type==='phase'&&log.phase==='validate');
       assert.equal(starts.length,commands.length,'each actual policy operation logs its start before execution');assert.equal(starts.at(-1).command,r.command);
       try { value = { exit_code: 0, output: execFileSync('/bin/sh', ['-c', r.command], { cwd: repoDirectory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), timed_out: false, truncated: false }; }
@@ -307,7 +308,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: true, test_command: policy });
   const taskId = randomBytes(24).toString('hex'), input = { review: { implementation_goal: 'Fix requested addition' } };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101','development.issue','running','dev',1,'claim',?,?)", taskId, JSON.stringify(input), new Date().toISOString());
-  h.store.run("INSERT INTO task_locks(repository_id,task_id,token) VALUES('101',?,'claim')", taskId);
+  h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", taskId, new Date().toISOString());
   const engine = new TaskEngine(h.store, manager, endpoint + '/github');
   await engine.run(taskId, 'claim');
   const task = h.store.get('SELECT * FROM tasks WHERE id=?', taskId), saved = h.store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId);
@@ -316,7 +317,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     started = false; terminal = undefined; step = 0; ids.length = 0;
     const nextId = randomBytes(24).toString('hex');
     h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101','development.issue','running','dev',1,'claim',?,?)", nextId, JSON.stringify(input), new Date().toISOString());
-    h.store.run("UPDATE task_locks SET task_id=? WHERE repository_id='101'", nextId);
+    h.store.run('DELETE FROM task_claims'); h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", nextId, new Date().toISOString());
     await engine.run(nextId, 'claim');
     return { task: h.store.get('SELECT * FROM tasks WHERE id=?', nextId), candidate: JSON.parse(h.store.get('SELECT data FROM development_candidates WHERE task_id=?', nextId)?.data || 'null') };
   };

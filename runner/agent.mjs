@@ -1,6 +1,6 @@
 import {mkdir,readFile,writeFile,rename,open} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
-import {environment} from './command.mjs';
+import {environment,workspaceTag} from './command.mjs';
 
 // Policy commands run while Pi waits for publication. Reap command leftovers without killing
 // that exact agent; an explicit task release still reaps everything.
@@ -31,7 +31,7 @@ export async function agentOperation(input,root){
     if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}return {started:true};}
     JSON.parse(await readFile(dir+'/input.json','utf8'));
     const out=await open(dir+'/process.log','a',0o600);
-    try{const child=spawn('node',['/opt/runner/pi-entry.mjs',root],{cwd:root+'/repo',env:environment,detached:true,stdio:['ignore',out.fd,out.fd]});
+    try{const child=spawn('node',['/opt/runner/pi-entry.mjs',root],{cwd:root+'/repo',env:{...environment,...workspaceTag(input.workspace_id)},detached:true,stdio:['ignore',out.fd,out.fd]});
       await writeFile(dir+'/state.json',JSON.stringify({state:'running',pid:child.pid,boot}),{mode:0o600});child.unref();}
     finally{await out.close();}return {started:true};
   }

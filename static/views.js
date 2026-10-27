@@ -53,11 +53,12 @@ function keepOpen(container, render) {
 function networkText(pc) { return pc.network_policy === 'internet egress' ? '可访问外网（项目独立网络）' : pc.network_policy === 'internal, no egress' ? '项目内部网络，无外网' : pc.network_policy; }
 function scroller(node) { return getComputedStyle(node).overflowY === 'auto' ? node : node.parentElement; }
 function operationId() { return [...crypto.getRandomValues(new Uint8Array(24))].map(n => n.toString(16).padStart(2, '0')).join(''); }
-function environmentButtons(environment, task, after, report) {
+// busy: tasks are running on the computer, so stopping it asks for confirmation first.
+function environmentButtons(environment, busy, after, report) {
   return [['start', '启动'], ['stop', '停止'], ['reset', '重置']].map(([action, caption]) => {
     const b = button(caption, async () => {
       if (action === 'reset' && !await askConfirm({ title: `重置 ${environment.full_name} 的虚拟电脑？`, body: ['旧工作卷会保留，新环境从空工作卷开始。'], action: '重置', danger: true })) return;
-      if (action === 'stop' && task && !await askConfirm({ title: `停止 ${environment.full_name} 的虚拟电脑？`, body: ['仓库会被停用，正在执行的任务会中止。'], action: '停止', danger: true })) return;
+      if (action === 'stop' && busy && !await askConfirm({ title: `停止 ${environment.full_name} 的虚拟电脑？`, body: ['仓库会被停用，正在执行的任务都会中止。'], action: '停止', danger: true })) return;
       b.disabled = true;
       try { await api(`/api/environments/${environment.repository_id}/${action}`, 'POST', { operation_id: operationId(), generation: environment.generation }); }
       catch (err) { report(err); }
@@ -215,6 +216,8 @@ function step(log) {
   } else if (value.type === 'snapshot') {
     title.textContent = '仓库快照日志';
     add(element('p', `提交 ${value.sha} · 已接收 ${value.files} 个文件，${value.bytes} 字节 · 跳过 ${value.skipped} 项`));
+    if (value.source) add(element('p', value.source === 'git_cache' ? (value.cache === 'hit' ? '文件来自仓库 Git 缓存，这个提交已缓存，没有访问 GitHub。' : '文件来自仓库 Git 缓存，本次从 GitHub 拉取了这个提交。')
+      : value.cache === 'unavailable' ? 'Git 缓存不可用，文件经 GitHub API 逐个读取。' : '文件经 GitHub API 逐个读取。', 'muted'));
     if (value.directory_fallback) add(element('p', '递归树被截断，已改为逐目录列举。', 'muted'));
     if (value.detail) add(element('p', value.detail, 'say'));
   } else if (value.type === 'prepared') {
@@ -284,13 +287,14 @@ function renderTaskSide(detail, environment) {
 function computerCard(task, environment) {
   const section = card('虚拟电脑（项目环境）');
   if (!environment) { section.append(element('p', '无法读取环境状态。', 'muted')); return section; }
-  const env = environment.environment, pc = env.computer || {}, current = environment.current_task;
-  const usage = current?.id === task.id ? '本任务正在使用' : current ? `正在执行 ${kindLabels[current.kind] || current.kind} #${current.object_number}` : '空闲';
+  const env = environment.environment, pc = env.computer || {}, running = environment.running_tasks || [];
+  const others = running.filter(other => other.id !== task.id).length, mine = running.length > others;
+  const usage = mine ? (others ? `本任务正在使用，另有 ${others} 个任务同时执行` : '本任务正在使用') : running.length ? `正在执行 ${running.length} 个任务` : '空闲';
   const head = element('div', '', 'actions'); head.append(state(env.state), element('span', usage, 'muted')); section.append(head);
   section.append(facts([['容器', pc.container], ['代次', task.generation && env.generation && task.generation !== env.generation ? `当前 g${env.generation}，本任务用 g${task.generation}` : env.generation ? 'g' + env.generation : '待创建'],
     ['资源', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程` : null], ['网络', networkText(pc)]]));
   const actions = element('div', '', 'actions');
-  actions.append(button('打开项目机器配置', () => { taskView.close(); openProject(task.repository_id, 'machine'); }), ...environmentButtons(env, current, refreshTask, err => { $('task-error').textContent = err.message; }));
+  actions.append(button('打开项目机器配置', () => { taskView.close(); openProject(task.repository_id, 'machine'); }), ...environmentButtons(env, running.length > 0, refreshTask, err => { $('task-error').textContent = err.message; }));
   section.append(actions); return section;
 }
 function resultCard(task) {

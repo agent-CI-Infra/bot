@@ -10,12 +10,15 @@ export const environment = { LANG:'C.UTF-8', ...projectEnvironment, PATH:`${user
 // Output is mirrored to outputFile while the command runs so the control plane can show it live.
 // timeoutMs null runs the command until it ends (stopping the project computer still ends it); omitted means 10 seconds.
 // secretEnv (the task's read-only GitHub token) is added to the command's environment and masked in everything it prints.
-export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false,secretEnv}={}) {
+// workspaceId marks the command and everything it starts as that task's (BOT_WORKSPACE_ID), so cleanup can end one task's
+// processes while other tasks keep running on the same computer.
+export const workspaceTag = id => /^[a-f0-9]{48}$/.test(id || '') ? { BOT_WORKSPACE_ID: id } : {};
+export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=false,secretEnv,workspaceId}={}) {
   if(typeof value!=='string'||!value||value.length>32768)throw new Error('invalid_command');
   const extra=Object.fromEntries(Object.entries(secretEnv||{}).filter(([key,secret])=>['GH_TOKEN','GITHUB_TOKEN'].includes(key)&&typeof secret==='string'&&secret.length>=8));
   const mask=text=>Object.values(extra).reduce((masked,secret)=>masked.replaceAll(secret,'[REDACTED]'),text);
   return new Promise((resolve,reject)=>{
-    const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:{...environment,...extra},stdio:['ignore','pipe','pipe']});
+    const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:{...environment,...workspaceTag(workspaceId),...extra},stdio:['ignore','pipe','pipe']});
     let output='',timedOut=false,truncated=false,done=false;
     const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
     const timer=timeoutMs===null?null:setTimeout(()=>{timedOut=true;kill();},Math.max(100,Number(timeoutMs)||10000));

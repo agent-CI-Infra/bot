@@ -69,7 +69,7 @@ async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api('/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules, models:models?.models||[] });
+  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules, models:models?.models||[] });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
 function projectStatus() {
@@ -125,7 +125,7 @@ function basicSection() {
 function machineSection() {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
   const status = element('div', '', 'status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
-  if (!pc) return [status, note('暂时读不到虚拟电脑规格，稍后再试。')];
+  if (!pc) return [status, concurrencyForm(), note('暂时读不到虚拟电脑规格，稍后再试。')];
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
   const number = (name, step) => input(name, shown[name], { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '' });
@@ -161,7 +161,16 @@ function machineSection() {
     await api(`/api/environments/${current.id}/configure`, 'POST', { operation_id: operationId(), generation: environment.environment.generation, spec });
     return '已保存，虚拟电脑已按新配置重建';
   }, { editable });
-  return [status, form];
+  return [status, concurrencyForm(), form];
+}
+// How many tasks this computer runs at once: the project's own value, or empty for the global default. Project
+// administrators change it too; it never rebuilds the computer.
+function concurrencyForm() {
+  const own = current.policy.task_concurrency, fallback = current.concurrencyDefault;
+  const value = input('task_concurrency', own ?? '', { type: 'number', min: 1, max: 32, step: 1, placeholder: `留空使用全局默认（${fallback}）` });
+  return settingsForm('同时运行的任务', [field('这台虚拟电脑同时运行的任务数', value),
+    note(`当前生效 ${own ?? fallback} 个${own == null ? '（全局默认）' : ''}。取 1–32，留空跟随全局默认；超出的任务继续排队。每个任务用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限；保存不会重建虚拟电脑。`)],
+  form => { const text = form.elements.task_concurrency.value.trim(); return patchPolicy(changed({ task_concurrency: text === '' ? null : Number(text) }, { task_concurrency: own ?? null })); });
 }
 // Status cards of the machine section, re-rendered by the refresh loop without touching the form.
 function machineStatus() {
@@ -170,7 +179,7 @@ function machineStatus() {
   machine.append(facts([['状态', state(env.state)], ['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
     ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null], ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null],
     ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', env.error]]));
-  lifecycle.append(...environmentButtons(env, environment.current_task, reloadProject, error)); machine.append(lifecycle);
+  lifecycle.append(...environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error)); machine.append(lifecycle);
   return [machine, usageCard(), preparationCard(pc)];
 }
 let usage = null;
@@ -385,8 +394,10 @@ function membersSection() {
 function activitySection() { const box = element('div', '', 'status-grid'); box.id = 'activity-status'; box.append(...activityCards()); return [box]; }
 function activityCards() {
   const environment = current.environment; if (!environment) return [note('暂时读不到运行记录。')];
-  const { current_task: running, tasks, commands } = environment, work = card('正在执行');
-  work.append(running ? button(`${kindLabels[running.kind] || running.kind} #${running.object_number} · ${(states[running.status] || [running.status])[0]}`, () => openTask(running.id), 'quiet linkish') : note('空闲。每个项目同一时间只执行一个任务。'));
+  const { running_tasks: running = [], task_concurrency: limit, tasks, commands } = environment, work = card(`正在执行 ${running.length}／${limit ?? 1}`);
+  const list = element('ul', '', 'history');
+  for (const task of running) { const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status)); list.append(row); }
+  work.append(running.length ? list : note('空闲。'), note(`这台虚拟电脑最多同时执行 ${limit ?? 1} 个任务，其余任务排队。`));
   const recent = card('最近任务'), taskList = element('ul', '', 'history');
   for (const task of tasks) {
     const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status));

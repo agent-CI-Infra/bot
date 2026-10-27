@@ -5,8 +5,8 @@ import { type InstallationSync } from '../app/installations.js';
 import { dropUninstalledIntegrations } from './integrations.js';
 import { type ProjectService } from './service.js';
 
-// The task engine's running work, one promise per repository; a deletion waits for it before removing task rows.
-export interface RunningTasks { readonly active: ReadonlyMap<string, Promise<unknown>> }
+// The task engine's running work on a repository's computer; a deletion waits for it before removing task rows.
+export interface RunningTasks { working(repositoryId: string): Promise<unknown>[] }
 const finished = "('succeeded','pr_opened','completed','cancelled','superseded','failed')";
 
 // Removes everything that belongs only to this repository, children before parents (no foreign key cascades on delete).
@@ -22,7 +22,7 @@ export function deleteProjectRecords(store: Store, id: string): void {
     ['DELETE FROM board_values WHERE repository_id=?', 1], ['DELETE FROM board_objects WHERE repository_id=?', 1],
     ...['task_logs', 'task_tools', 'github_effects', 'development_candidates', 'task_metrics'].map((table): [string, number] => [`DELETE FROM ${table} WHERE task_id IN (${tasks})`, 1]),
     [`DELETE FROM model_requests WHERE repository_id=? OR task_id IN (${tasks})`, 2],
-    ['DELETE FROM task_locks WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1],
+    ['DELETE FROM task_claims WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1],
     ['DELETE FROM tasks WHERE repository_id=?', 1], ['DELETE FROM automation_runs WHERE repository_id=?', 1], ['DELETE FROM deliveries WHERE repository_id=?', 1],
     ['DELETE FROM environment_operations WHERE repository_id=?', 1], ['DELETE FROM project_environments WHERE repository_id=?', 1],
     ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
@@ -76,7 +76,7 @@ export class ProjectRemoval {
       await this.projects?.removeEnvironment(id, this.settleMs);
       if (!await this.settled(id)) fail(409, 'tasks_still_stopping');
       return this.store.transaction(() => {
-        if (this.engine?.active.has(id)) fail(409, 'tasks_still_stopping');
+        if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
         deleteProjectRecords(this.store, id);
         this.store.audit(user.id, 'repository.deleted', id, id);
         return { deleted: true, repository_id: id, registered: true };
@@ -84,9 +84,9 @@ export class ProjectRemoval {
     } finally { this.projects?.endRemoval(id); }
   }
   private async settled(id: string): Promise<boolean> {
-    const work = this.engine?.active.get(id); if (!work) return true;
+    const work = this.engine?.working(id) || []; if (!work.length) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([work.catch(() => {}), new Promise(resolve => { timer = setTimeout(resolve, this.settleMs); })]); clearTimeout(timer);
-    return !this.engine!.active.has(id);
+    await Promise.race([Promise.allSettled(work), new Promise(resolve => { timer = setTimeout(resolve, this.settleMs); })]); clearTimeout(timer);
+    return !this.engine!.working(id).length;
   }
 }

@@ -13,18 +13,30 @@ import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors } from '../rules/service.js';
+import { repositoryConcurrency } from '../app/settings.js';
+import { type GitCache } from './git-cache.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
+// A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run
+// at once, each in its own workspace and under its own claim; the rest stay queued.
 export class TaskEngine {
-  readonly active=new Map<string,Promise<void>>();private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
+  // Running work by task id, and the task ids running on each repository's computer.
+  readonly active=new Map<string,Promise<void>>();private readonly running=new Map<string,Set<string>>();
+  // Repositories whose last running task is clearing the computer; nothing starts there until it is done.
+  private readonly clearing=new Set<string>();
+  // The parallel runner calls last granted by the manager, per repository.
+  private readonly granted=new Map<string,number>();
+  private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
   readonly rules:RuleService;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string){this.rules=new RuleService(store,manager,githubUrl);}
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache){this.rules=new RuleService(store,manager,githubUrl);}
+  // The running tasks of one repository, for callers that must wait until they have stopped.
+  working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
     // A previous process may have stopped between checkpoints; never charge server downtime as task runtime.
     this.store.run('UPDATE task_metrics SET active_since=NULL,complete=0 WHERE active_since IS NOT NULL');
-    this.store.run("UPDATE task_locks SET task_id=NULL,token=NULL");
+    this.store.run('DELETE FROM task_claims');
     this.store.run("UPDATE tasks SET status='queued',claim_token=NULL WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND status IN ('running','preparing','implementing','validating','publishing','result_ready')");
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
     this.timer=setInterval(()=>this.tick(),1000);this.tick();
@@ -35,18 +47,39 @@ export class TaskEngine {
     this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
     const tasks=this.store.all(`SELECT * FROM tasks WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND
       status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY created_at,id`,Date.now());
+    const limits=new Map<string,number>();
     for(const task of tasks){
-      if(this.active.has(task.repository_id))continue;
-      const token=randomId();
+      const repo=String(task.repository_id);
+      if(this.active.has(task.id)||this.clearing.has(repo))continue;
+      if(!limits.has(repo))limits.set(repo,repositoryConcurrency(this.store,repo));
+      const running=this.running.get(repo)||new Set<string>();
+      if(running.size>=limits.get(repo)!)continue;
+      const token=randomId(),now=new Date().toISOString();
       this.store.transaction(()=>{
-        this.store.run('INSERT INTO task_locks(repository_id) VALUES(?) ON CONFLICT DO NOTHING',task.repository_id);
-        this.store.run('UPDATE task_locks SET task_id=?,token=?,fence=fence+1 WHERE repository_id=?',task.id,token,task.repository_id);
-        this.store.run("UPDATE tasks SET claim_token=?,status='running',updated_at=? WHERE id=?",token,new Date().toISOString(),task.id);
+        this.store.run('INSERT INTO task_claims VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET token=excluded.token,claimed_at=excluded.claimed_at',task.id,repo,token,now);
+        this.store.run("UPDATE tasks SET claim_token=?,status='running',updated_at=? WHERE id=?",token,now,task.id);
       });
+      running.add(task.id);this.running.set(repo,running);
       const work=this.run(task.id,token).finally(()=>{
-        this.store.run('UPDATE task_locks SET task_id=NULL,token=NULL WHERE repository_id=? AND token=?',task.repository_id,token);this.active.delete(task.repository_id);
-      });this.active.set(task.repository_id,work);
+        this.store.run('DELETE FROM task_claims WHERE task_id=? AND token=?',task.id,token);
+        this.active.delete(task.id);running.delete(task.id);if(!running.size&&this.running.get(repo)===running)this.running.delete(repo);
+      });this.active.set(task.id,work);
     }
+  }
+  // The manager lets as many runner calls share a computer as tasks may run on it, and never fewer than run there now,
+  // so lowering the setting lets running tasks finish instead of starving them.
+  private async share(repositoryId:string){
+    const tasks=Math.max(repositoryConcurrency(this.store,repositoryId),this.running.get(repositoryId)?.size||1);
+    if(this.granted.get(repositoryId)===tasks)return;
+    await this.manager.call('PUT',`/v1/projects/${repositoryId}/parallel`,{tasks}).then(()=>this.granted.set(repositoryId,tasks),()=>{});
+  }
+  // A task that is not the last one on its computer ends only its own processes; the last one clears the computer and
+  // holds back new work on it until that is done.
+  private async release(workspace:Workspace|undefined,task:Row){
+    if(!workspace)return;
+    const repo=String(task.repository_id),idle=![...this.running.get(repo)||[]].some(other=>other!==task.id);
+    if(idle)this.clearing.add(repo);
+    try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
   async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled(this.active.values());}
   async run(id:string,token:string){
@@ -61,14 +94,15 @@ export class TaskEngine {
       let content=JSON.stringify(clean);
       // Never slice serialized JSON: that used to hide the entire reason in the console.
       if(content.length>70000)content=JSON.stringify({type:clean.type,state:clean.state,code:clean.code,step:clean.step,detail_sha:clean.detail_sha,
-        phase:clean.phase,phase_key:clean.phase_key,sha:clean.sha,files:clean.files,bytes:clean.bytes,skipped:clean.skipped,directory_fallback:clean.directory_fallback,
+        phase:clean.phase,phase_key:clean.phase_key,sha:clean.sha,files:clean.files,bytes:clean.bytes,skipped:clean.skipped,directory_fallback:clean.directory_fallback,source:clean.source,cache:clean.cache,
         detail:clip(clean.detail,6000),output:clip(content,6000),truncated:true});
       if(value.type==='snapshot'&&this.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='snapshot' ORDER BY rowid DESC LIMIT 1",id)?.content===content)return;
       this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,content,new Date().toISOString());
     };
     const guard=async()=>{
-      const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),lock=this.store.get('SELECT * FROM task_locks WHERE repository_id=?',task.repository_id);
-      if(current?.claim_token!==token||lock?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled');
+      // Only this task's own claim counts; other tasks on the same computer hold their own.
+      const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
+      if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled');
       const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled');
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment');if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment');}
@@ -79,7 +113,7 @@ export class TaskEngine {
     };
     let workspace:Workspace|undefined;
     try{
-      await guard();const config=selectedModel(this.store,task.repository_id);redactor.add(config.key);
+      await guard();const config=selectedModel(this.store,task.repository_id);redactor.add(config.key);await this.share(task.repository_id);
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
       const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.'));
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
@@ -122,7 +156,7 @@ export class TaskEngine {
       };
       if(task.phase==='prepare'){
         let environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
-        if(!environment)environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);
+        if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment');
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         const object=await github.object(task.kind,task.object_number);await validate();
@@ -159,18 +193,21 @@ export class TaskEngine {
         // continues the bot's PR reads that PR's base branch, and other Issue tasks read the commit they check out.
         const ruleBranch=task.kind.endsWith('.pr')?github.defaultBranch:input.bot_pr?baseBranch:null;
         const ruleSha=ruleBranch?(await github.ref(ruleBranch))?.object.sha:ref.object.sha;
+        // The repository's mirror is brought up to both commits first; rules and files are then read at those commits.
+        const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[ref.object.sha,ruleSha],
+          refs:[task.kind.endsWith('.pr')?`refs/pull/${task.object_number}/head`:`refs/heads/${input.bot_pr?.head?.ref||baseBranch}`,...(ruleBranch?[`refs/heads/${ruleBranch}`]:[])]}):undefined;
         // Rules are checked before the workspace is written. A bad rule file waits for a person with its own code and
         // nothing is published; the retry after the fix then prepares the new commit without earlier writes in the way.
         let effectiveRules:ReturnType<typeof resolveRules>;
         try{
-          const ruleFiles=await this.rules.fetch(github,ruleSha);
+          const ruleFiles=await this.rules.fetch(github,ruleSha,mirror);
           this.rules.cache(task.repository_id,ruleSha,ruleFiles);
           effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
         }catch(error){
           if(error instanceof HttpError&&ruleErrors.has(error.code))stop(error.code,'waiting_configuration');
           throw error;
         }
-        const snapshot=await workspace.prepare(github,ref.object.sha);
+        const snapshot=await workspace.prepare(github,ref.object.sha,mirror);
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
         if(files.length>=3000)stop('pull_request_file_limit','waiting_environment');
         if(Object.entries(effectiveRules.computer).some(([key,value])=>JSON.stringify(environment.computer?.[key])!==JSON.stringify(value))){
@@ -253,10 +290,10 @@ export class TaskEngine {
         }
         else await publishDevelopment();
       }
-      await workspace.release();log({type:'completed',status:task.status});
+      await this.release(workspace,task);log({type:'completed',status:task.status});
     }catch(error){
       if(!(error instanceof TaskError))log({type:'runtime_fault',message:redactor.text(String((error as Error)?.message||'runtime failure')).slice(0,2000)});
-      await workspace?.release();
+      await this.release(workspace,task);
       const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed');
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
       const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
@@ -321,7 +358,7 @@ export class TaskEngine {
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
     fields(input,[]);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
     if(!task)return fail(404,'task_not_found');
-    if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status)||this.active.has(task.repository_id))fail(409,'task_not_retryable');
+    if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status)||this.active.has(task.id))fail(409,'task_not_retryable');
     this.store.transaction(()=>{
       if(task.phase!=='publish'&&['failed','waiting_environment','needs_replan'].includes(task.status)){
         this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,attempt=attempt+1 WHERE id=?",task.id);

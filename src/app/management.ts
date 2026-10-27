@@ -5,6 +5,7 @@ import { type Actor, repository, scope, superAdmin } from './auth.js';
 import { fail, fields, hashPassword, password, randomId, text, type Json } from '../core/security.js';
 import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
+import { concurrencyValue, defaultConcurrency } from './settings.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 function repoIds(store: Store, value: unknown): string[] {
@@ -189,11 +190,15 @@ export async function management(store: Store, user: Actor, method: string, path
   const repoMatch = /^\/api\/repositories\/([^/]+)(\/policy)?$/.exec(path);
   if (repoMatch) {
     const id = repoMatch[1]!; repository(store, user, id);
-    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)! };
+    // The project's own concurrency is task_concurrency (null follows the default); the default comes with it so a project
+    // administrator sees what an empty field means without reading the global settings.
+    const concurrency = () => ({ task_concurrency_default: defaultConcurrency(store) });
+    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, ...concurrency() };
     if (method === 'PATCH' && repoMatch[2]) {
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
       fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_language']);
+        'review_issues','review_pull_requests','review_pr_updates','review_language','task_concurrency']);
+      const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       if (body.review_language !== undefined && (typeof body.review_language !== 'string' || !['auto', 'zh', 'en'].includes(body.review_language))) fail(400, 'invalid_review_language');
       for (const key of ['review_enabled', 'development_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
@@ -224,7 +229,8 @@ export async function management(store: Store, user: Actor, method: string, path
           keep('review_language', body.review_language), id);
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
-        return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true };
+        if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
+        return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true, ...concurrency() };
       });
     }
   }

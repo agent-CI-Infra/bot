@@ -4,6 +4,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
+import { repositoryConcurrency } from '../app/settings.js';
 
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
@@ -67,6 +68,9 @@ export class ProjectService {
       if (!state && repo.enabled) state = await this.manager.call('PUT', '/v1/projects/' + repo.id);
       if (!state || this.removing.has(repo.id)) return;
       this.save(state);
+      // The manager admits as many runner calls at once as tasks may run, never fewer than hold a claim right now.
+      const parallel = Math.max(repositoryConcurrency(this.store, repo.id), Number(this.store.get('SELECT count(*) AS n FROM task_claims WHERE repository_id=?', repo.id)!.n));
+      if (Number.isSafeInteger(state.parallel) && state.parallel !== parallel) await this.manager.call('PUT', `/v1/projects/${repo.id}/parallel`, { tasks: parallel }).catch(() => {});
       const action = !repo.enabled && !['stopped','deleted'].includes(state.desired) ? 'stop'
         : repo.enabled && ['stopped','deleted'].includes(state.state) ? 'start' : null;
       if (action) {
@@ -114,7 +118,7 @@ export class ProjectService {
       throw error;
     }
   }
-  // One project computer: its fixed spec from manager, the task holding it, and what recently ran inside.
+  // One project computer: its fixed spec from manager, the tasks running on it, and what recently ran inside.
   async detail(id: string): Promise<Json> {
     const saved = this.store.get(`SELECT r.full_name,p.enabled,e.* FROM repositories r JOIN policies p ON p.repository_id=r.id
       LEFT JOIN project_environments e ON e.repository_id=r.id WHERE r.id=?`, id)!;
@@ -133,8 +137,9 @@ export class ProjectService {
     }
     return { environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer: live?.computer || null,
         operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
-      current_task: this.store.get('SELECT t.id,t.kind,t.status,t.phase,t.object_number FROM task_locks l JOIN tasks t ON t.id=l.task_id WHERE l.repository_id=?', id) || null,
-      tasks:withTaskMetrics(this.store,tasks), commands };
+      running_tasks: this.store.all(`SELECT t.id,t.kind,t.status,t.phase,t.object_number,c.claimed_at FROM task_claims c JOIN tasks t ON t.id=c.task_id
+        WHERE c.repository_id=? ORDER BY c.claimed_at,t.id`, id),
+      task_concurrency: repositoryConcurrency(this.store, id), tasks:withTaskMetrics(this.store,tasks), commands };
   }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/environments')) return undefined;
@@ -146,10 +151,10 @@ export class ProjectService {
       return { environments: this.store.all(`SELECT r.id AS repository_id,r.full_name,r.account_id,r.owner_id,p.enabled,
         e.generation,COALESCE(e.state,CASE WHEN p.enabled=1 THEN 'provisioning' ELSE 'stopped' END) AS state,e.desired,e.error,e.started_at,
         EXISTS(SELECT 1 FROM environment_operations o WHERE o.repository_id=r.id AND o.state='pending') AS operation_pending,
-        t.id AS current_task_id,t.kind AS current_task_kind,t.object_number AS current_task_number
+        (SELECT json_group_array(json_object('id',t.id,'kind',t.kind,'status',t.status,'object_number',t.object_number)) FROM task_claims c
+          JOIN tasks t ON t.id=c.task_id WHERE c.repository_id=r.id) AS running_tasks
         FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id
-        LEFT JOIN task_locks l ON l.repository_id=r.id LEFT JOIN tasks t ON t.id=l.task_id
-        WHERE ${clauses.join(' AND ')} ORDER BY r.full_name`, ...args) };
+        WHERE ${clauses.join(' AND ')} ORDER BY r.full_name`, ...args).map(row => ({ ...row, running_tasks: JSON.parse(row.running_tasks) })) };
     }
     const match = /^\/api\/environments\/([^/]+)(?:\/(start|stop|reset|delete|configure|stats))?$/.exec(url.pathname);
     if (!match) return fail(404, 'not_found');

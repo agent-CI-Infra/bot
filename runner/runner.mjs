@@ -1,9 +1,10 @@
-import { mkdir, readFile, writeFile, realpath, readdir, rename, open, unlink } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, realpath, readdir, rename, open, unlink, readlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import { workspace as workspaceTool } from './workspace.mjs';
 import { command } from './command.mjs';
 import { execFile } from 'node:child_process';
+import { ownership, isRunner, tasksRoot } from './ownership.mjs';
 
 const workspace = '/workspace', journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -69,19 +70,23 @@ function usage() {
   return new Promise(resolve => execFile('du', ['-sxb', workspace], { timeout: 20000, maxBuffer: 65536 }, (error, stdout) =>
     resolve({ workspace_bytes: Number(String(stdout).split('\t')[0]) || null, complete: !error })));
 }
-// Ends every project process except init, the idle keeper and this runner. The container itself keeps running.
-async function reap(workspaceId) {
-  const keep = new Set([1, process.pid]);
+// Without a workspace: ends every project process except init, the idle keeper and this runner; the container keeps
+// running. With one: ends only the processes of that task workspace, so other tasks on the computer keep running;
+// runner requests are left to finish, and keep_agent spares the task's agent while it waits for a policy command.
+async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
+  const keep = new Set([1, process.pid]), scoped = idPattern.test(workspaceId || '');
   // The idle keeper is the first child of the container init; later processes cannot take a lower PID.
   const idle = (await processes()).filter(p => p.ppid === 1 && p.cmdline === 'node /opt/runner/idle.mjs').sort((a, b) => a.pid - b.pid)[0];
   if (idle) keep.add(idle.pid);
-  if(idPattern.test(workspaceId||'')){
-    const {waitingAgent}=await import('./agent.mjs'),pid=await waitingAgent(`/workspace/tasks/${workspaceId}`,await processes());
+  if (scoped && keepAgent) {
+    const {waitingAgent}=await import('./agent.mjs'),pid=await waitingAgent(`${tasksRoot}${workspaceId}`,await processes());
     if(pid)keep.add(pid);
   }
   let killed = 0;
   for (let round = 0; round < 20; round++) {
-    const live = (await processes()).filter(p => !keep.has(p.pid) && p.state !== 'Z');
+    const rows = await processes(), owner = scoped ? await ownership(rows, { environ: pid => readFile(`/proc/${pid}/environ`, 'utf8').catch(() => ''),
+      cwd: pid => readlink(`/proc/${pid}/cwd`).catch(() => '') }) : null;
+    const live = rows.filter(p => !keep.has(p.pid) && p.state !== 'Z' && (!owner || !isRunner(p) && owner(p.pid) === workspaceId));
     if (!live.length) return { killed, remaining: 0 };
     for (const p of live) try { process.kill(p.pid, 'SIGKILL'); killed++; } catch { /* Already gone. */ }
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -94,7 +99,7 @@ if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operat
 let result;
 if (['tail', 'reap', 'usage'].includes(request.type)) {
   // Reading progress or usage and stopping leftovers are repeatable and never journaled.
-  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : await reap(request.workspace_id) }; } catch { result = { ok: false, error: request.type + '_failed' }; }
+  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : await reap(request) }; } catch { result = { ok: false, error: request.type + '_failed' }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };

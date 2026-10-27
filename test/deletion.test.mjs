@@ -66,7 +66,7 @@ function tablesWith(store, column) {
 }
 
 test('a project whose repository GitHub answers 404 for is deleted with its records; its computer goes, its volumes and audit stay', async t => {
-  const github = await fakeGitHub(t), env = managerFixture(t), engine = { active: new Map(), api: async () => undefined };
+  const github = await fakeGitHub(t), env = managerFixture(t), running = new Map(), engine = { working: id => running.has(id) ? [running.get(id)] : [], api: async () => undefined };
   let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine }));
   const { admin } = await setup(h), a = await account(admin), now = new Date().toISOString();
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
@@ -93,7 +93,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   h.store.run("INSERT INTO github_effects VALUES('effect-101','done-101','comment','{}','sent',NULL,'marker')");
   h.store.run("INSERT INTO development_candidates VALUES('done-101','{}')");
   h.store.run("INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at) VALUES('usage-101','done-101','101','request',?,'own',?)", own.id, now);
-  h.store.run("INSERT INTO task_locks(repository_id,task_id,token) VALUES('101','running-101','claim')");
+  h.store.run("INSERT INTO task_claims VALUES('running-101','101','claim',?)", now);
   h.store.run("INSERT INTO bot_branches VALUES('101','bot/issue-5','done-101')");
   h.store.run("INSERT INTO bot_pull_requests(repository_id,number,pr_id,author_id,head_repository_id,branch,sha,source_task_id) VALUES('101',6,'pr','1','101','bot/issue-5','abc','done-101')");
   h.store.run("INSERT INTO automation_runs VALUES('automation-101','101',NULL,'issues','issues.opened',1,'[]','[]',?)", now);
@@ -109,9 +109,9 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   assert.ok(h.store.get("SELECT 1 FROM external_events WHERE repository_id='101'"));
   // The running task stops at its next checkpoint once it is cancelled, as the engine's guard does.
   let stoppedAs = null;
-  engine.active.set('101', new Promise(resolve => { const timer = setInterval(() => {
+  running.set('101', new Promise(resolve => { const timer = setInterval(() => {
     const status = h.store.get("SELECT status FROM tasks WHERE id='running-101'")?.status;
-    if (status === 'cancelled') { stoppedAs = status; clearInterval(timer); engine.active.delete('101'); resolve(); }
+    if (status === 'cancelled') { stoppedAs = status; clearInterval(timer); running.delete('101'); resolve(); }
   }, 5); }));
 
   assert.equal((await remove(admin, '101', {})).status, 400);

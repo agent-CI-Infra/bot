@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { resolve,dirname,sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { command,environment } from './command.mjs';
+import { command,environment,workspaceTag } from './command.mjs';
 import {agentOperation} from './agent.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
@@ -21,7 +21,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks'){
   // The model's shell command timeout is still controlled by command().
   const git=(args,data,output)=>new Promise((res,rej)=>{
     const chunks=[],child=spawn('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgsign=false',...args],
-      {cwd:repo,env:{...environment,GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},stdio:['pipe',output?.fd??'pipe','ignore']});
+      {cwd:repo,env:{...environment,...workspaceTag(input.workspace_id),GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},stdio:['pipe',output?.fd??'pipe','ignore']});
     child.stdout?.on('data',chunk=>chunks.push(chunk));
     child.on('error',()=>rej(new Error(`git ${args[0]} could not start`)));
     child.on('close',(code,signal)=>code===0?res(Buffer.concat(chunks)):rej(new Error(`git ${args[0]} failed: ${signal||code}`)));
@@ -67,7 +67,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks'){
     try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
   }
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
-  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env});
+  if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id});
   if(input.type==='workspace_finalize'){
     await git(['add','--all']);const tree=(await git(['write-tree'])).toString().trim();
     const raw=(await git(['ls-tree','-r','-l','-z',tree])).toString();const files=[];

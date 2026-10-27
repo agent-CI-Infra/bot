@@ -5,6 +5,7 @@ import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, superAdmin } from '../app/auth.js';
 import { fail, fields, type Json } from '../core/security.js';
 import { GitHub, repositoryTree } from '../github/client.js';
+import { type Mirror } from '../agent/git-cache.js';
 import { Redactor } from '../agent/common.js';
 import type { Manager } from '../projects/service.js';
 
@@ -100,14 +101,16 @@ export class RuleService {
   consoleComputer(id:string,live:any){const row=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',id);return row?JSON.parse(row.spec):live||{};}
   rememberComputer(id:string,live:any){this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(resolveRules({}, {}, live).computer));}
   cache(id: string, sha: string, files: Record<string, string>) { this.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,files=excluded.files,updated_at=excluded.updated_at', id, sha, JSON.stringify(files), new Date().toISOString()); }
-  async fetch(github: GitHub, sha: string) {
-    const commit = await github.request('GET', github.path('/git/commits/' + sha)), tree = await repositoryTree(github,commit.tree.sha);
+  // A mirror that holds the commit supplies the listing and contents; the files and their checks are the same either way.
+  async fetch(github: GitHub, sha: string, mirror?: Mirror) {
+    const cached = !!mirror?.has(sha);
+    const tree = cached ? await mirror!.listing(sha) : await repositoryTree(github, (await github.request('GET', github.path('/git/commits/' + sha))).tree.sha);
     const entries = tree.tree.filter((f: any) => rulePath(f.path));
     if (entries.length > 38) fail(400, 'too_many_bot_skills'); const files: Record<string, string> = {};
     for (const file of entries) {
       if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode)) fail(400, 'invalid_bot_rule_file');
       if (file.size > maxRuleBytes) fail(400, 'bot_rule_too_large');
-      const blob = await github.request('GET', github.path('/git/blobs/' + file.sha)), data = Buffer.from(blob.content, 'base64');
+      const data = (cached ? await mirror!.blob(file.sha) : null) ?? Buffer.from((await github.request('GET', github.path('/git/blobs/' + file.sha))).content, 'base64');
       if (data.includes(0)) fail(400, 'invalid_rule_content');
       const content = data.toString('utf8'); if (Buffer.byteLength(content) > maxRuleBytes) fail(400, 'bot_rule_too_large'); files[file.path] = content;
     }

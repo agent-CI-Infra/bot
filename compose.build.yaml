@@ -8,6 +8,9 @@ services:
   bot:
     image: department-bot-control-plane:local
     build: .
+    environment:
+      # Built from this checkout, not a published tag: the settings page reports a source build.
+      BOT_IMAGE_TAG: ""
   webhook:
     image: department-bot-control-plane:local
     build: .

@@ -30,12 +30,22 @@ export function validateSpec(input) {
 }
 const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
+export const parallelBounds = [1, 32];
+const runnerTypes = ['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_token','workspace_agent_pull_request','workspace_agent_live','reap'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id','idle'];
+// A runner request is checked before it can touch the computer, so a malformed one never interrupts other tasks.
+function validateCall(call) {
+  if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
+  if (call.workspace_id !== undefined && !/^[a-f0-9]{48}$/.test(call.workspace_id) || call.idle !== undefined && call.idle !== true) throw new ManagerError('invalid_runner_request', 400);
+  if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
+}
 export class Projects {
   constructor({ database, docker, deployment, image, egress = true }) {
-    // background: repository -> task workspace whose kept processes may outlive a command. executing: repositories running a runner request.
-    this.egress = egress; this.background = new Map(); this.executing = new Set(); this.usage = new Map();
+    // background: repository -> task workspaces whose kept processes may outlive a command.
+    // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
+    this.egress = egress; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set();
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image; this.queues = new Map();
+    this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS projects(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,state TEXT NOT NULL,desired TEXT NOT NULL,error TEXT,started_at TEXT);
       CREATE TABLE IF NOT EXISTS resources(repository_id TEXT NOT NULL,generation INTEGER NOT NULL,image TEXT NOT NULL,PRIMARY KEY(repository_id,generation));
@@ -44,6 +54,8 @@ export class Projects {
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'revision')) this.db.exec('ALTER TABLE projects ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     // spec: the requested computer; build: the image built for its packages; setup: the last setup script run.
     for (const column of ['spec', 'build', 'setup']) if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === column)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${column} TEXT`);
+    // parallel: how many runner calls may share the computer, one per task the control plane may run there at once.
+    if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'parallel')) this.db.exec('ALTER TABLE projects ADD COLUMN parallel INTEGER NOT NULL DEFAULT 1');
   }
   get(repo) { return this.db.prepare('SELECT * FROM projects WHERE repository_id=?').get(repo); }
   list() { return this.db.prepare('SELECT * FROM projects ORDER BY repository_id').all(); }
@@ -59,10 +71,38 @@ export class Projects {
       root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true,
       ...spec, build: build ? JSON.parse(build) : null, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds } };
   }
-  lock(repo, fn) {
-    const previous = this.queues.get(repo) || Promise.resolve();
-    const next = previous.catch(() => {}).then(fn); this.queues.set(repo, next);
-    return next.finally(() => { if (this.queues.get(repo) === next) this.queues.delete(repo); });
+  // Up to `parallel` runner calls (shared) use a computer at once; lifecycle actions (exclusive) run alone. Waiters are
+  // admitted in arrival order, so a stop, reset or configure is not starved by a stream of runner calls.
+  admit(repo) {
+    const gate = this.gates.get(repo); if (!gate) return;
+    const limit = this.get(repo)?.parallel || 1;
+    while (gate.waiting.length && !gate.exclusive) {
+      const next = gate.waiting[0];
+      if (next.shared ? gate.shared >= limit : gate.shared > 0) break;
+      gate.waiting.shift(); if (next.shared) gate.shared++; else gate.exclusive = true; next.resolve();
+    }
+    if (!gate.shared && !gate.exclusive && !gate.waiting.length) this.gates.delete(repo);
+  }
+  lock(repo, fn, shared = false) {
+    let gate = this.gates.get(repo); if (!gate) { gate = { shared: 0, exclusive: false, waiting: [] }; this.gates.set(repo, gate); }
+    // The computer is busy while runner calls hold slots; the last one to leave marks it ready again.
+    const held = gate, run = new Promise(resolve => { held.waiting.push({ shared, resolve }); this.admit(repo); }).then(fn)
+      .finally(() => {
+        if (shared && !--held.shared) { const project = this.get(repo); if (project?.state === 'busy') this.update(repo, 'ready', 'ready', null, project.started_at); }
+        if (!shared) held.exclusive = false; this.admit(repo);
+      });
+    const settled = run.catch(() => {}); this.pending.add(settled); settled.then(() => this.pending.delete(settled));
+    return run;
+  }
+  running(repo) { return this.gates.get(repo)?.shared || 0; }
+  kept(repo) { let set = this.background.get(repo); if (!set) { set = new Set(); this.background.set(repo, set); } return set; }
+  // Sets how many runner calls may share the computer; raising it admits waiting calls at once.
+  parallelism(repo, tasks) {
+    this.validate(repo);
+    if (!Number.isSafeInteger(tasks) || tasks < parallelBounds[0] || tasks > parallelBounds[1]) throw new ManagerError('invalid_parallel', 400);
+    if (!this.get(repo)) throw new ManagerError('project_not_registered', 404);
+    this.db.prepare('UPDATE projects SET parallel=? WHERE repository_id=?').run(tasks, repo); this.admit(repo);
+    return this.describe(repo);
   }
   validate(repo) { if (!/^[1-9]\d{0,19}$/.test(repo)) throw new ManagerError('invalid_repository', 400); }
   names(repo, generation) {
@@ -196,9 +236,11 @@ export class Projects {
       catch (error) { this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'provision_failed'); throw error; }
     });
   }
-  // Stops leftover processes without restarting the container; falls back to a restart if any survive.
-  async reap(repo, generation, workspaceId) {
-    const result = await this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'reap', ...(workspaceId?{workspace_id:workspaceId}:{}) }).catch(() => null);
+  // Stops leftover processes without restarting the container; falls back to a restart if any survive. With a workspace,
+  // only that task's processes end (its waiting agent survives with keep_agent), so other tasks on the computer keep
+  // running; without one, everything ends except init, the idle keeper and the runner itself.
+  async reap(repo, generation, scope = {}) {
+    const result = await this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'reap', ...scope }).catch(() => null);
     if (result?.ok) return result.result;
     await this.stopGeneration(repo, generation); await this.provision(repo); return { restarted: true };
   }
@@ -216,10 +258,11 @@ export class Projects {
   async operate(repo, action, input) {
     this.validate(repo);
     if (!['start', 'stop', 'reset', 'delete', 'execute', 'configure'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
-    // An invalid spec is rejected before it is recorded, so it never touches the running computer.
+    // An invalid spec or runner request is rejected before it is recorded, so it never touches the running computer.
     if (action === 'configure') validateSpec(input.request);
-    // A long command holds the project lock; a new stop, reset or delete interrupts it by stopping the container.
-    if (['stop', 'reset', 'delete'].includes(action) && this.executing.has(repo) && !this.db.prepare('SELECT 1 FROM operations WHERE id=?').get(input.operation_id)
+    if (action === 'execute') validateCall(input.request);
+    // Running commands hold their slots; a new stop, reset or delete interrupts all of them by stopping the container.
+    if (['stop', 'reset', 'delete'].includes(action) && this.running(repo) && !this.db.prepare('SELECT 1 FROM operations WHERE id=?').get(input.operation_id)
       && this.get(repo)?.generation === input.generation) await this.stopGeneration(repo, input.generation).catch(() => {});
     return this.lock(repo, async () => {
       const encoded = JSON.stringify(input), old = this.db.prepare('SELECT * FROM operations WHERE id=?').get(input.operation_id);
@@ -231,7 +274,8 @@ export class Projects {
       const project = this.get(repo);
       if (!project) throw new ManagerError('project_not_registered', 404);
       if (project.generation !== input.generation) throw new ManagerError('stale_generation');
-      if (action === 'execute' && project.state !== 'ready') throw new ManagerError('environment_not_ready');
+      // Other tasks' calls keep the computer busy; that alone never refuses a call.
+      if (action === 'execute' && !['ready', 'busy'].includes(project.state)) throw new ManagerError('environment_not_ready');
       if (action === 'start' && project.state === 'reset_failed') throw new ManagerError('reset_required');
       this.db.prepare("INSERT INTO operations VALUES(?,?,?,?,?,'running',NULL)").run(input.operation_id, repo, action, input.generation, encoded);
       try {
@@ -248,33 +292,29 @@ export class Projects {
           }
           result = this.describe(repo);
         } else if (action === 'execute') {
-          this.update(repo, 'busy', 'ready', null, project.started_at);
+          if (project.state === 'ready') this.update(repo, 'busy', 'ready', null, project.started_at);
           const container = await this.inspect(repo, project.generation, 'container');
           if (!container?.State.Running || container.State.StartedAt !== project.started_at) throw new ManagerError('recovery_required');
-          const call = input.request;
-          const types=['command','read','write','workspace_init','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_token','workspace_agent_pull_request','workspace_agent_live','reap'];
-          const keys=['type','command','path','content','timeout_ms','keep_background','workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id'];
-          if (!call || !types.includes(call.type) || Object.keys(call).some(k => !keys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
-          // Kept background processes belong to one task workspace; any other work stops them first.
-          const owner = this.background.get(repo);
-          if (owner && owner !== call.workspace_id) { this.background.delete(repo); await this.reap(repo, project.generation); }
-          if (call.type === 'reap') { this.background.delete(repo); result = { ok: true, result: await this.reap(repo, project.generation) }; }
-          else {
+          const call = input.request, kept = this.kept(repo);
+          if (call.type === 'reap') {
+            // A task's release ends its own processes, kept background work included. The last task on the computer (idle)
+            // clears every leftover process, so the next task starts on a clean computer.
+            if (call.idle === true || !call.workspace_id) { kept.clear(); result = { ok: true, result: await this.reap(repo, project.generation) }; }
+            else { kept.delete(call.workspace_id); result = { ok: true, result: await this.reap(repo, project.generation, { workspace_id: call.workspace_id }) }; }
+          } else {
             // Commands run until they end unless the caller sets its own timeout_ms; stop, reset or delete interrupts them.
-            if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
             const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
             const request = command ? { ...call, timeout_ms: limit } : call,
               timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_snapshot','workspace_finalize','workspace_blob'].includes(call.type) ? 0 : 90000;
-            this.executing.add(repo);
-            try { result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout); }
-            finally { this.executing.delete(repo); }
+            result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout);
             if (commandTypes.includes(call.type)) {
-              if (call.type === 'workspace_command' && call.keep_background === true && result.ok) this.background.set(repo, call.workspace_id);
-              // Processes that escaped the command's process group end here unless this task keeps background work.
-              else if (!call.workspace_id || this.background.get(repo) !== call.workspace_id) await this.reap(repo, project.generation, call.workspace_id);
+              if (call.type === 'workspace_command' && call.keep_background === true && result.ok) kept.add(call.workspace_id);
+              // Processes that escaped a task command's process group end here, unless the task keeps background work; the
+              // task's waiting agent and every other task's processes stay. A plain command clears the computer as before.
+              else if (!call.workspace_id) await this.reap(repo, project.generation);
+              else if (!kept.has(call.workspace_id)) await this.reap(repo, project.generation, { workspace_id: call.workspace_id, keep_agent: true });
             }
           }
-          this.update(repo, 'ready', 'ready', null, this.get(repo).started_at);
         } else {
           this.update(repo, action === 'reset' ? 'resetting' : 'recovering', action === 'stop' ? 'stopped' : action === 'delete' ? 'deleted' : 'ready');
           await this.stopAll(repo);
@@ -294,13 +334,23 @@ export class Projects {
         this.db.prepare("UPDATE operations SET state='completed',result=? WHERE id=?").run(JSON.stringify(result), input.operation_id); return result;
       } catch (error) {
         if (error?.untouched) { this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id); throw error; }
+        // A task's failed runner call ends that task's processes; when that works, the computer and the other tasks on it
+        // keep running. Otherwise, as for any uncertain exec result, the whole environment stops before the slot is released.
+        const workspace = action === 'execute' ? input.request.workspace_id : undefined, current = this.get(repo);
+        if (workspace && error?.message !== 'recovery_required' && current?.generation === input.generation && ['ready', 'busy'].includes(current.state)) {
+          const reaped = await this.docker.runner(this.names(repo, input.generation).container, { operation_id: randomId(), type: 'reap', workspace_id: workspace }).catch(() => null);
+          if (reaped?.ok) {
+            this.kept(repo).delete(workspace); this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
+            throw error;
+          }
+        }
         // On an uncertain exec result, kill the entire environment before releasing its lock.
         try { await this.stopAll(repo); } catch {}
         this.update(repo, action === 'reset' ? 'reset_failed' : 'failed', 'stopped', error instanceof ManagerError ? error.message : 'operation_failed');
         this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
         throw error;
       }
-    });
+    }, action === 'execute');
   }
   async recover() {
     for (const row of this.list()) await this.lock(row.repository_id, async () => {
@@ -315,8 +365,9 @@ export class Projects {
       } catch { this.update(row.repository_id, row.state === 'resetting' ? 'reset_failed' : 'failed', 'stopped', 'recovery_failed'); }
     });
   }
+  // Liveness check of idle computers only: one with runner calls in flight is skipped rather than queued behind them.
   async check() {
-    await Promise.all(this.list().filter(p => p.state === 'ready').map(row => this.lock(row.repository_id, async () => {
+    await Promise.all(this.list().filter(p => p.state === 'ready' && !this.gates.has(p.repository_id)).map(row => this.lock(row.repository_id, async () => {
       const current = this.get(row.repository_id); if (current.state !== 'ready') return;
       try {
         const container = await this.inspect(row.repository_id, current.generation, 'container');
@@ -326,5 +377,5 @@ export class Projects {
       } catch { this.update(row.repository_id, 'failed', 'stopped', 'recovery_failed'); }
     })));
   }
-  async shutdown() { await Promise.all([...this.queues.values()].map(p => p.catch(() => {}))); for (const row of this.list()) await this.stopAll(row.repository_id); this.db.close(); }
+  async shutdown() { await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id); this.db.close(); }
 }

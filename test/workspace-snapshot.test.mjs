@@ -49,7 +49,7 @@ test('prepare accepts 2001 files and logs the commit, file count and bytes',asyn
   const data=Buffer.from('small\n'),files=Array.from({length:2001},(_,i)=>entry(`files/${i}.txt`,data));
   const f=fixture(files,new Map([[blobSha(data),data]])),snapshot=await f.prepare();
   assert.equal(snapshot.files.length,2001);assert.equal(snapshot.tree_sha,treeHash(files));
-  assert.deepEqual(f.logs.filter(log=>log.type==='snapshot'),[{type:'snapshot',sha:commit,files:2001,bytes:2001*data.length,skipped:0,directory_fallback:false,detail:''}]);
+  assert.deepEqual(f.logs.filter(log=>log.type==='snapshot'),[{type:'snapshot',sha:commit,files:2001,bytes:2001*data.length,skipped:0,directory_fallback:false,source:'github_api',detail:''}]);
   assert.equal(f.logs.filter(log=>log.type==='snapshot_progress').length,20);
 });
 
