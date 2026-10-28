@@ -1,20 +1,9 @@
 import { createSign } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
-import { Redactor, safePath, stop, TaskError } from '../agent/common.js';
+import { errorBody, networkReason, Redactor, safePath, stop } from '../agent/common.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
 const treeCache=new WeakMap<object,Map<string,Promise<SnapshotTree>>>();
-// Error responses are untrusted: keep only a short message, never headers or the whole payload.
-async function githubError(response:Response):Promise<any>{
-  const reader=response.body?.getReader();if(!reader)return null;
-  const chunks:Uint8Array[]=[];let length=0;
-  try{
-    while(length<16384){const {done,value}=await reader.read();if(done)break;chunks.push(value.subarray(0,16384-length));length+=value.length;}
-  }catch{/* Preserve the HTTP failure when the error body cannot be read. */}
-  finally{await reader.cancel().catch(()=>{});}
-  const text=Buffer.concat(chunks).toString('utf8');
-  try{return JSON.parse(text);}catch{return response.headers.get('content-type')?.startsWith('text/plain')?{message:text.split(/[\r\n]/)[0]}:null;}
-}
 function errorDetail(message:unknown,redactor:Redactor,token:string,status:number):string{
   let detail=typeof message==='string'?message:`GitHub HTTP ${status}`;
   if(token)detail=detail.replaceAll(token,'[REDACTED]');
@@ -93,10 +82,11 @@ export class GitHub {
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
-    catch { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait', this.redactor.text(`GitHub 请求 ${method} ${path} 连接失败或超时${method==='GET'?'，等待重试':'，写入结果尚未确认'}。`)); }
+    catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
+      this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
-      const error=await githubError(response),detail=errorDetail(error?.message,this.redactor,token,response.status);
+      const error=await errorBody(response),detail=errorDetail(error?.message,this.redactor,token,response.status);
       // Ref reads report an empty repository as 409; writes and other conflicts must still fail.
       if(response.status===409&&allowEmptyRepository&&['Git Repository is empty.','Git Repository is empty'].includes(error?.message))return null;
       if(snapshotBlob&&[403,413,422].includes(response.status)){

@@ -16,7 +16,7 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .step-waiting::before{background:#b37b1a}
 .task-side .facts dd{white-space:pre-wrap;overflow-wrap:anywhere}
 .step-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.step-head strong{font-size:13px}
-.step-meta{display:flex;align-items:center;gap:6px;color:#637c89;font-size:12px}.step p{margin:5px 0 0;font-size:13px;overflow-wrap:anywhere}.say{white-space:pre-wrap}
+.step-meta{display:flex;align-items:center;gap:6px;color:#637c89;font-size:12px}.step p{margin:5px 0 0;font-size:13px;overflow-wrap:anywhere}.say{white-space:pre-wrap}.fault-action{color:#24414f}
 pre.command{margin:7px 0 0;padding:7px 10px;border-radius:5px;background:#13394b;color:#e8f3f6;max-height:none}
 pre.output{margin:6px 0 0;padding:7px 10px;border-radius:5px;background:#f5f8fa;border:1px solid #e3eaf0;max-height:340px}
 .fold{margin-top:6px;font-size:12px;color:#536c78}.fold summary{cursor:pointer;width:fit-content}
