@@ -23,7 +23,7 @@ function makeRepo(id){
   return repo;
 }
 for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
-let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true;
+let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0;
 const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function model(input){
@@ -61,7 +61,12 @@ export const server=createServer(async(req,res)=>{
   const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
   try{
     if(url.pathname==='/fixture/config'&&method==='POST'){config={...config,...body};return send({ok:true});}
-    if(url.pathname==='/fixture/faults'&&method==='POST'){treeMismatch=!!body.tree_mismatch;return send({ok:true});}
+    if(url.pathname==='/fixture/faults'&&method==='POST'){treeMismatch=!!body.tree_mismatch;pullFailures=Number(body.pull_request_server_errors||0);return send({ok:true});}
+    // Move a branch: to a given commit, or one empty upstream commit ahead of where it is.
+    if(url.pathname==='/fixture/ref'&&method==='POST'){
+      const repo=repositories.get(String(body.repository_id)),current=repo.refs[body.branch];
+      repo.refs[body.branch]=body.sha||commit(trees.get(commits.get(current).tree.sha),current,'upstream '+current);return send({sha:repo.refs[body.branch],previous:current});
+    }
     if(url.pathname==='/fixture/pr'&&method==='POST'){const pr=repositories.get(String(body.repository_id)).pulls.get(Number(body.number));Object.assign(pr,body.values);return send(pr);}
     if(url.pathname==='/fixture/state')return send({...stats,repositories:[...repositories.values()].map(r=>({...publicRepo(r),refs:r.refs,createdPrs:r.createdPrs}))});
     if(url.pathname==='/model/chat/completions'){
@@ -108,6 +113,8 @@ export const server=createServer(async(req,res)=>{
     if((m=/^\/pulls\/(\d+)$/.exec(suffix))){const pr=repo.pulls.get(Number(m[1]));if(pr&&method==='PATCH')Object.assign(pr,body);return send(pr||{},pr?200:404);}
     if(suffix==='/pulls'){
       if(method==='GET'){const branch=(url.searchParams.get('head')||'').split(':')[1];return send(Number(url.searchParams.get('page')||1)===1?[...repo.pulls.values()].filter(p=>!branch||p.head.ref===branch):[]);}
+      // An injected 500 creates nothing, like a GitHub failure that never reached storage.
+      if(pullFailures>0){pullFailures--;return send({message:'Server Error'},500);}
       const number=repo.nextPr++,value={id:5000+number,number,title:body.title,body:body.body,state:'open',draft:false,user:{id:999},
         head:{ref:body.head,sha:repo.refs[body.head],repo:{id:repo.id}},base:{ref:body.base,sha:repo.refs[body.base],repo:{id:repo.id}},html_url:`https://github.invalid/${repo.id}/pull/${number}`};
       repo.pulls.set(number,value);repo.createdPrs.push(value);stats.prs.push({repository_id:repo.id,...value});return send(value,201);

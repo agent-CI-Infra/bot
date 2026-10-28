@@ -4,6 +4,29 @@ export class TaskError extends Error {
 }
 export const stop = (code: string, state?: string, detail?: string, retryAfterMs?: number): never => { throw new TaskError(code, state, detail, retryAfterMs); };
 export const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
+// Error responses are untrusted: keep only a short message, never headers or the whole payload.
+export async function errorBody(response:Response):Promise<any>{
+  const reader=response.body?.getReader();if(!reader)return null;
+  const chunks:Uint8Array[]=[];let length=0;
+  try{
+    while(length<16384){const {done,value}=await reader.read();if(done)break;chunks.push(value.subarray(0,16384-length));length+=value.length;}
+  }catch{/* Preserve the HTTP failure when the error body cannot be read. */}
+  finally{await reader.cancel().catch(()=>{});}
+  const text=Buffer.concat(chunks).toString('utf8');
+  try{return JSON.parse(text);}catch{return response.headers.get('content-type')?.startsWith('text/plain')?{message:text.split(/[\r\n]/)[0]}:null;}
+}
+// Why fetch() threw: a timeout, DNS, a refused or reset connection, TLS, or a redirect we refuse to follow.
+const networkCodes: Record<string,string> = { ENOTFOUND:'域名解析失败', EAI_AGAIN:'域名解析暂时失败', ECONNREFUSED:'连接被拒绝', ECONNRESET:'连接被重置',
+  ETIMEDOUT:'连接超时', EHOSTUNREACH:'主机不可达', ENETUNREACH:'网络不可达', EPIPE:'连接中断', UND_ERR_SOCKET:'连接中断',
+  UND_ERR_CONNECT_TIMEOUT:'建立连接超时', UND_ERR_HEADERS_TIMEOUT:'等待响应超时', UND_ERR_BODY_TIMEOUT:'读取响应超时' };
+export function networkReason(error: unknown, timeoutMs: number): string {
+  const value = error as any, cause = value?.cause, code = String(cause?.code || value?.code || ''), message = String(cause?.message || value?.message || '');
+  if (['TimeoutError','AbortError'].includes(value?.name) || ['TimeoutError','AbortError'].includes(cause?.name)) return `${Math.round(timeoutMs/1000)} 秒内没有响应`;
+  if (networkCodes[code]) return `${networkCodes[code]}（${code}）`;
+  if (/CERT|SSL|TLS/i.test(code)) return `TLS 证书校验失败（${code}）`;
+  if (/redirect/i.test(message)) return '服务返回了重定向，已拒绝跟随';
+  return code ? `网络错误（${code}）` : `网络错误（${message.replace(/\s+/g,' ').slice(0,120) || '未知'}）`;
+}
 export const operationId = (value: string) => sha(value).slice(0, 48);
 export const blobSha = (data: Buffer) => createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
 // Hash only entry metadata; file contents stay in one-file buffers during transfer.

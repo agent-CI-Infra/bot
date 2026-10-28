@@ -7,6 +7,8 @@ const publicationLabels = { comment: '总结评论', review: '行内检视（COM
 const publicationStates = { sent: ['已发布', 'success'], pending: ['待发布', 'info'], inflight: ['发布中', 'info'], unknown: ['结果待确认', 'warning'] };
 const emptyRepositoryMessage = '仓库还没有提交；默认分支出现提交后会自动继续。';
 function taskErrorText(code) { return code === 'repository_has_no_commit' ? emptyRepositoryMessage : code; }
+// The cause says whose move it is (a passing outage, a GitHub setting, the bot itself); the code stays for searching logs.
+function faultSummary(code, cause) { return code === 'repository_has_no_commit' || !cause ? taskErrorText(code) : `${cause.label}（${code}）`; }
 function taskState(task) { return task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit' ? badge('仓库还没有提交', 'warning') : state(task.status); }
 
 function objectLabel(task) { return `${task.kind.endsWith('.pr') ? 'PR' : 'Issue'} #${task.object_number}`; }
@@ -178,7 +180,12 @@ function liveText(task) {
   if(task.status==='waiting_pr_head')return `PR 尚未指向刚推送的提交 ${task.pushed_sha||'（读取中）'}；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。`;
   if (task.status === 'publishing') return '正在发布到 GitHub…';
   if(ownershipErrors[task.error_code])return ownershipErrors[task.error_code]+'；已暂停，不会推送其他作者或分支。';
-  if (task.status.startsWith('waiting_') || task.status === 'retry_wait') return `已暂停：${(states[task.status] || [task.status])[0]}${task.error_code ? '（' + task.error_code + '）' : ''}，条件满足后自动继续`;
+  if (task.status.startsWith('waiting_') || task.status === 'retry_wait' || task.status === 'needs_replan') {
+    const caption = (states[task.status] || [task.status])[0], cause = task.error_cause;
+    if (!cause) return `已暂停：${caption}${task.error_code ? '（' + task.error_code + '）' : ''}`;
+    const count = task.status === 'retry_wait' && task.retry_count ? `已连续失败 ${task.retry_count} 次，满 5 次转为失败。` : '';
+    return `已暂停：${caption} · ${cause.label}（${task.error_code}）。${count}${cause.action}`;
+  }
   return { prepare: '正在准备工作区：拉取固定提交并写入虚拟电脑…', model: 'Agent 正在思考，或在虚拟电脑里执行工具…', validate: '正在虚拟电脑里运行仓库测试…', publish: '正在发布到 GitHub…' }[task.phase] || '执行中…';
 }
 function renderTimeline(task, logs) {
@@ -293,9 +300,11 @@ function step(log) {
   else if (value.type === 'fault') {
     const empty = value.code === 'repository_has_no_commit' && value.state === 'waiting_configuration';
     if (empty) item.classList.replace('step-fault', 'step-waiting');
-    title.textContent = empty ? '仓库还没有提交' : '任务暂停或失败'; meta.prepend(empty ? badge('等待首次提交', 'warning') : state(value.state));
-    add(element('p', taskErrorText(value.code), 'muted'));
+    const cause = empty ? null : log.cause;
+    title.textContent = empty ? '仓库还没有提交' : cause ? '暂停或失败 · ' + cause.label : '任务暂停或失败'; meta.prepend(empty ? badge('等待首次提交', 'warning') : state(value.state));
+    if (!cause) add(element('p', taskErrorText(value.code), 'muted'));
     if (value.detail) add(element('p', value.detail, 'say'));
+    if (cause) add(element('p', '处理：' + cause.action, 'fault-action'), element('p', '错误码 ' + value.code, 'muted'));
   }
   else if (value.type === 'restart_attempt') { title.textContent = '重新开始一次尝试'; add(element('p', '中断的工作目录保留，新的尝试使用新目录。', 'muted')); }
   else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); }
@@ -306,7 +315,8 @@ function renderTaskSide(detail, environment) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const info = card('任务');
   info.append(facts([['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
-    [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
+    [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],
+    ['原因', task.error_code&&task.error_code!=='repository_has_no_commit'&&task.error_cause?faultSummary(task.error_code,task.error_cause):null], ['处理', task.error_code!=='repository_has_no_commit'?task.error_cause?.action:null], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
   side.append(info,taskMetricsCard(task), computerCard(task, environment));
   const result = resultCard(task); if (result) side.append(result);

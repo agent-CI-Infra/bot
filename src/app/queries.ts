@@ -3,9 +3,15 @@ import { type Actor, repository, scope } from './auth.js';
 import { deliveryResult } from '../review/delivery.js';
 import { fail, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
+import { explainFailure } from '../agent/failures.js';
+// Faults are classified when read, so logs written before a cause existed are explained the same way.
+function faultCause(log:Record<string,any>){
+  if(!String(log.content).startsWith('{"type":"fault"'))return log;
+  try{const value=JSON.parse(log.content);return {...log,cause:explainFailure(value.code,value.state)};}catch{return log;}
+}
 const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.repository_id,full_name:row.full_name,kind:row.kind,status:row.status,summary:row.summary,
   object_number:row.object_number,head_sha:row.head_sha,source_task_id:row.source_task_id,generation:row.generation,phase:row.phase,
-  error_code:row.error_code,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
+  error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status),retry_count:row.retry_count,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
 
 const pushedSha="(SELECT json_extract(data,'$.remote_sha') FROM development_candidates WHERE task_id=tasks.id) AS pushed_sha";
 const repositoryName='(SELECT full_name FROM repositories WHERE id=tasks.repository_id) AS full_name';
@@ -51,7 +57,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     if (!row) return fail(404, 'task_not_found');
     const fault=row.error_code&&!task[2]?store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='fault' AND json_extract(content,'$.code')=? ORDER BY rowid DESC LIMIT 1",row.id,row.error_code):null;
     const errorDetail=fault?JSON.parse(fault.content).detail:null;
-    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],error_detail:errorDetail||null},publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
+    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],error_detail:errorDetail||null},publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
   }
   if (path === '/api/audit') return { audit: store.all(`SELECT * FROM audit WHERE ${filter.sql}${repo ? ' AND repository_id=?' : ''}
     ORDER BY created_at DESC LIMIT 100`, ...filter.args, ...(repo ? [repo] : [])) };

@@ -246,7 +246,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 
 // Run the control-plane publication path against real Git objects and a local GitHub fixture.
 // The manager substitutes for the project computer; no deployment or external API is used.
-async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true } = {}) {
+async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
   const endpoint = 'http://127.0.0.1:' + githubFixture.address().port;
@@ -304,6 +304,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   repoDirectory = join(h.directory, 'repo'); mkdirSync(repoDirectory);
   await fetch(endpoint + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: a.token }) });
+  if (faults) await fetch(endpoint + '/fixture/faults', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(faults) });
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: true, test_command: policy });
   const taskId = randomBytes(24).toString('hex'), input = { review: { implementation_goal: 'Fix requested addition' } };
@@ -348,6 +349,29 @@ test('a later call for the same Issue appends to the same bot branch and PR', as
   assert.equal(d.h.store.get('SELECT count(*) n FROM bot_branches').n, 1);
   const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), writes = state.refWrites.filter(w => w.branch === first.branch);
   assert.deepEqual(writes.map(w => w.method), ['POST', 'PATCH']); assert.equal(writes[1].force, false);
+});
+
+test('a PR that GitHub answered with 500 pauses for confirmation, and 重试 opens it once even after the base moved on', async t => {
+  const d = await developmentHarness(t, { faults: { pull_request_server_errors: 1 } }), id = d.task.id, store = d.h.store;
+  const post = (path, body) => fetch(d.endpoint + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+  const faults = () => store.all('SELECT content FROM task_logs WHERE task_id=?', id).map(r => JSON.parse(r.content)).filter(l => l.type === 'fault');
+  assert.deepEqual([d.task.status, d.task.error_code, d.task.phase], ['retry_wait', 'github_response_unknown', 'publish']);
+  assert.match(faults()[0].detail, /^GitHub 请求 POST \/repos\/fixture\/project-101\/pulls 返回 HTTP 500，写入结果尚未确认：Server Error/);
+  // The base branch moves on while the task waits. Its branch is already pushed, so only the PR is left to open.
+  const moved = await post('/fixture/ref', { repository_id: 101, branch: 'trunk' });
+  try {
+    store.run('UPDATE tasks SET next_run_at=0 WHERE id=?', id); d.engine.tick(); await Promise.all(d.engine.active.values());
+    let task = store.get('SELECT * FROM tasks WHERE id=?', id);
+    assert.deepEqual([task.status, task.error_code], ['waiting_publication', 'github_publication_unknown']);
+    const admin = { id: 'admin', role: 'super_admin', repositories: [] };
+    assert.deepEqual(await d.engine.api(admin, 'POST', new URL('http://bot/api/tasks/' + id + '/retry'), {}), { ok: true });
+    await Promise.all(d.engine.active.values()); task = store.get('SELECT * FROM tasks WHERE id=?', id);
+    assert.equal(task.status, 'pr_opened', JSON.stringify(faults()));
+    const branch = JSON.parse(task.result).branch, state = await fetch(d.endpoint + '/fixture/state').then(r => r.json());
+    assert.equal(state.repositories.find(r => r.id === 101).createdPrs.filter(p => p.head.ref === branch).length, 1);
+    assert.deepEqual(state.refWrites.filter(w => w.branch === branch).map(w => w.method), ['POST'], 'retries only confirm the pushed branch');
+    assert.deepEqual(faults().map(f => f.code), ['github_response_unknown', 'github_publication_unknown']);
+  } finally { await post('/fixture/ref', { repository_id: 101, branch: 'trunk', sha: moved.previous }); }
 });
 
 test('policy-generated untracked files and tracked edits stay outside the published snapshot', async t => {

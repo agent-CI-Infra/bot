@@ -141,7 +141,9 @@ export class TaskEngine {
         if(task.kind==='development.issue'&&!developmentReady(current,this.label(task)))stop('development_not_approved','needs_replan',`Issue #${task.object_number} 不再满足开发条件：开发标签缺失或已有人接手。`);
         if(development){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=saved?JSON.parse(saved.data):null;
-          if(candidate&&!candidate.pr_number&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan',`基础分支 ${candidate.base_branch} 已偏离提交 ${candidate.base_sha}，需要重新规划。`);
+          // Once the branch is on GitHub, only its PR is left to open, and a base that moved on since is normal for a PR.
+          const pushed=!!this.store.get("SELECT 1 FROM github_effects WHERE id=? AND state='sent'",operationId(id+':branch'));
+          if(candidate&&!candidate.pr_number&&!pushed&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan',`基础分支 ${candidate.base_branch} 已偏离提交 ${candidate.base_sha}，需要重新规划。`);
           if(input.bot_pr){
             const pr=await github.object('review.pr',input.bot_pr.number),owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);
@@ -216,7 +218,7 @@ export class TaskEngine {
         }
         const snapshot=await workspace.prepare(github,ref.object.sha,mirror);
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
-        if(files.length>=3000)stop('pull_request_file_limit','waiting_environment',`PR #${task.object_number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
+        if(files.length>=3000)stop('pull_request_file_limit','failed',`PR #${task.object_number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
         if(Object.entries(effectiveRules.computer).some(([key,value])=>JSON.stringify(environment.computer?.[key])!==JSON.stringify(value))){
           this.rules.rememberComputer(task.repository_id,environment.computer);
           environment=await this.manager.call('POST',`/v1/projects/${task.repository_id}/configure`,{operation_id:randomId(),generation:environment.generation,request:redactor.clean(effectiveRules.computer)},35*60000);
@@ -301,7 +303,7 @@ export class TaskEngine {
     }catch(error){
       if(!(error instanceof TaskError))log({type:'runtime_fault',message:redactor.text(String((error as Error)?.message||'runtime failure')).slice(0,2000)});
       await this.release(workspace,task);
-      const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常，请查看此前的运行错误日志。`);
+      const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常：${redactor.text(String((error as Error)?.message||'未知错误')).replace(/\s+/g,' ').slice(0,300)}`);
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
       const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
       const delay=failure.code==='github_rate_limited'?(failure.retryAfterMs??60000):state==='waiting_configuration'?30000:5000;
@@ -310,11 +312,12 @@ export class TaskEngine {
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,attempt:task.attempt+1});
       }
-      // Waiting conditions can be polled every five seconds; retain one copy of an unchanged reason.
+      // Waiting conditions can be polled every five seconds; retain one copy of an unchanged reason. The state is the one
+      // the task is left in, so the retry that gives up shows as its own 失败 entry.
       const previous=this.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='fault' ORDER BY rowid DESC LIMIT 1",id);
       const last=previous?JSON.parse(previous.content):null,detail=redactor.clean(failure.detail);
-      if(current?.error_code!==failure.code||last?.code!==failure.code||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
-        log({type:'fault',state:failure.state,code:failure.code,...(detail?{detail,detail_sha:sha(detail)}:{})});
+      if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
+        log({type:'fault',state,code:failure.code,...(detail?{detail,detail_sha:sha(detail)}:{})});
     }
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.
@@ -371,10 +374,15 @@ export class TaskEngine {
     if(this.active.has(task.id)||['queued','running','preparing','implementing','validating','publishing','result_ready'].includes(task.status))fail(409,'task_already_running');
     if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status))fail(409,'task_not_retryable');
     this.store.transaction(()=>{
-      if(task.phase!=='publish'&&['failed','waiting_environment','needs_replan'].includes(task.status)){
+      // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
+      const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);
+      if((task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status)){
         this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,attempt=attempt+1 WHERE id=?",task.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task.id);
       }
+      // Pressing 重试 on 发布待确认 is the confirmation the pause waits for: the write is looked up once more and,
+      // only if GitHub still has no trace of it, sent again.
+      if(task.status==='waiting_publication')this.store.run("UPDATE github_effects SET state='pending' WHERE task_id=? AND state IN ('unknown','inflight')",task.id);
       this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0 WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
     });this.tick();return {ok:true};
   }

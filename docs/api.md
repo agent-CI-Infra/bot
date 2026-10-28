@@ -44,7 +44,7 @@
 | `/api/installations/:id/activate`、`/api/installations/:id/disable` | POST | 仅超级管理员；启动（可带 `model_id,development_enabled,account_id`）或再次启用／禁用一个仓库 |
 | `/api/installations/:id` | DELETE | 仅超级管理员，需 `confirm:true`；当场向 GitHub 核对后删除项目（未启动的仓库只删安装列表行）。仍能访问返回 409 `repository_still_accessible`，权限不足返回 409 `repository_permissions_insufficient`，GitHub 不可用、限流或答复不确定返回 502，凭据缺失返回 409 `github_credentials_missing`，以上都不删除；容器和网络删除失败或任务未停下时项目保持禁用、记录保留 |
 | `/api/installations/permissions/check` | POST | 仅超级管理员；重读各账号授予的权限，返回每行的 `permission_missing,permissions_checked_at,permissions_stale` 和各账号错误，不改变安装状态 |
-| `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST |
+| `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST。`waiting_publication` 的重试即人工确认：结果未知的写入回到待发送，先查找，查不到才发送。`needs_replan` 在尚未写入 GitHub 时从准备阶段重新规划 |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
 | `/api/costs` | GET | 范围内按 UTC 日期、项目聚合的模型估算费用。参数 `from,to` 为 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。最多 5000 个日期／项目分组，超限要求缩小范围；返回 `days,summary,collection_started_at`，不返回模型密钥或原始请求 |
 | `/hooks/github/:account/:endpoint` | POST | 仅 Webhook 端口，按已登记入口验签和归档 |
