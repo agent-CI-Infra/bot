@@ -230,7 +230,7 @@ function appendSnapshotProgress(list,log,value) {
   }
   if(value.sha)snapshotProgress.sha=value.sha;
   const {output,latest,time}=snapshotProgress,follow=output.scrollHeight-output.scrollTop-output.clientHeight<60,message=snapshotMessage(value);
-  if(log.created_at){time.textContent=log.created_at.slice(11,19);time.dateTime=log.created_at;time.title=timestamp(log.created_at);}
+  if(log.created_at){time.textContent=timestamp(log.created_at).slice(11,19);time.dateTime=log.created_at;time.title=timestamp(log.created_at);}
   latest.textContent=value.type==='snapshot'?`已接收 ${value.files} 个文件 · ${value.bytes} 字节 · 跳过 ${value.skipped} 项`
     :value.type==='snapshot_progress'&&value.files!==undefined?`已写入 ${value.files} 个文件 · ${value.bytes} 字节`
     :value.type==='snapshot_git'?'正在构建本地 Git 树…':message.split('\n')[0];
@@ -246,7 +246,7 @@ function step(log) {
   let value; try { value = JSON.parse(log.content); } catch { value = { type: 'raw' }; }
   const item = element('li', '', 'step step-' + value.type), head = element('div', '', 'step-head'), title = element('strong', ''), meta = element('span', '', 'step-meta');
   head.append(title, meta); item.append(head);
-  if (log.created_at) { const time = element('time', log.created_at.slice(11, 19)); time.dateTime = log.created_at; time.title = timestamp(log.created_at); meta.append(time); }
+  if (log.created_at) { const time = element('time', timestamp(log.created_at).slice(11, 19)); time.dateTime = log.created_at; time.title = timestamp(log.created_at); meta.append(time); }
   const add = (...nodes) => item.append(...nodes), args = value.arguments || {}, result = value.result || {};
   if (value.type === 'queued') {
     title.textContent = '任务排队日志'; add(element('p', value.detail));
