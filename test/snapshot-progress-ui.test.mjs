@@ -27,7 +27,8 @@ test('snapshot preparation is one folded entry and appends live lines without re
   const f=fixture(t);f.add(prepare);await f.open();
   const [fold]=f.groups(),output=fold.querySelector('pre');
   assert.equal(f.page.$('timeline').children.length,1);assert.equal(fold.open,false);
-  assert.match(text(fold.querySelector('summary')),/仓库快照进度/);assert.match(text(output),/\[16:30:00\] 正在准备工作区/);
+  const clock=new Date('2026-10-27T16:30:00Z').toLocaleTimeString('en-GB',{hour12:false});
+  assert.match(text(fold.querySelector('summary')),/仓库快照进度/);assert.ok(text(output).includes(`[${clock}] 正在准备工作区`));
   fold.open=true;Object.assign(output,{scrollHeight:1000,clientHeight:200,scrollTop:800});
   f.add(progress(100));await f.refresh();
   assert.equal(f.groups()[0],fold);assert.equal(fold.open,true);assert.equal(output.scrollTop,1000);

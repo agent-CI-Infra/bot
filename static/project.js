@@ -463,7 +463,7 @@ function activityCards() {
   const history = card('最近在虚拟电脑上执行的命令'), commandList = element('ul', '', 'history commands');
   for (const command of commands) {
     const row = element('li', ''); row.append(element('code', '$ ' + clipText(command.command, 160)), exitBadge(command));
-    row.append(element('span', `${command.created_at ? command.created_at.slice(11, 19) + ' · ' : ''}${kindLabels[command.kind] || command.kind} #${command.object_number}`, 'muted wide-cell')); commandList.append(row);
+    row.append(element('span', `${command.created_at ? timestamp(command.created_at).slice(11, 19) + ' · ' : ''}${kindLabels[command.kind] || command.kind} #${command.object_number}`, 'muted wide-cell')); commandList.append(row);
   }
   history.append(commands.length ? commandList : note('还没有命令记录。'));
   return [work, recent, history];

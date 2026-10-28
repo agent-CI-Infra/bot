@@ -35,7 +35,13 @@ const states = {
 };
 function state(value) { const [caption,tone]=states[value]||[value,'']; const badge=element('span',caption,'status'+(tone?' status-'+tone:''));badge.title=value;return badge; }
 function deliveryCaption(row){return {tasks_created:'已创建任务',draft:'因草稿跳过',not_trigger:'不是触发事件',duplicate:'重复，不重复建任务',review_disabled:'检视未开启，仅归档',unregistered_repository:'仓库未启动，仅归档'}[row.processing_result]||row.processing_result||'已归档';}
-function timestamp(value) { return value ? value.replace('T',' ').replace(/\.\d+Z$/,' UTC') : ''; }
+function timestamp(value) {
+  if(value==null||value==='')return '';
+  const date=new Date(value);if(Number.isNaN(date.getTime()))return '';
+  // Local getters use the browser's time zone, including its offset and daylight-saving rules.
+  const pad=(n,width=2)=>String(n).padStart(width,'0');
+  return `${pad(date.getFullYear(),4)}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
 async function start() {
   setup = !(await api('/api/setup')).initialized;
