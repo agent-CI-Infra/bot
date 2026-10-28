@@ -62,7 +62,7 @@ const codeActions: Record<string,string> = {
 };
 const causeActions: Record<FailureCause,(state:string)=>string> = {
   external: state => automatic.has(state) ? '不是配置问题，bot 会自动重试，一般无需处理。'
-    : '已自动重试多次仍失败。确认 GitHub、模型服务和网络恢复后点「重试」。',
+    : '已自动重试 5 次仍失败。先看 GitHub 状态页、模型服务和网络是否正常；都正常而同一个请求反复返回 502/504 时，多半是请求太大或太慢（GitHub 处理单个请求超过 10 秒会中止），请把任务链接反馈给 bot 维护者。恢复后点「重试」。',
   github_access: () => '按说明核对 GitHub App 是否安装到该仓库、授权的权限和仓库范围、账号凭据是否有效，' + retry,
   github_rejected: () => 'GitHub 收到了请求但不接受，通常是仓库当前状态与请求冲突（例如分支或 PR 已存在、分支保护规则）。按说明核对仓库后点「重试」；无法解释时请反馈给 bot 维护者。',
   model: () => '检查项目的模型地址、模型名和 API Key；模型输出不符合要求时可以点「重试」，或换用其他模型。',

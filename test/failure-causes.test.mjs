@@ -98,13 +98,17 @@ test('a write that landed despite a 500 is found on retry and never sent twice',
   h.due();const task=await h.run();assert.deepEqual([task.status,h.comments.length],['succeeded',1]);
 });
 
-test('the retry that gives up is logged as its own 失败 entry with the next step',async t=>{
+test('automatic retries back off, and the retry that gives up is logged as its own 失败 entry with the next step',async t=>{
   const h=await emptyRepositoryFixture(t,{github(path,send){if(path!=='/user')return false;send({message:'Server Error'},502);return true;}});
-  for(let attempt=1;attempt<=5;attempt++){h.due();await h.run();}
+  for(let attempt=1;attempt<=5;attempt++){
+    h.due();const before=Date.now(),task=await h.run(),after=Date.now();if(attempt===5)break;
+    // Automatic retries back off: 5 s, 15 s, 45 s, 135 s.
+    const delay=5000*3**(attempt-1);assert.ok(task.next_run_at>=before+delay&&task.next_run_at<=after+delay,`attempt ${attempt}`);
+  }
   const task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);assert.deepEqual([task.status,task.error_code,task.retry_count],['failed','github_http_502',5]);
   assert.deepEqual(faults(h).map(log=>log.state),['retry_wait','failed']);
   assert.equal(faults(h)[1].detail,'GitHub 请求 GET /user 返回 HTTP 502：Server Error');
-  const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task;assert.equal(detail.error_cause.cause,'external');assert.match(detail.error_cause.action,/已自动重试多次仍失败/);
+  const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task;assert.equal(detail.error_cause.cause,'external');assert.match(detail.error_cause.action,/已自动重试 5 次仍失败/);
 });
 
 test('model failures name the model, its host and the provider explanation without the key',async t=>{

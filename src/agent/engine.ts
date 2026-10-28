@@ -306,7 +306,10 @@ export class TaskEngine {
       const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常：${redactor.text(String((error as Error)?.message||'未知错误')).replace(/\s+/g,' ').slice(0,300)}`);
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
       const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
-      const delay=failure.code==='github_rate_limited'?(failure.retryAfterMs??60000):state==='waiting_configuration'?30000:5000;
+      // Automatic retries back off (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted
+      // instead of using up all five attempts in half a minute.
+      const delay=failure.code==='github_rate_limited'?(failure.retryAfterMs??60000):state==='waiting_configuration'?30000
+        :state==='retry_wait'?Math.min(5000*3**(retries-1),300000):5000;
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,next_run_at:Date.now()+delay});
       if(failure.code==='execution_interrupted'&&task.phase!=='publish'&&task.attempt<3){
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
