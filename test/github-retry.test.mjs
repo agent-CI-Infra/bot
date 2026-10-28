@@ -42,10 +42,41 @@ test('GitHub distinguishes rate limits from permissions and retains only a short
   await assert.rejects(github.snapshotBlob('a'.repeat(40)),error=>{
     assert.ok(error.detail.includes('Resource not accessible by integration'));
     for(const secret of [token,otherToken,'fixture-model-key','Authorization','unexpected-secret','whole-response-must-not-be-logged'])assert.ok(!error.detail.includes(secret),secret);
-    assert.ok(error.detail.length<=320);return true;
+    // The request line is ours; only GitHub's message is capped.
+    const prefix=`GitHub 请求 GET /repos//git/blobs/${'a'.repeat(40)} 返回 HTTP 403：`;
+    assert.ok(error.detail.startsWith(prefix));assert.ok(error.detail.length-prefix.length<=320);return true;
   });
   reply={status:403,body:{message:'Blob is too large',errors:[{code:'too_large'}],size:110*1024*1024}};
   assert.deepEqual(await github.snapshotBlob('a'.repeat(40)),{skipped:true,status:403,size:110*1024*1024,message:'Blob is too large'});
+});
+
+test('GitHub server errors name the request, status and GitHub request ID',async t=>{
+  let reply;const server=createServer((_req,res)=>{res.writeHead(reply.status,{'Content-Type':reply.type||'application/json',...reply.headers});res.end(reply.raw??JSON.stringify(reply.body));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const github=new GitHub(null,{},new Redactor(),async()=>{},'http://127.0.0.1:'+server.address().port);github.token='ghs_fixture';github.fullName='octo/repo';
+  const id='C5D4:3A2B:1234567:2345678:65F0A1B2',cases=[
+    {method:'POST',status:500,body:{message:'Server Error'},headers:{'X-GitHub-Request-Id':id},code:'github_response_unknown',
+      detail:`GitHub 请求 POST /repos/octo/repo/issues/12/comments 返回 HTTP 500，写入结果尚未确认：Server Error（GitHub 请求 ID：${id}）`},
+    // An HTML gateway page has no message, and a request ID that is not GitHub's format is dropped.
+    {method:'GET',status:502,raw:'<html>Bad Gateway</html>',type:'text/html',headers:{'X-GitHub-Request-Id':'not an id'},code:'github_http_502',
+      detail:'GitHub 请求 GET /repos/octo/repo/issues/12/comments 返回 HTTP 502'},
+    {method:'POST',status:422,body:{message:'Validation Failed'},headers:{'X-GitHub-Request-Id':id},code:'github_http_422',state:'failed',
+      detail:'GitHub 请求 POST /repos/octo/repo/issues/12/comments 返回 HTTP 422：Validation Failed'},
+  ];
+  for(const item of cases){reply=item;await assert.rejects(github.request(item.method,github.path('/issues/12/comments'),item.method==='POST'?{body:'x'}:undefined),error=>{
+    assert.deepEqual([error.code,error.state,error.detail],[item.code,item.state||'retry_wait',item.detail]);return true;
+  });}
+});
+
+test('a review comment that GitHub answers with a server error waits for retry and logs the request',async t=>{
+  const h=await emptyRepositoryFixture(t,{github(path,send,res){
+    if(!path.endsWith('/issues/1/comments')||res.req.method!=='POST')return false;
+    res.setHeader('X-GitHub-Request-Id','C5D4:3A2B:1');send({message:'Server Error'},500);return true;
+  }});h.setBranch('ready');
+  const task=await h.run();assert.equal(task.status,'retry_wait');assert.equal(task.error_code,'github_response_unknown');
+  const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task.error_detail;
+  assert.equal(detail,'GitHub 请求 POST /repos/fixture/project-101/issues/1/comments 返回 HTTP 500，写入结果尚未确认：Server Error（GitHub 请求 ID：C5D4:3A2B:1）');
+  assert.equal(h.store.get("SELECT state FROM github_effects WHERE task_id=? AND kind='comment'",h.taskId).state,'unknown');
 });
 
 test('rate limits wait a minute by default, honor Retry-After and fail on the fifth attempt without rewriting old pauses',async t=>{
