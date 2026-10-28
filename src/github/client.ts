@@ -106,10 +106,16 @@ export class GitHub {
       }
       const retryAfter=response.headers.get('retry-after'),limited=[403,429].includes(response.status)&&
         (retryAfter!==null||response.headers.get('x-ratelimit-remaining')==='0'||/rate[\s_-]*limit|abuse[\s_-]*(?:detection|detected)/i.test(String(error?.message||'')+' '+String(error?.documentation_url||'')));
-      if(limited)stop('github_rate_limited','retry_wait',detail===`GitHub HTTP ${response.status}`?detail+': rate limit exceeded':detail,retryAfterMs(retryAfter));
-      if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission',detail);
-      if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',detail);
-      stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',detail);
+      // GitHub's own message is often only "Server Error": name the request and status too. A 5xx also keeps
+      // GitHub's request ID, the only handle GitHub has for tracing that response.
+      const said=detail===`GitHub HTTP ${response.status}`?'':detail;
+      const requestId=response.status>=500?response.headers.get('x-github-request-id')?.match(/^[A-Za-z0-9:._-]{1,80}$/)?.[0]:undefined;
+      const explain=(message:string,note='')=>this.redactor.text(`GitHub 请求 ${method} ${path} 返回 HTTP ${response.status}${note}`
+        +(message?'：'+message:'')+(requestId?`（GitHub 请求 ID：${requestId}）`:''));
+      if(limited)stop('github_rate_limited','retry_wait',explain(said||'rate limit exceeded'),retryAfterMs(retryAfter));
+      if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission',explain(said));
+      if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',explain(said,'，写入结果尚未确认'));
+      stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',explain(said));
     }
     const value = await response.text(); if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large',undefined,`GitHub 请求 ${method} ${path} 的响应长度 ${value.length}，超过 48 MiB 上限。`);
     try { return value ? JSON.parse(value) : {}; } catch { return stop('github_invalid_response',undefined,`GitHub 请求 ${method} ${path} 返回无效 JSON，HTTP ${response.status}。`); }
