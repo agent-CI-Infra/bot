@@ -271,3 +271,36 @@ test('publishing a partial snapshot preserves excluded upstream paths and verifi
   assert.equal(writes.find(write=>write.path==='/git/commits').body.tree,expected);
   assert.equal(treeSha([file,...skipped]),expected);
 });
+
+// Publish a candidate through a GitHub double whose tree answers come from `trees` in order.
+async function publishTree(t,{files,snapshot,trees}){
+  const h=await emptyRepositoryFixture(t),branch='bot/issue-1-tree',source='d'.repeat(40),writes=[];
+  h.store.run('INSERT INTO bot_branches VALUES(?,?,?)','101',branch,h.taskId);
+  const expected=treeHash(files),answers=[...trees(expected)];
+  const github={defaultBranch:'main',path:path=>path,authorEmail:()=> '999+fixture-bot@users.noreply.github.com',ref:async()=>null,
+    async request(_method,path,body){writes.push({path,body});if(path==='/git/blobs')return {sha:body.sha||files.find(f=>f.base64===body.content).sha};
+      if(path==='/git/trees')return {sha:answers.shift()};if(path==='/git/commits')return {sha:'e'.repeat(40),tree:{sha:expected}};if(path==='/git/refs')return {object:{sha:'e'.repeat(40)}};assert.fail(path);}};
+  const candidate={branch,owner_task_id:h.taskId,files,skipped_files:[],snapshot_files:snapshot,source_tree:source,tree_sha:expected,base_sha:commit,date:new Date().toISOString(),
+    summary:'Update source',test_command:'true',validation:{source:'agent',skipped:true,command:'true'}};
+  await new Publisher(h.store,github,h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId),async()=>{}).branch(candidate);
+  return {source,trees:writes.filter(write=>write.path==='/git/trees').map(write=>write.body)};
+}
+
+test('a change in a large repository sends GitHub only the changed paths on top of the source tree',async t=>{
+  const unchanged=Array.from({length:5000},(_,i)=>entry(`src/${i%50}/file-${i}.txt`,Buffer.from('same '+i)));
+  const old=entry('src/changed.txt',Buffer.from('old')),data=Buffer.from('new'),changed={...entry('src/changed.txt',data),base64:data.toString('base64')};
+  const removed=entry('docs/obsolete.md',Buffer.from('gone')),added={...entry('docs/new.md',data),base64:data.toString('base64')},executable={...unchanged[0],mode:'100755'};
+  const {source,trees}=await publishTree(t,{files:[executable,...unchanged.slice(1),changed,added],snapshot:[...unchanged,old,removed],trees:expected=>[expected]});
+  assert.equal(trees.length,1);assert.equal(trees[0].base_tree,source);
+  assert.deepEqual(trees[0].tree.map(e=>[e.path,e.mode,e.sha]).sort(),[[added.path,'100644',added.sha],[removed.path,'100644',null],[changed.path,'100644',changed.sha],[executable.path,'100755',executable.sha]].sort());
+});
+
+test('a path that turns from a file into a directory, or a tree GitHub builds differently, uses the complete listing',async t=>{
+  const data=Buffer.from('x'),readme={...entry('docs/readme.md',data),base64:data.toString('base64')},kept=entry('keep.txt',Buffer.from('k'));
+  let result=await publishTree(t,{files:[kept,readme],snapshot:[kept,entry('docs',Buffer.from('was a file'))],trees:expected=>[expected]});
+  assert.equal(result.trees.length,1);assert.equal(result.trees[0].base_tree,undefined);assert.deepEqual(result.trees[0].tree.map(e=>e.path).sort(),['docs/readme.md','keep.txt']);
+  const changed={...entry('keep.txt',data),base64:data.toString('base64')};
+  result=await publishTree(t,{files:[changed],snapshot:[kept],trees:expected=>['f'.repeat(40),expected]});
+  assert.equal(result.trees.length,2);assert.equal(result.trees[0].base_tree,result.source);assert.equal(result.trees[1].base_tree,undefined);
+  await assert.rejects(publishTree(t,{files:[changed],snapshot:[kept],trees:()=>['f'.repeat(40),'f'.repeat(40)]}),/github_tree_mismatch/);
+});

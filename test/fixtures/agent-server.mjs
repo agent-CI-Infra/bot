@@ -24,7 +24,7 @@ function makeRepo(id){
 }
 for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
 let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0;
-const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[]};
+const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function model(input){
   const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw),repoId=context.repository.split('-').at(-1),repo=repositories.get(repoId),number=context.object.number;
@@ -132,7 +132,14 @@ export const server=createServer(async(req,res)=>{
     if((m=/^\/git\/trees\/(.+)$/.exec(suffix))){const files=trees.get(m[1]);return send({sha:m[1],tree:files.map(f=>({...f,size:blobs.get(f.sha).length})),truncated:false});}
     if((m=/^\/git\/blobs\/(.+)$/.exec(suffix))){const data=blobs.get(m[1]);return send({sha:m[1],size:data.length,encoding:'base64',content:data.toString('base64')});}
     if(suffix==='/git/blobs')return send({sha:blob(Buffer.from(body.content,'base64'))},201);
-    if(suffix==='/git/trees'){const hash=treeHash(body.tree);trees.set(hash,body.tree);return send({sha:treeMismatch?'f'.repeat(40):hash},201);}
+    if(suffix==='/git/trees'){
+      // Like GitHub: entries update the base tree, a null sha removes a path, and empty directories disappear.
+      if(body.base_tree&&!trees.has(body.base_tree))return send({message:'base_tree not found'},422);
+      let files=body.base_tree?[...trees.get(body.base_tree)]:[];
+      for(const entry of body.tree){files=files.filter(f=>f.path!==entry.path);if(entry.sha)files.push(entry);}
+      const hash=treeHash(files);trees.set(hash,files);stats.trees.push({repository_id:repo.id,base_tree:body.base_tree||null,entries:body.tree.length});
+      return send({sha:treeMismatch?'f'.repeat(40):hash},201);
+    }
     if(suffix==='/git/commits'){const sha=objectHash('commit',Buffer.from(JSON.stringify(body))),value={sha,tree:{sha:body.tree},parents:body.parents.map(sha=>({sha}))};commits.set(sha,value);return send(value,201);}
     if(suffix.startsWith('/compare/'))return send({status:'ahead'});
     return send({},404);

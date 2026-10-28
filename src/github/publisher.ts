@@ -73,16 +73,22 @@ export class Publisher {
       const blob=await this.github.request('POST',this.github.path('/git/blobs'),{content:file.base64,encoding:'base64'});
       if(blob.sha!==file.sha)stop('github_blob_mismatch',undefined,`GitHub 写入文件 ${file.path} 后返回的 SHA 不一致：预期 ${file.sha}，实际 ${blob.sha}。`);
     }
-    const entries=candidate.files.map((f:any)=>({path:f.path,mode:f.mode,type:'blob',sha:f.sha}));
-    let expected=candidate.tree_sha;
-    if(candidate.skipped_files?.length){
-      // Keep excluded upstream entries, including blobs GitHub will not let us download.
-      // Hashing the merged manifest also rejects a candidate that overwrites an excluded path.
-      expected=treeSha([...candidate.files,...candidate.skipped_files]);
-      const paths=new Set(candidate.files.map((f:any)=>f.path));
-      for(const file of candidate.snapshot_files)if(!paths.has(file.path))entries.push({path:file.path,mode:file.mode,type:'blob',sha:null});
-    }
-    const tree=await this.github.request('POST',this.github.path('/git/trees'),{...(candidate.skipped_files?.length?{base_tree:candidate.source_tree}:{}),tree:entries});
+    // Skipped upstream entries (submodules, blobs GitHub will not let us download) stay as they are in the source tree.
+    // Hashing the merged manifest also rejects a candidate that overwrites an excluded path.
+    const skipped=candidate.skipped_files||[],expected=skipped.length?treeSha([...candidate.files,...skipped]):candidate.tree_sha;
+    const entry=(f:any,sha=f.sha)=>({path:f.path,mode:f.mode,type:'blob',sha});
+    const snapshot=candidate.snapshot_files||[],upstream=new Map<string,any>(snapshot.map((f:any)=>[f.path,f])),paths=new Set(candidate.files.map((f:any)=>f.path));
+    const deletions=snapshot.filter((f:any)=>!paths.has(f.path)).map((f:any)=>entry(f,null));
+    const changes=candidate.files.filter((f:any)=>upstream.get(f.path)?.sha!==f.sha||upstream.get(f.path)?.mode!==f.mode).map((f:any)=>entry(f));
+    // Rebuilding a large repository's tree from every path can take GitHub longer than its 10-second request limit,
+    // which answers 502/504 on every retry, so only the changes go on top of the source tree. A path that turns from a
+    // file into a directory or back is not an update GitHub applies the same way; it, and any tree GitHub builds
+    // differently, falls back to the complete listing.
+    const before=[...upstream.keys(),...skipped.map((f:any)=>f.path)],files=new Set(before),directories=new Set(before.flatMap(parents));
+    const reshaped=changes.some((f:any)=>directories.has(f.path)||parents(f.path).some(path=>files.has(path)));
+    const create=(body:any)=>this.github.request('POST',this.github.path('/git/trees'),body);
+    let tree=candidate.source_tree&&changes.length+deletions.length&&!reshaped?await create({base_tree:candidate.source_tree,tree:[...changes,...deletions]}):null;
+    if(tree?.sha!==expected)tree=await create(skipped.length?{base_tree:candidate.source_tree,tree:[...candidate.files.map((f:any)=>entry(f)),...deletions]}:{tree:candidate.files.map((f:any)=>entry(f))});
     if(tree.sha!==expected)stop('github_tree_mismatch',undefined,`GitHub 创建的文件树不一致：预期 ${expected}，实际 ${tree.sha}。`);
     candidate.published_tree_sha=expected;
     const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
@@ -135,6 +141,9 @@ export class Publisher {
     return pr;
   }
 }
+
+// a/b/c.txt -> ['a','a/b']
+function parents(path:string):string[]{const parts=path.split('/');return parts.slice(1).map((_,index)=>parts.slice(0,index+1).join('/'));}
 
 export function assertOwnedPR(owned:Row|undefined,pr:any,actorId:string,repositoryId:string): asserts owned is Row {
   if(!owned)throw new TaskError('bot_pr_identity_changed','waiting_permission',`PR #${pr.number} 没有对应的机器人归属记录。`);

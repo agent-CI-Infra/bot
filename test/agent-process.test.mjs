@@ -337,6 +337,8 @@ test('create_pull_request with empty policy never reruns agent evidence and retu
   const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json());
   assert.match(state.prs.at(-1).body, /Tests: agent-already-ran-tests/);
   assert.match(state.prs.at(-1).body, /not rerun by the control plane/); assert.doesNotMatch(state.prs.at(-1).body, /Exit code:/);
+  // Only the one edited file goes to GitHub, on top of the snapshot's source tree, and GitHub's tree is the verified one.
+  assert.deepEqual(state.trees.at(-1), { repository_id: 101, base_tree: d.candidate.source_tree, entries: 1 });
 });
 
 test('a later call for the same Issue appends to the same bot branch and PR', async t => {
