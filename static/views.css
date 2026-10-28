@@ -148,4 +148,18 @@ dialog.confirm-dialog::backdrop{background:#16374485}
 button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:760px){.confirm-head{padding:18px 18px 6px}.confirm-body,.confirm-status{padding-left:18px;padding-right:18px}.confirm-actions{padding:12px 18px}.confirm-actions button{flex:1}}
 /* Global settings: version, deployment-wide defaults and wizard settings side by side, stacking on narrow screens; the shared model list spans the full width. */
-.settings-panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;padding:14px;align-items:start}.settings-panel .side-card h3{font-size:15px}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
+.settings-panel{display:block;padding:0}.settings-panel .side-card h3{font-size:15px}.settings-panel .settings-wide{grid-column:1/-1}.settings-panel .side-card .flash{margin:0 0 8px}.settings-panel .side-card>form{margin-top:10px}.settings-panel .history .muted{margin:2px 0 0}
+
+/* Global settings (static/settings.js): the project page's category layout inside the list card. */
+.settings-body{border-top:1px solid #e3eaf0;min-height:calc(100svh - 170px)}
+.settings-body .project-content{max-width:980px}
+.settings-list-head{justify-content:space-between;align-items:flex-start;flex-wrap:nowrap;gap:12px}.settings-list-head>.muted{flex:1;margin:0}
+.settings-rows{margin-top:8px;border-top:1px solid #e8eef2}
+.settings-rows .row{padding:10px 0;grid-template-columns:minmax(0,1fr) max-content max-content}
+.settings-rows .row:last-child{border-bottom:0}
+.settings-rows .row-content p{margin:2px 0 0}
+@media(max-width:760px){
+  .settings-body{min-height:0}
+  .settings-list-head{flex-direction:column;align-items:stretch}.settings-list-head>button{align-self:flex-start}
+  .settings-rows .row{grid-template-columns:minmax(0,1fr) auto}.settings-rows .row>.actions{grid-column:1/-1}
+}

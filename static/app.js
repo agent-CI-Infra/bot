@@ -1,8 +1,11 @@
 const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false, permissionAutoRefresh = false;
 // Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
-let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null;
-const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务', accounts: '机器人账号', users: '用户' };
+let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null, editorKind = null;
+const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务' };
+// Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
+const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', reviews: '#/reviews', developments: '#/developments', events: '#/events',
+  external: '#/external', onboarding: '#onboarding', settings: '#/settings' }, superTabs = ['onboarding', 'settings'];
 const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
 async function api(path, method = 'GET', body) {
@@ -58,7 +61,7 @@ async function start() {
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
-  if(me.role==='super_admin'&&!accounts.length&&!location.hash&&tab==='projects')tab='onboarding';
+  if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'',tabAddresses.onboarding);
   await route();
 }
 // Review and development are separate pages over the same task API.
@@ -66,12 +69,23 @@ const taskKinds = { reviews: 'review', developments: 'development' }, listTabs =
 // The wizard's address may name a step by index (#onboarding/2), so GitHub's return and a reload open that step.
 const onboardingAddress = /^#onboarding(?:\/([0-5]))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
+// The tab an address names: #/<tab>, a project page, a wizard step, or an older address (#external, #/accounts, #/users).
+function addressTab(hash) {
+  if (projectRoute() || hash === '#/projects') return 'projects';
+  if (onboardingAddress.test(hash)) return 'onboarding';
+  if (hash === '#external') return 'external';
+  const name = /^#\/([a-z]+)(?:\/|$)/.exec(hash)?.[1];
+  return ['accounts', 'users'].includes(name) ? 'settings' : tabAddresses[name] ? name : null;
+}
 async function route() {
   renderVersion++;
-  if(location.hash==='#external')tab='external';
+  // Accounts and users were tabs of their own; their old addresses open the matching settings section.
+  const moved = /^#\/(accounts|users)$/.exec(location.hash); if (moved) history.replaceState(null, '', '#/settings/' + moved[1]);
+  // An address the console does not know keeps the current page (on a fresh load that is the projects page).
+  let next = addressTab(location.hash) || tab;
+  if (superTabs.includes(next) && me.role !== 'super_admin') next = 'projects';
+  if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
-  if (target) tab = 'projects';
-  if(onboardingAddress.test(location.hash)&&me.role==='super_admin')tab='onboarding';
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   page.hidden = !target; list.hidden = !!target;
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
@@ -80,12 +94,13 @@ async function route() {
   if (target) await renderProject(target); else await render();
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });
-async function render() {
+// `quiet` is the periodic refresh: the list stays on screen while loading, and only rows whose data changed are replaced
+// (a running task's runtime changes every refresh; the rows around it, and whatever the user is pointing at, stay put).
+let listSignature = ''; const rowSignatures = new WeakMap();
+async function render(quiet = false) {
   const request=++renderVersion, taskTab = !!taskKinds[tab];
   $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  // Repositories come from installation sync and are started from the list, so the projects page has no add form.
-  $('add').hidden = listTabs.includes(tab) || ['projects','board','costs','settings'].includes(tab) || me.role !== 'super_admin';
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
   $('rows').hidden=['external','onboarding','board','costs','settings'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('sync').hidden=true;$('check').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
@@ -93,7 +108,7 @@ async function render() {
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
   if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
   if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
-  $('rows').replaceChildren();$('rows').dataset.view=tab;$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');
+  $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren();listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='settings'){try{await renderSettings(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
@@ -115,34 +130,27 @@ async function render() {
     staleIntegrations = !checked && integrations.some(item => item.stale);
   }
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
-  let result;try{if(tab==='users')grants=await api('/api/project-admin-assignments');result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
+  let result;try{result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
   if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
-  $('rows').replaceChildren(); $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目` : `${rows.length} 条记录`;
+  const signature=tab+'\n'+params+'\n'+JSON.stringify(rows);if(quiet&&signature===listSignature)return;listSignature=signature;
+  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目` : `${rows.length} 条记录`;
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
-    const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');
+    const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');line.dataset.key=String(row.id);rowSignatures.set(line,JSON.stringify(row));
     const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : (tab==='events'?(row.full_name?row.full_name+' · '+row.route:row.route):row.full_name) || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
     content.append(element('strong', name));
     const detail = tab === 'events' ? `${timestamp(row.received_at)} · ${deliveryCaption(row)} · ${row.delivery_id}`
       : taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+faultSummary(row.error_code,row.error_cause) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
-      : tab === 'accounts' ? `${row.type === 'github_app' ? 'GitHub App · App ID '+row.app_id : '机器人账号'}`
-      : tab === 'users' ? `${row.role === 'super_admin' ? '超级管理员' : '项目管理员'} · ID ${row.id}`
       : installedView ? installedDetail(row) : `仓库 ID ${row.id}${row.model_id ? '' : ' · 未选模型'}`;
     content.append(element('p', detail)); line.append(content);
-    if(tab==='users'&&row.role==='project_admin')content.append(element('p',grantSummary(row)));
     if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     if(tab==='events')for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
-    if(tab==='accounts')status.append(element('span',row.credentials_configured?'凭据已配置':'凭据已撤销','status status-'+(row.credentials_configured?'success':'warning')));
-    if(tab==='accounts'&&row.type==='github_app'&&row.credentials_configured)content.append(appPermissionCheck(row));
-    if(tab==='users')status.append(element('span',row.active?'已启用':'已停用','status'+(row.active?' status-success':'')));
     if(installedView){status.append(...installedBadges(row),...installedIntegration(integrationMap.get(row.id),row));}
     if(tab==='projects'){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
-    if(tab==='accounts'&&row.endpoints.length){const endpoints=element('details',''),summary=element('summary',`${row.endpoints.length} 个 Webhook 入口`);endpoints.append(summary);row.endpoints.forEach(e=>endpoints.append(element('code',e.webhook_path)));content.append(endpoints);}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
     if(installedView){const actions=installedActions(row,()=>start());if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}
-    if(tab==='users'||tab==='accounts'){const actions=element('div','','actions');if(tab==='users'&&row.role==='project_admin')actions.append(button('修改仓库权限',()=>editGrants(row)));actions.append(button('删除',()=>(tab==='users'?deleteUser:deleteAccount)(row).catch(error),'quiet destructive'));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
         try { $('detail-title').textContent='投递详情'; $('detail-body').textContent = JSON.stringify(await api('/api/events/' + row.id), null, 2); $('detail').showModal(); } catch (err) { error(err); }
@@ -160,8 +168,12 @@ async function render() {
       }line.append(actions);
     }
     if(taskTab)content.append(taskMetricsLine(row));
-    line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));$('rows').append(line);
+    line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));lines.push(line);
   });
+  const shown=[...$('rows').children];
+  if(quiet&&shown.length===lines.length&&shown.every((node,index)=>node.dataset.key===lines[index].dataset.key))
+    shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(lines[index]))node.replaceWith(lines[index]);});
+  else $('rows').replaceChildren(...lines);
   if(staleIntegrations)refreshStaleIntegrations();
   if(installedView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
 }
@@ -178,6 +190,25 @@ async function refreshStalePermissions() {
   if (permissionAutoRefresh) return; permissionAutoRefresh = true;
   try { updatePermissionBadges((await api('/api/installations/permissions/check', 'POST', {})).repositories || []); } catch {}
   finally { permissionAutoRefresh = false; }
+}
+// One account or user as a list row, the same markup as the other lists; drawn by the global settings sections.
+function settingsRow(title, detail, extra, badges, actions) {
+  const line = element('div', '', 'row has-actions'), content = element('div', '', 'row-content'), status = element('div', '', 'row-state'), group = element('div', '', 'actions');
+  line.setAttribute('role', 'listitem'); content.append(element('strong', title), element('p', detail), ...extra); status.append(...badges); group.append(...actions);
+  line.append(content, status, group); return line;
+}
+function accountLine(row) {
+  const extra = [];
+  if (row.type === 'github_app' && row.credentials_configured) extra.push(appPermissionCheck(row));
+  if (row.endpoints.length) { const endpoints = element('details', ''); endpoints.append(element('summary', `${row.endpoints.length} 个 Webhook 入口`), ...row.endpoints.map(e => element('code', e.webhook_path))); extra.push(endpoints); }
+  return settingsRow(row.name, row.type === 'github_app' ? 'GitHub App · App ID ' + row.app_id : '机器人账号（Token）', extra,
+    [element('span', row.credentials_configured ? '凭据已配置' : '凭据已撤销', 'status status-' + (row.credentials_configured ? 'success' : 'warning'))],
+    [button('删除', () => deleteAccount(row).catch(error), 'quiet destructive')]);
+}
+function userLine(row) {
+  return settingsRow(row.username, `${row.role === 'super_admin' ? '超级管理员 · 管理全部项目' : '项目管理员'} · ID ${row.id}`, row.role === 'project_admin' ? [element('p', grantSummary(row))] : [],
+    [element('span', row.active ? '已启用' : '已停用', 'status' + (row.active ? ' status-success' : ''))],
+    [...(row.role === 'project_admin' ? [button('修改仓库权限', () => editGrants(row))] : []), button('删除', () => deleteUser(row).catch(error), 'quiet destructive')]);
 }
 async function deleteUser(row) {
   const self = row.id === me.id, kept = '仓库和组织授权、个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
@@ -203,10 +234,11 @@ const forms = {
   accounts: [['name', '账号名称'], ['type', '账号类型', [['bot_account', '机器人账号'], ['github_app', 'GitHub App']]], ['app_id', 'App ID（仅 GitHub App）'], ['private_key', 'App 私钥（仅 GitHub App）', 'textarea'], ['token', '机器人 Token（仅机器人账号）', 'password'], ['webhook_secret', 'Webhook 签名凭据', 'password']],
   users: [['username', '用户名'], ['password', '初始密码（至少 12 位）', 'password'], ['role', '角色', [['project_admin', '项目管理员'], ['super_admin', '超级管理员']]], ['grants', '仓库权限', 'grants']]
 };
-$('add').addEventListener('click', () => {
-  editingUser = null; $('editor-note').hidden = false;
-  $('editor-title').textContent = '新增' + titles[tab]; $('editor-fields').replaceChildren(); $('editor-error').textContent = '';
-  for (const [name, title, kind] of forms[tab]) {
+const editorTitles = { accounts: '新增机器人账号', users: '新增用户' };
+function openEditor(kind) {
+  editingUser = null; editorKind = kind; $('editor-note').hidden = false;
+  $('editor-title').textContent = editorTitles[kind]; $('editor-fields').replaceChildren(); $('editor-error').textContent = '';
+  for (const [name, title, kind] of forms[editorKind]) {
     if (kind === 'grants') { $('editor-fields').append(grantField(null)); continue; }
     const label = element('label', title), choices = typeof kind === 'function' ? kind() : kind;
     const input = document.createElement(Array.isArray(choices) ? 'select' : kind === 'textarea' ? 'textarea' : 'input'); input.name = name;
@@ -216,9 +248,9 @@ $('add').addEventListener('click', () => {
     label.append(input); $('editor-fields').append(label);
   }
   // A super administrator sees every project and holds no grants, so the choice is only offered for project administrators.
-  if (tab === 'users') { const role = $('editor-form').elements.role, field = $('editor-fields').querySelector('[data-grants]'); role.addEventListener('change', () => { field.hidden = role.value === 'super_admin'; }); }
+  if (editorKind === 'users') { const role = $('editor-form').elements.role, field = $('editor-fields').querySelector('[data-grants]'); role.addEventListener('change', () => { field.hidden = role.value === 'super_admin'; }); }
   $('editor').showModal();
-});
+}
 // Installed repositories grouped by owner. A group's first option grants the whole organization, which also covers repositories
 // enabled there later; the other options grant one repository each and nothing the organization adds afterwards.
 function grantField(user) {
@@ -253,15 +285,15 @@ function grantSummary(user) {
   return [organizations.length ? '整个组织：' + organizations.join('、') : '', repos.length ? '仓库：' + repos.join('、') : ''].filter(Boolean).join(' · ');
 }
 function editGrants(user) {
-  editingUser = user; $('editor-note').hidden = true; $('editor-title').textContent = `修改 ${user.username} 的仓库权限`;
+  editingUser = user; editorKind = 'users'; $('editor-note').hidden = true; $('editor-title').textContent = `修改 ${user.username} 的仓库权限`;
   $('editor-fields').replaceChildren(grantField(user)); $('editor-error').textContent = ''; $('editor').showModal();
 }
 $('editor-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, data = Object.fromEntries(new FormData(form));
-  if (tab === 'accounts') { if (data.type === 'github_app') delete data.token; else { delete data.private_key; delete data.app_id; } }
-  if (tab === 'users') { delete data.grants; if (data.role !== 'super_admin') Object.assign(data, chosenGrants(form)); }
+  if (editorKind === 'accounts') { if (data.type === 'github_app') delete data.token; else { delete data.private_key; delete data.app_id; } }
+  if (editorKind === 'users') { delete data.grants; if (data.role !== 'super_admin') Object.assign(data, chosenGrants(form)); }
   const submit = form.querySelector('[type=submit]'); submit.disabled = true;
-  try { if (editingUser) await api('/api/project-admin-assignments', 'PUT', { user_id: editingUser.id, ...chosenGrants(form) }); else await api('/api/' + tab, 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
+  try { if (editingUser) await api('/api/project-admin-assignments', 'PUT', { user_id: editingUser.id, ...chosenGrants(form) }); else await api('/api/' + editorKind, 'POST', data); $('editor').close(); form.reset(); await start(); } catch (err) { error(err); } finally { submit.disabled = false; }
 });
 $('cancel').addEventListener('click', () => { $('editor').close(); $('editor-form').reset(); });
 $('close-detail').addEventListener('click', () => $('detail').close());
@@ -269,9 +301,13 @@ $('access-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, button = $('access-submit'); button.disabled = true;
   try { await api(setup ? '/api/setup' : '/api/auth/login', 'POST', Object.fromEntries(new FormData(form))); form.reset(); await start(); } catch (err) { error(err); } finally { button.disabled = false; }
 });
-$('logout').addEventListener('click', async () => { try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; tab = 'projects'; repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').textContent = ''; await start(); } catch (err) { error(err); } });
-$('tabs').addEventListener('click', event => { if (!event.target.dataset.tab) return; tab = event.target.dataset.tab; offset = 0;
-  if (location.hash) history.pushState(null, '', location.pathname); route().catch(error); });
+// Signing out returns to the default page, so whoever signs in next does not land on the previous user's page; the wizard
+// keeps its address (onboarding.js resets it to the first step).
+$('logout').addEventListener('click', async () => { try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; tab = 'projects'; if (!onboardingAddress.test(location.hash)) history.replaceState(null, '', location.pathname); repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').textContent = ''; await start(); } catch (err) { error(err); } });
+// The address is written without waiting for hashchange, so the page switches in the same click; back and forward still
+// fire hashchange and draw the page they return to.
+$('tabs').addEventListener('click', event => { const name = event.target.dataset.tab; if (!name) return;
+  if (location.hash !== tabAddresses[name]) history.pushState(null, '', tabAddresses[name]); offset = 0; route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));
 $('check').addEventListener('click', () => { forceIntegrationCheck = true; start().catch(error); });
 // The onboarding dialog calls this once a run reaches a terminal state.
@@ -285,6 +321,6 @@ $('sync').addEventListener('click', async () => {
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
 document.addEventListener('DOMContentLoaded',()=>start().catch(error),{once:true});
-setInterval(()=>{if(me&&['reviews','developments'].includes(tab)&&!projectRoute()&&!document.querySelector('dialog[open]'))render().catch(error);},5000);
+setInterval(()=>{if(me&&['reviews','developments'].includes(tab)&&!projectRoute()&&!document.hidden&&!document.querySelector('dialog[open]'))render(true).catch(error);},5000);
 
 setInterval(()=>{if(me&&tab==='projects'&&!projectRoute()&&!document.querySelector('dialog[open]'))refreshProjectActivity();},5000);

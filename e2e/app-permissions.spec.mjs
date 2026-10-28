@@ -13,7 +13,7 @@ test('机器人账号页检查 GitHub App 权限，列出缺少的项并给出�
   const{admin,password}=await setup(h),keys=generateKeyPairSync('rsa',{modulusLength:2048});
   await account(admin,{name:'Department App',type:'github_app',app_id:'123',private_key:keys.privateKey.export({type:'pkcs8',format:'pem'}),token:undefined});
   await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
-  await page.getByRole('button',{name:'机器人账号',exact:true}).click();
+  await page.getByRole('button',{name:'全局设置',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'机器人账号',exact:true}).click();
   const row=page.locator('.row',{hasText:'Department App'});await row.getByRole('button',{name:'检查权限',exact:true}).click();
   const result=row.locator('.permission-result');
   await expect(result).toContainText('第 1 步');await expect(result).toContainText('Actions：改为「Read and write」（当前「No access」）');await expect(result).toContainText('Commit statuses：改为「Read and write」（当前「Read-only」）');
