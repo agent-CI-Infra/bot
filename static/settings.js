@@ -1,44 +1,83 @@
-// Global settings (super administrators only): deployment-wide defaults, the version this control plane runs, the
-// deployment settings the onboarding wizard saves, and the shared models. Loaded after app.js, views.js and project.js and
-// reuses their helpers; tunnelCredential comes from onboarding.js, which loads later but before any page is drawn.
+// Global settings (super administrators only), laid out like a project page: categories on the left, one category on the
+// right, each with its own address (#/settings/<section>) so a reload stays on it. Loaded after app.js, views.js and
+// project.js and reuses their helpers; tunnelCredential comes from onboarding.js, which loads later but before any page is drawn.
 // The wizard settings and models are saved through the wizard's and the model APIs; a card redraws only itself.
 titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
+const settingsSections = [['general', '常规'], ['access', '公网接入'], ['accounts', '机器人账号'], ['models', '模型'], ['users', '用户']];
+function settingsSection() { const key = /^#\/settings\/([a-z]+)$/.exec(location.hash)?.[1]; return settingsSections.some(([name]) => name === key) ? key : 'general'; }
 // What the cards draw from; the model cards are redrawn together because deleting the default model clears it.
 let settingsView = null;
 async function renderSettings(request) {
-  const [{ settings, version }, onboarding, { accounts: registered }, { models }] = await Promise.all([
-    api('/api/settings'), api('/api/onboarding'), api('/api/accounts'), api('/api/models')]);
+  const section = settingsSection(), nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
+  nav.setAttribute('aria-label', '全局设置类别');
+  for (const [key, caption] of settingsSections) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
+  // The categories are drawn at once; the chosen category's cards follow when their data arrives.
+  $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
+  const cards = await settingsCards[section](request);
   if (request !== renderVersion) return;
-  $('count').textContent = '';
-  const about = card('当前运行版本');
-  about.append(version.image_tag ? facts([['镜像标签', version.image_tag]]) : note('源码运行：没有设置镜像标签（BOT_IMAGE_TAG），版本以部署所用的源码提交为准。'));
-  const [min, max] = settings.task_concurrency_bounds, concurrency = card('同时运行的任务');
-  const form = document.createElement('form'), value = input('task_concurrency', settings.task_concurrency, { type: 'number', min, max, step: 1, required: true });
-  const message = element('p', '', 'view-error'), actions = element('div', '', 'actions form-actions'), submit = element('button', '保存');
-  form.className = 'project-form'; form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'alert'); actions.append(submit);
-  form.append(field('每台虚拟电脑默认同时运行的任务数', value),
-    note(`取 ${min}–${max}。每个仓库一台虚拟电脑；项目在「机器配置」里没有单独设置时使用这个值，超出的任务继续排队。同时运行的任务各用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限。`),
-    message, actions);
-  form.addEventListener('submit', async event => {
-    event.preventDefault(); message.className = 'view-error'; message.textContent = '';
-    if (!value.checkValidity()) { message.textContent = `需要 ${min}–${max} 之间的整数`; value.focus(); return; }
-    submit.disabled = true;
-    try {
-      const saved = await api('/api/settings', 'PATCH', { task_concurrency: Number(value.value) });
-      value.value = saved.settings.task_concurrency; message.className = 'view-success'; message.textContent = '已保存，新任务按这个并发数排队';
-    } catch (err) { message.textContent = err.message; } finally { submit.disabled = false; }
-  });
-  concurrency.append(form);
-  const view = settingsView = { request, onboarding, accounts: registered, models };
-  view.address = liveCard('公网 HTTPS 地址', redraw => addressBody(view, redraw));
-  view.tunnel = liveCard('Cloudflare Tunnel', redraw => tunnelBody(view, redraw));
-  view.app = liveCard('GitHub App', redraw => appBody(view, redraw));
-  view.defaultModel = liveCard('默认共享模型', redraw => defaultModelBody(view, redraw));
-  view.sharedModels = liveCard('部署共享模型', () => sharedModelsBody(view));
-  view.sharedModels.section.classList.add('settings-wide');
-  $('settings-panel').replaceChildren(about, concurrency, ...['address', 'tunnel', 'app', 'defaultModel', 'sharedModels'].map(name => view[name].section));
+  content.replaceChildren(...cards);
+}
+// Each category loads only what its cards show.
+const settingsCards = {
+  async general(request) {
+    const { settings, version } = await api('/api/settings');
+    const about = card('当前运行版本');
+    about.append(version.image_tag ? facts([['镜像标签', version.image_tag]]) : note('源码运行：没有设置镜像标签（BOT_IMAGE_TAG），版本以部署所用的源码提交为准。'));
+    const [min, max] = settings.task_concurrency_bounds, concurrency = card('同时运行的任务');
+    const form = document.createElement('form'), value = input('task_concurrency', settings.task_concurrency, { type: 'number', min, max, step: 1, required: true });
+    const message = element('p', '', 'view-error'), actions = element('div', '', 'actions form-actions'), submit = element('button', '保存');
+    form.className = 'project-form'; form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'alert'); actions.append(submit);
+    form.append(field('每台虚拟电脑默认同时运行的任务数', value),
+      note(`取 ${min}–${max}。每个仓库一台虚拟电脑；项目在「机器配置」里没有单独设置时使用这个值，超出的任务继续排队。同时运行的任务各用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限。`),
+      message, actions);
+    form.addEventListener('submit', async event => {
+      event.preventDefault(); message.className = 'view-error'; message.textContent = '';
+      if (!value.checkValidity()) { message.textContent = `需要 ${min}–${max} 之间的整数`; value.focus(); return; }
+      submit.disabled = true;
+      try {
+        const saved = await api('/api/settings', 'PATCH', { task_concurrency: Number(value.value) });
+        value.value = saved.settings.task_concurrency; message.className = 'view-success'; message.textContent = '已保存，新任务按这个并发数排队';
+      } catch (err) { message.textContent = err.message; } finally { submit.disabled = false; }
+    });
+    concurrency.append(form);
+    return [about, concurrency];
+  },
+  // Where GitHub's webhooks arrive: a self-hosted HTTPS address, or a Cloudflare Tunnel in front of it.
+  async access(request) {
+    const view = settingsView = { request, onboarding: await api('/api/onboarding'), accounts: [], models: [] };
+    view.address = liveCard('公网 HTTPS 地址', redraw => addressBody(view, redraw));
+    view.tunnel = liveCard('Cloudflare Tunnel', redraw => tunnelBody(view, redraw));
+    return [view.address.section, view.tunnel.section];
+  },
+  // The App the wizard uses, then every registered account (GitHub Apps and bot tokens).
+  async accounts(request) {
+    const [onboarding, { accounts: registered }] = await Promise.all([api('/api/onboarding'), api('/api/accounts')]);
+    const view = settingsView = { request, onboarding, accounts: registered, models: [] };
+    view.app = liveCard('接入向导使用的 GitHub App', redraw => appBody(view, redraw));
+    return [view.app.section, settingsList('已登记的账号', '账号提供访问 GitHub 的凭据和接收 webhook 的入口；仓库经账号同步出现。凭据只保存，不会从读取接口返回。',
+      registered.map(accountLine), '还没有登记账号。', '新增账号', 'accounts')];
+  },
+  async models(request) {
+    const [onboarding, { models }] = await Promise.all([api('/api/onboarding'), api('/api/models')]);
+    const view = settingsView = { request, onboarding, accounts: [], models };
+    view.defaultModel = liveCard('默认共享模型', redraw => defaultModelBody(view, redraw));
+    view.sharedModels = liveCard('部署共享模型', () => sharedModelsBody(view));
+    return [view.defaultModel.section, view.sharedModels.section];
+  },
+  async users(request) {
+    const [{ users }, assigned] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);
+    grants = assigned;
+    return [settingsList('用户', '超级管理员管理全部项目和这里的设置；项目管理员只看到分配给自己的组织和仓库。', users.map(userLine), '还没有用户。', '新增用户', 'users')];
+  },
+};
+// A card holding a list of records with one add button that opens the shared editor.
+function settingsList(title, intro, lines, empty, caption, kind) {
+  const section = card(title), list = element('div', '', 'rows settings-rows'), head = element('div', '', 'actions settings-list-head');
+  list.setAttribute('role', 'list'); list.setAttribute('aria-label', title); list.append(...(lines.length ? lines : [element('p', empty, 'muted')]));
+  head.append(note(intro), button(caption, () => openEditor(kind), ''));
+  section.append(head, list); return section;
 }
 // A card whose body `draw(redraw)` builds; `redraw(notice)` draws it again with the outcome of the last action on top.
 function liveCard(title, draw) {
@@ -63,11 +102,11 @@ function actionForm(nodes, caption, save, extra = []) {
 function addressBody(view, redraw) {
   const saved = view.onboarding.public_address, origin = input('origin', saved?.origin || '', { type: 'url', placeholder: 'https://你的域名，不带路径' });
   return [saved ? facts([['已验证地址', saved.origin], ['检查时间', timestamp(saved.checked_at)]]) : note('还没有验证过的公网地址。'),
-    note('GitHub 把 webhook 送到这个地址。它只能连到 webhook 8791，检查会拒绝管理页面和其他实例。改了地址后，在「GitHub App」里点当前 App 的「重新检查」，把 App 的 webhook 改到新地址。'),
+    note('GitHub 把 webhook 送到这个地址。它只能连到 webhook 8791，检查会拒绝管理页面和其他实例。改了地址后，到「机器人账号」里点当前 App 的「重新检查」，把 App 的 webhook 改到新地址。'),
     actionForm([field('公网 HTTPS 地址', origin)], '检查并保存', async () => {
       if (!origin.value.trim()) throw new Error('先填写公网 HTTPS 地址');
       view.onboarding.public_address = (await api('/api/onboarding/address', 'POST', { origin: origin.value.trim() })).public_address;
-      redraw('已检查并保存 ' + view.onboarding.public_address.origin); view.app.redraw();
+      redraw('已检查并保存 ' + view.onboarding.public_address.origin); view.app?.redraw();
     })];
 }
 // The token is write-only: the page shows whether one is saved, never the token or the pasted command.

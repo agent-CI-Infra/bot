@@ -138,7 +138,7 @@ async function renderOnboarding(request){
       }
       projects.append(row);
     }
-    projects.append(note('这里包括已安装但尚未启动的仓库。未看到新仓时点击同步。自动开发默认关闭，在对应项目的「开发」中单独开启；尚未安装时不开始检视。'));panel.append(projects,button('完成向导',async()=>{await api('/api/onboarding/complete','POST',{});tab='projects';history.replaceState(null,'',location.pathname);await start();},''));
+    projects.append(note('这里包括已安装但尚未启动的仓库。未看到新仓时点击同步。自动开发默认关闭，在对应项目的「开发」中单独开启；尚未安装时不开始检视。'));panel.append(projects,button('完成向导',async()=>{await api('/api/onboarding/complete','POST',{});history.replaceState(null,'','#/projects');await start();},''));
   }
   nav.querySelector('[aria-current=step]')?.scrollIntoView({block:'nearest',inline:'nearest'});
 }

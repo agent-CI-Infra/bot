@@ -218,8 +218,9 @@ function deployment() {
     onboarding: { public_address: { origin: 'https://hooks.example.com', checked_at: '2026-10-27T00:00:00.000Z' },
       tunnel: { available: true, token_configured: true, origin: 'http://webhook:8791', state: 'connected', routes: [] },
       app: { account_id: 'a1', app_id: '123', slug: 'first-app', installations: 1, webhook_url: 'https://old.example.com/hooks/github/a1/e1' }, model_id: 'm1' },
-    accounts: [{ id: 'a1', name: 'First App', type: 'github_app', app_id: '123' }, { id: 'a2', name: 'Second App', type: 'github_app', app_id: '456' },
-      { id: 'b1', name: 'Token account', type: 'bot_account', app_id: null }],
+    accounts: [{ id: 'a1', name: 'First App', type: 'github_app', app_id: '123', credentials_configured: true, endpoints: [{ webhook_path: '/hooks/github/a1/e1' }] },
+      { id: 'a2', name: 'Second App', type: 'github_app', app_id: '456', credentials_configured: true, endpoints: [] },
+      { id: 'b1', name: 'Token account', type: 'bot_account', app_id: null, credentials_configured: false, endpoints: [] }],
     models: [{ id: 'm1', repository_id: null, model_name: 'default-model', api_url: 'https://one.example.com/v1', key_configured: true, version: 1 },
       { id: 'm2', repository_id: null, model_name: 'second-model', api_url: 'https://two.example.com/v1', key_configured: true, version: 1 },
       { id: 'p1', repository_id: '101', model_name: 'project-model', api_url: 'https://three.example.com/v1', key_configured: true, version: 1 }] };
@@ -251,15 +252,21 @@ function deployment() {
 test('global settings change the wizard settings and shared models without a project page or token echo', async () => {
   const { sent, respond } = deployment(), page = loadConsole(settingsScripts, respond);
   page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; var reloads = 0; reloadProject = async () => { reloads++; };");
-  await page.run('renderSettings(renderVersion)');
   const panel = page.$('settings-panel'), text = node => [node.textContent, ...node.children.flatMap(text)].join(' ');
-  const section = title => panel.children.find(node => node.querySelector('h3').textContent === title);
+  // Each category has its own address and draws only its own cards.
+  const open = async key => { page.run(`location.hash = '#/settings/${key}'`); await page.run('renderSettings(renderVersion)'); };
+  const cards = () => panel.querySelectorAll('h3').map(node => node.textContent);
+  const section = title => panel.querySelectorAll('section').find(node => node.querySelector('h3')?.textContent === title);
   const buttons = (node, caption) => node.querySelectorAll('button').filter(b => b.textContent === caption);
   const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');
   const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
-  assert.deepEqual(panel.querySelectorAll('h3').map(node => node.textContent), ['当前运行版本', '同时运行的任务', '公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub App', '默认共享模型', '部署共享模型']);
+  await page.run('renderSettings(renderVersion)');
+  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['常规', '#/settings/general'], ['公网接入', '#/settings/access'], ['机器人账号', '#/settings/accounts'], ['模型', '#/settings/models'], ['用户', '#/settings/users']]);
+  assert.deepEqual(cards(), ['当前运行版本', '同时运行的任务']);
+  assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '常规');
   assert.match(text(section('当前运行版本')), /v9\.9\.9/);
   assert.equal(String(section('同时运行的任务').querySelector('input').value), '2');
+  await open('access'); assert.deepEqual(cards(), ['公网 HTTPS 地址', 'Cloudflare Tunnel']);
   // One-time wizard steps stay in the wizard: nothing here creates an App or installs one.
   assert.ok(!panel.querySelectorAll('button').some(b => /创建|安装|跳过|manifest/i.test(b.textContent)));
 
@@ -268,7 +275,6 @@ test('global settings change the wizard settings and shared models without a pro
   await submit(section('公网 HTTPS 地址').querySelector('form'));
   assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/address', { origin: 'https://new.example.com' }]);
   assert.match(text(section('公网 HTTPS 地址')), /已检查并保存 https:\/\/new\.example\.com/);
-  assert.match(text(section('GitHub App')), /webhook 不在当前公网地址下/);
 
   // A pasted command is sent once and never drawn back; revoking asks first.
   const token = Buffer.from(JSON.stringify({ a: 'account', t: 'tunnel', s: 'secret-part' })).toString('base64');
@@ -281,15 +287,22 @@ test('global settings change the wizard settings and shared models without a pro
   assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/tunnel', { revoke: true }]);
   assert.match(text(section('Cloudflare Tunnel')), /未配置/); assert.equal(buttons(section('Cloudflare Tunnel'), '撤销 token').length, 0);
 
+  // The accounts category shows the wizard's App, which now flags the webhook left on the old address, and every account.
+  await open('accounts'); assert.deepEqual(cards(), ['接入向导使用的 GitHub App', '已登记的账号']);
+  const app = () => section('接入向导使用的 GitHub App');
+  assert.match(text(app()), /webhook 不在当前公网地址下/);
+  assert.deepEqual(section('已登记的账号').querySelectorAll('.row strong').map(node => node.textContent), ['First App', 'Second App', 'Token account']);
+  assert.match(text(section('已登记的账号')), /凭据已撤销/); assert.ok(buttons(section('已登记的账号'), '新增账号').length);
   // Only registered GitHub Apps are offered; switching writes the webhook to the verified address.
-  const apps = section('GitHub App').querySelectorAll('li');
+  const apps = app().querySelectorAll('li');
   assert.deepEqual(apps.map(row => row.querySelector('button').textContent), ['重新检查', '改用此 App']);
   await confirm(apps[1].querySelector('button').listeners.click[0]());
   assert.deepEqual(sent.at(-1), ['POST', '/api/onboarding/use-app', { account_id: 'a2', update_webhook: true }]);
-  assert.match(text(section('GitHub App')), /已改用 Second App/); assert.match(text(section('GitHub App')), /second-app/);
-  assert.doesNotMatch(text(section('GitHub App')), /webhook 不在当前公网地址下/);
+  assert.match(text(app()), /已改用 Second App/); assert.match(text(app()), /second-app/);
+  assert.doesNotMatch(text(app()), /webhook 不在当前公网地址下/);
 
   // The default is picked among shared models with a key; project models are not offered or listed.
+  await open('models'); assert.deepEqual(cards(), ['默认共享模型', '部署共享模型']);
   const choices = () => section('默认共享模型').querySelector('select').children.map(option => option.value);
   assert.deepEqual(choices(), ['', 'm1', 'm2']); assert.doesNotMatch(text(panel), /project-model/);
   section('默认共享模型').querySelector('select').value = 'm2'; await submit(section('默认共享模型').querySelector('form'));

@@ -164,10 +164,11 @@ try {
     // The project page's machine section carries the computer's lifecycle actions.
     await page.locator('#rows .row').first().getByRole('button',{name:'设置',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'机器配置',exact:true}).click();
     // A project administrator sees every category except 成员.
-    const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),7);
+    const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),8);
     await machine.getByRole('button',{name:'停止',exact:true}).click();await machine.locator('.status',{hasText:'已停止'}).waitFor();
     await machine.getByRole('button',{name:'启动',exact:true}).click();await machine.locator('.status',{hasText:'就绪'}).waitFor();
-    page.once('dialog',dialog=>dialog.accept());await machine.getByRole('button',{name:'重置',exact:true}).click();await machine.getByText('g3',{exact:true}).waitFor();
+    // Reset asks in the console's own confirmation dialog.
+    await machine.getByRole('button',{name:'重置',exact:true}).click();await page.locator('dialog[open]').getByRole('button',{name:'重置',exact:true}).click();await machine.getByText('g3',{exact:true}).waitFor();
     await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/project-env/project-mobile.png',fullPage:true});
     assert.deepEqual(errors,[]);passed('desktop and mobile environment page obey administrator scope');
   } finally {await browser.close();}

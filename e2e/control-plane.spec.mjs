@@ -16,18 +16,19 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await page.getByRole('button', { name: '项目', exact: true }).click();
     await expect(page.getByRole('heading', { name: '项目' })).toBeVisible();
     // Repositories come only from installation sync; there is no manual registration form.
-    await expect(page.locator('#add')).toBeHidden(); await expect(page.getByRole('button', { name: '手动登记仓库' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '新增', exact: true })).toHaveCount(0); await expect(page.getByRole('button', { name: '手动登记仓库' })).toHaveCount(0);
     await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
     await expect(page.getByText('本页 0 条投递')).toBeVisible();
     await admin('/api/auth/login', 'POST', { username: 'administrator', password });
-    await page.getByRole('button', { name: '机器人账号', exact: true }).click();
-    await page.getByRole('button', { name: '新增', exact: true }).click();
+    // Accounts live in global settings.
+    await page.getByRole('button', { name: '全局设置', exact: true }).click(); await page.locator('.project-nav').getByRole('link', { name: '机器人账号', exact: true }).click();
+    await expect(page).toHaveURL(/#\/settings\/accounts$/); await page.getByRole('button', { name: '新增账号', exact: true }).click();
     const secret = randomBytes(24).toString('hex');
     await page.getByLabel('账号名称', { exact: true }).fill('Browser account');
     await page.getByLabel('机器人 Token（仅机器人账号）', { exact: true }).fill(testPassword());
     await page.getByLabel('Webhook 签名凭据', { exact: true }).fill(secret);
     await page.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(page.locator('#rows').getByText('Browser account', { exact: true })).toBeVisible();
+    await expect(page.locator('#settings-panel').getByText('Browser account', { exact: true })).toBeVisible();
     const a = (await admin('/api/accounts')).value.accounts[0];
     await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
     const memberPassword = testPassword();
@@ -50,8 +51,7 @@ test('管理员完成初始化、登记账号、查看投递，项目管理员�
     await expect(page).toHaveURL(/#\/projects\/101\/basic$/); await expect(page.getByRole('link', { name: '基本设置', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Webhook 投递', exact: true }).click();
     await expect(page.getByText('本页 1 条投递')).toBeVisible();
-    await expect(page.getByRole('button', { name: '机器人账号', exact: true })).toBeHidden();
-    await expect(page.getByRole('button', { name: '用户', exact: true })).toBeHidden();
+    await expect(page.getByRole('button', { name: '全局设置', exact: true })).toBeHidden(); await expect(page.getByRole('button', { name: '接入向导', exact: true })).toBeHidden();
     await expect(page.locator('#rows')).toContainText('browser-own'); await expect(page.locator('#rows')).not.toContainText('browser-other');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
