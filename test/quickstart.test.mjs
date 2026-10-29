@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { harness, setup, account } from './helpers.mjs';
+import { harness, setup, account, testPassword } from './helpers.mjs';
 import { Quickstart, boardLocation, quickstartPermissions } from '../dist/projects/quickstart.js';
 import { GitHub, agentReadPermissions } from '../dist/github/client.js';
 import { ReadTokens } from '../dist/agent/read-token.js';
@@ -307,4 +307,42 @@ test('review, development and read tokens still never ask for workflows, pages o
   assert.deepEqual(requested[1], { contents: 'write', issues: 'write', pull_requests: 'write' });
   for (const permissions of requested) for (const key of onboardingOnly) assert.ok(!(key in permissions), key);
   for (const key of onboardingOnly) assert.ok(!(key in agentReadPermissions), key);
+});
+
+test('deleting a project removes only its control-plane records, in one transaction, without calling GitHub', async t => {
+  const { h, admin, state } = await fixture(t);
+  assert.equal((await admin('/api/installations/101/activate', 'POST', {})).status, 201);
+  h.store.run("INSERT INTO project_environments(repository_id) VALUES('101')");
+  h.store.run("INSERT INTO environment_operations VALUES('op-1','101','start','{}','completed',NULL)");
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('task-1','101','review.pr','succeeded','done')");
+  h.store.run("INSERT INTO task_logs VALUES('log-1','task-1','{}','2026-01-01T00:00:00.000Z')");
+  h.store.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,version,updated_at) VALUES('model-1','101','https://model.invalid/v1','m',NULL,1,'2026-01-01T00:00:00.000Z')");
+  h.store.run("UPDATE policies SET model_id='model-1' WHERE repository_id='101'");
+  h.store.run("INSERT INTO model_projects VALUES('model-1','101')");
+  h.store.run("INSERT INTO quickstart_runs VALUES('run-1','101','done','[]',NULL,NULL,0,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')");
+  // A pending environment operation would still write back after the rows are gone, so the delete refuses and keeps everything.
+  h.store.run("INSERT INTO environment_operations VALUES('op-2','101','start','{}','pending',NULL)");
+  let refused = await admin('/api/projects/101', 'DELETE', {});
+  assert.deepEqual([refused.status, refused.value.error], [409, 'project_account_pending']);
+  assert.ok(h.store.get("SELECT 1 FROM repositories WHERE id='101'"));
+  h.store.run("UPDATE environment_operations SET state='completed' WHERE id='op-2'");
+  const sent = state.requests.length;
+  const deleted = await admin('/api/projects/101', 'DELETE', {});
+  assert.deepEqual([deleted.status, deleted.value], [200, { deleted: true }]);
+  // GitHub was never called: no repository, App installation or token request was made.
+  assert.equal(state.requests.length, sent);
+  assert.deepEqual(state.revoked, []);
+  for (const table of ['repositories', 'policies', 'project_environments', 'environment_operations', 'quickstart_runs', 'installed_repositories',
+    'tasks', 'models', 'model_projects']) {
+    const column = table === 'repositories' ? 'id' : 'repository_id';
+    assert.equal(h.store.get(`SELECT count(*) AS n FROM ${table} WHERE ${column}=?`, '101').n, 0, table);
+  }
+  assert.equal(h.store.get('SELECT count(*) AS n FROM task_logs').n, 0);
+  assert.equal(h.store.get("SELECT action FROM audit WHERE action='repository.deleted' AND resource_id='101'").action, 'repository.deleted');
+  // Unknown projects are a 404, and the route is for super administrators only.
+  assert.equal((await admin('/api/projects/999', 'DELETE', {})).status, 404);
+  const password = testPassword(), member = h.client();
+  await admin('/api/users', 'POST', { username: 'member', password, repository_ids: [] });
+  await member('/api/auth/login', 'POST', { username: 'member', password });
+  assert.equal((await member('/api/projects/101', 'DELETE', {})).status, 403);
 });

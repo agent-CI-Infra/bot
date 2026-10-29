@@ -335,7 +335,7 @@ test('an older audit with foreign keys is rebuilt without them and keeps its rec
   assert.deepEqual(store.all('SELECT user_id,action FROM audit').map(row => ({ ...row })), [{ user_id: 'u', action: 'system.initialized' }]);
 });
 
-test('the project list marks reduced permissions, refreshes stale ones in place once, and offers deletion only off the installation', async () => {
+test('the project list marks reduced permissions, refreshes stale ones in place once, and offers deletion on every project row', async () => {
   const gap = [{ permission: 'actions', required: 'write', current: 'read' }];
   const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', installed: true, registered: true, enabled: true, review_enabled: true,
     development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false, ...extra });
@@ -356,7 +356,7 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   assert.match(permission(first).title, /Actions 需要「Read and write」，现在「Read-only」/);
   assert.deepEqual([permission(removed).hidden, permission(third).hidden], [true, true]);
   assert.ok(removed.querySelectorAll('.status').some(chip => chip.textContent === '已移出安装'));
-  assert.ok(actions(removed).includes('删除')); assert.ok(!actions(first).includes('删除')); assert.ok(!actions(third).includes('删除'));
+  assert.ok(actions(removed).includes('删除')); assert.ok(actions(first).includes('删除')); assert.ok(actions(third).includes('删除'));
   await settle();
   // One background check; the badges changed on the rows already drawn, which stayed on the list.
   assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations', 'POST /api/installations/permissions/check']);
@@ -409,4 +409,33 @@ test('deletions confirm in the console dialog, which shows the check and a refus
   // Closing with Esc cancels too.
   remove(); view.close(); await settle();
   assert.equal(deletes(), 2);
+});
+
+test('a started project row deletes only the control-plane records, never GitHub, from the console dialog', async () => {
+  const listing = [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true, registered: true, enabled: true, review_enabled: true,
+    development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false }];
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations') return [200, { integrations: [] }];
+    if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
+    if (method === 'DELETE' && path === '/api/projects/101') return [200, { deleted: true }];
+    return [404, { error: 'not_found' }];
+  });
+  page.run("var startCalls = 0; start = async () => { startCalls++; }; var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
+  await page.run('render()');
+  const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20));
+  const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
+  const remove = page.$('rows').children[0].querySelectorAll('button').find(button => button.textContent === '删除');
+  assert.ok(remove, 'a started project row offers 删除');
+  remove.listeners.click[0]();
+  assert.equal(view.open, true);
+  assert.deepEqual(texts('h2'), ['删除项目 fixture/project-101？']);
+  assert.ok(texts('p').some(line => line.includes('不会在 GitHub 上删除仓库')));
+  assert.ok(texts('p').some(line => line.includes('不会卸载 App 安装')));
+  view.querySelector('form').listeners.submit[0]({ preventDefault() {} });
+  await settle();
+  assert.equal(view.open, false);
+  assert.ok(page.requests.includes('DELETE /api/projects/101'));
+  // The GitHub-checked installation deletion is not used for a started project.
+  assert.ok(!page.requests.some(request => request.startsWith('DELETE /api/installations/')));
+  assert.equal(page.run('startCalls'), 1);
 });

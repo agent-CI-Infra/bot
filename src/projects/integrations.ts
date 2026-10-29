@@ -1,20 +1,34 @@
 import type { Json } from '../core/security.js';
 import type { Store, Row } from '../storage/database.js';
+import { appJwt, revokeInstallationToken } from '../github/client.js';
 
 /** How long a status stays fresh before the console re-checks it. */
 const CACHE_MS = 10 * 60_000;
+/** The checker only reads: a token minted for one repository never asks for a write permission. */
+const READ_PERMISSIONS: Record<string, string> = { contents: 'read', actions: 'read', metadata: 'read' };
 
 export type GateState = 'none' | 'configured' | 'live' | 'unknown';
 export type DashboardState = 'none' | 'registered' | 'published' | 'unknown';
 
 interface GitHubFile { text: string; sha: string }
+type Credentials = { kind: 'bot_account'; token: string } | { kind: 'github_app'; appId: string; privateKey: string };
 
-/** The account's GitHub token; GitHub App accounts are not supported by the checker yet. */
-export function accountToken(store: Store, accountId: string): string | null {
+/** A long-lived bot token or an App's sealed private key, read like every other GitHub caller reads accounts. */
+export function accountCredentials(store: Store, accountId: string): Credentials | null {
   const account = store.get('SELECT * FROM accounts WHERE id=?', accountId);
-  if (!account || account.type !== 'bot_account') return null;
+  if (!account) return null;
   const secrets = store.secrets.open(account.credentials, `account:${account.id}`);
-  return typeof secrets.token === 'string' && secrets.token ? secrets.token : null;
+  if (account.type === 'bot_account') return typeof secrets.token === 'string' && secrets.token
+    ? { kind: 'bot_account', token: secrets.token } : null;
+  if (account.type !== 'github_app' || !account.app_id) return null;
+  return typeof secrets.private_key === 'string' && secrets.private_key
+    ? { kind: 'github_app', appId: String(account.app_id), privateKey: secrets.private_key } : null;
+}
+
+/** The account's long-lived token; a GitHub App account mints one per check instead. */
+export function accountToken(store: Store, accountId: string): string | null {
+  const credentials = accountCredentials(store, accountId);
+  return credentials?.kind === 'bot_account' ? credentials.token : null;
 }
 
 const INSTALLED = 'SELECT repository_id FROM installed_repositories WHERE installed=1';
@@ -35,15 +49,29 @@ export class IntegrationChecker {
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com',
     readonly dashboardRepo = process.env.BOT_DASHBOARD_REPO || 'agent-CI-Infra/dashboard') {}
 
-  private async get(path: string, token: string): Promise<any | null> {
+  private async request(method: string, path: string, token: string, body?: unknown): Promise<any | null> {
     let response: Response;
     try {
-      response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { redirect: 'error', signal: AbortSignal.timeout(15000),
-        headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } });
+      response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(15000),
+        headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     } catch { throw new Error('github_unavailable'); }
     if (response.status === 404) return null;
     if (!response.ok) throw new Error('github_http_' + response.status);
-    return response.json();
+    const text = await response.text(); return text ? JSON.parse(text) : {};
+  }
+  private get(path: string, token: string): Promise<any | null> { return this.request('GET', path, token); }
+  /** Resolves the App installation on the repository and mints a read-only token limited to it. */
+  private async appToken(full: string, repositoryId: string, credentials: { appId: string; privateKey: string }): Promise<string | null> {
+    const jwt = appJwt(credentials.appId, credentials.privateKey);
+    const installation = await this.get(`/repos/${full}/installation`, jwt);
+    if (!installation?.id) return null;
+    const access = await this.request('POST', `/app/installations/${encodeURIComponent(String(installation.id))}/access_tokens`, jwt,
+      { repository_ids: [Number(repositoryId)], permissions: READ_PERMISSIONS });
+    const token = typeof access?.token === 'string' ? access.token : '';
+    if (!token) throw new Error('github_token_missing');
+    return token;
   }
   private async file(repo: string, path: string, token: string): Promise<GitHubFile | null> {
     const value = await this.get(`/repos/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}`, token);
@@ -90,14 +118,35 @@ export class IntegrationChecker {
     const installed = this.store.get('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', repositoryId);
     if (!installed) { this.store.run('DELETE FROM repo_integrations WHERE repository_id=?', repositoryId); return null; }
     const source = this.store.get('SELECT * FROM repositories WHERE id=?', repositoryId) || installed;
-    const full = String(source.full_name), token = accountToken(this.store, String(source.account_id)), now = new Date().toISOString();
-    let gate: { state: GateState; detail: string }, dashboard: { state: DashboardState; detail: string };
-    if (!token) {
-      gate = { state: 'unknown', detail: 'GitHub App 账号暂不支持自动检查' };
-      dashboard = { state: 'unknown', detail: 'GitHub App 账号暂不支持自动检查' };
-    } else {
-      [gate, dashboard] = await Promise.all([this.gate(full, token), this.dashboard(full, token)]);
+    const full = String(source.full_name), now = new Date().toISOString();
+    const unknown = (detail: string) => ({ gate: { state: 'unknown' as GateState, detail }, dashboard: { state: 'unknown' as DashboardState, detail } });
+    let result = unknown('账号没有保存可用的 GitHub 凭据');
+    const credentials = accountCredentials(this.store, String(source.account_id));
+    if (credentials?.kind === 'bot_account') {
+      const [gate, dashboard] = await Promise.all([this.gate(full, credentials.token), this.dashboard(full, credentials.token)]);
+      result = { gate, dashboard };
+    } else if (credentials?.kind === 'github_app') {
+      // An App token is minted for this repository alone and revoked as soon as the reads are done; a missing
+      // installation or a refused token leaves both states unknown instead of failing the whole check.
+      let token: string | null = null;
+      try {
+        token = await this.appToken(full, repositoryId, credentials);
+        if (!token) result = unknown('GitHub App 没有安装到该仓库');
+        else {
+          const [gate, dashboard] = await Promise.all([this.gate(full, token), this.dashboard(full, token)]);
+          result = { gate, dashboard };
+        }
+      } catch (error) {
+        result = unknown((error as Error).message);
+      } finally {
+        if (token) await revokeInstallationToken(this.apiUrl, token).catch(() => false);
+      }
     }
+    return this.save(repositoryId, result, now);
+  }
+
+  private save(repositoryId: string, result: { gate: { state: GateState; detail: string }; dashboard: { state: DashboardState; detail: string } }, now: string): Json {
+    const { gate, dashboard } = result;
     this.store.run(`INSERT INTO repo_integrations(repository_id,gate_state,gate_detail,dashboard_state,dashboard_detail,checked_at)
       VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET gate_state=excluded.gate_state,gate_detail=excluded.gate_detail,
       dashboard_state=excluded.dashboard_state,dashboard_detail=excluded.dashboard_detail,checked_at=excluded.checked_at`,
