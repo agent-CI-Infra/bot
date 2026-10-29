@@ -500,12 +500,7 @@ function integrationChip(caption, tone, href, title) {
   link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = title || href;
   return link;
 }
-function isBoardRepository(row) { return /-board$/.test(String(row?.full_name || '').split('/')[1] || ''); }
-function installedIntegration(integration, row) {
-  if (row && isBoardRepository(row)) {
-    const [owner = '', name = ''] = String(row.full_name).split('/');
-    return [integrationChip('看板仓', 'info', `https://${owner}.github.io/${name}/`, '接入流程生成的看板仓库，不需要再接入')];
-  }
+function installedIntegration(integration) {
   let chips = [badge('接入未检查', 'info')];
   if (integration) {
     const gate = gateLabels[integration.gate_state] || gateLabels.unknown, dashboard = dashboardLabels[integration.dashboard_state] || dashboardLabels.unknown;
@@ -532,8 +527,8 @@ function installedActions(row, after) {
     try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); $('message').textContent = ''; } catch (err) { error(err); }
     await after();
   };
-  // Gate PR, board repository and dashboard registration live in one dialog and run item by item.
-  if (!isBoardRepository(row)) actions.append(button('公共配置', () => openQuickstart(row, after), ''));
+  // Gate PR, board branch and dashboard registration live in one dialog and run item by item.
+  actions.append(button('公共配置', () => openQuickstart(row, after), ''));
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
   if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
@@ -573,7 +568,7 @@ $('activation-form').addEventListener('submit', async event => {
   } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
 });
 
-// Shared configuration: the gate PR, the board repository and the dashboard registration. Each item has its own checks
+// Shared configuration: the gate PR, the board branch and the dashboard registration. Each item has its own checks
 // and can run alone; running all of them still lets an item that cannot run stop without stopping the others.
 const quickstartView = document.createElement('dialog'); quickstartView.id = 'quickstart-view'; quickstartView.setAttribute('aria-labelledby', 'quickstart-title');
 quickstartView.innerHTML = `<h2 id="quickstart-title">公共配置</h2>
@@ -585,15 +580,13 @@ quickstartView.innerHTML = `<h2 id="quickstart-title">公共配置</h2>
 document.body.append(quickstartView);
 let quickstartRow = null, quickstartAfter = null, quickstartTimer = null, quickstartState = { run: null, items: {} }, quickstartWasBusy = false;
 const quickstartStepStatus = { pending: '等待', running: '进行中', done: '完成', skipped: '跳过', blocked: '需人工', failed: '失败' };
-const quickstartErrors = { board_repository: '这是看板仓库，不需要配置；请对源码仓操作。', repository_not_found: 'GitHub App 读不到这个仓库。',
+const quickstartErrors = { repository_not_found: 'GitHub App 读不到这个仓库。',
   github_app_required: '公共配置只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', github_credentials_missing: 'GitHub App 账号没有保存私钥。' };
 const quickstartBusy = run => !!run && ['running', 'queued'].includes(run.state);
 function quickstartItemList(row) {
-  // The board repository lives in the GitHub App's organization, named after the source owner and repository.
-  const boardName = row.full_name.replace('/', '-') + '-board';
   return [['gate_pr', '门禁 PR', '给源码仓开一个 PR，加入 CI-workflow 门禁和工作流，合入后门禁生效。'],
-    ['board', '看板仓库', `在 GitHub App 所属组织下创建 ${boardName}，开启 GitHub Pages（站点形如 https://<App 所属组织>.github.io/${boardName}/）。只接受公开仓库。`],
-    ['dashboard', 'Dashboard 登记', '向公共 dashboard 提登记 PR。需要同一个 GitHub App 也安装在 dashboard 仓库，并且看板仓库已经就绪。']];
+    ['board', '单仓看板', `在公共 dashboard 仓库触发「Create board」，为 ${row.full_name} 创建看板分支。只接受公开仓库。`],
+    ['dashboard', 'Dashboard 登记', '向公共 dashboard 提登记 PR。需要同一个 GitHub App 也安装在 dashboard 仓库，并且看板分支已经就绪。']];
 }
 function renderQuickstart() {
   if (!quickstartRow) return;

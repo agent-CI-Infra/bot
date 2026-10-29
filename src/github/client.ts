@@ -54,7 +54,7 @@ export function appJwt(appId: string, privateKey: string): string {
 }
 // The permissions a GitHub App needs for review and development: the onboarding manifest asks for exactly these, and the
 // permission check compares existing Apps and installations with them. Tokens still request only what each use needs.
-// One-click onboarding asks for more (workflows, pages, repository_creation) in its own tokens; see projects/quickstart.ts.
+// One-click onboarding asks for more (workflows, actions) in its own tokens; see projects/quickstart.ts.
 export const appPermissions: Record<string,string> = { contents:'write', issues:'write', pull_requests:'write', statuses:'write', actions:'write', checks:'write', metadata:'read' };
 const permissionRank: Record<string,number> = { read:1, write:2, admin:3 };
 export function missingPermissions(granted: unknown, required: Record<string,string> = appPermissions) {

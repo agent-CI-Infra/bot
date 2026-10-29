@@ -1,7 +1,7 @@
 import { randomId, type Json } from '../core/security.js';
 import type { Store } from '../storage/database.js';
 import { appJwt, missingPermissions, revokeInstallationToken } from '../github/client.js';
-import { boardReadme, workflowSet } from './gate-templates.js';
+import { workflowSet } from './gate-templates.js';
 
 type StepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'blocked' | 'failed';
 export type RunState = 'queued' | 'running' | 'planned' | 'awaiting_merge' | 'done' | 'partial' | 'blocked' | 'failed';
@@ -14,56 +14,41 @@ interface AppSession { appId: string; privateKey: string; issued: string[] }
 /** The onboarding items; each can be executed alone or together with the others. */
 export const quickstartItems = ['gate_pr', 'board', 'dashboard'] as const;
 export type Item = typeof quickstartItems[number];
-const itemTitles: Record<Item, string> = { gate_pr: '门禁 PR', board: '看板仓库', dashboard: 'Dashboard 登记' };
+const itemTitles: Record<Item, string> = { gate_pr: '门禁 PR', board: '单仓看板', dashboard: 'Dashboard 登记' };
 /** How one item ended. */
 interface Outcome { status: StepStatus; detail: string; code?: string; url?: string }
 const blocked = (detail: string, code: string): Outcome => ({ status: 'blocked', detail, code });
 /** What the items of one run share: the source repository read with its own installation token. */
 interface Source { app: AppSession; id: string; dryRun: boolean; full: string; owner: string; name: string; repositoryId: string;
-  installation: any; token: string; defaultBranch: string; private: boolean; target?: BoardTarget | Outcome }
-interface BoardTarget { organization: string; board: ReturnType<typeof boardRepository> }
+  installation: any; token: string; defaultBranch: string; private: boolean }
 
 const step = (id: string, title: string): Step => ({ id, title, status: 'pending', detail: '等待执行', at: null });
 const encode = (path: string) => path.split('/').map(encodeURIComponent).join('/');
 
 // Onboarding mints one installation token per purpose, each limited to what that step writes and to what the
 // installation has granted. Review and development tokens (GitHub.connect) never ask for workflows, pages or
-// repository_creation, so a development task still cannot change `.github/workflows/`.
+// administration, so a development task still cannot change `.github/workflows/` or repository settings.
 export const quickstartPermissions = {
   // The gate PR commits `.github/workflows/` to the source repository.
   source: { contents: 'write', pull_requests: 'write', workflows: 'write', metadata: 'read' },
-  // Creates the board repository in the App's organization; not pinned to a repository that does not exist yet.
-  creation: { repository_creation: 'write' },
-  // The new board repository: template files (workflows included), Pages and the first collection run.
-  board: { contents: 'write', workflows: 'write', pages: 'write', actions: 'write', metadata: 'read' },
+  // The dashboard repository hosts the board branch and runs `Create board`.
+  board: { actions: 'write', contents: 'read', metadata: 'read' },
   // The registration PR only changes JSON files.
   dashboard: { contents: 'write', pull_requests: 'write', metadata: 'read' },
-  // Reads a template repository (CI-workflow, or the dashboard's single-repo/) through the App installed on it.
+  // Reads the CI-workflow template repository through the App installed on it.
   template: { contents: 'read', metadata: 'read' },
 } satisfies Record<string, Permissions>;
-const permissionNames: Record<string, string> = { contents: 'Contents', pull_requests: 'Pull requests', workflows: 'Workflows', pages: 'Pages',
-  actions: 'Actions', metadata: 'Metadata', repository_creation: 'Repository creation' };
+const permissionNames: Record<string, string> = { contents: 'Contents', pull_requests: 'Pull requests', workflows: 'Workflows',
+  actions: 'Actions', metadata: 'Metadata', administration: 'Administration' };
 const levelNames: Record<string, string> = { read: 'Read-only', write: 'Read and write' };
 
-/** A source's board repository lives in the App's organization and carries the source owner, so `a/x` and `b/x` never collide. */
-export function boardRepository(organization: string, full: string) {
-  const [owner = '', name = ''] = full.split('/'), boardName = `${owner}-${name}-board`;
-  return { name: boardName, full: `${organization}/${boardName}`, siteUrl: `https://${organization.toLowerCase()}.github.io/${boardName}/`,
-    valid: /^[A-Za-z0-9._-]{1,100}$/.test(boardName) };
+/** A source's board is an orphan branch of the dashboard repository, published under `/boards/<owner>/<repo>/`. */
+export function boardLocation(dashboardRepo: string, full: string) {
+  const [dashOwner = '', dashName = ''] = dashboardRepo.split('/');
+  const key = full.toLowerCase();
+  return { key, branch: `board/${key}`, url: `https://${dashOwner.toLowerCase()}.github.io/${dashName}/boards/${key}/` };
 }
-const boardDescription = (full: string) => `${full} 的单仓看板（由控制面创建）`;
-
-/**
- * An existing repository is this source's board when its config sends this board's data to this source, or, before it
- * has any such entry, when the control plane created it for this source (a run that stopped before configuring it).
- */
-function ownsBoard(rawConfig: string | null, meta: any, full: string, board: string): boolean {
-  let deployments: Record<string, any> = {};
-  try { const value = rawConfig ? JSON.parse(rawConfig).deployments : null; if (value && typeof value === 'object' && !Array.isArray(value)) deployments = value; } catch { /* Not our config. */ }
-  const sources = Object.entries(deployments).filter(([, value]) => String(value?.repository || '').toLowerCase() === board.toLowerCase()).map(([source]) => source.toLowerCase());
-  if (sources.length) return sources.length === 1 && sources[0] === full.toLowerCase();
-  return meta?.description === boardDescription(full);
-}
+const boardKeyValid = (key: string) => /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(key);
 
 /** What an installation still lacks for one item, in GitHub's own permission names; null when nothing is missing. */
 function permissionGap(installation: any, required: Permissions): Outcome | null {
@@ -76,12 +61,11 @@ function permissionGap(installation: any, required: Permissions): Outcome | null
 /**
  * One-click onboarding as three items that run on their own:
  *  - gate_pr   — open a PR that adds the CI-workflow gate files to the source repository (the user merges it);
- *  - board     — create the source's board repository in the App's organization from the single-repo template,
- *                point it at the source repository, enable Pages and start the first collection;
+ *  - board     — trigger the dashboard's `Create board` workflow, which creates the board branch;
  *  - dashboard — open the registration PR on the public dashboard for the board.
  * A shared preflight reads the source repository; after that each item checks only what it needs, so an item that cannot
- * run is reported and the others still go ahead. Every write lands on a bot branch / a new repository; nothing is pushed to
- * a default branch, and only GitHub App installation tokens are used.
+ * run is reported and the others still go ahead. Every write lands on a bot branch or a workflow dispatch; nothing is
+ * pushed to a default branch, and only GitHub App installation tokens are used.
  */
 export class Quickstart {
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com',
@@ -140,18 +124,6 @@ export class Quickstart {
       if (meta?.private === false) return candidate;
     }
     return null;
-  }
-  /** Where this source's board lives: the App's organization from `GET /app`, resolved once per run. */
-  private async boardTarget(source: Source): Promise<BoardTarget | Outcome> {
-    if (!source.target) {
-      const appInfo = await this.request('GET', '/app', this.jwt(source.app));
-      const organization = appInfo?.owner?.type === 'Organization' ? String(appInfo.owner.login || '') : '';
-      const board = organization ? boardRepository(organization, source.full) : null;
-      source.target = !board ? blocked(`看板仓库建在 GitHub App 所属的组织下；这个 App 属于个人账号 ${String(appInfo?.owner?.login || '')}，需要改用组织拥有的 App`, 'app_owner_not_organization')
-        : !board.valid ? blocked(`看板仓库名 ${board.name} 超过 GitHub 的 100 个字符上限，需要人工处理`, 'board_name_invalid')
-        : { organization, board };
-    }
-    return source.target;
   }
 
   latest(repositoryId: string): Json | null {
@@ -232,9 +204,6 @@ export class Quickstart {
         const token = await this.token(app, installation, quickstartPermissions.source, { repository_ids: [Number(repositoryId)] });
         const meta = await this.request('GET', `/repos/${full}`, token);
         if (!meta) return stop(blocked('没有该仓库的访问权限', 'repository_not_found'));
-        if (/-board$/.test(name) || await this.file(full, 'board-config.json', token).catch(() => null) !== null) {
-          return stop(blocked('这是看板仓库，不需要接入；请对源码仓接入', 'board_repository'));
-        }
         source = { app, id, dryRun, full, owner, name, repositoryId, installation, token, defaultBranch: String(meta.default_branch || 'main'), private: !!meta.private };
         mark('preflight', { status: 'done', detail: `默认分支 ${source.defaultBranch} · ${source.private ? '私有仓库，只能接门禁' : '公开仓库'}` });
       } catch (error) { const code = (error as Error).message; return stop({ status: 'failed', detail: `失败：${code}`, code }); }
@@ -318,88 +287,48 @@ export class Quickstart {
     return { status: 'done', detail: `已创建 PR #${pr.number}，合入后门禁生效`, url: String(pr.html_url) };
   }
 
-  /** The board repository in the App's organization, configured for this source, with Pages and a first collection. */
+  /** The board branch on the public dashboard, created by that repository's `Create board` workflow. */
   private async board(source: Source, progress: (detail: string) => void): Promise<Outcome> {
-    const { app, full, owner, name, token, defaultBranch, dryRun } = source;
+    const { app, full, dryRun } = source;
     if (source.private) return blocked('公共看板只接受公开仓库，私有仓库不创建看板', 'private_repository');
-    const target = await this.boardTarget(source);
-    if ('status' in target) return target;
-    const { organization, board } = target, boardRepo = board.full;
-    const orgInstallation = await this.installation(app, `/orgs/${organization}/installation`);
-    if (!orgInstallation) return blocked(`GitHub App 没有安装到所属组织 ${organization}，无法在那里创建看板仓库`, 'app_org_not_installed');
-    // An existing board repository needs no creation permission; one the App cannot see is handled when creating.
-    const exists = !!await this.installation(app, `/repos/${boardRepo}/installation`);
-    const gap = permissionGap(orgInstallation, exists ? quickstartPermissions.board : { ...quickstartPermissions.creation, ...quickstartPermissions.board });
+    const location = boardLocation(this.dashboardRepo, full);
+    if (!boardKeyValid(location.key)) return blocked(`仓库名 ${full} 不能用作看板分支，需要人工处理`, 'invalid_repository');
+    const installation = await this.installation(app, `/repos/${this.dashboardRepo}/installation`);
+    if (!installation) return blocked('需要把同一个 GitHub App 安装到 ' + this.dashboardRepo + '，才能创建单仓看板', 'dashboard_app_not_installed');
+    const gap = permissionGap(installation, quickstartPermissions.board);
     if (gap) return gap;
-    // The board template is `single-repo/` in the dashboard repository; reading it does not need the App installed there when it is public.
-    const templateToken = await this.readToken(app, this.dashboardRepo, token);
-    if (templateToken === null) return blocked(`读取看板模板 ${this.dashboardRepo} 被拒绝，需要把同一个 GitHub App 安装到该仓库`, 'board_template_unavailable');
-    let boardToken: string;
-    if (!exists) {
-      if (dryRun) return { status: 'skipped', detail: `预演：将在 ${organization} 下创建 ${boardRepo} 并复制 single-repo 模板` };
-      const creationToken = await this.token(app, orgInstallation, quickstartPermissions.creation);
-      const created = await this.request('POST', `/orgs/${organization}/repos`, creationToken,
-        { name: board.name, private: false, auto_init: true, description: boardDescription(full) })
-        .catch((error: Error) => { if (error.message === 'github_http_422') return 'rejected'; throw error; });
-      // Usually a repository with this name that the App cannot see; it is left alone.
-      if (created === 'rejected') return blocked(`GitHub 拒绝创建 ${boardRepo}（通常是同名仓库已存在但 App 无权访问），没有覆盖，需要人工确认`, 'board_repository_conflict');
-      if (!created?.full_name) return { status: 'failed', detail: '创建看板仓库失败', code: 'board_create_failed' };
-      boardToken = await this.token(app, orgInstallation, quickstartPermissions.board, { repositories: [board.name] });
-      progress('复制 single-repo 模板…');
-      await this.copyTemplate(boardRepo, boardToken, templateToken);
-    } else {
-      boardToken = await this.token(app, orgInstallation, quickstartPermissions.board, { repositories: [board.name] });
-      const boardMeta = await this.request('GET', `/repos/${boardRepo}`, boardToken);
-      if (!ownsBoard(await this.file(boardRepo, 'board-config.json', boardToken), boardMeta, full, boardRepo)) {
-        return blocked(`${boardRepo} 已存在，但看不出是 ${full} 的看板，没有覆盖也没有删除，需要人工处理`, 'board_repository_conflict');
-      }
-      if (dryRun) return { status: 'skipped', detail: `预演：将更新 ${boardRepo} 的配置` };
-      if (await this.file(boardRepo, '.github/workflows/pages.yml', boardToken) === null) {
-        progress('看板仓库存在但模板不完整，补全模板…');
-        await this.copyTemplate(boardRepo, boardToken, templateToken);
-      } else progress('看板仓库已存在，更新配置…');
-    }
-    // Keep the template keys (deployments is what the collect workflow reads) and point them at this source.
-    const currentRaw = await this.file(boardRepo, 'board-config.json', boardToken);
-    const boardConfig: Json = currentRaw ? JSON.parse(currentRaw) : {};
-    boardConfig.label = name;
-    boardConfig.review_sla_days = boardConfig.review_sla_days ?? 3;
-    boardConfig.stale_days = boardConfig.stale_days ?? 30;
-    boardConfig.workflows = { ...(boardConfig.workflows as Json || {}), gate: ['^CI$', 'CI Gates', 'gate', '门禁'] };
-    boardConfig.branch_lines = [{ key: defaultBranch, ref: defaultBranch }];
-    boardConfig.deployments = { ...(boardConfig.deployments as Json || {}), [full]: { environment: 'production', label: name, repository: boardRepo } };
-    await this.put(boardRepo, 'board-config.json', JSON.stringify(boardConfig, null, 2) + '\n', 'main', boardToken, 'chore: configure board');
-    const siteUrl = board.siteUrl;
-    await this.put(boardRepo, 'README.md', boardReadme({ full, board: boardRepo, owner, branch: defaultBranch, siteUrl }), 'main', boardToken, 'docs: describe this board');
-    let pages = await this.request('POST', `/repos/${boardRepo}/pages`, boardToken, { build_type: 'workflow' }).catch(() => null);
-    if (pages === null) pages = await this.request('GET', `/repos/${boardRepo}/pages`, boardToken).catch(() => null);
-    const workflows = await this.request('GET', `/repos/${boardRepo}/actions/workflows`, boardToken).catch(() => null);
-    const collect = (workflows?.workflows || []).find((flow: any) => String(flow.path).includes('collect'));
-    const dispatched = collect ? await this.request('POST', `/repos/${boardRepo}/actions/workflows/${collect.id}/dispatches`, boardToken, { ref: 'main' }).catch(() => null) : null;
-    const gated = await this.file(full, '.github/ci-gates.json', token) !== null;
-    return { status: 'done', url: siteUrl, detail: `看板仓库 ${boardRepo} 已就绪${pages ? ' · Pages 已开启' : ' · Pages 未能自动开启，可在仓库 Settings → Pages 选择 GitHub Actions'}`
-      + ` · 站点 ${siteUrl}${dispatched !== null ? ' · 已触发首次采集' : ''}${gated ? '' : ' · 门禁还没接入，门禁数据要等门禁 PR 合入后才有'}` };
+    const token = await this.token(app, installation, quickstartPermissions.board, { repositories: [this.dashboardRepo.split('/')[1]] });
+    // A 404 means the branch does not exist yet; any other failure leaves this item failed instead of assuming it is missing.
+    const existing = await this.request('GET', `/repos/${this.dashboardRepo}/git/ref/heads/${encode(location.branch)}`, token);
+    if (existing) return { status: 'skipped', detail: `看板分支 ${location.branch} 已存在，数据由「Collect board data」定期更新`, url: location.url };
+    if (dryRun) return { status: 'skipped', detail: `预演：将在 ${this.dashboardRepo} 触发「Create board」创建分支 ${location.branch}` };
+    progress('触发「Create board」…');
+    const dispatched = await this.request('POST', `/repos/${this.dashboardRepo}/actions/workflows/board-create.yml/dispatches`, token,
+      { ref: 'main', inputs: { source_repository: full } });
+    if (dispatched === null) return { status: 'failed', detail: '触发「Create board」失败', code: 'board_dispatch_failed' };
+    return { status: 'done', detail: `已触发「Create board」，分支 ${location.branch} 建好后由采集与部署发布`, url: location.url };
   }
 
-  /** The registration PR on the public dashboard. It points at this source's board, so the board has to be in place. */
+  /** The registration PR on the public dashboard. It points at this source's board, so the board branch has to be in place. */
   private async dashboard(source: Source, boardOutcome: Outcome | undefined): Promise<Outcome> {
-    const { app, id, full, owner, name, token, defaultBranch, dryRun } = source;
+    const { app, id, full, owner, name, defaultBranch, dryRun } = source;
     if (source.private) return blocked('公共 dashboard 只接受公开仓库', 'private_repository');
-    const target = await this.boardTarget(source);
-    if ('status' in target) return target;
+    const location = boardLocation(this.dashboardRepo, full);
+    if (!boardKeyValid(location.key)) return blocked(`仓库名 ${full} 不能用作看板分支，需要人工处理`, 'invalid_repository');
     const installation = await this.installation(app, `/repos/${this.dashboardRepo}/installation`);
     if (!installation) return blocked(`需要把同一个 GitHub App 安装到 ${this.dashboardRepo}，才能提登记 PR`, 'dashboard_app_not_installed');
     const gap = permissionGap(installation, quickstartPermissions.dashboard);
     if (gap) return gap;
-    const boardRepo = target.board.full, boardUrl = target.board.siteUrl;
-    if (boardOutcome ? !['done', 'skipped'].includes(boardOutcome.status)
-      // Not run this time: the public board must already be configured for this source.
-      : !ownsBoard(await this.file(boardRepo, 'board-config.json', token).catch(() => null) ?? await this.file(boardRepo, 'board-config.json', '').catch(() => null), null, full, boardRepo)) {
-      return blocked(`看板仓库 ${boardRepo} 还没有就绪，先执行「看板仓库」这一项`, 'board_not_ready');
+    if (!boardOutcome || !['done', 'skipped'].includes(boardOutcome.status)) {
+      // Not created this time: the board branch must already exist on the dashboard.
+      const boardToken = await this.token(app, installation, quickstartPermissions.board, { repositories: [this.dashboardRepo.split('/')[1]] });
+      const branch = await this.request('GET', `/repos/${this.dashboardRepo}/git/ref/heads/${encode(location.branch)}`, boardToken);
+      if (!branch) return blocked(`单仓看板 ${location.branch} 还没有就绪，先执行「单仓看板」这一项`, 'board_not_ready');
     }
     const dashboardToken = await this.token(app, installation, quickstartPermissions.dashboard, { repositories: [this.dashboardRepo.split('/')[1]] });
     const entry = { id: full, name, owner, defaultBranch, type: 'status-board-lanes',
-      url: `${boardUrl}data/snapshot.json`, dashboardUrl: boardUrl, boardUrl, channelMap: [{ channel: 'gate', workflow: ['CI'] }] };
+      url: `${location.url}data/snapshot.json`, dashboardUrl: location.url, boardUrl: location.url,
+      channelMap: [{ channel: 'gate', workflow: ['CI'] }] };
     const rawGate = await this.file(this.dashboardRepo, 'config/gate-sources.json', dashboardToken);
     const rawCommunity = await this.file(this.dashboardRepo, 'config/internal-contributors.json', dashboardToken);
     if (!rawGate || !rawCommunity) return blocked('读不到 dashboard 的来源清单或社区名单', 'dashboard_unreadable');
@@ -444,37 +373,5 @@ export class Quickstart {
       result[workflowPath] = remote ?? fallback;
     }
     return result;
-  }
-
-  /** Copy `single-repo/` from the dashboard repository (read with its token) into a new board repository (one commit). */
-  private async copyTemplate(target: string, token: string, templateToken: string): Promise<void> {
-    // A brand-new repository has no refs and rejects Git Data writes until it has one commit.
-    const head = async () => this.request('GET', `/repos/${target}/git/ref/heads/main`, token).catch(() => null);
-    let base = await head();
-    if (!base) {
-      await this.request('PUT', `/repos/${target}/contents/README.md`, token, { message: 'chore: initialize repository', content: Buffer.from('# board\n').toString('base64') });
-      base = await head();
-    }
-    const baseSha = base?.object?.sha ? String(base.object.sha) : null;
-    const parent = baseSha ? await this.request('GET', `/repos/${target}/git/commits/${baseSha}`, token) : null;
-    const tree = await this.request('GET', `/repos/${this.dashboardRepo}/git/trees/main?recursive=1`, templateToken);
-    const entries = (tree?.tree || []).filter((item: any) => item.type === 'blob' && String(item.path).startsWith('single-repo/')
-      && !/(^|\/)\.git(\/|$)/.test(String(item.path)));
-    if (!entries.length) throw new Error('template_unavailable');
-    const blobs: any[] = [];
-    for (let index = 0; index < entries.length; index += 8) {
-      const batch = entries.slice(index, index + 8);
-      const created = await Promise.all(batch.map(async (item: any) => {
-        const blob = await this.request('GET', `/repos/${this.dashboardRepo}/git/blobs/${item.sha}`, templateToken);
-        if (typeof blob?.content !== 'string') throw new Error('template_blob_unavailable');
-        return this.request('POST', `/repos/${target}/git/blobs`, token, { content: blob.content, encoding: blob.encoding || 'base64' });
-      }));
-      created.forEach((blob, position) => blobs.push({ path: String(batch[position]!.path).slice('single-repo/'.length),
-        mode: batch[position]!.mode === '100755' ? '100755' : '100644', type: 'blob', sha: blob?.sha }));
-    }
-    const next = await this.request('POST', `/repos/${target}/git/trees`, token, { tree: blobs, ...(parent?.tree?.sha ? { base_tree: String(parent.tree.sha) } : {}) });
-    const commit = await this.request('POST', `/repos/${target}/git/commits`, token, { message: 'chore: initialize board from single-repo template', tree: next?.sha, parents: baseSha ? [baseSha] : [] });
-    if (baseSha) await this.request('PATCH', `/repos/${target}/git/refs/heads/main`, token, { sha: commit?.sha, force: true });
-    else await this.request('POST', `/repos/${target}/git/refs`, token, { ref: 'refs/heads/main', sha: commit?.sha });
   }
 }
