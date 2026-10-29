@@ -476,6 +476,7 @@ const removalErrors = {
   repository_deleting: '这个项目正在删除。',
   last_super_admin: '不能删除最后一名活跃的超级管理员。',
   account_has_projects: '还有项目使用这个账号，请先删除这些项目。',
+  project_account_pending: '项目的虚拟电脑或公共配置还有未完成的操作，稍后再删除。',
 };
 function removalMessage(err) {
   const code = String(err.message).replace(/^\d+\s*·\s*/, '');
@@ -537,8 +538,10 @@ function installedActions(row, after) {
       call('disable', {}, `正在禁用 ${row.full_name}…`);
   }));
   if (row.registered) actions.append(button('设置', () => openProject(row.id)));
-  // Only a repository the list no longer shows as installed can be deleted; the server checks with GitHub again.
+  // A project still off the installation is deleted only after GitHub confirms the account lost it; a started project can
+  // also be deleted here from the control plane alone, without touching GitHub or the App installation.
   if (row.installed !== true) actions.append(button('删除', () => deleteProject(row, after), 'quiet destructive'));
+  else if (row.registered) actions.append(button('删除', () => deleteProjectRecord(row, after), 'quiet destructive'));
   return actions;
 }
 const activationView = document.createElement('dialog'); activationView.id = 'activation-view'; activationView.setAttribute('aria-labelledby', 'activation-title');

@@ -52,10 +52,11 @@ test('a full sync lists every installation repository and marks the rest as no l
   const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
   await h.hook(a.path, a.secret, 'old', added(303, 101), { 'X-GitHub-Event': 'installation_repositories' });
-  // GitHub App accounts are not checked yet; the answer is still cached with the time of the check.
+  // A failed App check is still cached as unknown with the time of the check; the caller does not see an error.
   const checker = new IntegrationChecker(h.store, 'http://127.0.0.1:9'), cached = id => h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', id);
   await checker.check('303'); await checker.check('101');
-  assert.deepEqual([cached('303').gate_detail, cached('101').dashboard_detail], ['GitHub App 账号暂不支持自动检查', 'GitHub App 账号暂不支持自动检查']);
+  assert.deepEqual([cached('303').gate_detail, cached('101').dashboard_detail], ['github_unavailable', 'github_unavailable']);
+  assert.deepEqual([cached('303').gate_state, cached('101').dashboard_state], ['unknown', 'unknown']);
   const requests = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://fake'); requests.push(req.method + ' ' + url.pathname); res.setHeader('Content-Type', 'application/json');
@@ -80,7 +81,7 @@ test('a full sync lists every installation repository and marks the rest as no l
   const expired = '2026-01-01T00:00:00.000Z';
   h.store.run('UPDATE repo_integrations SET checked_at=? WHERE repository_id=?', expired, '101');
   await checker.check('101');
-  assert.equal(cached('101').gate_detail, 'GitHub App 账号暂不支持自动检查'); assert.ok(cached('101').checked_at > expired);
+  assert.equal(cached('101').gate_detail, 'github_unavailable'); assert.ok(cached('101').checked_at > expired);
   assert.equal(await checker.check('303'), null); assert.equal(cached('303'), undefined);
 });
 
@@ -92,6 +93,76 @@ async function emptyGitHub(t) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
   return { url: `http://127.0.0.1:${server.address().port}`, requests };
 }
+
+// A GitHub that knows one App installation on fixture/project-101 and the dashboard repository. Every read must use the
+// minted installation token; the App JWT only resolves the installation and mints/revokes tokens.
+async function appGitHub(t, { installed = true, mint = 201 } = {}) {
+  const requests = [], revoked = [], keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token = 'installation-token-fixture';
+  const file = text => ({ type: 'file', content: Buffer.from(text).toString('base64'), sha: 'sha-' + text.length });
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const url = new URL(req.url, 'http://fake'), path = decodeURIComponent(url.pathname);
+    const auth = (req.headers.authorization || '').replace(/^Bearer /, '');
+    requests.push({ method: req.method, path, auth, body: raw ? JSON.parse(raw) : undefined });
+    const send = (status, value) => { res.statusCode = status; res.setHeader('Content-Type', 'application/json'); res.end(value === undefined ? '' : JSON.stringify(value)); };
+    const jwt = auth.split('.').length === 3;
+    if (path === '/repos/fixture/project-101/installation') return jwt && installed ? send(200, { id: 77, account: { id: 10, login: 'fixture' } }) : send(404, {});
+    if (path === '/app/installations/77/access_tokens' && req.method === 'POST') {
+      return !jwt ? send(401, {}) : mint !== 201 ? send(mint, {}) : send(201, { token, expires_at: '2099-01-01T00:00:00Z' });
+    }
+    if (path === '/installation/token' && req.method === 'DELETE') { if (auth === token) revoked.push(auth); return send(204); }
+    if (auth !== token) return send(auth ? 401 : 404, {});
+    const contents = {
+      '/repos/fixture/project-101/contents/.github/ci-gates.json': '{"version":1}',
+      '/repos/fixture/project-101/contents/.github/workflows/ci.yml': 'name: CI\n',
+      '/repos/fixture/dashboard/contents/config/gate-sources.json': JSON.stringify({ sources: [{ id: 'fixture/project-101', owner: 'fixture', name: 'project-101' }] }),
+      '/repos/fixture/dashboard/contents/public/data/gate/index.json': JSON.stringify({ sources: [{ id: 'fixture/project-101' }] }),
+    };
+    if (contents[path]) return send(200, file(contents[path]));
+    if (path === '/repos/fixture/project-101/actions/workflows') return send(200, { workflows: [{ id: 5, name: 'CI', path: '.github/workflows/ci.yml' }] });
+    if (path === '/repos/fixture/project-101/actions/workflows/5/runs') return send(200, { workflow_runs: [{ conclusion: 'success', created_at: new Date().toISOString() }] });
+    return send(404, {});
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  return { url: `http://127.0.0.1:${server.address().port}`, privateKey, token, requests, revoked };
+}
+
+test('a GitHub App project is checked with a repository-scoped read-only token that is revoked afterwards', async t => {
+  const github = await appGitHub(t), h = await harness(t), { admin } = await setup(h);
+  const a = await account(admin, { type: 'github_app', app_id: '123', private_key: github.privateKey, token: undefined });
+  await h.hook(a.path, a.secret, 'app-install', added(101), { 'X-GitHub-Event': 'installation_repositories' });
+  const checker = new IntegrationChecker(h.store, github.url, 'fixture/dashboard');
+  await checker.check('101');
+  const row = h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', '101');
+  assert.deepEqual([row.gate_state, row.dashboard_state], ['live', 'published']);
+  assert.match(row.gate_detail, /最近一次 CI 通过/);
+  // Exactly one token, limited to this repository and read-only, then revoked through GitHub.
+  const minted = github.requests.filter(r => r.path === '/app/installations/77/access_tokens');
+  assert.deepEqual(minted.map(r => r.body), [{ repository_ids: [101], permissions: { contents: 'read', actions: 'read', metadata: 'read' } }]);
+  assert.equal(minted[0].auth.split('.').length, 3);
+  const installation = github.requests.find(r => r.path === '/repos/fixture/project-101/installation');
+  assert.equal(installation.auth, minted[0].auth);
+  for (const request of github.requests.filter(r => r.path.includes('/contents/') || r.path.includes('/actions/'))) assert.equal(request.auth, github.token, request.path);
+  assert.deepEqual(github.revoked, [github.token]);
+  assert.deepEqual(github.requests.filter(r => r.method !== 'GET').map(r => r.method + ' ' + r.path),
+    ['POST /app/installations/77/access_tokens', 'DELETE /installation/token']);
+});
+
+test('an App that is not installed, or refuses a token, leaves both states unknown without throwing', async t => {
+  const h = await harness(t), { admin } = await setup(h);
+  for (const [options, detail] of [[{ installed: false }, 'GitHub App 没有安装到该仓库'], [{ mint: 403 }, 'github_http_403']]) {
+    const github = await appGitHub(t, options), a = await account(admin, { type: 'github_app', app_id: '123', private_key: github.privateKey, token: undefined });
+    await h.hook(a.path, a.secret, options.installed === false ? 'app-missing' : 'app-refused', added(101), { 'X-GitHub-Event': 'installation_repositories' });
+    const checker = new IntegrationChecker(h.store, github.url, 'fixture/dashboard');
+    await checker.check('101');
+    const row = h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', '101');
+    assert.deepEqual([row.gate_state, row.dashboard_state, row.gate_detail], ['unknown', 'unknown', detail]);
+    assert.deepEqual(github.revoked, []);
+    // No token was minted, so nothing is revoked either; the only non-read is the refused token request.
+    assert.ok(github.requests.every(r => r.method === 'GET' || r.path === '/app/installations/77/access_tokens'), detail);
+  }
+});
 
 test('a repository that leaves the installation drops its cached integration status and is not checked again', async t => {
   const github = await emptyGitHub(t);
