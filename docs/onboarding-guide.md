@@ -4,6 +4,28 @@
 
 ---
 
+## 访问入口
+
+| 入口 | 地址 | 用途 |
+| --- | --- | --- |
+| **管理面（控制台）** | https://agent-ci-infra-bot-admin.llmbots.co/ | 启动项目、跑一键接入、管理用户与仓库授权 |
+| **公共 Dashboard** | https://agent-ci-infra.github.io/dashboard/ | 看所有已登记仓库的门禁与时延等指标 |
+| **单仓看板** | `https://agent-ci-infra.github.io/dashboard/boards/<owner>/<repo>/` | 单个仓库的看板，`<owner>/<repo>` 用小写 |
+| **GitHub App 安装页** | https://github.com/apps/agent-ci-infra-bot/installations/new | 把 bot 安装到你的账号/组织 |
+
+### 管理面怎么登录
+
+1. 打开 https://agent-ci-infra-bot-admin.llmbots.co/ ；
+2. 如果出现 Cloudflare Access 的验证页，先填**你的邮箱**，收邮件验证码完成验证（这一步是网关鉴权，不是 bot 账号）；
+3. 进入控制台登录页后，用管理员分配的**用户名 + 密码**登录；
+4. 首次部署时首页会显示「创建第一名超级管理员」，由部署者初始化，之后这里只提供登录。
+
+登录后顶部导航里有「接入向导」和各个列表页；普通使用者通常是**项目管理员**，只看到分配给自己的仓库，超级管理员能看到全部。
+
+> 忘记密码或需要账号，找超级管理员在「用户管理」里重置或新建；控制台的写操作需要登录会话，长时间无操作后会要求重新登录。
+
+---
+
 ## 0. 开始之前
 
 | 你的仓库需要 | 说明 |
