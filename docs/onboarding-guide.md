@@ -88,13 +88,45 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 
 ### 2.1 私有仓库的一次性准备
 
-私有仓库不需要额外的接入项，只要求 dashboard 维护者提前做一次：
+私有仓库的接入项和公开仓完全一样，只是 dashboard 需要一份**只读令牌**才能读到私仓数据。这件事由 dashboard 维护者做一次：
 
-1. 在 `agent-CI-Infra/dashboard` 的 **Settings → Secrets and variables → Actions** 添加 repository secret `PRIVATE_SOURCE_TOKEN`；
-2. 令牌只需能只读访问私有源仓（读取仓库内容和元数据），不要给它写权限；
-3. 每个私有源仓共用这一个 secret，不需要逐仓配置。
+**① 建一个只读 fine-grained token**
 
-没有配置时，「单仓看板」会以 `dashboard_private_token_missing` 停下；补上 secret 后重新执行该项即可。
+1. 打开 https://github.com/settings/personal-access-tokens/new
+2. 填写：
+   - **Token name**：`dashboard-private-source`
+   - **Expiration**：按团队策略选（到期需要换新）
+   - **Resource owner**：**必须是有那个私仓的账号或组织**（私仓属于个人就选个人，属于组织就选组织）——选错了 token 完全看不到该仓
+3. **Repository access** 二选一：
+   - `Only select repositories`：勾上每个要接的私仓。**每新增一个私仓都要回来补勾**，否则采集会报“读不到源仓”；
+   - `All repositories`：以后新私仓自动可用，权限仍然只有下面两项只读。
+4. **Permissions → Repository permissions** 只开三项：
+   | 权限 | 值 |
+   | --- | --- |
+   | Contents | Read-only |
+   | Actions | Read-only |
+   | Metadata | Read-only（勾上面两项后自动带上） |
+5. 点 **Generate token**，复制 `github_pat_...`（只显示一次）
+
+**② 存进 dashboard 仓库**
+
+1. 打开 https://github.com/agent-CI-Infra/dashboard/settings/secrets/actions
+2. **New repository secret**
+3. Name 填 `PRIVATE_SOURCE_TOKEN`（大小写必须一致），Secret 粘贴上一步的值，保存
+
+**③ 以后加新的私仓时**
+
+只改 token 的 `Repository access` 勾选（或保持 `All repositories`），点 **Update** 即可，**不需要**重新生成 token，也不需要改 dashboard 的 secret——改动立即生效。
+
+**④ 常见失败提示**
+
+| 提示 | 原因 | 处理 |
+| --- | --- | --- |
+| `dashboard_private_token_missing` | dashboard 没有这个 secret，或值无效 | 重做 ①②，确认名字拼写 |
+| `PRIVATE_SOURCE_TOKEN cannot read private source <repo>` | token 的 `Repository access` 没勾这个仓，或 resource owner 选错、已过期 | 回到 token 设置页补勾/改正，或重新生成 |
+| 看板 404 | 分支刚建、Pages 还在部署 | 等 1–2 分钟再刷新 |
+
+> 用经典 PAT（勾 `repo`）也能跑通，但它能读你名下所有仓库，权限过大；仅在临时排查时使用，用完换成 fine-grained token。
 
 点之前可以先点 **预演**：它只读不写，把每一步会做什么列出来，不产生任何改动。
 
