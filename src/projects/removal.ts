@@ -42,7 +42,8 @@ export class ProjectRemoval {
   constructor(readonly store: Store, readonly installations?: InstallationSync, readonly projects?: ProjectService, readonly engine?: RunningTasks,
     readonly settleMs = 120_000) {}
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
-    const match = /^\/api\/installations\/([1-9]\d*)$/.exec(url.pathname);
+    // The console's GitHub-checked project deletion. Plain DELETE /api/installations/:id only hides a list row.
+    const match = /^\/api\/installations\/([1-9]\d*)\/removal$/.exec(url.pathname);
     if (!match || method !== 'DELETE') return undefined;
     superAdmin(user); fields(input, ['confirm']); if (input.confirm !== true) fail(400, 'confirmation_required');
     return this.remove(user, match[1]!);

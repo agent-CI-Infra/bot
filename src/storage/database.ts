@@ -109,7 +109,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS installation_syncs(account_id TEXT PRIMARY KEY REFERENCES accounts(id),synced_at TEXT,error TEXT,repositories INTEGER);`);
     // What GitHub granted on the repository as last read: the installation's permissions for an App, the account's role
     // flags for a bot account. NULL until a sync or permission check has read it.
-    extend('installed_repositories', { permissions: 'TEXT', permissions_at: 'TEXT' });
+    extend('installed_repositories', { permissions: 'TEXT', permissions_at: 'TEXT', hidden: 'INTEGER NOT NULL DEFAULT 0' });
     // Gate/dashboard connection status per repository and one-click onboarding runs.
     this.db.exec(`CREATE TABLE IF NOT EXISTS repo_integrations(repository_id TEXT PRIMARY KEY,
         gate_state TEXT NOT NULL DEFAULT 'unknown',gate_detail TEXT NOT NULL DEFAULT '',

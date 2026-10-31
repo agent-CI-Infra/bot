@@ -40,9 +40,12 @@
 | `/api/board/cards/:repository/:type/:number` | PATCH | `{field_id,option_id}` 修改当前用户的自定义单选值，`option_id:null` 清空；禁止写执行阶段，不创建或修改任务 |
 | `/api/board/fields`、`/api/board/fields/:id/options` | POST | `{name}` 新建个人单选字段／新增选项（即加列），每用户最多 30 个字段、每字段最多 50 个选项 |
 | `/api/board/views`、`/api/board/views/:id` | POST、PATCH / DELETE | 个人视图，字段 `name,group_by,filters,hidden_columns`；最多 50 个自建视图。内置 `default` 仅允许保存筛选和隐藏列，不能删除、改名或切换分组字段 |
-| `/api/installations`、`/api/installations/sync` | GET、POST | 仅超级管理员；每个仓库一行，合并 GitHub 安装范围、登记、启用和环境状态，以及各账号最近同步结果；POST 立即全量同步 |
+| `/api/installations`、`/api/installations/sync` | GET、POST | 仅超级管理员；每个仓库一行，合并 GitHub 安装范围、登记、启用和环境状态，以及各账号最近同步结果；POST 立即全量同步。`hidden=1` 的行不出现在这里 |
+| `/api/installations/hidden` | GET | 仅超级管理员；从列表隐藏的仓库，仍保留安装行；每行可调用恢复 |
 | `/api/installations/:id/activate`、`/api/installations/:id/disable` | POST | 仅超级管理员；启动（可带 `model_id,development_enabled,account_id`）或再次启用／禁用一个仓库 |
-| `/api/installations/:id` | DELETE | 仅超级管理员，需 `confirm:true`；当场向 GitHub 核对后删除项目（未启动的仓库只删安装列表行）。仍能访问返回 409 `repository_still_accessible`，权限不足返回 409 `repository_permissions_insufficient`，GitHub 不可用、限流或答复不确定返回 502，凭据缺失返回 409 `github_credentials_missing`，以上都不删除；容器和网络删除失败或任务未停下时项目保持禁用、记录保留 |
+| `/api/installations/:id` | DELETE | 仅超级管理员；只把该仓库的安装行标记为隐藏（`hidden=1`），不访问 GitHub、不改项目策略或任何其他表，同步也不会让它重新出现；没有安装行返回 404 `repository_not_installed`，成功返回 `{hidden:true}` |
+| `/api/installations/:id/restore` | POST | 仅超级管理员；取消隐藏（`hidden=0`），返回 `{hidden:false}`；没有安装行返回 404 `repository_not_installed` |
+| `/api/installations/:id/removal` | DELETE | 仅超级管理员，需 `confirm:true`；当场向 GitHub 核对后删除项目（未启动的仓库只删安装列表行）。仍能访问返回 409 `repository_still_accessible`，权限不足返回 409 `repository_permissions_insufficient`，GitHub 不可用、限流或答复不确定返回 502，凭据缺失返回 409 `github_credentials_missing`，以上都不删除；容器和网络删除失败或任务未停下时项目保持禁用、记录保留 |
 | `/api/installations/permissions/check` | POST | 仅超级管理员；重读各账号授予的权限，返回每行的 `permission_missing,permissions_checked_at,permissions_stale` 和各账号错误，不改变安装状态 |
 | `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST。`waiting_publication` 的重试即人工确认：结果未知的写入回到待发送，先查找，查不到才发送。`needs_replan` 在尚未写入 GitHub 时从准备阶段重新规划 |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |

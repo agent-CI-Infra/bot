@@ -437,6 +437,7 @@ function installedDetail(row) {
 }
 function installedBadges(row) {
   const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : row.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning')];
+  if (row.hidden) badges.push(badge('已隐藏', 'info'));
   if (row.installed === false) badges.push(badge('已移出安装', 'danger'));
   else if (row.installed === null) badges.push(badge('不在安装列表'));
   badges.push(permissionBadge(row));
@@ -489,9 +490,21 @@ async function deleteProject(row, after) {
     : [check, '删除后：', ['这个项目从项目列表消失', '正在执行的任务会停止', '虚拟电脑的容器和网络会去掉', '工作卷按现有环境删除保留，重置留下的旧代次卷也保留',
       '项目的策略、成员分配、专属模型、外部执行客户端、任务记录、投递和看板数据一并删除，操作审计保留'], '以后安装同步如果又看到这个仓库，它会像新仓库一样出现。'];
   const deleted = await askConfirm({ title: `${row.registered === false ? '从项目列表删除' : '删除项目'} ${row.full_name}？`, body, action: '删除', danger: true,
-    progress: `正在向 GitHub 核对 ${row.full_name}…`, run: () => api(`/api/installations/${row.id}`, 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
+    progress: `正在向 GitHub 核对 ${row.full_name}…`, run: () => api(`/api/installations/${row.id}/removal`, 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
   if (deleted) await after();
   return deleted;
+}
+// Installed but never started: no project record to delete. Hiding only removes the list row, and sync keeps it hidden.
+async function hideInstalled(row, after) {
+  const hidden = await askConfirm({ title: `从列表隐藏 ${row.full_name}？`, action: '隐藏', danger: true,
+    body: ['只从列表里隐藏这一行；不会卸载 App、不会删除 GitHub 仓库，下次同步也不会再出现（可用“恢复”找回）。'],
+    run: () => api(`/api/installations/${row.id}`, 'DELETE', {}).catch(err => { throw new Error(removalMessage(err)); }) });
+  if (hidden) await after();
+  return hidden;
+}
+async function restoreInstalled(row, after) {
+  try { await api(`/api/installations/${row.id}/restore`, 'POST', {}); $('message').textContent = ''; } catch (err) { error(err); }
+  await after();
 }
 const gateLabels = { none: ['门禁未接入', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
 const dashboardLabels = { none: ['看板未接入', 'info'], registered: ['看板待发布', 'warning'], published: ['看板已接入', 'success'], unknown: ['看板未知', 'info'] };
@@ -539,9 +552,10 @@ function installedActions(row, after) {
   }));
   if (row.registered) actions.append(button('设置', () => openProject(row.id)));
   // A project still off the installation is deleted only after GitHub confirms the account lost it; a started project can
-  // also be deleted here from the control plane alone, without touching GitHub or the App installation.
+  // also be deleted here from the control plane alone; an installed but never started repository is only hidden.
   if (row.installed !== true) actions.append(button('删除', () => deleteProject(row, after), 'quiet destructive'));
   else if (row.registered) actions.append(button('删除', () => deleteProjectRecord(row, after), 'quiet destructive'));
+  else actions.append(button('删除', () => hideInstalled(row, after), 'quiet destructive'));
   return actions;
 }
 const activationView = document.createElement('dialog'); activationView.id = 'activation-view'; activationView.setAttribute('aria-labelledby', 'activation-title');

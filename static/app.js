@@ -117,9 +117,12 @@ async function render(quiet = false) {
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.
   const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView; $('check').hidden = !installedView;
+  $('hidden-filter-label').hidden = !installedView;
+  // The 已隐藏 filter swaps the list for the rows an administrator removed from it; each one can be restored.
+  const hiddenView = installedView && $('hidden-filter').checked;
   // Gate / dashboard connection status (cached; refreshed on demand).
   const integrationMap = new Map(); let staleIntegrations = false;
-  if (installedView) {
+  if (installedView && !hiddenView) {
     let integrations = [], checked = false; try { integrations = (await api('/api/integrations')).integrations || []; } catch {}
     if (!integrations.length || forceIntegrationCheck) {
       forceIntegrationCheck = false; checked = true;
@@ -130,10 +133,11 @@ async function render(quiet = false) {
     staleIntegrations = !checked && integrations.some(item => item.stale);
   }
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
-  let result;try{result=await api(installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
+  const address = hiddenView ? '/api/installations/hidden' : installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`;
+  let result;try{result=await api(address);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
   if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
-  const signature=tab+'\n'+params+'\n'+JSON.stringify(rows);if(quiet&&signature===listSignature)return;listSignature=signature;
-  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目` : `${rows.length} 条记录`;
+  const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+JSON.stringify(rows);if(quiet&&signature===listSignature)return;listSignature=signature;
+  const lines=[]; $('count').textContent = tab === 'events' ? `本页 ${rows.length} 条投递` : hiddenView ? `${rows.length} 个已隐藏仓库` : installedView ? `${rows.length} 个仓库 · ${syncSummary(result.syncs)}` : tab === 'projects' ? `${rows.length} 个项目` : `${rows.length} 条记录`;
   $('previous').disabled = offset === 0; $('next').disabled = rows.length < 50; $('page-number').textContent = `第 ${offset / 50 + 1} 页`;
   rows.forEach(row => {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');line.dataset.key=String(row.id);rowSignatures.set(line,JSON.stringify(row));
@@ -145,11 +149,13 @@ async function render(quiet = false) {
     content.append(element('p', detail)); line.append(content);
     if(listTabs.includes(tab))status.append(taskTab ? taskState(row) : state(row.status));
     if(tab==='events')for(const task of row.tasks||[])content.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id),'quiet linkish'));
-    if(installedView){status.append(...installedBadges(row),...installedIntegration(integrationMap.get(row.id),row));}
-    if(tab==='projects'){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
+    if(installedView){status.append(...installedBadges(row));if(!hiddenView)status.append(...installedIntegration(integrationMap.get(row.id),row));}
+    if(tab==='projects'&&!hiddenView){line.classList.add('project-list-row');line.dataset.repositoryId=row.id;status.classList.add('project-overview');status.append(projectListControls(row));}
     if(taskTab&&row.result?.pr_url){try{const url=new URL(row.result.pr_url);if(['https:','http:'].includes(url.protocol)){const link=element('a',row.result.pr_number?'PR #'+row.result.pr_number:'查看 PR','result-link');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';content.lastElementChild.append(link);}}catch{}}
     if(status.childElementCount)line.append(status);
-    if(installedView){const actions=installedActions(row,()=>start());if(actions.childElementCount)line.append(actions);}
+    if(installedView){const actions=hiddenView?element('div','','actions'):installedActions(row,()=>start());
+      if(hiddenView)actions.append(button('恢复',()=>restoreInstalled(row,()=>start()).catch(error),'quiet'));
+      if(actions.childElementCount)line.append(actions);}
     else if(tab==='projects'){const actions=element('div','','actions');actions.append(button('设置',()=>openProject(row.id)));line.append(actions);}
     if (tab === 'events') {
       const button = element('button', '查看详情', 'quiet'); button.addEventListener('click', async () => {
@@ -175,7 +181,7 @@ async function render(quiet = false) {
     shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(lines[index]))node.replaceWith(lines[index]);});
   else $('rows').replaceChildren(...lines);
   if(staleIntegrations)refreshStaleIntegrations();
-  if(installedView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
+  if(installedView&&!hiddenView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
 }
 // Stale chips are checked once in the background and only the chips change; the list is neither reloaded nor cleared.
 // A result that is still stale (a failed check, or more repositories than one check covers) waits for a manual refresh.
@@ -328,8 +334,9 @@ $('sync').addEventListener('click', async () => {
   catch (err) { error(err); } finally { $('sync').disabled = false; }
 });
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
+$('hidden-filter').addEventListener('change', () => { offset = 0; render().catch(error); });
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
 document.addEventListener('DOMContentLoaded',()=>start().catch(error),{once:true});
 setInterval(()=>{if(me&&['reviews','developments'].includes(tab)&&!projectRoute()&&!document.hidden&&!document.querySelector('dialog[open]'))render(true).catch(error);},5000);
 
-setInterval(()=>{if(me&&tab==='projects'&&!projectRoute()&&!document.querySelector('dialog[open]'))refreshProjectActivity();},5000);
+setInterval(()=>{if(me&&tab==='projects'&&!$('hidden-filter').checked&&!projectRoute()&&!document.querySelector('dialog[open]'))refreshProjectActivity();},5000);
