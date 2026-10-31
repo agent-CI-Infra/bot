@@ -598,12 +598,13 @@ document.body.append(quickstartView);
 let quickstartRow = null, quickstartAfter = null, quickstartTimer = null, quickstartState = { run: null, items: {} }, quickstartWasBusy = false;
 const quickstartStepStatus = { pending: '等待', running: '进行中', done: '完成', skipped: '跳过', blocked: '需人工', failed: '失败' };
 const quickstartErrors = { repository_not_found: 'GitHub App 读不到这个仓库。',
-  github_app_required: '公共配置只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', github_credentials_missing: 'GitHub App 账号没有保存私钥。' };
+  github_app_required: '公共配置只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', github_credentials_missing: 'GitHub App 账号没有保存私钥。',
+  dashboard_private_token_missing: 'dashboard 仓库还没有配置 PRIVATE_SOURCE_TOKEN；私有仓库看板需要这个一次性添加的只读 secret。' };
 const quickstartBusy = run => !!run && ['running', 'queued'].includes(run.state);
 function quickstartItemList(row) {
   return [['gate_pr', '门禁 PR', '给源码仓开一个 PR，加入 CI-workflow 门禁和工作流，合入后门禁生效。'],
-    ['board', '单仓看板', `在公共 dashboard 仓库触发「Create board」，为 ${row.full_name} 创建看板分支。只接受公开仓库。`],
-    ['dashboard', 'Dashboard 登记', '向公共 dashboard 提登记 PR。需要同一个 GitHub App 也安装在 dashboard 仓库，并且看板分支已经就绪。']];
+    ['board', '单仓看板', `在 dashboard 仓库触发「Create board」创建 ${row.full_name} 的看板分支，并触发首轮采集。公开仓库直接读取；私有仓库需要 dashboard 一次性配置只读 secret PRIVATE_SOURCE_TOKEN。`],
+    ['dashboard', 'Dashboard 登记', '向 dashboard 提登记 PR；PR 会写明公开或私有可见性。需要同一个 GitHub App 也安装在 dashboard 仓库，并且看板分支已经就绪。']];
 }
 function renderQuickstart() {
   if (!quickstartRow) return;

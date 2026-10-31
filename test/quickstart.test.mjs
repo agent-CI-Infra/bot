@@ -30,7 +30,7 @@ async function fakeGitHub(t) {
       'agent-CI-Infra/CI-workflow': repo(201, { files: { 'template/.github/workflows/ci.yml': 'name: CI\n', 'scripts/gate/gate.mjs': '// gate\n' } }),
       'agent-CI-Infra/dashboard': repo(301, { files: { 'config/gate-sources.json': '{"sources":[]}\n', 'config/internal-contributors.json': '{}\n' } }),
     },
-    tokens: new Map(), revoked: [], requests: [], repo,
+    tokens: new Map(), revoked: [], requests: [], repo, collectMissing: false, createMissing: false,
   };
   let counter = 0;
   const server = createServer(async (req, res) => {
@@ -94,8 +94,20 @@ async function fakeGitHub(t) {
     if (rest === '/pulls' && method === 'GET') return send(200, []);
     if ((m = /^\/actions\/workflows\/([^/]+)\/dispatches$/.exec(rest)) && method === 'POST') {
       if (!can('actions')) return send(403, {});
-      target.dispatched = { workflow: m[1], ...body }; return send(204);
+      target.dispatched = { workflow: m[1], ...body };
+      if (m[1] === 'board-collect.yml' || m[1] === 'board-create.yml') {
+        const id = 800 + (target.runs?.length || 0), now = new Date().toISOString();
+        const missing = m[1] === 'board-create.yml' ? state.createMissing : state.collectMissing;
+        (target.runs ||= []).push({ id, workflow: m[1], status: 'completed', conclusion: missing ? 'failure' : 'success',
+          run_started_at: now, html_url: `https://github.com/${full}/actions/runs/${id}` });
+        (target.jobsById ||= {})[id] = [{ steps: [{ name: 'Check PRIVATE_SOURCE_TOKEN', status: 'completed',
+          conclusion: missing ? 'failure' : 'success' }] }];
+      }
+      return send(204);
     }
+    if ((m = /^\/actions\/workflows\/([^/]+)\/runs$/.exec(rest)) && method === 'GET')
+      return send(200, { workflow_runs: (target.runs || []).filter(run => run.workflow === m[1]) });
+    if ((m = /^\/actions\/runs\/(\d+)\/jobs$/.exec(rest)) && method === 'GET') return send(200, { jobs: (target.jobsById || {})[m[1]] || [] });
     return send(404, {});
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
@@ -181,9 +193,12 @@ test('the board item dispatches Create board with an actions-only dashboard toke
   assert.ok(dispatch, JSON.stringify(state.requests));
   assert.deepEqual(dispatch.body, { ref: 'main', inputs: { source_repository: 'octo/hello' } });
   assert.deepEqual(grantOf(state, dispatch.auth), { installation: 3, repositories: ['dashboard'], permissions: quickstartPermissions.board });
-  assert.deepEqual(state.repos['agent-CI-Infra/dashboard'].dispatched, { workflow: 'board-create.yml', ...dispatch.body });
+  // The collection runs immediately, so the first snapshot does not wait for the daily schedule.
+  const collect = state.requests.find(r => r.method === 'POST' && r.path === '/repos/agent-CI-Infra/dashboard/actions/workflows/board-collect.yml/dispatches');
+  assert.deepEqual(collect.body, { ref: 'main', inputs: { board: 'octo/hello' } });
+  assert.deepEqual(state.repos['agent-CI-Infra/dashboard'].dispatched, { workflow: 'board-collect.yml', ...collect.body });
   assert.equal(step(result, 'board').url, boardUrl);
-  assert.match(step(result, 'board').detail, /已触发「Create board」/);
+  assert.match(step(result, 'board').detail, /已触发「Create board」和首轮「Collect board data」/);
   // No repository is created; the board token is only issued for the dashboard.
   assert.deepEqual(tokensFor(state, 3).map(grant => [grant.repositories, grant.permissions]),
     [[['dashboard'], quickstartPermissions.board], [['dashboard'], quickstartPermissions.dashboard]]);
@@ -240,16 +255,42 @@ test('a missing permission stops only the item that needs it, listed in GitHub n
   assert.ok(writes(state).every(r => r.path.startsWith('/repos/octo/hello/')));
 });
 
-test('a private source repository can still get the gate PR, but no public board or dashboard registration', async t => {
+test('a private source repository gets all three items; the dashboard secret is named once in the plan', async t => {
   const { state, run } = await fixture(t);
   state.repos['octo/hello'].private = true;
+  gated(state);
   const result = await run();
-  assert.equal(result.state, 'partial', JSON.stringify(result));
+  assert.equal(result.state, 'done', JSON.stringify(result));
   assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
-    [['done', null], ['blocked', 'private_repository'], ['blocked', 'private_repository']]);
-  assert.ok(!writes(state).some(r => r.path.startsWith('/repos/agent-CI-Infra/')));
-  assert.ok(!state.repos['agent-CI-Infra/dashboard'].dispatched);
-  assert.ok(writes(state).every(r => r.path.startsWith('/repos/octo/hello/')));
+    [['skipped', null], ['done', null], ['done', null]]);
+  assert.match(step(result, 'preflight').detail, /PRIVATE_SOURCE_TOKEN/);
+  // Create board and the first collection are both dispatched for the private source.
+  const dispatches = state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/dispatches'));
+  assert.deepEqual(dispatches.map(r => r.body.inputs), [{ source_repository: 'octo/hello' }, { board: 'octo/hello' }]);
+  assert.match(step(result, 'board').detail, /PRIVATE_SOURCE_TOKEN/);
+  const pull = state.repos['agent-CI-Infra/dashboard'].pulls[0];
+  assert.match(pull.body, /可见性：private/);
+  assert.match(pull.body, /PRIVATE_SOURCE_TOKEN/);
+});
+
+test('a private board stops with dashboard_private_token_missing when the dashboard secret is absent', async t => {
+  const { state, run } = await fixture(t);
+  state.repos['octo/hello'].private = true;
+  state.createMissing = true;
+  const result = await run(['board']);
+  assert.deepEqual([result.state, ...outcome(result, 'board')], ['blocked', 'blocked', 'dashboard_private_token_missing']);
+  assert.match(step(result, 'board').detail, /PRIVATE_SOURCE_TOKEN/);
+  // Without the secret Create board fails, so the first collection is not dispatched.
+  assert.ok(!state.requests.some(r => r.method === 'POST' && r.path.endsWith('/board-collect.yml/dispatches')));
+});
+
+test('a private board also maps a missing secret found by the first collection', async t => {
+  const { state, run } = await fixture(t);
+  state.repos['octo/hello'].private = true;
+  state.collectMissing = true;
+  const result = await run(['board']);
+  assert.deepEqual([result.state, ...outcome(result, 'board')], ['blocked', 'blocked', 'dashboard_private_token_missing']);
+  assert.ok(state.requests.some(r => r.method === 'POST' && r.path.endsWith('/board-collect.yml/dispatches')));
 });
 
 test('a repository on a bot account is not onboarded and its long-lived token is never sent', async t => {
