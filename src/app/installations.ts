@@ -35,12 +35,15 @@ function installed(repo: Json, installationId: string | null, permissions?: unkn
 }
 // A listing without permissions (an event that does not carry them) keeps the grant read before.
 function upsert(store: Store, accountId: string, rows: Installed[], now: string): void {
-  for (const r of rows) store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at,permissions,permissions_at)
-    VALUES(?,?,?,?,?,?,?,1,?,?,?) ON CONFLICT(account_id,repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,
+  // `hidden` is never in the UPDATE list, so a sync keeps a row hidden. A row first seen for another account of a hidden
+  // repository is born hidden too, so syncing can never pull the repository back into the visible list.
+  for (const r of rows) store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at,permissions,permissions_at,hidden)
+    VALUES(?,?,?,?,?,?,?,1,?,?,?,(SELECT COALESCE(MAX(hidden),0) FROM installed_repositories WHERE repository_id=?))
+    ON CONFLICT(account_id,repository_id) DO UPDATE SET installation_id=excluded.installation_id,full_name=excluded.full_name,
     owner_id=excluded.owner_id,owner_login=excluded.owner_login,private=excluded.private,installed=1,synced_at=excluded.synced_at,
     permissions=coalesce(excluded.permissions,installed_repositories.permissions),
     permissions_at=CASE WHEN excluded.permissions IS NULL THEN installed_repositories.permissions_at ELSE excluded.permissions_at END`,
-  accountId, r.repository_id, r.installation_id, r.full_name, r.owner_id, r.owner_login, Number(r.private), now, r.permissions, r.permissions ? now : null);
+  accountId, r.repository_id, r.installation_id, r.full_name, r.owner_id, r.owner_login, Number(r.private), now, r.permissions, r.permissions ? now : null, r.repository_id);
 }
 function grantInstallation(store: Store, accountId: string, installationId: string, permissions: unknown, now: string): void {
   const value = granted(permissions);
@@ -240,6 +243,7 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   if (!path.startsWith('/api/installations')) return undefined;
   superAdmin(user);
   if (path === '/api/installations' && method === 'GET') return list(store);
+  if (path === '/api/installations/hidden' && method === 'GET') return hiddenList(store);
   if (path === '/api/installations/sync' && method === 'POST') { fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const results = await sync.syncAll(); return { results, ...list(store) }; }
   // The list asks for this when it opens with stale grants and swaps only the permission badges with the answer.
   if (path === '/api/installations/permissions/check' && method === 'POST') {
@@ -247,6 +251,11 @@ export async function installationApi(store: Store, sync: InstallationSync | und
     return { errors, repositories: (list(store).repositories as Json[]).map(r => ({ id: r.id, permission_missing: r.permission_missing,
       permissions_checked_at: r.permissions_checked_at, permissions_stale: r.permissions_stale })) };
   }
+  // Hiding only removes a row from the console list; it never touches GitHub, projects or policies. Restore is the only way back.
+  const hide = /^\/api\/installations\/([1-9]\d*)$/.exec(path);
+  if (hide && method === 'DELETE') return setHidden(store, user, hide[1]!, input, true);
+  const restore = /^\/api\/installations\/([1-9]\d*)\/restore$/.exec(path);
+  if (restore && method === 'POST') return setHidden(store, user, restore[1]!, input, false);
   const match = /^\/api\/installations\/([1-9]\d*)\/(activate|disable)$/.exec(path);
   if (!match || method !== 'POST') return fail(404, 'not_found');
   return match[2] === 'activate' ? activate(store, user, match[1]!, input) : disable(store, user, match[1]!, input);
@@ -256,7 +265,7 @@ function list(store: Store): Json {
   const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.model_id,
     e.state AS environment_state,${projectActivityColumns} FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id ${projectActivityJoin}`).map(r => [r.id, r]));
   const scope = new Map<string, Row>();
-  for (const row of store.all('SELECT i.*,a.name AS account_name,a.type AS account_type FROM installed_repositories i JOIN accounts a ON a.id=i.account_id ORDER BY i.installed DESC')) {
+  for (const row of store.all('SELECT i.*,a.name AS account_name,a.type AS account_type FROM installed_repositories i JOIN accounts a ON a.id=i.account_id WHERE i.hidden=0 ORDER BY i.installed DESC')) {
     const current = scope.get(row.repository_id), owner = registered.get(row.repository_id)?.account_id;
     if (!current || !current.installed && row.installed || row.account_id === owner && row.installed >= current.installed) scope.set(row.repository_id, row);
   }
@@ -273,6 +282,28 @@ function list(store: Store): Json {
       running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));
   return { repositories, syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
+}
+// Rows removed from the list. They keep their installation row, so sync neither recreates nor unhides them.
+function hiddenList(store: Store): Json {
+  const registered = new Set(store.all('SELECT id FROM repositories').map(row => row.id));
+  const rows = store.all(`SELECT i.*,a.name AS account_name FROM installed_repositories i JOIN accounts a ON a.id=i.account_id
+    WHERE i.hidden=1 ORDER BY i.full_name,i.account_id`);
+  const seen = new Set<string>(), repositories = rows.filter(row => {
+    if (seen.has(String(row.repository_id))) return false; seen.add(String(row.repository_id)); return true;
+  }).map(row => ({ id: String(row.repository_id), full_name: String(row.full_name), owner_id: String(row.owner_id), owner_login: String(row.owner_login || ''),
+    private: !!row.private, account_id: String(row.account_id), account_name: row.account_name || null, installation_id: row.installation_id || null,
+    installed: !!row.installed, synced_at: row.synced_at || null, registered: registered.has(String(row.repository_id)), hidden: true }));
+  return { repositories };
+}
+// Hiding is a console-only flag on the installation rows; it never asks GitHub and touches no other table.
+function setHidden(store: Store, user: Actor, id: string, input: Json, hidden: boolean): Json {
+  fields(input, []);
+  if (!store.get('SELECT 1 FROM installed_repositories WHERE repository_id=?', id)) return fail(404, 'repository_not_installed');
+  return store.transaction(() => {
+    store.run('UPDATE installed_repositories SET hidden=? WHERE repository_id=?', Number(hidden), id);
+    store.audit(user.id, hidden ? 'repository.hidden' : 'repository.restored', id, id);
+    return { hidden };
+  });
 }
 function activate(store: Store, user: Actor, id: string, input: Json): Json {
   fields(input, ['account_id', 'model_id', 'development_enabled']);

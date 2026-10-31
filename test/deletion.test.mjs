@@ -17,7 +17,7 @@ const full = { contents: 'write', issues: 'write', pull_requests: 'write', statu
 const repo = id => ({ id: Number(id), full_name: `fixture/project-${id}`, private: false, owner: { id: 10, login: 'fixture' } });
 const installation = (id, permissions = full, extra = {}) => ({ id, account: { id: 10, login: 'fixture', type: 'Organization' }, permissions, ...extra });
 const random = () => randomBytes(24).toString('hex');
-const remove = (admin, id, body = { confirm: true }) => admin(`/api/installations/${id}`, 'DELETE', body);
+const remove = (admin, id, body = { confirm: true }) => admin(`/api/installations/${id}/removal`, 'DELETE', body);
 const listedIds = async admin => (await admin('/api/installations')).value.repositories.map(row => row.id);
 
 // A GitHub that answers what installation sync and the deletion check ask. `installations` is the App's installation list,
@@ -380,7 +380,7 @@ test('deletions confirm in the console dialog, which shows the check and a refus
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [] }];
     if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
-    if (method === 'DELETE' && path === '/api/installations/202') return answer;
+    if (method === 'DELETE' && path === '/api/installations/202/removal') return answer;
     return [404, { error: 'not_found' }];
   });
   // A browser popup would fail here: the page has no confirm() or prompt().

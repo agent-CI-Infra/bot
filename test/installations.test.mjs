@@ -314,3 +314,95 @@ test('the permission check lists what an App and its installations lack and link
   assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions'); assert.equal(report.installations[0].review_url, null);
   assert.equal((await admin(`/api/accounts/${bot.id}/permissions`)).status, 409);
 });
+
+test('an installed but never started repository is hidden from the list, survives sync, and can be restored', async t => {
+  // A GitHub that lists both repositories; no hide/restore request below may reach it.
+  const requests = [], repo = id => ({ id, full_name: 'fixture/project-' + id, private: false, owner: { id: 10, login: 'fixture' } });
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://fake'); requests.push(`${req.method} ${url.pathname}`);
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/user/repos') return res.end(JSON.stringify(url.searchParams.get('page') === '1' ? [repo(101), repo(202)] : []));
+    res.statusCode = 404; res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
+  let sync;
+  const h = await harness(t, undefined, store => ({ installations: sync = new InstallationSync(store, `http://127.0.0.1:${server.address().port}`) }));
+  const { admin, password } = await setup(h), a = await account(admin), events = { 'X-GitHub-Event': 'installation_repositories' };
+  const listed = async () => (await admin('/api/installations')).value.repositories.map(row => row.id).sort();
+  await h.hook(a.path, a.secret, 'install', added(101, 202), events);
+  assert.deepEqual(await listed(), ['101', '202']);
+  // Only super administrators hide and restore, and both mutations need the session's CSRF token.
+  const userPassword = testPassword(), member = h.client();
+  assert.equal((await admin('/api/users', 'POST', { username: 'member', password: userPassword, repository_ids: ['101'] })).status, 201);
+  await member('/api/auth/login', 'POST', { username: 'member', password: userPassword });
+  assert.deepEqual([(await member('/api/installations/202', 'DELETE', {})).status, (await member('/api/installations/202/restore', 'POST', {})).status,
+    (await member('/api/installations/hidden')).status], [403, 403, 403]);
+  const login = await fetch(h.admin + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'administrator', password }) });
+  const cookie = String(login.headers.get('set-cookie')).split(';')[0];
+  const refused = await fetch(h.admin + '/api/installations/202', { method: 'DELETE', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: '{}' });
+  assert.deepEqual([refused.status, (await refused.json()).error], [403, 'csrf_required']);
+  const refusedRestore = await fetch(h.admin + '/api/installations/202/restore', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: '{}' });
+  assert.deepEqual([refusedRestore.status, (await refusedRestore.json()).error], [403, 'csrf_required']);
+
+  const hidden = await admin('/api/installations/202', 'DELETE', {});
+  assert.deepEqual([hidden.status, hidden.value], [200, { hidden: true }]);
+  assert.deepEqual(await listed(), ['101']);
+  const hiddenRows = (await admin('/api/installations/hidden')).value.repositories;
+  assert.deepEqual(hiddenRows.map(row => [row.id, row.hidden, row.registered]), [['202', true, false]]);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='202' AND action='repository.hidden'"));
+  assert.equal(h.store.get("SELECT enabled FROM policies WHERE repository_id='202'"), undefined);
+  // A full sync sees both repositories again, but the hidden flag survives and the list stays without it.
+  assert.equal((await sync.sync(a.id)).repositories, 2);
+  assert.equal(h.store.get('SELECT hidden FROM installed_repositories WHERE repository_id=?', '202').hidden, 1);
+  assert.deepEqual(await listed(), ['101']);
+  // Let the hook's scheduled sync finish, then require restore to be silent as well.
+  await sync.sync(a.id).catch(() => {}); requests.length = 0;
+  // Restore is the only way back.
+  const restored = await admin('/api/installations/202/restore', 'POST', {});
+  assert.deepEqual([restored.status, restored.value], [201, { hidden: false }]);
+  assert.deepEqual(await listed(), ['101', '202']);
+  assert.deepEqual((await admin('/api/installations/hidden')).value.repositories, []);
+  assert.ok(h.store.get("SELECT 1 FROM audit WHERE repository_id='202' AND action='repository.restored'"));
+  // Unknown repositories are 404 on both endpoints, and nothing above asked GitHub anything.
+  assert.deepEqual([(await admin('/api/installations/999', 'DELETE', {})).status, (await admin('/api/installations/999/restore', 'POST', {})).status], [404, 404]);
+  assert.equal((await admin('/api/installations/999', 'DELETE', {})).value.error, 'repository_not_installed');
+  assert.deepEqual(requests, []);
+});
+
+test('every repository row offers 删除 and an installed but never started row hides through the new endpoint', async () => {
+  const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', installed: true, registered: false, enabled: false,
+    review_enabled: false, development_enabled: false, model_id: null, running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false, ...extra });
+  const listing = [row('101'), row('202', { installed: false, registered: true }), row('303', { registered: true, enabled: true, review_enabled: true, model_id: 'm' })];
+  const hiddenRow = { ...row('404'), hidden: true, installed: false };
+  const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
+    if (path === '/api/integrations') return [200, { integrations: [] }];
+    if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
+    if (path === '/api/installations/hidden') return [200, { repositories: [hiddenRow] }];
+    if (method === 'DELETE' && path === '/api/installations/101') return [200, { hidden: true }];
+    if (method === 'POST' && path === '/api/installations/404/restore') return [200, { hidden: false }];
+    return [404, { error: 'not_found' }];
+  });
+  page.run("var startCalls = 0; start = async () => { startCalls++; }; var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
+  await page.run('render()');
+  const rows = page.$('rows').children, actions = line => line.querySelectorAll('button').map(button => button.textContent);
+  assert.deepEqual(rows.map(actions).map(names => names.includes('删除')), [true, true, true]);
+  const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20));
+  const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
+  rows[0].querySelectorAll('button').find(button => button.textContent === '删除').listeners.click[0]();
+  assert.equal(view.open, true);
+  assert.ok(texts('p').some(line => line.includes('只从列表里隐藏这一行')));
+  view.querySelector('form').listeners.submit[0]({ preventDefault() {} });
+  await settle();
+  assert.equal(view.open, false);
+  assert.ok(page.requests.includes('DELETE /api/installations/101'));
+  assert.equal(page.run('startCalls'), 1);
+  // The 已隐藏 filter lists hidden rows and offers 恢复; restoring calls the restore endpoint.
+  page.$('hidden-filter').checked = true; page.requests.length = 0; await page.run('render()');
+  const [hiddenLine] = page.$('rows').children;
+  assert.deepEqual(page.requests, ['GET /api/installations/hidden']);
+  assert.deepEqual(actions(hiddenLine), ['恢复']);
+  hiddenLine.querySelectorAll('button')[0].listeners.click[0](); await settle();
+  assert.ok(page.requests.includes('POST /api/installations/404/restore'));
+  assert.equal(page.run('startCalls'), 2);
+});

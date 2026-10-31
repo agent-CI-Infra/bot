@@ -44,6 +44,7 @@ button.linkish{border:0;background:none;padding:0;min-height:0;color:#16636b;tex
 }
 #activation-view{width:min(560px,calc(100vw - 24px))}#activation-view h2{font-size:17px}#activation-view p{margin:0;font-size:13px}
 label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5}label.check input{width:auto;margin-top:3px}
+.hidden-filter{flex-direction:row;align-items:center;gap:6px;font-size:12px;color:#365564;white-space:nowrap}.hidden-filter input{width:auto;margin:0}
 .step-running{margin:10px 0 0 18px;border-color:#b9cdea}.live-output{max-height:420px}
 @media(min-width:761px){.row>.actions{flex-wrap:nowrap}#rows[data-view=projects] .row.has-actions{grid-template-columns:minmax(0,1fr) max-content max-content}}
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px}.settings-actions{justify-content:flex-end}

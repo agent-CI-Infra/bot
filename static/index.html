@@ -10,7 +10,7 @@
 </section>
 <section id="workspace" hidden>
   <section class="card list-panel">
-    <div class="heading toolbar"><div class="title-group"><h1 id="page-title"></h1><span id="count" class="muted" aria-live="polite"></span></div><div class="actions"><button id="sync" class="quiet" hidden>同步安装列表</button><button id="check" class="quiet" hidden>检查接入</button><button id="refresh" class="quiet">刷新</button></div></div>
+    <div class="heading toolbar"><div class="title-group"><h1 id="page-title"></h1><span id="count" class="muted" aria-live="polite"></span></div><div class="actions"><label class="check hidden-filter" id="hidden-filter-label" hidden><input type="checkbox" id="hidden-filter"> 已隐藏</label><button id="sync" class="quiet" hidden>同步安装列表</button><button id="check" class="quiet" hidden>检查接入</button><button id="refresh" class="quiet">刷新</button></div></div>
     <form id="filters"><label>仓库<select id="repository-filter"><option value="">所有有权访问的仓库</option></select></label><label id="account-filter-label" hidden>账号<select id="account-filter"><option value="">全部账号</option></select></label><label class="owner-filter">组织 ID<input id="owner-filter" placeholder="组织或用户 ID"></label><button type="submit" class="quiet">筛选</button></form>
     <div id="rows" class="rows" role="list" aria-labelledby="page-title"></div><div id="external-panel" hidden></div><div id="onboarding-panel" hidden></div><div id="board-panel" hidden></div><div id="costs-panel" hidden></div><div id="settings-panel" class="settings-panel" hidden></div>
     <div id="paging" class="actions" hidden><button id="previous" class="quiet">上一页</button><span id="page-number"></span><button id="next" class="quiet">下一页</button></div>
