@@ -12,7 +12,7 @@
 | 有构建或测试脚本 | `scripts.build` 或 `scripts.test` 至少一个 |
 | 依赖有锁文件 | 有 `dependencies` 就要有 `package-lock.json` 等 |
 | 没有 `.github/workflows/ci.yml` | 已存在则视为"已接入门禁"，不再覆盖 |
-| 是**公开仓库** | 单仓看板和 Dashboard 登记只接受公开仓；私有仓只能接门禁 |
+| 是公开或私有仓库 | 两种仓库都能接门禁、单仓看板和 Dashboard 登记；私有仓库需要 dashboard 仓库一次性配置只读 secret `PRIVATE_SOURCE_TOKEN` |
 
 另外，你需要在 GitHub 上有该仓库的管理权限，并且是控制台的超管（或找超管帮你点）。
 
@@ -57,10 +57,22 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 | 项 | 它做什么 | 产物 |
 | --- | --- | --- |
 | **门禁 PR** | 从 `CI-workflow` 复制门禁模板到你的仓库 | 分支 `bot/gate-onboarding-*` 上的 PR，含 `.github/workflows/ci.yml`、`.github/workflows/nightly.yml`、`.github/ci-gates.json`、`scripts/gate/gate.mjs`、锁文件 |
-| **单仓看板** | 在 `agent-CI-Infra/dashboard` 触发 `Create board` 工作流 | 数据分支 `board/<owner>/<repo>`，站点 `https://agent-ci-infra.github.io/dashboard/boards/<owner>/<repo>/` |
-| **Dashboard 登记** | 往公共 Dashboard 提登记 PR | 改 `config/gate-sources.json` 和 `config/internal-contributors.json` |
+| **单仓看板** | 在 `agent-CI-Infra/dashboard` 触发 `Create board`，并触发首轮 `Collect board data` | 数据分支 `board/<owner>/<repo>`，站点 `https://agent-ci-infra.github.io/dashboard/boards/<owner>/<repo>/` |
+| **Dashboard 登记** | 往 dashboard 提登记 PR（PR 写明公开/私有可见性） | 改 `config/gate-sources.json` 和 `config/internal-contributors.json` |
 
 执行顺序建议：**门禁 PR → 单仓看板 → Dashboard 登记**。第三项依赖第二项（看板分支要先建好），前两项互不依赖。
+
+公开仓库和私有仓库走同一套看板：分支都在 dashboard 仓库里，叫 `board/<owner>/<repo>`，不会在用户账号下新建仓库。私有仓库的看板分支只发布 `site/data/` 快照，不含源码或凭据；采集时由 dashboard 仓库一次性配置的只读 secret `PRIVATE_SOURCE_TOKEN` 读取源仓，不需要给每个源仓单独放 secret。
+
+### 2.1 私有仓库的一次性准备
+
+私有仓库不需要额外的接入项，只要求 dashboard 维护者提前做一次：
+
+1. 在 `agent-CI-Infra/dashboard` 的 **Settings → Secrets and variables → Actions** 添加 repository secret `PRIVATE_SOURCE_TOKEN`；
+2. 令牌只需能只读访问私有源仓（读取仓库内容和元数据），不要给它写权限；
+3. 每个私有源仓共用这一个 secret，不需要逐仓配置。
+
+没有配置时，「单仓看板」会以 `dashboard_private_token_missing` 停下；补上 secret 后重新执行该项即可。
 
 点之前可以先点 **预演**：它只读不写，把每一步会做什么列出来，不产生任何改动。
 
@@ -103,10 +115,10 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 需要 App 拥有 `Workflows`（写）、`Administration`（写）、`Pages`（写），并且在**安装**里批准过这些权限。App 声明和安装批准是两层，两层都完成才生效。
 
 **私有仓库能接吗？**
-能接门禁，不能接单仓看板和 Dashboard 登记（公共站点只发布公开仓库的数据）。
+能，和公开仓库一样接门禁、单仓看板和 Dashboard 登记。区别只有一处：dashboard 仓库要一次性配置只读 secret `PRIVATE_SOURCE_TOKEN`，采集私有源仓时用它读取；看板分支仍然在 dashboard 仓库里，只发布 `site/data/` 数据。
 
 **想撤销某个项目的接入？**
 控制台项目行的 **删除** 只清理本系统记录（仓库、策略、运行记录），**不会**卸载 App，也不会删除 GitHub 上的仓库。GitHub 侧请自行处理。
 
 **接入失败了怎么排查？**
-每个项都会显示失败原因和错误码（如 `app_permissions_missing`、`dashboard_app_not_installed`、`board_not_ready`），对着提示处理即可；也可以先跑一次预演看它想做什么。
+每个项都会显示失败原因和错误码（如 `app_permissions_missing`、`dashboard_app_not_installed`、`dashboard_private_token_missing`、`board_not_ready`），对着提示处理即可；也可以先跑一次预演看它想做什么。

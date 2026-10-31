@@ -87,19 +87,21 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 ## 一键接入
 
-项目页的「公共配置」包含三项，可以逐项执行，也可以一次全部执行：门禁 PR（给源码仓加 CI-workflow 门禁）、单仓看板（在 dashboard 仓库触发「Create board」，创建 `board/<owner>/<repo>` 数据分支）和 Dashboard 登记（向公共 dashboard `BOT_DASHBOARD_REPO`，默认 `agent-CI-Infra/dashboard`，提登记 PR）。共同的预检只确认仓库挂在 GitHub App 上、App 能读到它；之后每一项只核对自己要用的安装和权限，在自己的第一次写入之前停下，其他项照常执行。只有 Dashboard 登记依赖另一项：它登记的是看板站点，所以看板分支要先就绪。对话框里每一项显示最近一次执行它的结果。
+项目页的「公共配置」包含三项，可以逐项执行，也可以一次全部执行：门禁 PR（给源码仓加 CI-workflow 门禁）、单仓看板（在 dashboard 仓库触发「Create board」，创建 `board/<owner>/<repo>` 数据分支，再触发首轮「Collect board data」）和 Dashboard 登记（向 dashboard `BOT_DASHBOARD_REPO`，默认 `agent-CI-Infra/dashboard`，提登记 PR）。共同的预检只确认仓库挂在 GitHub App 上、App 能读到它；之后每一项只核对自己要用的安装和权限，在自己的第一次写入之前停下，其他项照常执行。只有 Dashboard 登记依赖另一项：它登记的是看板站点，所以看板分支要先就绪。对话框里每一项显示最近一次执行它的结果。
 
 全程只用 GitHub App 安装令牌，由控制面用 App 私钥签 JWT 后按用途分别签发，权限取安装已授予的子集，运行结束时撤销；机器人账号的长期 Token 不用于接入，挂在机器人账号上的仓库停在预检。
 
 | 令牌 | 范围 | 权限 |
 | --- | --- | --- |
 | 源码仓 | 仅该仓库 | contents 写、pull_requests 写、workflows 写、metadata 读（门禁 PR 要提交 `.github/workflows/`） |
-| 单仓看板 | 仅 dashboard 仓库 | contents 读、actions 写、metadata 读（查询 `board/*` 分支并触发「Create board」） |
+| 单仓看板 | 仅 dashboard 仓库 | contents 读、actions 写、metadata 读（查询 `board/*` 分支，触发「Create board」和首轮「Collect board data」） |
 | Dashboard | 仅 dashboard 仓库 | contents 写、pull_requests 写、metadata 读（登记文件是 JSON） |
 
-模板仓库 CI-workflow（`BOT_CI_TEMPLATE_REPO`）在 App 装有它时用只读令牌读取；没装但仓库公开时，用手上的令牌或不带令牌读取。单仓看板不再复制 `single-repo/`：dashboard 仓库自己的「Create board」工作流创建 orphan 分支 `board/<owner>/<repo>`（小写），`Deploy` 汇总发布到 `https://<dashboard 所有者>.github.io/<dashboard 仓库名>/boards/<owner>/<repo>/`。分支已存在时看板这一项跳过，由「Collect board data」定期更新。
+模板仓库 CI-workflow（`BOT_CI_TEMPLATE_REPO`）在 App 装有它时用只读令牌读取；没装但仓库公开时，用手上的令牌或不带令牌读取。单仓看板不再复制 `single-repo/`：dashboard 仓库自己的「Create board」工作流创建 orphan 分支 `board/<owner>/<repo>`（小写），`board-config.json` 写入源仓的 `visibility`（public/private）；`Deploy` 汇总发布到 `https://<dashboard 所有者>.github.io/<dashboard 仓库名>/boards/<owner>/<repo>/`。分支已存在时看板这一项跳过，由「Collect board data」定期更新。
 
-权限不足时，对应项列出 GitHub 上的权限名（Workflows、Actions 等，均为 Read and write）和缺权限的安装，由人在 App 设置里新增并在该安装里同意。dashboard 仓库没有安装 App 时，单仓看板和 Dashboard 登记都说明需要把同一个 App 安装过去。公共 dashboard 只接受公开源码仓：私有仓库仍可开门禁 PR，单仓看板和 Dashboard 登记两项停下，不创建公开看板。
+公开源仓用 dashboard 自带的 workflow 令牌读取；私有源仓用 dashboard 仓库一次性配置的只读 secret `PRIVATE_SOURCE_TOKEN` 读取，发布看板分支仍用 dashboard 自己的令牌。私有源仓与公开源仓共用同一套 `board/<owner>/<repo>` 分支，不会在用户账号下建仓，也不按源仓配置 secret。看板分支只发布 `site/data/` 快照和静态资源，不包含源码或凭据。缺少 `PRIVATE_SOURCE_TOKEN` 时，首轮采集以 `dashboard_private_token_missing` 返回给单仓看板这一项。
+
+权限不足时，对应项列出 GitHub 上的权限名（Workflows、Actions 等，均为 Read and write）和缺权限的安装，由人在 App 设置里新增并在该安装里同意。dashboard 仓库没有安装 App 时，单仓看板和 Dashboard 登记都说明需要把同一个 App 安装过去。私有仓库同样可以完成三项；Dashboard 登记 PR 会写明 `public` 或 `private` 可见性。
 
 ## 代码快照与发布
 
