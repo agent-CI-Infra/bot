@@ -76,6 +76,8 @@ async function loadProject(id,section=current.section) {
   Object.assign(current, { external, repository: repo.repository, policy: repo.policy, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules, models:models?.models||[] });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
+// Reloads the project with the outcome of an action shown at the top of the section.
+async function reloadWith(notice) { if (notice) current.flash = notice; await reloadProject(); }
 function projectStatus() {
   const { policy, installed } = current;
   const status = !policy.enabled ? badge('已禁用', 'warning') : policy.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning');
@@ -226,22 +228,26 @@ async function refreshProjectStatus(token) {
 function modelSection() {
   const { policy } = current, superUser = me.role === 'super_admin', chooser = card('使用的模型'), list = element('div', '', 'model-list');
   chooser.append(note('检视和开发都用这里选择的模型。部署共享模型由超级管理员提供，本项目专属模型只对这个项目可见。'), list);
-  const own = card('本项目专属模型'), ownList = element('ul', '', 'history'), shared = card('部署共享模型'), sharedList = element('ul', '', 'history');
+  const own = card('本项目专属模型'), ownList = element('div', '', 'provider-list'), shared = card('部署共享模型'), sharedList = element('div', '', 'provider-list');
   own.append(ownList); shared.append(sharedList);
   (async () => {
     const models = (await api(superUser ? '/api/models' : '/api/models?repository_id=' + current.id)).models.filter(m => m.repository_id === null || m.repository_id === current.id);
     const choices = element('div', '', 'choices'), save = element('button', '保存选择'), message = element('p', '', 'view-error');
     const option = (value, title, detail, checked) => { const label = element('label', '', 'choice'), radio = input('model', value, { type: 'radio', checked }); label.append(radio, element('strong', title), element('span', detail, 'muted')); return label; };
     choices.append(option('', '不使用模型', '检视和开发任务会停在“配置待补”', !policy.model_id));
-    for (const m of models) choices.append(option(m.id, m.model_name, `${m.repository_id ? '本项目专属' : '部署共享'} · ${m.api_url}${m.key_configured ? '' : ' · Key 已撤销'}`, policy.model_id === m.id));
+    for (const group of byProvider(models)) {
+      choices.append(providerTitle(group[0], 'choice-group'));
+      for (const m of group) choices.append(option(m.id, m.model_name, `${m.repository_id ? '本项目专属' : '部署共享'}${m.key_configured ? '' : ' · Key 已撤销'}`, policy.model_id === m.id));
+    }
     save.type = 'button'; save.addEventListener('click', async () => {
       const value = choices.querySelector('input:checked')?.value || null; save.disabled = true;
       try { await patchPolicy(changed({ model_id: value }, { model_id: policy.model_id || null })); await reloadProject(); } catch (err) { message.textContent = err.message; save.disabled = false; }
     });
     const actions = element('div', '', 'actions form-actions'); actions.append(save); list.replaceChildren(choices, message, actions);
-    const row = (m, target) => { const li = element('li', '', 'model-entry'), result = probeResult('wide-cell'); li.append(modelAddress(m), modelActions(m, result), result); target.append(li); };
-    models.filter(m => m.repository_id === current.id).forEach(m => row(m, ownList)); if (!ownList.childElementCount) ownList.append(element('li', '还没有专属模型。', 'muted'));
-    models.filter(m => m.repository_id === null).forEach(m => row(m, sharedList)); if (!sharedList.childElementCount) sharedList.append(element('li', '还没有共享模型。', 'muted'));
+    const row = m => { const li = element('li', '', 'model-entry'), result = probeResult('wide-cell'); li.append(modelLabel(m), modelActions(m, result), result); return li; };
+    const ownModels = models.filter(m => m.repository_id === current.id), sharedModels = models.filter(m => m.repository_id === null);
+    ownList.replaceChildren(...(ownModels.length ? [providerList(ownModels, row)] : [element('p', '还没有专属模型。', 'muted')]));
+    sharedList.replaceChildren(...(sharedModels.length ? [providerList(sharedModels, row)] : [element('p', '还没有共享模型。', 'muted')]));
   })().catch(err => list.replaceChildren(element('p', err.message, 'view-error')));
   own.append(modelForm('添加专属模型', current.id));
   const sections = [chooser, own];
@@ -252,7 +258,7 @@ function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
 // Rotating or revoking a key never shows it; an empty key field keeps the current one. Listing and testing use the
 // saved URL, key and name and need the same right as editing; their outcome goes to the row's result line. `after`
 // redraws the list once a change is saved: the project page reloads, global settings redraws only its model cards.
-function modelActions(model, result, after = reloadProject) {
+function modelActions(model, result, after = reloadWith) {
   const actions = element('div', '', 'actions'), editable = me.role === 'super_admin' || model.repository_id === current?.id;
   if (!editable) return actions;
   if (model.key_configured) actions.append(
@@ -328,10 +334,80 @@ function endpointFacts(endpoints) {
   if (!endpoints.has_v1) nodes.push(element('p', modelV1Warning, 'endpoint-warning'));
   return nodes;
 }
+// Saved models are shown by provider: one group per request address. The key is the server's chat_url, so URLs that
+// differ only in what the server ignores (a trailing / or /chat/completions) are one provider, as they are for tasks.
+function byProvider(models) {
+  const groups = new Map();
+  for (const model of models) { const key = model.endpoints?.chat_url || model.api_url; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(model); }
+  return [...groups.values()];
+}
+function providerTitle(model, className = 'provider-title') {
+  const title = element('div', '', className); title.append(element('strong', hostOf(model.api_url)), ' ', element('span', model.api_url, 'muted'));
+  if (model.endpoints && !model.endpoints.has_v1) { const flag = badge('地址不含 /v1', 'warning'); flag.title = modelV1Warning; title.append(' ', flag); }
+  return title;
+}
+// A model with its address on one line, where it is not shown inside a provider group (the onboarding wizard).
 function modelAddress(model) {
   const address = element('span', `${model.model_name} · ${model.api_url}`, 'model-address');
   if (model.endpoints && !model.endpoints.has_v1) { const flag = badge('地址不含 /v1', 'warning'); flag.title = modelV1Warning; address.append(' ', flag); }
   return address;
+}
+// A model inside its provider group: the name, and `extra` badges such as the wizard's default.
+function modelLabel(model, extra = []) {
+  const label = element('span', model.model_name, 'model-address');
+  for (const flag of [...extra, ...(model.key_configured ? [] : [badge('Key 已撤销', 'warning')])]) label.append(' ', flag);
+  return label;
+}
+// The provider groups of one list (models of one project, or the shared ones); `row` draws each model. Whoever may edit
+// the models can add more of a provider's models with its saved key.
+function providerList(models, row, after = reloadWith) {
+  const list = element('div', '', 'provider-list');
+  for (const group of byProvider(models)) {
+    const section = element('section', '', 'provider-group'), head = element('div', '', 'provider-head'), slot = element('div', ''), rows = element('ul', '', 'history');
+    head.append(providerTitle(group[0]), element('span', `${group.length} 个模型`, 'muted provider-count'));
+    const source = group.find(model => model.key_configured), editable = me.role === 'super_admin' || group[0].repository_id === current?.id;
+    if (source && editable) head.append(quickAdd(source, group, slot, after));
+    for (const model of group) rows.append(row(model));
+    section.append(head, slot, rows); list.append(section);
+  }
+  return list;
+}
+// Lists the provider's upstream models with the key saved on `source`; one click adds a model with that key (the server
+// copies it, so it is never shown or typed again). Names already in the group are marked; the page redraws on 完成.
+function quickAdd(source, group, slot, after) {
+  const open = button('添加该供应商的模型', async () => {
+    if (slot.childElementCount) { slot.replaceChildren(); return; }
+    const panel = element('div', '', 'provider-add'), status = probeResult(), chips = element('div', '', 'model-chips'), have = new Set(group.map(model => model.model_name)), added = [];
+    const filter = input('filter', '', { type: 'search', placeholder: '筛选模型 id' }), manual = input('model_name', '', { maxLength: 200, placeholder: '列表外的模型名' });
+    filter.setAttribute('aria-label', '筛选模型 id'); manual.setAttribute('aria-label', '列表外的模型名');
+    const add = async (name, control) => {
+      control.disabled = true; status.replaceChildren(element('p', `正在添加 ${name}…`, 'view-progress'));
+      try { await api('/api/models', 'POST', { repository_id: source.repository_id, key_from: source.id, model_name: name }); }
+      catch (err) { control.disabled = false; status.replaceChildren(element('p', err.message, 'view-error')); return false; }
+      have.add(name); added.push(name); status.replaceChildren(element('p', `已添加 ${name}`, 'view-success')); return true;
+    };
+    const chip = name => {
+      const item = button(name, async () => { if (await add(name, item)) mark(item); }, 'quiet model-chip'), mark = node => { node.disabled = true; node.title = '已添加'; node.textContent = name + ' ✓'; };
+      item.dataset.name = name.toLowerCase(); if (have.has(name)) mark(item); return item;
+    };
+    const manualAdd = button('添加', async () => {
+      const name = manual.value.trim(); if (!name) return;
+      if (have.has(name)) { status.replaceChildren(element('p', `${name} 已经在这个供应商下`, 'view-error')); return; }
+      if (await add(name, manualAdd)) { manual.value = ''; manualAdd.disabled = false; }
+    }), done = button('完成', async () => { slot.replaceChildren(); if (added.length) await after(`已添加 ${added.join('、')}`); }, '');
+    filter.addEventListener('input', () => { const text = filter.value.trim().toLowerCase(); for (const item of chips.children) item.hidden = !!text && !item.dataset.name.includes(text); });
+    const manualRow = element('div', '', 'actions'), actions = element('div', '', 'actions form-actions');
+    manualRow.append(manual, manualAdd); actions.append(done);
+    panel.append(status, filter, chips, manualRow, note(`添加的模型使用 ${source.model_name} 已保存的 API Key，之后可以各自更换。`), actions); slot.replaceChildren(panel);
+    status.replaceChildren(element('p', '正在获取模型列表…', 'view-progress')); open.disabled = true;
+    try {
+      const value = await api(`/api/models/${source.id}/upstream`, 'POST', {});
+      if (!value.ok) status.replaceChildren(...probeFailure(value));
+      else { status.replaceChildren(element('p', `上游返回 ${value.total} 个模型${value.truncated ? `，只列出按名称排序的前 ${value.models.length} 个` : ''}；点一个即添加。`, 'view-success')); chips.append(...value.models.map(chip)); }
+    } catch (err) { status.replaceChildren(element('p', err.message, 'view-error')); }
+    finally { open.disabled = false; }
+  });
+  return open;
 }
 function probeResult(className = '') { const box = element('div', '', ('probe-result ' + className).trim()); box.setAttribute('role', 'status'); return box; }
 const probeErrors = { upstream_timeout: '上游 15 秒内没有响应', upstream_unreachable: '无法连接上游', upstream_redirect: '上游要求重定向，请改填最终地址',

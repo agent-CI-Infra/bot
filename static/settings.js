@@ -195,14 +195,11 @@ function defaultModelBody(view, redraw) {
 }
 // The same row actions and add form as the project page, refreshing only these two cards instead of a project.
 function sharedModelsBody(view) {
-  const list = element('ul', '', 'history');
-  for (const model of view.models.filter(row => row.repository_id === null)) {
-    const row = element('li', '', 'model-entry'), result = probeResult('wide-cell'), address = modelAddress(model);
-    if (model.id === view.onboarding.model_id) address.append(' ', badge('默认', 'info'));
-    if (!model.key_configured) address.append(' ', badge('Key 已撤销', 'warning'));
-    row.append(address, modelActions(model, result, refreshSettingsModels), result); list.append(row);
-  }
-  if (!list.childElementCount) list.append(element('li', '还没有部署共享模型。', 'muted'));
+  const shared = view.models.filter(row => row.repository_id === null), row = model => {
+    const item = element('li', '', 'model-entry'), result = probeResult('wide-cell');
+    item.append(modelLabel(model, model.id === view.onboarding.model_id ? [badge('默认', 'info')] : []), modelActions(model, result, refreshSettingsModels), result); return item;
+  };
+  const list = shared.length ? providerList(shared, row, refreshSettingsModels) : element('p', '还没有部署共享模型。', 'muted');
   return [note('不属于任何仓库、所有项目都能选用的模型。项目在「使用的模型」里选用；删除后，选用它的项目改回「不使用模型」，已有成本记录保留。'), list,
     modelForm('添加部署共享模型', null, refreshSettingsModels)];
 }

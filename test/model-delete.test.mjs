@@ -169,7 +169,9 @@ test('the project model page keeps the shared model card for super administrator
   page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; current = { id: '101', section: 'model', policy: { model_id: null } };");
   const cards = page.run('modelSection()'); await settle();
   const shared = cards.find(card => card.querySelector('h3').textContent === '部署共享模型');
-  assert.deepEqual(shared.querySelectorAll('.model-address').map(node => node.textContent), ['shared · https://model.invalid/v1']);
+  // The model sits under its provider: the heading carries the address, the row the model name.
+  assert.deepEqual(shared.querySelectorAll('.model-address').map(node => node.textContent), ['shared']);
+  assert.deepEqual(['.provider-title strong', '.provider-title .muted'].map(selector => shared.querySelector(selector).textContent), ['model.invalid', 'https://model.invalid/v1']);
   assert.equal(shared.querySelector('details summary').textContent, '添加部署共享模型');
   page.run("me.role = 'project_admin';"); assert.ok(!page.run('modelSection()').some(card => card.querySelector('h3').textContent === '部署共享模型'));
 });
