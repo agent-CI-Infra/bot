@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Docker, ManagerError } from './docker.mjs';
-import { Projects } from './projects.mjs';
+import { Projects, logFailure } from './projects.mjs';
 
 process.umask(0o077);
 const token = readFileSync(process.env.BOT_MANAGER_TOKEN_FILE), bearer = 'Bearer ' + token.toString('base64');
@@ -47,7 +47,11 @@ const server = createServer(async (req, res) => {
       } else throw new ManagerError('not_found', 404);
     }
     res.end(JSON.stringify({ result }));
-  } catch (error) { res.statusCode = error instanceof ManagerError ? error.status : 503; res.end(JSON.stringify({ error: error instanceof ManagerError ? error.message : 'manager_unavailable' })); }
+  } catch (error) {
+    // A refusal is answered with its code; an unexpected error or a Docker failure is also logged with the request.
+    if (!(error instanceof ManagerError) || error.status >= 500) logFailure(`${req.method} ${new URL(req.url, 'http://manager').pathname}`, error);
+    res.statusCode = error instanceof ManagerError ? error.status : 503; res.end(JSON.stringify({ error: error instanceof ManagerError ? error.message : 'manager_unavailable' }));
+  }
 });
 server.requestTimeout = 10000; server.headersTimeout = 5000; server.listen(8793, '0.0.0.0');
 for (const signal of ['SIGINT','SIGTERM']) process.on(signal, () => { clearInterval(timer); server.close(async () => { await projects.shutdown(); process.exit(0); }); });

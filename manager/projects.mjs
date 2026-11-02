@@ -5,6 +5,11 @@ import { randomBytes, createHash } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
+// One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
+export function logFailure(what, error) {
+  const reason = error instanceof ManagerError ? error.message + (error.detail ? ` (${error.detail})` : '') : error?.stack || String(error);
+  console.error(`[manager] ${what}: ${reason}`);
+}
 // Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
 // The resource values are the built-in defaults: a super administrator replaces them in the global settings, and every
 // resource a project does not set itself follows the current default.
@@ -278,7 +283,7 @@ export class Projects {
       if (this.get(repo)) return this.get(repo);
       this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired,error,started_at) VALUES(?,1,'provisioning','ready',NULL,NULL)").run(repo);
       try { return await this.provision(repo); }
-      catch (error) { this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'provision_failed'); throw error; }
+      catch (error) { logFailure(`project ${repo} first provision failed`, error); this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'provision_failed'); throw error; }
     });
   }
   // Stops leftover processes without restarting the container; falls back to a restart if any survive. With a workspace,
@@ -397,6 +402,7 @@ export class Projects {
           }
         }
         // On an uncertain exec result, kill the entire environment before releasing its lock.
+        logFailure(`project ${repo} ${action === 'execute' ? input.request.type : action} failed, computer stopped`, error);
         try { await this.stopAll(repo); } catch {}
         this.update(repo, action === 'reset' ? 'reset_failed' : 'failed', 'stopped', error instanceof ManagerError ? error.message : 'operation_failed');
         this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
@@ -414,7 +420,7 @@ export class Projects {
         if (row.state === 'reset_failed') return;
         if (row.desired === 'ready') { this.update(row.repository_id, 'recovering', 'ready'); await this.provision(row.repository_id); }
         else this.update(row.repository_id, row.desired, row.desired, row.error);
-      } catch { this.update(row.repository_id, row.state === 'resetting' ? 'reset_failed' : 'failed', 'stopped', 'recovery_failed'); }
+      } catch (error) { logFailure(`project ${row.repository_id} recovery on start failed`, error); this.update(row.repository_id, row.state === 'resetting' ? 'reset_failed' : 'failed', 'stopped', 'recovery_failed'); }
     });
   }
   // Liveness check of idle computers only: one with runner calls in flight is skipped rather than queued behind them.
@@ -426,7 +432,7 @@ export class Projects {
         if (!container?.State.Running || container.State.StartedAt !== current.started_at) {
           this.update(row.repository_id, 'recovering', 'ready'); await this.stopAll(row.repository_id); await this.provision(row.repository_id);
         }
-      } catch { this.update(row.repository_id, 'failed', 'stopped', 'recovery_failed'); }
+      } catch (error) { logFailure(`project ${row.repository_id} recovery after its container stopped failed`, error); this.update(row.repository_id, 'failed', 'stopped', 'recovery_failed'); }
     })));
   }
   async shutdown() { await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id); this.db.close(); }

@@ -302,7 +302,12 @@ export class TaskEngine {
       }
       await this.release(workspace,task);log({type:'completed',status:task.status});
     }catch(error){
-      if(!(error instanceof TaskError))log({type:'runtime_fault',message:redactor.text(String((error as Error)?.message||'runtime failure')).slice(0,2000)});
+      // An unexpected error keeps its message and where it was thrown (the top stack frames), in the task log and in the
+      // control plane's log; both pass through the task's redactor.
+      if(!(error instanceof TaskError)){
+        const message=redactor.text(String((error as Error)?.message||'runtime failure')).slice(0,2000),where=redactor.text(String((error as Error)?.stack||'')).split('\n').slice(1,6).map(line=>line.trim()).join('\n').slice(0,2000);
+        log({type:'runtime_fault',message,...(where?{where}:{})});console.error(`[engine] task ${id} runtime fault in ${task.phase}: ${message}${where?'\n  '+where.replace(/\n/g,'\n  '):''}`);
+      }
       await this.release(workspace,task);
       const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常：${redactor.text(String((error as Error)?.message||'未知错误')).replace(/\s+/g,' ').slice(0,300)}`);
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);

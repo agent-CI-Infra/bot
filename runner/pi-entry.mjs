@@ -88,5 +88,7 @@ try{
   try{await session.prompt(config.prompt);}catch(error){if(!finished)throw error;}
   await events;
   const result=finished||JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,''));await save({state:'completed',result,agent:'pi',version:'1.4.0'});
-}catch{await events.catch(()=>{});await save({state:'failed',error:'pi_execution_failed'});}
+}catch(error){await events.catch(()=>{});
+  // The reason goes into the task log; issued tokens are masked like every event.
+  await save({state:'failed',error:'pi_execution_failed',detail:clean(String(error?.message||error||'unknown')).slice(0,1000)});}
 finally{session?.dispose();server.closeAllConnections();server.close();}
