@@ -55,7 +55,8 @@ jobs:
       - run: npm ci
 
       # The browser is downloaded once per Playwright version (pinned in package-lock.json) and restored from the Actions
-      # cache afterwards; the runner's system libraries are still installed on every run, which takes only a few seconds.
+      # cache afterwards. The runner image usually has every system library the headless shell needs, so they are installed
+      # only when a dry run reports some missing (installing them takes 15-30 seconds of apt).
       - name: Playwright version
         id: playwright
         run: echo "version=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
@@ -65,9 +66,8 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium-headless-shell
       - if: steps.browsers.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium --only-shell
-      - if: steps.browsers.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+        run: npx playwright install chromium --only-shell
+      - run: npx playwright install-deps --dry-run chromium-headless-shell || npx playwright install-deps chromium-headless-shell
 
       - run: npm run test:e2e
 
