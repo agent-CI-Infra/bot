@@ -21,7 +21,8 @@ export class Forwarder{
     if(this.closing)return;
     for(const row of this.store.all("SELECT * FROM (SELECT d.*,row_number() OVER (PARTITION BY subscription_id ORDER BY created_at,id) AS ordinal FROM external_deliveries d WHERE state IN ('pending','retry') AND next_at<=?) WHERE ordinal=1 ORDER BY created_at,id LIMIT 100",Date.now())){
       if(this.active.has(row.subscription_id))continue;
-      const work=this.deliver(row).catch(()=>{this.store.run("UPDATE external_deliveries SET state='failed',error='forward_internal_failure' WHERE id=?",row.id);}).finally(()=>this.active.delete(row.subscription_id));this.active.set(row.subscription_id,work);
+      // A delivery the forwarder itself could not handle fails with a fixed code; the cause goes to the control plane's log.
+      const work=this.deliver(row).catch(error=>{console.error(`[forward] delivery ${row.id} of subscription ${row.subscription_id} failed internally:`,error);this.store.run("UPDATE external_deliveries SET state='failed',error='forward_internal_failure' WHERE id=?",row.id);}).finally(()=>this.active.delete(row.subscription_id));this.active.set(row.subscription_id,work);
     }
   }
   async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled(this.active.values());}

@@ -91,7 +91,8 @@ test('the control plane drains paged events before returning a completed or fail
     const running=agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='pages'"),workspace,new Redactor(),async()=>{},{mode:'review'});
     if(state==='completed')assert.equal((await running).summary,result.summary);
     else await assert.rejects(running,error=>error.code==='pi_execution_failed');
-    assert.equal(polls,3);assert.deepEqual(logs,events);
+    // A failed agent adds the reason it gave (none here) after its events.
+    assert.equal(polls,3);assert.deepEqual(logs,state==='failed'?[...events,{type:'agent_failure',error:null,detail:null}]:events);
   }
 });
 

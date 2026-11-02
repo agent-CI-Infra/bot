@@ -30,7 +30,7 @@ const gitCache = new GitCache(process.env.BOT_GIT_CACHE_DIR || resolve(dirname(d
 const engine=new TaskEngine(store,manager,process.env.BOT_GITHUB_API_URL,gitCache);engine.start();
 const external=new ExternalService(store,{githubUrl:process.env.BOT_GITHUB_API_URL,privateHosts:(process.env.BOT_FORWARD_PRIVATE_HOSTS||'').split(',').map(v=>v.trim().toLowerCase()).filter(Boolean)});external.forwarder.start();
 void projects.reconcile();
-const timer = setInterval(() => { void projects.reconcile().catch(() => {}); }, 5000);
+const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
 // Installed repositories are listed on start and every ten minutes; webhook events update them in between.
 const installations = new InstallationSync(store, process.env.BOT_GITHUB_API_URL || undefined);
 const onboarding = new Onboarding(store, { tunnelFile: process.env.BOT_TUNNEL_TOKEN_FILE, tunnelMetrics: process.env.BOT_TUNNEL_METRICS_URL, githubUrl: process.env.BOT_GITHUB_API_URL });

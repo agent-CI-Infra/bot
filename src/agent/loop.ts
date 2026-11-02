@@ -45,8 +45,12 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       if (!publication) stop('create_pull_request_required', undefined, '开发执行已结束，但没有通过 create_pull_request 创建或更新 PR。');
       return publication;
     }
-    if (state.error || ['interrupted', 'missing'].includes(state.state)) stop('execution_interrupted', 'waiting_environment', `轮询任务执行进程时中断，状态=${state.state||'未知'}，offset=${offset}。`);
-    if (state.state === 'failed') stop('pi_execution_failed', undefined, '任务执行进程返回 failed 状态，请查看此前的执行日志。');
+    // A failed agent carries error as well, so it takes this path and is retried in a fresh workspace; its reason is kept.
+    if (state.state === 'failed') workspace.log({ type: 'agent_failure', error: state.error || null, detail: redactor.text(String(state.detail || '')).slice(0, 1000) || null });
+    if (state.error || ['interrupted', 'missing'].includes(state.state)) stop('execution_interrupted', 'waiting_environment', state.state === 'failed'
+      ? `任务执行进程失败：${redactor.text(String(state.detail || '没有返回原因')).replace(/\s+/g, ' ').slice(0, 300)}。`
+      : `轮询任务执行进程时中断，状态=${state.state||'未知'}，offset=${offset}。`);
+    if (state.state === 'failed') stop('pi_execution_failed', undefined, `任务执行进程返回 failed 状态${state.detail ? '：' + redactor.text(String(state.detail)).replace(/\s+/g, ' ').slice(0, 300) : ''}，请查看此前的执行日志。`);
     if (state.pull_request && !answered.has('pr:' + state.pull_request.id)) {
       if (!development || !createPullRequest) stop('create_pull_request_not_allowed', undefined, '当前任务不允许调用 create_pull_request。');
       const id = String(state.pull_request.id), args = redactor.clean(state.pull_request.arguments);

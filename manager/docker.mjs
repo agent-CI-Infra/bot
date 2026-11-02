@@ -14,7 +14,11 @@ export class Docker {
         res.on('data', b => { size += b.length; if (size > 4 * 1024 * 1024) req.destroy(new Error('docker_response_too_large')); else chunks.push(b); });
         res.on('end', () => {
           if (res.statusCode === 404) { resolve(null); return; }
-          if (res.statusCode >= 300) { reject(new ManagerError('docker_operation_failed', 503)); return; }
+          if (res.statusCode >= 300) {
+            // Docker explains a refusal in its body ({"message": ...}); it is kept for the manager's log, never for callers.
+            let reason = ''; try { reason = String(JSON.parse(Buffer.concat(chunks).toString()).message || ''); } catch {}
+            reject(Object.assign(new ManagerError('docker_operation_failed', 503), { detail: `${method} ${path.split('?')[0]} → HTTP ${res.statusCode}${reason ? ': ' + reason.slice(0, 500) : ''}` })); return;
+          }
           const result = Buffer.concat(chunks);
           try { resolve(raw ? result : result.length ? JSON.parse(result.toString()) : {}); } catch { reject(new ManagerError('docker_protocol_failed', 503)); }
         });

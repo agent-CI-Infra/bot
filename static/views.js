@@ -9,6 +9,15 @@ const emptyRepositoryMessage = '仓库还没有提交；默认分支出现提交
 function taskErrorText(code) { return code === 'repository_has_no_commit' ? emptyRepositoryMessage : code; }
 // The cause says whose move it is (a passing outage, a GitHub setting, the bot itself); the code stays for searching logs.
 function faultSummary(code, cause) { return code === 'repository_has_no_commit' || !cause ? taskErrorText(code) : `${cause.label}（${code}）`; }
+// What a project computer's fault code means; the manager logs each of these with its cause.
+const environmentErrors = {
+  manager_unavailable: '连不上虚拟电脑管理服务（manager）', recovery_failed: '容器停止后没能恢复', provision_failed: '创建虚拟电脑失败',
+  operation_failed: '操作中途失败，电脑已停止', reset_interrupted: '重置被 manager 重启打断，需要再次重置', runner_not_ready: '容器启动后 runner 没有就绪',
+  approved_image_missing: '找不到批准的项目镜像', image_build_failed: '软件包镜像构建失败', docker_operation_failed: 'Docker 拒绝了操作',
+  docker_protocol_failed: 'Docker 返回了无法识别的内容', container_not_stopped: '容器没能停止', container_missing: '容器不存在',
+  resource_ownership_mismatch: '同名容器、卷或网络不属于这个部署', recovery_required: '容器在命令执行中重启', runner_failed: 'runner 执行请求失败',
+  runner_protocol_failed: 'runner 返回了无法识别的内容', environment_not_ready: '电脑还没有就绪' };
+function environmentFault(code) { return code ? `${environmentErrors[code] || '未归类的故障'}（${code}）。原因见日志：docker compose -p bot logs manager bot` : null; }
 function taskState(task) { return task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit' ? badge('仓库还没有提交', 'warning') : state(task.status); }
 
 function objectLabel(task) { return `${task.kind.endsWith('.pr') ? 'PR' : 'Issue'} #${task.object_number}`; }
@@ -307,7 +316,8 @@ function step(log) {
     if (cause) add(element('p', '处理：' + cause.action, 'fault-action'), element('p', '错误码 ' + value.code, 'muted'));
   }
   else if (value.type === 'restart_attempt') { title.textContent = '重新开始一次尝试'; add(element('p', '中断的工作目录保留，新的尝试使用新目录。', 'muted')); }
-  else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); }
+  else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); if (value.where) add(collapsible('出错位置', value.where)); }
+  else if (value.type === 'agent_failure') { title.textContent = '执行进程失败'; add(element('p', value.detail || '执行进程没有给出原因。', 'say')); if (value.error) add(element('p', '错误码 ' + value.error, 'muted')); }
   else { title.textContent = value.type === 'tool' ? '工具 ' + value.name : '记录'; add(element('pre', log.content, 'output')); }
   return item;
 }

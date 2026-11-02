@@ -2,7 +2,8 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
-import { fail, fields, randomId, type Json } from '../core/security.js';
+import { fail, fields, randomId, HttpError, type Json } from '../core/security.js';
+import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { ownComputer } from '../rules/service.js';
@@ -37,6 +38,7 @@ export class ProjectService {
   // that is being deleted alone, so it cannot start or recreate its computer while the deletion runs.
   private readonly removing = new Set<string>();
   private readonly working = new Map<string, Promise<void>>();
+  private readonly failures = new FailureLog('projects');
   constructor(readonly store: Store, readonly manager: Manager) {store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');}
   save(row: Row): void {
     if (!row) return;
@@ -54,7 +56,9 @@ export class ProjectService {
     // Retry persisted intentions with their original id, never create another reset after a lost response.
     for (const op of this.store.all("SELECT * FROM environment_operations WHERE state='pending'")) {
       if (this.removing.has(op.repository_id)) continue;
-      try { await this.send(op); } catch { /* Keep the last durable manager state; the operation API exposes failure. */ }
+      // Keep the last durable manager state; the operation API exposes failure and the log says why.
+      try { await this.send(op); this.failures.clear(`operation ${op.action} ${op.id} of ${op.repository_id}`); }
+      catch (error) { this.failures.report(`operation ${op.action} ${op.id} of ${op.repository_id}`, error); }
     }
     for (const repo of this.store.all('SELECT r.id,p.enabled FROM repositories r JOIN policies p ON p.repository_id=r.id')) {
       if (this.removing.has(repo.id)) continue;
@@ -88,10 +92,17 @@ export class ProjectService {
         });
         if (queued) await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
       }
-    } catch { /* The environment page retains a visible fault instead of claiming readiness. */
+      this.failures.clear('project ' + repo.id);
+    } catch (error) { /* The environment page retains a visible fault instead of claiming readiness. */
+      this.failures.report('project ' + repo.id, error);
       if (this.removing.has(repo.id) || !this.store.get('SELECT 1 FROM repositories WHERE id=?', repo.id)) return;
-      this.store.run(`INSERT INTO project_environments(repository_id,state,error) VALUES(?,'unavailable','manager_unavailable')
-        ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error='manager_unavailable'`, repo.id);
+      // A manager that answered with its own code has saved what failed (a stopped or failed computer and its code);
+      // that state is shown as it is. Only a manager that could not be reached marks the environment unavailable.
+      const answered = error instanceof HttpError && error.code !== 'manager_unavailable';
+      const state = answered ? await this.manager.call('GET', '/v1/projects/' + repo.id).catch(() => null) : null;
+      if (state) { this.save(state); return; }
+      this.store.run(`INSERT INTO project_environments(repository_id,state,error) VALUES(?,'unavailable',?)
+        ON CONFLICT(repository_id) DO UPDATE SET state='unavailable',error=excluded.error`, repo.id, answered ? (error as HttpError).code : 'manager_unavailable');
     }
   }
   // Deleting a project runs the existing environment deletion: the containers and networks of every generation go, and the
