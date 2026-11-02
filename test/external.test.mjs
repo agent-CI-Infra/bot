@@ -150,6 +150,22 @@ test('public-key registration rejects private/weak keys and project administrato
  assert.equal((await member('/api/external/clients/'+c.client.id,'PATCH',{public_key:c.publicKey})).status,200);
 });
 
+test('a verified public address supplies the audience when the super-admin setting is empty (#90)',async t=>{
+ const h=await externalFixture(t),created=await h.client(),client=created.client;
+ const save=origin=>h.store.run("INSERT INTO settings(key,value) VALUES('onboarding.public',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({origin,checked_at:new Date().toISOString()}));
+ h.store.run("DELETE FROM settings WHERE key='external_token_audience'");
+ // Without either source the route stays closed: the fallback never invents an address.
+ assert.equal((await h.exchange(client.id,created.privateKey)).status,503);
+ for(const origin of ['http://bot.invalid','https://bot.invalid/console','https://user:pass@bot.invalid','not a url']){save(origin);assert.equal((await h.exchange(client.id,created.privateKey)).status,503);}
+ save('https://bot.invalid');
+ const settings=await h.admin('/api/external/settings');assert.equal(settings.value.settings.token_audience,h.audience);assert.equal(settings.value.settings.token_audience_source,'onboarding');
+ assert.equal((await h.exchange(client.id,created.privateKey)).status,200);
+ // A saved value still wins over the wizard's address, and the response says which one is in force.
+ await h.admin('/api/external/settings','PUT',{token_audience:'https://other.invalid/external/token'});
+ assert.equal((await h.admin('/api/external/settings')).value.settings.token_audience_source,'setting');
+ assert.equal((await h.exchange(client.id,created.privateKey)).status,401);
+});
+
 test('the laptop helper signs without uploading its private key and requires private file permissions',async t=>{
  const h=await externalFixture(t),c=await h.client(),pem=c.privateKey.export({type:'pkcs8',format:'pem'});let sent;
  const grant=await exchangeToken(h.audience,c.client.id,pem,async(url,options)=>{assert.equal(url,h.audience);sent=options;assert.ok(!JSON.stringify(options).includes(pem));return fetch(h.webhook+'/external/token',options);});

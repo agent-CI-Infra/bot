@@ -6,7 +6,7 @@
 
 1. 超级管理员登记 GitHub App 和目标仓库，并在 App 安装中授予 Contents read、Issues write、Pull requests write。外部凭据兑换只支持 GitHub App；不会把机器人账号的长期 Token 当作临时凭据分发。
 2. 在目标项目设置的「外部执行」类别选择「新增客户端」，自动绑定当前项目，不提供仓库选择。个人电脑选择公钥签名认证；GitHub Actions 选择 OIDC。项目管理员只能配置分配给自己的仓库。
-3. 个人电脑在本机生成 RSA 密钥，只向 Bot 登记 SPKI PEM 公钥；私钥不离开个人电脑。管理页显示公钥指纹，支持更换公钥或停用客户端。超级管理员先在全局「外部执行端」页设置实际 HTTPS 兑换地址，作为签名证明的固定 audience。
+3. 个人电脑在本机生成 RSA 密钥，只向 Bot 登记 SPKI PEM 公钥；私钥不离开个人电脑。管理页显示公钥指纹，支持更换公钥或停用客户端。兑换地址作为签名证明的固定 audience：超级管理员可在全局「外部执行端」页保存实际 HTTPS 地址，未保存时使用接入向导已验证的公开地址（`<已验证 origin>/external/token`），所以项目管理员不必等这一项也能完成接入。
 4. 在当前项目的「外部执行」中新增转发订阅，指定接收 URL、事件和动作。例如事件 `pull_request`，动作 `opened,ready_for_review,synchronize`，勾选排除草稿。保存后显示一次签名密钥，在接收端保存并校验签名。客户端私钥与转发签名密钥分开管理。
 5. 外部接收端收到消息后，按转发 ID 去重，再运行原来的检视工具。检视完成后调用公开的临时凭据接口，再用取得的令牌请求 GitHub 评论／Review API。也可先兑换临时令牌，再用同一个令牌调用 `GET /external/events` 拉取事件。完成后调用撤销接口。
 
@@ -22,7 +22,7 @@
 
 ## 个人电脑认证与兑换
 
-公开 Webhook 监听入口提供 `POST /external/token`，管理 API 保留在独立管理入口。HTTPS 反向代理应路由 `/hooks/github/` 和 `/external/`。超级管理员在「外部执行端 → 设置兑换地址」填写实际完整 HTTPS 地址，以 `/external/token` 结尾；不从传入 Host 头推导信任地址。项目管理员可读取该地址，不能修改。
+公开 Webhook 监听入口提供 `POST /external/token`，管理 API 保留在独立管理入口。HTTPS 反向代理应路由 `/hooks/github/` 和 `/external/`。超级管理员在「外部执行端 → 设置兑换地址」填写实际完整 HTTPS 地址，以 `/external/token` 结尾；未保存时使用接入向导已验证的公开地址加 `/external/token`，保存的值优先。两者都不从传入 Host 头推导信任地址。项目管理员可读取该地址，不能修改。
 
 在个人电脑生成新的密钥文件，私钥留在本机，公钥粘贴到管理页：
 

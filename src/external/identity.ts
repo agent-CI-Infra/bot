@@ -23,7 +23,28 @@ export function audienceUrl(value:unknown):string{
   try{const url=new URL(text(value,2048));if(url.protocol!=='https:'||url.username||url.password||url.hash||url.search||url.pathname!=='/external/token')return fail(400,'invalid_token_audience');return url.href;}
   catch{return fail(400,'invalid_token_audience');}
 }
-export function tokenAudience(store:Store):string|undefined{return store.get("SELECT value FROM settings WHERE key='external_token_audience'")?.value;}
+// The onboarding wizard already proves that this origin reaches the public webhook listener and
+// nothing else, and `/external/token` is served by that same listener. A deployment that finished
+// onboarding therefore has an audience without a second setting, which is what lets a project
+// administrator complete the laptop exchange while the audience stays a super-admin decision (#90).
+function verifiedPublicAudience(store:Store):string|undefined{
+  const saved=store.get("SELECT value FROM settings WHERE key='onboarding.public'")?.value;
+  if(!saved)return undefined;
+  try{
+    const origin:unknown=JSON.parse(saved)?.origin;
+    const url=new URL(String(origin));
+    if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash||url.pathname!=='/')return undefined;
+    return url.origin+'/external/token';
+  }catch{return undefined;}
+}
+export function tokenAudience(store:Store):string|undefined{
+  return store.get("SELECT value FROM settings WHERE key='external_token_audience'")?.value||verifiedPublicAudience(store);
+}
+// Which of the two sources answered: the admin page says so instead of implying the setting is unset.
+export function audienceSource(store:Store):'setting'|'onboarding'|null{
+  if(store.get("SELECT value FROM settings WHERE key='external_token_audience'")?.value)return 'setting';
+  return verifiedPublicAudience(store)?'onboarding':null;
+}
 export function trustConfig(value: unknown): Json {
   if(!value||typeof value!=='object'||Array.isArray(value))return fail(400,'oidc_trust_required');
   const v=value as Json;fields(v,['audience','subject','repository','repository_id','owner_id','workflow_ref','ref']);
