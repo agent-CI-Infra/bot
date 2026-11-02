@@ -53,7 +53,22 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npx playwright install --with-deps chromium --only-shell
+
+      # The browser is downloaded once per Playwright version (pinned in package-lock.json) and restored from the Actions
+      # cache afterwards; the runner's system libraries are still installed on every run, which takes only a few seconds.
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        id: browsers
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium-headless-shell
+      - if: steps.browsers.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium --only-shell
+      - if: steps.browsers.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
       - run: npm run test:e2e
 
       - uses: actions/upload-artifact@v7
