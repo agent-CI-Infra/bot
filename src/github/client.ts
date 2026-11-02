@@ -56,6 +56,10 @@ export function appJwt(appId: string, privateKey: string): string {
 // permission check compares existing Apps and installations with them. Tokens still request only what each use needs.
 // One-click onboarding asks for more (workflows, actions) in its own tokens; see projects/quickstart.ts.
 export const appPermissions: Record<string,string> = { contents:'write', issues:'write', pull_requests:'write', statuses:'write', actions:'write', checks:'write', metadata:'read' };
+// The webhook events those Apps subscribe to: opened and updated Issues and PRs, their comments, reviews and review comments.
+// installation and installation_repositories reach every App without a subscription. The permission check compares with these too.
+export const appEvents = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
+export function missingEvents(subscribed: unknown, required: string[] = appEvents) { const have = Array.isArray(subscribed) ? subscribed.map(String) : []; return required.filter(name => !have.includes(name)); }
 const permissionRank: Record<string,number> = { read:1, write:2, admin:3 };
 export function missingPermissions(granted: unknown, required: Record<string,string> = appPermissions) {
   const have = granted && typeof granted === 'object' ? granted as Record<string,unknown> : {};

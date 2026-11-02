@@ -283,12 +283,14 @@ test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKE
   assert.equal(JSON.parse(readFileSync(join(dir, `agent/token-reply-${id}.json`), 'utf8')).token, token);
 });
 
-test('the permission check lists what an App and its installations lack and links the GitHub pages that fix it', async t => {
+test('the permission check lists the permissions and events an App and its installations lack and links the GitHub pages that fix them', async t => {
   const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
+  const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
+  // An App created before comment triggers subscribes only to issues and pull_request.
   const app = { slug: 'fixture-app', html_url: 'https://github.com/apps/fixture-app', owner: { login: 'fixture', type: 'Organization' },
-    permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read', statuses: 'read' } };
-  const installations = [{ id: 7, account: { login: 'fixture' }, html_url: 'https://github.com/organizations/fixture/settings/installations/7', permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read' } },
-    { id: 8, account: { login: 'paused' }, suspended_at: '2026-01-01', permissions: {} }];
+    permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read', statuses: 'read' }, events: ['issues', 'pull_request'] };
+  const installations = [{ id: 7, account: { login: 'fixture' }, html_url: 'https://github.com/organizations/fixture/settings/installations/7', permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read' }, events: ['issues', 'pull_request'] },
+    { id: 8, account: { login: 'paused' }, suspended_at: '2026-01-01', permissions: {}, events: [] }];
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://fake'); res.setHeader('Content-Type', 'application/json');
     if (url.pathname === '/app') return res.end(JSON.stringify(app));
@@ -301,14 +303,19 @@ test('the permission check lists what an App and its installations lack and link
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
   const check = async () => (await admin(`/api/accounts/${a.id}/permissions`)).value;
   let report = await check();
-  assert.equal(report.ok, false); assert.deepEqual(report.required, full);
+  assert.equal(report.ok, false); assert.deepEqual(report.required, full); assert.deepEqual(report.required_events, events);
+  assert.deepEqual(report.app.missing_events, ['issue_comment', 'pull_request_review', 'pull_request_review_comment']);
+  assert.deepEqual(report.installations.map(i => i.missing_events), [['issue_comment', 'pull_request_review', 'pull_request_review_comment'], events]);
   assert.deepEqual(report.app.missing.map(m => [m.permission, m.required, m.current]), [['statuses', 'write', 'read'], ['actions', 'write', null], ['checks', 'write', null]]);
   assert.equal(report.app.settings_url, 'https://github.com/organizations/fixture/settings/apps/fixture-app/permissions');
   assert.deepEqual(report.installations.map(i => [i.account, i.suspended, i.missing.map(m => m.permission).join(','), i.review_url]),
     [['fixture', false, 'statuses,actions,checks', 'https://github.com/organizations/fixture/settings/installations/7'], ['paused', true, Object.keys(full).join(','), null]]);
   // After the App owner saves and the installation accepts, the check passes; a suspended installation does not hold it back.
   app.permissions = full; installations[0].permissions = full; report = await check();
-  assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []);
+  // Permissions alone are not enough while events are still missing, first on the App and then on the installation.
+  assert.equal(report.ok, false); app.events = events; report = await check();
+  assert.equal(report.ok, false); assert.deepEqual(report.app.missing_events, []); installations[0].events = [...events, 'push']; report = await check();
+  assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []); assert.deepEqual(report.installations[0].missing_events, []);
   // A personal App links the personal settings page; a review link on another host is never shown.
   app.owner = { login: 'someone', type: 'User' }; installations[0].html_url = 'https://elsewhere.example/settings'; report = await check();
   assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions'); assert.equal(report.installations[0].review_url, null);
