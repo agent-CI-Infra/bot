@@ -23,10 +23,11 @@ export function audienceUrl(value:unknown):string{
   try{const url=new URL(text(value,2048));if(url.protocol!=='https:'||url.username||url.password||url.hash||url.search||url.pathname!=='/external/token')return fail(400,'invalid_token_audience');return url.href;}
   catch{return fail(400,'invalid_token_audience');}
 }
-// The onboarding wizard already proves that this origin reaches the public webhook listener and
-// nothing else, and `/external/token` is served by that same listener. A deployment that finished
-// onboarding therefore has an audience without a second setting, which is what lets a project
-// administrator complete the laptop exchange while the audience stays a super-admin decision (#90).
+// The onboarding wizard proves that this origin reaches the public webhook listener and that the
+// admin surface is not exposed. `/external/token` is the public route on that listener, so the
+// address is *derived* from a verified origin rather than probed itself; a deployment that routes
+// `/external/` somewhere else must save the explicit address. The derivation still lets a project
+// administrator finish the laptop exchange while the audience stays a super-admin decision (#90).
 function verifiedPublicAudience(store:Store):string|undefined{
   const saved=store.get("SELECT value FROM settings WHERE key='onboarding.public'")?.value;
   if(!saved)return undefined;

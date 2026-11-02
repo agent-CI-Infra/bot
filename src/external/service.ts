@@ -40,7 +40,7 @@ export class ExternalService{
       if(method==='PUT'){
         superAdmin(user);fields(body,['token_audience']);const value=audienceUrl(body.token_audience);
         return this.store.transaction(()=>{this.store.run("INSERT INTO settings(key,value) VALUES('external_token_audience',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);
-          this.store.audit(user.id,'external.audience.updated','external_token_audience');return {settings:{token_audience:value}};});
+          this.store.audit(user.id,'external.audience.updated','external_token_audience');return {settings:{token_audience:value,token_audience_source:'setting'}};});
       }
       return fail(405,'method_not_allowed');
     }
