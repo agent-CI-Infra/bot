@@ -26,6 +26,8 @@ test('每个页面都有地址，刷新后停在原页面；全局设置按类�
       await nav.getByRole('link', { name: caption, exact: true }).click(); await expect(page).toHaveURL(new RegExp(`#/settings/${key}$`));
       await expect(nav.locator('[aria-current=page]')).toHaveText(caption); await expect.poll(cards).toEqual(shown);
     }
+    // Controls of the projects list stay with it.
+    await expect(page.locator('#hidden-filter-label')).toBeHidden(); await expect(page.locator('#sync')).toBeHidden();
     await page.reload(); await expect(nav.locator('[aria-current=page]')).toHaveText('用户'); await expect(page.locator('#settings-panel')).toContainText('administrator');
     // The old addresses of the two removed tabs open their settings category.
     await page.goto(h.admin + '/#/accounts'); await expect(page).toHaveURL(/#\/settings\/accounts$/); await expect(page.locator('#settings-panel')).toContainText('Test account');

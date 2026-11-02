@@ -2,7 +2,7 @@ import { projectActivityColumns, projectActivityJoin } from './project-activity.
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
 import { HttpError, fail, fields, text, type Json } from '../core/security.js';
-import { appJwt, appPermissions, missingPermissions } from '../github/client.js';
+import { appEvents, appJwt, appPermissions, missingEvents, missingPermissions } from '../github/client.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
@@ -112,8 +112,9 @@ export class InstallationSync {
     }
     throw new Error('github_pagination_limit');
   }
-  // GitHub has no API that changes an App's permissions, so this only measures the gap and links the two pages that
-  // close it: the App's permission settings (one save by the App owner), then each installation's review of the request.
+  // GitHub has no API that changes an App's permissions or event subscriptions, so this only measures the gap and links the two
+  // pages that close it: the App's Permissions & events settings (one save by the App owner), then each installation's review.
+  // An installation lists the events it receives; one missing an event the App subscribes to has a request to accept.
   async permissions(accountId: string): Promise<Json> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) return fail(404, 'account_not_found');
     if (account.type !== 'github_app') return fail(409, 'github_app_required');
@@ -124,10 +125,10 @@ export class InstallationSync {
     catch (error) { return fail(502, /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'github_unavailable'); }
     const slug = encodeURIComponent(String(app.slug || '')), owner = app.owner as Json | undefined, origin = githubOrigin(app.html_url);
     const settings = owner?.type === 'Organization' ? `${origin}/organizations/${encodeURIComponent(String(owner.login))}/settings/apps/${slug}/permissions` : `${origin}/settings/apps/${slug}/permissions`;
-    const appMissing = missingPermissions(app.permissions), rows = installations.map(i => ({ id: String(i.id), account: String((i.account as Json | undefined)?.login || ''),
-      suspended: !!i.suspended_at, missing: missingPermissions(i.permissions), review_url: githubLink(i.html_url, origin) }));
-    return { required: appPermissions, app: { slug: String(app.slug || ''), owner: String(owner?.login || ''), missing: appMissing, settings_url: settings },
-      installations: rows, ok: !appMissing.length && rows.every(row => row.suspended || !row.missing.length) };
+    const appMissing = missingPermissions(app.permissions), appEventsMissing = missingEvents(app.events), rows = installations.map(i => ({ id: String(i.id), account: String((i.account as Json | undefined)?.login || ''),
+      suspended: !!i.suspended_at, missing: missingPermissions(i.permissions), missing_events: missingEvents(i.events), review_url: githubLink(i.html_url, origin) }));
+    return { required: appPermissions, required_events: appEvents, app: { slug: String(app.slug || ''), owner: String(owner?.login || ''), missing: appMissing, missing_events: appEventsMissing, settings_url: settings },
+      installations: rows, ok: !appMissing.length && !appEventsMissing.length && rows.every(row => row.suspended || !row.missing.length && !row.missing_events.length) };
   }
   // Asked before a project is deleted, because the list's flags may be stale. 'gone' covers a deleted repository, one no
   // longer in the installation (even when it is public and anyone can still read it), a suspended or missing installation,

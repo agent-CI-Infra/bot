@@ -30,7 +30,7 @@ docker compose up -d
 1. **创建超级管理员。** 首页显示「创建第一名超级管理员」：填用户名和 12–256 位密码，点「初始化并登录」。初始化只成功一次，之后这里只有登录。
 2. **走完接入向导。** 首次登录会自动打开「接入向导」（之后从顶部导航进入），按顶部的六步走：
    1. 公网 HTTPS：选「自建 HTTPS 中转」，把一个专用域名整个反向代理到 `http://<这台机器>:8791`，填 `https://<你的域名>`，点「检查并使用」。或者选「Cloudflare Tunnel」，粘贴 tunnel token 点「保存 token」，在 Cloudflare 的 Published application 把 Service URL 设为 `http://webhook:8791`，回到向导点该路由的「检查并使用此域名」。两种方式都不要把 8792 转出去，管理页留在本机 `127.0.0.1:8792`。
-   2. GitHub App：填「目标组织」和「App 名称」，点「准备 GitHub 确认页」→「前往 GitHub 确认创建」，在 GitHub 上确认后会回到向导。权限固定为 Contents、Issues、Pull requests、Commit statuses、Actions、Checks 写，Metadata 读（Actions、Checks、Commit statuses 让检视和开发任务能用只读令牌查看 CI 状态，这三项的写权限留给控制面发布状态、检查结果和重跑 CI；之前创建的 App 要在 GitHub 上补加），订阅 `issues`、`pull_request`、`issue_comment`、`pull_request_review` 和 `pull_request_review_comment`（已有 App 需由所有者在 Permissions & events 勾选 Issue comment、Pull request review、Pull request review comment 并保存，评论和检视回复才会触发再次检视）；Webhook 地址 `https://<你的域名>/hooks/github/<account_id>/<endpoint_id>` 由向导写进 App，不用手填。已在「全局设置 → 机器人账号」登记过的 App 点「使用此 App」。
+   2. GitHub App：填「目标组织」和「App 名称」，点「准备 GitHub 确认页」→「前往 GitHub 确认创建」，在 GitHub 上确认后会回到向导。权限固定为 Contents、Issues、Pull requests、Commit statuses、Actions、Checks 写，Metadata 读（Actions、Checks、Commit statuses 让检视和开发任务能用只读令牌查看 CI 状态，这三项的写权限留给控制面发布状态、检查结果和重跑 CI；之前创建的 App 要在 GitHub 上补加），订阅 `issues`、`pull_request`、`issue_comment`、`pull_request_review` 和 `pull_request_review_comment`（已有 App 需由所有者在 Permissions & events 勾选 Issue comment、Pull request review、Pull request review comment 并保存，评论和检视回复才会触发再次检视；「检查权限和事件订阅」会列出缺少的事件）；Webhook 地址 `https://<你的域名>/hooks/github/<account_id>/<endpoint_id>` 由向导写进 App，不用手填。已在「全局设置 → 机器人账号」登记过的 App 点「使用此 App」。
    3. 安装：点「在 GitHub 安装此 App」，选好仓库后回来点「重新检查安装」。
    4. 模型：在「添加模型」填接口 URL、API Key、模型名，点「保存并继续」。URL 下方会显示实际的对话地址和模型列表地址；bot 不会替你补上或去掉 `/v1`，地址不以 `/v1` 结尾时页面会提示。保存前可以点「获取模型列表」从上游选模型名，或点「测试模型」确认 URL、Key 和模型名可用。
    5. 规则：看一下内置规则，点「下一步」。
@@ -47,7 +47,7 @@ docker compose up -d
 - **全局设置**：超级管理员在「全局设置」里管理整个部署，左侧按类别分开，每个类别有自己的地址（`#/settings/<类别>`），刷新或分享链接都停在同一类：
   - 「常规」：每台虚拟电脑默认同时运行的任务数（1–32，默认 1），以及当前运行的镜像标签；源码运行时显示为源码运行。
   - 「公网接入」：修改并重新检查公网 HTTPS 地址；保存或撤销 Cloudflare Tunnel token（可以粘贴完整的 cloudflared 命令，只保存其中的 token，页面不回显）。
-  - 「机器人账号」：改选接入向导使用的 GitHub App，并把它的 webhook 改到当前公网地址；新增、检查权限和删除已登记的 GitHub App 与机器人 Token。
+  - 「机器人账号」：改选接入向导使用的 GitHub App，并把它的 webhook 改到当前公网地址；新增、检查权限和事件订阅、删除已登记的 GitHub App 与机器人 Token。
   - 「模型」：更换向导启用仓库时使用的默认共享模型；添加、修改和删除部署共享模型。
   - 「用户」：新增用户、修改项目管理员的仓库权限、删除用户。
 

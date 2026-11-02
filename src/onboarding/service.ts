@@ -5,7 +5,7 @@ import type { Store } from '../storage/database.js';
 import { type Actor, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { publicOrigin, probeGet } from './public-url.js';
-import { appJwt, appPermissions } from '../github/client.js';
+import { appEvents, appJwt, appPermissions } from '../github/client.js';
 import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
 import { tunnelToken } from './tunnel-token.js';
@@ -130,7 +130,7 @@ export class Onboarding {
       this.store.run("INSERT INTO app_manifest_states VALUES(?,?,?,?,?,'pending')", state, user.id, account, endpoint, Date.now() + 15 * 60000);
       const manifest = { name, url: address.origin, redirect_url: adminOrigin + '/onboarding/github/callback', public: input.public===true,
         hook_attributes: { url: address.origin + `/hooks/github/${account}/${endpoint}`, active: true },
-        default_permissions: appPermissions, default_events: ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'] };
+        default_permissions: appPermissions, default_events: appEvents };
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };
     }
     if (method === 'POST' && url.pathname === '/api/onboarding/installation') { fields(input, ['skip']); if (typeof input.skip !== 'boolean') fail(400, 'invalid_skip'); this.save('installation_skipped', input.skip); return { skipped: input.skip }; }
