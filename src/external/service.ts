@@ -4,7 +4,7 @@ import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { TokenBroker } from './broker.js';
 import { Forwarder } from './forward.js';
 import { targetUrl } from './target.js';
-import { trustConfig, publicKey, fingerprint, tokenAudience, audienceUrl } from './identity.js';
+import { trustConfig, publicKey, fingerprint, tokenAudience, audienceSource, audienceUrl } from './identity.js';
 import { type JWTVerifyGetKey } from 'jose';
 import { EventPoller } from './events.js';
 
@@ -36,7 +36,7 @@ export class ExternalService{
     if(project&&url.searchParams.has('repository_id')&&url.searchParams.get('repository_id')!==repo)fail(400,'external_repository_mismatch');
     if(path==='/api/external/settings'){
       if(project)fail(404,'not_found');
-      if(method==='GET')return {settings:{token_audience:tokenAudience(this.store)||null}};
+      if(method==='GET')return {settings:{token_audience:tokenAudience(this.store)||null,token_audience_source:audienceSource(this.store)}};
       if(method==='PUT'){
         superAdmin(user);fields(body,['token_audience']);const value=audienceUrl(body.token_audience);
         return this.store.transaction(()=>{this.store.run("INSERT INTO settings(key,value) VALUES('external_token_audience',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value);

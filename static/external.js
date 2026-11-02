@@ -6,7 +6,13 @@ const credentialDialog=dialog('external-credential','<h2>请保存新凭据</h2>
 externalDialog.classList.remove('wide');credentialDialog.classList.remove('wide');
 credentialDialog.setAttribute('aria-label','一次性凭据');
 let saveExternal=null;
-let externalAudience='';
+let externalAudience='',externalAudienceSource=null;
+// The audience can come from the super-admin setting or from the address the wizard verified;
+// saying which one it is stops a project administrator from hunting for a button they cannot have.
+function audienceCaption(audience=externalAudience,source=externalAudienceSource){
+  if(!audience)return '尚未配置，个人电脑客户端暂不能兑换；请超级管理员设置，或先在接入向导中验证公开地址。';
+  return source==='onboarding'?audience+'（来自接入向导已验证的公开地址；超级管理员可覆写）':audience;
+}
 const externalKeyCommands='umask 077\nopenssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out bot-client.pem\nopenssl pkey -in bot-client.pem -pubout -out bot-client.pub.pem';
 const externalTokenPermissions='contents: read、issues: write、pull_requests: write';
 const externalTokenDocs='/docs/external-token-api.md';
@@ -46,9 +52,9 @@ function externalPublicKeyGuide(clients=[],audience=externalAudience,{expanded=f
   }else body.append(head,element('p',expanded?'在本项目新增个人电脑客户端后，即可在这里选择并复制接入指令。':'先在项目设置 → 外部执行中新增个人电脑客户端，再回到这里选择客户端并复制接入指令。'));
   const steps=element('ol','');
   const keyStep=element('li','');keyStep.append(element('strong','在个人电脑生成公钥'),element('pre',externalKeyCommands),element('p','先检查文件是否已存在，不要覆盖已有私钥。仅将 bot-client.pub.pem 的公钥粘贴到 Bot；只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。bot-client.pem 私钥留在个人电脑，不要粘贴进 Bot、聊天或日志。'));
-  const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换自己的 GitHub token'),element('p','超级管理员先设置以 /external/token 结尾的 HTTPS 兑换地址；该完整地址就是签名证明的 audience。'));
+  const exchangeStep=element('li','');exchangeStep.append(element('strong','兑换自己的 GitHub token'),element('p','兑换地址以 /external/token 结尾，取自部署的公开入口：超级管理员可设置或覆写，未设置时使用接入向导已验证的公开地址；该完整地址就是签名证明的 audience。'));
   if(audience){exchangeStep.append(element('p','当前兑换地址：'+audience));exchangeStep.append(element('pre',externalTokenRequest(audience)));}
-  else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员先设置，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
+  else exchangeStep.append(element('p','兑换地址尚未配置：请超级管理员设置，或先在接入向导中验证公开地址，再重新打开说明。配置前无法兑换，不要猜测 URL。'));
   exchangeStep.append(element('p','可用任意语言或 HTTP 工具，不要求 Node.js 或项目脚本。用本机私钥签名 RS256 JWT，最长 120 秒：iss、sub 均为客户端 ID，aud 为完整兑换地址，iat 为当前 Unix 秒，exp ≤ iat + 120；每次生成唯一 jti（16–128 位字母、数字、下划线或短横线）。'),element('p','POST /external/token：Authorization: Bearer <签名JWT>，Content-Type: application/json。正文的 request_id 必须等于 jti；只发送证明，不上传私钥。'));
   exchangeStep.append(element('pre',JSON.stringify({client_id:'<所选客户端ID>',request_id:'<与 jti 完全相同>'},null,2)),element('p','curl 示例从私有文件读取请求头和正文（umask 077），响应保存到 token-response.json，不要输出到公共日志。成功的 token 是绑定仓库的 GitHub App 安装令牌。'));
   const docs=element('a','详细接口文档：OpenSSL 签名、curl 兑换与撤销');docs.href=externalTokenDocs;docs.target='_blank';docs.rel='noopener noreferrer';exchangeStep.append(docs);
@@ -116,10 +122,10 @@ async function loadExternalProject(repositoryId){
 }
 async function renderExternal(params,request){
   const [{clients},{settings}]=await Promise.all([api('/api/external/clients?'+params),api('/api/external/settings')]);
-  if(request!==renderVersion)return;externalAudience=settings.token_audience||'';
+  if(request!==renderVersion)return;externalAudience=settings.token_audience||'';externalAudienceSource=settings.token_audience_source||null;
   $('count').textContent=clients.length+' 个客户端';const panel=$('external-panel');panel.replaceChildren();
   const endpoint=externalGroup('签名证明的兑换地址',me.role==='super_admin'?button('设置兑换地址',()=>editor('设置兑换地址','填写客户端实际访问的 HTTPS /external/token 地址，作为签名证明的固定 audience。',[externalField('token_audience','兑换地址',externalAudience)],data=>api('/api/external/settings','PUT',data))):null);
-  endpoint.append(element('p',externalAudience||'尚未配置，个人电脑客户端暂不能兑换；请超级管理员设置。','muted'),externalPublicKeyGuide(clients));panel.append(endpoint);
+  endpoint.append(element('p',audienceCaption(),'muted'),externalPublicKeyGuide(clients));panel.append(endpoint);
   const projects=externalGroup('已配置外部客户端的项目');
   for(const id of [...new Set(clients.map(c=>c.repository_id))]){
     const repo=repositories.find(r=>r.id===id),open=element('a','配置项目外部执行','button-link');open.href='#/projects/'+id+'/external';
@@ -136,7 +142,7 @@ function externalSection(){
   const repositoryId=current.id,{clients,subscriptions,deliveries,grants,settings}=current.external;
   const mutate=async(path,body)=>{const result=await externalProjectApi(repositoryId,path,'PATCH',body);await route();if(result.signing_secret)externalSecret(result.signing_secret);};
   const intro=externalGroup('当前项目的外部执行');
-  intro.append(element('p','客户端只授权当前仓库，固定权限为 '+externalTokenPermissions+'。Webhook 推送和事件轮询可同时使用。','muted'),externalPublicKeyGuide(clients,settings.token_audience||'',{expanded:true}));
+  intro.append(element('p','客户端只授权当前仓库，固定权限为 '+externalTokenPermissions+'。Webhook 推送和事件轮询可同时使用。','muted'),element('p','兑换地址：'+audienceCaption(settings.token_audience||'',settings.token_audience_source),'muted'),externalPublicKeyGuide(clients,settings.token_audience||'',{expanded:true}));
   const group=externalGroup('客户端',button('新增客户端',()=>addClient(repositoryId)));
   for(const c of clients){const actions=[button(c.enabled?'停用':'启用',()=>mutate('/clients/'+c.id,{enabled:!c.enabled}).catch(error))];if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));actions.push(button('删除',()=>deleteExternalClient(c),'quiet destructive'));
     const pending=c.auth_type==='private_key_jwt'&&!c.key_configured,row=externalRow(c.name,`仓库 ${c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,pending?'待登记公钥':c.enabled?'已启用':'已停用',actions);
