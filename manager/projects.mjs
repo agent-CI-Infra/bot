@@ -55,7 +55,8 @@ export class Projects {
   constructor({ database, docker, deployment, image, egress = true }) {
     // background: repository -> task workspaces whose kept processes may outlive a command.
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
-    this.egress = egress; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set();
+    // restarting: computers with a restart queued under the exclusive lock (restartAlone).
+    this.egress = egress; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
@@ -288,11 +289,32 @@ export class Projects {
   }
   // Stops leftover processes without restarting the container; falls back to a restart if any survive. With a workspace,
   // only that task's processes end (its waiting agent survives with keep_agent), so other tasks on the computer keep
-  // running; without one, everything ends except init, the idle keeper and the runner itself.
+  // running; without one, everything ends except init, the idle keeper and the runner itself. The caller holds a shared
+  // slot, so the restart is queued to run alone rather than done here, under other tasks' calls.
   async reap(repo, generation, scope = {}) {
-    const result = await this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'reap', ...scope }).catch(() => null);
+    const result = await this.docker.runner(this.names(repo, generation).container, { operation_id: randomId(), type: 'reap', ...scope }).catch(error => ({ ok: false, error }));
     if (result?.ok) return result.result;
-    await this.stopGeneration(repo, generation); await this.provision(repo); return { restarted: true };
+    this.restartAlone(repo, generation, 'its leftover processes could not be ended', result?.error);
+    return { restart_queued: true };
+  }
+  // Restarts a computer under the exclusive lock: it waits for the runner calls running now, and calls that arrive later
+  // wait for it, so no call finds the container changed under it (which would stop the computer as failed). Processes of
+  // the tasks on it end with the restart, so those tasks start again; the work volume and generation stay. A computer
+  // has at most one restart queued, and one that has meanwhile been stopped, reset or reconfigured is left as it is.
+  restartAlone(repo, generation, reason, cause) {
+    if (this.restarting.has(repo)) return; this.restarting.add(repo);
+    logFailure(`project ${repo} restart queued: ${reason}`, cause || 'no detail');
+    void this.lock(repo, async () => {
+      try {
+        const project = this.get(repo);
+        if (project?.generation !== generation || project.desired !== 'ready' || !['ready', 'busy'].includes(project.state)) return;
+        this.update(repo, 'recovering', 'ready'); this.background.delete(repo);
+        await this.stopAll(repo); await this.provision(repo);
+      } catch (error) {
+        // desired stays ready, so the control plane starts it again.
+        logFailure(`project ${repo} restart failed`, error); this.update(repo, 'failed', 'ready', error instanceof ManagerError ? error.message : 'recovery_failed');
+      }
+    }).finally(() => this.restarting.delete(repo));
   }
   async output(repo, operation, offset) {
     this.validate(repo);
@@ -391,10 +413,16 @@ export class Projects {
         this.db.prepare("UPDATE operations SET state='completed',result=? WHERE id=?").run(JSON.stringify(result), input.operation_id); return result;
       } catch (error) {
         if (error?.untouched) { this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id); throw error; }
+        // The container stopped or restarted on its own before this call ran anything in it: the call fails, so its task
+        // starts again, and the computer is brought back alone instead of being stopped as failed.
+        if (error?.message === 'recovery_required') {
+          this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
+          this.restartAlone(repo, input.generation, 'its container stopped or restarted outside the manager'); throw error;
+        }
         // A task's failed runner call ends that task's processes; when that works, the computer and the other tasks on it
         // keep running. Otherwise, as for any uncertain exec result, the whole environment stops before the slot is released.
         const workspace = action === 'execute' ? input.request.workspace_id : undefined, current = this.get(repo);
-        if (workspace && error?.message !== 'recovery_required' && current?.generation === input.generation && ['ready', 'busy'].includes(current.state)) {
+        if (workspace && current?.generation === input.generation && ['ready', 'busy'].includes(current.state)) {
           const reaped = await this.docker.runner(this.names(repo, input.generation).container, { operation_id: randomId(), type: 'reap', workspace_id: workspace }).catch(() => null);
           if (reaped?.ok) {
             this.kept(repo).delete(workspace); this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);

@@ -9,6 +9,7 @@ import { FakeDocker } from './fake-docker.mjs';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { createServer } from 'node:http';
 import { ManagerClient } from '../dist/projects/service.js';
+import { fail } from '../dist/core/security.js';
 const id = () => randomBytes(24).toString('hex');
 
 function fixture(t) {
@@ -251,4 +252,63 @@ test('a failed runner call ends only its own task workspace; the computer and th
   assert.deepEqual(reaps.map(r => r.workspace_id), [mine]); assert.equal(f.projects.get('101').state, 'busy'); assert.equal(f.projects.get('101').started_at, started);
   assert.equal(f.docker.containers.get(f.projects.names('101', 1).container).State.Running, true);
   g.finish('long'); assert.equal((await long).ok, true); assert.equal(f.projects.get('101').state, 'ready');
+});
+
+// The incident behind these two tests: on a computer running four tasks, a reap that could not end leftover processes
+// restarted the container from its shared slot; another task's call then found the container changed, which stopped the
+// computer as failed (recovery_required) and left every task waiting for it.
+test('a restart after leftover processes survive a reap runs alone, and calls around it keep the computer ready', async t => {
+  const lines = []; t.mock.method(console, 'error', (...args) => lines.push(args.join(' ')));
+  const f = fixture(t); await f.projects.register('101'); f.projects.parallelism('101', 3); const g = gatedRunner(f.docker);
+  const gated = f.docker.runner; let failures = 1;
+  f.docker.runner = (container, input, wait) => input.type === 'reap' && input.workspace_id && failures-- > 0 ? Promise.resolve({ ok: false, error: 'reap_incomplete' }) : gated(container, input, wait);
+  const run = command => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: id(), command } });
+  const starts = f.docker.starts, long = run('long'); await settle();
+  const released = await f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'reap', workspace_id: id() } });
+  assert.deepEqual(released, { ok: true, result: { restart_queued: true } });
+  // The restart waits for the call that is running; a call that comes later waits behind the restart.
+  const later = run('later'); await settle();
+  assert.deepEqual([g.started, f.docker.starts, f.projects.get('101').state], [['long'], starts, 'busy']);
+  g.finish('long'); assert.equal((await long).ok, true); await settle();
+  assert.equal(f.docker.starts, starts + 1); assert.deepEqual(g.started, ['long', 'later']);
+  g.finish('later'); assert.equal((await later).ok, true);
+  const project = f.projects.get('101'), container = f.docker.containers.get(f.projects.names('101', 1).container);
+  assert.deepEqual([project.state, project.error, project.started_at, project.generation], ['ready', null, container.State.StartedAt, 1]);
+  assert.deepEqual(lines, ['[manager] project 101 restart queued: its leftover processes could not be ended: reap_incomplete']);
+});
+
+test('a call that finds its container restarted outside the manager fails alone, and the computer is brought back', async t => {
+  const lines = []; t.mock.method(console, 'error', (...args) => lines.push(args.join(' ')));
+  const f = fixture(t); await f.projects.register('101'); f.projects.parallelism('101', 2);
+  const container = () => f.docker.containers.get(f.projects.names('101', 1).container), run = () => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: id(), command: 'true' } });
+  container().State.StartedAt = 'restarted-by-someone-else';
+  await assert.rejects(run(), /recovery_required/); await settle();
+  assert.deepEqual([f.projects.get('101').state, f.projects.get('101').desired, f.projects.get('101').started_at], ['ready', 'ready', container().State.StartedAt]);
+  assert.equal((await run()).ok, true);
+  assert.deepEqual(lines, ['[manager] project 101 restart queued: its container stopped or restarted outside the manager: no detail']);
+});
+
+test('the control plane starts a failed computer of an enabled project again, waiting longer after each failed start', async t => {
+  t.mock.method(console, 'error', () => {});
+  // 101 fails and its first two starts fail too; 202's reset failed, which only a person may resolve.
+  const states = { 101: 'ready', 202: 'ready' }, starts = { 101: 0, 202: 0 }; let failing = 2, revision = 0;
+  const manager = { call: async (method, path) => {
+    const repo = path.split('/')[3];
+    if (method === 'POST' && path.endsWith('/start')) { starts[repo]++; if (failing-- > 0) fail(503, 'runner_not_ready'); states[repo] = 'ready'; }
+    const state = states[repo];
+    return { repository_id: repo, generation: 1, state, desired: state === 'ready' ? 'ready' : 'stopped', error: state === 'ready' ? null : 'recovery_required', revision: ++revision };
+  } };
+  const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202'); await h.projects.reconcile();
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  Object.assign(states, { 101: 'failed', 202: 'reset_failed' });
+  const environment = () => h.store.get("SELECT state FROM project_environments WHERE repository_id='101'").state;
+  await h.projects.reconcile(); assert.deepEqual([starts[101], environment()], [1, 'failed']);
+  await h.projects.reconcile(); assert.equal(starts[101], 1, 'no second start within 30 s');
+  t.mock.timers.tick(30_000); await h.projects.reconcile(); assert.equal(starts[101], 2);
+  t.mock.timers.tick(30_000); await h.projects.reconcile(); assert.equal(starts[101], 2, 'the next start waits a minute');
+  t.mock.timers.tick(30_000); await h.projects.reconcile(); assert.deepEqual([starts[101], environment()], [3, 'ready']);
+  // Once it is up, a later failure starts again at once.
+  states[101] = 'failed'; await h.projects.reconcile(); assert.deepEqual([starts[101], environment()], [4, 'ready']);
+  assert.equal(starts[202], 0);
 });

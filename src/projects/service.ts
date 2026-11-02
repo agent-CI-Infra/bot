@@ -39,6 +39,8 @@ export class ProjectService {
   private readonly removing = new Set<string>();
   private readonly working = new Map<string, Promise<void>>();
   private readonly failures = new FailureLog('projects');
+  // Automatic starts of failed computers: how many in a row, and when the next one may be sent.
+  private readonly restarts = new Map<string, { attempts: number, at: number }>();
   constructor(readonly store: Store, readonly manager: Manager) {store.db.exec('CREATE TABLE IF NOT EXISTS computer_console_specs(repository_id TEXT PRIMARY KEY,spec TEXT NOT NULL)');}
   save(row: Row): void {
     if (!row) return;
@@ -76,12 +78,20 @@ export class ProjectService {
       // The manager admits as many runner calls at once as tasks may run, never fewer than hold a claim right now.
       const parallel = Math.max(repositoryConcurrency(this.store, repo.id), Number(this.store.get('SELECT count(*) AS n FROM task_claims WHERE repository_id=?', repo.id)!.n));
       if (Number.isSafeInteger(state.parallel) && state.parallel !== parallel) await this.manager.call('PUT', `/v1/projects/${repo.id}/parallel`, { tasks: parallel }).catch(() => {});
+      // An enabled project's computer that failed (a lost container, a failed recovery or restart) is started again, after
+      // 30 s, 1, 2, 4 … minutes (at most 30) between attempts, so it never stays down with its tasks waiting for it.
+      // A failed reset is left for a person: starting the old generation is refused until it is reset again.
+      if (state.state !== 'failed') this.restarts.delete(repo.id);
+      const retry = repo.enabled && state.state === 'failed' && Date.now() >= (this.restarts.get(repo.id)?.at ?? 0);
+      if (retry) { const attempts = (this.restarts.get(repo.id)?.attempts ?? 0) + 1; this.restarts.set(repo.id, { attempts, at: Date.now() + Math.min(30_000 * 2 ** (attempts - 1), 30 * 60_000) }); }
       const action = !repo.enabled && !['stopped','deleted'].includes(state.desired) ? 'stop'
-        : repo.enabled && ['stopped','deleted'].includes(state.state) ? 'start' : null;
+        : repo.enabled && (['stopped','deleted'].includes(state.state) || retry) ? 'start' : null;
       if (action) {
         const input = { operation_id: randomId(), generation: state.generation };
         this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, action, JSON.stringify(input));
-        await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
+        const result = await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
+        // A start that brought the computer up ends the backoff, so a later failure is retried at once.
+        if (result?.state !== 'failed') this.restarts.delete(repo.id);
       } else if (repo.enabled && state.state === 'ready' && state.computer?.resources_pending) {
         // The resource defaults changed: a computer that follows them is rebuilt once no task runs on it. The engine claims no
         // task on it while the refresh is pending; checking for claims and recording it in one step leaves no gap between.

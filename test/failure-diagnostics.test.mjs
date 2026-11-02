@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { FailureLog } from '../dist/core/log.js';
 import { fail } from '../dist/core/security.js';
@@ -44,7 +44,8 @@ test('an agent that fails keeps its reason in the task log and the stop message,
 test('the manager logs why Docker refused an operation and why a computer stopped', async t => {
   mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/diagnostics-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
   // Docker explains a refusal in its JSON body; the code stays docker_operation_failed and the reason travels as detail.
-  const socket = join(directory, 'docker.sock'), daemon = createServer((_req, res) => { res.statusCode = 400; res.end(JSON.stringify({ message: 'Range of CPUs is from 0.01 to 8.00, as there are only 8 CPUs available' })); });
+  // Relative to the checkout: a unix socket path is limited to 107 bytes, which a deep checkout's absolute path exceeds.
+  const socket = join(relative(process.cwd(), directory), 'docker.sock'), daemon = createServer((_req, res) => { res.statusCode = 400; res.end(JSON.stringify({ message: 'Range of CPUs is from 0.01 to 8.00, as there are only 8 CPUs available' })); });
   daemon.listen(socket); await once(daemon, 'listening'); t.after(() => new Promise(done => daemon.close(done)));
   await assert.rejects(new Docker(socket).request('POST', '/containers/create?name=dbot-x', {}), error => {
     assert.equal(error.message, 'docker_operation_failed');
