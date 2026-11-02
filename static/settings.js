@@ -42,7 +42,8 @@ const settingsCards = {
       } catch (err) { message.textContent = err.message; } finally { submit.disabled = false; }
     });
     concurrency.append(form);
-    return [about, concurrency];
+    const resources = { computer: settings.computer_defaults };
+    return [about, concurrency, liveCard('虚拟电脑默认资源', redraw => resourceDefaultsBody(resources, redraw)).section];
   },
   // Where GitHub's webhooks arrive: a self-hosted HTTPS address, or a Cloudflare Tunnel in front of it.
   async access(request) {
@@ -72,6 +73,32 @@ const settingsCards = {
     return [settingsList('用户', '超级管理员管理全部项目和这里的设置；项目管理员只看到分配给自己的组织和仓库。', users.map(userLine), '还没有用户。', '新增用户', 'users')];
   },
 };
+// The resources a computer gets for every value its project does not set itself, chosen from common sizes inside the
+// manager's bounds; CPU and memory sizes larger than the host are not offered. The current value is always an option.
+const commonSizes = { cpus: [0.5, 1, 2, 4, 6, 8, 12, 16], memory_mb: [512, 1024, 2048, 4096, 8192, 12288, 16384, 32768, 65536],
+  pids: [256, 512, 1024, 2048, 4096, 8192, 16384], tmp_mb: [256, 512, 1024, 2048, 4096, 8192, 16384] };
+const megabytes = value => value >= 1024 ? `${Number((value / 1024).toFixed(1))} GB` : `${value} MB`;
+const resourceFields = [['cpus', 'CPU', value => `${value} 核`], ['memory_mb', '内存', megabytes], ['pids', '进程数上限', value => `${value} 个`], ['tmp_mb', '/tmp 大小', megabytes]];
+function resourceDefaultsBody(view, redraw) {
+  if (!view.computer) return [note('暂时读不到 manager，无法显示默认资源，稍后再试。')];
+  const { defaults, builtin, bounds, host, allocated } = view.computer, hostLimit = { cpus: host?.cpus, memory_mb: host?.memory_mb };
+  const grid = element('div', '', 'field-grid'), controls = {};
+  for (const [key, caption, label] of resourceFields) {
+    const select = controls[key] = document.createElement('select'); select.name = key;
+    const sizes = [...new Set([...commonSizes[key].filter(size => size >= bounds[key][0] && size <= bounds[key][1] && !(hostLimit[key] && size > hostLimit[key])), defaults[key]])].sort((a, b) => a - b);
+    for (const size of sizes) { const option = element('option', label(size) + (size === builtin[key] ? '（内置默认）' : '')); option.value = String(size); select.append(option); }
+    select.value = String(defaults[key]); grid.append(field(caption, select));
+  }
+  return [facts([['这台主机', host ? `${host.cpus} CPU · ${megabytes(host.memory_mb)} 内存` : '读不到'],
+    ['运行中的虚拟电脑', `${allocated.computers} 台，共分配 ${allocated.cpus} CPU · ${megabytes(allocated.memory_mb)} 内存`]]),
+    note('项目在「机器配置」里留空的资源使用这里的值。虚拟电脑共用这台主机，分配总量可以超过主机，同时满载时会互相争用。'),
+    actionForm([grid, note('保存后新建的虚拟电脑立即使用新值；已有的虚拟电脑等到没有任务运行时按新值重建，工作卷和代次保留，运行中的任务不会被打断。')], '保存', async () => {
+      const changes = Object.fromEntries(resourceFields.map(([key]) => [key, Number(controls[key].value)]).filter(([key, value]) => value !== defaults[key]));
+      if (!Object.keys(changes).length) { redraw('没有改动'); return; }
+      view.computer = (await api('/api/settings', 'PATCH', { computer_defaults: changes })).settings.computer_defaults;
+      redraw('已保存：新建的虚拟电脑立即使用，已有的在空闲时重建');
+    })];
+}
 // A card holding a list of records with one add button that opens the shared editor.
 function settingsList(title, intro, lines, empty, caption, kind) {
   const section = card(title), list = element('div', '', 'rows settings-rows'), head = element('div', '', 'actions settings-list-head');

@@ -27,6 +27,14 @@ const rulePath = (path: string) => Object.hasOwn(defaults, path) || skillPath(pa
 export const maxRuleBytes = 16384;
 // Rule file errors a person has to fix; a task that meets one waits for configuration instead of failing.
 export const ruleErrors = new Set(['bot_rule_too_large', 'invalid_bot_label', 'invalid_bot_computer', 'invalid_bot_rule_file', 'invalid_rule_content', 'too_many_bot_skills', 'unsafe_bot_rule']);
+// The fields of .bot/computer.yaml, the same as the manager's project computer spec.
+const computerKeys = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress', 'packages', 'env', 'setup_script'];
+// The resource values that were fixed before a super administrator could change the defaults.
+const builtinResources: Record<string, number> = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
+// The console layer taken from a computer the manager describes: its fields without the resources that follow the default.
+export function ownComputer(live: any): Record<string, unknown> {
+  return Object.fromEntries(computerKeys.filter(key => live?.[key] !== undefined && !live.inherited?.includes(key)).map(key => [key, live[key]]));
+}
 export function resolveRules(policy: Row, files: Record<string, string>, computer: any = {}) {
   if(Object.keys(files).filter(skillPath).length>32)fail(400,'too_many_bot_skills');
   const repositoryRules=Object.entries(files).filter(([path])=>rulePath(path));
@@ -36,7 +44,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   const overrides = JSON.parse(policy.rule_overrides || '{}'), rows: any[] = [];
   const consoleRules: Record<string, string> = { ...overrides };
   // The existing manager computer is the console layer, not a new resource system.
-  const allowed = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress', 'packages', 'env', 'setup_script'];
+  const allowed = computerKeys;
   const consoleComputer = Object.fromEntries(allowed.filter(key => computer[key] !== undefined).map(key => [key, computer[key]]));
   let effectiveComputer = { ...consoleComputer };
   for (const [path, builtin] of Object.entries(defaults)) {
@@ -97,9 +105,18 @@ export class RuleService {
         store.run("UPDATE policies SET rule_overrides=?,review_instructions='',review_label='' WHERE repository_id=?", JSON.stringify(overrides), row.repository_id);
       }
     });
+    // The console layer used to copy all four resources from the manager. Values equal to the built-in defaults are dropped
+    // once, as the manager does with its saved specs, so those projects follow the global default from then on.
+    if (!store.get("SELECT 1 FROM settings WHERE key='computer.own_resources'")) store.transaction(() => {
+      for (const row of store.all('SELECT repository_id,spec FROM computer_console_specs')) {
+        const spec = JSON.parse(row.spec); for (const [key, value] of Object.entries(builtinResources)) if (spec[key] === value) delete spec[key];
+        store.run('UPDATE computer_console_specs SET spec=? WHERE repository_id=?', JSON.stringify(spec), row.repository_id);
+      }
+      store.run("INSERT INTO settings VALUES('computer.own_resources','1')");
+    });
   }
-  consoleComputer(id:string,live:any){const row=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',id);return row?JSON.parse(row.spec):live||{};}
-  rememberComputer(id:string,live:any){this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(resolveRules({}, {}, live).computer));}
+  consoleComputer(id:string,live:any){const row=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',id);return row?JSON.parse(row.spec):ownComputer(live);}
+  rememberComputer(id:string,live:any){this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(ownComputer(live)));}
   cache(id: string, sha: string, files: Record<string, string>) { this.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET sha=excluded.sha,files=excluded.files,updated_at=excluded.updated_at', id, sha, JSON.stringify(files), new Date().toISOString()); }
   // A mirror that holds the commit supplies the listing and contents; the files and their checks are the same either way.
   async fetch(github: GitHub, sha: string, mirror?: Mirror) {

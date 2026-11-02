@@ -54,7 +54,8 @@ export class TaskEngine {
     for(const task of tasks){
       const repo=String(task.repository_id);
       if(this.active.has(task.id)||this.clearing.has(repo))continue;
-      if(!limits.has(repo))limits.set(repo,repositoryConcurrency(this.store,repo));
+      // A computer being rebuilt with new default resources takes new tasks once that is done (see ProjectService.reconcileProject).
+      if(!limits.has(repo))limits.set(repo,this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND action='refresh' AND state='pending'",repo)?0:repositoryConcurrency(this.store,repo));
       const running=this.running.get(repo)||new Set<string>();
       if(running.size>=limits.get(repo)!)continue;
       const token=randomId(),now=new Date().toISOString();

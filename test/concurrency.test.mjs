@@ -82,6 +82,16 @@ test('with nothing configured a repository runs one task at a time and the next 
   assert.deepEqual(f.statuses(), ['succeeded', 'succeeded', 'succeeded']);
 });
 
+test('no task starts on a computer while it is rebuilt with new default resources', async t => {
+  const f = await fixture(t);
+  f.h.store.run("INSERT INTO environment_operations VALUES('refresh-1','101','refresh','{}','pending',NULL)");
+  f.engine.tick(); await settle();
+  assert.deepEqual(f.statuses(), ['queued', 'queued', 'queued']); assert.equal(f.engine.active.size, 0);
+  f.h.store.run("UPDATE environment_operations SET state='completed' WHERE id='refresh-1'");
+  f.engine.tick(); await f.reached(1); await f.finish(1);
+  assert.equal(f.task(1).status, 'succeeded');
+});
+
 test('a project concurrency of 2 runs two tasks at once in their own workspaces and keeps the third queued', async t => {
   const f = await fixture(t);
   assert.equal((await f.admin('/api/repositories/101/policy', 'PATCH', { task_concurrency: 2 })).status, 200);
@@ -135,7 +145,9 @@ test('a project without its own value follows the global default, and each task 
 test('only super administrators read and change global settings; project administrators set their own project only', async t => {
   const h = await harness(t, undefined, { imageTag: 'v9.9.9' }), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
-  assert.deepEqual((await admin('/api/settings')).value, { settings: { task_concurrency: 1, task_concurrency_bounds: [1, 32] }, version: { image_tag: 'v9.9.9', source: 'image' } });
+  // Without a manager the default computer resources cannot be read.
+  assert.deepEqual((await admin('/api/settings')).value, { settings: { task_concurrency: 1, task_concurrency_bounds: [1, 32], computer_defaults: null }, version: { image_tag: 'v9.9.9', source: 'image' } });
+  assert.equal((await admin('/api/settings', 'PATCH', { computer_defaults: { cpus: 1 } })).status, 503);
   for (const value of [0, 33, 1.5, '2', null]) assert.equal((await admin('/api/settings', 'PATCH', { task_concurrency: value })).status, 400);
   assert.equal((await admin('/api/settings', 'PATCH', { task_concurrency: 4 })).value.settings.task_concurrency, 4);
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='settings.updated'"));
@@ -262,7 +274,7 @@ test('global settings change the wizard settings and shared models without a pro
   const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
   await page.run('renderSettings(renderVersion)');
   assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['常规', '#/settings/general'], ['公网接入', '#/settings/access'], ['机器人账号', '#/settings/accounts'], ['模型', '#/settings/models'], ['用户', '#/settings/users']]);
-  assert.deepEqual(cards(), ['当前运行版本', '同时运行的任务']);
+  assert.deepEqual(cards(), ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']);
   assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '常规');
   assert.match(text(section('当前运行版本')), /v9\.9\.9/);
   assert.equal(String(section('同时运行的任务').querySelector('input').value), '2');

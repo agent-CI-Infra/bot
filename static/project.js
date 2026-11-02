@@ -132,7 +132,10 @@ function machineSection() {
   if (!pc) return [status, concurrencyForm(), note('暂时读不到虚拟电脑规格，稍后再试。')];
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
-  const number = (name, step) => input(name, shown[name], { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '' });
+  // A resource left empty follows the global default; own() is the value the project sets (console or repository file).
+  const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
+  const number = (name, step) => input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
+    placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
   const sourceLink=element('a','查看规则总览');sourceLink.href=`#/projects/${current.id}/rules`;
   const sourceActions=element('div','','actions');sourceActions.append(sourceLink);
   // Tasks apply the repository file when they prepare; a super administrator can apply it right away.
@@ -142,6 +145,7 @@ function machineSection() {
     note(source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的生效值。这里保存的是控制台配置，下次任务准备时会再次被仓库文件覆盖。':'表单显示当前生效电脑规格；仓库 .bot/computer.yaml 可以覆盖控制台值。'),sourceActions,
     note(editable ? '保存后虚拟电脑按新配置重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包时会先构建镜像，首次可能需要几分钟。' : '机器配置由超级管理员设置。'),
     element('h4', '资源'),
+    note('留空的资源跟随全局默认（全局设置 → 常规），全局默认改了以后这台电脑在空闲时按新值重建。'),
     (() => { const grid = element('div', '', 'field-grid'); grid.append(field('CPU（核）', number('cpus', '0.25')), field('内存（MB）', number('memory_mb', '128')), field('进程数上限', number('pids', '1')),
       field('/tmp 大小（MB）', number('tmp_mb', '16'))); return grid; })(),
     checkbox('egress', shown.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）'),
@@ -153,7 +157,8 @@ function machineSection() {
     checkbox('rerun_setup', false, '保存后重新运行初始化脚本')];
   const form = settingsForm('配置', nodes, async (form, progress) => {
     const spec = {};
-    for (const name of specFields) if (Number(form.elements[name].value) !== shown[name]) spec[name] = Number(form.elements[name].value);
+    // null clears the project's value, so the resource follows the global default again.
+    for (const name of specFields) { const text = form.elements[name].value.trim(), value = text === '' ? null : Number(text); if (value !== (own(name) ?? null)) spec[name] = value; }
     if (form.elements.egress.checked !== (shown.network_policy === 'internet egress')) spec.egress = form.elements.egress.checked;
     const packages = [...new Set(form.elements.packages.value.split(/[\s,]+/).filter(Boolean))];
     if (packages.slice().sort().join(' ') !== [...(shown.packages || [])].sort().join(' ')) spec.packages = packages;
@@ -182,6 +187,7 @@ function machineStatus() {
   const env = environment.environment, pc = env.computer || {}, machine = card('机器'), lifecycle = element('div', '', 'actions');
   machine.append(facts([['状态', state(env.state)], ['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
     ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null], ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null],
+    ['资源', pc.resources_pending ? '全局默认资源已改，等没有任务运行时按新值重建' : null],
     ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', env.error]]));
   lifecycle.append(...environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error)); machine.append(lifecycle);
   return [machine, usageCard(), preparationCard(pc)];
