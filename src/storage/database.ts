@@ -99,6 +99,7 @@ export class Store {
     extend('task_logs', { created_at: "TEXT NOT NULL DEFAULT ''" });
     // Review rules: which events start a review, the comment language and the administrator's project-specific guidance.
     extend('policies', { review_issues: 'INTEGER NOT NULL DEFAULT 1', review_pull_requests: 'INTEGER NOT NULL DEFAULT 1', review_pr_updates: 'INTEGER NOT NULL DEFAULT 1',
+      review_issue_updates: 'INTEGER NOT NULL DEFAULT 1', review_pr_discussion: 'INTEGER NOT NULL DEFAULT 1',
       review_language: "TEXT NOT NULL DEFAULT 'auto'", review_instructions: "TEXT NOT NULL DEFAULT ''", rule_overrides: "TEXT NOT NULL DEFAULT '{}'" });
     // How many tasks the project computer runs at once; NULL follows the global default in settings.
     extend('policies', { task_concurrency: 'INTEGER' });

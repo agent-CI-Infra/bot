@@ -237,9 +237,9 @@ export async function management(store: Store, user: Actor, method: string, path
     if (method === 'PATCH' && repoMatch[2]) {
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
       fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_language','task_concurrency']);
+        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency']);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
-      for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
+      for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates', 'review_issue_updates', 'review_pr_discussion']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       if (body.review_language !== undefined && (typeof body.review_language !== 'string' || !['auto', 'zh', 'en'].includes(body.review_language))) fail(400, 'invalid_review_language');
       for (const key of ['review_enabled', 'development_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       const previous = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
@@ -264,8 +264,9 @@ export async function management(store: Store, user: Actor, method: string, path
           body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
         if (grant) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
         const keep = (key: string, value: unknown) => body[key] === undefined ? previous[key] : value;
-        store.run('UPDATE policies SET review_issues=?,review_pull_requests=?,review_pr_updates=?,review_language=? WHERE repository_id=?',
+        store.run('UPDATE policies SET review_issues=?,review_pull_requests=?,review_pr_updates=?,review_issue_updates=?,review_pr_discussion=?,review_language=? WHERE repository_id=?',
           keep('review_issues', Number(body.review_issues)), keep('review_pull_requests', Number(body.review_pull_requests)), keep('review_pr_updates', Number(body.review_pr_updates)),
+          keep('review_issue_updates', Number(body.review_issue_updates)), keep('review_pr_discussion', Number(body.review_pr_discussion)),
           keep('review_language', body.review_language), id);
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
