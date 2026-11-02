@@ -28,6 +28,61 @@ export function commentReviewKind(store: Store, repositoryId: string, event: str
   if (issue.pull_request) return policy.review_pull_requests ? 'review.pr' : null;
   return policy.review_issues ? 'review.issue' : null;
 }
+// What the bot writes itself carries its marker; a bot account posts as an ordinary GitHub user, so the sender type is not enough.
+const botMarker = /<!-- dept-bot[:-]/;
+const byBot = (payload: any, body: unknown) => payload?.sender?.type === 'Bot' || botMarker.test(String(body ?? ''));
+const clip = (value: unknown, limit = 4000) => { const text = String(value ?? ''); return text.length > limit ? text.slice(0, limit) + '…' : text; };
+// A person updated an open Issue or PR after it was opened: edited its title or body, commented, submitted a review or replied
+// to review comments. Returns the review to queue and what triggered it, or null. Opening, new commits and mentions have their
+// own triggers; drafts, closed objects and the bot's own writing never trigger.
+export function updateTrigger(event: string, payload: Json): { kind: 'review.issue' | 'review.pr', number: number, pullRequest?: Json, trigger: Json } | null {
+  const p = payload as any, action = p.action, actor = String(p.sender?.login || ''), edited = (changes: any) => ['title', 'body'].filter(key => changes && key in changes);
+  const open = (object: any) => object?.state === 'open' && object.draft !== true && Number.isSafeInteger(object.number) && object.number > 0;
+  if (event === 'issues' && action === 'edited' && open(p.issue) && !p.issue.pull_request && edited(p.changes).length && !byBot(p, null))
+    return { kind: 'review.issue', number: p.issue.number, trigger: { reason: 'issue_edited', actor, changed: edited(p.changes),
+      previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
+  if (event === 'issue_comment' && action === 'created' && p.issue?.state === 'open' && Number.isSafeInteger(p.issue.number) && p.issue.number > 0
+    && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body))
+    return { kind: p.issue.pull_request ? 'review.pr' : 'review.issue', number: p.issue.number, trigger: { reason: 'comment', actor, url: String(p.comment.html_url || '') } };
+  const pr = p.pull_request;
+  // A bot account editing its own PR description is the bot, even though GitHub reports a user.
+  if (event === 'pull_request' && action === 'edited' && open(pr) && edited(p.changes).length && !byBot(p, null)
+    && !(String(pr.user?.id ?? '') === String(p.sender?.id ?? '') && botMarker.test(String(pr.body ?? ''))))
+    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'pull_request_edited', actor, changed: edited(p.changes),
+      previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
+  if (event === 'pull_request_review_comment' && action === 'created' && open(pr) && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body))
+    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: p.comment.in_reply_to_id ? 'review_reply' : 'review_comment', actor,
+      url: String(p.comment.html_url || ''), path: String(p.comment.path || ''), line: p.comment.line ?? null } };
+  // Every reply to a review thread also arrives as a review without a body; that one is the comment event above.
+  if (event === 'pull_request_review' && action === 'submitted' && open(pr) && !byBot(p, p.review?.body)
+    && (String(p.review?.body || '').trim() || p.review?.state === 'changes_requested'))
+    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'review_submitted', actor, state: String(p.review.state || ''),
+      body: clip(p.review.body), url: String(p.review.html_url || '') } };
+  return null;
+}
+// Reviews of updates follow the repository's switches: Issue updates need Issue review, PR discussion needs PR review.
+function updateEnabled(policy: any, kind: string) { return kind === 'review.issue' ? !!(policy.review_issues && policy.review_issue_updates) : !!(policy.review_pull_requests && policy.review_pr_discussion); }
+// An issue_comment on a PR names only the PR number; the webhook reads the current head before archiving when a review may follow.
+export function pullRequestNeeded(store: Store, repositoryId: string, event: string, payload: Json) {
+  if (event !== 'issue_comment' || !(payload.issue as any)?.pull_request) return false;
+  if (commentReviewKind(store, repositoryId, event, payload) === 'review.pr') return true;
+  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
+  return !!policy?.enabled && !!policy.review_enabled && updateTrigger(event, payload)?.kind === 'review.pr' && updateEnabled(policy, 'review.pr');
+}
+// Updates arriving close together review once: while a review of the object waits to start, it will read the latest state anyway.
+const waitingStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment'];
+function queueUpdate(store: Store, repositoryId: string, policy: any, event: string, payload: Json, delivery: string, currentPullRequest?: Json) {
+  const update = updateTrigger(event, payload);
+  if (!update || !updateEnabled(policy, update.kind)) return 0;
+  const pending = store.get(`SELECT 1 FROM tasks WHERE repository_id=? AND kind=? AND object_number=? AND status IN (${waitingStates.map(() => '?').join(',')}) LIMIT 1`,
+    repositoryId, update.kind, update.number, ...waitingStates);
+  if (pending) return 0;
+  const input = { ...payload, trigger: { event, action: payload.action, ...update.trigger } };
+  if (update.kind === 'review.issue') return enqueue(store, repositoryId, 'review.issue', update.number, null, input, delivery, null, null, delivery) ? 1 : 0;
+  const pr = (update.pullRequest || currentPullRequest) as any;
+  if (!pr || pr.number !== update.number || pr.state !== 'open' || pr.draft === true) return 0;
+  return enqueue(store, repositoryId, 'review.pr', update.number, String(pr.head?.sha || ''), { ...input, pull_request: pr }, delivery, null, null, delivery) ? 1 : 0;
+}
 // A person adding the development label after the review starts the development that review found requested.
 // Labels added before the review finishes are checked when the review is published instead.
 function queueLabeledDevelopment(store: Store, repositoryId: string, policy: any, payload: any, number: number, delivery: string) {
@@ -41,14 +96,16 @@ function queueLabeledDevelopment(store: Store, repositoryId: string, policy: any
   return !!enqueue(store, repositoryId, 'development.issue', number, null, { review: result, object_hash: result.object_hash }, delivery, review!.id);
 }
 
+// `commentId` keys a mention review to its comment; `updateId` keys an update review to its delivery record.
 export function enqueue(store: Store, repositoryId: string, kind: string, number: number, head: string | null, input: Json,
-  delivery: string | null = null, sourceTask: string | null = null, commentId: string | null = null): string | null {
+  delivery: string | null = null, sourceTask: string | null = null, commentId: string | null = null, updateId: string | null = null): string | null {
   if (!Number.isSafeInteger(number) || number < 1 || kind.endsWith('.pr') && !/^[a-f0-9]{40}$/.test(head || '')) return null;
   if (commentId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[1-9]\d*$/.test(commentId))) return null;
+  if (updateId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[\w-]{1,200}$/.test(updateId))) return null;
   if (kind === 'development.issue' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=?
     AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
       'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, number)) return null;
-  const key = `${repositoryId}:${kind}:${number}:${commentId !== null ? `comment:${commentId}` : kind.endsWith('.pr') ? head : 'opened'}`;
+  const key = `${repositoryId}:${kind}:${number}:${commentId !== null ? `comment:${commentId}` : updateId !== null ? `update:${updateId}` : kind.endsWith('.pr') ? head : 'opened'}`;
   const existing = store.get('SELECT id FROM tasks WHERE unique_key=?', key); if (existing) return null;
   const id = randomId(), now = new Date().toISOString();
   store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,head_sha,source_task_id,source_delivery_id,created_at,updated_at)
@@ -68,7 +125,8 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   if (!policy?.enabled || !policy.review_enabled) return 0;
   if (event === 'issue_comment') {
     const kind = commentReviewKind(store, repositoryId, event, payload);
-    if (!kind) return 0;
+    // A comment without a mention may still be an update to review.
+    if (!kind) return queueUpdate(store, repositoryId, policy, event, payload, delivery, currentPullRequest);
     const issue = payload.issue as Json, commentId = String((payload.comment as Json).id), issueNumber = Number(issue.number);
     if (kind === 'review.issue') return enqueue(store, repositoryId, kind, issueNumber, null, payload, delivery, null, commentId) ? 1 : 0;
     if (!currentPullRequest || currentPullRequest.number !== issue.number || currentPullRequest.state !== 'open' || currentPullRequest.draft === true) return 0;
@@ -83,5 +141,5 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
     const head = object.head as Json | undefined;
     return enqueue(store, repositoryId, 'review.pr', number, String(head?.sha || ''), payload, delivery) ? 1 : 0;
   }
-  return 0;
+  return queueUpdate(store, repositoryId, policy, event, payload, delivery);
 }

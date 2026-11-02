@@ -23,7 +23,8 @@ function mentionNames(t,value) {
 test('Issue comment mentions queue independently of opened events and deduplicate comments and deliveries',async t=>{
   mentionNames(t,undefined);
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true});
+  // Only the mention rule here; comments and edits as updates are covered in test/review-updates.test.mjs.
+  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true,review_issue_updates:false,review_pr_discussion:false});
   const issue={number:1,state:'open',title:'Fix the bug',body:'Fix the bug',labels:[{name:'bot-develop'}],assignees:[]};
   const opened={repository:{id:101},action:'opened',issue};
   assert.equal((await h.hook(a.path,a.secret,'opened',opened)).value.tasks_created,1);
@@ -55,7 +56,7 @@ test('Issue comment mentions queue independently of opened events and deduplicat
 test('mention configuration can disable comments or replace default names, with literal case-insensitive boundaries',async t=>{
   mentionNames(t,'off');
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true});
+  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,review_issue_updates:false,review_pr_discussion:false});
   let id=300;const send=body=>h.hook(a.path,a.secret,'config-'+(++id),{repository:{id:101},action:'created',sender:{type:'User'},
     issue:{number:3,state:'open'},comment:{id,body}},{'X-GitHub-Event':'issue_comment'});
   for(const off of ['off',' OFF ']){process.env.BOT_MENTION_NAMES=off;assert.equal((await send('@bot @agent-ci-infra-bot')).value.tasks_created,0);}
@@ -80,7 +81,7 @@ test('PR conversation mentions read the current head with read-only permissions,
   const h=await harness(t,undefined,{githubUrl:'http://127.0.0.1:'+server.address().port}),{admin}=await setup(h);
   const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'});
   const a=await account(admin,{type:'github_app',app_id:'1',private_key:pem,token:undefined});await repository(admin,a.id,'101');
-  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true});
+  await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,review_issue_updates:false,review_pr_discussion:false});
   const payload={repository:{id:101},action:'created',sender:{type:'User'},issue:{number:7,state:'open',pull_request:{url:'https://api.github.invalid/repos/fixture/project-101/pulls/7'}},
     comment:{id:400,body:'@Agent-CI-Infra-Bot please recheck',html_url:'https://github.invalid/issue/7#issuecomment-400'}};
   const send=(delivery,value=payload)=>h.hook(a.path,a.secret,delivery,value,{'X-GitHub-Event':'issue_comment'});

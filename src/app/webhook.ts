@@ -1,7 +1,7 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
-import { commentReviewKind, queueWebhook } from '../review/queue.js';
+import { pullRequestNeeded, queueWebhook } from '../review/queue.js';
 import { GitHub } from '../github/client.js';
 import { Redactor } from '../agent/common.js';
 import { recordAutomation } from '../automation/runner.js';
@@ -48,7 +48,8 @@ export async function ingest(
   const safeHeaders = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key,
     /authorization|cookie|token|secret|signature|key/i.test(key) ? '[REDACTED]' : value]));
   let currentPullRequest: Json | undefined;
-  if (status === 200 && owner && payload && commentReviewKind(store, repoId, event, payload) === 'review.pr'
+  // A PR conversation comment (a mention or an update) is reviewed at the PR's current head, which the comment does not carry.
+  if (status === 200 && owner && payload && pullRequestNeeded(store, repoId, event, payload)
     && !store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId)) {
     // Read before the synchronous archive transaction; actor lookup is unnecessary for this read-only request.
     const github = new GitHub(store, owner, new Redactor(), async () => {}, githubUrl);

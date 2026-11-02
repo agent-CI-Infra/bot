@@ -402,12 +402,17 @@ function reviewSection() {
   language.value = policy.review_language || 'auto';
   const nodes = [checkbox('review_enabled', policy.review_enabled, '检视这个项目的 Issue 和 PR'),
     element('h4', '何时检视'), checkbox('review_issues', policy.review_issues, '新打开的 Issue'), checkbox('review_pull_requests', policy.review_pull_requests, '新打开或从草稿转为可检视的 PR'),
-    checkbox('review_pr_updates', policy.review_pr_updates, 'PR 推送新提交后（bot PR 的自动跟进也依赖它）'), note('草稿 PR 不检视；编辑、评论和重新打开不额外触发。行内评论固定 COMMENT，不会批准、请求修改或合并。'),
+    checkbox('review_pr_updates', policy.review_pr_updates, 'PR 推送新提交后（bot PR 的自动跟进也依赖它）'),
+    checkbox('review_issue_updates', policy.review_issue_updates, 'Issue 的标题或正文被修改、有新评论后'),
+    checkbox('review_pr_discussion', policy.review_pr_discussion, 'PR 的标题或描述被修改、有新评论、提交检视或回复检视意见后'),
+    note('草稿 PR 和已关闭的 Issue／PR 不检视；bot 自己的评论和检视不会触发。上一次检视还在排队时，新的修改和评论并入那一次，不重复检视。评论里提到 bot 时总会再检视一次。行内评论固定 COMMENT，不会批准、请求修改或合并。'),
     field('评论语言', language)];
   return [settingsForm('检视开关', nodes, form => patchPolicy(changed({
     review_enabled: form.elements.review_enabled.checked, review_issues: form.elements.review_issues.checked, review_pull_requests: form.elements.review_pull_requests.checked,
-    review_pr_updates: form.elements.review_pr_updates.checked, review_language: form.elements.review_language.value }, { review_enabled: !!policy.review_enabled,
-    review_issues: !!policy.review_issues, review_pull_requests: !!policy.review_pull_requests, review_pr_updates: !!policy.review_pr_updates, review_language: policy.review_language || 'auto' }))),
+    review_pr_updates: form.elements.review_pr_updates.checked, review_issue_updates: form.elements.review_issue_updates.checked,
+    review_pr_discussion: form.elements.review_pr_discussion.checked, review_language: form.elements.review_language.value }, { review_enabled: !!policy.review_enabled,
+    review_issues: !!policy.review_issues, review_pull_requests: !!policy.review_pull_requests, review_pr_updates: !!policy.review_pr_updates, review_issue_updates: !!policy.review_issue_updates,
+    review_pr_discussion: !!policy.review_pr_discussion, review_language: policy.review_language || 'auto' }))),
     ...['.bot/rules/issue-review.md', '.bot/rules/pr-review.md', '.bot/rules/labels.md'].map(ruleCard)];
 }
 
