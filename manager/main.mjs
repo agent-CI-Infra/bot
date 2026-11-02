@@ -27,6 +27,8 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://manager'), path = url.pathname, output = /^\/v1\/projects\/([1-9]\d{0,19})\/output\/([a-f0-9]{48})$/.exec(path);
     let result;
     if (req.method === 'GET' && path === '/v1/projects') result = projects.list();
+    else if (req.method === 'GET' && path === '/v1/defaults') result = await projects.defaultsView();
+    else if (req.method === 'PUT' && path === '/v1/defaults') result = await projects.setDefaults(await json(req));
     else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
     else if (req.method === 'GET' && /^\/v1\/projects\/[1-9]\d{0,19}\/stats$/.test(path)) result = await projects.stats(path.split('/')[3]);
     else if (req.method === 'PUT' && /^\/v1\/projects\/[1-9]\d{0,19}\/parallel$/.test(path)) {
@@ -34,7 +36,7 @@ const server = createServer(async (req, res) => {
       if (Object.keys(input).some(k => k !== 'tasks')) throw new ManagerError('invalid_input', 400);
       result = projects.parallelism(path.split('/')[3], input.tasks);
     } else {
-      const match = /^\/v1\/projects\/([1-9]\d{0,19})(?:\/(start|stop|reset|delete|execute|configure))?$/.exec(path);
+      const match = /^\/v1\/projects\/([1-9]\d{0,19})(?:\/(start|stop|reset|delete|execute|configure|refresh))?$/.exec(path);
       if (!match) throw new ManagerError('not_found', 404);
       if (req.method === 'GET' && !match[2]) result = projects.describe(match[1]);
       else if (req.method === 'PUT' && !match[2]) result = await projects.register(match[1]);

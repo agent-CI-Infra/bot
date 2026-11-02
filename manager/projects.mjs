@@ -6,19 +6,26 @@ import { ManagerError } from './docker.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // Default project computer spec and the bounds the manager enforces; callers can only choose values inside them.
-const defaults = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024, packages: [], env: {}, setup_script: '' };
+// The resource values are the built-in defaults: a super administrator replaces them in the global settings, and every
+// resource a project does not set itself follows the current default.
+const builtin = { cpus: 2, memory_mb: 4096, pids: 1024, tmp_mb: 1024 };
+const defaults = { ...builtin, packages: [], env: {}, setup_script: '' };
 const bounds = { cpus: [0.25, 16], memory_mb: [256, 65536], pids: [64, 16384], tmp_mb: [16, 16384] };
+const resourceKeys = Object.keys(bounds), resources = spec => Object.fromEntries(resourceKeys.map(key => [key, spec[key]]));
 const mib = 1024 * 1024;
+// CPUs in steps of 0.01, the other resources whole numbers, all inside their bounds.
+function validResource(key, value) {
+  const [min, max] = bounds[key];
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (key === 'cpus' ? Math.round(value * 100) === value * 100 : Number.isInteger(value));
+}
 // Debian package names only (no options, files or URLs); environment names that the computer or runner own are refused.
 export const PACKAGE_NAME = /^[a-z0-9][a-z0-9+.-]{1,99}(?::[a-z0-9-]{1,20})?$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/, reservedEnv = new Set(['PATH', 'HOME', 'TMPDIR', 'USER', 'SHELL', 'PWD', 'HOSTNAME', 'NPM_CONFIG_PREFIX']);
 export function validateSpec(input) {
   const keys = ['egress', 'packages', 'env', 'setup_script', 'rerun_setup', ...Object.keys(bounds)];
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !keys.includes(k))) throw new ManagerError('invalid_spec', 400);
-  for (const [key, [min, max]] of Object.entries(bounds)) if (input[key] !== undefined) {
-    const value = input[key];
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max || key !== 'cpus' && !Number.isInteger(value) || key === 'cpus' && Math.round(value * 100) !== value * 100) throw new ManagerError('invalid_spec', 400);
-  }
+  // null clears the project's own value, so the resource follows the default again.
+  for (const key of resourceKeys) if (input[key] != null && !validResource(key, input[key])) throw new ManagerError('invalid_spec', 400);
   for (const key of ['egress', 'rerun_setup']) if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new ManagerError('invalid_spec', 400);
   if (input.packages !== undefined && (!Array.isArray(input.packages) || input.packages.length > 100 || new Set(input.packages).size !== input.packages.length
     || input.packages.some(name => typeof name !== 'string' || !PACKAGE_NAME.test(name)))) throw new ManagerError('invalid_packages', 400);
@@ -56,20 +63,57 @@ export class Projects {
     for (const column of ['spec', 'build', 'setup']) if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === column)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${column} TEXT`);
     // parallel: how many runner calls may share the computer, one per task the control plane may run there at once.
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'parallel')) this.db.exec('ALTER TABLE projects ADD COLUMN parallel INTEGER NOT NULL DEFAULT 1');
+    // applied: the resources the current container was created with, so a changed default shows as pending.
+    if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'applied')) this.db.exec('ALTER TABLE projects ADD COLUMN applied TEXT');
+    this.db.exec('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+    // Before the defaults could change, a saved spec held all four resources. Values equal to the built-in defaults are
+    // dropped once, so those projects follow the global default from then on; any other value stays the project's own.
+    if (!this.db.prepare("SELECT 1 FROM settings WHERE key='own_resources'").get()) {
+      this.db.exec('BEGIN IMMEDIATE');
+      for (const row of this.db.prepare('SELECT repository_id,spec FROM projects WHERE spec IS NOT NULL').all()) {
+        const spec = JSON.parse(row.spec); for (const key of resourceKeys) if (spec[key] === builtin[key]) delete spec[key];
+        this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(spec), row.repository_id);
+      }
+      this.db.prepare("INSERT INTO settings VALUES('own_resources','1')").run(); this.db.exec('COMMIT');
+    }
   }
   get(repo) { return this.db.prepare('SELECT * FROM projects WHERE repository_id=?').get(repo); }
   list() { return this.db.prepare('SELECT * FROM projects ORDER BY repository_id').all(); }
-  // A project's saved spec over the defaults; it survives restarts and resets.
+  // The values a project set itself; it survives restarts and resets.
   // Commands have no time limit, so a max_command_minutes saved by an earlier version is dropped.
-  spec(repo) { const saved = this.get(repo)?.spec, { max_command_minutes: _removed, ...spec } = saved ? JSON.parse(saved) : {}; return { ...defaults, egress: this.egress, ...spec }; }
+  own(repo) { const saved = this.get(repo)?.spec, { max_command_minutes: _removed, ...spec } = saved ? JSON.parse(saved) : {}; return spec; }
+  // The resource defaults now in force: the built-in values with the ones saved in the global settings.
+  resourceDefaults() { const saved = this.db.prepare("SELECT value FROM settings WHERE key='resource_defaults'").get(); return { ...builtin, ...(saved ? JSON.parse(saved.value) : {}) }; }
+  spec(repo) { return { ...defaults, ...this.resourceDefaults(), egress: this.egress, ...this.own(repo) }; }
   describe(repo) {
     const project = this.get(repo); if (!project) return null;
     const resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, project.generation);
     const generations = this.db.prepare('SELECT count(*) AS n FROM resources WHERE repository_id=?').get(repo).n;
-    const { spec: _saved, build, setup, ...state } = project, spec = this.spec(repo);
+    const { spec: _saved, build, setup, applied, ...state } = project, spec = this.spec(repo), own = this.own(repo);
+    // inherited: the resources that follow the default; resources_pending: the container still has other resources.
     return { ...state, computer: { ...this.names(repo, project.generation), image: resource?.image || null, user: '10001:10001', workdir: '/workspace',
       root_filesystem: 'read-only', network_policy: spec.egress ? 'internet egress' : 'internal, no egress', init: true,
-      ...spec, build: build ? JSON.parse(build) : null, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds } };
+      ...spec, build: build ? JSON.parse(build) : null, setup: setup ? JSON.parse(setup) : null, retained_generations: generations, bounds,
+      defaults: this.resourceDefaults(), inherited: resourceKeys.filter(key => own[key] === undefined),
+      resources_pending: !!applied && applied !== JSON.stringify(resources(spec)) } };
+  }
+  // The resource defaults with their bounds, and for reference the host's CPUs and memory and what the running computers
+  // are given (computers share the host, so their totals may exceed it).
+  async defaultsView() {
+    const info = await this.docker.request('GET', '/info').catch(() => null);
+    const running = this.list().filter(p => ['ready', 'busy'].includes(p.state)).map(p => this.spec(p.repository_id));
+    return { defaults: this.resourceDefaults(), builtin, bounds, host: info?.NCPU ? { cpus: info.NCPU, memory_mb: Math.floor(info.MemTotal / mib) } : null,
+      allocated: { computers: running.length, cpus: Math.round(running.reduce((sum, s) => sum + s.cpus, 0) * 100) / 100, memory_mb: running.reduce((sum, s) => sum + s.memory_mb, 0) } };
+  }
+  // New computers use the new defaults at once; a running one that follows them shows resources_pending until the control
+  // plane sends refresh while no task uses it.
+  async setDefaults(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length || Object.entries(input).some(([key, value]) => !resourceKeys.includes(key) || !validResource(key, value))) throw new ManagerError('invalid_defaults', 400);
+    // Docker refuses to create a container that is given more CPUs than the host has.
+    const info = await this.docker.request('GET', '/info').catch(() => null);
+    if (info?.NCPU && input.cpus > info.NCPU) throw new ManagerError('cpus_exceed_host', 400);
+    this.db.prepare("INSERT INTO settings VALUES('resource_defaults',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify({ ...this.resourceDefaults(), ...input }));
+    return this.defaultsView();
   }
   // Up to `parallel` runner calls (shared) use a computer at once; lifecycle actions (exclusive) run alone. Waiters are
   // admitted in arrival order, so a stop, reset or configure is not starved by a stream of runner calls.
@@ -169,6 +213,7 @@ export class Projects {
           Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }] } });
       container = await this.inspect(repo, generation, 'container');
     }
+    this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(spec)), repo);
     if (!container.State.Running) await this.docker.request('POST', `/containers/${names.container}/start`);
     // Readiness is a protocol and journal check, not a Docker running flag.
     const health = await this.docker.runner(names.container, { operation_id: randomId(), type: 'health' });
@@ -257,7 +302,7 @@ export class Projects {
   }
   async operate(repo, action, input) {
     this.validate(repo);
-    if (!['start', 'stop', 'reset', 'delete', 'execute', 'configure'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
+    if (!['start', 'stop', 'reset', 'delete', 'execute', 'configure', 'refresh'].includes(action) || !/^[a-f0-9]{48}$/.test(input.operation_id || '') || !Number.isSafeInteger(input.generation)) throw new ManagerError('invalid_operation', 400);
     // An invalid spec or runner request is rejected before it is recorded, so it never touches the running computer.
     if (action === 'configure') validateSpec(input.request);
     if (action === 'execute') validateCall(input.request);
@@ -282,14 +327,21 @@ export class Projects {
         let result;
         if (action === 'configure') {
           // Saved under the project lock, so a running command finishes first; a stopped computer applies it on the next start.
-          const { rerun_setup: rerun, ...requested } = input.request, previous = this.get(repo).spec, spec = { ...this.spec(repo), ...requested };
-          this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(spec), repo);
+          // Only the project's own values are saved; a null resource is removed, so it follows the default again.
+          const { rerun_setup: rerun, ...requested } = input.request, previous = this.get(repo).spec, own = { ...this.own(repo), ...requested };
+          for (const key of resourceKeys) if (own[key] === null) delete own[key];
+          this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(JSON.stringify(own), repo);
           // Build a new package image before touching the running computer; a failed build leaves it as it was.
-          try { await this.resolveImage(repo, spec); }
+          try { await this.resolveImage(repo, this.spec(repo)); }
           catch (error) { this.db.prepare('UPDATE projects SET spec=? WHERE repository_id=?').run(previous, repo); throw Object.assign(error, { untouched: true }); }
           if (project.desired === 'ready' && project.state !== 'reset_failed') {
             this.background.delete(repo); await this.stopGeneration(repo, project.generation); await this.provision(repo, { forceSetup: rerun === true });
           }
+          result = this.describe(repo);
+        } else if (action === 'refresh') {
+          // Applies the current spec, such as changed resource defaults, to a ready computer. provision replaces the container
+          // only when it differs; the work volume and generation stay. The control plane sends it only while no task runs there.
+          if (project.desired === 'ready' && project.state === 'ready') { this.background.delete(repo); await this.provision(repo); }
           result = this.describe(repo);
         } else if (action === 'execute') {
           if (project.state === 'ready') this.update(repo, 'busy', 'ready', null, project.started_at);

@@ -5,6 +5,7 @@ import { type Actor, repository, scope, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
+import { ownComputer } from '../rules/service.js';
 
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
@@ -77,6 +78,15 @@ export class ProjectService {
         const input = { operation_id: randomId(), generation: state.generation };
         this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, action, JSON.stringify(input));
         await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
+      } else if (repo.enabled && state.state === 'ready' && state.computer?.resources_pending) {
+        // The resource defaults changed: a computer that follows them is rebuilt once no task runs on it. The engine claims no
+        // task on it while the refresh is pending; checking for claims and recording it in one step leaves no gap between.
+        const input = { operation_id: randomId(), generation: state.generation };
+        const queued = this.store.transaction(() => {
+          if (this.store.get("SELECT 1 FROM task_claims WHERE repository_id=? UNION ALL SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", repo.id, repo.id)) return false;
+          this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, repo.id, 'refresh', JSON.stringify(input)); return true;
+        });
+        if (queued) await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
       }
     } catch { /* The environment page retains a visible fault instead of claiming readiness. */
       if (this.removing.has(repo.id) || !this.store.get('SELECT 1 FROM repositories WHERE id=?', repo.id)) return;
@@ -100,14 +110,16 @@ export class ProjectService {
   endRemoval(id: string): void { this.removing.delete(id); }
   private async send(op: Row): Promise<Json> {
     try {
-      // Starting, resetting or reconfiguring may build a package image and run the setup script: allow up to 35 minutes.
-      const result = await this.manager.call('POST', `/v1/projects/${op.repository_id}/${op.action}`, JSON.parse(op.input), ['start', 'reset', 'configure'].includes(op.action) ? 35 * 60000 : 90000);
+      // Starting, resetting, reconfiguring or refreshing may build a package image and run the setup script: allow up to 35 minutes.
+      const result = await this.manager.call('POST', `/v1/projects/${op.repository_id}/${op.action}`, JSON.parse(op.input), ['start', 'reset', 'configure', 'refresh'].includes(op.action) ? 35 * 60000 : 90000);
       this.store.transaction(() => {
         this.save(result); this.store.run("UPDATE environment_operations SET state='completed',result=? WHERE id=?", JSON.stringify(result), op.id);
         if(op.action==='configure'){
           const previous=this.store.get('SELECT spec FROM computer_console_specs WHERE repository_id=?',op.repository_id),base=previous?JSON.parse(previous.spec):{};
           const{rerun_setup:_rerun,...values}=JSON.parse(op.input).request;
-          this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec',op.repository_id,JSON.stringify({...base,...values}));
+          // A null resource follows the default again, so it leaves the console layer.
+          const spec={...base,...values};for(const key of Object.keys(spec))if(spec[key]===null)delete spec[key];
+          this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT(repository_id) DO UPDATE SET spec=excluded.spec',op.repository_id,JSON.stringify(spec));
         }
       }); return result;
     } catch (error) {
@@ -176,10 +188,7 @@ export class ProjectService {
     if (!previous && this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id)) fail(409, 'environment_operation_pending');
     const state = await this.manager.call('GET', '/v1/projects/' + id) || await this.manager.call('PUT', '/v1/projects/' + id);
     this.save(state);
-    if(match[2]==='configure'&&!previous){
-      const names=['cpus','memory_mb','pids','tmp_mb','egress','packages','env','setup_script'];
-      this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(Object.fromEntries(names.filter(key=>state.computer?.[key]!==undefined).map(key=>[key,state.computer[key]]))));
-    }
+    if(match[2]==='configure'&&!previous)this.store.run('INSERT INTO computer_console_specs VALUES(?,?) ON CONFLICT DO NOTHING',id,JSON.stringify(ownComputer(state.computer)));
     if (!previous && input.generation !== state.generation) fail(409, 'stale_generation');
     this.store.transaction(() => {
       if (!previous) {

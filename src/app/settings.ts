@@ -1,6 +1,7 @@
 import { type Store } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
 import { fail, fields, type Json } from '../core/security.js';
+import type { Manager } from '../projects/service.js';
 
 // Tasks one project computer runs at the same time: a global default, optionally overridden per project.
 export const concurrencyBounds = [1, 32] as const;
@@ -22,18 +23,29 @@ export function runningVersion(imageTag: string | undefined): Json {
   const tag = String(imageTag || '').trim().slice(0, 128);
   return tag ? { image_tag: tag, source: 'image' } : { image_tag: null, source: 'source' };
 }
-export function settingsApi(store: Store, user: Actor, method: string, path: string, input: Json, imageTag?: string): Json | undefined {
+// The default computer resources live in the manager, which applies them; computer_defaults is null while it cannot be read.
+export async function settingsApi(store: Store, user: Actor, method: string, path: string, input: Json, imageTag?: string, manager?: Manager): Promise<Json | undefined> {
   if (path !== '/api/settings' && path !== '/api/version') return undefined;
   superAdmin(user);
   if (path === '/api/version') return method === 'GET' ? runningVersion(imageTag) : undefined;
-  const view = () => ({ settings: { task_concurrency: defaultConcurrency(store), task_concurrency_bounds: [...concurrencyBounds] }, version: runningVersion(imageTag) });
+  const view = async (computer?: Json) => ({ settings: { task_concurrency: defaultConcurrency(store), task_concurrency_bounds: [...concurrencyBounds],
+    computer_defaults: computer ?? await manager?.call('GET', '/v1/defaults').catch(() => null) ?? null }, version: runningVersion(imageTag) });
   if (method === 'GET') return view();
   if (method !== 'PATCH') return undefined;
-  fields(input, ['task_concurrency']);
-  const value = concurrencyValue(input.task_concurrency);
+  fields(input, ['task_concurrency', 'computer_defaults']);
+  if (input.task_concurrency === undefined && input.computer_defaults === undefined) fail(400, 'invalid_settings');
+  const value = input.task_concurrency === undefined ? undefined : concurrencyValue(input.task_concurrency);
+  const defaults = input.computer_defaults as Json | undefined;
+  if (defaults !== undefined && (!defaults || typeof defaults !== 'object' || Array.isArray(defaults))) fail(400, 'invalid_defaults');
+  if (defaults !== undefined && !manager) fail(503, 'manager_not_configured');
+  // The manager checks the values against its bounds and the host's CPUs.
+  const computer = defaults === undefined ? undefined : await manager!.call('PUT', '/v1/defaults', defaults);
   store.transaction(() => {
-    store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', concurrencyKey, String(value));
-    store.audit(user.id, 'settings.updated', concurrencyKey);
+    if (value !== undefined) {
+      store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', concurrencyKey, String(value));
+      store.audit(user.id, 'settings.updated', concurrencyKey);
+    }
+    if (computer) store.audit(user.id, 'settings.updated', 'computer.defaults');
   });
-  return view();
+  return view(computer);
 }
