@@ -161,7 +161,8 @@ test('a verified public address supplies the audience when the super-admin setti
  const settings=await h.admin('/api/external/settings');assert.equal(settings.value.settings.token_audience,h.audience);assert.equal(settings.value.settings.token_audience_source,'onboarding');
  assert.equal((await h.exchange(client.id,created.privateKey)).status,200);
  // A saved value still wins over the wizard's address, and the response says which one is in force.
- await h.admin('/api/external/settings','PUT',{token_audience:'https://other.invalid/external/token'});
+ const saved=await h.admin('/api/external/settings','PUT',{token_audience:'https://other.invalid/external/token'});
+ assert.equal(saved.value.settings.token_audience_source,'setting');
  assert.equal((await h.admin('/api/external/settings')).value.settings.token_audience_source,'setting');
  assert.equal((await h.exchange(client.id,created.privateKey)).status,401);
 });
