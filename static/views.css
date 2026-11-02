@@ -92,6 +92,17 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .endpoint-preview .facts,.probe-result .facts{margin:0}.probe-result .view-error{padding:6px 10px}.probe-result .fold{margin-top:0}
 .endpoint-warning{margin:0;padding:6px 10px;border-radius:5px;background:#fff2d9;color:#875a0a;font-size:12px;line-height:1.5}
 .model-address .status{vertical-align:1px}
+/* Saved models grouped by provider (static/project.js providerList), and the one-click list for adding more of them. */
+.provider-list{display:flex;flex-direction:column;gap:10px;min-width:0}
+.provider-group{border:1px solid #e3eaf0;border-radius:6px;padding:8px 12px;min-width:0}
+.provider-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding-bottom:6px;border-bottom:1px solid #edf1f4}
+.provider-title,.choice-group{min-width:0;overflow-wrap:anywhere;font-size:13px}.provider-title{flex:1 1 260px}.provider-title .muted{font-size:12px}
+.provider-count{font-size:12px}.provider-head>button{margin-left:auto}
+.choice-group{margin:8px 0 0;color:#365564}.choice-group:first-of-type{margin-top:4px}
+.provider-add{display:flex;flex-direction:column;gap:8px;padding:10px 0;border-bottom:1px solid #edf1f4;min-width:0}
+.provider-add input[type=search]{max-width:320px}.provider-add .actions input{flex:1 1 200px;min-width:0}
+.model-chips{display:flex;flex-wrap:wrap;gap:6px;max-height:240px;overflow:auto}.model-chips:empty{display:none}
+.model-chip{font-size:12px;padding:4px 10px;overflow-wrap:anywhere;text-align:left}.model-chip:disabled{color:#24603d;background:#e5f2e9;border-color:#cfe5d6;opacity:1}
 @media(max-width:760px){.history .model-entry{grid-template-columns:minmax(0,1fr)}.model-entry>.actions{grid-column:1;justify-content:flex-start;flex-wrap:wrap}}
 
 /* Rule files (static/project.js): the overview table and one card per file. */

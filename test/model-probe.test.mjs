@@ -159,6 +159,37 @@ test('a saved model is listed and tested with its stored key under the editing r
   assert.deepEqual((await member(`/api/models/${own.id}/test`, 'POST', {})).value, { error: 'model_key_missing' });
 });
 
+test('another model of a provider reuses a saved key of the same scope, which is never sent back', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin), fake = await upstream(t);
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+  const password = testPassword(); await admin('/api/users', 'POST', { username: 'member', password, repository_ids: ['101'] });
+  const member = h.client(); await member('/api/auth/login', 'POST', { username: 'member', password });
+  const ownKey = 'sk-' + randomBytes(24).toString('hex'), sharedKey = 'sk-' + randomBytes(24).toString('hex'), otherKey = 'sk-' + randomBytes(24).toString('hex');
+  const own = (await member('/api/models', 'POST', { repository_id: '101', api_url: fake.origin + '/v1/', api_key: ownKey, model_name: 'model-001' })).value.model;
+  const shared = (await admin('/api/models', 'POST', { api_url: fake.origin + '/v1', api_key: sharedKey, model_name: 'model-002' })).value.model;
+  const other = (await admin('/api/models', 'POST', { repository_id: '202', api_url: fake.origin + '/v1', api_key: otherKey, model_name: 'model-003' })).value.model;
+  await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['101'] });
+
+  const added = await member('/api/models', 'POST', { repository_id: '101', key_from: own.id, model_name: 'model-004' });
+  assert.equal(added.status, 201); assert.deepEqual([added.value.model.api_url, added.value.model.key_configured], [fake.origin + '/v1/', true]);
+  assert.equal((await member(`/api/models/${added.value.model.id}/test`, 'POST', {})).value.ok, true); assert.equal(fake.requests.at(-1).authorization, 'Bearer ' + ownKey);
+  // Each model seals its own copy: revoking the source leaves the new model working.
+  await member(`/api/models/${own.id}/credentials/revoke`, 'POST', {});
+  assert.equal((await member(`/api/models/${added.value.model.id}/upstream`, 'POST', {})).value.ok, true);
+  assert.deepEqual((await member('/api/models', 'POST', { repository_id: '101', key_from: own.id, model_name: 'model-005' })).value, { error: 'model_key_missing' });
+  // A key stays in its scope: not from a shared model into a project, not from another project, not from a project into the shared models.
+  for (const [client, body] of [[member, { repository_id: '101', key_from: shared.id }], [member, { repository_id: '101', key_from: other.id }], [admin, { repository_id: null, key_from: added.value.model.id }]])
+    assert.deepEqual((await client('/api/models', 'POST', { ...body, model_name: 'model-006' })).value, { error: 'model_not_found' });
+  assert.equal((await member('/api/models', 'POST', { repository_id: '202', key_from: other.id, model_name: 'model-006' })).status, 403);
+  // The URL and key come from the source only.
+  for (const extra of [{ api_key: 'sk-other' }, { api_url: fake.origin + '/v1' }])
+    assert.deepEqual((await admin('/api/models', 'POST', { repository_id: null, key_from: shared.id, model_name: 'model-006', ...extra })).value, { error: 'invalid_model_source' });
+  const sharedAdded = await admin('/api/models', 'POST', { repository_id: null, key_from: shared.id, model_name: 'model-006' });
+  assert.equal(sharedAdded.status, 201); await admin(`/api/models/${sharedAdded.value.model.id}/test`, 'POST', {});
+  assert.equal(fake.requests.at(-1).authorization, 'Bearer ' + sharedKey);
+  assert.ok(!JSON.stringify([added.value, sharedAdded.value, h.store.all('SELECT * FROM audit')]).includes(ownKey));
+});
+
 test('with no repository at all a super administrator adds, tests and deletes a shared model', async t => {
   const h = await harness(t), { admin } = await setup(h), fake = await upstream(t), key = 'sk-' + randomBytes(24).toString('hex');
   assert.equal(h.store.get('SELECT count(*) n FROM repositories').n, 0);

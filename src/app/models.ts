@@ -32,10 +32,21 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     return { models: store.all(`SELECT m.* FROM models m WHERE ${visible.sql}${extra} ORDER BY m.updated_at`, ...visible.args, ...(repo ? [repo, repo] : [])).map(row=>publicModel(store,row)) };
   }
   if (path === '/api/models' && method === 'POST') {
-    fields(body, ['repository_id', 'api_url', 'api_key', 'model_name', 'pricing']);
+    fields(body, ['repository_id', 'api_url', 'api_key', 'model_name', 'pricing', 'key_from']);
     const repo = body.repository_id == null ? null : text(body.repository_id);
     if (repo) repository(store, user, repo); else superAdmin(user);
-    const id = randomId(), endpoint = apiUrl(body.api_url), key = text(body.api_key, 32768), model = text(body.model_name);
+    // key_from adds another model of the same provider: the URL and key come from that saved model, which must belong
+    // to the same project (or both are shared), so a key never reaches a scope it was not given to.
+    let endpoint: string, key: string;
+    if (body.key_from !== undefined) {
+      if (body.api_url !== undefined || body.api_key !== undefined) fail(400, 'invalid_model_source');
+      const source = store.get('SELECT * FROM models WHERE id=? AND repository_id IS ?', text(body.key_from), repo);
+      if (!source) return fail(404, 'model_not_found');
+      key = source.api_key === null ? '' : String(store.secrets.open(source.api_key, `model:${source.id}`).value || '');
+      if (!key) return fail(409, 'model_key_missing');
+      endpoint = apiUrl(source.api_url);
+    } else { endpoint = apiUrl(body.api_url); key = text(body.api_key, 32768); }
+    const id = randomId(), model = text(body.model_name);
     const pricing=body.pricing===undefined?null:validatePricing(body.pricing);
     return store.transaction(() => {
       store.run('INSERT INTO models VALUES(?,?,?,?,?,?,?)', id, repo, endpoint, model, store.secrets.seal({ value: key }, `model:${id}`), 1, new Date().toISOString());
