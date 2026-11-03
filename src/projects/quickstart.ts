@@ -240,15 +240,8 @@ export class Quickstart {
     const pkg = await this.file(full, 'package.json', token);
     if (!pkg) return blocked('暂时只支持 Node 仓库（未找到 package.json）', 'unsupported_stack');
     const parsed = JSON.parse(pkg), scripts = parsed.scripts || {};
-    const build = scripts.build ? ['npm run build'] : scripts.test ? ['npm test'] : [];
-    const ready = [scripts.lint ? 'npm run lint' : null, scripts.test ? 'npm test' : null].filter((value): value is string => !!value);
-    if (!build.length) return blocked('package.json 里没有 build 或 test 脚本，无法生成 build lane', 'no_build_script');
-    const lanes: Json = { build: { commands: build } };
-    const checks = ready.length ? ready : build;
-    lanes['pr-ready'] = { commands: checks };
-    lanes['pr-merge'] = { commands: checks };
-    lanes.daily = { commands: checks };
-    lanes.release = { commands: build };
+    // Empty lanes are runnable scaffolding; repository maintainers choose their own checks.
+    const lanes = Object.fromEntries(['build', 'pr-ready', 'pr-merge', 'daily', 'release'].map(lane => [lane, { commands: [] }]));
     const config = { version: 1, level: 'C1', preset: 'auto', caseRoot: 'test', lanes };
     // setup-node caches npm and npm ci needs a lock file; an empty dependency tree can be locked without the registry.
     const hasDependencies = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']
@@ -285,7 +278,7 @@ export class Quickstart {
     if (lockfile !== null) await this.put(full, 'package-lock.json', lockfile, branch, token);
     const pr = await this.request('POST', `/repos/${full}/pulls`, token, {
       title: 'chore(ci): connect CI gates', head: branch, base: defaultBranch,
-      body: `把仓库接入 CI-workflow 门禁，并按脚本生成 build / CI / nightly / e2e / release 工作流。\n\n<!-- dept-bot:quickstart:${id} -->\n\n由控制面一键接入创建，合并前请确认 lane 命令符合本仓库的实际脚本。` });
+      body: `提供 CI-workflow 门禁框架及版本标签触发的 .github/workflows/release.yml。\n\n<!-- dept-bot:quickstart:${id} -->\n\nci-gates.json 的 lane 命令留空，由仓库开发者填写；空 lane 只报告 not_applicable，不表示实际检查通过。控制面只提供框架，并在人工确认后打标签。具体检查项和是否发布 PyPI、npm 包或镜像，由仓库开发者写进自己的 Release workflow，由标签触发 Release Actions。手动发版本仍先生成草稿，再由人正式发布。` });
     if (!pr?.html_url) return { status: 'failed', detail: 'PR 创建失败', code: 'pr_failed' };
     return { status: 'done', detail: `已创建 PR #${pr.number}，合入后门禁生效`, url: String(pr.html_url) };
   }

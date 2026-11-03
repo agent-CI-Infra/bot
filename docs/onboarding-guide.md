@@ -31,7 +31,7 @@
 | 你的仓库需要 | 说明 |
 | --- | --- |
 | 是 **Node** 仓库 | 根目录有 `package.json` |
-| 有构建或测试脚本 | `scripts.build` 或 `scripts.test` 至少一个 |
+| 检查命令由仓库维护者配置 | 不要求已有 build 或 test 脚本；接入 PR 不按 `package.json` 代选检查命令 |
 | 依赖有锁文件 | 有 `dependencies` 就要有 `package-lock.json` 等 |
 | 没有 `.github/workflows/ci.yml` | 已存在则视为"已接入门禁"，不再覆盖 |
 | 是公开或私有仓库 | 两种仓库都能接门禁、单仓看板和 Dashboard 登记；私有仓库需要 dashboard 仓库一次性配置只读 secret `PRIVATE_SOURCE_TOKEN` |
@@ -78,11 +78,17 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 
 | 项 | 它做什么 | 产物 |
 | --- | --- | --- |
-| **门禁 PR** | 从 `CI-workflow` 复制门禁模板到你的仓库 | 分支 `bot/gate-onboarding-*` 上的 PR，含 `.github/workflows/ci.yml`、`.github/workflows/nightly.yml`、`.github/ci-gates.json`、`scripts/gate/gate.mjs`、锁文件 |
+| **门禁 PR** | 从 `CI-workflow` 复制门禁框架到你的仓库 | 分支 `bot/gate-onboarding-*` 上的 PR，含 `.github/workflows/ci.yml`、版本标签触发的 `.github/workflows/release.yml`、补充门禁 workflow、`.github/ci-gates.json`、`scripts/gate/gate.mjs`、锁文件 |
 | **单仓看板** | 在 `agent-CI-Infra/dashboard` 触发 `Create board`，并触发首轮 `Collect board data` | 数据分支 `board/<owner>/<repo>`，站点 `https://agent-ci-infra.github.io/dashboard/boards/<owner>/<repo>/` |
 | **Dashboard 登记** | 往 dashboard 提登记 PR（PR 写明公开/私有可见性） | 改 `config/gate-sources.json` 和 `config/internal-contributors.json` |
 
 执行顺序建议：**门禁 PR → 单仓看板 → Dashboard 登记**。第三项依赖第二项（看板分支要先建好），前两项互不依赖。
+
+门禁 PR 同时就是发版本的接入示例，不另建示例仓库。`release.yml` 优先来自 `agent-CI-Infra/CI-workflow` 的 `template/.github/workflows/release.yml`，缺少时使用同样只运行 release 门禁 lane 的本地模板；`v1.2.3`、`v1.2.3-beta.1` 等标签会触发 Release Actions。框架不含 PyPI、npm 或镜像发布步骤。
+
+`.github/ci-gates.json` 保留 `build`、`pr-ready`、`pr-merge`、`daily`、`release` 的 lane 名字，但 `commands` 留空。空 lane 能运行并生成 `not_applicable` 报告，只说明还没有配置检查，不表示实际检查通过。仓库开发者应填写各 lane 的检查命令，并决定是否在自己的 Release workflow 中增加 PyPI、npm 或镜像发布步骤。控制面只提供框架、在人确认版本和完整提交 SHA 后打标签；具体检查及发包行为均由该仓库自己的 Release Actions 执行。没有 build/test 脚本的 Node 仓库也能先接入框架。
+
+使用时，先合并并配置门禁 PR，再到项目页「发版本」检查版本和目标提交。相对上一枚可达的合法版本标签没有新提交时，页面说明跳过，不能确认；没有上一枚标签则按首次发布处理。有新提交时，人确认后创建标签，仓库 Release Actions 成功后生成草稿，再由人点击「正式发布」。定时发版本和自动计算版本号不在当前框架范围内。
 
 公开仓库和私有仓库走同一套看板：分支都在 dashboard 仓库里，叫 `board/<owner>/<repo>`，不会在用户账号下新建仓库。私有仓库的看板分支只发布 `site/data/` 快照，不含源码或凭据；采集时由 dashboard 仓库一次性配置的只读 secret `PRIVATE_SOURCE_TOKEN` 读取源仓，不需要给每个源仓单独放 secret。
 
@@ -138,7 +144,7 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 
 自动化到"PR 开出来"为止，下面三件是刻意留给人把关的：
 
-1. **合并门禁 PR**：合并后 CI 门禁才真正生效；
+1. **配置并合并门禁 PR**：由本仓库开发者填写 lane 检查命令，并决定 Release workflow 是否需要发布包或镜像；空命令 lane 仅为框架；
 2. **合并 Dashboard 登记 PR**：合并后下一次采集，你的仓库才会出现在公共 Dashboard；
 3. **给需要开发的 Issue 加 `bot-develop` 标签**：bot 只处理带这个标签的 Issue，这是"允许 bot 改代码"的唯一开关。
 
