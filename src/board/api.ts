@@ -16,16 +16,6 @@ const successes = "('pr_opened','succeeded','completed')";
 const attention = "('failed','cancelled','waiting_configuration','waiting_permission','needs_replan','retry_wait')";
 const developing = "('queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready')";
 const taskTime = (alias: string) => `coalesce(nullif(${alias}.updated_at,''),${alias}.created_at)`;
-// A newer successful result clears an older failure, regardless of which task family produced it.
-const latest = `CASE WHEN d.id IS NULL THEN r.status WHEN r.id IS NULL THEN d.status
-  WHEN ${taskTime('d')}>=${taskTime('r')} THEN d.status ELSE r.status END`;
-const stage = `CASE
-  WHEN d.status IN ${developing} THEN 'developing'
-  WHEN (${latest}) IN ${attention} THEN 'attention'
-  WHEN d.status IN ${successes} THEN 'developed'
-  WHEN d.id IS NULL AND r.status NOT IN ${successes} AND r.status NOT IN ${attention} AND r.status<>'superseded' THEN 'reviewing'
-  WHEN r.status IN ${successes} THEN 'reviewed'
-  ELSE 'unreviewed' END`;
 const taskJoin = (alias: string, family: string) => `LEFT JOIN tasks ${alias} ON ${alias}.id=(SELECT t.id FROM tasks t
   WHERE t.repository_id=o.repository_id AND t.object_number=o.object_number AND t.kind='${family}.'||o.object_type
   ORDER BY ${taskTime('t')} DESC,t.created_at DESC,t.rowid DESC LIMIT 1)`;
@@ -46,7 +36,7 @@ const objectStage = (category: string) => {
     WHEN r.id IS NOT NULL AND r.status<>'superseded' THEN 'reviewing' ELSE 'unreviewed' END`;
   if (category === 'development') return `CASE WHEN d.status IN ${developing} THEN 'developing' WHEN d.status IN ${attention} THEN 'attention'
     WHEN d.status IN ${successes} THEN 'developed' ELSE 'unreviewed' END`;
-  return stage;
+  return "'unreviewed'";
 };
 const releaseStage = `CASE WHEN p.stage IN ('tagging','waiting_run','running','preparing_notes','creating_draft','publishing') THEN 'developing'
   WHEN p.stage IN ('published','externally_published') THEN 'developed' ELSE 'attention' END`;
@@ -63,7 +53,7 @@ function filters(value: unknown, store: Store, user: Actor): Filter[] {
     if (field === 'include_closed' && typeof value === 'boolean') return { field, value };
     if (typeof value !== 'string' || !value.trim() || value.length > 200) return fail(400, 'invalid_board_filter');
     if (field === 'repository_id') repository(store, user, value);
-    else if (field === 'object_type' && ['issue','pr'].includes(value)) { /* validated */ }
+    else if (field === 'object_type' && ['all','issue','pr'].includes(value)) { /* validated */ }
     else if (field === 'bot_stage' && boardStages.some(s => s.id === value)) { /* validated */ }
     else if (field === 'category' && ['review','development','release'].includes(value)) { /* validated */ }
     else if (field === 'execution_status' && boardExecutionStatuses.some(s => s.id === value)) { /* validated */ }
@@ -113,66 +103,64 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     const view = viewFor(store, user, url.searchParams.get('view_id') || 'default');
     const conditions = url.searchParams.has('filters') ? filters(parse(url.searchParams.get('filters')!),store,user) : view.filters as Filter[];
     const category = String(conditions.find(f => f.field === 'category')?.value || 'all');
-    const objectStageSql = objectStage(category), objectExecutionSql = execution(category === 'review' ? 'r.status' : category === 'development' ? 'd.status' : `(${latest})`);
-    type Clause = { sql: string; args: (string | number)[]; type?: boolean; tasks?: boolean };
-    // Both branches apply repository scope independently; a release never widens the object's grant or vice versa.
-    const objectAccess = scope(user,'o.repository_id'), releaseAccess = scope(user,'p.repository_id');
-    const objects: Clause[] = [{ sql: objectAccess.sql, args: objectAccess.args }], releases: Clause[] = [{ sql: releaseAccess.sql, args: releaseAccess.args }];
-    if (!conditions.some(f => f.field === 'include_closed' && f.value === true)) objects.push({ sql: "coalesce(o.github_state,'open')<>'closed'", args: [] });
-    if (category === 'release') objects.push({ sql: '0', args: [] });
-    if (!['all','release'].includes(category)) releases.push({ sql: '0', args: [] });
-    if (category === 'review') objects.push({ sql: 'r.id IS NOT NULL', args: [], tasks: true });
-    if (category === 'development') objects.push({ sql: 'd.id IS NOT NULL', args: [], tasks: true });
-    for (const f of conditions) {
-      if (f.field === 'repository_id') {
-        objects.push({ sql: 'o.repository_id=?', args: [String(f.value)] }); releases.push({ sql: 'p.repository_id=?', args: [String(f.value)] });
-      }
-      if (f.field === 'object_type') objects.push({ sql: 'o.object_type=?', args: [String(f.value)], type: true });
-      if (f.field === 'bot_stage') {
-        objects.push({ sql: `(${objectStageSql})=?`, args: [String(f.value)], tasks: true });
-        releases.push({ sql: `(${releaseStage})=?`, args: [String(f.value)] });
-      }
-      if (f.field === 'execution_status') {
-        objects.push({ sql: `(${objectExecutionSql})=?`, args: [String(f.value)], tasks: true });
-        releases.push({ sql: `(${releaseExecution})=?`, args: [String(f.value)] });
-      }
-      if (f.field === 'text') {
-        const term = String(f.value), number = /^#?([1-9]\d*)$/.exec(term), pattern = '%' + term.replace(/[\\%_]/g,'\\$&') + '%';
-        if (number && Number.isSafeInteger(Number(number[1]))) objects.push({ sql: 'o.object_number=?', args: [Number(number[1])] });
-        else objects.push({ sql: "o.title LIKE ? ESCAPE '\\'", args: [pattern] });
-        releases.push({ sql: "p.version LIKE ? ESCAPE '\\'", args: [pattern] });
-      }
-    }
-    const where = (list: Clause[]) => ({ sql: list.map(c => c.sql).join(' AND '), args: list.flatMap(c => c.args) });
     const { limit, offset } = pagination(url);
-    const group = grouping(store,user,url.searchParams.get('group_by') || view.group_by), allObjects = where(objects), allReleases = where(releases);
-    const objectSql = `SELECT 'object' AS card_type,o.repository_id,o.object_type,o.object_number,o.title,o.github_state,o.draft,o.last_seen,
-      repos.full_name,${objectStageSql} AS bot_stage,${objectExecutionSql} AS execution_status,r.id AS review_task_id,r.status AS review_status,
-      d.id AS development_task_id,d.status AS development_status,
-      CASE WHEN json_valid(d.result) AND typeof(json_extract(d.result,'$.pr_number'))='integer' THEN json_extract(d.result,'$.pr_number') END AS development_pr_number,
-      (SELECT option_id FROM board_values v WHERE v.user_id=? AND v.repository_id=o.repository_id
-        AND v.object_type=o.object_type AND v.object_number=o.object_number AND v.field_id=?) AS field_value,
-      NULL AS release_id,NULL AS version,NULL AS release_stage,NULL AS release_url
-      FROM board_objects o JOIN repositories repos ON repos.id=o.repository_id ${taskJoin('r','review')} ${taskJoin('d','development')}
-      WHERE ${allObjects.sql}`;
-    const releaseSql = `SELECT 'release' AS card_type,p.repository_id,'release' AS object_type,NULL AS object_number,p.version AS title,NULL AS github_state,0 AS draft,
-      p.updated_at AS last_seen,repos.full_name,${releaseStage} AS bot_stage,${releaseExecution} AS execution_status,
+    const group = grouping(store,user,url.searchParams.get('group_by') || view.group_by);
+    // Each branch projects one family of work. Grouping never changes its status or task identity.
+    const objectSql = (family: 'review' | 'development') => {
+      const task = family === 'review' ? 'r' : 'd';
+      return `SELECT 'object' AS card_type,'${family}' AS card_category,o.repository_id,o.object_type,o.object_number,
+        o.title,o.github_state,o.draft,coalesce(${taskTime(task)},o.last_seen) AS last_seen,repos.full_name,
+        ${objectStage(family)} AS bot_stage,${execution(task+'.status')} AS execution_status,
+        ${task}.id AS task_id,${task}.status AS task_status,r.id AS review_task_id,r.status AS review_status,
+        d.id AS development_task_id,d.status AS development_status,
+        CASE WHEN json_valid(d.result) AND typeof(json_extract(d.result,'$.pr_number'))='integer' THEN json_extract(d.result,'$.pr_number') END AS development_pr_number,
+        (SELECT option_id FROM board_values v WHERE v.user_id=? AND v.repository_id=o.repository_id
+          AND v.object_type=o.object_type AND v.object_number=o.object_number AND v.field_id=?) AS field_value,
+        NULL AS release_id,NULL AS version,NULL AS release_stage,NULL AS release_url
+        FROM board_objects o JOIN repositories repos ON repos.id=o.repository_id ${taskJoin('r','review')} ${taskJoin('d','development')}
+        WHERE ${family === 'review' ? '(r.id IS NOT NULL OR d.id IS NULL)' : 'd.id IS NOT NULL'}`;
+    };
+    const releaseSql = `SELECT 'release' AS card_type,'release' AS card_category,p.repository_id,'release' AS object_type,
+      NULL AS object_number,p.version AS title,NULL AS github_state,0 AS draft,p.updated_at AS last_seen,repos.full_name,
+      ${releaseStage} AS bot_stage,${releaseExecution} AS execution_status,NULL AS task_id,NULL AS task_status,
       NULL AS review_task_id,NULL AS review_status,NULL AS development_task_id,NULL AS development_status,NULL AS development_pr_number,NULL AS field_value,
       p.id AS release_id,p.version AS version,p.stage AS release_stage,
       CASE WHEN json_valid(p.data) THEN json_extract(p.data,'$.release_url') END AS release_url
-      FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id WHERE ${allReleases.sql}`;
-    const rows = store.all(`SELECT * FROM (${objectSql} UNION ALL ${releaseSql})
-      ORDER BY last_seen DESC,repository_id,object_type,object_number,version LIMIT ? OFFSET ?`,
-      user.id,group,...allObjects.args,...allReleases.args,limit+1,offset);
-    // The Issue and PR totals ignore the type condition but keep category, execution and every other filter.
-    const untyped = objects.filter(c => !c.type), counted = where(untyped);
-    const joins = untyped.some(c => c.tasks) ? `${taskJoin('r','review')} ${taskJoin('d','development')}` : '';
-    const totals = new Map(store.all(`SELECT o.object_type,count(*) n FROM board_objects o JOIN repositories repos ON repos.id=o.repository_id ${joins}
-      WHERE ${counted.sql} GROUP BY o.object_type`, ...counted.args).map(row => [row.object_type, Number(row.n)]));
-    const releaseCount = store.get(`SELECT count(*) n FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id WHERE ${allReleases.sql}`, ...allReleases.args)!.n;
+      FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id`;
+    const cte = `WITH work AS (${objectSql('review')} UNION ALL ${objectSql('development')} UNION ALL ${releaseSql})`;
+    const access = scope(user,'w.repository_id');
+    const clauses: { sql: string; args: (string | number)[]; type?: boolean }[] = [{ sql: access.sql, args: access.args }];
+    if (!conditions.some(f => f.field === 'include_closed' && f.value === true)) clauses.push({sql:"coalesce(w.github_state,'open')<>'closed'",args:[]});
+    for (const f of conditions) {
+      if (f.field === 'repository_id') clauses.push({sql:'w.repository_id=?',args:[String(f.value)]});
+      if (f.field === 'category') clauses.push({sql:'w.card_category=?',args:[String(f.value)]});
+      // A release-only view keeps the previous object choice for when the person returns to object work.
+      if (f.field === 'object_type' && f.value !== 'all' && category !== 'release') clauses.push({sql:'w.object_type=?',args:[String(f.value)],type:true});
+      if (f.field === 'bot_stage' || f.field === 'execution_status') clauses.push({sql:`w.${f.field}=?`,args:[String(f.value)]});
+      if (f.field === 'text') {
+        const term = String(f.value), number = /^#?([1-9]\d*)$/.exec(term), pattern = '%' + term.replace(/[\\%_]/g,'\\$&') + '%';
+        clauses.push(number && Number.isSafeInteger(Number(number[1]))
+          ? {sql:"(w.object_number=? OR (w.card_type='release' AND w.version LIKE ? ESCAPE '\\'))",args:[Number(number[1]),pattern]}
+          : {sql:"w.title LIKE ? ESCAPE '\\'",args:[pattern]});
+      }
+    }
+    const select = (list = clauses) => ({sql:`${cte} SELECT * FROM work w WHERE ${list.map(c=>c.sql).join(' AND ')}`,
+      args:[user.id,group,user.id,group,...list.flatMap(c=>c.args)]});
+    const selected = select(), untyped = select(clauses.filter(c=>!c.type));
+    const rows = store.all(`${selected.sql} ORDER BY last_seen DESC,repository_id,object_type,object_number,card_category,version LIMIT ? OFFSET ?`,...selected.args,limit+1,offset);
+    // These are distinct GitHub objects, separate from the number of work cards.
+    const totals = new Map(store.all(`SELECT object_type,count(*) n FROM
+      (SELECT DISTINCT repository_id,object_type,object_number FROM (${untyped.sql}) WHERE card_type='object') GROUP BY object_type`,...untyped.args)
+      .map(row=>[row.object_type,Number(row.n)]));
+    const column = group === 'repository' ? 'repository_id' : group === 'category' ? 'card_category'
+      : group === 'execution_status' ? 'execution_status' : group === 'bot_stage' ? 'bot_stage' : "coalesce(field_value,'unassigned')";
+    const columnCounts = Object.fromEntries(store.all(`SELECT ${column} id,count(*) n FROM (${selected.sql}) GROUP BY 1`,...selected.args).map(row=>[String(row.id),Number(row.n)]));
+    const counts = store.get(`SELECT count(*) n,sum(card_type='release') releases FROM (${selected.sql})`,...selected.args)!;
     return { cards: rows.slice(0,limit), has_more: rows.length>limit, limit, offset,
-      counts: { issue: totals.get('issue') || 0, pr: totals.get('pr') || 0 }, release_count: Number(releaseCount) };
+      counts: { issue: totals.get('issue') || 0, pr: totals.get('pr') || 0 }, release_count: Number(counts.releases || 0),
+      work_count: Number(counts.n), column_counts: columnCounts };
   }
+
   const card = /^\/api\/board\/cards\/([^/]+)\/(issue|pr)\/([1-9]\d*)(\/tasks)?$/.exec(path);
   if (card) {
     const [, repo, type, num, tasks] = card, number = Number(num);

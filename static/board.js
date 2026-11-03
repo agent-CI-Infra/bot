@@ -1,7 +1,8 @@
 // Saved views and custom fields belong to the signed-in user. Execution stages remain read-only.
-// Issues and PRs are two boards switched at the top; both read the same saved view (filters, grouping, collapsed columns).
+// A card represents one family of work; saved views include object scope as well as grouping.
 let boardState = null, boardRequest = 0, boardDragging = false;
-const boardPageSize = 100, boardTypes = [['issue', 'Issue'], ['pr', 'PR']];
+const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR']];
+const boardMedia = matchMedia('(max-width:760px)');
 function boardButton(name, action, className = 'quiet') {
   return button(name, async event => { const control=event.currentTarget; control.disabled=true;
     try { await action(); } catch(err) { error(err); } finally { control.disabled=false; }
@@ -18,18 +19,22 @@ const boardCategories=[['','全部类别'],['review','检视'],['development','�
 const boardExecutionStatuses=[['running','正在执行'],['queued','排队'],['failed','失败'],['completed','已完成'],['waiting','等待处理'],['other','其他 / 未开始']];
 const boardStandardGroups=['bot_stage','repository','execution_status','category'];
 // The PR board renames development stages: there the bot revises its own PR after a review.
-function boardStage(stage,type=boardState.type) { return {...stage,...(type==='pr'?stage.pr:{})}; }
+function boardStage(stage,type=boardState.type) {
+  const mixed=(boardCategory()==='release'?{developing:'发版本中',developed:'发版本完成'}:type==='all'?{developing:'开发 / 跟进 / 发版中',developed:'开发 / 跟进 / 发版完成'}:{})[stage.id];
+  return {...stage,...(type==='pr'?stage.pr:{}),...(mixed?{name:mixed}:{})};
+}
 function boardCustomField() { return boardState.fields.find(f=>f.id===boardState.group); }
 function boardColumns() {
   if(boardState.group==='bot_stage')return boardState.stages.map(s=>boardStage(s));
-  if(boardState.group==='repository')return repositories.map(r=>({id:r.id,name:r.full_name,hint:'仅列出你有权访问的仓库'}));
+  if(boardState.group==='repository')return repositories.filter(r=>!boardFilter('repository_id')||r.id===boardFilter('repository_id')).map(r=>({id:r.id,name:r.full_name,hint:'仅列出你有权访问的仓库'}));
   if(boardState.group==='execution_status')return boardExecutionStatuses.map(([id,name])=>({id,name}));
-  if(boardState.group==='category')return boardCategories.slice(1).map(([id,name])=>({id,name}));
+  if(boardState.group==='category')return boardCategories.slice(1).filter(([id])=>boardCategory()==='all'||id===boardCategory()).map(([id,name])=>({id,name}));
   return [{id:'unassigned',name:'未设置',hint:'还没有为这个字段选值'},...(boardCustomField()?.options||[])];
 }
 function boardFilter(field) { return boardState.filters.find(f=>f.field===field)?.value; }
 function boardCategory() { return boardFilter('category')||'all'; }
 function boardSetFilter(field,value) {
+  boardState.mobileColumn=null;
   boardState.filters=boardState.filters.filter(f=>f.field!==field);
   if(value!==''&&value!==undefined&&value!==false)boardState.filters.push({field,value});
   boardDirty();
@@ -38,7 +43,7 @@ function boardConditions() { return boardState.filters.filter(f=>f.value!==''&&f
 // Unsaved means different from the stored view, so undoing a change hides the save button again.
 function boardViewShape(filters,hidden,group) {
   const sorted=list=>[...list].map(f=>JSON.stringify([f.field,f.value])).sort();
-  return JSON.stringify([sorted(filters.filter(f=>f.field!=='object_type'&&f.value!==''&&f.value!==undefined&&f.value!==false)),[...hidden].sort(),group]);
+  return JSON.stringify([sorted(filters.filter(f=>f.value!==''&&f.value!==undefined&&f.value!==false&&!(f.field==='object_type'&&f.value==='all'))),[...hidden].sort(),group]);
 }
 function boardDirty() {
   const view=boardView();
@@ -51,24 +56,23 @@ async function renderBoard(request,useView=false) {
   if(boardState?.owner!==owner){boardState=null;$('board-panel').replaceChildren();}
   const data=await api('/api/board');
   if(request!==renderVersion||me?.id!==owner)return;
-  if(!boardState)boardState={owner,viewId:'default',type:localStorage.getItem('bot-board-type:'+owner)==='pr'?'pr':'issue'};
+  if(!boardState)boardState={owner,viewId:'default',type:'all'};
   Object.assign(boardState,data);
   if(!boardState.views.some(v=>v.id===boardState.viewId)){boardState.viewId='default';useView=true;}
   if(useView||!boardState.filters)boardUseView();else boardShell();
-  const category=boardAddressCategory();if(category&&boardFilter('category')!==category){boardSetFilter('category',category);boardShell();}
+  const category=boardAddressCategory();if(category){
+    history.replaceState(null,'','#/board');boardSetFilter('category',category);boardShell();
+  }
   await boardLoadCards();
 }
 function boardUseView() {
   const view=boardView(),filters=structuredClone(view.filters);
-  // Views saved before the Issue/PR split may carry the type as a filter; it now selects the board instead.
-  const typed=filters.find(f=>f.field==='object_type');if(typed)boardSetType(typed.value);
-  Object.assign(boardState,{group:view.group_by,filters:filters.filter(f=>f.field!=='object_type'),hidden:[...view.hidden_columns],
-    dirty:false,offset:0,cards:[],hasMore:false,signature:''});
+  Object.assign(boardState,{group:view.group_by,filters:filters.filter(f=>f.field!=='object_type'||f.value!=='all'),hidden:[...view.hidden_columns],
+    type:filters.find(f=>f.field==='object_type')?.value||'all',mobileColumn:null,dirty:false,offset:0,cards:[],hasMore:false,columnCounts:{},signature:''});
   boardShell();
 }
 function boardSetType(type) {
-  boardState.type=type==='pr'?'pr':'issue';localStorage.setItem('bot-board-type:'+boardState.owner,boardState.type);
-  document.querySelectorAll('#board-types [data-type]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.type===boardState.type)));
+  boardState.type=['issue','pr'].includes(type)?type:'all';boardSetFilter('object_type',boardState.type==='all'?'':boardState.type);
 }
 function boardMenu(caption,label) {
   const menu=element('div','','board-menu'),panel=element('div','','board-menu-panel');panel.hidden=true;
@@ -79,70 +83,75 @@ function boardOpenMenu(menu,open) {
   menu.classList.toggle('open',open);menu.querySelector('.board-menu-panel').hidden=!open;menu.querySelector('.board-menu-toggle').setAttribute('aria-expanded',String(open));
 }
 function boardShell() {
-  const panel=$('board-panel'); panel.replaceChildren();
+  const panel=$('board-panel');panel.replaceChildren();
   const toolbar=element('div','','board-toolbar'),category=boardCategory();
-  const types=element('div','','board-types');types.id='board-types';types.setAttribute('role','group');types.setAttribute('aria-label','对象类型');types.hidden=category==='release';
-  for(const [type,name]of boardTypes){
-    const b=button('',()=>{if(boardState.type===type)return;boardSetType(type);boardLoadCards().catch(error);},'board-type');
-    b.dataset.type=type;b.setAttribute('aria-pressed',String(boardState.type===type));b.append(element('span',name),document.createTextNode(' '),element('span','','board-type-count'));types.append(b);
-  }
-  const categories=boardSelect('类别',boardCategories,category==='all'?'':category);categories.select.classList.add('board-category');
-  categories.select.addEventListener('change',async()=>{
-    boardSetFilter('category',categories.select.value);const address=boardCategories.find(([id])=>id===categories.select.value)?.[0];
-    history.replaceState(null,'',address==='review'?'#/reviews':address==='development'?'#/developments':'#/board');boardShell();await boardLoadCards().catch(error);
-  });
-  const search=element('label','','board-search'),icon=element('span','⌕'),input=document.createElement('input');icon.setAttribute('aria-hidden','true');
-  input.type='search';input.maxLength=200;input.placeholder='搜索编号、标题或版本';input.setAttribute('aria-label','搜索编号或标题');input.value=boardFilter('text')||'';
-  let timer;input.addEventListener('input',event=>{if(event.isComposing)return;clearTimeout(timer);timer=setTimeout(()=>{
-    if((boardFilter('text')||'')===input.value.trim())return;boardSetFilter('text',input.value.trim());boardLoadCards().catch(error);},300);});
-  search.append(icon,input);
-  // A revoked grant may remain in a saved view; never show the former repository's name or its cards.
+  const filters=document.createElement('details');filters.className='board-filter-details';filters.open=boardState.filterOpen??!boardMedia.matches;filters.addEventListener('toggle',()=>{if(filters.isConnected)boardState.filterOpen=filters.open;});
+  const summary=element('summary','筛选');summary.addEventListener('click',()=>{boardState.filterOpen=!filters.open;});filters.append(summary);
+  const controls=element('div','','board-filter-controls');controls.setAttribute('role','group');controls.setAttribute('aria-label','筛选');
+  const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};
   const repoChoices=[['','全部仓库'],...repositories.map(r=>[r.id,r.full_name])],repo=boardFilter('repository_id');
   if(repo&&!repoChoices.some(c=>c[0]===repo))repoChoices.push([repo,'仓库不可访问']);
-  const repoSelect=boardSelect('仓库',repoChoices,repo||'').select;repoSelect.classList.add('board-repository');
-  repoSelect.addEventListener('change',()=>{boardSetFilter('repository_id',repoSelect.value);boardLoadCards().catch(error);});
+  const repository=boardSelect('仓库',repoChoices,repo||'');repository.select.classList.add('board-repository');
+  repository.select.addEventListener('change',()=>apply('repository_id',repository.select.value));
+  const categories=boardSelect('工作类别',boardCategories,category==='all'?'':category);
+  categories.select.addEventListener('change',()=>apply('category',categories.select.value,true));
+  const execution=boardSelect('执行状态',[['','全部状态'],...boardExecutionStatuses],boardFilter('execution_status')||'');
+  execution.select.addEventListener('change',()=>apply('execution_status',execution.select.value));
+  const types=boardSelect('对象类型',boardTypes,boardState.type==='all'?'':boardState.type);types.label.hidden=category==='release';
+  types.select.addEventListener('change',()=>{boardSetType(types.select.value);boardShell();boardLoadCards().catch(error);});
+  const search=element('label','搜索','board-search'),input=document.createElement('input');
+  input.type='search';input.maxLength=200;input.placeholder='编号、标题或版本';input.setAttribute('aria-label','搜索编号或标题');input.value=boardFilter('text')||'';
+  let timer;input.addEventListener('input',event=>{if(event.isComposing)return;clearTimeout(timer);timer=setTimeout(()=>{
+    if((boardFilter('text')||'')===input.value.trim())return;apply('text',input.value.trim());},300);});search.append(input);
   const closed=element('label','','board-check'),check=document.createElement('input');check.type='checkbox';check.checked=boardFilter('include_closed')===true;
-  check.addEventListener('change',()=>{boardSetFilter('include_closed',check.checked);boardLoadCards().catch(error);});closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
-  const chips=element('div','','board-chips');chips.id='board-chips';
-  const views=boardSelect('视图',boardState.views.map(v=>[v.id,v.name]),boardState.viewId);views.label.className='board-field';
-  views.select.addEventListener('change',()=>{boardState.viewId=views.select.value;boardUseView();boardLoadCards().catch(error);});
-  const save=boardButton('保存视图',boardSave,'board-save');save.id='board-save';
-  const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';
-  const groups=boardSelect('查看维度',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','类别'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group);groups.label.className='board-field';
-  groups.select.title='切换同一批工作的分列方式。执行阶段由任务自动计算；只有自定义字段的列可以拖动卡片。';
+  check.addEventListener('change',()=>apply('include_closed',check.checked));closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
+  controls.append(repository.label,categories.label,execution.label,types.label,search,closed);filters.append(controls);
+  const chips=element('div','','board-chips');chips.id='board-chips';chips.setAttribute('aria-label','当前筛选');
+  const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','排列与视图');
+  const groups=boardSelect('按…分列',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','类别'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group);groups.label.className='board-field';
   groups.select.addEventListener('change',async()=>{
     if(boardView().builtin&&!boardStandardGroups.includes(groups.select.value)){
       const target=groups.select.value;groups.select.value=boardState.group;boardSaveAs(target);return;
     }
-    boardState.group=groups.select.value;boardState.hidden=[];boardDirty();boardShell();await boardLoadCards().catch(error);
+    boardState.group=groups.select.value;boardState.hidden=[];boardState.mobileColumn=null;boardDirty();boardShell();await boardLoadCards().catch(error);
   });
+  const views=boardSelect('视图',boardState.views.map(v=>[v.id,v.name]),boardState.viewId);views.label.className='board-field board-view-choice';
+  views.select.addEventListener('change',()=>{boardState.viewId=views.select.value;boardUseView();boardLoadCards().catch(error);});
+  const save=boardButton('保存视图',boardSave,'board-menu-item');save.id='board-save';
+  const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';more.panel.append(views.label,save);
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
-  const add=boardButton('加列',boardAddColumn);add.hidden=!['bot_stage'].includes(boardState.group)&&!boardCustomField();
-  toolbar.append(types,categories.select,search,repoSelect,closed,chips,element('span','','board-divider'),views.label,save,more.menu,groups.label,
-    add,element('span','','board-spacer'),status,boardButton('刷新',()=>boardLoadCards()));
-  const scroll=element('div','','board-scroll');scroll.id='board-columns';scroll.setAttribute('aria-label','看板列');
-  panel.append(toolbar,scroll);boardViewControls();boardChips();
+  arrangement.append(groups.label,more.menu,element('span','','board-spacer'),status,boardButton('刷新',()=>boardLoadCards()));
+  toolbar.append(filters,chips,arrangement);
+  const mobile=boardSelect('当前分组',[],'');mobile.label.className='board-mobile-group';mobile.select.id='board-mobile-group';
+  mobile.select.addEventListener('change',()=>{boardState.mobileColumn=mobile.select.value;boardRenderCards();});
+  const zero=element('div','','board-zero-counts');zero.id='board-zero-counts';
+  const scroll=element('div','','board-scroll');scroll.id='board-columns';scroll.setAttribute('aria-label','看板工作');
+  panel.append(toolbar,mobile.label,zero,scroll);boardViewControls();boardChips();
 }
-// Saving is offered only while the working view differs from the stored one.
 function boardViewControls() {
   const save=$('board-save'),panel=document.querySelector('#board-view-menu .board-menu-panel');if(!save||!panel)return;
-  save.hidden=!boardState.dirty;panel.replaceChildren(boardButton('另存视图',()=>{boardOpenMenu($('board-view-menu'),false);boardSaveAs();},'board-menu-item'));
+  panel.querySelectorAll('button:not(#board-save)').forEach(b=>b.remove());save.hidden=!boardState.dirty;
+  panel.append(boardButton('另存视图',()=>{boardOpenMenu($('board-view-menu'),false);boardSaveAs();},'board-menu-item'));
+  if(boardState.group==='bot_stage'||boardCustomField())panel.append(boardButton(boardCustomField()?'加列':'新建自定义字段',()=>{boardOpenMenu($('board-view-menu'),false);boardAddColumn();},'board-menu-item'));
   if(!boardView().builtin)panel.append(boardButton('删除视图',async()=>{
     await api('/api/board/views/'+boardState.viewId,'DELETE',{});boardState.viewId='default';await renderBoard(renderVersion,true);
   },'board-menu-item danger'));
 }
-// Older saved views may filter by stage; the stage columns replace that filter, but it stays visible and removable.
 function boardChips() {
   const chips=$('board-chips');if(!chips)return;chips.replaceChildren();
-  for(const filter of boardState.filters.filter(f=>f.field==='bot_stage')){
-    const name=boardStage(boardState.stages.find(s=>s.id===filter.value)||{name:filter.value}).name,chip=element('span','','board-chip');
-    const remove=button('×',()=>{boardSetFilter('bot_stage','');boardChips();boardLoadCards().catch(error);},'board-chip-remove');remove.setAttribute('aria-label','移除筛选 阶段：'+name);
-    chip.append(element('span','阶段：'+name),remove);chips.append(chip);
+  const choices={repository_id:['仓库',repositories.map(r=>[r.id,r.full_name])],category:['工作类别',boardCategories],
+    execution_status:['执行状态',boardExecutionStatuses],object_type:['对象类型',boardTypes],
+    bot_stage:['阶段',boardState.stages.map(s=>[s.id,boardStage(s).name])],text:['搜索',[]],include_closed:['含已关闭',[]]};
+  for(const filter of boardConditions()){
+    const [prefix,options]=choices[filter.field]||[filter.field,[]],value=options.find(([id])=>id===filter.value)?.[1]||(filter.field==='repository_id'?'仓库不可访问':filter.value);
+    const caption=filter.field==='include_closed'?prefix:prefix+'：'+value,chip=element('span','','board-chip');
+    const remove=button('×',async()=>{boardSetFilter(filter.field,'');if(filter.field==='object_type')boardState.type='all';boardShell();await boardLoadCards().catch(error);},'board-chip-remove');remove.setAttribute('aria-label','移除筛选 '+caption);
+    chip.append(element('span',caption),remove);chips.append(chip);
   }
 }
 function boardParams(offset) {
   return new URLSearchParams({view_id:boardState.viewId,group_by:boardState.group,offset:String(offset),limit:String(boardPageSize),
-    filters:JSON.stringify([...boardConditions(),{field:'object_type',value:boardState.type}])});
+    filters:JSON.stringify(boardConditions())});
 }
 async function boardLoadCards(more=false) {
   const request=++boardRequest,owner=me.id,offset=more?boardState.offset+boardPageSize:0;
@@ -150,10 +159,10 @@ async function boardLoadCards(more=false) {
   try {
     const result=await api('/api/board/cards?'+boardParams(offset));
     if(request!==boardRequest||me?.id!==owner||tab!=='board')return;
-    // Later pages can repeat a card whose activity moved it while paging; one object keeps one card.
+    // A task can move between pages while loading; deduplicate by object and work family.
     const known=more?boardState.cards:[],keys=new Set(known.map(boardCardKey));
-    Object.assign(boardState,{cards:[...known,...result.cards.filter(c=>!keys.has(boardCardKey(c)))],offset,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,
-      signature:more?'':JSON.stringify([result.cards,result.has_more,result.counts,result.release_count])});
+    Object.assign(boardState,{cards:[...known,...result.cards.filter(c=>!keys.has(boardCardKey(c)))],offset,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts,
+      signature:more?'':JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts])});
     boardRenderCards(more);
   }catch(err){if(request===boardRequest)boardSummary();throw err;}
   finally{if(request===boardRequest)$('board-columns')?.removeAttribute('aria-busy');}
@@ -165,25 +174,14 @@ async function boardPoll() {
   if(!columns||columns.hasAttribute('aria-busy')||columns.contains(document.activeElement)||document.querySelector('dialog[open],.board-menu.open'))return;
   const request=boardRequest,owner=me.id,result=await api('/api/board/cards?'+boardParams(0));
   if(request!==boardRequest||me?.id!==owner||tab!=='board'||boardDragging)return;
-  const signature=JSON.stringify([result.cards,result.has_more,result.counts,result.release_count]);if(signature===boardState.signature)return;
-  Object.assign(boardState,{cards:result.cards,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,signature});boardRenderCards(true);
+  const signature=JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts]);if(signature===boardState.signature)return;
+  Object.assign(boardState,{cards:result.cards,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts,signature});boardRenderCards(true);
 }
 setInterval(()=>boardPoll().catch(()=>{}),15000);
 function boardToggleColumn(id) {
   boardState.hidden=boardState.hidden.includes(id)?boardState.hidden.filter(c=>c!==id):[...boardState.hidden,id];boardDirty();boardRenderCards(true);
 }
-function boardCardCategory(item) {
-  if(item.card_type==='release')return 'release';
-  return item.card_category||(boardCategory()==='all'?(item.development_task_id?'development':'review'):boardCategory());
-}
-function boardVisibleCards() {
-  if(boardState.group!=='category'||boardCategory()!=='all')return boardState.cards;
-  return boardState.cards.flatMap(item=>{
-    if(item.card_type==='release')return [{...item,card_category:'release'}];
-    const categories=[];if(item.review_task_id)categories.push('review');if(item.development_task_id)categories.push('development');
-    return (categories.length?categories:['review']).map(category=>({...item,card_category:category}));
-  });
-}
+function boardCardCategory(item) { return item.card_category; }
 function boardColumnValue(item) {
   if(boardState.group==='bot_stage')return item.bot_stage;
   if(boardState.group==='repository')return item.repository_id;
@@ -193,14 +191,19 @@ function boardColumnValue(item) {
 }
 function boardRenderCards(keepScroll=false) {
   const columns=$('board-columns');if(!columns)return;
-  const left=columns.scrollLeft,tops=new Map([...columns.querySelectorAll('.board-column')].map(c=>[c.dataset.columnId,c.querySelector('.board-column-list')?.scrollTop||0]));
-  columns.replaceChildren();const stageMode=boardState.group==='bot_stage',customMode=!!boardCustomField(),visible=boardVisibleCards();
-  for(const column of boardColumns()){
-    const collapsed=boardState.hidden.includes(column.id),cards=visible.filter(c=>boardColumnValue(c)===column.id);
-    const section=element('section','','board-column'+(collapsed?' board-collapsed':''));section.dataset.columnId=column.id;section.dataset.dimension=boardState.group;
+  const left=columns.scrollLeft,top=columns.scrollTop,tops=new Map([...columns.querySelectorAll('.board-column')].map(c=>[c.dataset.columnId,c.querySelector('.board-column-list')?.scrollTop||0]));
+  columns.replaceChildren();const stageMode=boardState.group==='bot_stage',customMode=!!boardCustomField(),visible=boardState.cards,allColumns=boardColumns();
+  const total=id=>boardState.columnCounts?.[id]||0;
+  if(!allColumns.some(c=>c.id===boardState.mobileColumn))boardState.mobileColumn=allColumns.find(c=>total(c.id)>0)?.id||allColumns[0]?.id;
+  const mobile=$('board-mobile-group');mobile.replaceChildren();allColumns.forEach(c=>mobile.add(new Option(c.name+' · '+total(c.id),c.id)));mobile.value=boardState.mobileColumn||'';
+  $('board-zero-counts').textContent=customMode?'':allColumns.filter(c=>!total(c.id)).map(c=>c.name+' 0').join(' · ');
+  const displayed=allColumns.filter(c=>customMode||total(c.id)>0||boardMedia.matches&&c.id===boardState.mobileColumn);
+  for(const column of displayed){
+    const collapsed=!boardMedia.matches&&boardState.hidden.includes(column.id),cards=visible.filter(c=>boardColumnValue(c)===column.id);
+    const section=element('section','','board-column'+(collapsed?' board-collapsed':''));section.dataset.columnId=column.id;section.dataset.dimension=boardState.group;section.classList.toggle('board-mobile-selected',column.id===boardState.mobileColumn);
     if(stageMode)section.dataset.stage=column.id;section.setAttribute('aria-label',column.name);
-    const heading=element('div','','board-column-heading'),dot=element('span','','board-column-dot'),count=element('span',String(cards.length),'board-column-count');
-    if(column.hint)heading.title=column.hint;dot.setAttribute('aria-hidden','true');count.setAttribute('aria-label',cards.length+' 张卡片');
+    const heading=element('div','','board-column-heading'),dot=element('span','','board-column-dot'),count=element('span',String(total(column.id)),'board-column-count');
+    if(column.hint)heading.title=column.hint;dot.setAttribute('aria-hidden','true');count.setAttribute('aria-label',total(column.id)+' 项工作');
     const toggle=button(collapsed?'›':'‹',()=>boardToggleColumn(column.id),'board-collapse');
     toggle.setAttribute('aria-label',(collapsed?'展开 ':'折叠 ')+column.name);toggle.setAttribute('aria-expanded',String(!collapsed));
     heading.append(dot,element('h2',column.name),count,toggle);section.append(heading);
@@ -214,25 +217,21 @@ function boardRenderCards(keepScroll=false) {
     if(collapsed)section.addEventListener('click',event=>{if(!event.target.closest('button'))boardToggleColumn(column.id);});
     else{
       const list=element('div','','board-column-list');cards.forEach(item=>list.append(boardCard(item)));
-      if(!cards.length)list.append(element('p','当前维度下没有条目','board-empty'));section.append(list);
+      if(!cards.length)list.append(element('p',total(column.id)?'这一分组的工作尚未加载，请加载更多。':'当前筛选和分组下没有条目','board-empty'));section.append(list);
     }
     columns.append(section);
   }
-  if(keepScroll){columns.scrollLeft=left;for(const list of columns.querySelectorAll('.board-column-list'))list.scrollTop=tops.get(list.closest('.board-column').dataset.columnId)||0;}
+  if(!displayed.length)columns.append(element('p','当前筛选和分组下没有条目','board-empty'));
+  if(keepScroll){columns.scrollLeft=left;columns.scrollTop=top;for(const list of columns.querySelectorAll('.board-column-list'))list.scrollTop=tops.get(list.closest('.board-column').dataset.columnId)||0;}
+  else{columns.scrollLeft=0;columns.scrollTop=0;}
   boardSummary();
 }
 function boardSummary() {
-  for(const b of document.querySelectorAll('#board-types [data-type]'))b.querySelector('.board-type-count').textContent=String(boardState.counts?.[b.dataset.type]??'');
-  const status=$('board-status');status.replaceChildren();
-  const objects=boardState.counts?.[boardState.type]??0,releases=boardState.releaseCount||0,total=boardCategory()==='release'?releases:boardCategory()==='all'?objects+releases:objects;
-  if(boardState.hasMore){
-    status.append(element('span',`已显示 ${boardState.cards.length} / ${total} 个条目`),boardButton('加载更多',()=>boardLoadCards(true),'board-link'));
-  }else if(!boardState.cards.length){
-    status.append(element('span','当前维度下没有条目'));
-    if(boardState.filters.some(f=>f.field!=='include_closed'))status.append(boardButton('清除筛选',async()=>{
-      boardState.filters=boardState.filters.filter(f=>f.field==='include_closed');history.replaceState(null,'','#/board');boardDirty();boardShell();await boardLoadCards();
-    },'board-link'));
-  }
+  const status=$('board-status');status.replaceChildren(element('span',`共 ${boardState.workCount||0} 项工作`));
+  if(boardState.hasMore)status.append(element('span',`已加载 ${boardState.cards.length} 项`),boardButton('加载更多',()=>boardLoadCards(true),'board-link'));
+  if(!boardState.cards.length&&boardConditions().length)status.append(boardButton('清除筛选',async()=>{
+    boardState.filters=[];boardState.type='all';boardDirty();boardShell();await boardLoadCards();
+  },'board-link'));
 }
 function boardKey(item) { return `${item.repository_id}/${item.object_type}/${item.card_type==='release'?item.release_id:item.object_number}`; }
 function boardCardKey(item) { return boardKey(item)+'/'+(item.card_category||''); }
@@ -247,7 +246,7 @@ function boardTime(value) {
 // The latest review and development statuses explain why a card sits in its stage, e.g. which task failed.
 function boardTaskBadge(prefix,status) { const [caption,tone]=states[status]||[status,''],b=badge(`${prefix} ${caption}`,tone);b.title=status;return b; }
 function boardCard(item) {
-  const release=item.card_type==='release',stageMode=boardState.group==='bot_stage',customMode=!!boardCustomField(),category=boardCardCategory(item);
+  const release=item.card_type==='release',customMode=!!boardCustomField(),category=boardCardCategory(item);
   const label=release?`发版本 ${item.version}`:`${boardTypeName(item.object_type)} #${item.object_number}`;
   const card=element('article','','board-card'+(release?' board-release-card':''));card.dataset.cardKey=boardKey(item);card.draggable=customMode&&!release;
   if(item.card_category)card.dataset.cardCategory=item.card_category;
@@ -255,10 +254,10 @@ function boardCard(item) {
   card.addEventListener('dragend',()=>{boardDragging=false;});
   card.addEventListener('click',event=>{if(!event.target.closest('a,button,select,label,input'))boardOpen(item).catch(error);});
   const heading=element('div','','board-card-heading'),title=boardButton('',()=>boardOpen(item),'board-card-title');title.title=item.title||label;
-  // The clamp wrapper keeps long titles to three lines with the number leading the first one.
+  // Keep the object type and number beside a title that can wrap to its full length.
   const caption=element('span','','board-card-caption');title.append(caption);
   if(release)caption.append(element('span','发版本','board-card-number'),document.createTextNode(' '),element('span',item.version,'board-card-text'));
-  else if(item.title)caption.append(element('span','#'+item.object_number,'board-card-number'),document.createTextNode(' '),element('span',item.title,'board-card-text'));
+  else if(item.title)caption.append(element('span',boardTypeName(item.object_type)+' #'+item.object_number,'board-card-number'),document.createTextNode(' '),element('span',item.title,'board-card-text'));
   else caption.append(element('span',label,'board-card-text'));
   heading.append(title);
   const url=boardGithub(item);if(url){const a=link(url,'↗','board-card-link');a.setAttribute('aria-label','在 GitHub 打开 '+label);a.title='在 GitHub 打开';heading.append(a);}
@@ -268,11 +267,10 @@ function boardCard(item) {
   const badges=element('div','','board-card-badges');
   if(release){const tone=item.execution_status==='failed'?'danger':item.execution_status==='waiting'?'warning':item.execution_status==='completed'?'success':'info';badges.append(badge(releaseStages[item.release_stage]||item.release_stage,tone));}
   else{
-    if(!stageMode&&boardState.group!=='category'){const stage=boardState.stages.find(s=>s.id===item.bot_stage);if(stage)badges.append(badge(boardStage(stage,item.object_type).name,item.bot_stage==='attention'?'warning':'info'));}
+    if(!item.task_id)badges.append(badge('检视 未开始',''));
     if(item.draft)badges.append(badge('草稿','warning'));
     if(item.github_state==='closed')badges.append(badge('已关闭',''));
-    if(item.review_status&&['all','review'].includes(category))badges.append(boardTaskBadge('检视',item.review_status));
-    if(item.development_status&&['all','development'].includes(category))badges.append(boardTaskBadge(item.object_type==='pr'?'跟进':'开发',item.development_status));
+    if(item.task_status)badges.append(boardTaskBadge(category==='review'?'检视':item.object_type==='pr'?'跟进':'开发',item.task_status));
     if(item.object_type==='issue'&&item.development_pr_number&&category!=='review'){
       const pr=boardGithub(item,'pr',item.development_pr_number),caption='→ PR #'+item.development_pr_number;badges.append(pr?link(pr,caption,'board-card-pr'):element('span',caption,'board-card-pr'));
     }
@@ -288,7 +286,8 @@ function boardCard(item) {
 async function boardMove(item,option) {
   if(!boardCustomField()||item.card_type==='release')return;
   await api('/api/board/cards/'+boardKey(item),'PATCH',{field_id:boardState.group,option_id:option});
-  item.field_value=option;boardRenderCards(true);
+  // Custom fields describe the GitHub object and are shared by its work cards.
+  boardState.cards.filter(c=>boardKey(c)===boardKey(item)).forEach(c=>c.field_value=option);await boardLoadCards();
 }
 async function boardSave() {
   const view=boardView(),body={filters:boardConditions(),hidden_columns:boardState.hidden};
@@ -331,8 +330,8 @@ function boardAddColumn() {
 async function boardOpen(item) {
   if(item.card_type==='release'){openProject(item.repository_id,'release');return;}
   const owner=me.id,label=`${boardTypeName(item.object_type)} #${item.object_number}`,conditions=[];
-  const category=item.card_category||(boardCategory()==='all'?'':boardCategory()),execution=boardFilter('execution_status');
-  if(category)conditions.push({field:'category',value:category});if(execution)conditions.push({field:'execution_status',value:execution});
+  const category=item.card_category;
+  if(category)conditions.push({field:'category',value:category});
   let offset=0;const tasks=[];
   const load=async()=>{
     const params=new URLSearchParams({offset:String(offset),limit:'100',filters:JSON.stringify(conditions)});
@@ -346,3 +345,5 @@ async function boardOpen(item) {
 // Close the view menu on an outside click or Escape, like other popovers.
 document.addEventListener('click',event=>{for(const menu of document.querySelectorAll('.board-menu.open'))if(!menu.contains(event.target))boardOpenMenu(menu,false);});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')for(const menu of document.querySelectorAll('.board-menu.open'))boardOpenMenu(menu,false);});
+
+boardMedia.addEventListener('change',()=>{if(boardState?.cards&&tab==='board'){boardState.filterOpen=!boardMedia.matches;boardShell();boardRenderCards(true);}});

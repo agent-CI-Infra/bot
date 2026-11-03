@@ -4,12 +4,13 @@ import { harness, setup, account, repository, testPassword } from './helpers.mjs
 import { boardTask, boardFixtures, boardRelease } from './board-fixtures.mjs';
 const query=filters=>'/api/board/cards?filters='+encodeURIComponent(JSON.stringify(filters));
 async function fixture(t){const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');return {h,admin,a};}
-test('board deduplicates objects, keeps published PR separate, derives stages and omits raw task JSON',async t=>{
+test('board projects one card per work family, keeps published PR separate and omits raw task JSON',async t=>{
   const {h,admin}=await fixture(t);boardFixtures(h.store);
   const result=await admin('/api/board/cards');assert.equal(result.status,200);
-  const own=result.value.cards.filter(c=>c.repository_id==='101');assert.equal(own.length,6);
-  assert.deepEqual(Object.fromEntries(own.map(c=>[c.object_number,c.bot_stage])),{1:'reviewed',2:'reviewing',3:'developing',4:'developed',5:'attention',40:'unreviewed'});
-  const combined=own.find(c=>c.object_number===3);assert.equal(combined.review_task_id,'source-review');assert.equal(combined.development_task_id,'developing');
+  const own=result.value.cards.filter(c=>c.repository_id==='101');assert.equal(own.length,8);
+  assert.deepEqual(Object.fromEntries(own.map(c=>[c.object_number+'/'+c.card_category,c.bot_stage])),{'1/review':'reviewed','2/review':'reviewing','3/review':'reviewed','3/development':'developing','4/review':'reviewed','4/development':'developed','5/review':'attention','40/review':'unreviewed'});
+  assert.equal(result.value.work_count,9);assert.equal(Object.values(result.value.column_counts).reduce((a,b)=>a+b,0),9);
+  const combined=own.find(c=>c.object_number===3&&c.card_category==='development');assert.equal(combined.review_task_id,'source-review');assert.equal(combined.development_task_id,'developing');
   assert.equal(own.find(c=>c.object_number===4).development_pr_number,40);assert.equal(combined.development_pr_number,null);
   assert.deepEqual(result.value.counts,{issue:5,pr:2});
   const stages=(await admin('/api/board')).value.stages;assert.deepEqual(stages.map(s=>s.id),['unreviewed','reviewing','reviewed','developing','developed','attention']);
@@ -19,7 +20,7 @@ test('board deduplicates objects, keeps published PR separate, derives stages an
   const tasks=(await admin('/api/board/cards/101/issue/3/tasks')).value.tasks;assert.equal(tasks.length,2);
   assert.equal((await admin('/api/tasks?kind=review')).value.tasks.length,6);assert.equal((await admin('/api/tasks?kind=development')).value.tasks.length,2);
 });
-test('stage precedence covers every development state, review failure and newer success across task families',async t=>{
+test('each family retains its stage when another family has a newer success or failure',async t=>{
   const {h,admin}=await fixture(t);
   const active=['queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready'];
   for(const [i,status]of active.entries()){
@@ -33,12 +34,23 @@ test('stage precedence covers every development state, review failure and newer 
   boardTask(h.store,'dev-success',52,'development.issue','succeeded');boardTask(h.store,'review-later',52,'review.issue','running',{time:'2026-10-02T12:00:00.000Z'});
   boardTask(h.store,'retry-fail',53,'review.issue','failed');boardTask(h.store,'retry-success',53,'review.issue','succeeded',{time:'2026-10-02T12:00:00.000Z'});
   const cards=(await admin('/api/board/cards')).value.cards;
-  assert.ok(cards.filter(c=>c.object_number>=10&&c.object_number<20).every(c=>c.bot_stage==='developing'));
+  assert.ok(cards.filter(c=>c.object_number>=10&&c.object_number<20&&c.card_category==='development').every(c=>c.bot_stage==='developing'));
   assert.ok(cards.filter(c=>c.object_number>=30&&c.object_number<36).every(c=>c.bot_stage==='attention'));
-  assert.equal(cards.find(c=>c.object_number===50).bot_stage,'reviewed');assert.equal(cards.find(c=>c.object_number===51).bot_stage,'attention');
-  assert.equal(cards.find(c=>c.object_number===52).bot_stage,'developed');assert.equal(cards.find(c=>c.object_number===53).bot_stage,'reviewed');
-  h.store.run("UPDATE tasks SET status='failed',updated_at='2026-10-03' WHERE id='d0'");
-  assert.equal((await admin(query([{field:'text',value:'10'}]))).value.cards[0].bot_stage,'attention');
+  const card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category);
+  assert.equal(card(50,'review').bot_stage,'reviewed');assert.equal(card(50,'development').bot_stage,'attention');
+  assert.equal(card(51,'review').bot_stage,'attention');assert.equal(card(51,'development').bot_stage,'developed');
+  assert.equal(card(52,'review').execution_status,'running');assert.equal(card(52,'development').execution_status,'completed');
+  assert.equal(card(53,'review').bot_stage,'reviewed');assert.equal(card(53,'review').task_id,'retry-success');
+  // A newer development result must not hide the still-running review.
+  h.store.run("UPDATE tasks SET status='succeeded',updated_at='2026-10-03' WHERE id='d0'");
+  const before=(await admin(query([{field:'text',value:'10'}]))).value.cards;
+  assert.equal(before.find(c=>c.card_category==='review').execution_status,'running');
+  assert.equal(before.find(c=>c.card_category==='development').execution_status,'completed');
+  for(const group of ['repository','execution_status','category']){
+    const after=(await admin(query([{field:'text',value:'10'}])+'&group_by='+group)).value.cards;
+    assert.deepEqual(after,before);
+  }
+
 });
 test('verified webhooks project draft, closed and comment objects without starting tasks; preserve known metadata',async t=>{
   const {h,admin,a}=await fixture(t);
@@ -88,11 +100,12 @@ test('filters, bounded pagination and personal views persist without affecting a
   assert.deepEqual((await admin(query([{field:'repository_id',value:'202'}]))).value.counts,{issue:1,pr:0});
   assert.equal((await admin(query([{field:'text',value:'successful review'}]))).value.cards.length,1);
   assert.equal((await admin(query([{field:'text',value:'%'}]))).value.cards.length,0);
-  assert.equal((await admin(query([{field:'text',value:'#3'}]))).value.cards.length,1);
+  assert.equal((await admin(query([{field:'text',value:'#3'}]))).value.cards.length,2);
   assert.equal((await admin(query([{field:'bot_stage',value:'attention'}]))).value.cards.length,1);
   const page=await admin('/api/board/cards?limit=2');assert.equal(page.value.cards.length,2);assert.equal(page.value.has_more,true);
   for(const suffix of ['limit=101','offset=-1','limit=1.1','offset=100001'])assert.equal((await admin('/api/board/cards?'+suffix)).status,400);
-  for(const condition of [[{field:'status',value:'bogus'}],[{field:'object_type',value:'all'}],[{field:'include_closed',value:'true'}]])assert.equal((await admin(query(condition))).status,400);
+  for(const condition of [[{field:'status',value:'bogus'}],[{field:'include_closed',value:'true'}]])assert.equal((await admin(query(condition))).status,400);
+  assert.equal((await admin(query([{field:'object_type',value:'all'}]))).value.work_count,9);
   const password=testPassword();await admin('/api/users','POST',{username:'other',password,repository_ids:['101']});
   const other=h.client();await other('/api/auth/login','POST',{username:'other',password});
   const saved=(await admin('/api/board/views','POST',{name:'PRs',filters:[{field:'object_type',value:'pr'}],hidden_columns:['unreviewed']})).value.view;
@@ -113,7 +126,7 @@ test('custom single-select columns include empty options; changing values never 
   assert.equal((await admin('/api/board/fields/'+field.id+'/options','POST',{name:'High'})).status,409);
   const before=h.store.all('SELECT * FROM tasks');
   assert.equal((await admin('/api/board/cards/101/issue/3','PATCH',{field_id:field.id,option_id:high.id})).status,200);
-  const grouped=(await admin('/api/board/cards?group_by='+field.id)).value.cards.find(c=>c.object_number===3);
+  const grouped=(await admin('/api/board/cards?group_by='+field.id)).value.cards.find(c=>c.object_number===3&&c.card_category==='development');
   assert.equal(grouped.field_value,high.id);assert.equal(grouped.bot_stage,'developing');assert.deepEqual(h.store.all('SELECT * FROM tasks'),before);
   assert.equal((await admin('/api/board')).value.fields[0].options.length,2);
   assert.equal((await admin('/api/board/cards/101/issue/3','PATCH',{field_id:'bot_stage',option_id:'developed'})).status,404);
@@ -146,7 +159,7 @@ test('repository, execution and category dimensions include releases without lea
   }
   for(const [category,key]of [['review','review_task_id'],['development','development_task_id']]){
     const result=await admin(query([{field:'category',value:category}]));assert.ok(result.value.cards.length>0);
-    assert.ok(result.value.cards.every(c=>c.card_type==='object'&&c[key]));assert.equal(result.value.release_count,0);
+    assert.ok(result.value.cards.every(c=>c.card_type==='object'&&c.card_category===category));assert.equal(result.value.release_count,0);
   }
   const releases=await admin(query([{field:'category',value:'release'}]));assert.equal(releases.value.cards.length,3);assert.ok(releases.value.cards.every(c=>c.card_type==='release'));
   assert.deepEqual(releases.value.counts,{issue:0,pr:0});
@@ -173,7 +186,25 @@ test('one-time backfill recovers historical tasks and deliveries and uses indexe
   await h.hook(a.path,a.secret,'backfill',{repository:{id:101},issue:{number:60,title:'Historical delivery'}});
   h.store.db.exec("DELETE FROM settings WHERE key='board_projection_v1'; DELETE FROM board_objects");
   await h.stop();await h.start();
-  assert.equal((await admin('/api/board/cards')).value.cards.length,8);
+  assert.equal((await admin('/api/board/cards')).value.cards.length,10);
   const plan=h.store.all("EXPLAIN QUERY PLAN SELECT id FROM tasks WHERE repository_id=? AND object_number=? AND kind=? ORDER BY coalesce(nullif(updated_at,''),created_at) DESC,created_at DESC,rowid DESC LIMIT 1",'101',3,'review.issue');
   assert.ok(plan.some(r=>r.detail.includes('board_task_latest')));
+});
+
+test('saved views restore object scope and filters, column totals cover all pages and permission scopes',async t=>{
+  const {h,admin}=await fixture(t);boardFixtures(h.store);
+  const filters=[{field:'object_type',value:'pr'},{field:'category',value:'review'},{field:'execution_status',value:'running'}];
+  const saved=(await admin('/api/board/views','POST',{name:'Running PR reviews',group_by:'repository',filters,hidden_columns:['202']})).value.view;
+  const result=(await admin('/api/board/cards?view_id='+saved.id)).value;
+  assert.deepEqual(result.cards.map(c=>c.task_id),['reviewing']);assert.deepEqual(result.column_counts,{'101':1});
+  assert.deepEqual(saved.filters,filters);assert.deepEqual(saved.hidden_columns,['202']);
+  const all=(await admin('/api/board/views','POST',{name:'All work',filters:[{field:'object_type',value:'all'}],group_by:'category'})).value.view;
+  assert.equal((await admin('/api/board/cards?view_id='+all.id)).value.work_count,9);
+  const page=(await admin('/api/board/cards?group_by=category&limit=1')).value;
+  assert.equal(page.cards.length,1);assert.equal(page.work_count,9);assert.deepEqual(page.column_counts,{review:7,development:2});
+  const keys=new Set();for(let offset=0;offset<9;offset+=2){
+    const next=(await admin('/api/board/cards?limit=2&offset='+offset)).value;
+    for(const c of next.cards)keys.add([c.repository_id,c.object_type,c.object_number,c.card_category].join('/'));
+  }
+  assert.equal(keys.size,9);
 });
