@@ -62,6 +62,20 @@ test('其他项目管理员看不到发版入口，直接请求本项目发布�
     expect(writes(f.state)).toHaveLength(0);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
+test('候选提交已被上一版本包含时说明跳过并禁用确认，已有发布记录仍可查看', async ({ page }) => {
+  const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) });
+  try {
+    const existing = await f.create('v1.2.1');
+    f.state.tags['v1.2.2'] = { type: 'commit', sha: target };
+    await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
+    await login(page, f.h.admin, 'administrator', f.password); await page.goto(f.h.admin + '/#/projects/101/release');
+    await page.getByLabel('版本号', { exact: true }).fill('v1.2.3'); await page.getByRole('button', { name: '检查候选提交' }).click();
+    await expect(page.locator('#project-page')).toContainText('没有新变更，跳过本次发布');
+    await expect(page.getByRole('button', { name: '确认打标签', exact: true })).toBeDisabled();
+    await expect(page.locator('#project-page')).toContainText(existing.value.release.version);
+    expect(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n).toBe(1); expect(writes(f.state)).toHaveLength(0);
+  } finally { for (const close of cleanup.reverse()) await close(); }
+});
 test('运行分析按需申请只读令牌并在页面展示脱敏日志证据', async ({ page }) => {
   const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) }); let release;
   try {

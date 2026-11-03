@@ -56,6 +56,7 @@ export class ReleaseService {
       const redactor = releaseRedactor(this.store, id);
       const preview = await withGitHub(this.store, id, this.apiUrl, { pull_requests: 'read' }, redactor, github => inspect(github, input.version as string));
       if (preview.target_sha !== input.target_sha || fingerprint(preview) !== saved.fingerprint) return fail(409, 'release_candidate_changed');
+      if (preview.no_changes) return fail(409, 'release_no_changes');
       if (!preview.available) return fail(409, 'release_preflight_failed');
       const row = this.store.transaction(() => {
         const found = this.current(id, input.version as string); if (found) return found;
