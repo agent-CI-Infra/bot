@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
-import { boardTask, boardFixtures } from './board-fixtures.mjs';
+import { boardTask, boardFixtures, boardRelease } from './board-fixtures.mjs';
 const query=filters=>'/api/board/cards?filters='+encodeURIComponent(JSON.stringify(filters));
 async function fixture(t){const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');return {h,admin,a};}
 test('board deduplicates objects, keeps published PR separate, derives stages and omits raw task JSON',async t=>{
@@ -127,6 +127,46 @@ test('custom single-select columns include empty options; changing values never 
   const other=h.client();await other('/api/auth/login','POST',{username:'field-other',password});
   assert.equal((await other('/api/board/cards?group_by='+field.id)).status,404);
   assert.equal((await other('/api/board/cards/101/issue/3','PATCH',{field_id:field.id,option_id:high.id})).status,404);
+});
+test('repository, execution and category dimensions include releases without leaking payload or grants',async t=>{
+  const {h,admin}=await fixture(t);boardFixtures(h.store);
+  boardTask(h.store,'queued',6,'review.issue','queued');boardTask(h.store,'waiting',7,'development.issue','waiting_permission');
+  boardTask(h.store,'cancelled',8,'review.issue','cancelled');
+  boardRelease(h.store,'release-running','101','v1.2.3','running');boardRelease(h.store,'release-done','101','v1.2.2','published');
+  boardRelease(h.store,'release-foreign','202','v9.9.9','failed');
+  const all=await admin('/api/board/cards');assert.equal(all.status,200);assert.equal(all.value.release_count,3);
+  const running=all.value.cards.find(c=>c.release_id==='release-running');assert.equal(running.full_name,'fixture/project-101');
+  assert.equal(running.version,'v1.2.3');assert.equal(running.release_stage,'running');assert.equal(running.execution_status,'running');assert.equal(running.bot_stage,'developing');
+  assert.equal(all.value.cards.find(c=>c.release_id==='release-done').execution_status,'completed');
+  assert.equal(all.value.cards.find(c=>c.release_id==='release-foreign').execution_status,'failed');
+  assert.ok(!JSON.stringify(all.value).includes('private release payload'));
+  for(const [id,status]of [['reviewing','running'],['reviewed','completed'],['failed-review','failed'],['queued','queued'],['waiting','waiting'],['cancelled','other']]){
+    const objectNumber=h.store.get('SELECT object_number FROM tasks WHERE id=?',id).object_number;
+    assert.equal(all.value.cards.find(c=>c.object_number===objectNumber&&c.card_type==='object').execution_status,status,id);
+  }
+  for(const [category,key]of [['review','review_task_id'],['development','development_task_id']]){
+    const result=await admin(query([{field:'category',value:category}]));assert.ok(result.value.cards.length>0);
+    assert.ok(result.value.cards.every(c=>c.card_type==='object'&&c[key]));assert.equal(result.value.release_count,0);
+  }
+  const releases=await admin(query([{field:'category',value:'release'}]));assert.equal(releases.value.cards.length,3);assert.ok(releases.value.cards.every(c=>c.card_type==='release'));
+  assert.deepEqual(releases.value.counts,{issue:0,pr:0});
+  assert.equal((await admin(query([{field:'text',value:'v1.2.3'}]))).value.cards[0].release_id,'release-running');
+  for(const status of ['running','queued','failed','completed','waiting','other']){
+    const result=await admin(query([{field:'execution_status',value:status}]));assert.ok(result.value.cards.every(c=>c.execution_status===status),status);
+  }
+  for(const group of ['repository','execution_status','category'])assert.equal((await admin('/api/board/cards?group_by='+group)).status,200);
+  const saved=await admin('/api/board/views/default','PATCH',{group_by:'repository',filters:[{field:'category',value:'review'}]});
+  assert.equal(saved.status,200);assert.equal(saved.value.view.group_by,'repository');assert.deepEqual(saved.value.view.filters,[{field:'category',value:'review'}]);
+  const taskQuery=(filters)=> '/api/board/cards/101/issue/3/tasks?filters='+encodeURIComponent(JSON.stringify(filters));
+  assert.deepEqual((await admin(taskQuery([{field:'category',value:'review'}]))).value.tasks.map(t=>t.id),['source-review']);
+  assert.deepEqual((await admin(taskQuery([{field:'category',value:'development'}]))).value.tasks.map(t=>t.id),['developing']);
+  assert.deepEqual((await admin(taskQuery([{field:'category',value:'development'},{field:'execution_status',value:'running'}]))).value.tasks.map(t=>t.id),['developing']);
+  assert.equal((await admin(taskQuery([{field:'category',value:'development'},{field:'execution_status',value:'completed'}]))).value.tasks.length,0);
+  const password=testPassword();await admin('/api/users','POST',{username:'release-member',password,repository_ids:['101']});
+  const member=h.client();await member('/api/auth/login','POST',{username:'release-member',password});
+  const visible=await member('/api/board/cards');assert.equal(visible.value.release_count,2);
+  assert.ok(visible.value.cards.filter(c=>c.card_type==='release').every(c=>c.repository_id==='101'));
+  assert.ok(!JSON.stringify(visible.value).includes('v9.9.9'));
 });
 test('one-time backfill recovers historical tasks and deliveries and uses indexed object task lookups',async t=>{
   const {h,admin,a}=await fixture(t);boardFixtures(h.store);

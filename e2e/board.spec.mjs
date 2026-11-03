@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
-import { boardTask, boardFixtures } from '../test/board-fixtures.mjs';
+import { boardTask, boardFixtures, boardRelease } from '../test/board-fixtures.mjs';
 
 async function login(page,url,username,password){
   await page.goto(url);await page.getByLabel('用户名',{exact:true}).fill(username);await page.getByLabel('密码',{exact:true}).fill(password);
@@ -41,9 +41,10 @@ test('Issue 和 PR 分开成两块全屏看板，保存筛选和个人视图，�
     await card.dispatchEvent('drop');expect(h.store.all('SELECT id,status FROM tasks ORDER BY id')).toEqual(original);
     await expect(card.getByRole('link',{name:'在 GitHub 打开 Issue #3'})).toHaveAttribute('href','https://github.com/fixture/project-101/issues/3');
     await card.getByRole('button',{name:'#3 Develop this Issue',exact:true}).click();
-    await expect(page.locator('#board-object .board-task-row')).toHaveCount(2);await expect(page.locator('#board-object')).toContainText('正在开发');
-    await expect(page.locator('#board-object').getByRole('link',{name:'在 GitHub 打开'})).toHaveAttribute('href','https://github.com/fixture/project-101/issues/3');
-    await page.locator('#board-object').getByRole('button',{name:'查看任务详情'}).first().click();await expect(page.locator('#task-title')).toContainText('Issue #3');
+    await expect(page.locator('#task-view')).toBeVisible();await expect(page.locator('#board-object')).toHaveCount(0);
+    await expect(page.locator('#task-picker .task-choice-row')).toHaveCount(2);await expect(page.locator('#task-picker')).toContainText('开发 Issue');
+    await page.locator('#task-picker .task-choice-open').first().click();await expect(page.locator('#task-title')).toContainText('Issue #3');
+    await expect(page.locator('#task-actions').getByRole('link',{name:'在 GitHub 打开'})).toHaveAttribute('href','https://github.com/fixture/project-101/issues/3');
     await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
     await prs.click();await expect(prs).toHaveAttribute('aria-pressed','true');await expect(page.locator('.board-card')).toHaveCount(3);
     expect(await columns.locator('h2').allTextContents()).toEqual(['未检视','正在检视','已检视','正在跟进','已跟进','需要处理']);
@@ -64,7 +65,7 @@ test('Issue 和 PR 分开成两块全屏看板，保存筛选和个人视图，�
     await expect(page.getByRole('button',{name:'保存视图',exact:true})).toBeHidden();
     await page.getByRole('button',{name:'加列',exact:true}).click();await expect(page.locator('#board-form')).toContainText('不能增加或改名');
     await page.getByLabel('字段名称',{exact:true}).fill('优先级');await page.getByLabel('第一列名称',{exact:true}).fill('高优先级');
-    await page.getByRole('button',{name:'创建字段和视图',exact:true}).click();await expect(page.getByLabel('分列',{exact:true})).not.toHaveValue('bot_stage');
+    await page.getByRole('button',{name:'创建字段和视图',exact:true}).click();await expect(page.getByLabel('查看维度',{exact:true})).not.toHaveValue('bot_stage');
     await expect(page.locator('[data-column-id=unassigned] .board-card')).toHaveCount(25);
     await page.getByRole('button',{name:'加列',exact:true}).click();await page.getByLabel('列名称',{exact:true}).fill('稍后安排');await page.getByRole('button',{name:'添加列',exact:true}).click();
     const high=page.locator('.board-column').filter({has:page.getByRole('heading',{name:'高优先级',exact:true})});
@@ -93,13 +94,68 @@ test('Issue 和 PR 分开成两块全屏看板，保存筛选和个人视图，�
       await expect(member.getByRole('button',{name:/^PR/})).toHaveText('PR 3');
       await expect(member.locator('#board-columns')).not.toContainText('Foreign private card');await expect(member.locator('[data-card-key^="202/"]')).toHaveCount(0);
       await member.screenshot({path:'.tmp/board-evidence/board-member.png'});
-      await expect(member.getByLabel('视图',{exact:true}).locator('option')).toHaveCount(1);expect(await member.getByLabel('分列',{exact:true}).locator('option').count()).toBe(1);
+      await expect(member.getByLabel('视图',{exact:true}).locator('option')).toHaveCount(1);expect(await member.getByLabel('查看维度',{exact:true}).locator('option').count()).toBe(4);
       expect(await member.getByLabel('仓库',{exact:true}).locator('option').allTextContents()).toEqual(['全部仓库','fixture/project-101']);
     }finally{await context.close();}
     await page.setViewportSize({width:1600,height:900});
-    await page.locator('header').getByRole('button',{name:'检视',exact:true}).click();await expect(page.getByRole('heading',{name:'检视任务',exact:true})).toBeVisible();
-    await page.locator('header').getByRole('button',{name:'开发',exact:true}).click();await expect(page.getByRole('heading',{name:'开发任务',exact:true})).toBeVisible();
-    expect(await page.evaluate(()=>document.body.classList.contains('board-mode'))).toBe(false);await page.screenshot({path:'.tmp/board-evidence/developments.png'});
+    for(const gone of ['检视','开发'])await expect(page.locator('#tabs').getByRole('button',{name:gone,exact:true})).toHaveCount(0);
+    await page.goto(h.admin+'/#/reviews');await expect(page.getByLabel('类别',{exact:true})).toHaveValue('review');await expect(page.locator('#board-panel')).toBeVisible();
+    await page.goto(h.admin+'/#/developments');await expect(page.getByLabel('类别',{exact:true})).toHaveValue('development');await expect(page.locator('#board-panel')).toBeVisible();
+    expect(await page.evaluate(()=>document.body.classList.contains('board-mode'))).toBe(true);await page.screenshot({path:'.tmp/board-evidence/developments.png'});
+    expect(errors).toEqual([]);
+  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
+});
+
+test('仓库、执行状态和类别切换同一批工作，任务直达、发版本详情与窄屏均可用',async({page,browser})=>{
+  test.setTimeout(60000);const h=await harness(),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');boardFixtures(h.store);
+  boardTask(h.store,'queued',6,'review.issue','queued',{title:'Queued review'});boardTask(h.store,'waiting',7,'development.issue','waiting_permission',{title:'Waiting development'});
+  boardTask(h.store,'cancelled',8,'review.issue','cancelled',{title:'Cancelled review'});
+  boardRelease(h.store,'release-running','101','v1.2.3','running');boardRelease(h.store,'release-done','101','v1.2.2','published');boardRelease(h.store,'release-foreign','202','v9.9.9','failed');
+  const errors=[];page.on('pageerror',err=>errors.push(err.message));mkdirSync('.tmp/board-evidence',{recursive:true});
+  try{
+    await page.setViewportSize({width:1600,height:900});await login(page,h.admin,'administrator',password);
+    await page.getByLabel('查看维度',{exact:true}).selectOption('repository');await expect(page.locator('[data-dimension=repository]')).toHaveCount(2);
+    expect(await page.locator('[data-dimension=repository] h2').allTextContents()).toEqual(['fixture/project-101','fixture/project-202']);
+    await expect(page.locator('[data-column-id="101"]')).toContainText('Develop this Issue');await expect(page.locator('[data-column-id="202"]')).toContainText('Foreign private card');
+    await page.screenshot({path:'.tmp/board-evidence/board-repositories.png'});
+    await page.getByLabel('查看维度',{exact:true}).selectOption('execution_status');await expect(page.locator('[data-dimension=execution_status]')).toHaveCount(6);
+    expect(await page.locator('[data-dimension=execution_status] h2').allTextContents()).toEqual(['正在执行','排队','失败','已完成','等待处理','其他 / 未开始']);
+    await expect(page.locator('[data-column-id=running]')).toContainText('Develop this Issue');await expect(page.locator('[data-column-id=running]')).toContainText('v1.2.3');
+    await expect(page.locator('[data-column-id=queued]')).toContainText('Queued review');await expect(page.locator('[data-column-id=failed]')).toContainText('Review failed');
+    await expect(page.locator('[data-column-id=failed]')).toContainText('v9.9.9');await expect(page.locator('[data-column-id=completed]')).toContainText('v1.2.2');
+    await expect(page.locator('[data-column-id=waiting]')).toContainText('Waiting development');await expect(page.locator('[data-column-id=other]')).toContainText('Cancelled review');
+    await page.screenshot({path:'.tmp/board-evidence/board-execution.png'});
+    await page.getByLabel('查看维度',{exact:true}).selectOption('category');await expect(page.locator('[data-dimension=category]')).toHaveCount(3);
+    expect(await page.locator('[data-dimension=category] h2').allTextContents()).toEqual(['检视','开发','发版本']);
+    const review=page.locator('[data-dimension=category][data-column-id=review] [data-card-key="101/issue/3"]');
+    const development=page.locator('[data-dimension=category][data-column-id=development] [data-card-key="101/issue/3"]');
+    await expect(review).toHaveCount(1);await expect(development).toHaveCount(1);await expect(page.locator('[data-column-id=release]')).toContainText('v1.2.3');
+    await page.screenshot({path:'.tmp/board-evidence/board-categories.png'});
+    await review.locator('.board-card-title').click();await expect(page.locator('#task-view')).toBeVisible();await expect(page.locator('#task-title')).toHaveText('检视 · Issue #3');
+    await expect(page.locator('#task-picker')).toBeHidden();await expect(page.locator('#board-object')).toHaveCount(0);await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
+    await development.locator('.board-card-title').click();await expect(page.locator('#task-title')).toHaveText('开发 · Issue #3');await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
+    const release=page.locator('[data-card-key="101/release/release-running"]');
+    await expect(release).toContainText('fixture/project-101');await expect(release).toContainText('工作流运行中');
+    await expect(release.getByRole('link',{name:'在 GitHub 打开 发版本 v1.2.3'})).toHaveAttribute('href','https://github.com/fixture/project-101/releases/tag/v1.2.3');
+    await release.locator('.board-card-title').click();await expect(page).toHaveURL(/#\/projects\/101\/release$/);
+    await expect(page.locator('#project-page .release-record').filter({hasText:'v1.2.3'})).toContainText('工作流运行中');await expect(page.locator('#task-view')).toBeHidden();
+    await page.locator('header').getByRole('button',{name:'看板',exact:true}).click();await page.getByLabel('类别',{exact:true}).selectOption('release');
+    await expect(page.locator('.board-card')).toHaveCount(3);await expect(page.getByRole('group',{name:'对象类型'})).toBeHidden();
+    await page.getByLabel('搜索编号或标题',{exact:true}).fill('no-such-release');await expect(page.locator('.board-card')).toHaveCount(0);
+    await expect(page.locator('#board-status')).toContainText('当前维度下没有条目');await expect(page.locator('[data-column-id=release] .board-empty')).toHaveText('当前维度下没有条目');
+    await page.getByRole('button',{name:'清除筛选',exact:true}).click();await page.getByLabel('类别',{exact:true}).selectOption('');
+    await page.setViewportSize({width:390,height:844});expect(await pageScrolls(page)).toBe(false);
+    expect(await page.locator('#board-columns').evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/board-evidence/board-dimensions-mobile.png'});
+    await page.getByLabel('类别',{exact:true}).selectOption('review');const narrowReview=page.locator('[data-column-id=review] [data-card-key="101/issue/3"] .board-card-title');
+    await narrowReview.click();await expect(page.locator('#task-title')).toHaveText('检视 · Issue #3');expect(await pageScrolls(page)).toBe(false);
+    await page.screenshot({path:'.tmp/board-evidence/board-task-mobile.png'});await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
+    const memberPassword=testPassword();await admin('/api/users','POST',{username:'release-board-member',password:memberPassword,repository_ids:['101']});
+    const context=await browser.newContext(),member=await context.newPage();
+    try{
+      await login(member,h.admin,'release-board-member',memberPassword);await member.getByLabel('类别',{exact:true}).selectOption('release');
+      await expect(member.locator('.board-card')).toHaveCount(2);await expect(member.locator('#board-columns')).toContainText('v1.2.3');
+      await expect(member.locator('#board-columns')).not.toContainText('v9.9.9');await expect(member.locator('[data-card-key^="202/"]')).toHaveCount(0);
+    }finally{await context.close();}
     expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });

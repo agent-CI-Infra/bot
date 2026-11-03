@@ -6,6 +6,9 @@ dialog.wide[open]{display:flex;flex-direction:column}
 .view-error{margin:0;padding:8px 16px;color:#a2292b;background:#fbeaea}.view-error:empty{display:none}
 .button-link{display:inline-flex;align-items:center;min-height:32px;padding:6px 12px;border:1px solid #cedbe2;border-radius:5px;color:#234b5b;background:#fff;font-weight:600;text-decoration:none;white-space:nowrap}
 .task-layout{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,380px)}
+.task-picker{flex:1;min-height:0;overflow:auto;padding:16px}.task-picker>.muted{margin:0 0 12px}.task-choice-list{display:grid;gap:8px;max-width:900px;margin-bottom:12px}
+.task-choice-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 14px;padding:10px 12px;border:1px solid #dce6eb;border-radius:7px;background:#f7fafb}
+.task-choice-open{justify-self:start;text-align:left;white-space:normal;height:auto;overflow-wrap:anywhere}.task-choice-row .task-metrics{grid-column:1/-1;margin:0}
 .timeline-panel{min-height:0;overflow:auto;padding:14px 18px 20px}.timeline-panel h3,.side-card h3{font-size:14px;margin:0 0 10px;color:#365564}
 .task-side{min-height:0;overflow:auto;padding:14px;background:#f7fafb;border-left:1px solid #e3eaf0;display:flex;flex-direction:column;gap:12px}
 .timeline{list-style:none;margin:0;padding:0 0 0 18px;border-left:2px solid #dbe5ea;display:flex;flex-direction:column;gap:10px}
