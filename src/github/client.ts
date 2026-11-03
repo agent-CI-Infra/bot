@@ -149,6 +149,8 @@ export class GitHub {
         const key = account!.id + ':' + digest(this.token), known = actors.get(key);
         if (known && Date.now() - known.at < actorTtlMs) Object.assign(this, { actorId: known.id, actorLogin: known.login });
         else { const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || ''); actors.set(key, { at: Date.now(), id: this.actorId, login: this.actorLogin }); }
+        // The window is the token's user's; naming it lets the console show whose quota this is.
+        this.tokenWindow = userBucket(account!.id, this.actorLogin || null);
       }
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');
