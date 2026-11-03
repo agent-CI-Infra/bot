@@ -6,13 +6,15 @@ export class FakeDocker {
   containers = new Map(); volumes = new Map(); networks = new Map(); starts = 0; failNetwork = false;
   images = new Map([['approved', { Id: 'sha256:fixture', Config: { Labels: { 'department.bot.toolchain': 'fixture toolchain' } } }]]); builds = []; runs = [];
   calls = [];
+  async volumeSource(directory) { return directory; }
   async request(method, path, body) {
     this.calls.push(method + ' ' + path);
     if (path === '/info') return this.info || {};
     if (path.startsWith('/images/')) return this.images.get(decodeURIComponent(path.split('/')[2])) || null;
     const [kind, name] = path.slice(1).split('/');
     if (kind === 'volumes') {
-      if (method === 'POST') { this.volumes.set(body.Name, { Labels: body.Labels }); return {}; }
+      if (method === 'POST') { this.volumes.set(body.Name, { Labels: body.Labels, Options: body.DriverOpts }); return {}; }
+      if (method === 'DELETE') { if (this.failVolume) throw new ManagerError('injected_volume_failure'); this.volumes.delete(name); return {}; }
       return this.volumes.get(name) || null;
     }
     if (kind === 'networks') {

@@ -3,7 +3,7 @@ import {workspace as run} from '../../runner/workspace.mjs';
 import {environment} from '../../runner/command.mjs';
 
 Object.assign(environment,{HOME:process.env.BOT_RUNNER_TEST_ROOT,TMPDIR:process.env.BOT_RUNNER_TEST_ROOT});
-export const workspace=request=>run(request,process.env.BOT_RUNNER_TEST_ROOT);
+export const workspace=request=>run(request,process.env.BOT_RUNNER_TEST_ROOT,undefined,process.env.BOT_RUNNER_TEST_ROOT+'/project-notes');
 export const createExtensionRuntime=()=>({});
 export const ModelRuntime={create:async()=>({getModel:()=>({})})};
 export const SessionManager={inMemory:()=>({})};

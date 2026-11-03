@@ -1,6 +1,7 @@
 FROM node:22-bookworm-slim
 WORKDIR /app
 COPY manager ./manager
+COPY runner/notes.mjs ./runner/notes.mjs
 RUN for file in manager/*.mjs; do node --check "$file"; done
 COPY LICENSE ./LICENSE
 COPY NOTICE ./NOTICE

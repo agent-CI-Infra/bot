@@ -16,6 +16,8 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
   const token='runner-private-token',command=`printf '${token}'; while [ ! -f release ]; do sleep 0.05; done`;
   const calls=[{name:'github_read_token',args:{}},{name:'write_file',args:{path:'file.txt',content:'private body excluded from start'}},
+    {name:'write_file',args:{path:'../notes/repository.md',content:'x'.repeat(65536)}},
+    {name:'write_file',args:{path:'../notes/secret.md',content:'secret '+token}},
     {name:'read_file',args:{path:'file.txt'}},{name:'run_command',args:{command}},
     {name:'create_pull_request',args:{summary:'Ready',test_command:'true'}},{name:'finish_review',args:{summary:'Done'}}];
   await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:'a'.repeat(48),system:'fixture',prompt:JSON.stringify(calls),tools:calls.map(({name})=>({function:{name,parameters:{type:'object'}}}))}));
@@ -40,6 +42,9 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   await writeFile(join(dir,`pr-reply-${publication.id}.json`),JSON.stringify({pr:{number:1,html_url:'https://github.invalid/pull/1'}}));
   const [code]=await closed;assert.equal(code,0,output);assert.equal(JSON.parse(await readFile(join(dir,'state.json'),'utf8')).state,'completed',output);
   const all=await events();assert.ok(!JSON.stringify(all).includes(token));
+  assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,65536);
+  await assert.rejects(readFile(join(base,'project-notes/secret.md')),/ENOENT/);
+  assert.equal(all.find(event=>event.type==='tool'&&event.arguments?.path==='../notes/secret.md').result.error,'credential_in_notes');
   for(const [i,call] of calls.entries())assert.deepEqual(all.slice(i*3,i*3+3).map(event=>event.type),['model','tool_start','tool'],call.name);
   assert.equal(all.find(event=>event.type==='tool'&&event.name==='run_command').result.output,'[REDACTED]');
   assert.equal(all.at(-2).name,'finish_review');
@@ -56,4 +61,21 @@ test('poll exposes event pagination so completed and failed agents can drain all
     do{page=await agentOperation({type:'workspace_agent_poll',offset},root);collected.push(...page.events);offset=page.offset;}while(page.has_more);
     assert.deepEqual(collected,events);assert.equal(offset,45);
   }
+});
+
+test('review file tools can update project notes but refuse repository writes',async t=>{
+  await mkdir('.tmp',{recursive:true});const base=await mkdtemp(resolve('.tmp/pi-notes-')),root=join(base,'a'.repeat(48)),dir=join(root,'agent');
+  await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
+  const calls=[{name:'write_file',args:{path:'../notes/repository.md',content:'Review experience'}},
+    {name:'write_file',args:{path:'tracked.md',content:'forbidden'}},{name:'finish_review',args:{summary:'Done'}}];
+  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:'a'.repeat(48),system:'Review fixture',prompt:JSON.stringify(calls),tools:['write_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
+  const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
+  await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
+  const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
+  t.after(async()=>{child.kill('SIGKILL');await closed;});
+  assert.equal((await closed)[0],0);
+  assert.equal(await readFile(join(base,'project-notes/repository.md'),'utf8'),'Review experience');
+  await assert.rejects(readFile(join(root,'repo/tracked.md')),/ENOENT/);
+  const events=(await readFile(join(dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(events.find(e=>e.type==='tool'&&e.arguments?.path==='tracked.md').result.error,'review_repository_write_forbidden');
 });

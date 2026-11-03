@@ -65,7 +65,7 @@ function tablesWith(store, column) {
   return store.all("SELECT name FROM sqlite_master WHERE type='table'").map(row => row.name).filter(name => store.all(`PRAGMA table_info(${name})`).some(c => c.name === column));
 }
 
-test('a project whose repository GitHub answers 404 for is deleted with its records; its computer goes, its volumes and audit stay', async t => {
+test('a project whose repository GitHub answers 404 for is deleted with its records; its computer goes, its work volumes and audit stay', async t => {
   const github = await fakeGitHub(t), env = managerFixture(t), running = new Map(), engine = { working: id => running.has(id) ? [running.get(id)] : [], api: async () => undefined };
   let sync; const h = await harness(t, env.manager, store => ({ installations: sync = new InstallationSync(store, github.url), engine }));
   const { admin } = await setup(h), a = await account(admin), now = new Date().toISOString();
@@ -74,7 +74,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   assert.deepEqual([env.projects.get('101').state, env.projects.get('202').state], ['ready', 'ready']);
   // A reset leaves the first generation's volume behind; deletion must not remove it either.
   assert.equal((await admin('/api/environments/101/reset', 'POST', { operation_id: random(), generation: 1 })).status, 201);
-  assert.equal(env.docker.volumes.size, 3);
+  assert.equal(env.docker.volumes.size, 5);
 
   // Records that belong only to 101, next to the same kinds of records for 202.
   const shared = (await admin('/api/models', 'POST', { repository_id: null, api_url: 'https://model.invalid/v1', api_key: testPassword(), model_name: 'shared' })).value.model;
@@ -133,11 +133,11 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   assert.deepEqual(h.store.all('SELECT repository_id FROM model_projects WHERE model_id=?', shared.id).map(r => r.repository_id), ['202']);
   assert.deepEqual(h.store.all('SELECT repository_id FROM project_admin_assignments WHERE user_id=?', member.id).map(r => r.repository_id), ['202']);
   assert.ok(h.store.get('SELECT 1 FROM board_fields WHERE id=?', field.id));
-  // The existing environment deletion ran: containers and networks of both generations went, no volume was removed.
+  // The existing environment deletion ran: containers and networks of both generations went; only the stable notes volume was removed.
   assert.equal(env.projects.get('101').state, 'deleted');
   assert.ok(env.docker.calls.includes('DELETE /containers/' + env.projects.names('101', 1).container));
   assert.ok(env.docker.calls.includes('DELETE /containers/' + env.projects.names('101', 2).container));
-  assert.ok(!env.docker.calls.some(call => call.startsWith('DELETE /volumes')));
+  assert.deepEqual(env.docker.calls.filter(call => call.startsWith('DELETE /volumes')), ['DELETE /volumes/' + env.projects.notesName('101')]);
   assert.deepEqual([...env.docker.volumes.keys()].filter(name => name.includes('-101-')).sort(), [env.projects.names('101', 1).volume, env.projects.names('101', 2).volume]);
   assert.ok(![...env.docker.networks.keys()].some(name => name.includes('-101-')));
   assert.ok(env.docker.containers.has(env.projects.names('202', 1).container));
@@ -394,7 +394,7 @@ test('deletions confirm in the console dialog, which shows the check and a refus
   remove();
   assert.equal(view.open, true);
   assert.deepEqual(texts('h2'), ['删除项目 fixture/project-202？']);
-  assert.ok(texts('li').includes('虚拟电脑的容器和网络会去掉')); assert.ok(texts('li').some(line => line.startsWith('工作卷按现有环境删除保留')));
+  assert.ok(texts('li').includes('虚拟电脑的容器和网络、项目长期笔记及其卷会删除')); assert.ok(texts('li').some(line => line.startsWith('工作卷按现有环境删除保留')));
   assert.deepEqual([buttons().map(b => b.textContent), buttons()[1].className], [['取消', '删除'], 'danger']);
   assert.equal(buttons()[0].ownerFocus, true);
   buttons()[0].listeners.click[0](); await settle();
@@ -411,7 +411,7 @@ test('deletions confirm in the console dialog, which shows the check and a refus
   assert.equal(deletes(), 2);
 });
 
-test('a started project row deletes only the control-plane records, never GitHub, from the console dialog', async () => {
+test('a started project row removes the project from this system, never GitHub, from the console dialog', async () => {
   const listing = [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true, registered: true, enabled: true, review_enabled: true,
     development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {

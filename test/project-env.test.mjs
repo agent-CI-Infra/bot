@@ -21,7 +21,7 @@ function fixture(t) {
 }
 test('one persistent environment per repository and fully owned resources only', async t => {
   const f = fixture(t); await Promise.all(Array.from({ length: 5 }, () => f.projects.register('101')));
-  assert.equal(f.docker.containers.size, 1); assert.equal(f.docker.volumes.size, 1); assert.equal(f.projects.get('101').state, 'ready');
+  assert.equal(f.docker.containers.size, 1); assert.equal(f.docker.volumes.size, 2); assert.equal(f.projects.get('101').state, 'ready');
   const name = f.projects.names('101', 1).container;
   f.docker.containers.get(name).Config.Labels['department.bot.repository'] = '202';
   await assert.rejects(f.projects.operate('101', 'stop', { operation_id: id(), generation: 1 }), /resource_ownership_mismatch/);
@@ -31,14 +31,14 @@ test('reset fences the generation, preserves old volume, and never starts two wr
   const f = fixture(t); await f.projects.register('101');
   const request = { operation_id: id(), generation: 1 };
   const result = await f.projects.operate('101', 'reset', request);
-  assert.equal(result.generation, 2); assert.equal(f.docker.volumes.size, 2);
+  assert.equal(result.generation, 2); assert.equal(f.docker.volumes.size, 3);
   assert.equal(f.docker.containers.get(f.projects.names('101', 1).container).State.Running, false);
   assert.equal([...f.docker.containers.values()].filter(c => c.State.Running).length, 1);
   assert.deepEqual(await f.projects.operate('101', 'reset', request), { ...result });
   await assert.rejects(f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'command', command: 'true' } }), /stale_generation/);
   await f.projects.operate('101', 'stop', { operation_id: id(), generation: 2 });
   await f.projects.operate('101', 'delete', { operation_id: id(), generation: 2 });
-  assert.equal(f.docker.containers.size, 0); assert.equal(f.docker.networks.size, 0); assert.equal(f.docker.volumes.size, 2);
+  assert.equal(f.docker.containers.size, 0); assert.equal(f.docker.networks.size, 0); assert.equal(f.docker.volumes.size, 3);
 });
 test('failed and interrupted resets remain failed and cannot silently start the old workspace', async t => {
   const f = fixture(t); await f.projects.register('101'); f.docker.failNetwork = true;
@@ -108,7 +108,7 @@ test('the project computer spec is validated by the manager, survives restarts a
   assert.deepEqual([host.NanoCpus, host.Memory, host.PidsLimit, host.Tmpfs['/tmp'].includes(`size=${128 * 1024 * 1024}`)], [5e8, 1024 * 1024 * 1024, 256, true]);
   assert.equal(f.docker.networks.get(f.projects.names('101', 1).network).Internal, true);
   assert.equal(result.computer.network_policy, 'internal, no egress'); assert.equal(f.docker.created, created + 1);
-  assert.equal(f.docker.containers.get(name).State.Running, true); assert.equal(f.docker.volumes.size, 1);
+  assert.equal(f.docker.containers.get(name).State.Running, true); assert.equal(f.docker.volumes.size, 2);
   f.restart(); assert.equal(f.projects.spec('101').memory_mb, 1024);
   await f.projects.provision('101'); assert.equal(f.docker.created, created + 1);
 });

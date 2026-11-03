@@ -6,11 +6,15 @@ import { createHash } from 'node:crypto';
 import { command,environment,workspaceTag } from './command.mjs';
 import {agentOperation} from './agent.mjs';
 import { git as storeGit, storeRoot } from './store.mjs';
+import { Notes } from './notes.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
-export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=storeRoot){
+export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=storeRoot,notesRoot='/workspace/project-notes'){
   if(!/^[a-f0-9]{48}$/.test(input.workspace_id||''))throw new Error('invalid_workspace');
   const root=`${workspaceRoot}/${input.workspace_id}`,repo=root+'/repo';
+  const notes=new Notes(notesRoot),linkNotes=async()=>{
+    try{await symlink(notesRoot,root+'/notes');}catch(error){if(error.code!=='EEXIST'||await readlink(root+'/notes')!==notesRoot)throw new Error('invalid_notes_link');}
+  };
   const path=async(value,create=false)=>{
     const target=resolve(repo,safe(value));
     if(create)await mkdir(dirname(target),{recursive:true});
@@ -37,6 +41,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
   });
   if(input.type==='workspace_init'){
     await mkdir(repo,{recursive:true});
+    await linkNotes();
     if(input.author_email){if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(input.author_email))throw new Error('invalid_author_email');await writeFile(authorFile,JSON.stringify({email:input.author_email}),{mode:0o600});author.email=input.author_email;}
     try{await writeFile(root+'/snapshot.json','{}',{flag:'wx',mode:0o600});}catch(e){if(e.code!=='EEXIST')throw e;}
     return {initialized:true};
@@ -45,6 +50,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
   if(input.type==='workspace_checkout'){
     if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_commit');
     await mkdir(root,{recursive:true});
+    await linkNotes();
     if(input.author_email){if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(input.author_email))throw new Error('invalid_author_email');await writeFile(authorFile,JSON.stringify({email:input.author_email}),{mode:0o600});}
     // An existing directory counts only as a worktree of the store at exactly this commit; anything else there, such as an
     // earlier file copy of the same tree (its own repository, without history), is replaced.
@@ -65,6 +71,11 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
   }
   if(input.type.startsWith('workspace_agent_'))return agentOperation(input,root);
   if(input.type==='workspace_write'){
+    if(typeof input.path==='string'&&input.path.startsWith('../notes/')){
+      if(input.offset!==0||input.final!==true||input.mode!=='100644'||input.snapshot||typeof input.base64!=='string')throw new Error('invalid_note_write');
+      if(input.base64.length>Math.ceil(64*1024/3)*4)throw new Error('note_file_limit_64_KiB');
+      return notes.write(safe(input.path.slice(9)),Buffer.from(input.base64,'base64').toString('utf8'));
+    }
     if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
     const data=Buffer.from(input.base64,'base64'),target=await path(input.path,true);
     const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
@@ -92,6 +103,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
     return {tree_sha:tree,local_sha:commit};
   }
   if(input.type==='workspace_read'){
+    if(typeof input.path==='string'&&input.path.startsWith('../notes/'))return notes.read(safe(input.path.slice(9)));
     const asked=String(input.path||''),target=asked.startsWith('../context/')?await contextPath(asked.slice(11)):await path(asked),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
     try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
   }

@@ -7,6 +7,7 @@ import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { ownComputer } from '../rules/service.js';
+import { Redactor } from '../agent/common.js';
 
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
@@ -116,19 +117,44 @@ export class ProjectService {
     }
   }
   // Deleting a project runs the existing environment deletion: the containers and networks of every generation go, and the
-  // work volumes stay, including those an earlier reset left behind. A project without a manager record has nothing to delete.
+  // work volumes stay, including those an earlier reset left behind; the project notes volume goes with the project.
   // The project stays marked as being deleted until endRemoval, also when this throws.
-  async removeEnvironment(id: string, waitMs = 120_000): Promise<void> {
+  async removeEnvironment(id: string, waitMs = 120_000, deleteNotes = false): Promise<void> {
     this.removing.add(id);
     const step = this.working.get(id);
     if (step) { let timer: ReturnType<typeof setTimeout> | undefined; await Promise.race([step.catch(() => {}), new Promise(r => { timer = setTimeout(r, waitMs); })]); clearTimeout(timer); }
     const state = await this.manager.call('GET', '/v1/projects/' + id);
-    if (!state || state.state === 'deleted') return;
-    const input = { operation_id: randomId(), generation: state.generation };
+    if (!state) return;
+    const input = { operation_id: randomId(), generation: state.generation, ...(deleteNotes ? { request: { delete_notes: true } } : {}) };
     this.store.run("INSERT INTO environment_operations VALUES(?,?,?,?,'pending',NULL)", input.operation_id, id, 'delete', JSON.stringify(input));
     await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
   }
   endRemoval(id: string): void { this.removing.delete(id); }
+  private async notesApi(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
+    const match = /^\/api\/repositories\/([^/]+)\/notes(?:\/([^/]+))?$/.exec(url.pathname);
+    if (!match) return undefined;
+    const id = match[1]!, name = match[2]; repository(this.store, user, id);
+    const repo = this.store.get('SELECT * FROM repositories WHERE id=?', id)!;
+    if (this.removing.has(id)) fail(409, 'repository_deleting');
+    if (!['GET','PUT','DELETE'].includes(method) || method !== 'GET' && !name) fail(404, 'not_found');
+    if (name && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.md$/.test(name)) fail(400, 'invalid_note_name');
+    fields(input, method === 'PUT' ? ['content'] : []);
+    if (method === 'PUT') {
+      const content = input.content;
+      if (typeof content !== 'string') return fail(400, 'invalid_note_content');
+      if (Buffer.byteLength(content) > 64 * 1024) fail(400, 'note_file_limit_64_KiB');
+      const redactor = new Redactor(), add = (value: unknown): void => { if (value && typeof value === 'object') Object.values(value).forEach(add); else redactor.add(value); };
+      // The page knows the same stored credentials as task execution; refuse, never save a masked replacement.
+      const account = this.store.get('SELECT * FROM accounts WHERE id=?', repo.account_id);
+      if (account) add(this.store.secrets.open(account.credentials, `account:${account.id}`));
+      for (const model of this.store.all('SELECT id,api_key FROM models WHERE api_key IS NOT NULL')) add(this.store.secrets.open(model.api_key, `model:${model.id}`));
+      for (const endpoint of this.store.all('SELECT id,secret FROM endpoints WHERE account_id=?', repo.account_id)) add(this.store.secrets.open(endpoint.secret, `endpoint:${endpoint.id}`));
+      if (redactor.contains(Buffer.from(content))) fail(400, 'credential_in_notes');
+    }
+    const result = await this.manager.call(method, `/v1/projects/${id}/notes${name ? '/' + name : ''}`, method === 'PUT' ? { content: input.content } : undefined);
+    if (method !== 'GET') this.store.audit(user.id, method === 'PUT' ? 'notes.written' : 'notes.deleted', name!, id);
+    return result;
+  }
   private async send(op: Row): Promise<Json> {
     try {
       // Starting, resetting, reconfiguring or refreshing may build a package image and run the setup script: allow up to 35 minutes.
@@ -175,6 +201,7 @@ export class ProjectService {
       task_concurrency: repositoryConcurrency(this.store, id), tasks:withTaskMetrics(this.store,tasks), commands };
   }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
+    const notes = await this.notesApi(user, method, url, input); if (notes) return notes;
     if (!url.pathname.startsWith('/api/environments')) return undefined;
     if (url.pathname === '/api/environments' && method === 'GET') {
       const clauses = [scope(user, 'r.id').sql], args = [...scope(user, 'r.id').args];
