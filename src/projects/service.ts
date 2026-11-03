@@ -12,23 +12,32 @@ import { Redactor } from '../agent/common.js';
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
 export class ManagerClient implements Manager {
+  private readonly failures = new FailureLog('manager');
   constructor(private readonly url: string, private readonly token: Buffer) {}
+  private report(error: unknown, stage: string, timedOut: boolean): void {
+    // Never log the URL, exception message, request or response: all may contain credentials or project data.
+    const name = error instanceof Error && ['Error', 'TypeError', 'SyntaxError', 'AbortError', 'TimeoutError'].includes(error.name) ? error.name : 'Error';
+    const code = (error as NodeJS.ErrnoException)?.code;
+    const safeCode = typeof code === 'string' && /^(?:E[A-Z0-9_]{1,40}|ERR_[A-Z0-9_]{1,40})$/.test(code) ? code : 'none';
+    this.failures.report('request', `target=manager stage=${stage} name=${name} code=${safeCode} timeout=${timedOut}`);
+  }
   async call(method: string, path: string, input?: Json, timeoutMs = 90000) {
     // node:http rather than fetch: fetch stops waiting for response headers after 5 minutes, and the manager answers a command only when it ends.
     const url = new URL(this.url + path), body = input ? JSON.stringify(input) : undefined;
-    let status: number, text: string;
+    let status: number, text: string, timedOut = false;
     try {
       ({ status, text } = await new Promise<{ status: number, text: string }>((resolve, reject) => {
         const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, { method,
           headers: { Authorization: 'Bearer ' + this.token.toString('base64'), 'Content-Type': 'application/json', ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}) } }, res => {
-          const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk)); res.on('error', reject);
+          const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk)); res.on('error', error => { clearTimeout(timer); reject(error); });
           res.on('end', () => { clearTimeout(timer); resolve({ status: res.statusCode || 0, text: Buffer.concat(chunks).toString() }); });
         });
-        const timer = timeoutMs ? setTimeout(() => req.destroy(new Error('manager_timeout')), timeoutMs) : undefined;
+        const timer = timeoutMs ? setTimeout(() => { timedOut = true; req.destroy(Object.assign(new Error('manager_timeout'), { code: 'ETIMEDOUT' })); }, timeoutMs) : undefined;
         req.on('error', error => { clearTimeout(timer); reject(error); }); req.end(body);
       }));
-    } catch { return fail(503, 'manager_unavailable'); }
-    let value: Json; try { value = JSON.parse(text); } catch { return fail(503, 'manager_unavailable'); }
+    } catch (error) { this.report(error, 'request', timedOut); return fail(503, 'manager_unavailable'); }
+    let value: Json; try { value = JSON.parse(text); } catch (error) { this.report(error, 'response_json', false); return fail(503, 'manager_unavailable'); }
+    this.failures.clear('request');
     if (status < 200 || status >= 300) fail(status, typeof value.error === 'string' ? value.error : 'manager_unavailable');
     return value.result;
   }
@@ -114,6 +123,8 @@ export class ProjectService {
       if (!['failed', 'reset_failed'].includes(state.state)) this.failures.clear('project ' + repo.id);
     } catch (error) { /* The environment page retains a visible fault instead of claiming readiness. */
       this.failures.report('project ' + repo.id, error);
+      // Recovery is a temporary fence, not a new durable fault of this project's computer.
+      if (error instanceof HttpError && error.code === 'manager_not_ready') return;
       if (this.removing.has(repo.id) || !this.store.get('SELECT 1 FROM repositories WHERE id=?', repo.id)) return;
       // A manager that answered with its own code has saved what failed (a stopped or failed computer and its code);
       // that state is shown as it is. Only a manager that could not be reached marks the environment unavailable.
@@ -178,6 +189,8 @@ export class ProjectService {
         }
       }); return result;
     } catch (error) {
+      // No project operation ran during recovery. Keep the intention pending with its original id for the next pass.
+      if (error instanceof HttpError && error.code === 'manager_not_ready') throw error;
       // A timeout may mean the operation completed. Leave it pending and reconcile the same id.
       const state = await this.manager.call('GET', `/v1/projects/${op.repository_id}`).catch(() => null);
       if (state) this.save(state);
