@@ -87,6 +87,23 @@ test('a write GitHub answered with 500 pauses as unconfirmed, and 重试 sends i
   assert.equal(h.store.get("SELECT state FROM github_effects WHERE task_id=? AND kind='comment'",h.taskId).state,'sent');
 });
 
+test('a write that shows up on GitHub only after the pause is found by 重试 and not sent again',async t=>{
+  let fail=true,hidden=true;
+  const h=await emptyRepositoryFixture(t,{github(path,send,res,body){
+    if(!path.endsWith('/issues/1/comments'))return false;
+    // GitHub's listing lags behind the write until the pause is over.
+    if(res.req.method==='GET'&&hidden){send([]);return true;}
+    if(!fail||res.req.method!=='POST')return false;
+    fail=false;h.comments.push({id:1,body:body.body,user:{id:999},html_url:'https://github.invalid/comment/1'});send({message:'Server Error'},500);return true;
+  }});h.setBranch('ready');
+  assert.equal((await h.run()).status,'retry_wait');
+  h.due();let task=await h.run();assert.deepEqual([task.status,task.error_code,h.comments.length],['waiting_publication','github_publication_unknown',1]);
+  hidden=false;
+  assert.equal((await h.admin('/api/tasks/'+h.taskId+'/retry','POST',{})).status,201);
+  await Promise.all(h.engine.active.values());task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);
+  assert.deepEqual([task.status,h.comments.length],['succeeded',1]);
+});
+
 test('a write that landed despite a 500 is found on retry and never sent twice',async t=>{
   let fail=true;
   const h=await emptyRepositoryFixture(t,{github(path,send,res,body){

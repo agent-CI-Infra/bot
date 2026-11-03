@@ -36,6 +36,14 @@ const builtinResources: Record<string, number> = { cpus: 2, memory_mb: 4096, pid
 export function ownComputer(live: any): Record<string, unknown> {
   return Object.fromEntries(computerKeys.filter(key => live?.[key] !== undefined && !live.inherited?.includes(key)).map(key => [key, live[key]]));
 }
+// What applying the rules sends to the manager: the effective computer, plus null for every resource the computer still
+// sets as its own although neither the console nor the repository file does (a line removed from .bot/computer.yaml
+// after it was applied), so that resource follows the global default again. Empty when the computer already matches.
+export function computerRequest(effective: Record<string, unknown>, live: any): Record<string, unknown> | null {
+  const dropped = Array.isArray(live?.inherited) ? Object.keys(builtinResources).filter(key => effective[key] === undefined && live[key] !== undefined && !live.inherited.includes(key)) : [];
+  const changed = dropped.length || Object.entries(effective).some(([key, value]) => JSON.stringify(live?.[key]) !== JSON.stringify(value));
+  return changed ? { ...effective, ...Object.fromEntries(dropped.map(key => [key, null])) } : null;
+}
 // The project's skills as the agent finds them: a name, what the skill is for (its front matter description, or its first
 // line), and where its full text is in the task context. The agent reads a skill when it does the job the skill describes.
 export function skillIndex(rows: { path: string, source: string, effective: string }[]) {
@@ -47,7 +55,7 @@ export function skillIndex(rows: { path: string, source: string, effective: stri
   });
 }
 export function resolveRules(policy: Row, files: Record<string, string>, computer: any = {}) {
-  if(Object.keys(files).filter(skillPath).length>32)fail(400,'too_many_bot_skills');
+  const skills=Object.keys(files).filter(skillPath).length;if(skills>32)ruleError('too_many_bot_skills',`.agents/skills/ 下共有 ${skills} 份 SKILL.md，最多 32 份`);
   const repositoryRules=Object.entries(files).filter(([path])=>rulePath(path));
   // A NUL byte means the file is not text; it is rejected, not read as missing, also when an older version cached it.
   const binary=repositoryRules.find(([,content])=>content.includes('\0'));if(binary)ruleError('invalid_rule_content',`${binary[0]} 不是文本文件（含 NUL 字节）`);
@@ -70,25 +78,25 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
         delete value.max_command_minutes;
         if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error();
         effectiveComputer = { ...consoleComputer, ...value }; effective = JSON.stringify(effectiveComputer, null, 2);
-      } catch { return fail(400, 'invalid_bot_computer'); }
+      } catch { return ruleError('invalid_bot_computer', `${Object.hasOwn(files, path) ? '仓库' : '控制台'}的 ${path} 不是映射，或写了不支持的字段（只支持 ${allowed.join('、')}）`); }
     }
     rows.push({ path, layers, source: layers.at(-1)!.source, effective });
   }
   for (const [path, content] of Object.entries(files).filter(([path]) => skillPath(path))) rows.push({ path, source: 'repository', layers: [{ source: 'repository', content }], effective: content });
   const effective = (path: string) => rows.find(r => r.path === path)!.effective;
-  return { files: rows, computer: effectiveComputer, review_label: declaredLabel(effective('.bot/rules/labels.md'), 'review_label'),
-    development_label: declaredLabel(effective('.bot/rules/issue-development.md'), 'development_label') || defaultDevelopmentLabel };
+  return { files: rows, computer: effectiveComputer, review_label: declaredLabel(effective('.bot/rules/labels.md'), 'review_label', '.bot/rules/labels.md'),
+    development_label: declaredLabel(effective('.bot/rules/issue-development.md'), 'development_label', '.bot/rules/issue-development.md') || defaultDevelopmentLabel };
 }
 // Automatic development needs this label on the Issue, applied by a person. A development rule without the line keeps
 // the built-in name, so replacing the rule text can never switch the requirement off.
 export const defaultDevelopmentLabel = 'bot-develop';
 // The first `key: value` line of a rule file; a JSON string keeps the exact characters. The value ends with its line:
 // `key:` alone declares an empty label rather than taking the next line.
-function declaredLabel(text: string, key: string) {
+function declaredLabel(text: string, key: string, path: string) {
   const raw = new RegExp(`^${key}:[ \\t]*(.*)$`, 'm').exec(text)?.[1]?.trim();
   let label = raw || '';
-  try { if (raw?.startsWith('"')) label = JSON.parse(raw); } catch { return fail(400, 'invalid_bot_label'); }
-  if (label.length > 50 || label !== label.trim() || /\p{Cc}/u.test(label)) fail(400, 'invalid_bot_label');
+  try { if (raw?.startsWith('"')) label = JSON.parse(raw); } catch { return ruleError('invalid_bot_label', `${path} 的 ${key} 不是合法的 JSON 字符串`); }
+  if (label.length > 50 || label !== label.trim() || /\p{Cc}/u.test(label)) ruleError('invalid_bot_label', `${path} 的 ${key} 不合法（最长 50 个字符，首尾不能有空白，不能含控制字符）`);
   return label;
 }
 // The development label from the saved rule layers, without calling GitHub or the manager.
@@ -97,8 +105,8 @@ export function developmentLabel(store: Store, repositoryId: string) {
   const saved = store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?', repositoryId);
   const files = saved ? JSON.parse(saved.files) : {}, overrides = JSON.parse(policy?.rule_overrides || '{}');
   const text = Object.hasOwn(files, path) ? files[path] : Object.hasOwn(overrides, path) ? overrides[path] : defaults[path]!;
-  if (text.includes('\0')) fail(400, 'invalid_rule_content');
-  return declaredLabel(text, 'development_label') || defaultDevelopmentLabel;
+  if (text.includes('\0')) ruleError('invalid_rule_content', `${path} 不是文本文件（含 NUL 字节）`);
+  return declaredLabel(text, 'development_label', path) || defaultDevelopmentLabel;
 }
 export class RuleService {
   constructor(readonly store: Store, readonly manager?: Manager, readonly githubUrl?: string) {
@@ -133,7 +141,7 @@ export class RuleService {
     const listing = mirror?.has(sha) ? await mirror.listing(sha) : null, cached = !!listing;
     const tree = listing ?? await repositoryTree(github, (await github.request('GET', github.path('/git/commits/' + sha))).tree.sha);
     const entries = tree.tree.filter((f: any) => rulePath(f.path));
-    if (entries.length > 38) fail(400, 'too_many_bot_skills'); const files: Record<string, string> = {};
+    if (entries.length > 38) ruleError('too_many_bot_skills', `.bot/ 和 .agents/skills/ 下共有 ${entries.length} 个规则文件，SKILL.md 最多 32 份`); const files: Record<string, string> = {};
     for (const file of entries) {
       if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode)) ruleError('invalid_bot_rule_file', `${file.path} 不是普通文件（符号链接或子模块）`);
       const data = (cached ? await mirror!.blob(file.sha) : null) ?? Buffer.from((await github.request('GET', github.path('/git/blobs/' + file.sha))).content, 'base64');
@@ -170,7 +178,7 @@ export class RuleService {
       const live = await this.manager!.call('GET', '/v1/projects/' + id), rules = await this.view(id);
       if (!live) fail(409, 'environment_not_ready');
       this.rememberComputer(id,live.computer);
-      const result = await this.manager!.call('POST', `/v1/projects/${id}/configure`, { operation_id: (await import('../core/security.js')).randomId(), generation: live.generation, request: rules.computer }, 35 * 60000);
+      const result = await this.manager!.call('POST', `/v1/projects/${id}/configure`, { operation_id: (await import('../core/security.js')).randomId(), generation: live.generation, request: computerRequest(rules.computer, live.computer) ?? rules.computer }, 35 * 60000);
       this.store.audit(user.id, 'rules.computer_applied', id, id); return { environment: result };
     }
     return fail(404, 'not_found');

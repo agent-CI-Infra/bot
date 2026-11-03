@@ -25,19 +25,20 @@ test('GitHub distinguishes rate limits from permissions and retains only a short
   server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
   const github=new GitHub(null,{},redactor,async()=>{},'http://127.0.0.1:'+server.address().port);github.token=token;
   const cases=[
-    {status:403,body:{message:'You have exceeded a secondary rate limit.'},code:'github_rate_limited',delay:60000},
+    // Without a time from GitHub there is no delay here: the engine backs off on its own (a minute, then doubling).
+    {status:403,body:{message:'You have exceeded a secondary rate limit.'},code:'github_rate_limited'},
     {status:403,body:{message:'API rate limit exceeded'},headers:{'Retry-After':'90'},code:'github_rate_limited',delay:90000},
-    {status:403,body:{message:'Forbidden'},headers:{'X-RateLimit-Remaining':'0'},code:'github_rate_limited',delay:60000},
+    {status:403,body:{message:'Forbidden'},headers:{'X-RateLimit-Remaining':'0'},code:'github_rate_limited'},
     {status:403,body:{message:'You have triggered an abuse detection mechanism.'},headers:{'Retry-After':'900'},code:'github_rate_limited',delay:900000},
-    // GitHub's own wait is honored however long it is; only an unreadable one falls back to a minute.
+    // GitHub's own wait is honored however long it is; an unreadable one counts as none.
     {status:429,body:{message:'Rate limit exceeded'},headers:{'Retry-After':'901'},code:'github_rate_limited',delay:901000},
-    {status:429,body:{message:'Slow down'},headers:{'Retry-After':'invalid'},code:'github_rate_limited',delay:60000},
+    {status:429,body:{message:'Slow down'},headers:{'Retry-After':'invalid'},code:'github_rate_limited'},
     {status:403,body:{message:'Resource not accessible by integration'},code:'github_permission_403'},
     {status:401,body:{message:'Bad credentials'},code:'github_permission_401'},
     {status:404,body:{message:'Not Found'},code:'github_permission_404'},
   ];
   for(const item of cases){reply=item;await assert.rejects(github.snapshotBlob('a'.repeat(40)),error=>{
-    assert.equal(error.code,item.code);assert.equal(error.state,item.delay?'retry_wait':'waiting_permission');assert.ok(error.detail.includes(item.body.message));assert.equal(error.retryAfterMs,item.delay);return true;
+    assert.equal(error.code,item.code);assert.equal(error.state,item.code==='github_rate_limited'?'retry_wait':'waiting_permission');assert.ok(error.detail.includes(item.body.message));assert.equal(error.retryAfterMs,item.delay);return true;
   });}
   reply={status:403,body:{message:`Resource not accessible by integration ${token} ${otherToken} fixture-model-key\nAuthorization: Bearer unexpected-secret`,extra:'whole-response-must-not-be-logged'}};
   await assert.rejects(github.snapshotBlob('a'.repeat(40)),error=>{
@@ -101,8 +102,9 @@ test('rate limits are waited out without using up retries, as long as GitHub ask
   const reads=blobReads;assert.match(await attempt(50000,65000),/未发送/);assert.equal(blobReads,reads);
   elapse();retryAfter='120';await attempt(120000,125000);
   elapse();retryAfter='901';await attempt(901000,906000);
-  // However often it happens, a rate limit never fails the task.
-  for(let more=0;more<3;more++){elapse();retryAfter=undefined;await attempt(60000,65000);}
+  // However often it happens, a rate limit never fails the task. Without a time from GitHub the wait doubles from a minute;
+  // after four stops in a row it is at its 15-minute cap.
+  for(let more=0;more<3;more++){elapse();retryAfter=undefined;assert.match(await attempt(900000,905000),/GitHub 未给出恢复时间/);}
   assert.equal(h.store.get("SELECT status FROM tasks WHERE id='old-pause'").status,'waiting_permission');
   await withBusyComputer(h,async()=>{
     assert.equal((await h.admin('/api/tasks/'+h.taskId+'/retry','POST',{})).status,201);

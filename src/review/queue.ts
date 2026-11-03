@@ -37,12 +37,17 @@ const clip = (value: unknown, limit = 4000) => { const text = String(value ?? ''
 // own triggers; drafts, closed objects and the bot's own writing never trigger.
 export function updateTrigger(event: string, payload: Json): { kind: 'review.issue' | 'review.pr', number: number, pullRequest?: Json, trigger: Json } | null {
   const p = payload as any, action = p.action, actor = String(p.sender?.login || ''), edited = (changes: any) => ['title', 'body'].filter(key => changes && key in changes);
+  // Anyone can comment on a public repository: a comment or review counts only from the object's author or from someone
+  // with a role in the repository, so strangers cannot spend the model budget. Editing a title or body on GitHub already
+  // takes one of those.
+  const trusted = (association: unknown, author: any) => ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(String(association))
+    || author?.id != null && String(author.id) === String(p.sender?.id ?? '');
   const open = (object: any) => object?.state === 'open' && object.draft !== true && Number.isSafeInteger(object.number) && object.number > 0;
   if (event === 'issues' && action === 'edited' && open(p.issue) && !p.issue.pull_request && edited(p.changes).length && !byBot(p, null))
     return { kind: 'review.issue', number: p.issue.number, trigger: { reason: 'issue_edited', actor, changed: edited(p.changes),
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
   if (event === 'issue_comment' && action === 'created' && p.issue?.state === 'open' && Number.isSafeInteger(p.issue.number) && p.issue.number > 0
-    && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body))
+    && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body) && trusted(p.comment.author_association, p.issue.user))
     return { kind: p.issue.pull_request ? 'review.pr' : 'review.issue', number: p.issue.number, trigger: { reason: 'comment', actor, url: String(p.comment.html_url || '') } };
   const pr = p.pull_request;
   // A bot account editing its own PR description is the bot, even though GitHub reports a user.
@@ -50,11 +55,12 @@ export function updateTrigger(event: string, payload: Json): { kind: 'review.iss
     && !(String(pr.user?.id ?? '') === String(p.sender?.id ?? '') && botMarker.test(String(pr.body ?? ''))))
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'pull_request_edited', actor, changed: edited(p.changes),
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
-  if (event === 'pull_request_review_comment' && action === 'created' && open(pr) && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body))
+  if (event === 'pull_request_review_comment' && action === 'created' && open(pr) && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body)
+    && trusted(p.comment.author_association, pr.user))
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: p.comment.in_reply_to_id ? 'review_reply' : 'review_comment', actor,
       url: String(p.comment.html_url || ''), path: String(p.comment.path || ''), line: p.comment.line ?? null } };
   // Every reply to a review thread also arrives as a review without a body; that one is the comment event above.
-  if (event === 'pull_request_review' && action === 'submitted' && open(pr) && !byBot(p, p.review?.body)
+  if (event === 'pull_request_review' && action === 'submitted' && open(pr) && !byBot(p, p.review?.body) && trusted(p.review?.author_association, pr.user)
     && (String(p.review?.body || '').trim() || p.review?.state === 'changes_requested'))
     return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'review_submitted', actor, state: String(p.review.state || ''),
       body: clip(p.review.body), url: String(p.review.html_url || '') } };
@@ -69,14 +75,20 @@ export function pullRequestNeeded(store: Store, repositoryId: string, event: str
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   return !!policy?.enabled && !!policy.review_enabled && updateTrigger(event, payload)?.kind === 'review.pr' && updateEnabled(policy, 'review.pr');
 }
-// Updates arriving close together review once: while a review of the object waits to start, it will read the latest state anyway.
+// Updates arriving close together review once: while a review of the object waits to start, it will read the latest state
+// anyway, and is given the updates that joined it.
 const waitingStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment'];
 function queueUpdate(store: Store, repositoryId: string, policy: any, event: string, payload: Json, delivery: string, currentPullRequest?: Json) {
   const update = updateTrigger(event, payload);
   if (!update || !updateEnabled(policy, update.kind)) return 0;
-  const pending = store.get(`SELECT 1 FROM tasks WHERE repository_id=? AND kind=? AND object_number=? AND status IN (${waitingStates.map(() => '?').join(',')}) LIMIT 1`,
+  const pending = store.get(`SELECT id,input FROM tasks WHERE repository_id=? AND kind=? AND object_number=? AND status IN (${waitingStates.map(() => '?').join(',')}) ORDER BY created_at LIMIT 1`,
     repositoryId, update.kind, update.number, ...waitingStates);
-  if (pending) return 0;
+  if (pending) {
+    // The waiting review is told what happened meanwhile (the discussion it reads holds the content), up to 20 updates.
+    const waiting = JSON.parse(pending.input || '{}'), merged = Array.isArray(waiting.merged_updates) ? waiting.merged_updates : [];
+    if (merged.length < 20) store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...waiting, merged_updates: [...merged, { event, action: payload.action, ...update.trigger }] }), pending.id);
+    return 0;
+  }
   const input = { ...payload, trigger: { event, action: payload.action, ...update.trigger } };
   if (update.kind === 'review.issue') return enqueue(store, repositoryId, 'review.issue', update.number, null, input, delivery, null, null, delivery) ? 1 : 0;
   const pr = (update.pullRequest || currentPullRequest) as any;

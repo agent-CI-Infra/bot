@@ -122,6 +122,8 @@ export class Store {
       PRAGMA user_version=5;`);
     // wait_count: how many times in a row the task stopped for the same reason, so each automatic wait lasts longer.
     extend('tasks', { wait_count: 'INTEGER NOT NULL DEFAULT 0' });
+    // rate_limit_bucket: the GitHub window (github_rate_limits.bucket) that refused the task's last request, while it waits.
+    extend('tasks', { rate_limit_bucket: 'TEXT' });
     rateLimitStorage(this);
     externalStorage(this);
     boardStorage(this);

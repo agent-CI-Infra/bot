@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+// retryAfterMs: how long GitHub asked to wait, when it said; bucket: the rate-limit window that refused the request.
 export class TaskError extends Error {
-  constructor(readonly code: string, readonly state = 'failed', readonly detail?: string, readonly retryAfterMs?: number) { super(code); }
+  constructor(readonly code: string, readonly state = 'failed', readonly detail?: string, readonly retryAfterMs?: number, readonly bucket?: string) { super(code); }
 }
-export const stop = (code: string, state?: string, detail?: string, retryAfterMs?: number): never => { throw new TaskError(code, state, detail, retryAfterMs); };
+export const stop = (code: string, state?: string, detail?: string, retryAfterMs?: number, bucket?: string): never => { throw new TaskError(code, state, detail, retryAfterMs, bucket); };
 export const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 // Error responses are untrusted: keep only a short message, never headers or the whole payload.
 export async function errorBody(response:Response):Promise<any>{

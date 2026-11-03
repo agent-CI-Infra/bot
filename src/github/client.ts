@@ -88,7 +88,7 @@ export class GitHub {
     await this.guard();
     // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
     const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
-    if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now());
+    if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
     let response: Response;
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
@@ -114,7 +114,9 @@ export class GitHub {
       const requestId=response.status>=500?response.headers.get('x-github-request-id')?.match(/^[A-Za-z0-9:._-]{1,80}$/)?.[0]:undefined;
       const explain=(message:string,note='')=>this.redactor.text(`GitHub 请求 ${method} ${path} 返回 HTTP ${response.status}${note}`
         +(message?'：'+message:'')+(requestId?`（GitHub 请求 ID：${requestId}）`:''));
-      if(limited){const now=Date.now(),until=refused(this.store,window,response.headers,now);stop('github_rate_limited','retry_wait',explain(said||'rate limit exceeded',`，${utcTime(until)} 后重试`),until-now);}
+      // Without a time from GitHub the task backs off on its own (a minute, doubling up to 15 minutes).
+      if(limited){const now=Date.now(),{until,reported}=refused(this.store,window,response.headers,now);
+        stop('github_rate_limited','retry_wait',explain(said||'rate limit exceeded',reported?`，${utcTime(until)} 后重试`:'，GitHub 未给出恢复时间，稍后重试（每次等待加倍）'),reported?until-now:undefined,window?.key);}
       if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission',explain(said));
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',explain(said,'，写入结果尚未确认'));
       stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',explain(said));
@@ -144,13 +146,15 @@ export class GitHub {
     this.fullName = this.repository.full_name;
     if (account!.type === 'bot_account') {
       if (!secrets.token) stop('github_credentials_missing', 'waiting_configuration', 'GitHub 机器人账号未保存访问令牌，请重新配置凭据。'); this.token = String(secrets.token); this.redactor.add(this.token);
-      this.tokenWindow = userBucket(account!.id);
+      // The login seen last time names the window until GET /user answers, so a used-up window that stops that very
+      // request still says whose it is.
+      this.tokenWindow = userBucket(account!.id, this.store.get("SELECT owner FROM github_rate_limits WHERE bucket=? AND owner IS NOT NULL LIMIT 1", 'user:' + account!.id)?.owner ?? null);
       if (identifyActor) {
         const key = account!.id + ':' + digest(this.token), known = actors.get(key);
         if (known && Date.now() - known.at < actorTtlMs) Object.assign(this, { actorId: known.id, actorLogin: known.login });
         else { const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || ''); actors.set(key, { at: Date.now(), id: this.actorId, login: this.actorLogin }); }
         // The window is the token's user's; naming it lets the console show whose quota this is.
-        this.tokenWindow = userBucket(account!.id, this.actorLogin || null);
+        this.tokenWindow = userBucket(account!.id, this.actorLogin || this.tokenWindow.owner);
       }
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');

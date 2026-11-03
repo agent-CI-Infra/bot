@@ -8,6 +8,8 @@ import { TaskEngine } from '../dist/agent/engine.js';
 import { enqueue } from '../dist/review/queue.js';
 import { InstallationSync } from '../dist/app/installations.js';
 import { appBucket, installationBucket, userBucket, bucketName, observe, refused, blockedUntil, rateLimitView } from '../dist/github/rate-limits.js';
+import { GitHub } from '../dist/github/client.js';
+import { Redactor } from '../dist/agent/common.js';
 
 const head = 'a'.repeat(40), seconds = ms => Math.floor(ms / 1000);
 const windowHeaders = (remaining, reset, extra = {}) => ({ 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': String(remaining), 'x-ratelimit-used': String(5000 - remaining),
@@ -34,7 +36,7 @@ async function fixture(t, { computer = 'ready' } = {}) {
     if (path === '/users/fixture-app[bot]') return send({ id: 999, login: 'fixture-app[bot]' });
     if (path === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' });
     if (path === repo + '/pulls/7') {
-      if (state.secondary) return send({ message: 'You have exceeded a secondary rate limit.' }, 403, { 'retry-after': '30' });
+      if (state.secondary) return send({ message: 'You have exceeded a secondary rate limit.' }, 403, state.secondary === 'silent' ? {} : { 'retry-after': '30' });
       if (state.pullRemaining === 0) return send({ message: 'API rate limit exceeded for installation ID 55.' }, 403, windowHeaders(0, reset));
       return send({ id: 7007, number: 7, state: 'open', draft: false, title: 'Change', body: '', head: { sha: head, ref: 'feature', repo: { id: 101 } }, base: { ref: 'main' }, labels: [] }, 200, windowHeaders(state.pullRemaining, reset));
     }
@@ -63,7 +65,7 @@ async function fixture(t, { computer = 'ready' } = {}) {
 test('every response updates its window; a used-up window is waited out until it resets, without using up retries', async t => {
   const f = await fixture(t); f.state.pullRemaining = 0;
   let task = await f.run();
-  assert.deepEqual([task.status, task.error_code, task.retry_count], ['retry_wait', 'github_rate_limited', 0]);
+  assert.deepEqual([task.status, task.error_code, task.retry_count, task.rate_limit_bucket], ['retry_wait', 'github_rate_limited', 0, 'installation:55']);
   // It resumes a few seconds after the window resets, not after a fixed minute.
   // GitHub reports the reset in whole seconds.
   const resetAt = seconds(f.reset) * 1000;
@@ -96,9 +98,23 @@ test('the same wait repeated waits twice as long each time; another stop or a ma
   // A manual retry resets the counter.
   assert.equal((await f.admin(`/api/tasks/${f.h.store.get('SELECT id FROM tasks').id}/retry`, 'POST', {})).status, 201);
   assert.equal(f.h.store.get('SELECT wait_count FROM tasks').wait_count, 0);
-  // A different stop starts over: the computer is back, GitHub refuses the PR read for a moment.
-  f.state.computer = 'ready'; f.state.secondary = true;
-  const task = await f.run(); assert.deepEqual([task.error_code, task.wait_count], ['github_rate_limited', 0]);
+  // A different stop starts over: after three waits for the computer, it is back and GitHub refuses the PR read without
+  // saying for how long, so the task waits the first minute of that stop.
+  f.h.store.run("UPDATE tasks SET status='waiting_environment',error_code='environment_not_ready',wait_count=3");
+  f.state.computer = 'ready'; f.state.secondary = 'silent';
+  const before = Date.now(), task = await f.run(); assert.deepEqual([task.error_code, task.wait_count], ['github_rate_limited', 0]);
+  assert.ok(task.next_run_at >= before + 60_000 && task.next_run_at <= Date.now() + 65_000, String(task.next_run_at - before));
+});
+
+test('a rate limit without a reset time waits a minute, then twice as long each time it repeats', async t => {
+  const f = await fixture(t); f.state.secondary = 'silent'; const delays = [];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    // The minute the installation pauses has passed (the test does not wait for it).
+    f.h.store.run('UPDATE github_rate_limits SET limited_until=NULL');
+    const before = Date.now(), task = await f.run(); delays.push(Math.floor((task.next_run_at - before) / 60_000));
+    assert.deepEqual([task.status, task.retry_count], ['retry_wait', 0]);
+  }
+  assert.deepEqual(delays, [1, 2, 4, 8, 15]);
 });
 
 test('probing reads the App and installation windows without spending them, and only super administrators see them', async t => {
@@ -125,7 +141,7 @@ test('the view groups windows by account and counts the tasks waiting for each t
   const headers = remaining => new Headers(windowHeaders(remaining, now + 600_000));
   observe(h.store, appBucket(a.id), headers(4999));
   observe(h.store, installationBucket(a.id, '77', 'org-a'), headers(12));
-  const until = refused(h.store, installationBucket(a.id, '78', 'org-b'), new Headers(windowHeaders(0, now + 300_000)), now);
+  const { until, reported } = refused(h.store, installationBucket(a.id, '78', 'org-b'), new Headers(windowHeaders(0, now + 300_000)), now); assert.equal(reported, true);
   assert.equal(until, seconds(now + 300_000) * 1000);
   assert.equal(blockedUntil(h.store, installationBucket(a.id, '78'), now), until); assert.equal(blockedUntil(h.store, installationBucket(a.id, '77'), now), null);
   // A window whose reset has passed no longer blocks.
@@ -133,12 +149,37 @@ test('the view groups windows by account and counts the tasks waiting for each t
   await repository(admin, a.id, '101');
   h.store.run("UPDATE installed_repositories SET installation_id='78' WHERE repository_id='101'");
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,error_code) VALUES('w1','101','review.pr','retry_wait','',?)", 'github_rate_limited');
+  // A task counts against the window that refused it: here the App's own, not the installation its repository is on.
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,error_code,rate_limit_bucket) VALUES('w2','101','review.pr','retry_wait','',?,?)", 'github_rate_limited', 'app:' + a.id);
   const view = rateLimitView(h.store, now), buckets = view.accounts[0].buckets;
   assert.deepEqual(buckets.map(b => [b.kind, b.owner, b.windows[0].remaining, !!b.blocked_until, b.waiting_tasks]),
-    [['app', null, 4999, false, 0], ['installation', 'org-a', 12, false, 0], ['installation', 'org-b', 0, true, 1]]);
+    [['app', null, 4999, false, 1], ['installation', 'org-a', 12, false, 0], ['installation', 'org-b', 0, true, 1]]);
 });
 
 test('a window is named by whose requests share it: an App installation on an organization, or the GitHub user of a Token account', () => {
   assert.deepEqual([appBucket('a1'), installationBucket('a1', '175700149', 'openJiuwen-ai'), installationBucket('a1', '9'), userBucket('a2', 'dept-bot'), userBucket('a2')].map(bucketName),
     ['GitHub App 自身（JWT）', 'openJiuwen-ai 上的 App 安装（175700149）', 'App 安装（9）', 'Token 用户 dept-bot', 'Token 用户 （登录名未读到）']);
+});
+
+test('a Token account names its used-up window by the stored login, and probing reads the login only once', async t => {
+  const requests = [], server = createServer((req, res) => {
+    requests.push(req.url); res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/user') return res.end(JSON.stringify({ id: 77, login: 'dept-bot' }));
+    if (req.url === '/rate_limit') return res.end(JSON.stringify({ resources: { core: { limit: 5000, remaining: 4000, used: 1000, reset: seconds(Date.now() + 600_000) } } }));
+    res.statusCode = 404; res.end('{}');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = 'http://127.0.0.1:' + server.address().port;
+  let sync; const h = await harness(t, undefined, store => ({ installations: sync = new InstallationSync(store, url) }));
+  const { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  // The first probe reads the login with GET /user; later ones keep the stored one and send only GET /rate_limit.
+  await f_probe(); assert.deepEqual(requests.filter(r => r === '/user').length, 1);
+  requests.length = 0; await f_probe(); assert.deepEqual(requests, ['/rate_limit']);
+  async function f_probe() { assert.equal((await admin(`/api/accounts/${a.id}/rate-limits/probe`, 'POST', {})).status, 201); }
+  // The window is used up: the task stops before GET /user, and the message still says whose window it is.
+  h.store.run("UPDATE github_rate_limits SET remaining=0,reset_at=? WHERE bucket=?", Date.now() + 600_000, 'user:' + a.id);
+  const github = new GitHub(h.store, h.store.get("SELECT * FROM repositories WHERE id='101'"), new Redactor(), async () => {}, url);
+  requests.length = 0;
+  await assert.rejects(github.connect(false), error => { assert.match(error.detail, /^GitHub 流控：Token 用户 dept-bot本小时的请求额度已用完/); return true; });
+  assert.deepEqual(requests, []);
 });

@@ -60,9 +60,10 @@ test('the manager logs why Docker refused an operation and why a computer stoppe
 
 test('reconciliation shows the code a manager answered with, and only an unreachable manager as unavailable', async t => {
   // A stopped computer whose start fails: the manager answers with its code and records the computer as failed.
-  let reachable = true, failed = false;
+  let reachable = true, failed = false, fixed = false;
   const manager = { call: async method => {
     if (!reachable) fail(503, 'manager_unavailable');
+    if (fixed) return { repository_id: '101', generation: 1, state: 'ready', desired: 'ready', error: null, revision: 3 };
     if (method === 'POST') { failed = true; fail(503, 'approved_image_missing'); }
     return { repository_id: '101', generation: 1, state: failed ? 'failed' : 'stopped', desired: failed ? 'ready' : 'stopped', error: failed ? 'approved_image_missing' : null, revision: failed ? 2 : 1 };
   } };
@@ -73,14 +74,32 @@ test('reconciliation shows the code a manager answered with, and only an unreach
   await h.projects.reconcile(); assert.deepEqual(environment(), ['failed', 'approved_image_missing']);
   reachable = false; await h.projects.reconcile(); await h.projects.reconcile();
   assert.deepEqual(environment(), ['unavailable', 'manager_unavailable']);
-  // One line when a failure appears or changes and one when reconciling works again, however often it runs.
+  reachable = true; fixed = true; await h.projects.reconcile(); await h.projects.reconcile();
+  // One line when a failure appears or changes and one when the computer works again, however often it runs: a pass that
+  // only reads a computer the manager still reports as failed is no recovery.
   assert.deepEqual(lines.filter(line => line.startsWith('[projects] project 101')),
-    ['[projects] project 101: approved_image_missing', '[projects] project 101: works again', '[projects] project 101: manager_unavailable']);
+    ['[projects] project 101: approved_image_missing', '[projects] project 101: manager_unavailable', '[projects] project 101: works again']);
+});
+
+test('a saved computer operation the manager refused is logged once as given up and not kept as a failure', async t => {
+  const manager = { call: async method => {
+    if (method === 'POST') fail(400, 'invalid_spec');
+    return { repository_id: '101', generation: 1, state: 'ready', desired: 'ready', error: null, revision: 1 };
+  } };
+  const lines = stderr(t), h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  h.store.run("INSERT INTO environment_operations VALUES('op-1','101','configure',?,'pending',NULL)", JSON.stringify({ operation_id: 'op-1', generation: 1, request: {} }));
+  await h.projects.reconcile(); await h.projects.reconcile();
+  assert.equal(h.store.get("SELECT state FROM environment_operations WHERE id='op-1'").state, 'failed');
+  assert.deepEqual(lines.filter(line => line.includes('op-1')), ['[projects] operation configure op-1 of 101: invalid_spec (given up, not retried)']);
+  assert.equal(h.projects.failures.last.size, 0);
 });
 
 test('the machine page explains a computer fault code and where its cause is logged', () => {
   const page = loadConsole(['static/app.js', 'static/views.js'], () => [200, {}]);
   assert.equal(page.run("environmentFault('docker_operation_failed')"), 'Docker 拒绝了操作（docker_operation_failed）。原因见日志：docker compose -p bot logs manager bot');
   assert.equal(page.run("environmentFault('something_new')"), '未归类的故障（something_new）。原因见日志：docker compose -p bot logs manager bot');
+  // Codes the manager does not log point to where their cause is.
+  assert.equal(page.run("environmentFault('manager_unavailable')"), '连不上虚拟电脑管理服务（manager）（manager_unavailable）。原因见控制面日志：docker compose -p bot logs bot');
+  assert.match(page.run("environmentFault('unauthorized')"), /内部令牌不一致.*manager\.token/);
   assert.equal(page.run('environmentFault(null)'), null);
 });

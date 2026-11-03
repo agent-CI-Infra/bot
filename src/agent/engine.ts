@@ -12,7 +12,7 @@ import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { type GitCache } from './git-cache.js';
 
@@ -232,9 +232,10 @@ export class TaskEngine {
         if(!snapshot){if(mirror?.has(ref.object.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,ref.object.sha,mirror);}
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
         if(files.length>=3000)stop('pull_request_file_limit','failed',`PR #${task.object_number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
-        if(Object.entries(effectiveRules.computer).some(([key,value])=>JSON.stringify(environment.computer?.[key])!==JSON.stringify(value))){
+        const computer=computerRequest(effectiveRules.computer,environment.computer);
+        if(computer){
           this.rules.rememberComputer(task.repository_id,environment.computer);
-          environment=await this.manager.call('POST',`/v1/projects/${task.repository_id}/configure`,{operation_id:randomId(),generation:environment.generation,request:redactor.clean(effectiveRules.computer)},35*60000);
+          environment=await this.manager.call('POST',`/v1/projects/${task.repository_id}/configure`,{operation_id:randomId(),generation:environment.generation,request:redactor.clean(computer)},35*60000);
           environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         }
         const comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
@@ -261,7 +262,7 @@ export class TaskEngine {
               diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
             implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
-            ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
+            ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(development?{}:{repository_labels:labels}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
@@ -351,7 +352,8 @@ export class TaskEngine {
       const waits=current?.error_code===failure.code?Number(current?.wait_count||0)+1:0,grow=(base:number,cap:number)=>Math.min(base*2**waits,cap);
       const delay=limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
-      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,next_run_at:Date.now()+delay});
+      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
+        rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:Date.now()+delay});
       if(failure.code==='execution_interrupted'&&task.phase!=='publish'&&task.attempt<3){
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,attempt:task.attempt+1});
@@ -385,7 +387,8 @@ export class TaskEngine {
     assertOwnedPR(row,pr,github.actorId,task.repository_id);
     return row!;
   }
-  label(task:Row){try{return developmentLabel(this.store,task.repository_id);}catch(error){return stop(error instanceof HttpError&&ruleErrors.has(error.code)?error.code:'invalid_bot_label','waiting_configuration',`仓库 ${task.repository_id} 的开发标签配置无效，请检查行为规则。`);}}
+  label(task:Row){try{return developmentLabel(this.store,task.repository_id);}catch(error){const detail=(error as {detail?:string}).detail;
+    return stop(error instanceof HttpError&&ruleErrors.has(error.code)?error.code:'invalid_bot_label','waiting_configuration',`仓库 ${task.repository_id} 的开发标签配置无效${detail?'：'+detail:''}，请检查行为规则。`);}}
   // The latest time the development label was added must be by a user account, not an app, and nobody may be assigned.
   async developmentApproved(github:GitHub,task:Row){
     const label=this.label(task);
@@ -400,6 +403,10 @@ export class TaskEngine {
     if(task.kind==='review.pr'&&(input.comment||input.trigger))return;
     if(task.kind==='review.issue'){
       if(!approved||!reviewRequestsCode(input.object,result))return;
+      // Development that continues the bot's PR for this Issue revises that PR, so it counts against the same budget.
+      const owned=this.store.get(`SELECT p.revisions FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
+        WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? ORDER BY t.created_at LIMIT 1`,task.repository_id,task.object_number);
+      if(owned&&owned.revisions>=policy.max_revisions)return;
       enqueue(this.store,task.repository_id,'development.issue',task.object_number,null,{review:result,object_hash:input.object_hash},task.source_delivery_id,task.id);
     }else{
       let owned:Row;try{owned=this.owned(github,task,input.object);}catch{return;}
@@ -426,7 +433,7 @@ export class TaskEngine {
       }
       // Pressing 重试 on 发布待确认 is the confirmation the pause waits for: the write is looked up once more and,
       // only if GitHub still has no trace of it, sent again.
-      if(task.status==='waiting_publication')this.store.run("UPDATE github_effects SET state='pending' WHERE task_id=? AND state IN ('unknown','inflight')",task.id);
+      if(task.status==='waiting_publication')this.store.run("UPDATE github_effects SET state='recheck' WHERE task_id=? AND state IN ('unknown','inflight')",task.id);
       this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0 WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
     });this.tick();return {ok:true};
   }

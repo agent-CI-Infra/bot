@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import{generateKeyPairSync,randomBytes}from'node:crypto';import{readFileSync,statSync}from'node:fs';
 import{harness,setup,account,repository,testPassword}from'./helpers.mjs';
-import{Onboarding}from'../dist/onboarding/service.js';import{publicOrigin}from'../dist/onboarding/public-url.js';import{RuleService,resolveRules,defaults}from'../dist/rules/service.js';
+import{Onboarding}from'../dist/onboarding/service.js';import{publicOrigin}from'../dist/onboarding/public-url.js';import{RuleService,resolveRules,defaults,computerRequest}from'../dist/rules/service.js';
 
 test('a public origin must prove this webhook listener and cannot expose the console or redirect',async t=>{
  let onboarding,mode='webhook';const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{probe:async raw=>{const url=new URL(raw);if(url.pathname.includes('probe'))return{status:mode==='redirect'?302:200,body:JSON.stringify(onboarding.probe(url.searchParams.get('nonce'),mode==='console'?'admin':'webhook'))};return{status:mode==='split'&&url.pathname==='/api/setup'?200:404,body:'{}'};}})}));const{admin}=await setup(h);
@@ -77,6 +77,20 @@ test('review guidance and the label saved as policy fields by earlier versions m
  assert.equal(file('.bot/rules/pr-review.md').effective,'Explicit PR rule');assert.equal(rules.review_label,'legacy-label');
  const policy=h.store.get("SELECT * FROM policies WHERE repository_id='101'");assert.deepEqual([policy.review_instructions,policy.review_label],['','']);
  assert.equal(Object.keys(JSON.parse(policy.rule_overrides)).length,3);
+});
+test('a resource removed from .bot/computer.yaml after it was applied follows the global default again',async t=>{
+ // The manager reports which resources follow the default (inherited); cpus is the project's own, set by an earlier file.
+ const requests=[];let live={cpus:4,memory_mb:4096,pids:1024,tmp_mb:1024,egress:true,packages:[],inherited:['memory_mb','pids','tmp_mb']};
+ const manager={call:async(method,path,body)=>{if(method==='POST'){requests.push(body.request);return{computer:live};}return{generation:1,computer:live};}};
+ const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const rules=new RuleService(h.store,manager);rules.rememberComputer('101',{...live,cpus:2,inherited:['cpus','memory_mb','pids','tmp_mb']});rules.cache('101','a'.repeat(40),{});
+ assert.equal((await admin('/api/repositories/101/rules/apply-computer','POST',{})).status,201);
+ assert.equal(requests.at(-1).cpus,null);assert.equal(requests.at(-1).memory_mb,undefined);
+ // A file that still sets it keeps it; a computer whose resources all follow the default needs no change.
+ assert.deepEqual(computerRequest({cpus:4,egress:true},live),null);
+ assert.deepEqual(computerRequest({egress:true},{...live,cpus:2,inherited:['cpus','memory_mb','pids','tmp_mb']}),null);
+ // A manager that does not say what is inherited is never asked to clear anything.
+ assert.equal(computerRequest({egress:true},{cpus:4,egress:true}),null);
 });
 test('removing a repository computer override restores the saved console spec instead of treating the override as console input',async t=>{
  const computer={cpus:2,memory_mb:2048,packages:[]},manager={call:async()=>({computer})};const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');const rules=new RuleService(h.store,manager);rules.rememberComputer('101',{cpus:2,memory_mb:4096,packages:[]});rules.cache('101','a'.repeat(40),{'.bot/computer.yaml':'memory_mb: 2048'});assert.equal((await rules.view('101')).computer.memory_mb,2048);rules.cache('101','b'.repeat(40),{});assert.equal((await rules.view('101')).computer.memory_mb,4096);

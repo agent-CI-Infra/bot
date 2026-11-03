@@ -86,9 +86,12 @@ export class InstallationSync {
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
   private keep(token: string, bucket: Bucket): string { if (this.windows.size > 500) this.windows.clear(); if (token) this.windows.set(token, bucket); return token; }
   private appToken(account: Row, secrets: Json): string { return this.keep(appJwt(String(account.app_id), String(secrets.private_key)), appBucket(account.id)); }
-  // A Token account's window is its GitHub user's; the login is read with the token (one request) so the console can name it.
+  // A Token account's window is its GitHub user's, named by the login so the console can say whose it is. GET /user counts
+  // against that window, so it is sent only while no login is stored; tasks read the user each hour and keep it current.
   private async userToken(account: Row, secrets: Json): Promise<string> {
-    const token = this.keep(String(secrets.token), userBucket(account.id)), user = await this.request('/user', token).catch(() => null);
+    const stored = this.store.get("SELECT owner FROM github_rate_limits WHERE bucket=? AND owner IS NOT NULL LIMIT 1", 'user:' + account.id)?.owner;
+    const token = this.keep(String(secrets.token), userBucket(account.id, stored)); if (stored) return token;
+    const user = await this.request('/user', token).catch(() => null);
     return user?.login ? this.keep(token, userBucket(account.id, String(user.login))) : token;
   }
   private installationToken(account: Row, installation: Json, access: Json): string {
