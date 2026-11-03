@@ -13,7 +13,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   environment: { label:'项目电脑或运行环境', codes:['environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
     'workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
-    'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit'] },
+    'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
+    // The repository's .bot/ rule files and .agents/skills/ are the repository's to fix.
+    'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer'] },
   task_changed: { label:'任务条件已变化', codes:['object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
@@ -58,6 +60,9 @@ const codeActions: Record<string,string> = {
   revision_scope_unconfirmed:'在 PR 上给出明确的修改意见后点「重试」。',
   create_pull_request_required:'模型没有通过 create_pull_request 提交修改。点「重试」会重新开始一次尝试；反复出现可换用更强的模型。',
   agent_context_too_large:'减少仓库 bot 规则或提示文件的大小后点「重试」。',
+  // Raised only by versions that still limited rule file sizes.
+  bot_rule_too_large:'规则文件和 skill 已不再限制大小，点「重试」即可继续。',
+  too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
 };
 const causeActions: Record<FailureCause,(state:string)=>string> = {

@@ -1,12 +1,12 @@
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{createHash}from'node:crypto';import{rmSync}from'node:fs';
 import{harness,setup,account,repository}from'./helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{blobSha}from'../dist/agent/common.js';
-import{RuleService,resolveRules,developmentLabel}from'../dist/rules/service.js';
+import{RuleService,resolveRules,developmentLabel}from'../dist/rules/service.js';import{explainFailure}from'../dist/agent/failures.js';
 
 const id=value=>createHash('sha1').update(JSON.stringify(value)).digest('hex');
 // A fake GitHub repository whose branches point at commits built from {path: text | {data, mode}}, and a manager whose
 // review agent finishes at once. stopModel ends a task right after preparation, before the model runs.
 async function repositoryFixture(t,{stopModel=false}={}){
-  const blobs=new Map(),trees=new Map(),commits=new Map(),heads={},comments=[],labels=[];let engine;
+  const blobs=new Map(),trees=new Map(),commits=new Map(),heads={},comments=[],labels=[],chunks=[];let engine;
   const issue={id:1,number:1,state:'open',title:'Fix the parser',body:'Please fix the parser.',labels:[{name:'bot-develop'}],assignee:null,assignees:[]};
   const fixture={heads,comments,labels,issue,pr:null,
     commit(files){
@@ -38,6 +38,8 @@ async function repositoryFixture(t,{stopModel=false}={}){
     if(!path.endsWith('/execute'))return{repository_id:'101',state:'ready',generation:1,desired:'ready',revision:1};
     const type=body.request.type;
     if(type==='workspace_snapshot')return{ok:true,result:{tree_sha:body.request.tree_sha}};
+    // The agent configuration arrives in chunks; the last one completes it (its system prompt carries the rule files).
+    if(type==='workspace_agent_config'){chunks.push(Buffer.from(body.request.base64,'base64'));if(body.request.final){fixture.config=JSON.parse(Buffer.concat(chunks).toString());chunks.length=0;}}
     if(type==='workspace_agent_config'&&stopModel)return{ok:false,error:'fixture_stop'};
     if(type==='workspace_agent_poll')return{ok:true,result:{state:'completed',result:{summary:'Reviewed.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}}};
     return{ok:true,result:{}};
@@ -66,7 +68,7 @@ test('a label line ends with its line: an empty value is an empty label, never t
   for(const value of ['" padded"','x'.repeat(51),'"tab\\there"'])assert.throws(()=>rules({'.bot/rules/labels.md':'review_label: '+value}),{code:'invalid_bot_label'});
 });
 
-test('repository rules with NUL are rejected wherever they come from, and the console limit counts UTF-8 bytes',async t=>{
+test('repository rules with NUL are rejected wherever they come from, and console rules have no size limit of their own',async t=>{
   for(const path of ['.bot/guide.md','.bot/rules/labels.md','.agents/skills/check/SKILL.md'])assert.throws(()=>resolveRules({},{[path]:'text\0more'}),{code:'invalid_rule_content'});
   // Binary files under .bot/ that are not rule files are not rules.
   assert.equal(resolveRules({},{'.bot/logo.png':'\0PNG'}).review_label,'bot-reviewed');
@@ -79,19 +81,18 @@ test('repository rules with NUL are rejected wherever they come from, and the co
   assert.equal((await admin('/api/repositories/101/rules')).value.error,'invalid_rule_content');assert.throws(()=>developmentLabel(h.store,'101'),{code:'invalid_rule_content'});
   rules.cache('101','b'.repeat(40),{});
   const put=content=>admin('/api/repositories/101/rules','PUT',{path:'.bot/guide.md',content});
-  const wide='规'.repeat(16384);assert.ok(Buffer.byteLength(wide)>16384);
-  const rejected=await put(wide);assert.equal(rejected.status,400);assert.equal(rejected.value.error,'invalid_rule_content');
-  assert.equal((await put('规'.repeat(5461))).status,200);assert.equal((await put('x'.repeat(16384))).status,200);assert.equal((await put('x'.repeat(16385))).status,400);
-  assert.equal((await admin('/api/repositories/101/rules')).value.rules.files.find(f=>f.path==='.bot/guide.md').effective,'x'.repeat(16384));
+  // Text far past the former 16 KiB limit is kept whole; only the request size bounds it.
+  const wide='规'.repeat(30000);assert.equal((await put(wide)).status,200);
+  assert.equal((await admin('/api/repositories/101/rules')).value.rules.files.find(f=>f.path==='.bot/guide.md').effective,wide);
+  const binary=await put('text\0more');assert.equal(binary.status,400);assert.equal(binary.value.error,'invalid_rule_content');
 });
 
 test('a bad rule file stops the task before publishing with its own code, and the same task completes once the file is fixed',async t=>{
   const f=await repositoryFixture(t);
-  f.heads.main=f.commit({'src/app.js':'export {};\n','.bot/guide.md':'x'.repeat(16385)});
+  f.heads.main=f.commit({'src/app.js':'export {};\n','.bot/guide.md':'guide\0'});
   await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
   const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id;
   const bad={
-    bot_rule_too_large:{'.bot/guide.md':'x'.repeat(16385)},
     invalid_bot_label:{'.bot/rules/labels.md':'review_label: '+'y'.repeat(51)},
     invalid_bot_computer:{'.bot/computer.yaml':'docker_socket: /var/run/docker.sock\n'},
     invalid_rule_content:{'.bot/guide.md':'guide\0'},
@@ -103,8 +104,9 @@ test('a bad rule file stops the task before publishing with its own code, and th
       const task=await f.run(taskId);
       assert.equal(task.error_code,code);assert.equal(task.status,'waiting_configuration');assert.equal(task.phase,'prepare');assert.equal(f.comments.length,0);
     }
-    // Waiting again for the same file does not repeat the entry.
+    // Waiting again for the same file does not repeat the entry; the entry names the file.
     assert.equal(f.logs(taskId).filter(log=>log.type==='fault'&&log.code===code).length,1);
+    if(code==='invalid_rule_content')assert.match(f.logs(taskId).find(log=>log.type==='fault'&&log.code===code).detail,/^加载仓库行为规则失败（invalid_rule_content）：\.bot\/guide\.md 不是文本文件（含 NUL 字节），/);
   }
   assert.ok(!f.logs(taskId).some(log=>log.type==='runtime_fault'));
   // Fixed on the default branch: the waiting task prepares the new commit and publishes. `review_label:` alone means no label.
@@ -128,4 +130,17 @@ test('an Issue development that continues the bot PR checks out its head and rea
   assert.equal(input.snapshot_sha,head);assert.equal(f.logs('next').find(log=>log.type==='prepared').sha,head);
   assert.equal(f.store.get("SELECT sha FROM repository_rule_sources WHERE repository_id='101'").sha,f.heads.release);
   assert.equal(input.context.effective_rules.files.find(row=>row.path==='.bot/guide.md').effective,'Release guide');
+});
+
+test('long rule files and skills are sent whole, and rule file errors are the repository\'s to fix',async t=>{
+  const f=await repositoryFixture(t),skill=(name,bytes)=>[`.agents/skills/${name}/SKILL.md`,`# ${name}\n`+'s'.repeat(bytes-name.length-3)];
+  // A real repository's skills (37 KB and more), well past the former 16 KiB limit, and a long behavior guide.
+  f.heads.main=f.commit({'src/app.js':'export {};\n','.bot/guide.md':'g'.repeat(40000),...Object.fromEntries([skill('a',37204),skill('b',70000),skill('c',200000)])});
+  await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
+  const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
+  assert.equal(task.status,'succeeded',task.error_code);
+  for(const path of ['.bot/guide.md','.agents/skills/a/SKILL.md','.agents/skills/b/SKILL.md','.agents/skills/c/SKILL.md'])assert.ok(f.config.system.includes(`## ${path} (repository)\n`),path);
+  assert.ok(f.config.system.includes('g'.repeat(40000)));assert.ok(f.config.system.includes('s'.repeat(199990)));
+  assert.equal(explainFailure('invalid_rule_content','waiting_configuration').label,'仓库内容或规则');
+  assert.equal(explainFailure('bot_rule_too_large','waiting_configuration').action,'规则文件和 skill 已不再限制大小，点「重试」即可继续。');
 });
