@@ -5,6 +5,7 @@ import { workspace as workspaceTool } from './workspace.mjs';
 import { command } from './command.mjs';
 import { execFile } from 'node:child_process';
 import { ownership, isRunner, tasksRoot } from './ownership.mjs';
+import { pruneJournal } from './journal.mjs';
 
 const workspace = '/workspace', journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -21,14 +22,9 @@ async function filePath(value) {
 async function execute(input) {
   const outputFile = `${journal}/${input.operation_id}.out`;
   if(input.type.startsWith('workspace_')) return workspaceTool({ ...input, output_file: outputFile });
-  if (input.type === 'health') {
-    let interrupted = 0;
-    for (const name of await readdir(journal)) if (/^[a-f0-9]{48}\.json$/.test(name) && name !== `${input.operation_id}.json`) {
-      const record = JSON.parse(await readFile(`${journal}/${name}`, 'utf8'));
-      if (record.state === 'running') { await save(name.slice(0, -5), { state: 'interrupted' }); interrupted++; }
-    }
-    return { ready: true, runner_version: 1, interrupted };
-  }
+  // Health does not read the journal: a record left running by an earlier container already answers a repeated id
+  // with operation_interrupted, and reading every record took longer than a start may on a computer with a large journal.
+  if (input.type === 'health') return { ready: true, runner_version: 1 };
   if (input.type === 'write') {
     if (typeof input.content !== 'string' || Buffer.byteLength(input.content) > 48 * 1024) throw new Error('invalid_content');
     const handle = await open(await filePath(input.path), constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
@@ -97,9 +93,10 @@ await mkdir(journal, { recursive: true, mode: 0o700 }); await mkdir('/workspace/
 const request = JSON.parse(Buffer.from(process.argv[2] || '', 'base64url').toString());
 if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operation_id');
 let result;
-if (['tail', 'reap', 'usage'].includes(request.type)) {
-  // Reading progress or usage and stopping leftovers are repeatable and never journaled.
-  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : await reap(request) }; } catch { result = { ok: false, error: request.type + '_failed' }; }
+if (['tail', 'reap', 'usage', 'prune'].includes(request.type)) {
+  // Reading progress or usage, stopping leftovers and removing old journal records are repeatable and never journaled.
+  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'prune' ? await pruneJournal(journal) : await reap(request) }; }
+  catch { result = { ok: false, error: request.type + '_failed' }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (existing) result = existing.state === 'completed' ? existing.result : { ok: false, error: 'operation_interrupted' };

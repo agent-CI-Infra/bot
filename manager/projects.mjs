@@ -57,6 +57,8 @@ export class Projects {
     // gates: repository -> runner calls running now, whether a lifecycle action holds the computer, and who waits.
     // restarting: computers with a restart queued under the exclusive lock (restartAlone).
     this.egress = egress; this.background = new Map(); this.usage = new Map(); this.gates = new Map(); this.pending = new Set(); this.restarting = new Set();
+    // pruned: when each computer's journal was last pruned; pruning: computers with a prune running now.
+    this.pruned = new Map(); this.pruning = new Set();
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
@@ -227,7 +229,20 @@ export class Projects {
     await this.setup(repo, generation, spec, forceSetup);
     container = await this.inspect(repo, generation, 'container');
     this.update(repo, 'ready', 'ready', null, container.State.StartedAt);
+    this.prune(repo, true);
     return this.get(repo);
+  }
+  // Removes journal records older than a day from a running computer's work volume, after each provision and every
+  // six hours. It runs in the background and outside the project lock, without a time limit: it deletes only records no
+  // call uses any more, and the first run on a large journal can take minutes. One prune per computer at a time.
+  prune(repo, now = false) {
+    const project = this.get(repo);
+    if (!project || this.pruning.has(repo) || !now && Date.now() - (this.pruned.get(repo) || 0) < 6 * 3600 * 1000) return;
+    this.pruning.add(repo); this.pruned.set(repo, Date.now());
+    void this.docker.runner(this.names(repo, project.generation).container, { operation_id: randomId(), type: 'prune' }, 0)
+      .then(result => { if (!result?.ok) logFailure(`project ${repo} journal prune failed`, result?.error || 'no detail'); },
+        error => logFailure(`project ${repo} journal prune failed`, error))
+      .finally(() => this.pruning.delete(repo));
   }
   // The approved image, or one derived from it with the project's system packages. Built once per package set and base image,
   // and only by the manager: apt runs as root at build time, nothing inside the computer needs root.
@@ -453,6 +468,7 @@ export class Projects {
   }
   // Liveness check of idle computers only: one with runner calls in flight is skipped rather than queued behind them.
   async check() {
+    for (const row of this.list()) if (['ready', 'busy'].includes(row.state)) this.prune(row.repository_id);
     await Promise.all(this.list().filter(p => p.state === 'ready' && !this.gates.has(p.repository_id)).map(row => this.lock(row.repository_id, async () => {
       const current = this.get(row.repository_id); if (current.state !== 'ready') return;
       try {
