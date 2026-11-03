@@ -110,6 +110,31 @@ try {
   assert.equal(reached.result.output.trim(),'up'); await manager('101','execute',{type:'reap',workspace_id:ws});
   assert.equal((await manager('101','execute',probe)).result.exit_code,3);
   passed('a task keeps background services across its commands and they stop when it releases the computer');
+  // The repository's history reaches the computer's git store as a pack; each task checks out its own worktree from it.
+  const source = resolve('.tmp/project-env/source'), sh = (...args) => execFileSync('git', ['-C', source, ...args], { encoding: 'utf8' }).trim();
+  execFileSync('rm', ['-rf', source]); mkdirSync(source, { recursive: true });
+  sh('init', '-q', '-b', 'main'); sh('config', 'user.email', 'fixture@example.invalid'); sh('config', 'user.name', 'Fixture');
+  writeFileSync(source + '/README.md', 'base\n'); sh('add', '.'); sh('commit', '-qm', 'base'); const baseSha = sh('rev-parse', 'HEAD');
+  writeFileSync(source + '/feature.txt', 'feature\n'); sh('add', '.'); sh('commit', '-qm', 'head'); const headSha = sh('rev-parse', 'HEAD'), headTree = sh('rev-parse', 'HEAD^{tree}');
+  const pack = execFileSync('git', ['-C', source, 'pack-objects', '--revs', '--stdout', '-q'], { input: `${headSha}\n${baseSha}\n` }), packId = id();
+  assert.deepEqual((await manager('101', 'execute', { type: 'git_have' })).result.commits, []);
+  for (let offset = 0; offset < pack.length; offset += 45000) await manager('101', 'execute', { type: 'git_pack', pack_id: packId, base64: pack.subarray(offset, offset + 45000).toString('base64'), offset });
+  assert.deepEqual((await manager('101', 'execute', { type: 'git_import', pack_id: packId, commits: [headSha, baseSha] })).result.imported, [headSha, baseSha]);
+  const task = id(), checkout = (await manager('101', 'execute', { type: 'workspace_checkout', workspace_id: task, sha: headSha, tree_sha: headTree, author_email: '999+fixture-bot@users.noreply.github.com' })).result;
+  assert.deepEqual([checkout.tree_sha, checkout.local_sha], [headTree, headSha]);
+  const inTask = async command => (await manager('101', 'execute', { type: 'workspace_command', workspace_id: task, command, timeout_ms: 30000 })).result;
+  assert.equal((await inTask(`git diff --name-only ${baseSha}...${headSha}`)).output.trim(), 'feature.txt');
+  assert.equal((await inTask('git rev-list --count HEAD')).output.trim(), '2');
+  await manager('101', 'execute', { type: 'workspace_context', workspace_id: task, path: 'object.json', base64: Buffer.from('{"title":"Fixture"}').toString('base64'), offset: 0 });
+  assert.equal((await manager('101', 'execute', { type: 'workspace_read', workspace_id: task, path: '../context/object.json' })).result.content, '{"title":"Fixture"}');
+  assert.equal((await inTask('git status --porcelain')).output, '');
+  // A second task on the computer needs nothing more; a change in one worktree is a candidate of that task only.
+  const other = id(); await manager('101', 'execute', { type: 'workspace_checkout', workspace_id: other, sha: headSha, tree_sha: headTree });
+  await inTask('echo changed > README.md');
+  const candidate = (await manager('101', 'execute', { type: 'workspace_finalize', workspace_id: task })).result;
+  assert.notEqual(candidate.tree_sha, headTree); assert.deepEqual(candidate.files.map(f => f.path).sort(), ['README.md', 'feature.txt']);
+  assert.equal((await manager('101', 'execute', { type: 'workspace_command', workspace_id: other, command: 'cat README.md', timeout_ms: 30000 })).result.output, 'base\n');
+  passed('a task checks out a git worktree with the history from the computer store, reads its context next to it, and changes only its own worktree');
   const slowOp = id(), slow = manager('101','execute',{type:'command',command:'sleep 300',timeout_ms:400000},1,slowOp).then(() => 'completed', e => e.message);
   await wait(async () => (await output(slowOp))?.state === 'running', 'slow command running');
   const stopping = Date.now(); await api('/api/environments/101/stop','POST',{operation_id:id(),generation:1});

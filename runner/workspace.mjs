@@ -1,19 +1,27 @@
-import { mkdir,readFile,writeFile,open,realpath,symlink,unlink,readlink,chmod,rename } from 'node:fs/promises';
+import { mkdir,readFile,writeFile,open,realpath,symlink,unlink,readlink,chmod,rename,rm,stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve,dirname,sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { command,environment,workspaceTag } from './command.mjs';
 import {agentOperation} from './agent.mjs';
+import { git as storeGit, storeRoot } from './store.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
-export async function workspace(input,workspaceRoot='/workspace/tasks'){
+export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=storeRoot){
   if(!/^[a-f0-9]{48}$/.test(input.workspace_id||''))throw new Error('invalid_workspace');
   const root=`${workspaceRoot}/${input.workspace_id}`,repo=root+'/repo';
   const path=async(value,create=false)=>{
     const target=resolve(repo,safe(value));
     if(create)await mkdir(dirname(target),{recursive:true});
     const parent=await realpath(dirname(target));if(parent!==repo&&!parent.startsWith(repo+sep))throw new Error('invalid_parent');return target;
+  };
+  // Task context the control plane writes (the Issue or PR, its comments, the project's skills) sits next to the checkout.
+  // The agent reads it as ../context/<path>; it is not part of the repository and never part of a candidate.
+  const context=root+'/context',contextPath=async(value,create=false)=>{
+    const target=resolve(context,safe(value));
+    if(create)await mkdir(dirname(target),{recursive:true});
+    const parent=await realpath(dirname(target));if(parent!==context&&!parent.startsWith(context+sep))throw new Error('invalid_parent');return target;
   };
   const authorFile=root+'/author.json';
   const author=await readFile(authorFile,'utf8').then(JSON.parse).catch(()=>({email:'department-bot@invalid.local'}));
@@ -33,7 +41,24 @@ export async function workspace(input,workspaceRoot='/workspace/tasks'){
     try{await writeFile(root+'/snapshot.json','{}',{flag:'wx',mode:0o600});}catch(e){if(e.code!=='EEXIST')throw e;}
     return {initialized:true};
   }
+  // The task's checkout: a worktree of one fixed commit from the computer's git store, with the repository's history.
+  if(input.type==='workspace_checkout'){
+    if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_commit');
+    await mkdir(root,{recursive:true});
+    if(input.author_email){if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(input.author_email))throw new Error('invalid_author_email');await writeFile(authorFile,JSON.stringify({email:input.author_email}),{mode:0o600});}
+    if(!await stat(repo+'/.git').then(()=>true,()=>false)){await rm(repo,{recursive:true,force:true});await storeGit(['worktree','add','--detach','--force',repo,input.sha],{cwd:gitRoot+'/repo.git'});}
+    const tree=(await storeGit(['rev-parse','HEAD^{tree}'],{cwd:repo})).toString().trim(),head=(await storeGit(['rev-parse','HEAD'],{cwd:repo})).toString().trim();
+    if(tree!==input.tree_sha)throw new Error(`checkout_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
+    return {tree_sha:tree,local_sha:head};
+  }
   const actual=await realpath(repo);if(actual!==repo)throw new Error(`workspace_replaced: expected ${repo}, actual ${actual}`);
+  if(input.type==='workspace_context'){
+    if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
+    const data=Buffer.from(input.base64,'base64'),target=await contextPath(input.path,true);
+    const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
+    try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);}finally{await handle.close();}
+    return {written:true};
+  }
   if(input.type.startsWith('workspace_agent_'))return agentOperation(input,root);
   if(input.type==='workspace_write'){
     if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
@@ -63,7 +88,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks'){
     return {tree_sha:tree,local_sha:commit};
   }
   if(input.type==='workspace_read'){
-    const target=await path(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
+    const asked=String(input.path||''),target=asked.startsWith('../context/')?await contextPath(asked.slice(11)):await path(asked),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
     try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
   }
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
@@ -73,6 +98,8 @@ export async function workspace(input,workspaceRoot='/workspace/tasks'){
     const raw=(await git(['ls-tree','-r','-l','-z',tree])).toString();const files=[];
     for(const row of raw.split('\0').filter(Boolean)){
       const tab=row.indexOf('\t'),[mode,type,hash,size]=row.slice(0,tab).trim().split(/\s+/),name=safe(row.slice(tab+1));
+      // A submodule a checkout keeps in the index stays as the base tree has it; it is not a file of the candidate.
+      if(type==='commit'&&mode==='160000')continue;
       if(type!=='blob'||!['100644','100755','120000'].includes(mode))throw new Error(`unsupported_tree_entry: ${name}, type ${type}, mode ${mode}`);
       files.push({path:name,mode,sha:hash,size:Number(size)});
     }

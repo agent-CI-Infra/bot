@@ -34,12 +34,13 @@ function model(input){
   if(context.mode==='review'){
     if(!names.includes('read_file'))return call('read_file',{path:'calc.mjs'},'read');
     if(number===10&&!names.includes('run_command'))return call('run_command',{command:"node -e \"require('node:fs').writeFileSync('recovery-marker.txt','started');setTimeout(()=>console.log('recovered'),5000)\""},'recovery');
-    const issue=!context.object.head,requested=issue&&String(context.object.body).startsWith('Fix');
+    // The prompt holds a summary of the Issue or PR; a pull request has pull_request with its base and head.
+    const issue=!context.pull_request,requested=issue&&String(context.object.body_excerpt).startsWith('Fix');
     if(!issue&&number===43&&!staled){
       staled=true;const current=repo.pulls.get(43),files=trees.get(commits.get(current.head.sha).tree.sha).map(f=>f.path==='calc.mjs'?{...f,sha:blob(goodBody(repoId))}:f);
       current.head.sha=commit(files,current.head.sha,'new head');
     }
-    result={summary:number===8?'Do not echo '+config.model_key:'Reviewed project material',requires_code_change:requested||!issue,issue_requests_code:requested,clarification_required:false,implementation_goal:'Fix addition and document numeric behavior',request_quote:requested?context.object.body:'',
+    result={summary:number===8?'Do not echo '+config.model_key:'Reviewed project material',requires_code_change:requested||!issue,issue_requests_code:requested,clarification_required:false,implementation_goal:'Fix addition and document numeric behavior',request_quote:requested?context.object.body_excerpt:'',
       findings:[{body:'The arithmetic implementation requires attention.',format:issue?'discussion':'inline',actionable:true,within_goal:true,requires_human_decision:false,selection_reason:issue?'Issue has no inline diff.':'Evidence is on the changed arithmetic line.',path:'calc.mjs',line:number===44?999:1,side:'RIGHT'}]};
     return call('finish_review',result,'finish');
   }
@@ -48,7 +49,7 @@ function model(input){
     if(!tools.some(t=>t.id==='call-retest'))return call('run_command',{command:'node --test'},'retest');
   }
   if(!names.includes('write_file')){
-    const own=Boolean(context.object.head),content=number===6?baseBody(repoId).replace('a - b','a * b'):own?`// Normalize numeric inputs.\nexport const add = (a, b) => Number(a) + Number(b); // REPO_${repoId}_ONLY\n`:goodBody(repoId);
+    const own=Boolean(context.pull_request),content=number===6?baseBody(repoId).replace('a - b','a * b'):own?`// Normalize numeric inputs.\nexport const add = (a, b) => Number(a) + Number(b); // REPO_${repoId}_ONLY\n`:goodBody(repoId);
     return call('write_file',{path:'calc.mjs',content},'write');
   }
   if(!names.includes('run_command'))return call('run_command',{command:'node --test'},'test');
@@ -106,6 +107,8 @@ export const server=createServer(async(req,res)=>{
       const number=Number(m[1]),reviews=repo.reviews.get(number)||[];if(method==='GET')return send(Number(url.searchParams.get('page')||1)===1?reviews:[]);
       const value={id:stats.reviews.length+1,...body,user:{id:999}};reviews.push(value);repo.reviews.set(number,reviews);stats.reviews.push({repository_id:repo.id,number,...value});return send(value,201);
     }
+    // The pull request's inline review comments, read into the files a task agent reads on demand.
+    if(/^\/pulls\/\d+\/comments$/.test(suffix)&&method==='GET')return send(Number(url.searchParams.get('page')||1)===1?[]:[]);
     if((m=/^\/pulls\/(\d+)\/reviews\/(\d+)\/comments$/.exec(suffix))){
       const review=(repo.reviews.get(Number(m[1]))||[]).find(r=>r.id===Number(m[2]));
       return send(Number(url.searchParams.get('page')||1)===1?(review?.comments||[]).map((c,index)=>({...c,id:Number(m[2])*1000+index,html_url:'https://github.invalid/review-comment/'+index,commit_id:review.commit_id})):[]);

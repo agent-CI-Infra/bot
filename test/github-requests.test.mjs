@@ -31,6 +31,7 @@ async function reviewFixture(t) {
     if (path === repo + `/pulls/${n}/files`) return send([{ filename: 'a.js', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }]);
     if (path === repo + `/pulls/${n}/reviews`) { if (method === 'POST') { reviews.push(JSON.parse(raw)); return send({ id: 1, user: { id: 999 } }); } return send([]); }
     if (path === repo + `/pulls/${n}/reviews/1/comments`) return send([]);
+    if (path === repo + `/pulls/${n}/comments`) return send([]);
     if (path === repo + `/issues/${n}/comments`) { if (method === 'POST') { comments.push(JSON.parse(raw)); return send({ id: 2, user: { id: 999 }, html_url: 'https://github.invalid/c/2' }, 201); } return send([]); }
     if (path === repo + '/labels') return send([]);
     if (path === repo + `/issues/${n}/labels`) return send(method === 'POST' ? JSON.parse(raw).labels.map(name => ({ name })) : []);
@@ -71,11 +72,12 @@ test('a PR review stays within its GitHub request budget, and a second one skips
   };
   let task = await f.run(7);
   assert.equal(task.status, 'succeeded', task.error_code); assert.equal(f.reviews.length, 1); assert.equal(f.comments.length, 1);
-  budget(f.requests, 23, 20);
+  // Two of these read the PR's reviews and inline review comments into the files the agent reads on demand.
+  budget(f.requests, 25, 22);
   // The PR is read once to prepare, once when the agent is done and once before each write (review, comment, labels).
   assert.equal(tally(f.requests)['GET /repos/fixture/project-101/pulls/7'], 7);
   task = await f.run(8); assert.equal(task.status, 'succeeded', task.error_code);
-  budget(f.requests, 21, 19);
+  budget(f.requests, 23, 21);
   assert.deepEqual(['GET /app', 'GET /users/fixture-app[bot]'].map(request => tally(f.requests)[request] || 0), [0, 0]);
 });
 

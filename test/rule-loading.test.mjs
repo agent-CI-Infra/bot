@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{createHash}from'node:crypto';import{rmSync}from'node:fs';
 import{harness,setup,account,repository}from'./helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{blobSha}from'../dist/agent/common.js';
-import{RuleService,resolveRules,developmentLabel}from'../dist/rules/service.js';import{explainFailure}from'../dist/agent/failures.js';
+import{RuleService,resolveRules,developmentLabel,skillIndex}from'../dist/rules/service.js';import{explainFailure}from'../dist/agent/failures.js';
 
 const id=value=>createHash('sha1').update(JSON.stringify(value)).digest('hex');
 // A fake GitHub repository whose branches point at commits built from {path: text | {data, mode}}, and a manager whose
@@ -8,7 +8,7 @@ const id=value=>createHash('sha1').update(JSON.stringify(value)).digest('hex');
 async function repositoryFixture(t,{stopModel=false}={}){
   const blobs=new Map(),trees=new Map(),commits=new Map(),heads={},comments=[],labels=[],chunks=[];let engine;
   const issue={id:1,number:1,state:'open',title:'Fix the parser',body:'Please fix the parser.',labels:[{name:'bot-develop'}],assignee:null,assignees:[]};
-  const fixture={heads,comments,labels,issue,pr:null,
+  const fixture={heads,comments,labels,issue,pr:null,context:{},
     commit(files){
       const entries=Object.entries(files).map(([path,value])=>{const data=Buffer.from(typeof value==='string'?value:value.data),sha=blobSha(data);blobs.set(sha,data);return{path,type:'blob',mode:value.mode||'100644',sha,size:data.length};});
       const tree=id(entries);trees.set(tree,entries);const sha=id([tree,commits.size]);commits.set(sha,tree);return sha;
@@ -38,8 +38,9 @@ async function repositoryFixture(t,{stopModel=false}={}){
     if(!path.endsWith('/execute'))return{repository_id:'101',state:'ready',generation:1,desired:'ready',revision:1};
     const type=body.request.type;
     if(type==='workspace_snapshot')return{ok:true,result:{tree_sha:body.request.tree_sha}};
-    // The agent configuration arrives in chunks; the last one completes it (its system prompt carries the rule files).
+    // The agent configuration arrives in chunks; the last one completes it. Task context files are kept by path.
     if(type==='workspace_agent_config'){chunks.push(Buffer.from(body.request.base64,'base64'));if(body.request.final){fixture.config=JSON.parse(Buffer.concat(chunks).toString());chunks.length=0;}}
+    if(type==='workspace_context'){fixture.context[body.request.path]=(body.request.offset?fixture.context[body.request.path]:'')+Buffer.from(body.request.base64,'base64').toString();}
     if(type==='workspace_agent_config'&&stopModel)return{ok:false,error:'fixture_stop'};
     if(type==='workspace_agent_poll')return{ok:true,result:{state:'completed',result:{summary:'Reviewed.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}}};
     return{ok:true,result:{}};
@@ -139,8 +140,30 @@ test('long rule files and skills are sent whole, and rule file errors are the re
   await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
   const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
   assert.equal(task.status,'succeeded',task.error_code);
-  for(const path of ['.bot/guide.md','.agents/skills/a/SKILL.md','.agents/skills/b/SKILL.md','.agents/skills/c/SKILL.md'])assert.ok(f.config.system.includes(`## ${path} (repository)\n`),path);
-  assert.ok(f.config.system.includes('g'.repeat(40000)));assert.ok(f.config.system.includes('s'.repeat(199990)));
+  assert.ok(f.config.system.includes('## .bot/guide.md (repository)\n'+'g'.repeat(40000)));
+  for(const [name,bytes] of [['a',37204],['b',70000],['c',200000]])assert.equal(Buffer.byteLength(f.context[`skills/${name}/SKILL.md`]),bytes,name);
   assert.equal(explainFailure('invalid_rule_content','waiting_configuration').label,'仓库内容或规则');
   assert.equal(explainFailure('bot_rule_too_large','waiting_configuration').action,'规则文件和 skill 已不再限制大小，点「重试」即可继续。');
+});
+
+test('the agent gets the rules and an index of the skills; the skills, the Issue and its discussion are files it reads when it needs them',async t=>{
+  const f=await repositoryFixture(t),ci='---\nname: ci\ndescription: Read, diagnose and change the CI pipeline.\n---\n# CI\n'+'Run the checks. '.repeat(500);
+  f.heads.main=f.commit({'src/app.js':'export {};\n','.bot/guide.md':'Be brief.\n','.agents/skills/ci/SKILL.md':ci,'.agents/skills/deploy/SKILL.md':'# Deploy the stack\nSteps.\n'});
+  await f.hook(f.account.path,f.account.secret,'opened',{repository:{id:101},action:'opened',issue:f.issue});
+  const taskId=f.store.get("SELECT id FROM tasks WHERE kind='review.issue'").id,task=await f.run(taskId);
+  assert.equal(task.status,'succeeded',task.error_code);
+  // The behavior guide is in the system prompt; a skill only by name, with what it is for and where to read it.
+  assert.ok(f.config.system.includes('## .bot/guide.md (repository)\nBe brief.'));assert.ok(!f.config.system.includes('Run the checks.'));
+  const prompt=JSON.parse(f.config.prompt);
+  assert.deepEqual(prompt.skills,[{name:'ci',description:'Read, diagnose and change the CI pipeline.',path:'../context/skills/ci/SKILL.md'},{name:'deploy',description:'Deploy the stack',path:'../context/skills/deploy/SKILL.md'}]);
+  assert.deepEqual(prompt.context_files.map(file=>file.path),['../context/object.json','../context/comments.json']);
+  assert.deepEqual([prompt.object.title,prompt.object.body_excerpt,prompt.comments,prompt.files,prompt.materials,prompt.pull_request],['Fix the parser','Please fix the parser.',undefined,undefined,undefined,undefined]);
+  // The files hold everything, the skills in full.
+  assert.equal(f.context['skills/ci/SKILL.md'],ci);assert.equal(JSON.parse(f.context['object.json']).body,'Please fix the parser.');assert.deepEqual(JSON.parse(f.context['comments.json']),[]);
+});
+
+test('a skill is indexed by its front matter description, or else its first line',()=>{
+  assert.deepEqual(skillIndex([{path:'.agents/skills/a/b/SKILL.md',source:'repository',effective:'---\ndescription: "Nested skill: does b"\n---\nBody'},
+    {path:'.agents/skills/plain/SKILL.md',source:'repository',effective:'\n## Plain heading\nmore'},{path:'.bot/guide.md',source:'builtin',effective:'guide'}]).map(({name,description,path})=>[name,description,path]),
+    [['a/b','Nested skill: does b','../context/skills/a/b/SKILL.md'],['plain','Plain heading','../context/skills/plain/SKILL.md']]);
 });

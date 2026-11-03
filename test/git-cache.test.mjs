@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, symlinkSync, chmodSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, symlinkSync, chmodSync, utimesSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -9,6 +9,7 @@ import { GitCache } from '../dist/agent/git-cache.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { Redactor } from '../dist/agent/common.js';
 import { workspace as runnerWorkspace } from '../runner/workspace.mjs';
+import { storeOperation, pruneTasks } from '../runner/store.mjs';
 import { environment } from '../runner/command.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -123,12 +124,14 @@ test('a mirror that holds the commit but cannot be read any more falls back to t
   assert.equal(readFileSync(join(copy.repo, 'README.md'), 'utf8'), 'second\n');
 });
 
-test('review tasks on one commit share the mirror: the second fetches nothing and neither reads files through the API', async t => {
+test('review tasks on one commit share the mirror and the computer store: the second fetches and sends nothing, and neither reads files through the API', async t => {
   const rest = [], manager = { call: async (_method, path, body) => {
     if (!path.endsWith('/execute')) return { repository_id: '101', state: 'ready', generation: 1, desired: 'ready', revision: 1 };
     const request = body.request;
-    if (['workspace_init', 'workspace_write', 'workspace_snapshot'].includes(request.type))
-      return runnerWorkspace(request, join(u.root, 'tasks')).then(result => ({ ok: true, result }), error => ({ ok: false, error: 'runner_operation_failed', detail: error.message }));
+    // The real runner operations, with the computer's task and store directories under the test root.
+    const answer = run => run.then(result => ({ ok: true, result }), error => ({ ok: false, error: 'runner_operation_failed', detail: error.message }));
+    if (['workspace_init', 'workspace_write', 'workspace_snapshot', 'workspace_checkout', 'workspace_context', 'workspace_read'].includes(request.type)) return answer(runnerWorkspace(request, join(u.root, 'tasks'), join(u.root, 'store')));
+    if (request.type.startsWith('git_')) return answer(storeOperation(request, join(u.root, 'store')));
     if (request.type === 'workspace_agent_poll') return { ok: true, result: { state: 'completed', result: { summary: 'Reviewed.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } } };
     return { ok: true, result: {} };
   } };
@@ -159,6 +162,75 @@ test('review tasks on one commit share the mirror: the second fetches nothing an
   assert.deepEqual(tasks.map(task => task.status), ['succeeded', 'succeeded']); assert.ok(fetched > 0); assert.equal(u.server.requests.length, fetched);
   assert.deepEqual(rest.filter(path => /\/git\/(?:blobs|trees|commits)\//.test(path)), []);
   const snapshots = tasks.map(task => JSON.parse(h.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_extract(content,'$.type')='snapshot'", task.id).content));
-  assert.deepEqual(snapshots.map(log => [log.source, log.cache, log.files]), [['git_cache', 'fetched', 3], ['git_cache', 'hit', 3]]);
+  // Each task has its own worktree; the store got the history once.
+  assert.deepEqual(snapshots.map(log => [log.source, log.cache, log.files, log.pack_bytes > 0]), [['git_worktree', 'fetched', 3, true], ['git_worktree', 'hit', 3, false]]);
+  for (const task of tasks) {
+    const repo = join(u.root, 'tasks', task.workspace_id, 'repo');
+    assert.equal(readFileSync(join(repo, 'README.md'), 'utf8'), 'second\n'); assert.equal(git(repo, 'rev-parse', 'HEAD'), u.second);
+    // The history is there, and the Issue and its comments are files next to the checkout.
+    assert.equal(git(repo, 'rev-list', '--count', 'HEAD'), '2');
+    assert.equal(JSON.parse(readFileSync(join(u.root, 'tasks', task.workspace_id, 'context', 'object.json'), 'utf8')).title, 'Review');
+  }
   assert.ok(!JSON.stringify(h.store.all('SELECT content FROM task_logs')).includes(token));
+});
+
+// A task on a project computer: the real runner's workspace and store operations, in directories under the test root.
+function computerTask(root) {
+  const id = randomBytes(24).toString('hex'), logs = [], redactor = new Redactor(); redactor.add(token);
+  const workspace = new Workspace(null, null, { id: 'task-' + id, attempt: 1, workspace_id: id }, redactor, async () => {}, value => logs.push(value));
+  const run = request => (request.type.startsWith('git_') ? storeOperation(request, join(root, 'store')) : runnerWorkspace({ ...request, workspace_id: id }, join(root, 'tasks'), join(root, 'store')))
+    .catch(error => ({ error: 'runner_operation_failed', detail: error.message }));
+  workspace.call = (_key, request) => run(request); workspace.deliver = request => run(request);
+  return { id, logs, workspace, run, github: { authorEmail: () => '999+fixture-bot@users.noreply.github.com' }, root: join(root, 'tasks', id), repo: join(root, 'tasks', id, 'repo'),
+    snapshot: () => logs.find(entry => entry.type === 'snapshot') };
+}
+
+test('a task checks out a git worktree with the history; the computer store receives only the commits it lacks', async t => {
+  const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.second, u.first] });
+  const a = computerTask(u.root), snapshot = await a.workspace.checkout(a.github, u.second, mirror, [u.first]);
+  assert.equal(snapshot.history, true); assert.equal(snapshot.tree_sha, git(u.bare, 'rev-parse', u.second + '^{tree}'));
+  assert.deepEqual(snapshot.files.map(f => f.path).sort(), ['README.md', 'link.md', 'src/run.sh']); assert.deepEqual(snapshot.skipped_files.map(f => f.path), ['vendor/module']);
+  // The files are the commit's, with modes and links; the history and a pull request's base are there for git.
+  assert.equal(readFileSync(join(a.repo, 'README.md'), 'utf8'), 'second\n'); assert.ok(statSync(join(a.repo, 'src', 'run.sh')).mode & 0o100);
+  assert.equal(git(a.repo, 'rev-list', '--count', 'HEAD'), '2'); assert.match(git(a.repo, 'diff', '--stat', `${u.first}...${u.second}`), /README\.md/);
+  assert.ok(a.snapshot().pack_bytes > 0); assert.equal(a.snapshot().source, 'git_worktree');
+  // Another task on the same commit gets its own worktree and nothing travels.
+  const b = computerTask(u.root); await b.workspace.checkout(b.github, u.second, mirror);
+  assert.equal(b.snapshot().pack_bytes, 0); assert.equal(git(b.repo, 'rev-parse', 'HEAD'), u.second);
+  // A new upstream commit: only it is sent.
+  writeFileSync(join(u.work, 'README.md'), 'third\n'); git(u.work, 'add', 'README.md'); git(u.work, 'commit', '-qm', 'third');
+  const third = git(u.work, 'rev-parse', 'HEAD'); git(u.work, 'push', '-q', u.bare, `${third}:refs/heads/main`);
+  const next = await u.cache.open('101', { url: u.url, token, commits: [third] }), c = computerTask(u.root); await c.workspace.checkout(c.github, third, next);
+  assert.ok(c.snapshot().pack_bytes > 0 && c.snapshot().pack_bytes < a.snapshot().pack_bytes, String(c.snapshot().pack_bytes));
+  // Task context sits next to the checkout and is read as ../context/<path>; it cannot reach the repository from there.
+  await a.workspace.context({ 'object.json': '{"title":"Fix"}', 'skills/ci/SKILL.md': '# CI\nRun the checks.\n' });
+  assert.equal((await a.run({ type: 'workspace_read', path: '../context/skills/ci/SKILL.md' })).content, '# CI\nRun the checks.\n');
+  assert.equal((await a.run({ type: 'workspace_read', path: '../context/../repo/README.md' })).error, 'runner_operation_failed');
+  assert.equal(git(a.repo, 'status', '--porcelain'), '');
+  // A development candidate leaves the submodule entry as the base tree has it.
+  writeFileSync(join(a.repo, 'README.md'), 'changed\n');
+  const candidate = await a.run({ type: 'workspace_finalize' });
+  assert.deepEqual(candidate.files.map(f => f.path).sort(), ['README.md', 'link.md', 'src/run.sh']);
+});
+
+test('a repository file holding a task credential stops the checkout before anything is sent to the computer', async t => {
+  const u = await upstream(t);
+  writeFileSync(join(u.work, 'leak.txt'), `token=${token}\n`); git(u.work, 'add', 'leak.txt'); git(u.work, 'commit', '-qm', 'leak');
+  const leaked = git(u.work, 'rev-parse', 'HEAD'); git(u.work, 'push', '-q', u.bare, `${leaked}:refs/heads/main`);
+  const mirror = await u.cache.open('101', { url: u.url, token, commits: [leaked] }), a = computerTask(u.root);
+  await assert.rejects(a.workspace.checkout(a.github, leaked, mirror), { code: 'credential_in_repository', detail: 'Credential found in repository file: leak.txt' });
+  assert.deepEqual((await a.run({ type: 'git_have' })).commits, []);
+});
+
+test('task directories untouched for three days go with their worktree registrations; recent ones stay', async t => {
+  const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.second] });
+  const old = computerTask(u.root), recent = computerTask(u.root);
+  await old.workspace.checkout(old.github, u.second, mirror); await recent.workspace.checkout(recent.github, u.second, mirror);
+  const later = Date.now() + 4 * 24 * 3600 * 1000;
+  // The recent task's agent is still writing its events.
+  mkdirSync(join(recent.root, 'agent'), { recursive: true }); writeFileSync(join(recent.root, 'agent', 'events.jsonl'), '');
+  utimesSync(join(recent.root, 'agent', 'events.jsonl'), later / 1000, later / 1000);
+  assert.deepEqual(await pruneTasks(join(u.root, 'tasks') + '/', 3 * 24 * 3600 * 1000, later, join(u.root, 'store')), { removed: 1 });
+  assert.deepEqual(readdirSync(join(u.root, 'tasks')), [recent.id]);
+  assert.doesNotMatch(git(join(u.root, 'store', 'repo.git'), 'worktree', 'list'), new RegExp(old.id));
 });

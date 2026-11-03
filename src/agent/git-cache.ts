@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { mkdir, rm, access } from 'node:fs/promises';
+import { mkdir, rm, access, open } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { safePath, TaskError } from './common.js';
 
@@ -21,6 +22,8 @@ export class Mirror {
     catch (error) { if (error instanceof TaskError) throw error; this.unreadable = String((error as Error)?.message || error).slice(0, 2000); return null; }
   }
   blob(sha: string) { return this.cache.blob(this.repository, sha); }
+  pack(wanted: string[], haves: string[]) { return this.cache.pack(this.repository, wanted, haves); }
+  secrets(commit: string, values: Iterable<string>) { return this.cache.secrets(this.repository, commit, values); }
 }
 type Run = { stdout: Buffer; stderr: string; code: number | null };
 const objectId = /^[a-f0-9]{40}$/;
@@ -33,15 +36,16 @@ export class GitCache {
     if (!/^[1-9]\d{0,19}$/.test(repository)) throw new Error('invalid_repository');
     return join(this.root, repository + '.git');
   }
-  private git(args: string[], options: { cwd?: string; env?: Record<string, string>; timeoutMs?: number } = {}): Promise<Run> {
+  private git(args: string[], options: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; input?: string; output?: number } = {}): Promise<Run> {
     // No global or system config, no prompts: only what this process passes applies.
     const env = { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: this.root, LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_TERMINAL_PROMPT: '0', ...options.env };
     return new Promise((resolve, reject) => {
-      const child = spawn('git', args, { cwd: options.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] }), out: Buffer[] = [];
+      const child = spawn('git', args, { cwd: options.cwd, env, stdio: [options.input === undefined ? 'ignore' : 'pipe', options.output ?? 'pipe', 'pipe'] }), out: Buffer[] = [];
+      if (options.input !== undefined) { child.stdin!.on('error', () => {}); child.stdin!.end(options.input); }
       let stderr = '';
       const timer = options.timeoutMs ? setTimeout(() => child.kill('SIGKILL'), options.timeoutMs) : undefined;
-      child.stdout.on('data', chunk => out.push(chunk)); child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4000); });
+      child.stdout?.on('data', chunk => out.push(chunk)); child.stderr!.on('data', chunk => { stderr = (stderr + chunk).slice(-4000); });
       child.on('error', error => { clearTimeout(timer); reject(error); });
       child.on('close', code => { clearTimeout(timer); resolve({ stdout: Buffer.concat(out), stderr, code }); });
     });
@@ -112,6 +116,33 @@ export class GitCache {
       entries.push({ path: safePath(row.slice(tab + 1)), mode: mode!, type: type!, sha: sha!, ...(size && size !== '-' ? { size: Number(size) } : {}) });
     }
     return { tree_sha: tree, tree: entries };
+  }
+  // A pack of what a project computer's store needs for `wanted`: their history, without what the commits in `haves`
+  // already hold (haves the mirror does not know are ignored). It is written to a file, since a first pack holds the
+  // whole repository; the caller removes it.
+  async pack(repository: string, wanted: string[], haves: string[]): Promise<{ file: string; size: number }> {
+    const dir = this.path(repository), known = haves.filter(sha => objectId.test(sha));
+    const checked = known.length ? (await this.git(['cat-file', '--batch-check=%(objectname) %(objecttype)'], { cwd: dir, input: known.join('\n') + '\n' })).stdout.toString() : '';
+    const present = new Set(checked.split('\n').filter(line => line.endsWith(' commit')).map(line => line.split(' ')[0]));
+    const file = join(this.root, `pack-${randomBytes(12).toString('hex')}.pack`), out = await open(file, 'w', 0o600);
+    try {
+      const run = await this.git(['pack-objects', '--revs', '--stdout', '-q'], { cwd: dir, input: [...wanted.filter(sha => objectId.test(sha)), ...[...present].map(sha => '^' + sha)].join('\n') + '\n', output: out.fd });
+      if (run.code !== 0) throw new Error(`git pack-objects failed: ${run.stderr.trim() || 'exit ' + run.code}`);
+      return { file, size: (await out.stat()).size };
+    } catch (error) { await rm(file, { force: true }); throw error; } finally { await out.close(); }
+  }
+  // Paths in a commit that contain any of `values` (the task's own credentials), read from the mirror without copying files.
+  async secrets(repository: string, commit: string, values: Iterable<string>): Promise<string[]> {
+    const needles = [...values].filter(value => value.length >= 8 && !/[\r\n]/.test(value));
+    if (!needles.length || !objectId.test(commit)) return [];
+    // The patterns go through a file only this process can read, removed at once (a pipe cannot be opened as a file).
+    const patterns = join(this.root, `grep-${randomBytes(12).toString('hex')}`), handle = await open(patterns, 'w', 0o600);
+    let run: Run;
+    try { await handle.writeFile(needles.join('\n') + '\n'); await handle.close(); run = await this.git(['grep', '-l', '-I', '-F', '-z', '-f', patterns, commit], { cwd: this.path(repository) }); }
+    finally { await handle.close().catch(() => {}); await rm(patterns, { force: true }); }
+    if (run.code === 1) return [];
+    if (run.code !== 0) throw new Error(`git grep failed: ${run.stderr.trim() || 'exit ' + run.code}`);
+    return run.stdout.toString().split('\0').filter(Boolean).map(entry => entry.slice(commit.length + 1));
   }
   // A blob's bytes, or null when the mirror does not have it or cannot be read.
   async blob(repository: string, sha: string): Promise<Buffer | null> {

@@ -36,6 +36,16 @@ const builtinResources: Record<string, number> = { cpus: 2, memory_mb: 4096, pid
 export function ownComputer(live: any): Record<string, unknown> {
   return Object.fromEntries(computerKeys.filter(key => live?.[key] !== undefined && !live.inherited?.includes(key)).map(key => [key, live[key]]));
 }
+// The project's skills as the agent finds them: a name, what the skill is for (its front matter description, or its first
+// line), and where its full text is in the task context. The agent reads a skill when it does the job the skill describes.
+export function skillIndex(rows: { path: string, source: string, effective: string }[]) {
+  return rows.filter(row => skillPath(row.path)).map(row => {
+    const name = row.path.slice('.agents/skills/'.length, -'/SKILL.md'.length), front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(row.effective)?.[1] || '';
+    let description = ''; try { const value = parse(front, { maxAliasCount: 0 }); if (value && typeof value.description === 'string') description = value.description; } catch {}
+    description ||= row.effective.replace(/^---[\s\S]*?\n---/, '').split('\n').map(line => line.replace(/^#+\s*/, '').trim()).find(Boolean) || '';
+    return { name, description: description.slice(0, 500), file: `skills/${name}/SKILL.md`, path: `../context/skills/${name}/SKILL.md`, content: row.effective };
+  });
+}
 export function resolveRules(policy: Row, files: Record<string, string>, computer: any = {}) {
   if(Object.keys(files).filter(skillPath).length>32)fail(400,'too_many_bot_skills');
   const repositoryRules=Object.entries(files).filter(([path])=>rulePath(path));
