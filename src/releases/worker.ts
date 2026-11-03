@@ -3,6 +3,7 @@ import type { GitHub } from '../github/client.js';
 import { digest } from '../core/security.js';
 import { stop, type Redactor } from '../agent/common.js';
 import { tag, releaseRedactor, withGitHub } from './github.js';
+import { actionPages, ambiguousBranch, matchesRun, runSnapshot } from './actions.js';
 
 export class ReleaseWorker {
   constructor(readonly service: ReleaseService) {}
@@ -50,13 +51,18 @@ export class ReleaseWorker {
     const redactor = releaseRedactor(this.service.store, row.repository_id);
     try {
       await withGitHub(this.service.store, row.repository_id, this.service.apiUrl, row.stage === 'tagging' ? { contents: 'write' } : {}, redactor,
-        async github => { if (row.stage === 'tagging') await this.tagging(github, row, redactor); }, () => this.service.guard(row));
+        async github => {
+          if (row.stage === 'tagging') await this.tagging(github, row, redactor);
+          else if (['waiting_run', 'running'].includes(row.stage)) await this.observeRun(github, row, redactor);
+        }, () => this.service.guard(row));
     } catch (error) { this.failed(row, error, redactor); }
     finally { this.service.unlock(row); }
   }
-  failed(row: any, error: any, redactor: Redactor) {
-    const stage = error.state === 'waiting_permission' ? 'waiting_permission' : error.state === 'write_unknown' ? 'write_unknown' : 'failed';
-    this.service.save(row, { failure_step: row.stage, error: error.code || 'release_failed', detail: redactor.text(error.detail || '发布步骤失败，请检查接入和 GitHub 状态。') }, stage);
+  failed(row: any, error: any, redactor: Redactor, failureStep = row.stage) {
+    const retryRead = error.state === 'retry_wait' && !['tagging', 'creating_draft', 'publishing'].includes(row.stage);
+    const stage = retryRead ? row.stage : error.state === 'waiting_permission' ? 'waiting_permission' : error.state === 'write_unknown' ? 'write_unknown' : 'failed';
+    this.service.save(row, { failure_step: failureStep, error: error.code || 'release_failed', detail: redactor.text(error.detail || '发布步骤失败，请检查接入和 GitHub 状态。') }, stage);
+    if (retryRead) this.pollLater(row, error.retryAfterMs);
   }
   async tagging(github: GitHub, row: any, redactor: Redactor) {
     let existing = await this.checkedTag(github, row);
@@ -72,5 +78,60 @@ export class ReleaseWorker {
     existing = await this.checkedTag(github, row);
     if (!existing) return stop('release_write_unknown', 'write_unknown', '标签引用写入后仍不可见，请先查证。');
     this.service.save(row, { tag_object_sha: existing.object_sha, reused_tag: false, wait_started_at: Date.now() }, 'waiting_run');
+  }
+  pollLater(row: any, minimum = 0) {
+    const data = JSON.parse(row.data), count = (data.poll_count || 0) + 1;
+    this.service.save(row, { poll_count: count });
+    this.service.store.run('UPDATE project_releases SET next_poll=? WHERE id=? AND lease=?', Date.now() + Math.max(minimum, Math.min(900_000, 15000 * 2 ** Math.min(count, 6))), row.id, row.lease);
+  }
+  async observeRun(github: GitHub, row: any, redactor: Redactor) {
+    let data = JSON.parse(row.data);
+    if (!data.run_id) {
+      const candidates = (await actionPages(github, github.path(`/actions/workflows/${data.workflow_id}/runs?event=push&head_sha=${row.target_sha}`), 'workflow_runs'))
+        .filter(run => matchesRun(row, run) && (data.reused_tag || Date.parse(run.created_at) >= Date.parse(data.tagged_at) - 5000));
+      const unique = [...new Map(candidates.map(run => [run.id, run])).values()];
+      if (unique.length > 1 || (unique.length && ambiguousBranch(data, row.version))) {
+        this.service.save(row, { candidates: unique.map(r => ({ id: r.id, url: r.html_url })) });
+        return stop('release_run_ambiguous', 'failed', 'Release 工作流关联不明确：存在多个候选，或同名分支也可触发。请检查候选 Actions 链接，不能自动推进草稿。');
+      }
+      if (!unique.length) {
+        if (Date.now() - (data.wait_started_at || Date.parse(row.created_at)) > 30 * 60_000)
+          return stop('release_run_missing', 'failed', '标签已存在，但没有找到该标签触发的 Release 工作流');
+        this.service.save(row, { detail: '已打标签，等待 Release 工作流出现', actions_url: `https://github.com/${github.fullName}/actions/workflows/release.yml`, tag_url: `https://github.com/${github.fullName}/tree/${row.version}` }, 'waiting_run');
+        this.pollLater(row); return;
+      }
+      const run = unique[0];
+      this.service.save(row, { run_id: run.id, run_attempt: run.run_attempt, actions_url: run.html_url, poll_count: 0 }, 'running'); data = JSON.parse(row.data);
+    }
+    const { run, snapshot, success } = await runSnapshot(github, row);
+    this.service.store.run('INSERT INTO release_attempts VALUES(?,?,?,?) ON CONFLICT(release_id,run_id,attempt) DO UPDATE SET data=excluded.data',
+      row.id, run.id, run.run_attempt, JSON.stringify(redactor.clean(snapshot)));
+    if (data.expected_attempt && run.run_attempt < data.expected_attempt) {
+      this.service.save(row, { detail: `等待 Actions attempt 增加到 ${data.expected_attempt}，旧 attempt 不用于发布。` }, 'running'); this.pollLater(row); return;
+    }
+    this.service.save(row, redactor.clean({ run_attempt: run.run_attempt, run: snapshot, detail: '', error: null, failure_step: null }));
+    if (success) {
+      this.service.save(row, { ci_success: { run_id: run.id, attempt: run.run_attempt }, expected_attempt: null }, 'preparing_notes'); return;
+    }
+    if (run.status === 'completed') return stop('release_ci_unsuccessful', 'failed', `Release 工作流结论：${run.conclusion || 'unknown'}。${snapshot.jobs.length ? '只有当前 attempt 全部 job 成功才能生成草稿。' : '本次没有可读取的 job。'}不会自动重跑。`);
+    this.pollLater(row);
+  }
+  async rerun(github: GitHub, row: any, redactor: Redactor) {
+    const data = JSON.parse(row.data);
+    if (!data.run_id || !data.run || data.run.status !== 'completed' || data.ci_success) return stop('release_rerun_unavailable', 'failed', '只有已绑定且未成功的 Actions run 可以人工重跑。');
+    if (!await this.checkedTag(github, row)) return stop('release_tag_missing', 'failed', '标签已不存在，不能重跑。');
+    const current = await runSnapshot(github, row);
+    const from = data.run_attempt;
+    if (current.run.run_attempt > from) {
+      this.service.save(row, { expected_attempt: from + 1, ci_success: null, failure_step: null, error: null }, 'running'); return;
+    }
+    if (current.run.status !== 'completed') return stop('release_rerun_unavailable', 'failed', 'Actions 仍在运行，请先刷新。');
+    // Persist the lower bound before sending. A lost response must never reuse the previous successful attempt.
+    this.service.save(row, { expected_attempt: from + 1, ci_success: null, failure_step: 'rerun' });
+    await this.effect(row, 'rerun:' + from, { run_id: data.run_id, from_attempt: from },
+      () => github.request('POST', github.path(`/actions/runs/${data.run_id}/rerun`)),
+      async () => { const run = await github.request('GET', github.path(`/actions/runs/${data.run_id}`)); if (!matchesRun(row, run)) return stop('release_run_changed', 'failed', '重跑的 Actions 身份已变化。'); return run.run_attempt > from ? { attempt: run.run_attempt } : null; }, redactor);
+    this.service.save(row, { detail: '已请求人工重跑，等待新的 attempt。', error: null, failure_step: null }, 'running');
+    this.service.store.run('UPDATE project_releases SET next_poll=0 WHERE id=?', row.id);
   }
 }
