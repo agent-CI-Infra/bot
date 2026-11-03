@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { rmSync, mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 
-test('每个页面都有地址，刷新后停在原页面；全局设置按类别打开；任务列表后台刷新不清空', async ({ page, browser }) => {
+test('每个页面都有地址，旧任务地址进入看板类别；全局设置按类别打开', async ({ page, browser }) => {
   const h = await harness(), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
@@ -10,12 +10,16 @@ test('每个页面都有地址，刷新后停在原页面；全局设置按类�
       't' + i, '101', 'review.issue', i === 1 ? 'running' : 'succeeded', 'Task ' + i, i, i === 1 ? 'model' : 'done', 'a'.repeat(40));
     await page.goto(h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    // Accounts and users are no longer tabs of their own.
-    for (const gone of ['机器人账号', '用户']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
+    // Accounts, users, review and development no longer have top-level tabs.
+    for (const gone of ['机器人账号', '用户', '检视', '开发']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
     const tab = name => page.locator('#tabs').getByRole('button', { name, exact: true }), current = () => page.locator('#tabs [aria-current=page]');
-    for (const [name, address] of [['看板', '#/board'], ['成本', '#/costs'], ['检视', '#/reviews'], ['开发', '#/developments'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['项目', '#/projects']]) {
+    for (const [name, address] of [['看板', '#/board'], ['成本', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
       await page.reload(); await expect(current()).toHaveText(name);
+    }
+    for (const [address, category] of [['#/reviews', 'review'], ['#/developments', 'development']]) {
+      await page.goto(h.admin + '/' + address); await expect(current()).toHaveText('看板'); await expect(page.getByLabel('类别', { exact: true })).toHaveValue(category);
+      await page.reload(); await expect(current()).toHaveText('看板'); await expect(page.getByLabel('类别', { exact: true })).toHaveValue(category);
     }
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);
@@ -32,15 +36,11 @@ test('每个页面都有地址，刷新后停在原页面；全局设置按类�
     // The old addresses of the two removed tabs open their settings category.
     await page.goto(h.admin + '/#/accounts'); await expect(page).toHaveURL(/#\/settings\/accounts$/); await expect(page.locator('#settings-panel')).toContainText('Test account');
     mkdirSync('.tmp/console-addresses', { recursive: true }); await page.screenshot({ path: '.tmp/console-addresses/settings-accounts-desktop.png', fullPage: true });
-    // The task list refreshes in the background without being emptied; finished rows stay the same nodes, and a row whose task
-    // changed is replaced in place.
-    await tab('检视').click(); await expect(page.locator('#rows > .row')).toHaveCount(4);
-    await page.evaluate(() => { window.kept = new Map([...document.querySelectorAll('#rows > .row')].map(node => [node.dataset.key, node])); window.emptied = 0;
-      new MutationObserver(() => { if (!document.getElementById('rows').childElementCount) window.emptied++; }).observe(document.getElementById('rows'), { childList: true }); });
+    // A changed task is picked up by the board's quiet refresh without leaving the selected category.
+    await page.goto(h.admin + '/#/reviews'); await expect(page.locator('.board-card')).toHaveCount(4);
     h.store.run("UPDATE tasks SET status='succeeded',phase='done' WHERE id='t1'");
-    await expect(page.locator('#rows > .row[data-key=t1] .row-state')).toHaveText('已完成', { timeout: 12000 });
-    expect(await page.evaluate(() => [window.emptied, ['t2', 't3', 't4'].every(key => window.kept.get(key) === document.querySelector(`#rows > .row[data-key=${key}]`))])).toEqual([0, true]);
-    await expect(page.locator('#count')).not.toHaveText('正在加载…');
+    await page.evaluate(() => boardPoll()); await expect(page.locator('[data-card-key="101/issue/1"]')).toContainText('检视 已完成');
+    await expect(page.getByLabel('类别', { exact: true })).toHaveValue('review');
     // A project administrator has no global settings; its address falls back to the projects page.
     const memberPassword = testPassword(); await admin('/api/users', 'POST', { username: 'member', password: memberPassword, role: 'project_admin', repository_ids: ['101'] });
     const context = await browser.newContext(), member = await context.newPage(); await member.goto(h.admin + '/#/settings/users');

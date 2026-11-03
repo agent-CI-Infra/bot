@@ -3,6 +3,12 @@ export function boardTask(store, id, number, kind, status, options={}) {
   store.run(`INSERT INTO tasks(id,repository_id,object_number,kind,status,summary,input,result,created_at,updated_at)
     VALUES(?,?,?,?,?,?,?,?,?,?)`,id,repo,number,kind,status,id,JSON.stringify({title,...input}),result?JSON.stringify(result):null,time,time);
 }
+export function boardRelease(store,id,repo,version,stage,options={}) {
+  const time=options.time||'2026-10-02T12:00:00.000Z',active=['failed','published','externally_published'].includes(stage)?0:1;
+  const data=JSON.stringify({release_url:`https://github.com/fixture/project-${repo}/releases/tag/${version}`,detail:'private release payload'});
+  store.run(`INSERT INTO project_releases(id,repository_id,version,target_sha,actor_id,stage,active,data,created_at,updated_at)
+    VALUES(?,?,?,?,'fixture',?,?,?,?,?)`,id,repo,version,'a'.repeat(40),stage,active,data,time,time);
+}
 export function boardFixtures(store) {
   boardTask(store,'reviewed',1,'review.issue','succeeded',{title:'Only successful review'});
   boardTask(store,'reviewing',2,'review.pr','running',{title:'Review in progress'});

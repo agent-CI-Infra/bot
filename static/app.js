@@ -2,9 +2,9 @@ const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false, permissionAutoRefresh = false;
 // Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
 let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null, editorKind = null;
-const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递', reviews: '检视任务', developments: '开发任务' };
+const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
-const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', reviews: '#/reviews', developments: '#/developments', events: '#/events',
+const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
   external: '#/external', onboarding: '#onboarding', settings: '#/settings' }, superTabs = ['onboarding', 'settings'];
 const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
@@ -64,14 +64,15 @@ async function start() {
   if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'',tabAddresses.onboarding);
   await route();
 }
-// Review and development are separate pages over the same task API.
-const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events', 'reviews', 'developments', 'external','onboarding'];
+// The generic list renderer still understands task rows; their old top-level addresses now select a board category.
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events','external','onboarding'];
 // The wizard's address may name a step by index (#onboarding/2), so GitHub's return and a reload open that step.
 const onboardingAddress = /^#onboarding(?:\/([0-5]))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 // The tab an address names: #/<tab>, a project page, a wizard step, or an older address (#external, #/accounts, #/users).
 function addressTab(hash) {
   if (projectRoute() || hash === '#/projects') return 'projects';
+  if (['#/reviews', '#/developments'].includes(hash)) return 'board';
   if (onboardingAddress.test(hash)) return 'onboarding';
   if (hash === '#external') return 'external';
   const name = /^#\/([a-z]+)(?:\/|$)/.exec(hash)?.[1];
@@ -337,6 +338,4 @@ $('filters').addEventListener('submit', event => { event.preventDefault(); offse
 $('hidden-filter').addEventListener('change', () => { offset = 0; render().catch(error); });
 for (const [id, delta] of [['previous', -50], ['next', 50]]) $(id).addEventListener('click', () => { offset += delta; render().catch(error); });
 document.addEventListener('DOMContentLoaded',()=>start().catch(error),{once:true});
-setInterval(()=>{if(me&&['reviews','developments'].includes(tab)&&!projectRoute()&&!document.hidden&&!document.querySelector('dialog[open]'))render(true).catch(error);},5000);
-
 setInterval(()=>{if(me&&tab==='projects'&&!$('hidden-filter').checked&&!projectRoute()&&!document.querySelector('dialog[open]'))refreshProjectActivity();},5000);

@@ -38,11 +38,11 @@
 | `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
 | `/api/tasks/:id/live` | GET | 运行中任务当前正在执行的命令及其已产生的输出，参数 `offset` 为已读字节数 |
 | `/api/board` | GET | 当前用户的视图、自定义单选字段及选项、六个固定 bot 阶段；阶段带 `hint` 说明，PR 看板措辞不同时带 `pr:{name,hint}` |
-| `/api/board/cards` | GET | 按对象去重的卡片，参数 `view_id`（默认 `default`）、`group_by`、`filters`（JSON 数组）、`limit`（1–100）、`offset`（0–100000）；返回 `cards,has_more,limit,offset,counts`，始终限制在当前仓库授权范围。`counts` 为 `{issue,pr}` 总数，忽略 `object_type` 条件、保留其余条件，供 Issue／PR 切换显示；卡片的 `development_pr_number` 是最近开发任务结果里的 PR 编号 |
-| `/api/board/cards/:repository/:type/:number/tasks` | GET | 同一对象的关联任务摘要，`type` 为 `issue` 或 `pr`，支持同样的有界分页；任务详情沿用 `/api/tasks/:id` |
+| `/api/board/cards` | GET | Issue／PR 对象与 `project_releases` 发版本卡片，参数 `view_id`（默认 `default`）、`group_by`、`filters`（JSON 数组）、`limit`（1–100）、`offset`（0–100000）；返回 `cards,has_more,limit,offset,counts,release_count`，对象和发版本均始终限制在当前仓库授权范围。`counts` 为 `{issue,pr}` 总数，忽略 `object_type` 条件、保留其余条件，供 Issue／PR 切换显示；对象卡片的 `development_pr_number` 是最近开发任务结果里的 PR 编号，发版本卡片带 `release_id,version,release_stage,execution_status,release_url`，不返回原始 `data` |
+| `/api/board/cards/:repository/:type/:number/tasks` | GET | 同一对象的关联任务摘要，`type` 为 `issue` 或 `pr`，支持同样的有界分页；`filters` 可带 `category` 和 `execution_status`，与当前看板筛选一致；任务详情沿用 `/api/tasks/:id` |
 | `/api/board/cards/:repository/:type/:number` | PATCH | `{field_id,option_id}` 修改当前用户的自定义单选值，`option_id:null` 清空；禁止写执行阶段，不创建或修改任务 |
 | `/api/board/fields`、`/api/board/fields/:id/options` | POST | `{name}` 新建个人单选字段／新增选项（即加列），每用户最多 30 个字段、每字段最多 50 个选项 |
-| `/api/board/views`、`/api/board/views/:id` | POST、PATCH / DELETE | 个人视图，字段 `name,group_by,filters,hidden_columns`；最多 50 个自建视图。内置 `default` 仅允许保存筛选和隐藏列，不能删除、改名或切换分组字段 |
+| `/api/board/views`、`/api/board/views/:id` | POST、PATCH / DELETE | 个人视图，字段 `name,group_by,filters,hidden_columns`；最多 50 个自建视图。内置 `default` 可保存筛选、折叠列和标准查看维度，不能删除、改名或切换为自定义字段 |
 | `/api/installations`、`/api/installations/sync` | GET、POST | 仅超级管理员；每个仓库一行，合并 GitHub 安装范围、登记、启用和环境状态，以及各账号最近同步结果；POST 立即全量同步。`hidden=1` 的行不出现在这里 |
 | `/api/installations/hidden` | GET | 仅超级管理员；从列表隐藏的仓库，仍保留安装行；每行可调用恢复 |
 | `/api/installations/:id/activate`、`/api/installations/:id/disable` | POST | 仅超级管理员；启动（可带 `model_id,development_enabled,account_id`）或再次启用／禁用一个仓库 |
@@ -59,7 +59,7 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 项目列表接口 `GET /api/repositories` 与超级管理员的 `GET /api/installations` 在每个仓库上返回 `running_tasks` 和 `queued_tasks`。`GET /api/installations` 另返回 `permission_missing`：仍在安装列表中的仓库所缺权限（`permission,required,current`；机器人账号为 `repository_role`），未读到授予权限或不在安装列表时为 null；`permissions_stale` 表示授予权限已超过 10 分钟未重读。前者仅统计实际执行阶段，后者统计 queued；配置等待、环境等待与已结束任务不计入执行中。返回范围沿用项目管理员的仓库权限。列表开关调用 `PATCH /api/repositories/{id}/policy`，仅提交本次切换的 `review_enabled` 或 `development_enabled`，不更改项目总启用状态。
 
-看板筛选格式为 `[{"field":"object_type","value":"pr"},{"field":"text","value":"research"}]`，最多 20 条，条件之间为“且”。支持 `repository_id`（仓库 ID）、`object_type`（`issue`／`pr`，不添加该条件表示全部）、`bot_stage`（`unreviewed,reviewing,reviewed,developing,developed,attention`）、`text`（编号可带 `#`，否则按标题文字匹配）、`include_closed`（布尔，默认 false）。`group_by` 为 `bot_stage` 或当前用户的单选字段 ID；空值列 ID 为 `unassigned`。筛选和隐藏列可在浏览器先预览，点击“保存视图”后持久保存。分页与列计数只表示已加载的卡片，不冒充全库总量；全量只看 `counts`。
+看板筛选格式为 `[{"field":"object_type","value":"pr"},{"field":"text","value":"research"}]`，最多 20 条，条件之间为“且”。支持 `repository_id`（仓库 ID）、`object_type`（`issue`／`pr`，只限制对象卡片）、`category`（`review`／`development`／`release`）、`execution_status`（`running,queued,failed,completed,waiting,other`）、`bot_stage`（`unreviewed,reviewing,reviewed,developing,developed,attention`）、`text`（对象编号可带 `#`，否则按标题或发版本号匹配）、`include_closed`（布尔，默认 false，只影响对象卡片）。`group_by` 为 `bot_stage,repository,execution_status,category` 或当前用户的单选字段 ID；自定义字段空值列 ID 为 `unassigned`。筛选、标准维度和折叠列可在浏览器先预览，点击“保存视图”后持久保存。分页与列计数只表示已加载的卡片，不冒充全库总量；全量只看 `counts` 和 `release_count`。
 
 任务列表、任务详情、项目最近任务和看板关联任务现在带 `metrics`：`runtime_ms`（累计已观测执行时长，不含排队／等待）、`running`、`complete`（历史或进程中断时可能不完整）、`input_tokens,output_tokens,cached_input_tokens,cache_hit_rate`、`requests,usage_missing_requests,cache_missing_requests,unpriced_requests` 和按币种分开的 `costs`。缓存是输入的子集，命中率用累计缓存 token 除以累计输入 token；缺少必要统计时返回 null，不用 0 冒充。`complete:false` 时显示的是已经观测到的部分。
 

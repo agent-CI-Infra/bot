@@ -18,15 +18,16 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
   usageRequest(h.store,'development-usage',model.id,{date:'2026-10-23',usage:null});await h.projects.reconcile();
   const errors=[];page.on('pageerror',e=>errors.push(e.message));mkdirSync('.tmp/metrics-evidence',{recursive:true});
   try{
-    await login(page,h.admin,'administrator',password);await page.getByRole('button',{name:'检视',exact:true}).click();
-    const own=page.locator('#rows .row').filter({hasText:'fixture/project-101'});
-    await expect(own.locator('.task-metrics')).toContainText('运行 1 分 5 秒');await expect(own.locator('.task-metrics')).toContainText('输入 1,000,000');
-    await expect(own.locator('.task-metrics')).toContainText('输出 100,000');await expect(own.locator('.task-metrics')).toContainText('缓存 800,000');await expect(own.locator('.task-metrics')).toContainText('命中率 80.0%');
-    await own.getByRole('button',{name:'查看过程',exact:true}).click();await expect(page.locator('#task-side')).toContainText('用量统计');await expect(page.locator('#task-side')).toContainText('USD 1.560000');
+    await login(page,h.admin,'administrator',password);await page.goto(h.admin+'/#/reviews');
+    const own=page.locator('[data-card-key="101/issue/1"]');await expect(own).toBeVisible();await own.locator('.board-card-title').click();
+    await expect(page.locator('#task-side')).toContainText('用量统计');await expect(page.locator('#task-side')).toContainText('USD 1.560000');
+    await expect(page.locator('#task-side .task-metrics')).toContainText('运行 1 分 5 秒');await expect(page.locator('#task-side .task-metrics')).toContainText('输入 1,000,000');
+    await expect(page.locator('#task-side .task-metrics')).toContainText('输出 100,000');await expect(page.locator('#task-side .task-metrics')).toContainText('缓存 800,000');await expect(page.locator('#task-side .task-metrics')).toContainText('命中率 80.0%');
     await page.screenshot({path:'.tmp/metrics-evidence/task-detail.png',fullPage:true});await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
-    await page.getByRole('button',{name:'开发',exact:true}).click();await expect(page.locator('#rows .task-metrics')).toContainText('统计不完整');
-    await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('[data-card-key="101/issue/1"] .board-card-title').click();
-    await expect(page.locator('#board-object .task-metrics')).toHaveCount(2);await page.locator('#board-object').getByRole('button',{name:'关闭',exact:true}).click();
+    await page.goto(h.admin+'/#/developments');await page.locator('[data-card-key="101/issue/1"] .board-card-title').click();await expect(page.locator('#task-side')).toContainText('统计不完整');
+    await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();await page.getByLabel('类别',{exact:true}).selectOption('');
+    await page.locator('[data-card-key="101/issue/1"] .board-card-title').click();
+    await expect(page.locator('#task-picker .task-metrics')).toHaveCount(2);await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
     await page.goto(h.admin+'/#/projects/101/activity');await expect(page.getByRole('heading',{name:'最近任务',exact:true})).toBeVisible();await expect(page.locator('#project-page .task-metrics')).toHaveCount(2);
     await page.goto(h.admin+'/#/projects/101/model');await page.getByRole('button',{name:'计费单价',exact:true}).click();
     await expect(page.getByLabel('输入单价 / 百万 token',{exact:true})).toHaveValue('2');await page.getByLabel('输入单价 / 百万 token',{exact:true}).fill('5');
@@ -51,7 +52,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
       expect(await member.getByLabel('成本项目',{exact:true}).locator('option').count()).toBe(2);
       await member.screenshot({path:'.tmp/metrics-evidence/cost-member.png',fullPage:true});
     }finally{await context.close();}
-    await page.getByRole('button',{name:'检视',exact:true}).click();await expect(page.locator('#rows .task-metrics')).toHaveCount(2);
+    await page.goto(h.admin+'/#/reviews');await page.locator('[data-card-key="101/issue/1"] .board-card-title').click();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/metrics-evidence/task-mobile.png',fullPage:true});expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
