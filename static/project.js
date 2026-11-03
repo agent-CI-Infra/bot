@@ -116,6 +116,7 @@ const changed = (values, saved) => Object.fromEntries(Object.entries(values).fil
 
 function releaseSection() {
   const section = card('发版本'), endpoint = `/api/repositories/${current.id}/releases`, id = current.id;
+  section.classList.add('release-panel');
   const version = input('release_version', '', { placeholder: 'v1.2.3 或 v1.2.3-beta.1', maxLength: 256 }), preview = element('div'), status = element('div'), message = element('p', '', 'view-error');
   const confirm = button('确认打标签', async () => {
     const p = current.releasePreview;
@@ -134,7 +135,7 @@ function releaseSection() {
       preview.replaceChildren(...(p.checks || []).map(c => note(c.message + (c.reason ? ' ' + c.reason : ''))));
       if (p.detail) preview.append(note(p.detail));
       if (p.target_sha) preview.append(facts([['默认分支', p.default_branch], ['目标提交', link(p.target_url, p.target_sha)], ['提交标题', p.target_title], ['版本', !p.version_valid ? '请填写合法版本号' : p.prerelease ? '预发布' : '稳定版'],
-        ['上一枚版本', p.previous_tag ? `${p.previous_tag.name} · ${p.previous_tag.sha}` : '从仓库历史起算'], ['发行说明规则', `${p.skill.source} · ${p.skill.path || p.skill.version} · ${p.skill.sha} · ${p.skill.hash}`],
+        ['上一枚版本', p.previous_tag ? `${p.previous_tag.name} · ${p.previous_tag.sha}` : '从仓库历史起算'], ['发行说明规则', `${p.skill.source} · ${p.skill.path || p.skill.version}`],
         ['已有标签', p.existing_tag ? p.existing_tag.commit : '无'], ['已有 Release', p.existing_release ? link(p.existing_release.url, p.existing_release.draft ? '已有草稿' : '已由仓库工作流／外部操作发布') : '无']]));
       confirm.disabled = !p.available;
     } catch (err) { message.textContent = err.message; }
@@ -148,7 +149,9 @@ function releaseSection() {
       status.replaceChildren(...data.releases.map(r => releaseRecord(r, endpoint, refresh, message)));
     } catch (err) { message.textContent = err.message; }
   };
-  section.append(note('填写版本并确认目标提交。控制面创建标签，复用仓库 Release 工作流，成功后准备发行说明草稿。'), field('版本号', version), button('检查候选提交', check), preview, confirm, message, status);
+  const checks = element('div', '', 'actions'), actions = element('div', '', 'actions'), history = element('h4', '发布记录');
+  checks.append(button('检查候选提交', check)); actions.append(confirm); status.className = 'release-history';
+  section.append(note('填写版本并确认目标提交。控制面创建标签，复用仓库 Release 工作流，成功后准备发行说明草稿。'), field('版本号', version), checks, preview, actions, message, history, status);
   void check(); void refresh();
   const poll = async () => { if (current?.id !== id || current.section !== 'release') return; await refresh(); projectTimer = setTimeout(poll, 5000); };
   projectTimer = setTimeout(poll, 5000); return [section];
@@ -156,23 +159,35 @@ function releaseSection() {
 const releaseStages = { tagging: '正在打标签', waiting_run: '等待 Release 工作流', running: '工作流运行中', preparing_notes: '准备发行说明', creating_draft: '创建草稿', draft: '草稿待发布', publishing: '正式发布中', published: '已人工发布', externally_published: '已由仓库工作流／外部操作发布', failed: '失败', waiting_permission: '等待权限处理', write_unknown: '写入结果待查证' };
 function releaseRecord(r, endpoint, refresh, message) {
   const section = card(r.version), run = r.run;
-  section.append(facts([['阶段', releaseStages[r.stage] || r.stage], ['目标提交', r.target_sha], ['失败步骤', r.failure_step], ['说明', r.detail],
+  section.classList.add('release-record');
+  section.append(facts([['阶段', releaseStages[r.stage] || r.stage], ['目标提交', r.target_sha], ['失败步骤', r.failure_step], ['错误码', r.error], ['说明', r.detail],
     ['工作流', run?.name], ['Run／attempt', r.run_id ? `${r.run_id} / ${r.run_attempt}` : null], ['状态／结论', run ? `${run.status} / ${run.conclusion || '等待结果'}` : null],
     ['开始时间', run?.started_at], ['结束时间', run?.ended_at], ['Actions', r.actions_url ? link(r.actions_url, '查看本次运行') : null]]));
+  const jobs = element('div', '', 'release-jobs');
   for (const job of run?.jobs || []) {
-    section.append(note(`${job.name} · ${job.status} · ${job.conclusion || '等待结果'}`), link(job.url, '查看 job'));
+    const item = element('div', '', 'release-job'); item.append(note(`${job.name} · ${job.status} · ${job.conclusion || '等待结果'}`), link(job.url, '查看 job'));
     const failed = (job.steps || []).filter(s => s.conclusion && s.conclusion !== 'success');
-    for (const step of failed) section.append(note(`Step ${step.number}: ${step.name} · ${step.conclusion}`));
+    for (const step of failed) item.append(note(`Step ${step.number}: ${step.name} · ${step.conclusion}`)); jobs.append(item);
   }
+  section.append(jobs);
   for (const candidate of r.candidates || []) section.append(link(candidate.url, `候选 run ${candidate.id}`));
   const action = (caption, suffix) => button(caption, async () => {
     try { await api(endpoint + '/' + r.id + '/' + suffix, 'POST', { revision: r.revision }); await refresh(); }
     catch (err) { message.textContent = err.message; }
   });
-  if (r.stage === 'failed' && r.error === 'release_ci_unsuccessful' && r.run_id) section.append(action('重跑', 'rerun'));
-  if (['failed', 'write_unknown', 'waiting_permission'].includes(r.stage) && r.error !== 'release_ci_unsuccessful') section.append(action('继续／查证此步骤', 'resume'));
-  if (r.release_url) section.append(link(r.release_url, '查看 GitHub Release'));
-  if (r.skill) section.append(facts([['规则来源', r.skill.source], ['规则路径／版本', r.skill.path || r.skill.version], ['规则所在提交', r.skill.sha], ['规则内容哈希', r.skill.hash], ['上一枚版本', r.previous_tag ? `${r.previous_tag.name} · ${r.previous_tag.sha}` : '从仓库历史起算']]));
+  const actions = element('div', '', 'actions'); section.append(actions);
+  if (r.stage === 'failed' && ['release_ci_unsuccessful', 'release_rerun_not_started'].includes(r.error) && r.run_id) actions.append(action('重跑', 'rerun'));
+  if (['failed', 'write_unknown', 'waiting_permission'].includes(r.stage) && r.error !== 'release_ci_unsuccessful') actions.append(action('继续／查证此步骤', 'resume'));
+  if (r.run_id) actions.append(action('让智能体看这次运行（只读）', 'observe'));
+  if (r.observation_error) section.append(note(r.observation_error));
+  if (r.observation) {
+    section.append(note(`运行分析 · run ${r.observation.run_id} / attempt ${r.observation.attempt} · 仅供排查的建议`), note(r.observation.advice));
+    for (const job of r.observation.jobs) section.append(link(job.url, `${job.name} · ${job.conclusion}`));
+  }
+  if (r.release_url) actions.append(link(r.release_url, '查看 GitHub Release'));
+  if (r.skill) {
+    const provenance = element('details'); provenance.append(element('summary', '发行说明规则与范围'), facts([['规则来源', r.skill.source], ['规则路径／版本', r.skill.path || r.skill.version], ['规则所在提交', r.skill.sha], ['规则内容哈希', r.skill.hash], ['上一枚版本', r.previous_tag ? `${r.previous_tag.name} · ${r.previous_tag.sha}` : '从仓库历史起算']])); section.append(provenance);
+  }
   if (r.sources) {
     const details = element('details'), summary = element('summary', `发行说明来源（${r.sources.length}）`); details.append(summary);
     for (const source of r.sources) details.append(note(`${source.kind} · ${source.title}`), link(source.url, source.id));
@@ -191,8 +206,17 @@ function releaseRecord(r, endpoint, refresh, message) {
         current.releaseEdits.delete(r.id); await refresh(); message.textContent = saved.release.stage === 'draft' ? '草稿已保存' : '已由仓库工作流／外部操作发布';
       } catch (err) { message.textContent = err.message; await refresh(); } finally { save.disabled = false; }
     });
-    section.append(field('发行说明草稿', editor), note('保存正文不会正式发布。外部或其他人的修改会返回冲突，请刷新后对照。'), save,
-      button('丢弃本地编辑并刷新正文', async () => { current.releaseEdits.delete(r.id); await refresh(); }));
+    const edits = element('div', '', 'actions');
+    edits.append(save, button('丢弃本地编辑并刷新正文', async () => { current.releaseEdits.delete(r.id); message.textContent = ''; await refresh(); }));
+    section.append(field('发行说明草稿', editor), note('保存正文不会正式发布。外部或其他人的修改会返回冲突，请刷新后对照。'), edits);
+    const publish = button('正式发布', async () => {
+      if (edit.dirty) { message.textContent = '请先保存草稿正文，再正式发布。'; return; }
+      if (!await askConfirm({ title: `正式发布 ${r.version}？`, body: [r.target_sha, r.prerelease ? '发布后仍为预发布版本。' : '发布后为稳定版本。', '将此 GitHub Release 草稿改为正式发布。'], action: '正式发布' })) return;
+      try {
+        publish.disabled = true;
+        await api(endpoint + '/' + r.id + '/publish', 'POST', { revision: r.revision, body_revision: r.body_revision }); await refresh();
+      } catch (err) { message.textContent = err.message; await refresh(); } finally { publish.disabled = false; }
+    }); edits.append(publish);
   } else if (r.body) { const body = element('pre', r.body); section.append(body); }
   return section;
 }

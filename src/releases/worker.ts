@@ -59,8 +59,12 @@ export class ReleaseWorker {
           else if (['waiting_run', 'running'].includes(row.stage)) await this.observeRun(github, row, redactor);
           else if (row.stage === 'preparing_notes') await this.prepareNotes(github, row, redactor);
           else if (row.stage === 'creating_draft') await this.createDraft(github, row, redactor);
+          else if (row.stage === 'publishing') await this.reconcilePublish(github, row, redactor);
         }, () => this.service.guard(row));
-    } catch (error) { this.failed(row, error, redactor); }
+    } catch (error) {
+      // Another worker may have recovered an expired lease. Its record must never be overwritten by this worker.
+      if (this.service.store.get('SELECT lease FROM project_releases WHERE id=?', row.id)?.lease === row.lease) this.failed(row, error, redactor);
+    }
     finally { this.service.unlock(row); }
   }
   failed(row: any, error: any, redactor: Redactor, failureStep = row.stage) {
@@ -149,6 +153,17 @@ export class ReleaseWorker {
       return stop('release_ci_evidence_changed', 'failed', 'Actions 当前 attempt 与成功证据不一致，已停止 Release 写入；请刷新本次运行。');
     }
   }
+  async reconcileRerun(github: GitHub, row: any) {
+    const data = JSON.parse(row.data), current = await runSnapshot(github, row), expected = data.expected_attempt;
+    if (!expected) return fail(409, 'release_rerun_unavailable');
+    if (current.run.run_attempt >= expected) {
+      this.service.save(row, { error: null, failure_step: null, detail: '已查证新的 Actions attempt，继续读取本次运行。' }, 'running'); return;
+    }
+    const effect = this.service.store.get('SELECT state FROM release_effects WHERE id=?', row.id + ':rerun:' + (expected - 1));
+    if (effect && ['inflight', 'unknown'].includes(effect.state)) return stop('release_write_unknown', 'write_unknown', '重跑请求结果尚未查明，未重复发送。请继续查询 attempt。');
+    if (effect?.state === 'sent') { this.service.save(row, { error: null, failure_step: null, detail: '重跑请求已接受，等待新的 attempt。' }, 'running'); return; }
+    this.service.save(row, { error: 'release_rerun_not_started', failure_step: 'rerun', detail: '已查证重跑请求未被接受；需要再次点击「重跑」，继续查询不会重跑 CI。' }, 'failed');
+  }
   adopt(row: any, release: any, redactor: Redactor) {
     const data = JSON.parse(row.data), body = String(release.body || ''), hash = digest(body);
     this.service.save(row, { release_id: release.id, release_url: release.html_url, body: redactor.text(body), body_hash: hash,
@@ -220,5 +235,47 @@ export class ReleaseWorker {
       this.service.store.run("UPDATE release_effects SET state='sent',response=? WHERE id=?", JSON.stringify(redactor.clean(remote)), effect.id);
     }
     this.adopt(row, remote, redactor);
+  }
+  async publish(github: GitHub, row: any, actorId: string, bodyRevision: unknown, redactor: Redactor) {
+    const data = JSON.parse(row.data);
+    if (row.stage !== 'draft' && !(data.failure_step === 'publishing' && ['write_unknown', 'waiting_permission', 'failed', 'publishing'].includes(row.stage))) return fail(409, 'release_not_draft');
+    await this.requireTag(github, row); await this.ensureCI(github, row);
+    const remote = await this.currentDraft(github, row, redactor, bodyRevision); if (!remote) return;
+    if (redactor.contains(Buffer.from(String(remote.body || '')))) return fail(400, 'release_sensitive_body');
+    this.service.save(row, { publish_actor: actorId, publish_requested_at: new Date().toISOString(), failure_step: 'publishing' }, 'publishing');
+    const request = { draft: false, prerelease: prerelease(row.version) };
+    const result = await this.effect(row, 'publish', { release_id: remote.id, ...request },
+      async () => ({ ...await github.request('PATCH', github.path('/releases/' + remote.id), request), control_response: true }),
+      async () => {
+        const current = await releases(github, row.version, remote.id);
+        if (!current || current.id !== remote.id) return fail(409, 'release_draft_changed');
+        if (current.draft) {
+          if (digest(String(current.body || '')) !== data.body_hash) { this.adopt(row, current, redactor); return fail(409, 'release_body_conflict'); }
+          return null;
+        }
+        const effect = this.service.store.get('SELECT state FROM release_effects WHERE id=?', row.id + ':publish');
+        return { ...current, external: !effect || effect.state === 'pending' };
+      }, redactor);
+    if (result.id !== remote.id || result.tag_name !== row.version || result.draft !== false || result.prerelease !== prerelease(row.version))
+      return stop('release_write_unknown', 'write_unknown', '正式发布响应与本次 Release 或预发布标记不一致，请先查证。');
+    this.adopt(row, result, redactor);
+    if (!result.external) this.service.save(row, { detail: '已人工确认正式发布', published_at: new Date().toISOString(), publication_confirmation: result.control_response ? 'response' : 'remote_after_request' }, 'published');
+  }
+  async reconcilePublish(github: GitHub, row: any, redactor: Redactor) {
+    // Recovery is read-only. Persisted intent can justify checking the result, never another draft=false request.
+    const data = JSON.parse(row.data), remote = await releases(github, row.version, data.release_id);
+    if (!remote || remote.id !== data.release_id) return stop('release_write_unknown', 'write_unknown', '无法查证正式发布结果，请检查原 Release。');
+    const effect = this.service.store.get('SELECT state FROM release_effects WHERE id=?', row.id + ':publish');
+    if (!remote.draft) {
+      this.adopt(row, remote, redactor);
+      if (effect && ['inflight', 'unknown', 'sent'].includes(effect.state)) {
+        this.service.store.run("UPDATE release_effects SET state='sent',response=? WHERE id=?", JSON.stringify(redactor.clean(remote)), row.id + ':publish');
+        this.service.save(row, { detail: '已核实人工发布请求后的正式 Release', published_at: new Date().toISOString(), publication_confirmation: 'remote_after_request' }, 'published');
+      }
+      return;
+    }
+    if (effect && ['inflight', 'unknown'].includes(effect.state)) return stop('release_write_unknown', 'write_unknown', '正式发布请求结果尚未确认，未再次发送；可以继续查询。');
+    this.adopt(row, remote, redactor);
+    this.service.save(row, { detail: '上一次正式发布未确认成功，请重新点击正式发布。' }, 'draft');
   }
 }

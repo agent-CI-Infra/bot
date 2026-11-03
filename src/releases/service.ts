@@ -8,6 +8,8 @@ import { inspect, fingerprint, preflightToken } from './preflight.js';
 import { enabled, releaseRedactor, withGitHub } from './github.js';
 import { validVersion } from './version.js';
 import { ReleaseWorker } from './worker.js';
+import { runSnapshot } from './actions.js';
+import { explainRun } from './observe.js';
 
 export class ReleaseService {
   readonly worker: ReleaseWorker;
@@ -19,7 +21,7 @@ export class ReleaseService {
   tick(): Promise<void> {
     if (this.processing) return this.processing;
     this.processing = (async () => {
-      for (const row of this.store.all("SELECT id FROM project_releases WHERE active=1 AND stage IN ('tagging','waiting_run','running','preparing_notes','creating_draft') AND next_poll<=?", Date.now()))
+      for (const row of this.store.all("SELECT id FROM project_releases WHERE active=1 AND stage IN ('tagging','waiting_run','running','preparing_notes','creating_draft','publishing') AND next_poll<=?", Date.now()))
         await this.worker.process(row.id);
     })().finally(() => { this.processing = undefined; });
     return this.processing;
@@ -76,14 +78,15 @@ export class ReleaseService {
           await withGitHub(this.store, id, this.apiUrl, { actions: 'write' }, redactor, github => this.worker.rerun(github, row, redactor), () => this.guard(row));
         } else {
           const data = JSON.parse(row.data);
-          if (!['failed', 'write_unknown', 'waiting_permission'].includes(row.stage) || !['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'rerun', 'save_draft'].includes(data.failure_step) || data.error === 'release_ci_unsuccessful') return fail(409, 'release_resume_unavailable');
+          if (!['failed', 'write_unknown', 'waiting_permission'].includes(row.stage) || !['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'rerun', 'save_draft', 'publishing'].includes(data.failure_step) || data.error === 'release_ci_unsuccessful') return fail(409, 'release_resume_unavailable');
           this.store.audit(user.id, 'release.resume', row.id, id);
-          if (data.failure_step === 'rerun') await withGitHub(this.store, id, this.apiUrl, { actions: 'write' }, redactor, github => this.worker.rerun(github, row, redactor), () => this.guard(row));
+          if (data.failure_step === 'rerun') await withGitHub(this.store, id, this.apiUrl, {}, redactor, github => this.worker.reconcileRerun(github, row), () => this.guard(row));
           else if (data.failure_step === 'save_draft') await withGitHub(this.store, id, this.apiUrl, {}, redactor, github => this.worker.reconcileSave(github, row, redactor), () => this.guard(row));
+          else if (data.failure_step === 'publishing') await withGitHub(this.store, id, this.apiUrl, {}, redactor, github => this.worker.reconcilePublish(github, row, redactor), () => this.guard(row));
           else this.save(row, { error: null, detail: '', failure_step: null }, data.failure_step);
           this.store.run('UPDATE project_releases SET next_poll=0 WHERE id=?', row.id);
         }
-      } catch (error) { if ((error as any).status) throw error; this.worker.failed(row, error, redactor, operation[2] === 'rerun' || JSON.parse(row.data).expected_attempt ? 'rerun' : undefined); }
+      } catch (error) { if ((error as any).status) throw error; this.worker.failed(row, error, redactor, operation[2] === 'rerun' ? 'rerun' : JSON.parse(row.data).failure_step || row.stage); }
       finally { this.unlock(row); }
       return { release: this.view(row) };
     }
@@ -97,6 +100,41 @@ export class ReleaseService {
         await withGitHub(this.store, id, this.apiUrl, { contents: 'write' }, redactor, github => this.worker.saveDraft(github, row, input.body as string, input.body_revision, redactor), () => this.guard(row));
       } catch (error) { if ((error as any).status) throw error; this.worker.failed(row, error, redactor, 'save_draft'); }
       finally { this.unlock(row); }
+      return { release: this.view(row) };
+    }
+    const publication = /^([^/]+)\/publish$/.exec(action);
+    if (publication && method === 'POST') {
+      fields(input, ['revision', 'body_revision']); enabled(this.store, id);
+      const found = this.find(id, publication[1]!);
+      if (['published', 'externally_published'].includes(found.stage)) return { release: this.view(found) };
+      if (!Number.isSafeInteger(input.revision) || !Number.isSafeInteger(input.body_revision)) return fail(400, 'release_revision_required');
+      const row = this.claim(found.id, input.revision), redactor = releaseRedactor(this.store, id);
+      try {
+        this.store.audit(user.id, 'release.publish', row.id, id);
+        await withGitHub(this.store, id, this.apiUrl, { contents: 'write' }, redactor, github => this.worker.publish(github, row, user.id, input.body_revision, redactor), () => this.guard(row));
+      } catch (error) { if ((error as any).status) throw error; this.worker.failed(row, error, redactor, row.stage === 'running' ? 'running' : 'publishing'); }
+      finally { this.unlock(row); }
+      return { release: this.view(row) };
+    }
+    const observation = /^([^/]+)\/observe$/.exec(action);
+    if (observation && method === 'POST') {
+      fields(input, ['revision']); this.find(id, observation[1]!); enabled(this.store, id);
+      if (!Number.isSafeInteger(input.revision)) return fail(400, 'release_revision_required');
+      const row = this.claim(observation[1]!, input.revision), redactor = releaseRedactor(this.store, id);
+      try {
+        const data = JSON.parse(row.data); if (!data.run_id) return fail(409, 'release_no_bound_run');
+        this.store.audit(user.id, 'release.observe', row.id, id);
+        const result = await withGitHub(this.store, id, this.apiUrl, {}, redactor, async github => {
+          const current = await runSnapshot(github, row);
+          if (current.run.run_attempt !== data.run_attempt) return fail(409, 'release_attempt_changed');
+          return explainRun(this.store, id, current.snapshot, redactor);
+        }, () => this.guard(row));
+        this.save(row, { observation: result, observation_error: null });
+      } catch (error) {
+        if ((error as any).status) throw error;
+        const e = error as any;
+        this.save(row, { observation_error: redactor.text(e.detail || '本次分析失败，Actions 状态不受影响。') });
+      } finally { this.unlock(row); }
       return { release: this.view(row) };
     }
     return fail(404, 'not_found');

@@ -213,3 +213,96 @@ test('draft creation timeout is reconciled to the same draft without a duplicate
   assert.equal(writes(f.state).filter(r => r.path.endsWith('/releases')).length, 1);
   assert.ok(!writes(f.state).some(r => r.body?.draft === false));
 });
+test('complete beta release journey requires an explicit publish, preserves prerelease and is idempotent', async t => {
+  const f = await releaseFixture(t), r = await toDraft(f, 'v1.2.3-beta.1');
+  assert.equal(r.stage, 'draft'); await new ReleaseService(f.h.store, f.apiUrl).tick();
+  assert.ok(!writes(f.state).some(r => r.body?.draft === false));
+  const saved = await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: r.revision, body_revision: r.body_revision, body: 'Release notes reviewed by a maintainer' });
+  assert.equal(saved.status, 200); const current = saved.value.release;
+  const published = await f.admin(f.endpoint + '/' + r.id + '/publish', 'POST', { revision: current.revision, body_revision: current.body_revision });
+  assert.equal(published.status, 201); assert.equal(published.value.release.stage, 'published'); assert.ok(published.value.release.publish_actor); assert.ok(published.value.release.published_at);
+  assert.equal(f.state.releases[0].draft, false); assert.equal(f.state.releases[0].prerelease, true);
+  const again = await f.admin(f.endpoint + '/' + r.id + '/publish', 'POST', { revision: current.revision, body_revision: current.body_revision });
+  assert.equal(again.value.release.release_id, r.release_id);
+  const formal = writes(f.state).filter(r => r.body?.draft === false); assert.equal(formal.length, 1); assert.deepEqual(formal[0].body, { draft: false, prerelease: true });
+  assert.equal(f.h.store.get("SELECT COUNT(*) n FROM audit WHERE action='release.publish'").n, 1);
+});
+test('publication rechecks the tag, successful attempt and draft revision before any formal write', async t => {
+  const f = await releaseFixture(t), r = await toDraft(f); f.state.tags[r.version] = { type: 'commit', sha: other };
+  await f.admin(f.endpoint + '/' + r.id + '/publish', 'POST', { revision: r.revision, body_revision: r.body_revision });
+  assert.ok(!writes(f.state).some(r => r.body?.draft === false));
+  const g = await releaseFixture(t), s = await toDraft(g); g.state.runs[0].run_attempt = 2; g.state.runs[0].conclusion = 'failure'; g.state.jobs = [job({ run_attempt: 2, conclusion: 'failure' })];
+  await g.admin(g.endpoint + '/' + s.id + '/publish', 'POST', { revision: s.revision, body_revision: s.body_revision });
+  assert.equal((await g.admin(g.endpoint + '/' + s.id)).value.release.error, 'release_ci_evidence_changed'); assert.ok(!writes(g.state).some(r => r.body?.draft === false));
+  const h = await releaseFixture(t), u = await toDraft(h); h.state.releases[0].body = 'Externally edited before publishing';
+  assert.equal((await h.admin(h.endpoint + '/' + u.id + '/publish', 'POST', { revision: u.revision, body_revision: u.body_revision })).status, 409);
+  assert.ok(!writes(h.state).some(r => r.body?.draft === false));
+});
+test('publish timeout is probed and restart recovery never resends formal publication', async t => {
+  const f = await releaseFixture(t), r = await toDraft(f); f.state.unknown = '/repos/fixture/project-101/releases/' + r.release_id;
+  const result = await f.admin(f.endpoint + '/' + r.id + '/publish', 'POST', { revision: r.revision, body_revision: r.body_revision });
+  assert.equal(result.value.release.stage, 'published'); assert.equal(writes(f.state).filter(r => r.body?.draft === false).length, 1);
+  const g = await releaseFixture(t), s = await toDraft(g);
+  g.state.custom = async ({ method, path, body, req }) => { if (method === 'PATCH' && path.endsWith('/releases/' + s.release_id) && body.draft === false) { req.socket.destroy(); return true; } };
+  const uncertain = await g.admin(g.endpoint + '/' + s.id + '/publish', 'POST', { revision: s.revision, body_revision: s.body_revision });
+  assert.equal(uncertain.value.release.stage, 'write_unknown');
+  await g.admin(g.endpoint + '/' + s.id + '/resume', 'POST', { revision: uncertain.value.release.revision });
+  assert.equal(writes(g.state).filter(r => r.body?.draft === false).length, 1);
+  g.state.releases[0].draft = false; g.h.store.run("UPDATE project_releases SET stage='publishing',next_poll=0 WHERE id=?", s.id);
+  await new ReleaseService(g.h.store, g.apiUrl).tick(); assert.equal((await g.admin(g.endpoint + '/' + s.id)).value.release.stage, 'published');
+  assert.equal(writes(g.state).filter(r => r.body?.draft === false).length, 1);
+});
+test('read-only observation receives only this run and attempt with no write token or executable tools', async t => {
+  const f = await releaseFixture(t); f.state.runs = [run({ conclusion: 'failure' })]; f.state.jobs = [job({ conclusion: 'failure', steps: [{ name: 'Build', number: 1, conclusion: 'failure' }] })];
+  const r = await observe(f), m = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'observation-fixture-secret', model_name: 'fixture' });
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: m.value.model.id });
+  let input, request; f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: '{"job_ids":[1],"advice":"Inspect the Build step output"}', tool_calls: [{ function: { name: 'publish_release', arguments: '{}' } }] } }] }); return true; } };
+  const before = writes(f.state).length, tokens = f.state.tokens.length;
+  const result = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: r.revision });
+  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools, []); assert.equal(request.tool_choice, 'none');
+  assert.ok(!JSON.stringify(request).includes('fixture-installation-'));
+  assert.ok(f.state.tokens.slice(tokens).every(t => Object.values(t.permissions).every(p => p === 'read')));
+  assert.ok(writes(f.state).slice(before).every(r => r.path === '/v1/chat/completions'));
+  assert.equal(f.state.releases.length, 0);
+  f.state.custom = async ({ path, send }) => { if (path === '/v1/chat/completions') { send({ error: 'unavailable' }, 503); return true; } };
+  const failed = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: result.value.release.revision });
+  assert.equal(failed.value.release.stage, 'failed'); assert.ok(failed.value.release.observation_error); assert.equal(failed.value.release.run.conclusion, 'failure');
+});
+test('every attempt job page is checked, including a failure on the second page', async t => {
+  const f = await releaseFixture(t); f.state.runs = [run()];
+  f.state.custom = async ({ path, url, send }) => {
+    if (path === '/repos/fixture/project-101/actions/runs/800/attempts/1/jobs') { const page = Number(url.searchParams.get('page')); const jobs = Array.from({ length: 101 }, (_, n) => job({ id: n + 1, conclusion: n === 100 ? 'failure' : 'success' })); send({ total_count: 101, jobs: jobs.slice((page - 1) * 100, page * 100) }); return true; }
+  };
+  const r = await observe(f); assert.equal(r.stage, 'failed'); assert.equal(r.run.jobs.length, 101); assert.equal(r.run.jobs[100].conclusion, 'failure'); assert.equal(f.state.releases.length, 0);
+});
+test('a missing tag workflow times out diagnostically and does not create another tag', async t => {
+  const f = await releaseFixture(t), r = await observe(f), row = f.h.store.get('SELECT * FROM project_releases WHERE id=?', r.id), data = JSON.parse(row.data);
+  data.wait_started_at = Date.now() - 31 * 60_000; f.h.store.run('UPDATE project_releases SET data=? WHERE id=?', JSON.stringify(data), r.id);
+  await f.service.worker.process(r.id); const result = (await f.admin(f.endpoint + '/' + r.id)).value.release;
+  assert.equal(result.error, 'release_run_missing'); assert.equal(result.detail, '标签已存在，但没有找到该标签触发的 Release 工作流'); assert.ok(result.actions_url); assert.equal(writes(f.state).length, 2);
+});
+test('resume only reconciles an uncertain or rejected rerun and cannot send a new rerun', async t => {
+  const f = await releaseFixture(t); f.state.runs = [run({ conclusion: 'failure' })]; f.state.jobs = [job({ conclusion: 'failure' })];
+  const r = await observe(f); f.state.deny = '/repos/fixture/project-101/actions/runs/800/rerun';
+  const rejected = await f.admin(f.endpoint + '/' + r.id + '/rerun', 'POST', { revision: r.revision });
+  assert.equal(rejected.value.release.stage, 'waiting_permission'); const before = writes(f.state).length; f.state.deny = '';
+  const resumed = await f.admin(f.endpoint + '/' + r.id + '/resume', 'POST', { revision: rejected.value.release.revision });
+  assert.equal(resumed.value.release.error, 'release_rerun_not_started'); assert.equal(writes(f.state).length, before);
+  const userRerun = await f.admin(f.endpoint + '/' + r.id + '/rerun', 'POST', { revision: resumed.value.release.revision });
+  assert.equal(userRerun.value.release.stage, 'running'); assert.equal(f.state.runs[0].run_attempt, 2);
+});
+test('the server refuses both missing integration levels, excluded beta tags and illegal versions', async t => {
+  const f = await releaseFixture(t);
+  const submit = async version => { const p = await f.preview(version); return f.admin(f.endpoint, 'POST', { version, target_sha: p.target_sha, credential: p.credential }); };
+  delete f.state.files['.github/ci-gates.json']; assert.equal((await submit('v1.2.3')).status, 409);
+  f.state.files['.github/ci-gates.json'] = '{}'; delete f.state.files['.github/workflows/release.yml']; assert.equal((await submit('v1.2.3')).status, 409);
+  f.state.files['.github/workflows/release.yml'] = workflow.replace("['v*']", "['v*', '!v*-beta*']"); assert.equal((await submit('v1.2.3-beta.1')).status, 409);
+  assert.equal((await submit('v01.2.3')).status, 400); assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 0); assert.equal(writes(f.state).length, 0);
+});
+test('disabled and uninstalled projects and bot-account credentials cannot write releases', async t => {
+  const f = await releaseFixture(t), p = await f.preview(), input = { version: p.version, target_sha: target, credential: p.credential };
+  f.h.store.run('UPDATE policies SET enabled=0 WHERE repository_id=?', '101'); assert.equal((await f.preview()).error, 'release_disabled'); assert.equal((await f.admin(f.endpoint, 'POST', input)).status, 503);
+  f.h.store.run('UPDATE policies SET enabled=1 WHERE repository_id=?', '101'); f.h.store.run('UPDATE installed_repositories SET installed=0 WHERE repository_id=?', '101'); assert.equal((await f.preview()).error, 'release_uninstalled');
+  f.h.store.run('UPDATE installed_repositories SET installed=1 WHERE repository_id=?', '101'); f.h.store.run("UPDATE accounts SET type='bot_account'"); assert.equal((await f.preview()).error, 'release_app_required');
+  assert.equal(writes(f.state).length, 0);
+});
