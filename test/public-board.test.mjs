@@ -23,6 +23,8 @@ test('verified deliveries update both public contracts through the real local co
   assert.equal(snapshot.repository.name, 'octo/hello');
   assert.equal(snapshot.repository.stars, 1);
   assert.ok(snapshot.sections.ci);
+  assert.equal((await get('/boards/octo/hello/data/history/manifest.json')).status, 200);
+  assert.equal((await get('/boards/octo/hello/data/e2e/index.json')).status, 200);
   assert.deepEqual((await get('/dashboard/data/index.json')).data.repos.map(r => r.fullName), ['octo/hello']);
   assert.deepEqual((await get('/dashboard/data/gate/index.json')).data.sources.map(r => r.id), ['octo/hello']);
   assert.equal((await get('/dashboard/data/gate/octo/hello.json')).data.boardUrl, '/boards/octo/hello/');
@@ -37,6 +39,7 @@ test('verified deliveries update both public contracts through the real local co
   state.stars = 9;
   await hook('second'); await boards.drain();
   assert.equal((await get('/boards/octo/hello/data/snapshot.json')).data.repository.stars, 9);
+  assert.equal((await get('/boards/octo/hello/data/history/manifest.json')).status, 200);
   assert.equal((await get('/dashboard/data/octo/hello/latest.json')).data.repo.stars, 9);
   assert.ok(state.requests.filter(r => !['GET', 'DELETE'].includes(r.method)).every(r => r.path.endsWith('/access_tokens')));
   assert.ok(state.requests.filter(r => r.path.endsWith('/access_tokens')).every(r => r.body.repository_ids[0] === 101 && Object.values(r.body.permissions).every(p => p === 'read')));
