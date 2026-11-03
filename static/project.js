@@ -152,7 +152,26 @@ function releaseSection() {
   const poll = async () => { if (current?.id !== id || current.section !== 'release') return; await refresh(); projectTimer = setTimeout(poll, 5000); };
   projectTimer = setTimeout(poll, 5000); return [section];
 }
-function releaseRecord(r) { const section = card(r.version); section.append(facts([['阶段', r.stage], ['目标提交', r.target_sha]])); return section; }
+const releaseStages = { tagging: '正在打标签', waiting_run: '等待 Release 工作流', running: '工作流运行中', preparing_notes: '准备发行说明', creating_draft: '创建草稿', draft: '草稿待发布', publishing: '正式发布中', published: '已人工发布', externally_published: '已由仓库工作流／外部操作发布', failed: '失败', waiting_permission: '等待权限处理', write_unknown: '写入结果待查证' };
+function releaseRecord(r, endpoint, refresh, message) {
+  const section = card(r.version), run = r.run;
+  section.append(facts([['阶段', releaseStages[r.stage] || r.stage], ['目标提交', r.target_sha], ['失败步骤', r.failure_step], ['说明', r.detail],
+    ['工作流', run?.name], ['Run／attempt', r.run_id ? `${r.run_id} / ${r.run_attempt}` : null], ['状态／结论', run ? `${run.status} / ${run.conclusion || '等待结果'}` : null],
+    ['开始时间', run?.started_at], ['结束时间', run?.ended_at], ['Actions', r.actions_url ? link(r.actions_url, '查看本次运行') : null]]));
+  for (const job of run?.jobs || []) {
+    section.append(note(`${job.name} · ${job.status} · ${job.conclusion || '等待结果'}`), link(job.url, '查看 job'));
+    const failed = (job.steps || []).filter(s => s.conclusion && s.conclusion !== 'success');
+    for (const step of failed) section.append(note(`Step ${step.number}: ${step.name} · ${step.conclusion}`));
+  }
+  for (const candidate of r.candidates || []) section.append(link(candidate.url, `候选 run ${candidate.id}`));
+  const action = (caption, suffix) => button(caption, async () => {
+    try { await api(endpoint + '/' + r.id + '/' + suffix, 'POST', { revision: r.revision }); await refresh(); }
+    catch (err) { message.textContent = err.message; }
+  });
+  if (r.stage === 'failed' && r.error === 'release_ci_unsuccessful' && r.run_id) section.append(action('重跑', 'rerun'));
+  if (['failed', 'write_unknown', 'waiting_permission'].includes(r.stage) && r.error !== 'release_ci_unsuccessful') section.append(action('继续／查证此步骤', 'resume'));
+  return section;
+}
 
 function notesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/notes`, section = card('项目笔记'), list = element('div', '', 'project-notes-list'), message = element('p', '', 'view-error');

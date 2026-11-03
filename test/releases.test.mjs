@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { validVersion, compareVersions } from '../dist/releases/version.js';
 import { releaseWorkflow, filter } from '../dist/releases/workflow.js';
 import { noCI, noRelease } from '../dist/releases/preflight.js';
-import { releaseFixture, workflow, writes, target, other, tagObject } from './release-fixtures.mjs';
+import { releaseFixture, workflow, writes, target, other, tagObject, run } from './release-fixtures.mjs';
 import { Store } from '../dist/storage/database.js';
 import { ReleaseService } from '../dist/releases/service.js';
 import { testPassword } from './helpers.mjs';
@@ -89,4 +89,56 @@ test('uncertain tag writes are reconciled and an unknown tag object is never pos
   const restarted = new ReleaseService(g.h.store, g.apiUrl); await restarted.tick();
   assert.equal(writes(g.state).filter(r => r.path.endsWith('/git/tags')).length, 1);
   assert.equal(g.h.store.get("SELECT state FROM release_effects WHERE kind='tag_object'").state, 'unknown');
+});
+async function observe(f) { const r = await f.create(); await f.service.worker.process(r.value.release.id); await f.service.worker.process(r.value.release.id); return (await f.admin(f.endpoint + '/' + r.value.release.id)).value.release; }
+const job = (overrides = {}) => ({ id: 1, run_id: 800, run_attempt: 1, name: 'release lane', status: 'completed', conclusion: 'success', html_url: 'https://github.com/fixture/project-101/actions/runs/800/job/1', ...overrides });
+test('Actions binding rejects other workflows, other tags, dispatches, wrong repositories and older runs', async t => {
+  const f = await releaseFixture(t);
+  f.state.runs = [run({ workflow_id: 44 }), run({ head_branch: 'v9.0.0' }), run({ event: 'workflow_dispatch' }), run({ repository: { id: 202 } }), run({ created_at: '2020-01-01T00:00:00Z' })];
+  const r = await observe(f); assert.equal(r.stage, 'waiting_run'); assert.equal(r.run_id, undefined); assert.match(r.detail, /等待 Release/);
+  assert.ok(!writes(f.state).some(r => r.path.endsWith('/releases')));
+});
+test('Actions association ambiguity is diagnosed instead of guessing a successful run', async t => {
+  const f = await releaseFixture(t); f.state.runs = [run(), run({ id: 801 })]; f.state.jobs = [job()];
+  const r = await observe(f); assert.equal(r.error, 'release_run_ambiguous'); assert.equal(r.candidates.length, 2);
+  const g = await releaseFixture(t); g.state.files['.github/workflows/release.yml'] = workflow.replace("tags: ['v*']", "tags: ['v*']\n    branches: ['v*']"); g.state.runs = [run()]; g.state.jobs = [job()];
+  assert.equal((await observe(g)).error, 'release_run_ambiguous');
+});
+test('failed, cancelled, timed out, skipped and neutral jobs never advance to a draft', async t => {
+  for (const conclusion of ['failure', 'cancelled', 'timed_out', 'skipped', 'neutral']) {
+    const f = await releaseFixture(t); f.state.runs = [run({ conclusion })]; f.state.jobs = conclusion === 'cancelled' ? [] : [job({ conclusion, steps: [{ number: 1, name: 'Build artifacts', conclusion }] })];
+    const r = await observe(f); assert.equal(r.stage, 'failed'); assert.equal(r.error, 'release_ci_unsuccessful'); assert.ok(r.detail.includes(conclusion));
+    assert.equal(r.run.conclusion, conclusion); assert.equal(r.run.jobs.length, f.state.jobs.length);
+    await new ReleaseService(f.h.store, f.apiUrl).tick(); assert.ok(!writes(f.state).some(r => /rerun|releases$/.test(r.path)));
+  }
+});
+test('only all jobs from the matching attempt allow progress; permission failures preserve Actions facts', async t => {
+  const f = await releaseFixture(t); f.state.runs = [run()]; f.state.jobs = [job(), job({ id: 2, conclusion: 'skipped' })];
+  assert.equal((await observe(f)).stage, 'failed');
+  const g = await releaseFixture(t); g.state.runs = [run()]; g.state.jobs = [job()];
+  g.state.deny = '/repos/fixture/project-101/actions/runs/800/attempts/1/jobs';
+  const r = await observe(g); assert.equal(r.stage, 'waiting_permission'); assert.equal(r.run_id, 800); assert.ok(r.actions_url); assert.equal(r.error, 'github_permission_403');
+  g.state.deny = ''; const resumed = await g.admin(g.endpoint + '/' + r.id + '/resume', 'POST', { revision: r.revision }); assert.equal(resumed.status, 201);
+  await new ReleaseService(g.h.store, g.apiUrl).worker.process(r.id);
+  assert.equal((await g.admin(g.endpoint + '/' + r.id)).value.release.stage, 'preparing_notes');
+});
+test('manual rerun keeps the bound run and tag and waits for a higher attempt', async t => {
+  const f = await releaseFixture(t); f.state.runs = [run({ conclusion: 'failure' })]; f.state.jobs = [job({ conclusion: 'failure' })];
+  const r = await observe(f), before = writes(f.state).length;
+  f.state.custom = async ({ method, path, send }) => { if (path.endsWith('/rerun') && method === 'POST') { send({}, 201); return true; } };
+  const rerun = await f.admin(f.endpoint + '/' + r.id + '/rerun', 'POST', { revision: r.revision }); assert.equal(rerun.status, 201);
+  f.state.runs[0].conclusion = 'success'; f.state.jobs = [job()]; await f.service.worker.process(r.id);
+  let current = (await f.admin(f.endpoint + '/' + r.id)).value.release; assert.equal(current.stage, 'running'); assert.equal(current.ci_success, null);
+  f.state.runs[0].run_attempt = 2; f.state.jobs = [job({ run_attempt: 2 })]; await f.service.worker.process(r.id);
+  current = (await f.admin(f.endpoint + '/' + r.id)).value.release; assert.equal(current.stage, 'preparing_notes'); assert.equal(current.ci_success.attempt, 2);
+  assert.deepEqual(writes(f.state).slice(before).map(r => r.path), ['/repos/fixture/project-101/actions/runs/800/rerun']);
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM release_attempts WHERE release_id=?', r.id).n, 2);
+  assert.ok(f.state.tokens.some(t => t.permissions.actions === 'write' && t.permissions.contents === 'read'));
+});
+test('rerun refuses a moved tag and never issues a dispatch or tag write', async t => {
+  const f = await releaseFixture(t); f.state.runs = [run({ conclusion: 'failure' })]; f.state.jobs = [job({ conclusion: 'failure' })];
+  const r = await observe(f), before = writes(f.state).length; f.state.tags[r.version] = { type: 'commit', sha: other };
+  await f.admin(f.endpoint + '/' + r.id + '/rerun', 'POST', { revision: r.revision });
+  assert.equal(writes(f.state).length, before);
+  assert.equal((await f.admin(f.endpoint + '/' + r.id)).value.release.error, 'release_tag_conflict');
 });

@@ -42,7 +42,7 @@ export async function releaseFixture(t) {
     if (suffix === '/actions/workflows/77/runs') return send({ total_count: state.runs.length, workflow_runs: Number(url.searchParams.get('page')) > 1 ? [] : state.runs });
     let match;
     if ((match = /^\/actions\/runs\/(\d+)(?:\/attempts\/(\d+)\/jobs)?$/.exec(suffix))) {
-      if (match[2]) return send({ total_count: state.jobs.length, jobs: Number(url.searchParams.get('page')) > 1 ? [] : state.jobs.filter(j => !j.run_attempt || j.run_attempt === Number(match[2])) });
+      if (match[2]) { const jobs = state.jobs.filter(j => !j.run_attempt || j.run_attempt === Number(match[2])); return send({ total_count: jobs.length, jobs: Number(url.searchParams.get('page')) > 1 ? [] : jobs }); }
       const run = state.runs.find(r => r.id === Number(match[1])); return run ? send(run) : send({}, 404);
     }
     if ((match = /^\/actions\/runs\/(\d+)\/rerun$/.exec(suffix)) && method === 'POST') { const run = state.runs.find(r => r.id === Number(match[1])); run.run_attempt++; run.status = 'queued'; run.conclusion = null; return done({}, 201); }

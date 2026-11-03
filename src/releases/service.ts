@@ -65,6 +65,27 @@ export class ReleaseService {
       });
       return { release: this.view(row) };
     }
+    const operation = /^([^/]+)\/(rerun|resume)$/.exec(action);
+    if (operation && method === 'POST') {
+      fields(input, ['revision']); this.find(id, operation[1]!); enabled(this.store, id);
+      if (!Number.isSafeInteger(input.revision)) return fail(400, 'release_revision_required');
+      const row = this.claim(operation[1]!, input.revision), redactor = releaseRedactor(this.store, id);
+      try {
+        if (operation[2] === 'rerun') {
+          this.store.audit(user.id, 'release.rerun', row.id, id);
+          await withGitHub(this.store, id, this.apiUrl, { actions: 'write' }, redactor, github => this.worker.rerun(github, row, redactor), () => this.guard(row));
+        } else {
+          const data = JSON.parse(row.data);
+          if (!['failed', 'write_unknown', 'waiting_permission'].includes(row.stage) || !['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'rerun'].includes(data.failure_step) || data.error === 'release_ci_unsuccessful') return fail(409, 'release_resume_unavailable');
+          this.store.audit(user.id, 'release.resume', row.id, id);
+          if (data.failure_step === 'rerun') await withGitHub(this.store, id, this.apiUrl, { actions: 'write' }, redactor, github => this.worker.rerun(github, row, redactor), () => this.guard(row));
+          else this.save(row, { error: null, detail: '', failure_step: null }, data.failure_step);
+          this.store.run('UPDATE project_releases SET next_poll=0 WHERE id=?', row.id);
+        }
+      } catch (error) { if ((error as any).status) throw error; this.worker.failed(row, error, redactor, operation[2] === 'rerun' || JSON.parse(row.data).expected_attempt ? 'rerun' : undefined); }
+      finally { this.unlock(row); }
+      return { release: this.view(row) };
+    }
     return fail(404, 'not_found');
   }
   current(id: string, version: string) {
@@ -85,7 +106,7 @@ export class ReleaseService {
     if (!result.changes) return stop('release_record_changed', 'failed', '发布记录已变化，请刷新。');
     Object.assign(row, { data, stage, active: active ? 1 : 0, revision: row.revision + 1, updated_at: now });
   }
-  claim(id: string, revision?: unknown) {
+  claim(id: string, revision?: unknown): any {
     return this.store.transaction(() => {
       const row = this.store.get('SELECT * FROM project_releases WHERE id=?', id); if (!row) return fail(404, 'release_not_found');
       if (revision !== undefined && row.revision !== revision) return fail(409, 'release_revision_conflict');
@@ -101,5 +122,5 @@ export class ReleaseService {
     const found = this.store.run('UPDATE project_releases SET lease_until=? WHERE id=? AND lease=? AND lease_until>?', Date.now() + 300_000, row.id, row.lease, Date.now());
     if (!found.changes) return stop('release_lease_lost', 'write_unknown', '发布租约已失效，停止写入并等待查证。');
   }
-  unlock(row: any) { this.store.run('UPDATE project_releases SET lease=NULL,lease_until=0 WHERE id=? AND lease=?', row.id, row.lease); }
+  unlock(row: any) { this.store.run("UPDATE project_releases SET lease=NULL,lease_until=0,active=CASE WHEN stage IN ('failed','published','externally_published') THEN 0 ELSE active END WHERE id=? AND lease=?", row.id, row.lease); }
 }
