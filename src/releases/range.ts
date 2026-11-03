@@ -18,10 +18,14 @@ export async function previousTag(github: GitHub, target: string, version: strin
   return null;
 }
 export type Source = { id: string; kind: 'commit' | 'pr'; sha: string; title: string; url: string; number?: number };
-export async function sources(github: GitHub, target: string, previous: { name: string; sha: string } | null): Promise<Source[]> {
+// Preflight and release notes subtract the same complete ancestry, including merged branches.
+export async function newCommits(github: GitHub, target: string, previous: { name: string; sha: string } | null) {
   const all = await history(github, target), before = new Set(previous ? (await history(github, previous.sha)).map(c => c.sha) : []);
   if (previous && !all.some(c => c.sha === previous.sha)) stop('release_range_changed', 'failed', '已冻结的上一枚标签提交不在本次历史内。');
-  const commits = [...new Map(all.filter(c => !before.has(c.sha)).map(c => [c.sha, c])).values()], included = new Set(commits.map(c => c.sha));
+  return [...new Map(all.filter(c => !before.has(c.sha)).map(c => [c.sha, c])).values()];
+}
+export async function sources(github: GitHub, target: string, previous: { name: string; sha: string } | null): Promise<Source[]> {
+  const commits = await newCommits(github, target, previous), included = new Set(commits.map(c => c.sha));
   const result: Source[] = commits.map(c => ({ id: c.sha, kind: 'commit', sha: c.sha, title: String(c.commit?.message || '').split('\n')[0]!, url: c.html_url }));
   const prs = new Map<number, Source>();
   for (const commit of commits) {

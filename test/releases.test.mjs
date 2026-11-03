@@ -158,10 +158,43 @@ test('release notes freeze the highest reachable SemVer tag and verified merge, 
   assert.equal(r.skill.source, 'builtin'); assert.equal(r.skill.version, 'release-notes-v1'); assert.ok(r.skill.hash);
   const draft = writes(f.state).find(r => r.path.endsWith('/releases')); assert.equal(draft.body.draft, true); assert.equal(draft.body.tag_name, r.version);
 });
-test('notes describe initial history and an empty range without inventing changes', async t => {
+test('a first release still confirms and describes the existing history', async t => {
   const f = await releaseFixture(t), first = await toDraft(f); assert.equal(first.previous_tag, null); assert.match(first.body, /从仓库历史起算/); assert.ok(first.body.includes('Initial commit'));
-  const g = await releaseFixture(t); g.state.tags['v1.2.2'] = { type: 'commit', sha: target };
-  const empty = await toDraft(g); assert.equal(empty.stage, 'draft'); assert.equal(empty.sources.length, 0); assert.match(empty.body, /本次范围无新增提交/);
+});
+test('an empty source range blocks preflight and confirmation without creating a record, tag or Release', async t => {
+  for (const type of ['commit', 'tag']) {
+    const f = await releaseFixture(t);
+    f.state.tags['v1.2.2'] = type === 'tag' ? { type, sha: tagObject, commit: target } : { type, sha: target };
+    const tags = structuredClone(f.state.tags), p = await f.preview();
+    assert.equal(p.no_changes, true); assert.equal(p.available, false); assert.equal(p.previous_tag.sha, target);
+    assert.match(p.checks.find(c => !c.ok).message, /没有新变更.*跳过/);
+    const result = await f.admin(f.endpoint, 'POST', { version: p.version, target_sha: target, credential: p.credential });
+    assert.equal(result.status, 409); assert.equal(result.value.error, 'release_no_changes');
+    await f.service.tick();
+    assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 0);
+    assert.deepEqual(f.state.tags, tags); assert.deepEqual(f.state.releases, []); assert.deepEqual(writes(f.state), []);
+  }
+});
+test('confirmation rechecks the range when another version tags the candidate after preflight', async t => {
+  const f = await releaseFixture(t), p = await f.preview(); assert.equal(p.available, true);
+  f.state.tags['v1.2.2'] = { type: 'commit', sha: target };
+  const result = await f.admin(f.endpoint, 'POST', { version: p.version, target_sha: target, credential: p.credential });
+  assert.equal(result.status, 409); assert.equal(result.value.error, 'release_candidate_changed');
+  assert.equal((await f.preview()).no_changes, true);
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 0); assert.deepEqual(writes(f.state), []);
+});
+test('an existing failed record can still be viewed and resumed when a later tag makes its range empty', async t => {
+  const f = await releaseFixture(t), created = await f.create(), id = created.value.release.id;
+  f.state.deny = '/repos/fixture/project-101/git/tags'; await f.service.worker.process(id);
+  const failed = (await f.admin(f.endpoint + '/' + id)).value.release; assert.equal(failed.stage, 'waiting_permission');
+  f.state.tags['v1.2.2'] = { type: 'commit', sha: target }; f.state.deny = '';
+  assert.equal((await f.preview()).available, false);
+  const again = await f.create(); assert.equal(again.value.release.id, id);
+  const resumed = await f.admin(f.endpoint + '/' + id + '/resume', 'POST', { revision: failed.revision });
+  assert.equal(resumed.value.release.stage, 'tagging'); await f.service.worker.process(id);
+  assert.equal((await f.admin(f.endpoint + '/' + id)).value.release.stage, 'waiting_run');
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 1);
+  assert.equal(f.state.tags['v1.2.2'].sha, target);
 });
 test('existing drafts preserve manual text and an existing published release never returns to draft', async t => {
   for (const draft of [true, false]) {
