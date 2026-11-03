@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false, permissionAutoRefresh = false;
 // Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
 let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null, editorKind = null;
-const titles = { projects: '项目', board: '看板', costs: '成本', events: 'Webhook 投递' };
+const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
   external: '#/external', onboarding: '#onboarding', settings: '#/settings' }, superTabs = ['onboarding', 'settings'];
