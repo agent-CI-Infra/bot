@@ -172,6 +172,6 @@ test('the project model page keeps the shared model card for super administrator
   // The model sits under its provider: the heading carries the address, the row the model name.
   assert.deepEqual(shared.querySelectorAll('.model-address').map(node => node.textContent), ['shared']);
   assert.deepEqual(['.provider-title strong', '.provider-title .muted'].map(selector => shared.querySelector(selector).textContent), ['model.invalid', 'https://model.invalid/v1']);
-  assert.equal(shared.querySelector('details summary').textContent, '添加部署共享模型');
+  assert.ok(shared.querySelectorAll('button').some(node => node.textContent === '新增供应商'));
   page.run("me.role = 'project_admin';"); assert.ok(!page.run('modelSection()').some(card => card.querySelector('h3').textContent === '部署共享模型'));
 });

@@ -65,3 +65,11 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 模型创建和带 `version` 的 PATCH 还可提交 `pricing:{currency,input_per_million,output_per_million,cache_per_million}`，单价为每百万 token 的非负数（最多 1000000）。`pricing:null` 清除单价；读模型时返回当前单价，原有模型凭据及共享模型编辑权限不变。每次模型请求保存价格快照，费用为 `((输入-缓存)×输入单价 + 缓存×缓存单价 + 输出×输出单价) / 1000000`。缺少用量或单价时费用为 null；未返回缓存数据且缓存价不同于普通输入价时，也不能完整计价。费用页只汇总所选币种及尚未定价的请求，币种之间不作换算。
 
 获取模型列表和测试模型的上游结果都在成功响应里返回：`ok` 表示上游是否成功，`status` 是上游的 HTTP 状态码（没有收到响应时为 null）。列表成功时返回 `models_url,total,truncated,models`，按名称排序，最多 200 个 id；测试成功时返回 `chat_url`、`model`（上游答复中的模型名）、`reply`（回复摘录，最多 200 个字符）、`finish_reason` 和 `elapsed_ms`。失败时返回 `error`（`upstream_http_error`、`upstream_timeout`、`upstream_unreachable`、`upstream_redirect`、`upstream_response_invalid`、`upstream_response_too_large`）和简短的 `message`：它只取自上游 JSON 的错误字段（`error.message`，或字符串形式的 `error`、`message`、`detail`、`msg`），重定向时是 `Location`，连接失败时是错误码；其他响应正文一律不回显。两类请求都在 15 秒后超时、不跟随重定向，结果中出现的 Key 先整体替换为 `[REDACTED]`，再截断。模型 URL 只接受 http(s)，不能带用户名、密码、查询串（`?`）或片段（`#`），否则保存、解析、获取列表和测试都返回 400 `invalid_api_url`；这条规则之前保存的这类 URL 也不能获取列表或测试。测试请求的内容是一句不含项目数据的探测，只带 `max_completion_tokens: 32`，不带 `max_tokens`；任务中的模型请求不受影响，仍只带一个输出上限字段，数值 8192。
+
+
+供应商连接的批量管理沿用模型范围和规范化请求地址，不引入跨项目凭据共享：
+
+- `POST /api/models/provider`：`{repository_id?, api_url, api_key, model_names:[...]}`，一次创建供应商下的多个模型，至少一个、最多 200 个。相同范围已有该请求地址返回 `409 provider_already_exists`。
+- `PATCH /api/models/:id/provider`：以模型 ID 定位所在供应商；必须提供组内全部模型的 `versions:[{id,version}]`，可提交 `api_url`、非空 `api_key` 和待添加的 `model_names`。Key 空白保持原值。组成员、版本发生变化返回 `409 version_conflict`；事务内更新全部连接并添加新模型，返回不含 Key 的 `models`。
+- 同一路径提交 `{versions, revoke_key:true}` 统一撤销组内 Key；不能同时提交 URL、新 Key 或新增模型。项目选择和已有计费单价不变。
+- `POST /api/models/:id/upstream` 可带 `version`、草稿 `api_url`／`api_key`，在编辑权限下使用草稿或已保存 Key 获取列表，不保存这些值；空 Key 使用该模型已保存的 Key。旧的单模型 API 保持兼容。

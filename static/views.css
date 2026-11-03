@@ -178,3 +178,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
   .settings-list-head{flex-direction:column;align-items:stretch}.settings-list-head>button{align-self:flex-start}
   .settings-rows .row{grid-template-columns:minmax(0,1fr) auto}.settings-rows .row>.actions{grid-column:1/-1}
 }
+
+/* Provider connection settings are edited once, separately from model-specific operations. */
+.provider-create{margin-top:12px}#provider-edit{width:min(800px,calc(100vw - 24px))}#provider-edit form{gap:16px}.provider-fields{border:0;padding:0;margin:0;min-width:0;display:flex;flex-direction:column;gap:10px}.provider-fields h3{margin:8px 0 0;font-size:14px}.provider-fields p{margin:0}.provider-fields .model-chips:empty,.provider-fields .probe-result:empty{display:none}.provider-fields>button{align-self:flex-start}.provider-manual{align-items:flex-end}.provider-manual label{flex:1 1 220px}.provider-selected .model-chip{border-color:#16636b;color:#16636b}.provider-editor-actions{justify-content:flex-end}.provider-editor-actions .destructive{margin-right:auto}.provider-fields .model-chips{max-height:220px;overflow:auto;padding:2px}.provider-fields input[type=search]{max-width:320px}
+@media(max-width:760px){#provider-edit{padding:16px}.provider-head>button{margin-left:0}.provider-manual label{flex-basis:100%}.provider-editor-actions{gap:8px}}
