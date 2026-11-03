@@ -26,14 +26,14 @@ export async function withGitHub<T>(store: Store, id: string, api: string, permi
   try { await github.connect(false, { contents: 'read', actions: 'read', ...permissions }, undefined, false); return await fn(github); }
   finally { if (github.token) await revokeInstallationToken(api, github.token).catch(() => false); }
 }
-export async function file(github: GitHub, sha: string, path: string) {
+export async function file(github: GitHub, sha: string, path: string, allowEmpty = false) {
   const { tree } = await repositoryTree(github, sha), entry = tree.find(e => e.path === path);
   if (!entry) return null;
-  if (entry.type !== 'blob' || !['100644', '100755'].includes(entry.mode) || entry.size > 65536) stop('release_file_invalid', 'failed', `发布文件不是有效的普通文本文件：${path}`);
+  if (entry.type !== 'blob' || !['100644', '100755'].includes(entry.mode)) stop('release_file_invalid', 'failed', `发布文件不是有效的普通文本文件：${path}`);
   const blob = await github.snapshotBlob(entry.sha);
   if (blob.encoding !== 'base64' || typeof blob.content !== 'string') stop('release_file_invalid', 'failed', `发布文件读取失败：${path}`);
   const bytes = Buffer.from(blob.content, 'base64'), content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  if (bytes.length > 65536 || content.includes('\0') || !content.trim()) stop('release_file_invalid', 'failed', `发布文件为空、过大或不是文本：${path}`);
+  if (content.includes('\0') || (!allowEmpty && !content.trim())) stop('release_file_invalid', 'failed', `发布文件为空或不是文本：${path}`);
   return { sha: String(entry.sha), content };
 }
 export async function resolveObject(github: GitHub, object: any): Promise<{ commit: string; object_sha: string }> {

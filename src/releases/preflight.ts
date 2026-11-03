@@ -12,8 +12,8 @@ export async function inspect(github: GitHub, version: string) {
   const ref = await github.ref(github.defaultBranch), target = ref?.object?.sha;
   if (!/^[a-f0-9]{40}$/.test(target)) stop('release_empty_repository', 'failed', '默认分支还没有可发布的提交。');
   const commit = await github.request('GET', github.path('/commits/' + target));
-  const config = await file(github, target, '.github/ci-gates.json');
-  const ci = await file(github, target, '.github/workflows/ci.yml') ?? await file(github, target, '.github/workflows/ci-gates.yml');
+  const config = await file(github, target, '.github/ci-gates.json', true);
+  const ci = await file(github, target, '.github/workflows/ci.yml', true) ?? await file(github, target, '.github/workflows/ci-gates.yml', true);
   const workflowFile = await file(github, target, '.github/workflows/release.yml');
   let workflow: any = null, reason = '', workflowId: number | null = null;
   if (workflowFile) {
