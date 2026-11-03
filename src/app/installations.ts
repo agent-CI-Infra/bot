@@ -86,6 +86,11 @@ export class InstallationSync {
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
   private keep(token: string, bucket: Bucket): string { if (this.windows.size > 500) this.windows.clear(); if (token) this.windows.set(token, bucket); return token; }
   private appToken(account: Row, secrets: Json): string { return this.keep(appJwt(String(account.app_id), String(secrets.private_key)), appBucket(account.id)); }
+  // A Token account's window is its GitHub user's; the login is read with the token (one request) so the console can name it.
+  private async userToken(account: Row, secrets: Json): Promise<string> {
+    const token = this.keep(String(secrets.token), userBucket(account.id)), user = await this.request('/user', token).catch(() => null);
+    return user?.login ? this.keep(token, userBucket(account.id, String(user.login))) : token;
+  }
   private installationToken(account: Row, installation: Json, access: Json): string {
     return this.keep(String(access.token || ''), installationBucket(account.id, String(installation.id), (installation.account as Json | undefined)?.login ? String((installation.account as Json).login) : null));
   }
@@ -132,7 +137,7 @@ export class InstallationSync {
         }
       } else {
         if (!secrets.token) throw new Error('github_credentials_missing');
-        await this.window(this.keep(String(secrets.token), userBucket(account.id)));
+        await this.window(await this.userToken(account, secrets));
       }
     } catch (error) {
       const code = (error as Error).message;
@@ -259,7 +264,7 @@ export class InstallationSync {
         }
       } else {
         if (!secrets.token) throw new Error('github_credentials_missing');
-        const token = this.keep(String(secrets.token), userBucket(account.id));
+        const token = await this.userToken(account, secrets);
         for (const repo of await this.pages('/user/repos', token)) { const row = installed(repo, null, repo.permissions); if (row) rows.push(row); }
         await this.window(token);
       }

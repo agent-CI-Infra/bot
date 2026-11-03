@@ -103,7 +103,8 @@ function resourceDefaultsBody(view, redraw) {
 // organization or user, shared by every repository and task agent there) and a bot account's user.
 const windowNames = { core: 'REST', graphql: 'GraphQL', search: '搜索' };
 function rateLimitBody(view, redraw) {
-  const nodes = [note('GitHub 按凭据分别计算每小时的请求额度：每个安装（一个组织或用户，安装里所有仓库和任务 agent 的请求共用一份）和机器人账号各一份；App 自身（JWT）的请求 GitHub 报告额度时也列出。额度用完时，任务等到窗口重置再继续，不在窗口内重试。数据来自 GitHub 每次响应和每 10 分钟的同步；「探测」立即读取一次，不消耗额度。')];
+  const nodes = [note('GitHub 按发出请求的身份分别计算每小时的请求额度。GitHub App 按安装计算：装在几个组织（或个人账号）上就有几份，每份由那个组织下所有仓库的检视、开发和任务 agent 的请求共用，一个组织用完不影响其他组织。Token 账号按 Token 所属的 GitHub 用户计算，只有一份，它处理的所有仓库和这个用户的其他 Token 共用。'),
+    note('额度用完时，任务等到窗口重置再继续，不在窗口内重试。数据来自 GitHub 每次响应和每 10 分钟的同步；「探测」立即读取一次，不消耗额度。App 自身（JWT）的请求只在 GitHub 报告额度时列出。')];
   if (!view.limits) { nodes.push(element('p', '暂时读不到请求额度。', 'view-error')); return nodes; }
   for (const account of view.accounts) {
     const recorded = view.limits.accounts.find(row => row.account_id === account.id), head = element('div', '', 'actions settings-list-head');
@@ -113,14 +114,15 @@ function rateLimitBody(view, redraw) {
       catch (err) { probe.disabled = false; message.textContent = err.message; }
     }, ''), message = element('p', '', 'view-error');
     message.setAttribute('role', 'alert');
-    head.append(element('h4', `${account.name}（${account.type === 'github_app' ? 'GitHub App' : '机器人账号'}）`), probe); nodes.push(head, message);
+    head.append(element('h4', `${account.name}（${account.type === 'github_app' ? 'GitHub App' : 'Token 账号'}）`), probe); nodes.push(head, message);
     if (!recorded?.buckets.length) { nodes.push(note('还没有记录，点「探测」读取。')); continue; }
     const table = element('table', '', 'rule-table rate-table'), headRow = element('tr', '');
     for (const caption of ['对象', '额度', '已用', '剩余', '窗口重置', '状态']) headRow.append(element('th', caption));
     const thead = document.createElement('thead'), body = document.createElement('tbody'); thead.append(headRow); table.append(thead, body);
     for (const bucket of recorded.buckets) for (const window of bucket.windows) {
       const row = element('tr', ''), cell = (label, value) => { const td = element('td', ''); td.dataset.label = label; td.append(value); row.append(td); };
-      const who = bucket.kind === 'app' ? 'App 自身（JWT）' : bucket.kind === 'user' ? '机器人账号' : `${bucket.owner || '安装'}（安装 ${bucket.installation_id}）`;
+      const who = bucket.kind === 'app' ? 'App 自身（JWT）' : bucket.kind === 'user' ? `Token 用户 ${bucket.owner || '（登录名未读到）'}`
+        : `${bucket.owner ? bucket.owner + ' 上的 ' : ''}App 安装（${bucket.installation_id}）`;
       const share = window.quota ? window.remaining / window.quota : 1, meter = element('span', '', 'rate-meter'), fill = element('span', '');
       fill.style.width = `${Math.round(Math.min(1, window.used / (window.quota || 1)) * 100)}%`; if (share < 0.1) fill.className = 'low'; meter.append(fill);
       const status = window.resource === 'core' && bucket.blocked_until ? badge(`流控中，${timestamp(new Date(bucket.blocked_until).toISOString()).slice(11, 19)} 后继续`, 'danger')

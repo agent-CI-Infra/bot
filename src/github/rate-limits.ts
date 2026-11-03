@@ -6,7 +6,8 @@ import type { Store } from '../storage/database.js';
 // and resource, so a task waits for the window to reset instead of sending into it, and the global settings show it.
 export interface Bucket { key: string, kind: 'app' | 'installation' | 'user', account_id: string, installation_id?: string | null, owner?: string | null }
 export const appBucket = (accountId: string): Bucket => ({ key: 'app:' + accountId, kind: 'app', account_id: accountId });
-export const userBucket = (accountId: string): Bucket => ({ key: 'user:' + accountId, kind: 'user', account_id: accountId });
+// A Token account's requests count against its GitHub user, shared with every other token of that user; owner is the login.
+export const userBucket = (accountId: string, login?: string | null): Bucket => ({ key: 'user:' + accountId, kind: 'user', account_id: accountId, owner: login || null });
 export const installationBucket = (accountId: string, installationId: string, owner?: string | null): Bucket =>
   ({ key: 'installation:' + installationId, kind: 'installation', account_id: accountId, installation_id: installationId, owner: owner || null });
 // The windows shown; GitHub reports others (code scanning uploads, manifests) that the bot does not use.
@@ -60,8 +61,10 @@ export function blockedUntil(store: Store, bucket: Bucket, now = Date.now()): nu
   const until = row ? Math.max(Number(row.limited_until || 0), row.remaining === 0 ? Number(row.reset_at || 0) : 0) : 0;
   return until > now ? until : null;
 }
+// Whose requests share the bucket, as messages and the console name it.
 export function bucketName(bucket: Bucket): string {
-  return bucket.kind === 'app' ? 'GitHub App 自身（JWT）' : bucket.kind === 'user' ? '机器人账号' : `安装 ${bucket.installation_id}${bucket.owner ? `（${bucket.owner}）` : ''}`;
+  return bucket.kind === 'app' ? 'GitHub App 自身（JWT）' : bucket.kind === 'user' ? `Token 用户 ${bucket.owner || '（登录名未读到）'}`
+    : `${bucket.owner ? bucket.owner + ' 上的 ' : ''}App 安装（${bucket.installation_id}）`;
 }
 export const utcTime = (ms: number) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 

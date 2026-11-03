@@ -7,7 +7,7 @@ import { harness, setup, account, repository, testPassword } from './helpers.mjs
 import { TaskEngine } from '../dist/agent/engine.js';
 import { enqueue } from '../dist/review/queue.js';
 import { InstallationSync } from '../dist/app/installations.js';
-import { appBucket, installationBucket, observe, refused, blockedUntil, rateLimitView } from '../dist/github/rate-limits.js';
+import { appBucket, installationBucket, userBucket, bucketName, observe, refused, blockedUntil, rateLimitView } from '../dist/github/rate-limits.js';
 
 const head = 'a'.repeat(40), seconds = ms => Math.floor(ms / 1000);
 const windowHeaders = (remaining, reset, extra = {}) => ({ 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': String(remaining), 'x-ratelimit-used': String(5000 - remaining),
@@ -76,7 +76,7 @@ test('every response updates its window; a used-up window is waited out until it
   assert.deepEqual([task.status, task.retry_count], ['retry_wait', 0]);
   assert.ok(f.requests.every(request => ['GET /repos/fixture/project-101/installation', 'POST /app/installations/55/access_tokens'].includes(request)), f.requests.join());
   const fault = JSON.parse(f.h.store.get("SELECT content FROM task_logs WHERE task_id=? AND content LIKE '%未发送%' ORDER BY rowid DESC LIMIT 1", task.id).content);
-  assert.match(fault.detail, /^GitHub 流控：安装 55（fixture-org）本小时的请求额度已用完，\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC 重置后继续（GET \/\S+ 未发送）。$/);
+  assert.match(fault.detail, /^GitHub 流控：fixture-org 上的 App 安装（55）本小时的请求额度已用完，\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC 重置后继续（GET \/\S+ 未发送）。$/);
 });
 
 test('a secondary rate limit pauses the installation for as long as GitHub asks', async t => {
@@ -136,4 +136,9 @@ test('the view groups windows by account and counts the tasks waiting for each t
   const view = rateLimitView(h.store, now), buckets = view.accounts[0].buckets;
   assert.deepEqual(buckets.map(b => [b.kind, b.owner, b.windows[0].remaining, !!b.blocked_until, b.waiting_tasks]),
     [['app', null, 4999, false, 0], ['installation', 'org-a', 12, false, 0], ['installation', 'org-b', 0, true, 1]]);
+});
+
+test('a window is named by whose requests share it: an App installation on an organization, or the GitHub user of a Token account', () => {
+  assert.deepEqual([appBucket('a1'), installationBucket('a1', '175700149', 'openJiuwen-ai'), installationBucket('a1', '9'), userBucket('a2', 'dept-bot'), userBucket('a2')].map(bucketName),
+    ['GitHub App 自身（JWT）', 'openJiuwen-ai 上的 App 安装（175700149）', 'App 安装（9）', 'Token 用户 dept-bot', 'Token 用户 （登录名未读到）']);
 });
