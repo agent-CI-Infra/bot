@@ -1,10 +1,20 @@
 import http from 'node:http';
+import { posix } from 'node:path';
+import { hostname } from 'node:os';
 
 export class ManagerError extends Error {
   constructor(code, status = 409) { super(code); this.status = status; }
 }
 export class Docker {
   constructor(socketPath = '/var/run/docker.sock') { this.socketPath = socketPath; }
+  // Resolve a directory on the manager's persistent mount to the Docker host's path. A local bind-backed named
+  // volume exposes those same bytes to project computers; the manager never starts a helper container to edit notes.
+  async volumeSource(directory) {
+    const self = await this.request('GET', `/containers/${encodeURIComponent(hostname())}/json`);
+    const mount = self?.Mounts?.filter(m => directory.startsWith(m.Destination + '/') && m.RW).sort((a,b) => b.Destination.length-a.Destination.length)[0];
+    if (!mount || !posix.isAbsolute(mount.Source)) throw new ManagerError('notes_storage_mount_missing', 503);
+    return posix.join(mount.Source, posix.relative(mount.Destination, directory));
+  }
   request(method, path, body, raw = false, timeout = 90000) {
     return new Promise((resolve, reject) => {
       const bytes = body === undefined ? null : Buffer.from(JSON.stringify(body));

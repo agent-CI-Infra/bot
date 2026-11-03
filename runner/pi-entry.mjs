@@ -9,7 +9,7 @@ const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(
 const save=async value=>{await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
 let steps=0,session,finished,grant=null;
 // Serialize model and tool events in execution order; mask every issued token before it reaches disk.
-const secrets=new Set();let events=Promise.resolve();
+const secrets=new Set(),rejectedNotes=new Set();let events=Promise.resolve();
 const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
 const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
@@ -44,6 +44,7 @@ const server=createServer(async(req,res)=>{
     const end=Date.now()+120000;let response;
     while(Date.now()<end){response=await readFile(dir+'/reply-'+id+'.json','utf8').then(JSON.parse).catch(()=>null);if(response)break;await new Promise(resolve=>setTimeout(resolve,100));}
     if(!response)throw new Error('model_proxy_timeout');await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
+    for(const call of response.rejected_note_calls||[])rejectedNotes.add(call);
     res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
   }catch{res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"model_proxy_unavailable"}');}
 });
@@ -66,7 +67,13 @@ try{
       }
       else if(tool.function.name==='read_file')result=await workspace({type:'workspace_read',workspace_id:config.workspace_id,path:args.path});
       else if(tool.function.name==='write_file'){
-        const data=Buffer.from(args.content);if(data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:config.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});
+        const note=typeof args.path==='string'&&args.path.startsWith('../notes/');
+        if(note&&(rejectedNotes.has(id)||typeof args.content==='string'&&[...secrets].some(secret=>args.content.includes(secret))))result={error:'credential_in_notes'};
+        else if(!note&&!config.tools.some(tool=>tool.function.name==='create_pull_request'))result={error:'review_repository_write_forbidden'};
+        else {
+          try{const data=Buffer.from(args.content);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:config.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});}
+          catch(error){result={error:String(error.message)};}
+        }
       }else if(tool.function.name==='run_command'){
         // Commands have no time limit; the model may still bound one that could hang.
         const timeout=args.timeout_seconds>0?args.timeout_seconds*1000:null;
@@ -78,7 +85,7 @@ try{
         if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange();if(reply.error)result={error:reply.error};else {grant=reply;secrets.add(grant.token);}}
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else throw new Error('tool_not_allowed');
-      await writeEvent({type:'tool',name:tool.function.name,call_id:id,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{}};
+      await writeEvent({type:'tool',name:tool.function.name,call_id:id,arguments:result?.error==='credential_in_notes'?{path:args.path}:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{}};
     }}));
   ({session}=await createAgentSession({cwd,agentDir:dir,modelRuntime:runtime,model:runtime.getModel('department-proxy','selected'),thinkingLevel:'off',resourceLoader:loader,
     tools:tools.map(tool=>tool.name),customTools:tools,sessionManager:SessionManager.inMemory(cwd),settingsManager:SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false}})}));

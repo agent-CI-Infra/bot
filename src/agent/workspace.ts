@@ -10,6 +10,7 @@ export class Workspace {
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void){}
   async call(key:string,request:any){
     await this.guard();
+    if(request.type==='workspace_write'&&typeof request.path==='string'&&request.path.startsWith('../notes/')&&this.redactor.contains(Buffer.from(request.base64||'','base64')))return {error:'credential_in_notes'};
     request=this.redactor.clean(request);
     const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
     let row=this.store.get('SELECT * FROM task_tools WHERE id=?',id);

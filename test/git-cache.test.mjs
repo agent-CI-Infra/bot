@@ -38,9 +38,10 @@ async function upstream(t, options) {
 }
 // A task workspace backed by the real runner in a directory; the GitHub stub records every REST request it gets.
 function task(root, reads, mirrorTree) {
+  const notes = join(root, 'project-notes'); mkdirSync(notes, { recursive: true });
   const id = randomBytes(24).toString('hex'), logs = [], redactor = new Redactor(); redactor.add(token);
   const workspace = new Workspace(null, null, { id: 'task', attempt: 1, workspace_id: id }, redactor, async () => {}, value => logs.push(value));
-  workspace.call = (_key, request) => runnerWorkspace({ ...request, workspace_id: id }, join(root, 'tasks')).catch(error => ({ error: 'runner_operation_failed', detail: error.message }));
+  workspace.call = (_key, request) => runnerWorkspace({ ...request, workspace_id: id }, join(root, 'tasks'), undefined, notes).catch(error => ({ error: 'runner_operation_failed', detail: error.message }));
   const github = { path: path => path, authorEmail: () => '999+fixture-bot@users.noreply.github.com',
     async request(_method, path) { reads.push(path); return mirrorTree(path); },
     async snapshotBlob(sha) { reads.push('/git/blobs/' + sha); return mirrorTree('/git/blobs/' + sha); } };

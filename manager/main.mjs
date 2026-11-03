@@ -30,6 +30,10 @@ const server = createServer(async (req, res) => {
     else if (req.method === 'GET' && path === '/v1/defaults') result = await projects.defaultsView();
     else if (req.method === 'PUT' && path === '/v1/defaults') result = await projects.setDefaults(await json(req));
     else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
+    else if (/^\/v1\/projects\/[1-9]\d{0,19}\/notes(?:\/[^/]+)?$/.test(path)) {
+      const parts = path.split('/');
+      result = await projects.notes(parts[3], req.method, parts[5], req.method === 'PUT' ? await json(req) : {});
+    }
     else if (req.method === 'GET' && /^\/v1\/projects\/[1-9]\d{0,19}\/stats$/.test(path)) result = await projects.stats(path.split('/')[3]);
     else if (req.method === 'PUT' && /^\/v1\/projects\/[1-9]\d{0,19}\/parallel$/.test(path)) {
       const input = await json(req);

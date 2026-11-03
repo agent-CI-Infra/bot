@@ -236,10 +236,10 @@ async function deleteAccount(row) {
     }) });
   if (deleted) await start();
 }
-// Deletes the control-plane records only; unlike the off-installation delete this one never asks GitHub.
+// Removes the project's records, environment and notes without changing anything on GitHub.
 async function deleteProjectRecord(row, after) {
   const deleted = await askConfirm({ title: `删除项目 ${row.full_name}？`, action: '删除', danger: true,
-    body: ['只从本系统移除：项目策略、成员分配、专属模型、公共配置记录、任务记录和安装列表里的这一行一并删除，操作审计保留。',
+    body: ['只从本系统移除：项目环境、长期笔记、项目策略、成员分配、专属模型、公共配置记录、任务记录和安装列表里的这一行一并删除，操作审计保留。',
       '不会在 GitHub 上删除仓库，也不会卸载 App 安装，GitHub 上的内容完全不动。',
       '以后安装同步如果又看到这个仓库，它会像新仓库一样出现；需要时重新启动即可。'],
     run: () => api(`/api/projects/${encodeURIComponent(row.id)}`, 'DELETE', {}).catch(err => { throw new Error(removalMessage(err)); }) });

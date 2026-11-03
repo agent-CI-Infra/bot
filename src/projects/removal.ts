@@ -37,11 +37,21 @@ export function deleteProjectRecords(store: Store, id: string): void {
   }
 }
 
-// Deleting a project is allowed only when GitHub, asked right now, says the account no longer reaches the repository at all.
+// Both project-removal endpoints share environment and record cleanup. Off-installation removal first checks GitHub.
 export class ProjectRemoval {
   constructor(readonly store: Store, readonly installations?: InstallationSync, readonly projects?: ProjectService, readonly engine?: RunningTasks,
     readonly settleMs = 120_000) {}
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
+    // The legacy local removal endpoint must also remove the environment and notes, rather than only database rows.
+    const local = /^\/api\/projects\/([1-9]\d*)$/.exec(url.pathname);
+    if (local && method === 'DELETE') {
+      superAdmin(user); fields(input, ['confirm']);
+      const id = local[1]!;
+      if (!this.store.get('SELECT 1 FROM repositories WHERE id=?', id)) fail(404, 'repository_not_found');
+      if (this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id)
+        || this.store.get("SELECT 1 FROM quickstart_runs WHERE repository_id=? AND state IN ('queued','running')", id)) fail(409, 'project_account_pending');
+      await this.removeRegistered(user, id); return { deleted: true };
+    }
     // The console's GitHub-checked project deletion. Plain DELETE /api/installations/:id only hides a list row.
     const match = /^\/api\/installations\/([1-9]\d*)\/removal$/.exec(url.pathname);
     if (!match || method !== 'DELETE') return undefined;
@@ -66,6 +76,9 @@ export class ProjectRemoval {
       this.store.audit(user.id, 'repository.removed', id, id);
       return { deleted: true, repository_id: id, registered: false };
     });
+    return this.removeRegistered(user, id);
+  }
+  private async removeRegistered(user: Actor, id: string): Promise<Json> {
     try {
       // No new work, and every unfinished task is cancelled: a running one stops at its next checkpoint and can no longer
       // write its own status back.
@@ -78,6 +91,12 @@ export class ProjectRemoval {
       // Stopping the computer also interrupts the command a running task is waiting for.
       await this.projects?.removeEnvironment(id, this.settleMs);
       if (!await this.settled(id)) fail(409, 'tasks_still_stopping');
+      // Check child ordering, constraints and deletion triggers before destroying the persistent notes. Roll back this
+      // dry run: environment failures must leave the project records available for inspection and retry.
+      this.store.db.exec('SAVEPOINT project_removal_check');
+      try { deleteProjectRecords(this.store, id); this.store.audit(user.id, 'repository.deleted', id, id); }
+      finally { this.store.db.exec('ROLLBACK TO project_removal_check; RELEASE project_removal_check'); }
+      await this.projects?.removeEnvironment(id, this.settleMs, true);
       return this.store.transaction(() => {
         if (this.engine?.working(id).length) fail(409, 'tasks_still_stopping');
         deleteProjectRecords(this.store, id);

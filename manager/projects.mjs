@@ -1,8 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
+import { Notes, noteLimits, noteName } from '../runner/notes.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -61,6 +63,7 @@ export class Projects {
     this.pruned = new Map(); this.pruning = new Set();
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
+    this.notesRoot = dirname(database) + '/project-notes';
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS projects(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,state TEXT NOT NULL,desired TEXT NOT NULL,error TEXT,started_at TEXT);
       CREATE TABLE IF NOT EXISTS resources(repository_id TEXT NOT NULL,generation INTEGER NOT NULL,image TEXT NOT NULL,PRIMARY KEY(repository_id,generation));
@@ -161,6 +164,39 @@ export class Projects {
     const prefix = `dbot-${this.deployment}-${repo}-g${generation}`;
     return { container: prefix, volume: prefix + '-work', network: prefix + '-net' };
   }
+  notesName(repo) { return `dbot-${this.deployment}-${repo}-notes`; }
+  notesLabels(repo) { return { 'department.bot.deployment': this.deployment, 'department.bot.repository': repo, 'department.bot.kind': 'notes' }; }
+  async notesVolume(repo, create = true) {
+    const name = this.notesName(repo), labels = this.notesLabels(repo);
+    let volume = await this.docker.request('GET', '/volumes/' + name);
+    if (volume && Object.entries(labels).some(([key,value]) => volume.Labels?.[key] !== value)) throw new ManagerError('resource_ownership_mismatch', 403);
+    if (!volume && create) {
+      const notes = new Notes(this.notesRoot + '/' + repo); await notes.directory();
+      const device = await this.docker.volumeSource(notes.root);
+      await this.docker.request('POST', '/volumes/create', { Name: name, Labels: labels, Driver: 'local', DriverOpts: { type: 'none', o: 'bind', device } });
+      volume = await this.notesVolume(repo, false);
+    }
+    return volume;
+  }
+  async notes(repo, method, name, input = {}) {
+    this.validate(repo); if (name !== undefined) { try { noteName(name); } catch { throw new ManagerError('invalid_note_name', 400); } }
+    if (!['GET','PUT','DELETE'].includes(method) || method !== 'GET' && name === undefined || Object.keys(input).some(key => key !== 'content')) throw new ManagerError('invalid_notes_request', 400);
+    return this.lock(repo, async () => {
+      // A page can edit notes before the first boot. Register only the stopped metadata, never provision a computer.
+      if (!this.get(repo)) this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES(?,1,'stopped','stopped')").run(repo);
+      await this.notesVolume(repo);
+      const notes = new Notes(this.notesRoot + '/' + repo);
+      try {
+        if (method === 'GET') return name === undefined ? { files: await notes.list(), limits: noteLimits } : await notes.read(name);
+        if (method === 'PUT') return await notes.write(name, input.content);
+        return await notes.delete(name);
+      } catch (error) {
+        if (error.code === 'ENOENT') throw new ManagerError('note_not_found', 404);
+        if (/^(invalid_note|note_file_limit|notes_(?:file_count_limit|total_limit|busy))/.test(error.message)) throw new ManagerError(error.message, 400);
+        throw error;
+      }
+    });
+  }
   labels(repo, generation, kind) { return { 'department.bot.deployment': this.deployment, 'department.bot.repository': repo,
     'department.bot.generation': String(generation), 'department.bot.kind': kind }; }
   async inspect(repo, generation, kind) {
@@ -195,6 +231,7 @@ export class Projects {
     if (!resource) { this.db.prepare('INSERT INTO resources VALUES(?,?,?)').run(repo, generation, approved.Id); resource = { image: approved.Id }; }
     if (!await this.inspect(repo, generation, 'volume')) await this.docker.request('POST', '/volumes/create', { Name: names.volume, Labels: this.labels(repo, generation, 'volume') });
     await this.inspect(repo, generation, 'volume');
+    await this.notesVolume(repo);
     let network = await this.inspect(repo, generation, 'network'), container = await this.inspect(repo, generation, 'container');
     // A container whose template or spec differs (approved image, init, resources, network policy) is replaced in place when
     // provisioned; the work volume and generation stay. This never happens in the middle of a command.
@@ -204,7 +241,8 @@ export class Projects {
     const managed = new Set(['HOME', 'LANG', 'BOT_PROJECT_ENV_KEYS', ...Object.keys(spec.env), ...listed]);
     const envStale = container && JSON.stringify(current.filter(e => managed.has(e.slice(0, e.indexOf('=')))).sort()) !== JSON.stringify([...env].sort());
     if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== spec.memory_mb * mib
-      || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs)) {
+      || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
+      || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly))) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
       await this.docker.request('DELETE', `/containers/${names.container}?force=true`); container = null;
     }
@@ -218,7 +256,7 @@ export class Projects {
         HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
           Memory: spec.memory_mb * mib, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
           Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': tmpfs },
-          Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }] } });
+          Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }, { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false }] } });
       container = await this.inspect(repo, generation, 'container');
     }
     this.db.prepare('UPDATE projects SET applied=? WHERE repository_id=?').run(JSON.stringify(resources(spec)), repo);
@@ -348,6 +386,7 @@ export class Projects {
     // An invalid spec or runner request is rejected before it is recorded, so it never touches the running computer.
     if (action === 'configure') validateSpec(input.request);
     if (action === 'execute') validateCall(input.request);
+    if (action === 'delete' && input.request !== undefined && (!input.request || Object.keys(input.request).some(key => key !== 'delete_notes') || input.request.delete_notes !== true)) throw new ManagerError('invalid_operation', 400);
     // Running commands hold their slots; a new stop, reset or delete interrupts all of them by stopping the container.
     if (['stop', 'reset', 'delete'].includes(action) && this.running(repo) && !this.db.prepare('SELECT 1 FROM operations WHERE id=?').get(input.operation_id)
       && this.get(repo)?.generation === input.generation) await this.stopGeneration(repo, input.generation).catch(() => {});
@@ -419,6 +458,11 @@ export class Projects {
               for (const { generation } of this.db.prepare('SELECT generation FROM resources WHERE repository_id=?').all(repo)) {
                 if (await this.inspect(repo, generation, 'container')) await this.docker.request('DELETE', `/containers/${this.names(repo, generation).container}`);
                 if (await this.inspect(repo, generation, 'network')) await this.docker.request('DELETE', `/networks/${this.names(repo, generation).network}`);
+              }
+              // Deleting just a computer keeps project notes; only the project-removal flow requests their deletion.
+              if (input.request?.delete_notes) {
+                if (await this.notesVolume(repo, false)) await this.docker.request('DELETE', '/volumes/' + this.notesName(repo));
+                await rm(this.notesRoot + '/' + repo, { recursive: true, force: true });
               }
             }
             const state = action === 'stop' && project.state === 'reset_failed' ? 'reset_failed' : action === 'stop' ? 'stopped' : 'deleted';
