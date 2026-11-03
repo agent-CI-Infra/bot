@@ -135,13 +135,13 @@ confirmView.addEventListener('close', () => { if (!confirmView.open) settleConfi
 const taskView = dialog('task-view', `<div class="view-head"><div class="title-group"><h2 id="task-title"></h2><span id="task-badges" class="actions"></span></div><div id="task-actions" class="actions"></div></div>
 <p id="task-error" class="view-error" role="alert"></p>
 <div id="task-picker" class="task-picker" hidden></div>
-<div class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
+<div id="task-layout" class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
 taskView.setAttribute('aria-labelledby', 'task-title');
 
 let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null;
 async function openTask(id) {
   openTaskId = id; renderedLogs = new Set(); liveCommand = null; snapshotProgress = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
-  $('task-picker').hidden = true; taskView.querySelector('.task-layout').hidden = false;
+  $('task-picker').hidden = true; $('task-layout').hidden = false;
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
   if (!taskView.open) taskView.showModal();
@@ -151,7 +151,7 @@ function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   openTaskId = null; clearTimeout(taskTimer); $('timeline-command').hidden = true; $('timeline-live').hidden = true; notice('task-error');
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = `${label} · 选择任务`; $('task-actions').append(button('关闭', () => taskView.close()));
-  taskView.querySelector('.task-layout').hidden = true;
+  $('task-layout').hidden = true;
   const picker = $('task-picker'), list = element('div', '', 'task-choice-list'); picker.hidden = false; picker.replaceChildren();
   picker.append(element('p', tasks.length ? `当前筛选下有 ${tasks.length}${hasMore ? '+' : ''} 个关联任务，选择一个查看完整过程。` : '当前筛选下没有关联任务。', 'muted'));
   if (tasks.length) picker.append(list);
