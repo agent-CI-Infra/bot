@@ -161,6 +161,15 @@ test('release notes freeze the highest reachable SemVer tag and verified merge, 
 test('a first release still confirms and describes the existing history', async t => {
   const f = await releaseFixture(t), first = await toDraft(f); assert.equal(first.previous_tag, null); assert.match(first.body, /从仓库历史起算/); assert.ok(first.body.includes('Initial commit'));
 });
+test('preflight and notes subtract every ancestor of the previous tag, including earlier merged history', async t => {
+  const f = await releaseFixture(t);
+  f.state.commits.push({ sha: other, commit: { message: 'Earlier merged change' }, html_url: 'https://github.com/fixture/project-101/commit/' + other });
+  f.state.histories[previous] = f.state.commits.filter(commit => commit.sha !== target);
+  f.state.tags['v1.2.2'] = { type: 'commit', sha: previous };
+  const p = await f.preview(); assert.equal(p.available, true); assert.equal(p.no_changes, false);
+  const draft = await toDraft(f); assert.deepEqual(draft.sources.map(source => source.sha), [target]);
+  assert.ok(!draft.body.includes('Earlier merged change')); assert.ok(!draft.body.includes('Initial commit'));
+});
 test('an empty source range blocks preflight and confirmation without creating a record, tag or Release', async t => {
   for (const type of ['commit', 'tag']) {
     const f = await releaseFixture(t);
