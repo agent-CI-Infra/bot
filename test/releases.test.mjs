@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { validVersion, compareVersions } from '../dist/releases/version.js';
 import { releaseWorkflow, filter } from '../dist/releases/workflow.js';
 import { noCI, noRelease } from '../dist/releases/preflight.js';
-import { releaseFixture, workflow, writes } from './release-fixtures.mjs';
+import { releaseFixture, workflow, writes, target, other, tagObject } from './release-fixtures.mjs';
+import { Store } from '../dist/storage/database.js';
+import { ReleaseService } from '../dist/releases/service.js';
 import { testPassword } from './helpers.mjs';
 
 test('release versions and precedence follow SemVer without metadata or precision loss', () => {
@@ -44,4 +46,47 @@ test('release endpoints enforce project and organization grants on every operati
   assert.equal((await f.admin(f.endpoint, 'POST', {}, { 'X-CSRF-Token': '' })).status, 403);
   await f.admin('/api/project-admin-assignments', 'PUT', { user_id: user.id, repository_ids: [], organization_ids: ['10'] });
   assert.equal((await client('/api/repositories/202/releases')).status, 200);
+});
+test('confirmation binds the displayed SHA and preflight files, never silently advancing', async t => {
+  const f = await releaseFixture(t), p = await f.preview(); f.state.head = other;
+  assert.equal((await f.admin(f.endpoint, 'POST', { version: p.version, target_sha: p.target_sha, credential: p.credential })).status, 409);
+  f.state.head = target; f.state.files['.github/workflows/release.yml'] += '\n# changed';
+  assert.equal((await f.admin(f.endpoint, 'POST', { version: p.version, target_sha: target, credential: p.credential })).status, 409);
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 0);
+  assert.equal(writes(f.state).length, 0);
+});
+test('concurrent confirmations and workers create one record and one annotated tag', async t => {
+  const f = await releaseFixture(t), p = await f.preview();
+  const results = await Promise.all(Array.from({ length: 6 }, () => f.admin(f.endpoint, 'POST', { version: p.version, target_sha: target, credential: p.credential })));
+  assert.ok(results.every(r => r.status === 201)); assert.equal(new Set(results.map(r => r.value.release.id)).size, 1);
+  const id = results[0].value.release.id, secondStore = new Store(f.h.database, f.h.key), second = new ReleaseService(secondStore, f.apiUrl);
+  try { await Promise.all([f.service.worker.process(id), second.worker.process(id)]); } finally { secondStore.close(); }
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 1);
+  const mutations = writes(f.state);
+  assert.equal(mutations.length, 2); assert.deepEqual(mutations[0].body, { tag: 'v1.2.3', message: 'v1.2.3', object: target, type: 'commit' });
+  assert.deepEqual(mutations[1].body, { ref: 'refs/tags/v1.2.3', sha: tagObject });
+  assert.equal(f.h.store.get('SELECT stage FROM project_releases WHERE id=?', id).stage, 'waiting_run');
+  assert.ok(f.state.tokens.every(token => token.repository_ids.join() === '101' && !token.permissions.workflows && !token.permissions.administration));
+});
+test('same lightweight or annotated tag is reused and a conflicting tag is never moved', async t => {
+  for (const type of ['commit', 'tag']) {
+    const f = await releaseFixture(t); f.state.tags['v1.2.3'] = { type, sha: type === 'tag' ? tagObject : target, commit: target };
+    const result = await f.create(); assert.equal(result.status, 201);
+    await f.service.tick(); assert.equal((await f.admin(f.endpoint + '/' + result.value.release.id)).value.release.stage, 'waiting_run');
+    assert.equal(writes(f.state).length, 0);
+  }
+  const f = await releaseFixture(t), r = await f.create(); f.state.tags['v1.2.3'] = { type: 'commit', sha: other };
+  await f.service.tick(); const failed = (await f.admin(f.endpoint + '/' + r.value.release.id)).value.release;
+  assert.equal(failed.error, 'release_tag_conflict'); assert.ok(failed.detail.includes(target) && failed.detail.includes(other)); assert.equal(writes(f.state).length, 0);
+});
+test('uncertain tag writes are reconciled and an unknown tag object is never posted twice after restart', async t => {
+  const f = await releaseFixture(t); f.state.unknown = '/repos/fixture/project-101/git/refs';
+  const r = await f.create(); await f.service.tick();
+  assert.equal((await f.admin(f.endpoint + '/' + r.value.release.id)).value.release.stage, 'waiting_run');
+  assert.equal(writes(f.state).filter(r => r.path.endsWith('/git/refs')).length, 1);
+  const g = await releaseFixture(t); g.state.unknown = '/repos/fixture/project-101/git/tags'; const result = await g.create(); await g.service.tick();
+  assert.equal((await g.admin(g.endpoint + '/' + result.value.release.id)).value.release.stage, 'write_unknown');
+  const restarted = new ReleaseService(g.h.store, g.apiUrl); await restarted.tick();
+  assert.equal(writes(g.state).filter(r => r.path.endsWith('/git/tags')).length, 1);
+  assert.equal(g.h.store.get("SELECT state FROM release_effects WHERE kind='tag_object'").state, 'unknown');
 });
