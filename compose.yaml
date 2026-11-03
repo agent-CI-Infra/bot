@@ -23,7 +23,7 @@ services:
       key-init:
         condition: service_completed_successfully
       manager:
-        condition: service_started
+        condition: service_healthy
     environment:
       TMPDIR: /tmp
       SQLITE_TMPDIR: /tmp
@@ -79,6 +79,13 @@ services:
     restart: unless-stopped
   manager:
     image: ghcr.io/agent-ci-infra/bot-computer-manager:${BOT_IMAGE_TAG:-latest}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8793/ready', { signal: AbortSignal.timeout(2000) }).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      # Recovery runs serially and can include image builds and setup scripts for every saved project.
+      start_period: 30m
+      retries: 3
     depends_on:
       key-init:
         condition: service_completed_successfully
