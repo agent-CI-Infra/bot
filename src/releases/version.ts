@@ -1,6 +1,6 @@
 // The console receives this exact pattern from preflight; GitHub tags never use build metadata.
 export const versionPattern = '^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$';
-export const validVersion = (value: string) => value.length <= 256 && new RegExp(versionPattern).test(value);
+export const validVersion = (value: string) => value.length <= 256 && !/\s/.test(value) && new RegExp(versionPattern).test(value);
 export const prerelease = (value: string) => value.includes('-');
 export function compareVersions(a: string, b: string): number {
   const split = (v: string) => { const at = v.indexOf('-'); return [v.slice(1, at < 0 ? undefined : at).split('.'), at < 0 ? [] : v.slice(at + 1).split('.')] as const; };
