@@ -84,9 +84,15 @@ const causeActions: Record<FailureCause,(state:string)=>string> = {
   bot: () => '这是 bot 内部校验失败或运行异常，与外部服务和权限无关。可以先点「重试」；反复出现请把任务链接和上面的说明反馈给 bot 维护者。',
 };
 
-export function explainFailure(code: string|null|undefined, state = 'failed') {
+export function explainFailure(code: string|null|undefined, state = 'failed', detail?: string) {
   if (!code) return null;
   const cause = failureCause(code, state);
+  // Only token inactivity gets this explanation; DNS, connection failures and old logs keep their cause.
+  if (code === 'model_unavailable' && detail?.includes('连续 90 秒没有 token 输出')) return {
+    cause, label: '模型连续 90 秒没有 token 输出', automatic: automatic.has(state),
+    action: ended.has(state) ? '任务已结束，无需处理。' : automatic.has(state) ? '模型连续 90 秒没有 token 输出，bot 会自动重试。'
+      : '模型连续 90 秒没有 token 输出，已自动重试 5 次仍失败。请检查模型服务的输出是否中断，恢复后点「重试」。',
+  };
   const action = codeActions[code] || (ended.has(state) ? '任务已结束，无需处理。' : causeActions[cause](state));
   return { cause, label: causes[cause].label, action, automatic: automatic.has(state) };
 }

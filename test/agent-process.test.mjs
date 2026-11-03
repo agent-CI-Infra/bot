@@ -118,7 +118,7 @@ test('a relayed model request carries exactly one output limit, the field the ru
   received.forEach((body,i)=>{
     const field=shapes[i][1],other=field==='max_tokens'?'max_completion_tokens':'max_tokens';
     assert.equal(body[field],8192,`request ${i+1} sets ${field}`);assert.ok(!(other in body),`request ${i+1} omits ${other}`);
-    assert.equal(body.stream,false);assert.ok(!('stream_options' in body));assert.equal(body.model,'fixture');
+    assert.equal(body.stream,true);assert.deepEqual(body.stream_options,{include_usage:true});assert.equal(body.model,'fixture');
   });
 });
 
