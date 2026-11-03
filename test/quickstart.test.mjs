@@ -8,6 +8,10 @@ import { Quickstart, boardLocation, quickstartPermissions } from '../dist/projec
 import { GitHub, agentReadPermissions } from '../dist/github/client.js';
 import { ReadTokens } from '../dist/agent/read-token.js';
 import { Redactor } from '../dist/agent/common.js';
+import { workflowSet } from '../dist/projects/gate-templates.js';
+import { releaseWorkflow } from '../dist/releases/workflow.js';
+import { releaseFixture } from './release-fixtures.mjs';
+import { parse } from 'yaml';
 
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 }), privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' });
 const b64 = text => Buffer.from(text).toString('base64');
@@ -162,11 +166,49 @@ test('the gate PR runs on its own with a source-only App token that may write wo
   const [sourceToken, templateToken] = state.tokens.keys();
   const pull = state.repos['octo/hello'].pulls[0], branch = state.repos['octo/hello'].branches[pull.head];
   assert.ok(branch['.github/workflows/ci.yml'] && branch['.github/ci-gates.json'] && branch['scripts/gate/gate.mjs']);
+  assert.ok(releaseWorkflow(branch['.github/workflows/release.yml'], 'v1.2.3').matched);
+  assert.ok(Object.values(JSON.parse(branch['.github/ci-gates.json']).lanes).every(lane => lane.commands.length === 0));
   for (const request of state.requests.filter(r => r.path.startsWith('/repos/octo/hello') && !r.path.endsWith('/installation'))) assert.equal(request.auth, sourceToken, request.path);
   assert.ok(state.requests.filter(r => r.path.startsWith('/repos/agent-CI-Infra/CI-workflow/contents')).every(r => r.auth === templateToken));
   assert.ok(!state.requests.some(r => r.path.startsWith('/repos/agent-CI-Infra/dashboard')));
   assert.deepEqual(state.revoked, [sourceToken, templateToken]);
   assert.ok(!JSON.stringify(result).includes('ghs_'));
+});
+
+test('a repository without build or test scripts gets the upstream release framework recognized by preflight', async t => {
+  const { state, run } = await fixture(t);
+  state.repos['octo/hello'].files['package.json'] = JSON.stringify({ name: 'hello' });
+  const upstream = workflowSet({})['.github/workflows/release.yml'] + '\n# Upstream template\n';
+  state.repos['agent-CI-Infra/CI-workflow'].files['template/.github/workflows/release.yml'] = upstream;
+  const result = await run(['gate_pr']); assert.equal(step(result, 'gate_pr').status, 'done', JSON.stringify(result));
+  const pull = state.repos['octo/hello'].pulls[0], branch = state.repos['octo/hello'].branches[pull.head];
+  assert.equal(branch['.github/workflows/release.yml'], upstream);
+  assert.match(pull.body, /仓库开发者填写/); assert.match(pull.body, /PyPI、npm 包或镜像/);
+  const f = await releaseFixture(t); f.state.files = branch;
+  for (const version of ['v1.2.3', 'v1.2.3-beta.1']) {
+    const preview = await f.preview(version); assert.equal(preview.available, true, JSON.stringify(preview));
+  }
+});
+
+test('bundled release gates accept missing scripts and never choose repository check or publishing commands', async t => {
+  for (const scripts of [{}, { test: 'node --test' }, { build: 'tsc', test: 'node --test', lint: 'eslint .' }]) {
+    await t.test(JSON.stringify(scripts), async t => {
+      const { state, run } = await fixture(t);
+      state.repos['octo/hello'].files['package.json'] = JSON.stringify({ name: 'hello', scripts });
+      const result = await run(['gate_pr']); assert.equal(step(result, 'gate_pr').status, 'done', JSON.stringify(result));
+      const pull = state.repos['octo/hello'].pulls[0], branch = state.repos['octo/hello'].branches[pull.head];
+      const config = JSON.parse(branch['.github/ci-gates.json']);
+      assert.deepEqual(config.lanes, Object.fromEntries(['build', 'pr-ready', 'pr-merge', 'daily', 'release'].map(lane => [lane, { commands: [] }])));
+      const release = branch['.github/workflows/release.yml']; assert.ok(releaseWorkflow(release, 'v1.2.3').matched);
+      const workflow = parse(release);
+      assert.deepEqual(workflow.permissions, { contents: 'read' });
+      assert.deepEqual(Object.keys(workflow.jobs), ['gate']);
+      assert.deepEqual(workflow.jobs.gate.steps.filter(step => step.run).map(step => step.run),
+        ['npm ci --no-audit --no-fund', 'node scripts/gate/gate.mjs run --lane release']);
+      assert.deepEqual(workflow.jobs.gate.steps.filter(step => step.uses).map(step => step.uses),
+        ['actions/checkout@v4', 'actions/setup-node@v4', 'actions/upload-artifact@v4']);
+    });
+  }
 });
 
 test('without the App on the dashboard repository the board and dashboard items stop, while the gate PR still goes ahead', async t => {

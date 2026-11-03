@@ -49,10 +49,11 @@ export function workflowSet(scripts: Record<string, unknown>): WorkflowSet {
     workflows['.github/workflows/build.yml'] = laneWorkflow('Build', 'build',
       '  push:\n    branches: [main, master]\n  pull_request:\n  workflow_dispatch:',
       'Compile and package the default branch; the build lane report feeds the dashboard.');
-    workflows['.github/workflows/release.yml'] = laneWorkflow('Release', 'release',
-      '  push:\n    tags:\n      - "v*"\n      - "[0-9]+.[0-9]+.[0-9]+*"\n  workflow_dispatch:',
-      'Build the tagged commit and prove the release lane still passes.');
   }
+  // Every onboarding PR needs a tag trigger, even before the repository defines its checks.
+  workflows['.github/workflows/release.yml'] = laneWorkflow('Release', 'release',
+    '  push:\n    tags:\n      - "v*"\n      - "[0-9]+.[0-9]+.[0-9]+*"\n  workflow_dispatch:',
+    'Run the repository-configured release gate lane for the tagged commit.');
   if (has('test') || has('build')) {
     workflows['.github/workflows/nightly.yml'] = laneWorkflow('Nightly', 'daily',
       "  schedule:\n    # 16:00 UTC is 00:00 Asia/Shanghai, so the run finishes before the working day.\n    - cron: '0 16 * * *'\n  workflow_dispatch:",
