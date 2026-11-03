@@ -122,12 +122,22 @@ export class TaskEngine {
     try{
       await guard();const config=selectedModel(this.store,task.repository_id);redactor.add(config.key);await this.share(task.repository_id);
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
+      // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
+      // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.
+      let environment:any=null;
+      if(task.phase==='prepare'){
+        environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
+        if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
+        if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
+      }
       const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.'));
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.');
       if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
-      const validate=async()=>{
-        await guard();const current=await github.object(task.kind,task.object_number);
+      // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
+      let seen:any=null;
+      const validate=async(fetched?:any)=>{
+        await guard();const current=seen=fetched||await github.object(task.kind,task.object_number);
         if(current.state!=='open'||current.draft===true)stop('object_closed_or_draft','cancelled',`任务目标 #${task.object_number} 已关闭或变为草稿，state=${current.state}，draft=${current.draft===true}。`);
         if(task.kind.endsWith('.pr')){
           if(development)this.owned(github,task,current);
@@ -165,11 +175,8 @@ export class TaskEngine {
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
       };
       if(task.phase==='prepare'){
-        let environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
-        if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
-        if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
-        const object=await github.object(task.kind,task.object_number);await validate();
+        const object=await github.object(task.kind,task.object_number);await validate(object);
         let implementationGoal=input.review?.implementation_goal||'',actionableFindings:any[]=[];
         if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
         if(task.kind.endsWith('.pr')){
@@ -280,7 +287,8 @@ export class TaskEngine {
           const outputs=await publisher.review(result,input.files);
           // Labels go on only after the summary comment was published: the policy's review label, plus the classification
           // labels the model named that pass classificationLabels against the repository and the object's current labels.
-          const label=input.review_label,current=(await github.object(task.kind,task.object_number)).labels;
+          // publisher.review ends by validating the object, so its labels are current.
+          const label=input.review_label,current=(seen||await github.object(task.kind,task.object_number)).labels;
           const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label])];
           if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
