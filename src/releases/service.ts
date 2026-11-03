@@ -120,22 +120,42 @@ export class ReleaseService {
     if (observation && method === 'POST') {
       fields(input, ['revision']); this.find(id, observation[1]!); enabled(this.store, id);
       if (!Number.isSafeInteger(input.revision)) return fail(400, 'release_revision_required');
-      const row = this.claim(observation[1]!, input.revision), redactor = releaseRedactor(this.store, id);
+      // Analysis owns only its observer lease. CI polling and publication keep their own write lease.
+      const row = this.find(id, observation[1]!), redactor = releaseRedactor(this.store, id), observer = randomId();
+      if (row.revision !== input.revision) return fail(409, 'release_revision_conflict');
+      const initial = JSON.parse(row.data);
+      if (!initial.run_id) return fail(409, 'release_no_bound_run');
+      const claimed = this.store.run(`INSERT INTO release_observers VALUES(?,?,?) ON CONFLICT(release_id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE release_observers.expires_at<=?`, row.id, observer, Date.now() + 300000, Date.now());
+      if (!claimed.changes) return fail(409, 'release_observation_busy');
+      const guard = async () => {
+        enabled(this.store, id);
+        if (!this.store.run('UPDATE release_observers SET expires_at=? WHERE release_id=? AND token=? AND expires_at>?', Date.now() + 300000, row.id, observer, Date.now()).changes)
+          return stop('release_lease_lost', 'failed', '本次运行分析已失效，请重新查看。');
+        const latest = JSON.parse(this.find(id, row.id).data);
+        if (latest.run_id !== initial.run_id || latest.run_attempt !== initial.run_attempt) return fail(409, 'release_attempt_changed');
+      };
+      const save = (patch: Json) => this.store.transaction(() => {
+        if (!this.store.get('SELECT 1 FROM release_observers WHERE release_id=? AND token=? AND expires_at>?', row.id, observer, Date.now())) return;
+        const latest = this.find(id, row.id), data = JSON.parse(latest.data);
+        if (data.run_id !== initial.run_id || data.run_attempt !== initial.run_attempt) return fail(409, 'release_attempt_changed');
+        // Observer metadata does not invalidate a pending body edit or the worker's authoritative revision.
+        this.store.run('UPDATE project_releases SET data=? WHERE id=?', JSON.stringify({ ...data, ...patch }), row.id);
+      });
       try {
         const data = JSON.parse(row.data); if (!data.run_id) return fail(409, 'release_no_bound_run');
         this.store.audit(user.id, 'release.observe', row.id, id);
         const result = await withGitHub(this.store, id, this.apiUrl, {}, redactor, async github => {
           const current = await runSnapshot(github, row);
           if (current.run.run_attempt !== data.run_attempt) return fail(409, 'release_attempt_changed');
-          return explainRun(this.store, id, current.snapshot, redactor);
-        }, () => this.guard(row));
-        this.save(row, { observation: result, observation_error: null });
+          return explainRun(this.store, id, current.snapshot, redactor, github, row);
+        }, guard);
+        await guard(); save({ observation: result, observation_error: null });
       } catch (error) {
         if ((error as any).status) throw error;
         const e = error as any;
-        this.save(row, { observation_error: redactor.text(e.detail || '本次分析失败，Actions 状态不受影响。') });
-      } finally { this.unlock(row); }
-      return { release: this.view(row) };
+        save({ observation_error: redactor.text(e.detail || '本次分析失败，Actions 状态不受影响。') });
+      } finally { this.store.run('DELETE FROM release_observers WHERE release_id=? AND token=?', row.id, observer); }
+      return { release: this.view(this.find(id, row.id)) };
     }
     return fail(404, 'not_found');
   }
@@ -151,11 +171,14 @@ export class ReleaseService {
     return releaseRedactor(this.store, row.repository_id).clean({ ...data, id: row.id, repository_id: row.repository_id, version: row.version, target_sha: row.target_sha, stage: row.stage, revision: row.revision, created_at: row.created_at, updated_at: row.updated_at });
   }
   save(row: any, patch: any, stage = row.stage, active = !['failed', 'published', 'externally_published'].includes(stage)) {
-    const data = JSON.stringify({ ...JSON.parse(row.data), ...patch }), now = new Date().toISOString();
-    const result = this.store.run('UPDATE project_releases SET data=?,stage=?,active=?,revision=revision+1,updated_at=? WHERE id=? AND revision=? AND lease IS ?',
-      data, stage, active ? 1 : 0, now, row.id, row.revision, row.lease);
-    if (!result.changes) return stop('release_record_changed', 'failed', '发布记录已变化，请刷新。');
-    Object.assign(row, { data, stage, active: active ? 1 : 0, revision: row.revision + 1, updated_at: now });
+    this.store.transaction(() => {
+      const latest = this.store.get('SELECT data FROM project_releases WHERE id=?', row.id);
+      const data = JSON.stringify({ ...JSON.parse(latest?.data || row.data), ...patch }), now = new Date().toISOString();
+      const result = this.store.run('UPDATE project_releases SET data=?,stage=?,active=?,revision=revision+1,updated_at=? WHERE id=? AND revision=? AND lease IS ?',
+        data, stage, active ? 1 : 0, now, row.id, row.revision, row.lease);
+      if (!result.changes) return stop('release_record_changed', 'failed', '发布记录已变化，请刷新。');
+      Object.assign(row, { data, stage, active: active ? 1 : 0, revision: row.revision + 1, updated_at: now });
+    });
   }
   claim(id: string, revision?: unknown): any {
     return this.store.transaction(() => {

@@ -3,7 +3,7 @@
 export type FailureCause = 'external'|'github_access'|'github_rejected'|'model'|'environment'|'repository'|'task_changed'|'publication'|'bot';
 
 const causes: Record<FailureCause,{label:string,codes:string[]}> = {
-  external: { label:'外部服务或网络波动', codes:['github_unavailable','github_response_unknown','github_rate_limited','model_unavailable','release_actions_incomplete'] },
+  external: { label:'外部服务或网络波动', codes:['github_unavailable','github_response_unknown','github_rate_limited','model_unavailable','release_actions_incomplete','github_log_download_failed'] },
   github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_token_missing',
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','branch_not_owned','release_uninstalled','release_app_required'] },
@@ -27,7 +27,8 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown'] },
   bot: { label:'Bot 自身问题', codes:['task_runtime_failure','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed',
-    'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed'] },
+    'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
+    'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid'] },
 };
 const byCode = new Map(Object.entries(causes).flatMap(([cause,{codes}]) => codes.map(code => [code, cause as FailureCause])));
 export const classifiedCodes = new Set(byCode.keys());

@@ -84,18 +84,31 @@ export class GitHub {
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
-  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false): Promise<any> {
+  async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false): Promise<any> {
     await this.guard();
     // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
     const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
     let response: Response;
-    try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
+    try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: jobLogs ? 'manual' : 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
     catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
       this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
     if (window) observe(this.store, window, response.headers, response.status);
+    if (jobLogs && response.status === 302) {
+      // Only a fixed Actions job-log endpoint can enter this branch. The URL is supplied by GitHub,
+      // never by a model; signed storage requests deliberately carry no GitHub authorization header.
+      const location = response.headers.get('location'); await response.body?.cancel();
+      let address: URL;
+      try { address = new URL(location || ''); } catch { return stop('github_log_redirect_invalid', undefined, 'GitHub 日志下载没有返回有效地址。'); }
+      if (address.username || address.password || address.hash || (address.protocol !== 'https:' && !(address.protocol === 'http:' && address.origin === new URL(this.apiUrl).origin)))
+        return stop('github_log_redirect_invalid', undefined, 'GitHub 日志下载返回了不安全的地址，已拒绝读取。');
+      await this.guard();
+      try { response = await fetch(address, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(30000) }); }
+      catch { return stop('github_log_download_failed', 'retry_wait', 'GitHub 日志下载失败，未转发 GitHub 令牌或记录临时下载地址。'); }
+      if (!response.ok) { await response.body?.cancel(); return stop('github_log_download_failed', 'retry_wait', `GitHub 日志存储返回 HTTP ${response.status}，可稍后重试读取。`); }
+    }
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
       const error=await errorBody(response),detail=errorDetail(error?.message,this.redactor,token,response.status);
@@ -121,8 +134,24 @@ export class GitHub {
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',explain(said,'，写入结果尚未确认'));
       stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',explain(said));
     }
+    if (jobLogs) {
+      const reader = response.body?.getReader(), chunks: Uint8Array[] = []; let size = 0;
+      try {
+        if (reader) for (;;) {
+          const { done, value } = await reader.read(); if (done) break;
+          size += value.length;
+          if (size > 8 * 1024 * 1024) return stop('github_log_too_large', undefined, '该 job 日志超过 8 MiB，未返回不完整内容；请在 Actions 查看完整日志。');
+          chunks.push(value);
+        }
+      } finally { await reader?.cancel().catch(() => {}); }
+      return Buffer.concat(chunks).toString('utf8');
+    }
     const value = await response.text(); if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large',undefined,`GitHub 请求 ${method} ${path} 的响应长度 ${value.length}，超过 48 MiB 上限。`);
     try { return value ? JSON.parse(value) : {}; } catch { return stop('github_invalid_response',undefined,`GitHub 请求 ${method} ${path} 返回无效 JSON，HTTP ${response.status}。`); }
+  }
+  async jobLog(jobId: number): Promise<string> {
+    if (!Number.isSafeInteger(jobId) || jobId < 1) return stop('github_log_job_invalid', undefined, 'Actions job ID 无效。');
+    return this.request('GET', this.path(`/actions/jobs/${jobId}/logs`), undefined, false, this.token, false, false, true);
   }
   async snapshotBlob(sha:string):Promise<any>{
     if(!/^[a-f0-9]{40}$/.test(sha))stop('repository_blob_invalid',undefined,`Invalid blob SHA: ${sha}`);

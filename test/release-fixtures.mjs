@@ -10,7 +10,7 @@ export const workflow = "name: Release\non:\n  push:\n    tags: ['v*']\njobs:\n 
 export async function releaseFixture(t) {
   const state = { files: { '.github/ci-gates.json': '{}', '.github/workflows/ci.yml': 'name: CI', '.github/workflows/release.yml': workflow },
     head: target, tags: {}, releases: [], runs: [], jobs: [], requests: [], tokens: [], unknown: '', deny: '', registered: true,
-    commits: [{ sha: target, commit: { message: 'Add release lane' }, html_url: 'https://github.com/fixture/project-101/commit/' + target },
+    logs: {}, commits: [{ sha: target, commit: { message: 'Add release lane' }, html_url: 'https://github.com/fixture/project-101/commit/' + target },
       { sha: previous, commit: { message: 'Initial commit' }, html_url: 'https://github.com/fixture/project-101/commit/' + previous }], prs: {}, pages: {}, custom: null };
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -21,8 +21,8 @@ export async function releaseFixture(t) {
     const repo = { id: 101, full_name: 'fixture/project-101', owner: { id: 10 }, default_branch: 'main' };
     if (state.custom && await state.custom({ method, path, body, url, send, req, res })) return;
     if (state.deny === path) return send({ message: 'fixture permission denied' }, 403);
-    if (path === '/repos/fixture/project-101/installation') return send({ id: 55, account: { id: 10 }, permissions: { contents: 'write', actions: 'write', pull_requests: 'read' } });
-    if (path === '/app/installations/55/access_tokens') { state.tokens.push(body); return send({ token: 'fixture-installation-' + state.tokens.length, permissions: body.permissions }, 201); }
+    if (path === '/repos/fixture/project-101/installation') return send({ id: 55, account: { id: 10 }, permissions: { contents: 'write', actions: 'write', pull_requests: 'read', metadata: 'read' } });
+    if (path === '/app/installations/55/access_tokens') { state.tokens.push(body); return send({ token: 'fixture-installation-' + state.tokens.length, expires_at: new Date(Date.now() + 3600000).toISOString(), permissions: body.permissions }, 201); }
     if (path === '/installation/token') return send({});
     if (path === '/repositories/101') return send(repo);
     const prefix = '/repos/fixture/project-101', suffix = path.slice(prefix.length);
@@ -41,6 +41,7 @@ export async function releaseFixture(t) {
     if (suffix === '/git/refs' && method === 'POST') { const version = body.ref.slice('refs/tags/'.length); if (state.tags[version]) return send({}, 422); state.tags[version] = { sha: body.sha, type: 'tag', commit: target }; return done({ ref: body.ref, object: { sha: body.sha, type: 'tag' } }, 201); }
     if (suffix === '/actions/workflows/77/runs') return send({ total_count: state.runs.length, workflow_runs: Number(url.searchParams.get('page')) > 1 ? [] : state.runs });
     let match;
+    if ((match = /^\/actions\/jobs\/(\d+)\/logs$/.exec(suffix))) { const content = state.logs[match[1]]; if (content === undefined) return send({ message: 'Logs not available' }, 404); res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end(content); return; }
     if ((match = /^\/actions\/runs\/(\d+)(?:\/attempts\/(\d+)\/jobs)?$/.exec(suffix))) {
       if (match[2]) { const jobs = state.jobs.filter(j => !j.run_attempt || j.run_attempt === Number(match[2])); return send({ total_count: jobs.length, jobs: Number(url.searchParams.get('page')) > 1 ? [] : jobs }); }
       const run = state.runs.find(r => r.id === Number(match[1])); return run ? send(run) : send({}, 404);
