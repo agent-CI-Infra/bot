@@ -171,10 +171,17 @@ function releaseRecord(r, endpoint, refresh, message) {
   }
   section.append(jobs);
   for (const candidate of r.candidates || []) section.append(link(candidate.url, `候选 run ${candidate.id}`));
-  const action = (caption, suffix) => button(caption, async () => {
-    try { await api(endpoint + '/' + r.id + '/' + suffix, 'POST', { revision: r.revision }); await refresh(); }
-    catch (err) { message.textContent = err.message; }
-  });
+  const action = (caption, suffix) => {
+    const pending = current.releaseActions ||= new Set(), key = r.id + ':' + suffix;
+    const control = button(pending.has(key) ? caption + '…' : caption, async () => {
+      if (pending.has(key)) return;
+      pending.add(key); control.disabled = true; control.textContent = caption + '…';
+      try { await api(endpoint + '/' + r.id + '/' + suffix, 'POST', { revision: r.revision }); }
+      catch (err) { message.textContent = err.message; }
+      finally { pending.delete(key); await refresh(); }
+    });
+    control.disabled = pending.has(key); return control;
+  };
   const actions = element('div', '', 'actions'); section.append(actions);
   if (r.stage === 'failed' && ['release_ci_unsuccessful', 'release_rerun_not_started'].includes(r.error) && r.run_id) actions.append(action('重跑', 'rerun'));
   if (['failed', 'write_unknown', 'waiting_permission'].includes(r.stage) && r.error !== 'release_ci_unsuccessful') actions.append(action('继续／查证此步骤', 'resume'));
@@ -183,6 +190,9 @@ function releaseRecord(r, endpoint, refresh, message) {
   if (r.observation) {
     section.append(note(`运行分析 · run ${r.observation.run_id} / attempt ${r.observation.attempt} · 仅供排查的建议`), note(r.observation.advice));
     for (const job of r.observation.jobs) section.append(link(job.url, `${job.name} · ${job.conclusion}`));
+    for (const log of r.observation.logs || []) {
+      const details = element('details'); details.append(element('summary', `${log.name} 日志 · 第 ${log.first_line}–${log.last_line || log.first_line} 行${log.truncated ? '（已截取）' : ''}`), link(log.url, '查看 job 完整日志'), element('pre', log.content)); section.append(details);
+    }
   }
   if (r.release_url) actions.append(link(r.release_url, '查看 GitHub Release'));
   if (r.skill) {

@@ -62,3 +62,31 @@ test('其他项目管理员看不到发版入口，直接请求本项目发布�
     expect(writes(f.state)).toHaveLength(0);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
+test('运行分析按需申请只读令牌并在页面展示脱敏日志证据', async ({ page }) => {
+  const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) }); let release;
+  try {
+    f.state.runs = [run({ conclusion: 'failure' })];
+    f.state.jobs = [{ id: 1, run_id: 800, run_attempt: 1, name: 'release', status: 'completed', conclusion: 'failure', html_url: 'https://github.com/fixture/project-101/actions/runs/800/job/1' }];
+    f.state.logs[1] = 'Error: package missing\nobservation-ui-secret';
+    const created = await f.create(); for (let i = 0; i < 2; i++) await f.service.worker.process(created.value.release.id);
+    const model = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'observation-ui-secret', model_name: 'fixture' });
+    await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id });
+    const held = new Promise(resolve => { release = resolve; }); let turn = 0;
+    const tool = (id, name, args = {}) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
+    f.state.custom = async ({ path, send }) => {
+      if (path !== '/v1/chat/completions') return false;
+      const index = turn++; if (!index) await held;
+      send({ choices: [{ message: [tool('token', 'github_read_token'), tool('log', 'read_job_log', { job_id: 1 }), { content: '{"job_ids":[1],"advice":"日志第 1 行显示 package missing，请检查构建依赖。"}' }][index] }] }); return true;
+    };
+    await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
+    await login(page, f.h.admin, 'administrator', f.password); await page.goto(f.h.admin + '/#/projects/101/release');
+    const analyze = page.getByRole('button', { name: /让智能体看这次运行/ }); await analyze.click(); await expect(analyze).toBeDisabled();
+    await page.waitForTimeout(5200); await expect(analyze).toBeDisabled(); release();
+    await expect(page.locator('#project-page')).toContainText('日志第 1 行显示 package missing');
+    await page.getByText('release 日志 · 第 1–2 行', { exact: true }).click();
+    await expect(page.locator('#project-page pre')).toContainText('Error: package missing'); await expect(page.locator('#project-page pre')).toContainText('[REDACTED]');
+    await expect(page.locator('#project-page')).not.toContainText('observation-ui-secret'); expect(f.state.releases).toHaveLength(0);
+    const grant = f.state.tokens.find(t => t.permissions.metadata === 'read' && !t.permissions.contents); expect(grant.permissions).toEqual({ actions: 'read', metadata: 'read' });
+    mkdirSync('.tmp/release-observation', { recursive: true }); await page.screenshot({ path: '.tmp/release-observation/log-evidence.png', fullPage: true });
+  } finally { release?.(); for (const close of cleanup.reverse()) await close(); }
+});

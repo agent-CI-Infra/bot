@@ -252,14 +252,14 @@ test('publish timeout is probed and restart recovery never resends formal public
   await new ReleaseService(g.h.store, g.apiUrl).tick(); assert.equal((await g.admin(g.endpoint + '/' + s.id)).value.release.stage, 'published');
   assert.equal(writes(g.state).filter(r => r.body?.draft === false).length, 1);
 });
-test('read-only observation receives only this run and attempt with no write token or executable tools', async t => {
+test('read-only observation can finish without requesting logs and has no write tools', async t => {
   const f = await releaseFixture(t); f.state.runs = [run({ conclusion: 'failure' })]; f.state.jobs = [job({ conclusion: 'failure', steps: [{ name: 'Build', number: 1, conclusion: 'failure' }] })];
   const r = await observe(f), m = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'observation-fixture-secret', model_name: 'fixture' });
   await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: m.value.model.id });
-  let input, request; f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: '{"job_ids":[1],"advice":"Inspect the Build step output"}', tool_calls: [{ function: { name: 'publish_release', arguments: '{}' } }] } }] }); return true; } };
+  let input, request; f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: '{"job_ids":[1],"advice":"Inspect the Build step output"}' } }] }); return true; } };
   const before = writes(f.state).length, tokens = f.state.tokens.length;
   const result = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: r.revision });
-  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools, []); assert.equal(request.tool_choice, 'none');
+  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'read_job_log']); assert.equal(request.tool_choice, 'auto');
   assert.ok(!JSON.stringify(request).includes('fixture-installation-'));
   assert.ok(f.state.tokens.slice(tokens).every(t => Object.values(t.permissions).every(p => p === 'read')));
   assert.ok(writes(f.state).slice(before).every(r => r.path === '/v1/chat/completions'));
