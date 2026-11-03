@@ -83,6 +83,7 @@ export function loadConsole(files, respond) {
     return { ok: status < 400, status, json: async () => value };
   };
   const context = vm.createContext({ document, Node: FakeElement, fetch, location: { hash: '', pathname: '/' }, history: { pushState() {} }, addEventListener() {},
+    matchMedia: media => ({ media, matches: false, addEventListener() {} }),
     setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams, console });
   context.window = context;
   for (const file of files) vm.runInContext(readFileSync(file, 'utf8'), context, { filename: file });
