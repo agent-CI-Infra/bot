@@ -11,6 +11,7 @@ import { Onboarding } from './onboarding/service.js';
 import { IntegrationChecker } from './projects/integrations.js';
 import { Quickstart } from './projects/quickstart.js';
 import { GitCache } from './agent/git-cache.js';
+import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
 
 process.umask(0o077);
@@ -37,11 +38,12 @@ const installations = new InstallationSync(store, process.env.BOT_GITHUB_API_URL
 const onboarding = new Onboarding(store, { tunnelFile: process.env.BOT_TUNNEL_TOKEN_FILE, tunnelMetrics: process.env.BOT_TUNNEL_METRICS_URL, githubUrl: process.env.BOT_GITHUB_API_URL });
 setTimeout(() => void installations.syncAll(), 5000).unref();
 const syncTimer = setInterval(() => void installations.syncAll(), 10 * 60_000);
+const boards = new PublicBoards(store, resolve(dirname(databasePath), 'public-boards'), process.env.BOT_GITHUB_API_URL); boards.start();
 const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_URL || undefined);
 const quickstart = new Quickstart(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
 const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
-  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, quickstart, releases,
+  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, quickstart, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL });
 for (const [name, port] of [['webhook', 8791], ['admin', 8792]] as const) {
   const server = servers[name];
@@ -53,6 +55,6 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer);
   let remaining = 2;
-  for (const server of Object.values(servers)) server.close(async () => { if (--remaining === 0) { await Promise.all([engine.close(),external.forwarder.close(),releases.close()]); store.close(); process.exit(0); } });
+  for (const server of Object.values(servers)) server.close(async () => { if (--remaining === 0) { await Promise.all([engine.close(),external.forwarder.close(),releases.close(),boards.close()]); store.close(); process.exit(0); } });
   setTimeout(() => process.exit(1), 100_000).unref();
 });

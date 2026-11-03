@@ -1,3 +1,4 @@
+import { boardLocation, publicOrigin, publishedRepositories } from '../public-board/state.js';
 import type { Json } from '../core/security.js';
 import type { Store, Row } from '../storage/database.js';
 import { appJwt, revokeInstallationToken } from '../github/client.js';
@@ -42,12 +43,11 @@ export function dropUninstalledIntegrations(store: Store): void {
 
 /**
  * Whether a repository is connected to the CI gates (CI-workflow) and to the public
- * dashboard. Read-only: it inspects files on the default branch, the latest CI run and
- * the dashboard's source list, then caches the answer.
+ * dashboard. Read-only: it inspects source gate files and the latest CI run,
+ * then combines them with local publication state.
  */
 export class IntegrationChecker {
-  constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com',
-    readonly dashboardRepo = process.env.BOT_DASHBOARD_REPO || 'agent-CI-Infra/dashboard') {}
+  constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
 
   private async request(method: string, path: string, token: string, body?: unknown): Promise<any | null> {
     let response: Response;
@@ -98,19 +98,11 @@ export class IntegrationChecker {
     } catch (error) { return { state: 'unknown', detail: (error as Error).message }; }
   }
 
-  private async dashboard(full: string, token: string): Promise<{ state: DashboardState; detail: string }> {
-    try {
-      const [owner = '', name = ''] = full.split('/');
-      const config = await this.file(this.dashboardRepo, 'config/gate-sources.json', token);
-      if (!config) return { state: 'unknown', detail: '读不到 dashboard 来源清单' };
-      const sources = JSON.parse(config.text).sources;
-      const source = (Array.isArray(sources) ? sources : []).find((s: any) => s.id === full
-        || (String(s.owner || '').toLowerCase() === owner.toLowerCase() && String(s.name || '').toLowerCase() === name.toLowerCase()));
-      if (!source) return { state: 'none', detail: '未登记到公共 dashboard' };
-      const indexFile = await this.file(this.dashboardRepo, 'public/data/gate/index.json', token);
-      const published = indexFile ? (JSON.parse(indexFile.text).sources || []).some((s: any) => s.id === source.id) : false;
-      return published ? { state: 'published', detail: '已发布到公共 dashboard' } : { state: 'registered', detail: '已登记，等待采集发布' };
-    } catch (error) { return { state: 'unknown', detail: (error as Error).message }; }
+  private async dashboard(full: string, _token: string): Promise<{ state: DashboardState; detail: string }> {
+    const row = publishedRepositories(this.store).find(row => String(row.full_name).toLowerCase() === full.toLowerCase());
+    return !row ? { state: 'none', detail: '私有仓快照尚未在本地启用公开' }
+      : row.active_path ? { state: 'published', detail: '已由 bot 在 webhook 入口托管' }
+      : { state: 'registered', detail: '已由 bot 托管，等待首轮采集' };
   }
 
   /** Checks one installed repository; a repository no installation lists is not checked and loses its cached row. */
@@ -142,6 +134,7 @@ export class IntegrationChecker {
         if (token) await revokeInstallationToken(this.apiUrl, token).catch(() => false);
       }
     }
+    result.dashboard = await this.dashboard(full, '');
     return this.save(repositoryId, result, now);
   }
 
@@ -159,6 +152,8 @@ export class IntegrationChecker {
     if (!row) return null;
     return { repository_id: row.repository_id, gate_state: row.gate_state, gate_detail: row.gate_detail,
       dashboard_state: row.dashboard_state, dashboard_detail: row.dashboard_detail, checked_at: row.checked_at,
+      dashboard_url: publicOrigin(this.store) ? publicOrigin(this.store) + '/dashboard/' : null,
+      board_url: publicOrigin(this.store) ? boardLocation(publicOrigin(this.store), String(this.store.get('SELECT full_name FROM installed_repositories WHERE repository_id=? LIMIT 1', repositoryId)?.full_name)).url : null,
       stale: Date.now() - Date.parse(String(row.checked_at)) > CACHE_MS };
   }
 

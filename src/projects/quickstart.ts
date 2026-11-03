@@ -1,6 +1,8 @@
 import { randomId, type Json } from '../core/security.js';
 import type { Store } from '../storage/database.js';
 import { appJwt, missingPermissions, revokeInstallationToken } from '../github/client.js';
+import { boardLocation, publicOrigin, queueBoard } from '../public-board/state.js';
+export { boardLocation } from '../public-board/state.js';
 import { workflowSet } from './gate-templates.js';
 
 type StepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'blocked' | 'failed';
@@ -19,7 +21,7 @@ const itemTitles: Record<Item, string> = { gate_pr: '门禁 PR', board: '单仓�
 interface Outcome { status: StepStatus; detail: string; code?: string; url?: string }
 const blocked = (detail: string, code: string): Outcome => ({ status: 'blocked', detail, code });
 /** What the items of one run share: the source repository read with its own installation token. */
-interface Source { app: AppSession; id: string; dryRun: boolean; full: string; owner: string; name: string; repositoryId: string;
+interface Source { app: AppSession; appAccountId: string; id: string; dryRun: boolean; full: string; owner: string; name: string; repositoryId: string;
   installation: any; token: string; defaultBranch: string; private: boolean }
 
 const step = (id: string, title: string): Step => ({ id, title, status: 'pending', detail: '等待执行', at: null });
@@ -31,27 +33,12 @@ const encode = (path: string) => path.split('/').map(encodeURIComponent).join('/
 export const quickstartPermissions = {
   // The gate PR commits `.github/workflows/` to the source repository.
   source: { contents: 'write', pull_requests: 'write', workflows: 'write', metadata: 'read' },
-  // The dashboard repository hosts the board branch and runs `Create board`.
-  board: { actions: 'write', contents: 'read', metadata: 'read' },
-  // The registration PR only changes JSON files.
-  dashboard: { contents: 'write', pull_requests: 'write', metadata: 'read' },
   // Reads the CI-workflow template repository through the App installed on it.
   template: { contents: 'read', metadata: 'read' },
 } satisfies Record<string, Permissions>;
 const permissionNames: Record<string, string> = { contents: 'Contents', pull_requests: 'Pull requests', workflows: 'Workflows',
   actions: 'Actions', metadata: 'Metadata', administration: 'Administration' };
 const levelNames: Record<string, string> = { read: 'Read-only', write: 'Read and write' };
-
-/** A source's board is an orphan branch of the dashboard repository, published under `/boards/<owner>/<repo>/`. */
-export function boardLocation(dashboardRepo: string, full: string) {
-  const [dashOwner = '', dashName = ''] = dashboardRepo.split('/');
-  const key = full.toLowerCase();
-  return { key, branch: `board/${key}`, url: `https://${dashOwner.toLowerCase()}.github.io/${dashName}/boards/${key}/` };
-}
-const boardKeyValid = (key: string) => /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(key);
-/** Said once on a private source's plan: the dashboard reads it with one shared read-only secret. */
-const privateTokenNote = 'dashboard 仓库需要一次性配置只读 secret PRIVATE_SOURCE_TOKEN';
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /** What an installation still lacks for one item, in GitHub's own permission names; null when nothing is missing. */
 function permissionGap(installation: any, required: Permissions): Outcome | null {
@@ -64,16 +51,15 @@ function permissionGap(installation: any, required: Permissions): Outcome | null
 /**
  * One-click onboarding as three items that run on their own:
  *  - gate_pr   — open a PR that adds the CI-workflow gate files to the source repository (the user merges it);
- *  - board     — trigger the dashboard's `Create board` workflow, which creates the board branch;
- *  - dashboard — open the registration PR on the dashboard for the board.
+ *  - board     — enable the bot-hosted public board locally;
+ *  - dashboard — enable local public dashboard collection.
  * A shared preflight reads the source repository; after that each item checks only what it needs, so an item that cannot
- * run is reported and the others still go ahead. Every write lands on a bot branch or a workflow dispatch; nothing is
- * pushed to a default branch, and only GitHub App installation tokens are used.
+ * run is reported and the others still go ahead. The gate writes only to its proposed source branch; board publication
+ * is local. Nothing is pushed to a default branch, and only GitHub App installation tokens are used.
  */
 export class Quickstart {
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com',
-    readonly templateRepo = process.env.BOT_CI_TEMPLATE_REPO || 'agent-CI-Infra/CI-workflow',
-    readonly dashboardRepo = process.env.BOT_DASHBOARD_REPO || 'agent-CI-Infra/dashboard') {}
+    readonly templateRepo = process.env.BOT_CI_TEMPLATE_REPO || 'agent-CI-Infra/CI-workflow') {}
 
   /** An empty token sends the request without credentials (public reads). */
   private async request(method: string, path: string, token: string, body?: unknown): Promise<any | null> {
@@ -204,11 +190,11 @@ export class Quickstart {
         mark('preflight', { status: 'running', detail: '读取仓库信息…' });
         const installation = await this.installation(app, `/repos/${full}/installation`);
         if (!installation) return stop(blocked('GitHub App 没有安装到该仓库', 'repository_not_found'));
-        const token = await this.token(app, installation, quickstartPermissions.source, { repository_ids: [Number(repositoryId)] });
+        const token = await this.token(app, installation, selected.includes('gate_pr') ? quickstartPermissions.source : { contents: 'read', metadata: 'read' }, { repository_ids: [Number(repositoryId)] });
         const meta = await this.request('GET', `/repos/${full}`, token);
         if (!meta) return stop(blocked('没有该仓库的访问权限', 'repository_not_found'));
-        source = { app, id, dryRun, full, owner, name, repositoryId, installation, token, defaultBranch: String(meta.default_branch || 'main'), private: !!meta.private };
-        mark('preflight', { status: 'done', detail: `默认分支 ${source.defaultBranch} · ${source.private ? `私有仓库 · ${privateTokenNote}` : '公开仓库'}` });
+        source = { app, appAccountId: String(account.id), id, dryRun, full, owner, name, repositoryId, installation, token, defaultBranch: String(meta.default_branch || 'main'), private: !!meta.private };
+        mark('preflight', { status: 'done', detail: `默认分支 ${source.defaultBranch} · ${source.private ? '私有仓库 · 启用看板后快照将对外公开' : '公开仓库'}` });
       } catch (error) { const code = (error as Error).message; return stop({ status: 'failed', detail: `失败：${code}`, code }); }
 
       // Each item checks what it needs before its first write and stops on its own; the others still run.
@@ -218,10 +204,10 @@ export class Quickstart {
         progress('检查条件…');
         let outcome: Outcome;
         try {
-          outcome = item === 'gate_pr' ? await this.gate(source, progress) : item === 'board' ? await this.board(source, progress) : await this.dashboard(source, outcomes.board);
+          outcome = item === 'gate_pr' ? await this.gate(source, progress) : this.hostedBoard(source, item);
         } catch (error) { const code = (error as Error).message; outcome = { status: 'failed', detail: `失败：${code}`, code }; }
         outcomes[item] = outcome; mark(item, outcome);
-        if (outcome.status === 'done' && outcome.url && item !== 'board') this.store.run('UPDATE quickstart_runs SET pr_url=? WHERE id=?', outcome.url, id);
+        if (outcome.status === 'done' && outcome.url && item === 'gate_pr') this.store.run('UPDATE quickstart_runs SET pr_url=? WHERE id=?', outcome.url, id);
       }
       const bad = selected.filter(item => outcomes[item]!.status === 'blocked' || outcomes[item]!.status === 'failed');
       const state: RunState = !bad.length ? (dryRun ? 'planned' : 'done') : bad.length < selected.length ? 'partial'
@@ -283,133 +269,20 @@ export class Quickstart {
     return { status: 'done', detail: `已创建 PR #${pr.number}，合入后门禁生效`, url: String(pr.html_url) };
   }
 
-  /**
-   * The board branch on the dashboard, created by that repository's `Create board` workflow. The branch records the
-   * source's visibility, so the collector reads a private source with the dashboard's one shared PRIVATE_SOURCE_TOKEN.
-   */
-  private async board(source: Source, progress: (detail: string) => void): Promise<Outcome> {
-    const { app, full, dryRun } = source;
-    const location = boardLocation(this.dashboardRepo, full);
-    if (!boardKeyValid(location.key)) return blocked(`仓库名 ${full} 不能用作看板分支，需要人工处理`, 'invalid_repository');
-    const installation = await this.installation(app, `/repos/${this.dashboardRepo}/installation`);
-    if (!installation) return blocked('需要把同一个 GitHub App 安装到 ' + this.dashboardRepo + '，才能创建单仓看板', 'dashboard_app_not_installed');
-    const gap = permissionGap(installation, quickstartPermissions.board);
-    if (gap) return gap;
-    const token = await this.token(app, installation, quickstartPermissions.board, { repositories: [this.dashboardRepo.split('/')[1]] });
-    // A 404 means the branch does not exist yet; any other failure leaves this item failed instead of assuming it is missing.
-    const existing = await this.request('GET', `/repos/${this.dashboardRepo}/git/ref/heads/${encode(location.branch)}`, token);
-    if (existing) return { status: 'skipped', detail: `看板分支 ${location.branch} 已存在，数据由「Collect board data」定期更新`, url: location.url };
-    if (dryRun) {
-      const note = source.private ? `；私有仓库首次运行前，${privateTokenNote}` : '';
-      return { status: 'skipped', detail: `预演：将在 ${this.dashboardRepo} 触发「Create board」创建分支 ${location.branch}，随后触发「Collect board data」立即采集首份快照${note}` };
-    }
-    progress('触发「Create board」…');
-    const createdAt = Date.now();
-    const dispatched = await this.request('POST', `/repos/${this.dashboardRepo}/actions/workflows/board-create.yml/dispatches`, token,
-      { ref: 'main', inputs: { source_repository: full } });
-    if (dispatched === null) return { status: 'failed', detail: '触发「Create board」失败', code: 'board_dispatch_failed' };
-    // A private board can only be created when the dashboard has the shared token; name that failure precisely.
-    if (source.private) {
-      const created = await this.workflowOutcome('board-create.yml', token, createdAt);
-      if (created?.missing) return blocked('dashboard 仓库没有配置 PRIVATE_SOURCE_TOKEN，无法创建私有仓库看板；请 dashboard 维护者添加该只读 secret 后重试', 'dashboard_private_token_missing');
-      if (created?.failed) return { status: 'failed', detail: '触发「Create board」失败，请查看 dashboard 仓库的 Actions 日志', code: 'board_create_failed', url: created.url || location.url };
-    }
-    // Public boards would otherwise wait for the daily schedule; private boards always need this first snapshot.
-    progress('触发首轮「Collect board data」…');
-    const collectedAt = Date.now();
-    const collected = await this.request('POST', `/repos/${this.dashboardRepo}/actions/workflows/board-collect.yml/dispatches`, token,
-      { ref: 'main', inputs: { board: location.key } });
-    if (collected === null) return { status: 'failed', detail: '看板分支已创建，但触发首轮「Collect board data」失败', code: 'board_collect_dispatch_failed' };
-    if (source.private) {
-      const first = await this.workflowOutcome('board-collect.yml', token, collectedAt);
-      if (first?.missing) {
-        return blocked('dashboard 仓库没有配置 PRIVATE_SOURCE_TOKEN，私有仓库看板无法采集；请 dashboard 维护者添加该只读 secret 后重试', 'dashboard_private_token_missing');
-      }
-      if (first?.failed) return { status: 'failed', detail: '首轮「Collect board data」失败，请查看 dashboard 仓库的 Actions 日志', code: 'board_collect_failed', url: first.url || location.url };
-    }
-    return { status: 'done', detail: `已触发「Create board」和首轮「Collect board data」，分支 ${location.branch} 建好后由采集与部署发布${source.private ? `；私有源由 dashboard 的 PRIVATE_SOURCE_TOKEN 读取` : ''}`, url: location.url };
+  /** Local consent replaces external board branches, workflow dispatches and registration PRs. */
+  private hostedBoard(source: Source, item: 'board' | 'dashboard'): Outcome {
+    const origin = publicOrigin(this.store);
+    if (!origin) return blocked('请先在安装向导验证 webhook 公网地址', 'public_address_not_verified');
+    const location = boardLocation(origin, source.full), url = item === 'board' ? location.url : `${origin}/dashboard/`;
+    if (source.dryRun) return { status: 'skipped', detail: `预演：由 bot 托管，webhook 自动更新${source.private ? '；执行后私有仓快照将对外公开' : ''}`, url };
+    this.store.transaction(() => {
+      this.store.run('UPDATE installed_repositories SET private=? WHERE account_id=? AND repository_id=?', Number(source.private), source.appAccountId, source.repositoryId);
+      if (source.private) this.store.run('INSERT OR IGNORE INTO public_board_consents VALUES(?,?)', source.appAccountId, source.repositoryId);
+      queueBoard(this.store, source.appAccountId, source.repositoryId);
+    });
+    return { status: 'done', detail: `已在 bot 本地启用，数据由 webhook 自动更新${source.private ? '；私有仓快照对外公开' : ''}`, url };
   }
 
-  /**
-   * Read a dispatched workflow run just far enough to tell whether it stopped on the missing dashboard secret.
-   * Both board workflows keep that check in a step named `Check PRIVATE_SOURCE_TOKEN`; a slow run simply stops being watched.
-   */
-  private async workflowOutcome(workflow: string, token: string, since: number, timeout = 90000): Promise<{ missing: boolean; failed?: boolean; url?: string } | null> {
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-      const runs = await this.request('GET', `/repos/${this.dashboardRepo}/actions/workflows/${encodeURIComponent(workflow)}/runs?event=workflow_dispatch&per_page=20`, token);
-      if (runs === null) return null;
-      const list = Array.isArray(runs?.workflow_runs) ? runs.workflow_runs : [];
-      const run = list.find((item: any) => Date.parse(String(item.run_started_at || item.created_at || '')) >= since - 5000);
-      if (run) {
-        const jobs = await this.request('GET', `/repos/${this.dashboardRepo}/actions/runs/${encodeURIComponent(String(run.id))}/jobs?per_page=100`, token);
-        const missing = Array.isArray(jobs?.jobs) && jobs.jobs.some((job: any) =>
-          (Array.isArray(job.steps) ? job.steps : []).some((entry: any) => entry.name === 'Check PRIVATE_SOURCE_TOKEN' && entry.conclusion === 'failure'));
-        if (missing) return { missing: true, url: run.html_url };
-        if (run.status === 'completed') return { missing: false, failed: run.conclusion === 'failure', url: run.html_url };
-      }
-      await wait(2000);
-    }
-    return null;
-  }
-
-  /** The registration PR on the dashboard. It points at this source's board, so the board branch has to be in place. */
-  private async dashboard(source: Source, boardOutcome: Outcome | undefined): Promise<Outcome> {
-    const { app, id, full, owner, name, defaultBranch, dryRun } = source;
-    const location = boardLocation(this.dashboardRepo, full);
-    if (!boardKeyValid(location.key)) return blocked(`仓库名 ${full} 不能用作看板分支，需要人工处理`, 'invalid_repository');
-    const installation = await this.installation(app, `/repos/${this.dashboardRepo}/installation`);
-    if (!installation) return blocked(`需要把同一个 GitHub App 安装到 ${this.dashboardRepo}，才能提登记 PR`, 'dashboard_app_not_installed');
-    const gap = permissionGap(installation, quickstartPermissions.dashboard);
-    if (gap) return gap;
-    if (!boardOutcome || !['done', 'skipped'].includes(boardOutcome.status)) {
-      // Not created this time: the board branch must already exist on the dashboard.
-      const boardToken = await this.token(app, installation, quickstartPermissions.board, { repositories: [this.dashboardRepo.split('/')[1]] });
-      const branch = await this.request('GET', `/repos/${this.dashboardRepo}/git/ref/heads/${encode(location.branch)}`, boardToken);
-      if (!branch) return blocked(`单仓看板 ${location.branch} 还没有就绪，先执行「单仓看板」这一项`, 'board_not_ready');
-    }
-    const dashboardToken = await this.token(app, installation, quickstartPermissions.dashboard, { repositories: [this.dashboardRepo.split('/')[1]] });
-    const entry = { id: full, name, owner, defaultBranch, type: 'status-board-lanes',
-      url: `${location.url}data/snapshot.json`, dashboardUrl: location.url, boardUrl: location.url,
-      channelMap: [{ channel: 'gate', workflow: ['CI'] }] };
-    const rawGate = await this.file(this.dashboardRepo, 'config/gate-sources.json', dashboardToken);
-    const rawCommunity = await this.file(this.dashboardRepo, 'config/internal-contributors.json', dashboardToken);
-    if (!rawGate || !rawCommunity) return blocked('读不到 dashboard 的来源清单或社区名单', 'dashboard_unreadable');
-    if (dryRun) return { status: 'skipped', detail: `预演：将登记到 config/gate-sources.json 和 config/internal-contributors.json${source.private ? `（私有可见性；${privateTokenNote}）` : ''}` };
-    const gateConfigFile = JSON.parse(rawGate), sources: any[] = Array.isArray(gateConfigFile.sources) ? gateConfigFile.sources : [];
-    const community: Record<string, string[]> = JSON.parse(rawCommunity);
-    const needsGate = !sources.some((entry: any) => entry.id === full);
-    const needsCommunity = !(full in community);
-    if (!needsGate && !needsCommunity) return { status: 'skipped', detail: 'dashboard 的门禁和社区都已登记' };
-    if (needsGate) { sources.push(entry); gateConfigFile.sources = sources; }
-    if (needsCommunity) community[full] = Array.isArray(community[full]) && community[full].length ? community[full] : [owner];
-    const branch = `onboarding/${owner}-${name}`;
-    const open = await this.request('GET', `/repos/${this.dashboardRepo}/pulls?state=open&per_page=100`, dashboardToken).catch(() => null);
-    const existingPr = Array.isArray(open) ? open.find((pull: any) => pull.head?.ref === branch) : null;
-    if (existingPr) {
-      // A PR opened before community registration existed only carries the gate entry; add the missing file to it.
-      const updated: string[] = [];
-      if (needsCommunity) {
-        await this.put(this.dashboardRepo, 'config/internal-contributors.json', JSON.stringify(community, null, 2) + '\n', branch, dashboardToken, `chore(community): monitor ${full}`).catch(() => null);
-        updated.push('社区监控');
-      }
-      return { status: 'skipped', detail: `登记 PR 已存在 #${existingPr.number}${updated.length ? '，已补上' + updated.join('、') : ''}，等待合并`, url: String(existingPr.html_url) };
-    }
-    const base = await this.request('GET', `/repos/${this.dashboardRepo}/git/ref/heads/main`, dashboardToken);
-    if (!base?.object?.sha) return { status: 'failed', detail: '读不到 dashboard 默认分支', code: 'dashboard_base_unavailable' };
-    await this.request('POST', `/repos/${this.dashboardRepo}/git/refs`, dashboardToken, { ref: `refs/heads/${branch}`, sha: base.object.sha });
-    if (needsGate) await this.put(this.dashboardRepo, 'config/gate-sources.json', JSON.stringify(gateConfigFile, null, 2) + '\n', branch, dashboardToken, `chore(gate): register ${full}`);
-    if (needsCommunity) await this.put(this.dashboardRepo, 'config/internal-contributors.json', JSON.stringify(community, null, 2) + '\n', branch, dashboardToken, `chore(community): monitor ${full}`);
-    const changes = [needsGate ? '门禁来源' : null, needsCommunity ? '社区监控' : null].filter(Boolean).join(' + ');
-    const visibility = source.private ? 'private（私有；看板只发布 site/data 数据，dashboard 仓库需配置 PRIVATE_SOURCE_TOKEN）' : 'public（公开）';
-    const pr = await this.request('POST', `/repos/${this.dashboardRepo}/pulls`, dashboardToken, {
-      title: `chore(dashboard): register ${full}`, head: branch, base: 'main',
-      body: `登记 ${full} 的${changes}。\n\n- 可见性：${visibility}\n- 门禁：\`config/gate-sources.json\`（单仓看板快照）\n- 社区：\`config/internal-contributors.json\`（采集时按它读取仓库）\n\n<!-- dept-bot:quickstart:${id} -->` });
-    if (!pr?.html_url) return { status: 'failed', detail: '登记 PR 创建失败', code: 'dashboard_pr_failed' };
-    return { status: 'done', detail: `已创建登记 PR #${pr.number}（${changes}），合并后下一次采集即出现`, url: String(pr.html_url) };
-  }
-
-  /** Workflow files come from CI-workflow; the bundled copies only cover a missing template. */
   private async workflowTemplates(scripts: Record<string, unknown>, token: string): Promise<Record<string, string>> {
     const bundled = workflowSet(scripts), result: Record<string, string> = {};
     for (const [workflowPath, fallback] of Object.entries(bundled)) {

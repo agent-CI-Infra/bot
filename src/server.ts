@@ -25,11 +25,13 @@ import { ProjectRemoval } from './projects/removal.js';
 import { ReleaseService } from './releases/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
+import { PublicBoards } from './public-board/service.js';
+
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; quickstart?: Quickstart; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
-  imageTag?: string; }
+  imageTag?: string; boards?: PublicBoards; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -65,6 +67,10 @@ export function createControlPlane(options: Options) {
   const webhook = createServer(wrap(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname;
     if (req.method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'webhook')); return; }
+    if (options.boards && /^\/(dashboard|boards)(\/|$)/.test(path)) {
+      res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' https: data:; font-src 'self' data:; connect-src 'self' https://api.github.com; frame-ancestors 'none'; base-uri 'none'");
+      if (await options.boards.serve(req, res, url)) return;
+    }
     if (req.method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     if(req.method==='GET'&&path==='/external/events'){
       if(url.search)fail(400,'unexpected_query');

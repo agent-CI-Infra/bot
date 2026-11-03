@@ -1,3 +1,4 @@
+import { boardWebhook } from '../public-board/state.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import { type Store } from '../storage/database.js';
 import { randomId, verifySignature, type Json } from '../core/security.js';
@@ -66,6 +67,7 @@ export async function ingest(
       endpoint ? endpointId : null, owner?.id || null, deliveryId, event, route, outcome, Number(duplicate), new Date().toISOString(),
       status, JSON.stringify(safeHeaders), bytes, Number(complete), JSON.stringify(response));
     if (status === 200 && !duplicate) store.run('INSERT INTO processed_deliveries VALUES(?,?,?)', accountId, endpointId, deliveryId);
+    if (status === 200 && !duplicate && payload) boardWebhook(store, accountId, event, payload);
     const sync = status === 200 && !duplicate && !!payload && recordInstallationEvent(store, accountId, event, payload);
     if (status === 200 && !duplicate && event === 'installation' && ['deleted','suspend'].includes(action)) {
       const installation = payload?.installation as Json | undefined, account = installation?.account as Json | undefined;
