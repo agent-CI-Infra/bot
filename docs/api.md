@@ -52,7 +52,7 @@
 | `/api/installations/permissions/check` | POST | 仅超级管理员；重读各账号授予的权限，返回每行的 `permission_missing,permissions_checked_at,permissions_stale` 和各账号错误，不改变安装状态 |
 | `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST。`waiting_publication` 的重试即人工确认：结果未知的写入回到待发送，先查找，查不到才发送。`needs_replan` 在尚未写入 GitHub 时从准备阶段重新规划 |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
-| `/api/costs` | GET | 范围内按 UTC 日期、项目聚合的模型估算费用。参数 `from,to` 为 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。最多 5000 个日期／项目分组，超限要求缩小范围；返回 `days,summary,collection_started_at`，不返回模型密钥或原始请求 |
+| `/api/costs` | GET | 授权范围内的统计。参数 `timezone` 为浏览器的 IANA 时区（省略时兼容 UTC，无效时返回 400 `invalid_statistics_timezone`），`from,to` 为该时区的 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。模型费用和 token 按 `requested_at` 的本地日、项目聚合；费用最多 5000 个日期／项目分组，超限要求缩小范围。返回 `days,summary,prices,timezone,collection_started_at,tasks`；`tasks` 独立聚合，不占费用分组配额。不返回模型密钥或原始请求 |
 | `/hooks/github/:account/:endpoint` | POST | 仅 Webhook 端口，按已登记入口验签和归档 |
 
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置、未启动或已禁用的仓库只归档，不生成任务。
@@ -63,7 +63,9 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 任务列表、任务详情、项目最近任务和看板关联任务现在带 `metrics`：`runtime_ms`（累计已观测执行时长，不含排队／等待）、`running`、`complete`（历史或进程中断时可能不完整）、`input_tokens,output_tokens,cached_input_tokens,cache_hit_rate`、`requests,usage_missing_requests,cache_missing_requests,unpriced_requests` 和按币种分开的 `costs`。缓存是输入的子集，命中率用累计缓存 token 除以累计输入 token；缺少必要统计时返回 null，不用 0 冒充。`complete:false` 时显示的是已经观测到的部分。
 
-模型创建和带 `version` 的 PATCH 还可提交 `pricing:{currency,input_per_million,output_per_million,cache_per_million}`，单价为每百万 token 的非负数（最多 1000000）。`pricing:null` 清除单价；读模型时返回当前单价，原有模型凭据及共享模型编辑权限不变。每次模型请求保存价格快照，费用为 `((输入-缓存)×输入单价 + 缓存×缓存单价 + 输出×输出单价) / 1000000`。缺少用量或单价时费用为 null；未返回缓存数据且缓存价不同于普通输入价时，也不能完整计价。费用页只汇总所选币种及尚未定价的请求，币种之间不作换算。
+`GET /api/costs` 的 `tasks.days` 为按任务 `created_at` 的本地日、仓库与 `kind` 聚合的行，`tasks.summary` 为日期范围内按种类的汇总，`tasks.undated` 单独列出授权仓库内无可靠创建日期的历史任务，不进入日期范围内总数或每日分桶。仅统计 `review.issue,review.pr,development.issue,development.pr`。每行含 `count,runtime_ms,incomplete_tasks,running_tasks`；整段累计执行耗时计入创建日，不跨日拆分，运行中含当前已观测执行区间，不含排队与等待。缺失计时或未观测到时长的不完整历史计时返回 null，已有部分则仅累计已观测值并标记不完整。仅覆盖控制面账本与任务，不采集外部执行端自行调用或项目内其他服务。
+
+模型创建和带 `version` 的 PATCH 还可提交 `pricing:{currency,input_per_million,output_per_million,cache_per_million}`，单价为每百万 token 的非负数（最多 1000000）。`pricing:null` 清除单价；读模型时返回当前单价，原有模型凭据及共享模型编辑权限不变。每次模型请求保存价格快照，费用为 `((输入-缓存)×输入单价 + 缓存×缓存单价 + 输出×输出单价) / 1000000`。缺少用量或单价时费用为 null；未返回缓存数据且缓存价不同于普通输入价时，也不能完整计价。统计页的费用和 token 只汇总所选币种及尚未定价的请求，币种之间不作换算；币种不影响任务统计。
 
 获取模型列表和测试模型的上游结果都在成功响应里返回：`ok` 表示上游是否成功，`status` 是上游的 HTTP 状态码（没有收到响应时为 null）。列表成功时返回 `models_url,total,truncated,models`，按名称排序，最多 200 个 id；测试成功时返回 `chat_url`、`model`（上游答复中的模型名）、`reply`（回复摘录，最多 200 个字符）、`finish_reason` 和 `elapsed_ms`。失败时返回 `error`（`upstream_http_error`、`upstream_timeout`、`upstream_unreachable`、`upstream_redirect`、`upstream_response_invalid`、`upstream_response_too_large`）和简短的 `message`：它只取自上游 JSON 的错误字段（`error.message`，或字符串形式的 `error`、`message`、`detail`、`msg`），重定向时是 `Location`，连接失败时是错误码；其他响应正文一律不回显。两类请求都在 15 秒后超时、不跟随重定向，结果中出现的 Key 先整体替换为 `[REDACTED]`，再截断。模型 URL 只接受 http(s)，不能带用户名、密码、查询串（`?`）或片段（`#`），否则保存、解析、获取列表和测试都返回 400 `invalid_api_url`；这条规则之前保存的这类 URL 也不能获取列表或测试。测试请求的内容是一句不含项目数据的探测，只带 `max_completion_tokens: 32`，不带 `max_tokens`；任务中的模型请求不受影响，仍只带一个输出上限字段，数值 8192。
 

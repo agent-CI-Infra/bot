@@ -1,4 +1,4 @@
-import type { Store } from '../storage/database.js';
+import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, type Json } from '../core/security.js';
 
@@ -8,16 +8,31 @@ function date(value: string): string {
 }
 export function costsApi(store: Store, user: Actor, url: URL): Json | undefined {
   if(url.pathname!=='/api/costs')return undefined;
-  const end=date(url.searchParams.get('to')||new Date().toISOString().slice(0,10));
+  const timezone=url.searchParams.get('timezone')||'UTC';
+  let calendar: Intl.DateTimeFormat;
+  try { calendar=new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}); }
+  catch { fail(400,'invalid_statistics_timezone'); }
+  const localDate=(value: string | null): string | null => {
+    if(!value)return null;
+    const time=new Date(value);if(!Number.isFinite(time.getTime()))return null;
+    const parts=calendar.formatToParts(time),part=(type: string)=>parts.find(p=>p.type===type)!.value;
+    return `${part('year')}-${part('month')}-${part('day')}`;
+  };
+  // Queries are synchronous. Each query uses the browser's calendar, including historical DST offsets.
+  store.db.function('statistics_date',{deterministic:true},value=>localDate(value as string | null));
+  const end=date(url.searchParams.get('to')||localDate(new Date().toISOString())!);
   const start=date(url.searchParams.get('from')||new Date(Date.parse(end+'T00:00:00Z')-29*86400000).toISOString().slice(0,10));
   const days=(Date.parse(end+'T00:00:00Z')-Date.parse(start+'T00:00:00Z'))/86400000+1;
   if(days<1||days>366)fail(400,'cost_range_1_to_366_days');
   const currency=url.searchParams.get('currency')||'USD';if(!['USD','CNY'].includes(currency))fail(400,'invalid_pricing_currency');
-  const until=new Date(Date.parse(end+'T00:00:00Z')+86400000).toISOString();
-  const access=scope(user,'q.repository_id'),clauses=[access.sql,'q.requested_at>=?','q.requested_at<?','(q.currency=? OR q.currency IS NULL)'];
-  const args=[...access.args,start+'T00:00:00.000Z',until,currency];
+  // Keep the indexed timestamp bounds; the local date predicate removes the padding on either side.
+  const since=new Date(Date.parse(start+'T00:00:00Z')-86400000).toISOString();
+  const until=new Date(Date.parse(end+'T00:00:00Z')+2*86400000).toISOString();
+  const access=scope(user,'q.repository_id'),clauses=[access.sql,'q.requested_at>=?','q.requested_at<?',
+    'statistics_date(q.requested_at)>=?','statistics_date(q.requested_at)<=?','(q.currency=? OR q.currency IS NULL)'];
+  const args=[...access.args,since,until,start,end,currency];
   const repo=url.searchParams.get('repository_id');if(repo){repository(store,user,repo);clauses.push('q.repository_id=?');args.push(repo);}
-  const rows=store.all(`SELECT substr(q.requested_at,1,10) date,q.repository_id,r.full_name,sum(q.cost) cost,count(*) requests,
+  const rows=store.all(`SELECT statistics_date(q.requested_at) date,q.repository_id,r.full_name,sum(q.cost) cost,count(*) requests,
     sum(CASE WHEN q.cost IS NULL THEN 1 ELSE 0 END) unpriced_requests,
     sum(CASE WHEN q.input_tokens IS NULL OR q.output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
     sum(q.input_tokens) input_tokens,sum(q.output_tokens) output_tokens,sum(q.cached_input_tokens) cached_input_tokens
@@ -29,7 +44,28 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
     FROM model_requests q WHERE ${clauses.join(' AND ')} AND q.currency IS NOT NULL
     AND q.input_per_million IS NOT NULL AND q.output_per_million IS NOT NULL AND q.cache_per_million IS NOT NULL
     ORDER BY q.model_name,q.currency,q.input_per_million,q.output_per_million,q.cache_per_million`,...args);
-  return {from:start,to:end,currency,timezone:'UTC',days:rows,
+  // Aggregate tasks separately: four task kinds must not multiply the cost query's 5,000-group budget.
+  const taskAccess=scope(user,'t.repository_id'),taskClauses=[taskAccess.sql,
+    "t.kind IN ('review.issue','review.pr','development.issue','development.pr')",
+    '(statistics_date(t.created_at) BETWEEN ? AND ? OR statistics_date(t.created_at) IS NULL)'];
+  const taskArgs=[...taskAccess.args,start,end];
+  if(repo){taskClauses.push('t.repository_id=?');taskArgs.push(repo);}
+  const taskRows=store.all(`SELECT statistics_date(t.created_at) date,t.repository_id,r.full_name,t.kind,count(*) count,
+    sum(CASE WHEN m.task_id IS NULL OR (m.complete=0 AND m.runtime_ms=0 AND m.active_since IS NULL) THEN NULL
+      ELSE m.runtime_ms+CASE WHEN m.active_since IS NOT NULL THEN max(0,?-m.active_since) ELSE 0 END END) runtime_ms,
+    sum(CASE WHEN m.task_id IS NULL OR m.complete=0 THEN 1 ELSE 0 END) incomplete_tasks,
+    sum(CASE WHEN m.active_since IS NOT NULL THEN 1 ELSE 0 END) running_tasks
+    FROM tasks t JOIN repositories r ON r.id=t.repository_id LEFT JOIN task_metrics m ON m.task_id=t.id
+    WHERE ${taskClauses.join(' AND ')} GROUP BY date,t.repository_id,t.kind ORDER BY date,t.repository_id,t.kind`,Date.now(),...taskArgs);
+  const taskDays=taskRows.filter(r=>r.date!==null),undated=taskRows.filter(r=>r.date===null);
+  const taskSummary=new Map<string,Row>();
+  for(const row of taskDays){
+    const total=taskSummary.get(row.kind)||{kind:row.kind,count:0,runtime_ms:null,incomplete_tasks:0,running_tasks:0};
+    for(const key of ['count','incomplete_tasks','running_tasks'])total[key]+=row[key];
+    if(row.runtime_ms!==null)total.runtime_ms=(total.runtime_ms??0)+row.runtime_ms;
+    taskSummary.set(row.kind,total);
+  }
+  return {from:start,to:end,currency,timezone,days:rows,tasks:{days:taskDays,summary:[...taskSummary.values()],undated},
     prices,
     collection_started_at:store.get("SELECT value FROM settings WHERE key='task_metrics_v1'")?.value||null,
     summary:{cost:rows.reduce((n,r)=>n+Number(r.cost||0),0),requests:rows.reduce((n,r)=>n+r.requests,0),

@@ -33,23 +33,23 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await expect(page.getByLabel('输入单价 / 百万 token',{exact:true})).toHaveValue('2');await page.getByLabel('输入单价 / 百万 token',{exact:true}).fill('5');
     await page.getByRole('button',{name:'保存单价',exact:true}).click();await expect(page.locator('#model-pricing')).toHaveCount(0);
     expect(h.store.get("SELECT cost FROM model_requests WHERE task_id='review-usage'").cost).toBe(1.56);
-    await page.getByRole('button',{name:'成本',exact:true}).click();await page.getByLabel('开始日期（UTC）',{exact:true}).fill('2026-10-22');await page.getByLabel('结束日期（UTC）',{exact:true}).fill('2026-10-23');
-    await page.getByRole('button',{name:'查看费用',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 8.56');await expect(page.locator('.cost-incomplete')).toContainText('2 次请求');
+    await page.getByRole('button',{name:'统计',exact:true}).click();await page.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await page.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');
+    await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 8.56');await expect(page.locator('.cost-incomplete')).toContainText('2 次请求');
     await expect(page.locator('rect[data-project]')).toHaveCount(3);const segment=page.locator('rect[data-project="101"][data-date="2026-10-22"]');
     await segment.focus();await expect(page.locator('.cost-chart-detail')).toContainText('fixture/project-101');await expect(page.locator('.cost-chart-detail')).toContainText('USD 1.56');await expect(page.locator('.cost-chart-detail')).toContainText('当日 34.2%');
     await expect(page.locator('.cost-legend')).toContainText('fixture/project-101');await expect(page.locator('.cost-legend')).toContainText('fixture/project-202');
     await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/metrics-evidence/cost-desktop.png',fullPage:true});
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     expect(await page.locator('.cost-chart-scroll').evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/metrics-evidence/cost-mobile.png',fullPage:true});
-    await page.getByLabel('成本项目',{exact:true}).selectOption('101');await page.getByRole('button',{name:'查看费用',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 5.56');await expect(page.locator('rect[data-project="202"]')).toHaveCount(0);
-    await page.getByLabel('费用币种',{exact:true}).selectOption('CNY');await page.getByRole('button',{name:'查看费用',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('暂无可计价记录');
+    await page.getByLabel('统计项目',{exact:true}).selectOption('101');await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 5.56');await expect(page.locator('rect[data-project="202"]')).toHaveCount(0);
+    await page.getByLabel('费用币种',{exact:true}).selectOption('CNY');await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('暂无可计价记录');
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'metrics-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
-      await login(member,h.admin,'metrics-member',memberPassword);await member.getByRole('button',{name:'成本',exact:true}).click();
-      await member.getByLabel('开始日期（UTC）',{exact:true}).fill('2026-10-22');await member.getByLabel('结束日期（UTC）',{exact:true}).fill('2026-10-23');await member.getByRole('button',{name:'查看费用',exact:true}).click();
+      await login(member,h.admin,'metrics-member',memberPassword);await member.getByRole('button',{name:'统计',exact:true}).click();
+      await member.getByLabel('开始日期（本地）',{exact:true}).fill('2026-10-22');await member.getByLabel('结束日期（本地）',{exact:true}).fill('2026-10-23');await member.getByRole('button',{name:'查看统计',exact:true}).click();
       await expect(member.locator('.cost-summary')).toContainText('USD 5.56');await expect(member.locator('#costs-panel')).not.toContainText('project-202');
-      expect(await member.getByLabel('成本项目',{exact:true}).locator('option').count()).toBe(2);
+      expect(await member.getByLabel('统计项目',{exact:true}).locator('option').count()).toBe(2);
       await member.screenshot({path:'.tmp/metrics-evidence/cost-member.png',fullPage:true});
     }finally{await context.close();}
     await page.goto(h.admin+'/#/reviews');await expect(page.getByLabel('工作类别',{exact:true})).toHaveValue('review');await page.locator('[data-card-key="101/issue/1"][data-card-category=review] .board-card-title').click();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);

@@ -7,26 +7,26 @@ function addCostTokens(total,row) { for(const [key]of costTokenFields)if(row[key
 function costTokenCells(row) { return costTokenFields.map(([key])=>element('td',metricNumber(row[key]))); }
 async function renderCosts(request) {
   const owner=me.id,panel=$('costs-panel');panel.replaceChildren();
-  if(costState?.owner!==owner){const to=new Date().toISOString().slice(0,10);costState={owner,to,from:new Date(Date.parse(to+'T00:00:00Z')-29*86400000).toISOString().slice(0,10),currency:'USD',repository_id:''};}
+  if(costState?.owner!==owner){const to=timestamp(Date.now()).slice(0,10);costState={owner,to,from:new Date(Date.parse(to+'T00:00:00Z')-29*86400000).toISOString().slice(0,10),currency:'USD',repository_id:''};}
   if(costState.repository_id&&!repositories.some(r=>r.id===costState.repository_id))costState.repository_id='';
   const form=element('form','','cost-filters');
-  for(const [name,caption]of [['from','开始日期（UTC）'],['to','结束日期（UTC）']]){
+  for(const [name,caption]of [['from','开始日期（本地）'],['to','结束日期（本地）']]){
     const input=document.createElement('input');Object.assign(input,{name,type:'date',required:true,value:costState[name]});form.append(costControl(caption,input));
   }
   const currency=document.createElement('select');currency.name='currency';currency.setAttribute('aria-label','费用币种');
   [['USD','美元 USD'],['CNY','人民币 CNY']].forEach(([value,name])=>currency.add(new Option(name,value)));currency.value=costState.currency;form.append(costControl('费用币种',currency));
-  const repo=document.createElement('select');repo.name='repository_id';repo.setAttribute('aria-label','成本项目');repo.add(new Option('所有有权访问的项目',''));repositories.forEach(r=>repo.add(new Option(r.full_name,r.id)));repo.value=costState.repository_id;form.append(costControl('成本项目',repo));
-  const submit=element('button','查看费用','quiet');submit.type='submit';form.append(submit);
+  const repo=document.createElement('select');repo.name='repository_id';repo.setAttribute('aria-label','统计项目');repo.add(new Option('所有有权访问的项目',''));repositories.forEach(r=>repo.add(new Option(r.full_name,r.id)));repo.value=costState.repository_id;form.append(costControl('统计项目',repo));
+  const submit=element('button','查看统计','quiet');submit.type='submit';form.append(submit);
   const body=element('div','','cost-body');body.id='cost-body';panel.append(form,body);
   form.addEventListener('submit',async event=>{event.preventDefault();Object.assign(costState,Object.fromEntries(new FormData(form)));submit.disabled=true;try{await loadCosts(request);}catch(err){error(err);}finally{submit.disabled=false;}});
   await loadCosts(request);
 }
 async function loadCosts(version) {
-  const request=++costRequest,owner=me.id,params=new URLSearchParams({from:costState.from,to:costState.to,currency:costState.currency});if(costState.repository_id)params.set('repository_id',costState.repository_id);
-  $('cost-body').replaceChildren(element('p','正在加载费用…','muted'));
+  const request=++costRequest,owner=me.id,params=new URLSearchParams({from:costState.from,to:costState.to,currency:costState.currency,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone});if(costState.repository_id)params.set('repository_id',costState.repository_id);
+  $('cost-body').replaceChildren(element('p','正在加载统计…','muted'));
   const data=await api('/api/costs?'+params);
   if(request!==costRequest||version!==renderVersion||me?.id!==owner||tab!=='costs')return;
-  const body=$('cost-body');body.replaceChildren();$('count').textContent=`${data.from} 至 ${data.to} · UTC`;
+  const body=$('cost-body');body.replaceChildren();$('count').textContent=`${data.from} 至 ${data.to} · 浏览器本地日期`;
   const summary=element('div','','cost-summary');
   const known=data.summary.requests-data.summary.unpriced_requests;
   for(const [label,value]of [['已计价费用',known||!data.summary.requests?money(data.summary.cost,data.currency):'暂无可计价记录'],['模型请求',metricNumber(data.summary.requests)],['未计价请求',metricNumber(data.summary.unpriced_requests)],['用量不完整请求',metricNumber(data.summary.usage_missing_requests)]]){
@@ -34,9 +34,11 @@ async function loadCosts(version) {
   }
   const tokens=element('div','','cost-token-summary');
   for(const [key,label]of costTokenFields){const item=element('div','','cost-stat');item.append(element('span',label,'muted'),element('strong',metricNumber(data.summary[key])));tokens.append(item);}
-  body.append(summary,tokens,element('p','输入包含缓存命中 token。— 表示没有可靠记录；用量不完整时仅汇总已记录的 token。','cost-note'),element('p','按 UTC 请求日期汇总。费用按请求发生时保存的模型单价估算；不同币种分别展示，不作汇率换算。单价可在项目“使用的模型”中配置。','cost-note'));
+  body.append(summary,tokens,element('p','输入包含缓存命中 token。— 表示没有可靠记录；用量不完整时仅汇总已记录的 token。','cost-note'),element('p','费用和 token 按请求发生时的浏览器本地日期汇总。费用按当时保存的模型单价估算；不同币种分别展示，不作汇率换算。币种筛选仅影响费用和 token，不影响任务统计。单价可在项目“使用的模型”中配置。','cost-note'));
   if(data.summary.unpriced_requests)body.append(element('p',`有 ${data.summary.unpriced_requests} 次请求缺少单价或完整用量，未计入柱状图金额。占比仅针对已计价费用。`,'cost-incomplete'));
   body.append(element('p','统计开始于 '+timestamp(data.collection_started_at)+'；此前未记录的用量与费用无法补算。','cost-note'));
+  body.append(element('p','范围：费用和 token 只统计经控制面代理的模型请求，任务只统计控制面自己的任务；不含外部执行端自行发起的模型调用及项目容器内其他服务。','cost-note'));
+  if(data.tasks)renderTaskStatistics(body,data);
   const byProject=new Map(),byDate=new Map();
   for(let time=Date.parse(data.from+'T00:00:00Z');time<=Date.parse(data.to+'T00:00:00Z');time+=86400000)byDate.set(new Date(time).toISOString().slice(0,10),{cost:0,requests:0,unpriced_requests:0,rows:[]});
   for(const row of data.days){
@@ -60,8 +62,40 @@ async function loadCosts(version) {
     row.append(name,element('td',project.requests===project.unpriced_requests?'—':money(project.cost,data.currency)),element('td',data.summary.cost>0?(project.cost/data.summary.cost*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
   }
   const breakdown=element('section','','cost-breakdown');breakdown.append(element('h2','项目占比'),projectTable.wrap);if(!projects.length)breakdown.append(element('p','暂无项目费用记录。','muted'));body.append(breakdown);
-  const detail=element('details','','cost-breakdown'),daily=costTable(['日期（UTC）','已计价费用','模型请求',...costTokenFields.map(([,label])=>label),'未计价请求']);detail.append(element('summary','每日明细'));
+  const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）','已计价费用','模型请求',...costTokenFields.map(([,label])=>label),'未计价请求']);detail.append(element('summary','每日费用与 token 明细'));
   for(const [date,day]of byDate){const row=document.createElement('tr');row.append(element('td',date),element('td',day.requests&&day.requests===day.unpriced_requests?'—':money(day.cost,data.currency)),element('td',String(day.requests)),...costTokenCells(day),element('td',String(day.unpriced_requests)));daily.body.append(row);}detail.append(daily.wrap);body.append(detail);
+}
+const statisticsKinds=['review.issue','review.pr','development.issue','development.pr'];
+function taskStatisticsDuration(row) {
+  if(!row)return metricDuration(0);
+  const value=metricRuntime({runtime_ms:row.runtime_ms,complete:!row.incomplete_tasks});
+  return value+(row.incomplete_tasks?` · ${row.incomplete_tasks} 项耗时不完整`:'')+(row.running_tasks?` · ${row.running_tasks} 项执行中`:'');
+}
+function renderTaskStatistics(body,data) {
+  const section=element('section','','cost-breakdown statistics-tasks'),summary=costTable(['任务类别','任务数','累计执行耗时']);
+  summary.wrap.classList.add('statistics-task-summary');
+  section.append(element('h2','任务统计'),element('p','按任务创建时的浏览器本地日期归日，整段累计执行耗时都计入创建日，不跨日拆分。耗时不含排队和等待，执行中任务含已观测到的当前时长；历史缺失或中断的耗时保留不完整提示。','cost-note'));
+  for(const kind of statisticsKinds){const item=data.tasks.summary.find(r=>r.kind===kind),row=document.createElement('tr');row.dataset.kind=kind;row.append(element('td',kindLabels[kind]),element('td',metricNumber(item?.count??0)),element('td',taskStatisticsDuration(item)));summary.body.append(row);}
+  section.append(summary.wrap);
+  if(!data.tasks.summary.length)section.append(element('p','这个日期范围内没有任务记录。','cost-empty'));
+  const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）',...statisticsKinds.flatMap(kind=>[kindLabels[kind]+' · 数量',kindLabels[kind]+' · 耗时'])]);detail.append(element('summary','每日任务明细'));
+  const days=new Map();
+  for(const item of data.tasks.days){const day=days.get(item.date)||new Map(),total=day.get(item.kind)||{count:0,runtime_ms:null,incomplete_tasks:0,running_tasks:0};
+    for(const key of ['count','incomplete_tasks','running_tasks'])total[key]+=item[key];if(item.runtime_ms!=null)total.runtime_ms=(total.runtime_ms??0)+item.runtime_ms;
+    day.set(item.kind,total);days.set(item.date,day);
+  }
+  // These UTC values enumerate date labels only; attribution itself is performed in the browser's time zone by the API.
+  for(let time=Date.parse(data.from+'T00:00:00Z');time<=Date.parse(data.to+'T00:00:00Z');time+=86400000){
+    const date=new Date(time).toISOString().slice(0,10),day=days.get(date),row=document.createElement('tr');row.append(element('td',date));
+    for(const kind of statisticsKinds){const item=day?.get(kind);row.append(element('td',metricNumber(item?.count??0)),element('td',taskStatisticsDuration(item)));}daily.body.append(row);
+  }
+  detail.append(daily.wrap);section.append(detail);
+  if(data.tasks.undated.length){
+    const unknown=element('section','','cost-breakdown statistics-undated'),table=costTable(['项目','任务类别','任务数','累计执行耗时']);
+    unknown.append(element('h2','日期不明的历史任务'),element('p','以下任务没有可靠的创建日期，沿用所选项目范围，单独列出，不计入日期范围内的任务总数或任何一天。','cost-incomplete'));
+    for(const item of data.tasks.undated){const row=document.createElement('tr');row.append(element('td',item.full_name),element('td',kindLabels[item.kind]),element('td',metricNumber(item.count)),element('td',taskStatisticsDuration(item)));table.body.append(row);}unknown.append(table.wrap);section.append(unknown);
+  }
+  body.append(section);
 }
 function costTable(headers) {
   const wrap=element('div','','cost-table-scroll'),table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');headers.forEach(name=>{const th=element('th',name);th.scope='col';row.append(th);});head.append(row);const body=document.createElement('tbody');table.append(head,body);wrap.append(table);return {wrap,body};
