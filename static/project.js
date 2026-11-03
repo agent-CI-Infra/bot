@@ -144,6 +144,7 @@ function releaseSection() {
   const refresh = async () => {
     try {
       const data = await api(endpoint); if (current.id !== id || current.section !== 'release') return;
+      if (document.activeElement?.name === 'release_body') return;
       status.replaceChildren(...data.releases.map(r => releaseRecord(r, endpoint, refresh, message)));
     } catch (err) { message.textContent = err.message; }
   };
@@ -170,6 +171,29 @@ function releaseRecord(r, endpoint, refresh, message) {
   });
   if (r.stage === 'failed' && r.error === 'release_ci_unsuccessful' && r.run_id) section.append(action('重跑', 'rerun'));
   if (['failed', 'write_unknown', 'waiting_permission'].includes(r.stage) && r.error !== 'release_ci_unsuccessful') section.append(action('继续／查证此步骤', 'resume'));
+  if (r.release_url) section.append(link(r.release_url, '查看 GitHub Release'));
+  if (r.skill) section.append(facts([['规则来源', r.skill.source], ['规则路径／版本', r.skill.path || r.skill.version], ['规则所在提交', r.skill.sha], ['规则内容哈希', r.skill.hash], ['上一枚版本', r.previous_tag ? `${r.previous_tag.name} · ${r.previous_tag.sha}` : '从仓库历史起算']]));
+  if (r.sources) {
+    const details = element('details'), summary = element('summary', `发行说明来源（${r.sources.length}）`); details.append(summary);
+    for (const source of r.sources) details.append(note(`${source.kind} · ${source.title}`), link(source.url, source.id));
+    if (!r.sources.length) details.append(note('本次范围无新增提交')); section.append(details);
+  }
+  if (r.stage === 'draft') {
+    current.releaseEdits ||= new Map();
+    let edit = current.releaseEdits.get(r.id);
+    if (!edit?.dirty) { edit = { body: r.body || '', revision: r.revision, body_revision: r.body_revision, dirty: false }; current.releaseEdits.set(r.id, edit); }
+    const editor = textarea('release_body', edit.body, { rows: 16, spellcheck: false });
+    editor.addEventListener('input', () => { edit.body = editor.value; edit.dirty = true; });
+    const save = button('保存草稿正文', async () => {
+      try {
+        save.disabled = true;
+        const saved = await api(endpoint + '/' + r.id + '/draft', 'PATCH', { body: editor.value, revision: edit.revision, body_revision: edit.body_revision });
+        current.releaseEdits.delete(r.id); await refresh(); message.textContent = saved.release.stage === 'draft' ? '草稿已保存' : '已由仓库工作流／外部操作发布';
+      } catch (err) { message.textContent = err.message; await refresh(); } finally { save.disabled = false; }
+    });
+    section.append(field('发行说明草稿', editor), note('保存正文不会正式发布。外部或其他人的修改会返回冲突，请刷新后对照。'), save,
+      button('丢弃本地编辑并刷新正文', async () => { current.releaseEdits.delete(r.id); await refresh(); }));
+  } else if (r.body) { const body = element('pre', r.body); section.append(body); }
   return section;
 }
 

@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { validVersion, compareVersions } from '../dist/releases/version.js';
 import { releaseWorkflow, filter } from '../dist/releases/workflow.js';
 import { noCI, noRelease } from '../dist/releases/preflight.js';
-import { releaseFixture, workflow, writes, target, other, tagObject, run } from './release-fixtures.mjs';
+import { releaseFixture, workflow, writes, target, previous, other, tagObject, run } from './release-fixtures.mjs';
 import { Store } from '../dist/storage/database.js';
 import { ReleaseService } from '../dist/releases/service.js';
 import { testPassword } from './helpers.mjs';
 
 test('release versions and precedence follow SemVer without metadata or precision loss', () => {
   for (const v of ['v0.1.0', 'v1.2.3-beta', 'v1.2.3-beta.1', 'v1.2.3-rc.1', 'v999999999999999999.0.0']) assert.ok(validVersion(v), v);
-  for (const v of ['v01.2.3', 'v1.2.3-', 'v1.2.3-beta.01', 'v1', '1.2.3', 'v1.2', 'v1.2.3+build', ' v1.2.3', 'v1.2.3-a..b']) assert.ok(!validVersion(v), v);
+  for (const v of ['v01.2.3', 'v1.2.3-', 'v1.2.3-beta.01', 'v1', '1.2.3', 'v1.2', 'v1.2.3+build', ' v1.2.3', 'v1.2.3\n', 'v1.2.3-a..b']) assert.ok(!validVersion(v), v);
   assert.ok(compareVersions('v1.2.3-beta.10', 'v1.2.3-beta.2') > 0);
   assert.ok(compareVersions('v1.2.3', 'v1.2.3-rc.1') > 0);
 });
@@ -141,4 +141,75 @@ test('rerun refuses a moved tag and never issues a dispatch or tag write', async
   await f.admin(f.endpoint + '/' + r.id + '/rerun', 'POST', { revision: r.revision });
   assert.equal(writes(f.state).length, before);
   assert.equal((await f.admin(f.endpoint + '/' + r.id)).value.release.error, 'release_tag_conflict');
+});
+async function toDraft(f, version = 'v1.2.3') {
+  f.state.runs = [run({ head_branch: version })]; f.state.jobs = [job()];
+  const created = await f.create(version); assert.equal(created.status, 201);
+  for (let i = 0; i < 4; i++) await f.service.worker.process(created.value.release.id);
+  return (await f.admin(f.endpoint + '/' + created.value.release.id)).value.release;
+}
+test('release notes freeze the highest reachable SemVer tag and verified merge, squash and rebase PR sources', async t => {
+  const f = await releaseFixture(t);
+  f.state.tags = { 'v1.2.0-beta.2': { type: 'commit', sha: previous }, 'v1.2.0-beta.10': { type: 'tag', sha: 'e'.repeat(40), commit: previous }, 'v99.0.0': { type: 'commit', sha: other } };
+  f.state.prs[target] = [1, 2, 3].map(number => ({ number, title: ['Merge change', 'Squash change', 'Rebase change'][number - 1], merged_at: '2026-01-01T00:00:00Z', merge_commit_sha: target, base: { repo: { id: 101 } }, html_url: `https://github.com/fixture/project-101/pull/${number}` }));
+  f.state.prs[target].push({ number: 4, merged_at: '2026-01-01T00:00:00Z', merge_commit_sha: other, base: { repo: { id: 101 } } });
+  const r = await toDraft(f); assert.equal(r.stage, 'draft'); assert.equal(r.previous_tag.name, 'v1.2.0-beta.10'); assert.equal(r.previous_tag.sha, previous);
+  assert.equal(r.sources.length, 4); assert.ok(!r.body.includes('Initial commit')); assert.ok(r.body.includes('#1') && r.body.includes('#2') && r.body.includes('#3'));
+  assert.equal(r.skill.source, 'builtin'); assert.equal(r.skill.version, 'release-notes-v1'); assert.ok(r.skill.hash);
+  const draft = writes(f.state).find(r => r.path.endsWith('/releases')); assert.equal(draft.body.draft, true); assert.equal(draft.body.tag_name, r.version);
+});
+test('notes describe initial history and an empty range without inventing changes', async t => {
+  const f = await releaseFixture(t), first = await toDraft(f); assert.equal(first.previous_tag, null); assert.match(first.body, /从仓库历史起算/); assert.ok(first.body.includes('Initial commit'));
+  const g = await releaseFixture(t); g.state.tags['v1.2.2'] = { type: 'commit', sha: target };
+  const empty = await toDraft(g); assert.equal(empty.stage, 'draft'); assert.equal(empty.sources.length, 0); assert.match(empty.body, /本次范围无新增提交/);
+});
+test('existing drafts preserve manual text and an existing published release never returns to draft', async t => {
+  for (const draft of [true, false]) {
+    const f = await releaseFixture(t); f.state.releases = [{ id: 900, tag_name: 'v1.2.3', draft, body: 'Human edited text', html_url: 'https://github.com/fixture/project-101/releases/tag/v1.2.3' }];
+    const r = await toDraft(f); assert.equal(r.stage, draft ? 'draft' : 'externally_published'); assert.equal(r.release_id, 900); assert.equal(r.body, 'Human edited text');
+    assert.equal(writes(f.state).filter(r => /\/releases(?:\/|$)/.test(r.path)).length, 0);
+  }
+});
+test('draft saving enforces both revisions and preserves external edits instead of overwriting them', async t => {
+  const f = await releaseFixture(t), r = await toDraft(f);
+  const saved = await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: r.revision, body_revision: r.body_revision, body: 'Human edited notes' });
+  assert.equal(saved.status, 200); assert.equal(f.state.releases[0].body, 'Human edited notes');
+  assert.equal((await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: r.revision, body_revision: r.body_revision, body: 'Stale overwrite' })).status, 409);
+  const current = saved.value.release; f.state.releases[0].body = 'Edited directly on GitHub';
+  assert.equal((await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: current.revision, body_revision: current.body_revision, body: 'Overwrite external changes' })).status, 409);
+  assert.equal(f.state.releases[0].body, 'Edited directly on GitHub');
+  assert.equal((await f.admin(f.endpoint + '/' + r.id)).value.release.body, 'Edited directly on GitHub');
+  assert.ok(writes(f.state).filter(r => r.method === 'PATCH').every(r => Object.keys(r.body).join() === 'body'));
+});
+test('repository release-notes Skill is explicitly loaded at the target SHA into a tool-free model call', async t => {
+  const f = await releaseFixture(t), skill = 'Group real commits under Changes. Do not invent results.';
+  f.state.files['.agents/skills/release-notes/SKILL.md'] = skill;
+  await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-model-release-key', model_name: 'notes-fixture' });
+  const model = f.h.store.get('SELECT id FROM models WHERE repository_id=?', '101'); await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
+  let request;
+  f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; const input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: JSON.stringify({ groups: [{ heading: 'Changes', source_ids: input.sources.map(s => s.id) }] }) } }] }); return true; } };
+  const r = await toDraft(f); assert.equal(r.stage, 'draft'); assert.equal(r.skill.source, 'repository'); assert.equal(r.skill.sha, target);
+  const modelInput = JSON.parse(request.messages[1].content); assert.equal(modelInput.skill, skill); assert.equal(modelInput.skill_sha, target); assert.deepEqual(request.tools, []); assert.equal(request.tool_choice, 'none');
+  assert.ok(!JSON.stringify(request).includes('fixture-installation-')); assert.match(r.body, /## Changes/);
+});
+test('invalid Skill content, unsupported model claims and known secrets cannot enter a release body', async t => {
+  const f = await releaseFixture(t); f.state.files['.agents/skills/release-notes/SKILL.md'] = '';
+  assert.equal((await f.preview()).available, false);
+  const g = await releaseFixture(t); g.state.files['.agents/skills/release-notes/SKILL.md'] = 'Write notes';
+  const m = await g.admin('/api/models', 'POST', { repository_id: '101', api_url: g.apiUrl + '/v1', api_key: 'fixture-secret-note-key', model_name: 'notes-fixture' });
+  await g.admin('/api/repositories/101/policy', 'PATCH', { model_id: m.value.model.id });
+  g.state.custom = async ({ path, send }) => { if (path === '/v1/chat/completions') { send({ choices: [{ message: { content: '{"groups":[{"heading":"All tests passed, 10x faster","source_ids":[]}]}' } }] }); return true; } };
+  const invalid = await toDraft(g); assert.equal(invalid.error, 'release_notes_invalid'); assert.equal(g.state.releases.length, 0);
+  const h = await releaseFixture(t); await h.admin('/api/models', 'POST', { repository_id: '101', api_url: h.apiUrl + '/v1', api_key: 'registered-secret-release', model_name: 'fixture' });
+  h.state.commits[0].commit.message = 'Leak registered-secret-release'; const sensitive = await toDraft(h); assert.equal(sensitive.error, 'release_sensitive_body'); assert.equal(h.state.releases.length, 0);
+  assert.ok(!JSON.stringify(sensitive).includes('registered-secret-release'));
+  const j = await releaseFixture(t), draft = await toDraft(j); await j.admin('/api/models', 'POST', { repository_id: '101', api_url: j.apiUrl + '/v1', api_key: 'registered-secret-release', model_name: 'fixture' });
+  assert.equal((await j.admin(j.endpoint + '/' + draft.id + '/draft', 'PATCH', { revision: draft.revision, body_revision: draft.body_revision, body: 'registered-secret-release' })).status, 400);
+  assert.ok(!j.state.releases[0].body.includes('registered-secret-release'));
+});
+test('draft creation timeout is reconciled to the same draft without a duplicate POST', async t => {
+  const f = await releaseFixture(t); f.state.unknown = '/repos/fixture/project-101/releases';
+  const r = await toDraft(f, 'v1.2.3-rc.1'); assert.equal(r.stage, 'draft'); assert.equal(f.state.releases.length, 1); assert.equal(f.state.releases[0].prerelease, true);
+  assert.equal(writes(f.state).filter(r => r.path.endsWith('/releases')).length, 1);
+  assert.ok(!writes(f.state).some(r => r.body?.draft === false));
 });

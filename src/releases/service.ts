@@ -34,7 +34,7 @@ export class ReleaseService {
         const preview = await withGitHub(this.store, id, this.apiUrl, { pull_requests: 'read' }, redactor, github => inspect(github, version));
         const token = preflightToken();
         this.store.run('DELETE FROM release_preflights WHERE expires_at<?', Date.now());
-        this.store.run('INSERT INTO release_preflights VALUES(?,?,?,?,?,?)', token, id, user.id, fingerprint(preview), JSON.stringify(preview), Date.now() + 10 * 60_000);
+        this.store.run('INSERT INTO release_preflights VALUES(?,?,?,?,?,?)', token, id, user.id, fingerprint(preview), JSON.stringify(redactor.clean(preview)), Date.now() + 10 * 60_000);
         const { content, ...skill } = preview.skill;
         return redactor.clean({ ...preview, skill, credential: token });
       } catch (error) {
@@ -76,13 +76,26 @@ export class ReleaseService {
           await withGitHub(this.store, id, this.apiUrl, { actions: 'write' }, redactor, github => this.worker.rerun(github, row, redactor), () => this.guard(row));
         } else {
           const data = JSON.parse(row.data);
-          if (!['failed', 'write_unknown', 'waiting_permission'].includes(row.stage) || !['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'rerun'].includes(data.failure_step) || data.error === 'release_ci_unsuccessful') return fail(409, 'release_resume_unavailable');
+          if (!['failed', 'write_unknown', 'waiting_permission'].includes(row.stage) || !['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'rerun', 'save_draft'].includes(data.failure_step) || data.error === 'release_ci_unsuccessful') return fail(409, 'release_resume_unavailable');
           this.store.audit(user.id, 'release.resume', row.id, id);
           if (data.failure_step === 'rerun') await withGitHub(this.store, id, this.apiUrl, { actions: 'write' }, redactor, github => this.worker.rerun(github, row, redactor), () => this.guard(row));
+          else if (data.failure_step === 'save_draft') await withGitHub(this.store, id, this.apiUrl, {}, redactor, github => this.worker.reconcileSave(github, row, redactor), () => this.guard(row));
           else this.save(row, { error: null, detail: '', failure_step: null }, data.failure_step);
           this.store.run('UPDATE project_releases SET next_poll=0 WHERE id=?', row.id);
         }
       } catch (error) { if ((error as any).status) throw error; this.worker.failed(row, error, redactor, operation[2] === 'rerun' || JSON.parse(row.data).expected_attempt ? 'rerun' : undefined); }
+      finally { this.unlock(row); }
+      return { release: this.view(row) };
+    }
+    const draft = /^([^/]+)\/draft$/.exec(action);
+    if (draft && method === 'PATCH') {
+      fields(input, ['revision', 'body_revision', 'body']); this.find(id, draft[1]!); enabled(this.store, id);
+      if (!Number.isSafeInteger(input.revision) || !Number.isSafeInteger(input.body_revision) || typeof input.body !== 'string' || Buffer.byteLength(input.body) > 120000 || input.body.includes('\0')) return fail(400, 'release_invalid_draft');
+      const row = this.claim(draft[1]!, input.revision), redactor = releaseRedactor(this.store, id);
+      try {
+        this.store.audit(user.id, 'release.save_draft', row.id, id);
+        await withGitHub(this.store, id, this.apiUrl, { contents: 'write' }, redactor, github => this.worker.saveDraft(github, row, input.body as string, input.body_revision, redactor), () => this.guard(row));
+      } catch (error) { if ((error as any).status) throw error; this.worker.failed(row, error, redactor, 'save_draft'); }
       finally { this.unlock(row); }
       return { release: this.view(row) };
     }
@@ -97,7 +110,7 @@ export class ReleaseService {
   }
   view(row: any): Json {
     const data = JSON.parse(row.data); if (data.skill) delete data.skill.content;
-    return { ...data, id: row.id, repository_id: row.repository_id, version: row.version, target_sha: row.target_sha, stage: row.stage, revision: row.revision, created_at: row.created_at, updated_at: row.updated_at };
+    return releaseRedactor(this.store, row.repository_id).clean({ ...data, id: row.id, repository_id: row.repository_id, version: row.version, target_sha: row.target_sha, stage: row.stage, revision: row.revision, created_at: row.created_at, updated_at: row.updated_at });
   }
   save(row: any, patch: any, stage = row.stage, active = !['failed', 'published', 'externally_published'].includes(stage)) {
     const data = JSON.stringify({ ...JSON.parse(row.data), ...patch }), now = new Date().toISOString();

@@ -1,9 +1,12 @@
 import type { ReleaseService } from './service.js';
 import type { GitHub } from '../github/client.js';
-import { digest } from '../core/security.js';
+import { digest, fail } from '../core/security.js';
 import { stop, type Redactor } from '../agent/common.js';
-import { tag, releaseRedactor, withGitHub } from './github.js';
+import { tag, releases, releaseRedactor, withGitHub } from './github.js';
 import { actionPages, ambiguousBranch, matchesRun, runSnapshot } from './actions.js';
+import { sources } from './range.js';
+import { notes } from './notes.js';
+import { prerelease } from './version.js';
 
 export class ReleaseWorker {
   constructor(readonly service: ReleaseService) {}
@@ -50,10 +53,12 @@ export class ReleaseWorker {
     let row: any; try { row = this.service.claim(id); } catch { return; }
     const redactor = releaseRedactor(this.service.store, row.repository_id);
     try {
-      await withGitHub(this.service.store, row.repository_id, this.service.apiUrl, row.stage === 'tagging' ? { contents: 'write' } : {}, redactor,
+      await withGitHub(this.service.store, row.repository_id, this.service.apiUrl, ['tagging', 'creating_draft'].includes(row.stage) ? { contents: 'write' } : { pull_requests: 'read' }, redactor,
         async github => {
           if (row.stage === 'tagging') await this.tagging(github, row, redactor);
           else if (['waiting_run', 'running'].includes(row.stage)) await this.observeRun(github, row, redactor);
+          else if (row.stage === 'preparing_notes') await this.prepareNotes(github, row, redactor);
+          else if (row.stage === 'creating_draft') await this.createDraft(github, row, redactor);
         }, () => this.service.guard(row));
     } catch (error) { this.failed(row, error, redactor); }
     finally { this.service.unlock(row); }
@@ -66,7 +71,10 @@ export class ReleaseWorker {
   }
   async tagging(github: GitHub, row: any, redactor: Redactor) {
     let existing = await this.checkedTag(github, row);
-    if (existing) { this.service.save(row, { tag_object_sha: existing.object_sha, reused_tag: true, tagged_at: null }, 'waiting_run'); return; }
+    if (existing) {
+      const data = JSON.parse(row.data);
+      this.service.save(row, { tag_object_sha: existing.object_sha, reused_tag: !data.tagged_at, tagged_at: data.tagged_at || null, wait_started_at: data.wait_started_at || Date.now() }, 'waiting_run'); return;
+    }
     const object = await this.effect(row, 'tag_object', { tag: row.version, message: row.version, object: row.target_sha, type: 'commit' },
       () => github.request('POST', github.path('/git/tags'), { tag: row.version, message: row.version, object: row.target_sha, type: 'commit' }),
       async () => { const found = await this.checkedTag(github, row); return found ? { sha: found.object_sha } : null; }, redactor);
@@ -133,5 +141,84 @@ export class ReleaseWorker {
       async () => { const run = await github.request('GET', github.path(`/actions/runs/${data.run_id}`)); if (!matchesRun(row, run)) return stop('release_run_changed', 'failed', '重跑的 Actions 身份已变化。'); return run.run_attempt > from ? { attempt: run.run_attempt } : null; }, redactor);
     this.service.save(row, { detail: '已请求人工重跑，等待新的 attempt。', error: null, failure_step: null }, 'running');
     this.service.store.run('UPDATE project_releases SET next_poll=0 WHERE id=?', row.id);
+  }
+  async ensureCI(github: GitHub, row: any) {
+    const data = JSON.parse(row.data), current = await runSnapshot(github, row);
+    if (!current.success || current.run.id !== data.ci_success?.run_id || current.run.run_attempt !== data.ci_success?.attempt || (data.expected_attempt && current.run.run_attempt < data.expected_attempt)) {
+      this.service.save(row, { run: github.redactor.clean(current.snapshot), run_attempt: current.run.run_attempt, ci_success: null }, 'running');
+      return stop('release_ci_evidence_changed', 'failed', 'Actions 当前 attempt 与成功证据不一致，已停止 Release 写入；请刷新本次运行。');
+    }
+  }
+  adopt(row: any, release: any, redactor: Redactor) {
+    const data = JSON.parse(row.data), body = String(release.body || ''), hash = digest(body);
+    this.service.save(row, { release_id: release.id, release_url: release.html_url, body: redactor.text(body), body_hash: hash,
+      body_revision: hash === data.body_hash ? data.body_revision : (data.body_revision || 0) + 1, github_updated_at: release.updated_at,
+      error: null, detail: release.draft ? '' : '已由仓库工作流／外部操作发布', failure_step: null }, release.draft ? 'draft' : 'externally_published');
+  }
+  async requireTag(github: GitHub, row: any) {
+    if (!await this.checkedTag(github, row)) return stop('release_tag_missing', 'failed', '标签已不存在，不能创建或修改 Release。');
+  }
+  async prepareNotes(github: GitHub, row: any, redactor: Redactor) {
+    await this.ensureCI(github, row); await this.requireTag(github, row);
+    const data = JSON.parse(row.data), existing = await releases(github, row.version, data.release_id);
+    if (existing) { this.adopt(row, existing, redactor); return; }
+    const input = data.sources || await sources(github, row.target_sha, data.previous_tag);
+    // Persist the fixed inputs even if model generation fails; retries use this exact source range.
+    const sensitive = data.input_sensitive || redactor.contains(Buffer.from(JSON.stringify(input)));
+    this.service.save(row, { sources: redactor.clean(input), input_sensitive: !!sensitive });
+    if (sensitive) return stop('release_sensitive_body', 'failed', '发行说明来源包含已登记的密钥，已拒绝写入。');
+    const generated = await notes(this.service.store, row, input, redactor);
+    this.service.save(row, { body: generated.body, notes_input_hash: generated.input_hash, note_groups: generated.groups }, 'creating_draft');
+  }
+  async createDraft(github: GitHub, row: any, redactor: Redactor) {
+    await this.ensureCI(github, row); await this.requireTag(github, row);
+    const data = JSON.parse(row.data);
+    if (redactor.contains(Buffer.from(data.body))) return stop('release_sensitive_body', 'failed', '发行说明包含已登记的密钥，已拒绝写入。');
+    const request = { tag_name: row.version, name: row.version, body: data.body, draft: true, prerelease: prerelease(row.version) };
+    const release = await this.effect(row, 'draft', request, () => github.request('POST', github.path('/releases'), request), () => releases(github, row.version, data.release_id), redactor);
+    this.adopt(row, release, redactor);
+  }
+  async currentDraft(github: GitHub, row: any, redactor: Redactor, bodyRevision: unknown) {
+    const data = JSON.parse(row.data);
+    if (!data.release_id) return fail(409, 'release_draft_missing');
+    const remote = await releases(github, row.version, data.release_id);
+    if (!remote || remote.id !== data.release_id) return fail(409, 'release_draft_changed');
+    if (!remote.draft) { this.adopt(row, remote, redactor); return null; }
+    if (digest(String(remote.body || '')) !== data.body_hash || bodyRevision !== data.body_revision) {
+      this.adopt(row, remote, redactor); return fail(409, 'release_body_conflict');
+    }
+    return remote;
+  }
+  async saveDraft(github: GitHub, row: any, body: string, bodyRevision: unknown, redactor: Redactor) {
+    if (row.stage !== 'draft') return fail(409, 'release_not_draft');
+    if (redactor.contains(Buffer.from(body))) return fail(400, 'release_sensitive_body');
+    await this.requireTag(github, row);
+    const remote = await this.currentDraft(github, row, redactor, bodyRevision); if (!remote) return;
+    const data = JSON.parse(row.data);
+    const key = 'save:' + data.body_revision + ':' + digest(body);
+    this.service.save(row, { pending_save: { key, body_hash: digest(body) } });
+    const saved = await this.effect(row, key, { release_id: remote.id, body_hash: digest(body) },
+      () => github.request('PATCH', github.path('/releases/' + remote.id), { body }),
+      async () => {
+        const current = await releases(github, row.version, remote.id);
+        if (!current || current.id !== remote.id) return fail(409, 'release_draft_changed');
+        if (!current.draft) { this.adopt(row, current, redactor); return fail(409, 'release_not_draft'); }
+        if (current.body === body) return current;
+        if (digest(String(current.body || '')) !== data.body_hash) { this.adopt(row, current, redactor); return fail(409, 'release_body_conflict'); }
+        return null;
+      }, redactor);
+    this.adopt(row, saved, redactor);
+  }
+  async reconcileSave(github: GitHub, row: any, redactor: Redactor) {
+    await this.requireTag(github, row);
+    const data = JSON.parse(row.data), remote = await releases(github, row.version, data.release_id);
+    if (!remote || remote.id !== data.release_id) return fail(409, 'release_draft_changed');
+    if (!remote.draft) { this.adopt(row, remote, redactor); return; }
+    const effect = data.pending_save && this.service.store.get('SELECT * FROM release_effects WHERE id=?', row.id + ':' + data.pending_save.key);
+    if (effect && ['inflight', 'unknown'].includes(effect.state)) {
+      if (digest(String(remote.body || '')) !== data.pending_save.body_hash) return stop('release_write_unknown', 'write_unknown', '保存正文的结果尚未确认，未重复发送或覆盖外部正文。');
+      this.service.store.run("UPDATE release_effects SET state='sent',response=? WHERE id=?", JSON.stringify(redactor.clean(remote)), effect.id);
+    }
+    this.adopt(row, remote, redactor);
   }
 }
