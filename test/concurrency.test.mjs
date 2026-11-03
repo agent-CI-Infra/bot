@@ -300,7 +300,7 @@ test('global settings change the wizard settings and shared models without a pro
   assert.match(text(section('Cloudflare Tunnel')), /未配置/); assert.equal(buttons(section('Cloudflare Tunnel'), '撤销 token').length, 0);
 
   // The accounts category shows the wizard's App, which now flags the webhook left on the old address, and every account.
-  await open('accounts'); assert.deepEqual(cards(), ['接入向导使用的 GitHub App', '已登记的账号']);
+  await open('accounts'); assert.deepEqual(cards(), ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']);
   const app = () => section('接入向导使用的 GitHub App');
   assert.match(text(app()), /webhook 不在当前公网地址下/);
   assert.deepEqual(section('已登记的账号').querySelectorAll('.row strong').map(node => node.textContent), ['First App', 'Second App', 'Token account']);

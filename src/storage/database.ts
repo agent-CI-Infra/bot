@@ -5,6 +5,7 @@ import { SecretBox, randomId } from '../core/security.js';
 import { externalStorage } from '../external/storage.js';
 import { boardStorage } from '../board/storage.js';
 import { metricsStorage } from '../metrics/storage.js';
+import { rateLimitStorage } from '../github/rate-limits.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -119,6 +120,9 @@ export class Store {
         pr_url TEXT,error TEXT,dry_run INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS quickstart_repo_time ON quickstart_runs(repository_id,created_at);
       PRAGMA user_version=5;`);
+    // wait_count: how many times in a row the task stopped for the same reason, so each automatic wait lasts longer.
+    extend('tasks', { wait_count: 'INTEGER NOT NULL DEFAULT 0' });
+    rateLimitStorage(this);
     externalStorage(this);
     boardStorage(this);
     metricsStorage(this);

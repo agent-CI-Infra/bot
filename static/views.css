@@ -107,6 +107,9 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 
 /* Rule files (static/project.js): the overview table and one card per file. */
 .rule-table-wrap{min-width:0}
+/* GitHub request windows (static/settings.js rateLimitBody): a small bar of the window's share already used. */
+.rate-meter{display:inline-block;width:56px;height:6px;border-radius:3px;background:#e3eaf0;vertical-align:middle;overflow:hidden}.rate-meter>span{display:block;height:100%;background:#16636b}.rate-meter>span.low{background:#b3261e}
+.rate-table td:last-child{white-space:normal}
 .rule-table{width:100%;border-collapse:collapse;font-size:13px}
 .rule-table th{text-align:left;font-size:12px;font-weight:600;color:#637c89;padding:6px 8px;border-bottom:1px solid #dde6eb;white-space:nowrap}
 .rule-table td{padding:8px;border-bottom:1px solid #edf1f4;vertical-align:middle}

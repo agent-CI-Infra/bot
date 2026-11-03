@@ -1,6 +1,7 @@
 import { createSign } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
 import { digest } from '../core/security.js';
+import { appBucket, blockedUntil, bucketName, installationBucket, observe, refused, userBucket, utcTime, type Bucket } from './rate-limits.js';
 import { errorBody, networkReason, Redactor, safePath, stop } from '../agent/common.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
@@ -14,11 +15,6 @@ function errorDetail(message:unknown,redactor:Redactor,token:string,status:numbe
     .replace(/\b(?:github_pat_|gh[pousr]_)[a-zA-Z0-9_]+/g,'[REDACTED]')
     .replace(/\b(?:access_token|token|api_key)\s*[:=]\s*[^\s,;]+/gi,'[REDACTED]')
     .replace(/\s+/g,' ').trim().slice(0,320)||`GitHub HTTP ${status}`;
-}
-function retryAfterMs(value:string|null):number{
-  // GitHub sends seconds. Also accept HTTP dates; invalid or excessive waits use the one-minute fallback.
-  const delay=value&&/^\d+$/.test(value)?Number(value)*1000:value?Date.parse(value)-Date.now():NaN;
-  return Number.isFinite(delay)&&delay>=0&&delay<=900000?delay:60000;
 }
 // Rule preflight and workspace preparation share the same complete listing for an immutable tree.
 export function repositoryTree(github:Pick<GitHub,'request'|'path'>,sha:string):Promise<SnapshotTree>{
@@ -82,17 +78,24 @@ export class GitHub {
   token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = ''; permissions: Record<string,string> = {};
   // The repository's HTTPS clone URL as GitHub reports it; the Git cache fetches from it without putting the token in it.
   cloneUrl = '';
+  // The rate-limit windows this client's credentials count against: the App's JWT, and the installation (or the bot
+  // account's user) for the token.
+  private jwt = ''; private appWindow?: Bucket; private tokenWindow?: Bucket;
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
   async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false): Promise<any> {
     await this.guard();
+    // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
+    const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
+    if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now());
     let response: Response;
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
     catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
       this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
+    if (window) observe(this.store, window, response.headers);
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
       const error=await errorBody(response),detail=errorDetail(error?.message,this.redactor,token,response.status);
@@ -111,7 +114,7 @@ export class GitHub {
       const requestId=response.status>=500?response.headers.get('x-github-request-id')?.match(/^[A-Za-z0-9:._-]{1,80}$/)?.[0]:undefined;
       const explain=(message:string,note='')=>this.redactor.text(`GitHub 请求 ${method} ${path} 返回 HTTP ${response.status}${note}`
         +(message?'：'+message:'')+(requestId?`（GitHub 请求 ID：${requestId}）`:''));
-      if(limited)stop('github_rate_limited','retry_wait',explain(said||'rate limit exceeded'),retryAfterMs(retryAfter));
+      if(limited){const now=Date.now(),until=refused(this.store,window,response.headers,now);stop('github_rate_limited','retry_wait',explain(said||'rate limit exceeded',`，${utcTime(until)} 后重试`),until-now);}
       if ([401,403,404].includes(response.status)) stop('github_permission_' + response.status, 'waiting_permission',explain(said));
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',explain(said,'，写入结果尚未确认'));
       stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',explain(said));
@@ -141,6 +144,7 @@ export class GitHub {
     this.fullName = this.repository.full_name;
     if (account!.type === 'bot_account') {
       if (!secrets.token) stop('github_credentials_missing', 'waiting_configuration', 'GitHub 机器人账号未保存访问令牌，请重新配置凭据。'); this.token = String(secrets.token); this.redactor.add(this.token);
+      this.tokenWindow = userBucket(account!.id);
       if (identifyActor) {
         const key = account!.id + ':' + digest(this.token), known = actors.get(key);
         if (known && Date.now() - known.at < actorTtlMs) Object.assign(this, { actorId: known.id, actorLogin: known.login });
@@ -149,10 +153,11 @@ export class GitHub {
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');
       this.redactor.add(secrets.private_key);
-      const jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.redactor.add(jwt);
+      const jwt = this.jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.redactor.add(jwt); this.appWindow = appBucket(account!.id);
       const actorKey = account!.id + ':' + String(account!.app_id), known = actors.get(actorKey), fresh = !!known && Date.now() - known.at < actorTtlMs;
       const app = identifyActor && !fresh ? await this.request('GET','/app', undefined, false, jwt) : null;
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
+      this.tokenWindow = installationBucket(account!.id, String(installation.id), installation.account?.login ? String(installation.account.login) : null);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission', `GitHub App 安装 ${installation.id} 的所属账号与仓库登记的所有者不一致。`);
       const requested: Record<string,string> = requiredPermissions || requestedPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
       if(requiredPermissions&&Object.entries(requiredPermissions).some(([key,value])=>!installation.permissions?.[key]||value==='write'&&installation.permissions[key]!=='write'))stop('github_permissions_insufficient','waiting_permission', `GitHub App 安装 ${installation.id} 缺少本次操作所需的权限，请检查安装授权。`);
