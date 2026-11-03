@@ -132,13 +132,14 @@ export class GitCache {
     } catch (error) { await rm(file, { force: true }); throw error; } finally { await out.close(); }
   }
   // Paths in a commit that contain any of `values` (the task's own credentials), read from the mirror without copying files.
+  // Binary files are searched too (-a), as the per-file check of the copy did.
   async secrets(repository: string, commit: string, values: Iterable<string>): Promise<string[]> {
     const needles = [...values].filter(value => value.length >= 8 && !/[\r\n]/.test(value));
     if (!needles.length || !objectId.test(commit)) return [];
     // The patterns go through a file only this process can read, removed at once (a pipe cannot be opened as a file).
     const patterns = join(this.root, `grep-${randomBytes(12).toString('hex')}`), handle = await open(patterns, 'w', 0o600);
     let run: Run;
-    try { await handle.writeFile(needles.join('\n') + '\n'); await handle.close(); run = await this.git(['grep', '-l', '-I', '-F', '-z', '-f', patterns, commit], { cwd: this.path(repository) }); }
+    try { await handle.writeFile(needles.join('\n') + '\n'); await handle.close(); run = await this.git(['grep', '-l', '-a', '-F', '-z', '-f', patterns, commit], { cwd: this.path(repository) }); }
     finally { await handle.close().catch(() => {}); await rm(patterns, { force: true }); }
     if (run.code === 1) return [];
     if (run.code !== 0) throw new Error(`git grep failed: ${run.stderr.trim() || 'exit ' + run.code}`);

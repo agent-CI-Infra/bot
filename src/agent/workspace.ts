@@ -24,7 +24,7 @@ export class Workspace {
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
-    const wait=['workspace_snapshot','workspace_finalize','workspace_blob'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const wait=['workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
     catch{return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${request.type}${request.path?' '+request.path:''}`);}
     await this.guard();
@@ -84,10 +84,10 @@ export class Workspace {
           if(offset%(45000*200)===0)this.log({type:'snapshot_progress',sha:commitSha,bytes:offset+bytesRead,detail:`正在把仓库历史传到虚拟电脑：${offset+bytesRead}／${pack.size} 字节`});
         }
       }finally{await file.close();await rm(pack.file,{force:true});}
-      const imported=await this.call('checkout:import:'+missing.join(','),{type:'git_import',pack_id:id,commits:missing});if(imported.error)return null;
+      const imported=await this.call('checkout:import:'+id,{type:'git_import',pack_id:id,commits:missing});if(imported.error)return null;
       packed=pack.size;
     }
-    const ready=await this.call('checkout:worktree',{type:'workspace_checkout',sha:commitSha,tree_sha:listing.tree_sha,author_email:github.authorEmail()});
+    const ready=await this.call('checkout:worktree:'+this.task.workspace_id,{type:'workspace_checkout',sha:commitSha,tree_sha:listing.tree_sha,author_email:github.authorEmail()});
     if(ready.error||ready.tree_sha!==listing.tree_sha)return null;
     const files=listing.tree.filter(f=>f.type==='blob'),skipped=listing.tree.filter(f=>f.type!=='blob');
     this.log({type:'snapshot',sha:commitSha,files:files.length,bytes:files.reduce((sum,f)=>sum+(f.size||0),0),skipped:skipped.length,source:'git_worktree',cache:mirror.state,pack_bytes:packed,

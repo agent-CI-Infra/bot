@@ -14,6 +14,7 @@ import { environment } from '../runner/command.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from './helpers.mjs';
+import { Workspace as ControlWorkspace } from '../dist/agent/workspace.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 
 const token = 'ghs_' + 'f'.repeat(36);
@@ -206,6 +207,10 @@ test('a task checks out a git worktree with the history; the computer store rece
   await a.workspace.context({ 'object.json': '{"title":"Fix"}', 'skills/ci/SKILL.md': '# CI\nRun the checks.\n' });
   assert.equal((await a.run({ type: 'workspace_read', path: '../context/skills/ci/SKILL.md' })).content, '# CI\nRun the checks.\n');
   assert.equal((await a.run({ type: 'workspace_read', path: '../context/../repo/README.md' })).error, 'runner_operation_failed');
+  // A context file of a normal pull request is far larger than one chunk; it arrives whole.
+  const files = JSON.stringify(Array.from({ length: 400 }, (_, i) => ({ filename: `src/file-${i}.js`, patch: '@@ -1 +1 @@\n-old\n+new line ' + 'x'.repeat(200) })));
+  await a.workspace.context({ 'files.json': files }); assert.ok(files.length > 100000);
+  assert.equal((await a.run({ type: 'workspace_read', path: '../context/files.json' })).content, files);
   assert.equal(git(a.repo, 'status', '--porcelain'), '');
   // A development candidate leaves the submodule entry as the base tree has it.
   writeFileSync(join(a.repo, 'README.md'), 'changed\n');
@@ -233,4 +238,52 @@ test('task directories untouched for three days go with their worktree registrat
   assert.deepEqual(await pruneTasks(join(u.root, 'tasks') + '/', 3 * 24 * 3600 * 1000, later, join(u.root, 'store')), { removed: 1 });
   assert.deepEqual(readdirSync(join(u.root, 'tasks')), [recent.id]);
   assert.doesNotMatch(git(join(u.root, 'store', 'repo.git'), 'worktree', 'list'), new RegExp(old.id));
+});
+
+test('a credential inside a binary file stops the checkout too', async t => {
+  const u = await upstream(t);
+  writeFileSync(join(u.work, 'build.bin'), Buffer.concat([Buffer.from([0, 1, 2, 0]), Buffer.from(token), Buffer.from([0])])); git(u.work, 'add', 'build.bin'); git(u.work, 'commit', '-qm', 'binary');
+  const sha = git(u.work, 'rev-parse', 'HEAD'); git(u.work, 'push', '-q', u.bare, `${sha}:refs/heads/main`);
+  const mirror = await u.cache.open('101', { url: u.url, token, commits: [sha] }), a = computerTask(u.root);
+  await assert.rejects(a.workspace.checkout(a.github, sha, mirror), { code: 'credential_in_repository', detail: 'Credential found in repository file: build.bin' });
+});
+
+test('a workspace holding an earlier file copy of the same tree is replaced by a worktree with the history', async t => {
+  const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.second] }), a = computerTask(u.root);
+  // The copy keeps the tree but is its own one-commit repository.
+  await a.workspace.prepare(a.github, u.second, mirror);
+  assert.equal(git(a.repo, 'rev-list', '--count', 'HEAD'), '1'); assert.notEqual(git(a.repo, 'rev-parse', 'HEAD'), u.second);
+  const snapshot = await a.workspace.checkout(a.github, u.second, mirror);
+  assert.equal(snapshot.history, true); assert.equal(git(a.repo, 'rev-parse', 'HEAD'), u.second); assert.equal(git(a.repo, 'rev-list', '--count', 'HEAD'), '2');
+});
+
+test('checkouts in two workspaces of one task attempt are separate operations, and import and checkout wait as long as they run', async t => {
+  const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.second] });
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,generation,attempt) VALUES('keys','101','review.issue','running','',1,1)");
+  const task = { ...h.store.get("SELECT * FROM tasks WHERE id='keys'"), workspace_id: randomBytes(24).toString('hex') }, waits = {};
+  // The real control-plane calls, recorded per task, with the runner operations behind a stand-in manager.
+  const manager = { call: async (_method, _path, input, wait) => {
+    const request = input.request; waits[request.type] = wait;
+    const result = await (request.type.startsWith('git_') ? storeOperation(request, join(u.root, 'store')) : runnerWorkspace(request, join(u.root, 'tasks'), join(u.root, 'store')))
+      .then(value => ({ ok: true, result: value }), error => ({ ok: false, error: 'runner_operation_failed', detail: error.message }));
+    return result;
+  } };
+  const redactor = new Redactor(); redactor.add(token);
+  const workspace = new ControlWorkspace(h.store, manager, task, redactor, async () => {}, () => {}), github = { authorEmail: () => '999+fixture-bot@users.noreply.github.com' };
+  assert.equal((await workspace.checkout(github, u.second, mirror)).history, true);
+  // The same attempt moves to another workspace (as after a fallback) and checks out again.
+  task.workspace_id = randomBytes(24).toString('hex');
+  assert.equal((await workspace.checkout(github, u.second, mirror)).history, true);
+  assert.equal(git(join(u.root, 'tasks', task.workspace_id, 'repo'), 'rev-parse', 'HEAD'), u.second);
+  assert.deepEqual([waits.git_import, waits.workspace_checkout], [0, 0]);
+});
+
+test('a pack left by an interrupted transfer is removed after a few hours', async t => {
+  mkdirSync(resolve('.tmp'), { recursive: true }); const root = mkdtempSync(resolve('.tmp/store-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const pack = 'a'.repeat(48);
+  await storeOperation({ type: 'git_pack', pack_id: pack, base64: Buffer.from('PACK').toString('base64'), offset: 0 }, root);
+  assert.deepEqual(readdirSync(join(root, 'incoming')), [pack + '.pack']);
+  await pruneTasks(join(root, 'tasks') + '/', 3 * 24 * 3600 * 1000, Date.now() + 60_000, root); assert.equal(readdirSync(join(root, 'incoming')).length, 1);
+  await pruneTasks(join(root, 'tasks') + '/', 3 * 24 * 3600 * 1000, Date.now() + 7 * 3600 * 1000, root); assert.deepEqual(readdirSync(join(root, 'incoming')), []);
 });
