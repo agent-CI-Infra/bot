@@ -249,34 +249,18 @@ function modelSection() {
     ownList.replaceChildren(...(ownModels.length ? [providerList(ownModels, row)] : [element('p', '还没有专属模型。', 'muted')]));
     sharedList.replaceChildren(...(sharedModels.length ? [providerList(sharedModels, row)] : [element('p', '还没有共享模型。', 'muted')]));
   })().catch(err => list.replaceChildren(element('p', err.message, 'view-error')));
-  own.append(modelForm('添加专属模型', current.id));
+  own.append(providerCreate(current.id));
   const sections = [chooser, own];
-  if (superUser) { shared.append(modelForm('添加部署共享模型', null)); sections.push(shared); }
+  if (superUser) { shared.append(providerCreate(null)); sections.push(shared); }
   return sections;
 }
 function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
-// Rotating or revoking a key never shows it; an empty key field keeps the current one. Listing and testing use the
-// saved URL, key and name and need the same right as editing; their outcome goes to the row's result line. `after`
-// redraws the list once a change is saved: the project page reloads, global settings redraws only its model cards.
+// Connections belong to the provider editor; testing, naming, pricing and deletion stay with each model.
 function modelActions(model, result, after = reloadWith) {
   const actions = element('div', '', 'actions'), editable = me.role === 'super_admin' || model.repository_id === current?.id;
   if (!editable) return actions;
-  if (model.key_configured) actions.append(
-    probeButton('获取模型列表', result, () => api(`/api/models/${model.id}/upstream`, 'POST', {}), value => listOutcome(value, model.model_name)),
-    probeButton('测试模型', result, () => api(`/api/models/${model.id}/test`, 'POST', {}), testOutcome));
-  actions.append(button('修改 URL 和模型名', () => modelEdit(model, after)));
-  actions.append(button('计费单价',()=>modelPricing(model, after)));
-  actions.append(button('更换 Key', async () => {
-    const saved = await confirmDialog({ title: `更换 ${model.model_name} 的 API Key`, body: ['保存后立即生效；页面和接口都不会再显示这个 Key。'], action: '保存',
-      input: { label: '新的 API Key', type: 'password' }, run: key => api('/api/models/' + model.id, 'PATCH', { version: model.version, api_key: key }) });
-    if (saved) await after(`已更换 ${model.model_name} 的 API Key`);
-  }));
-  if (model.key_configured) actions.append(button('撤销 Key', async () => {
-    if (!await askConfirm({ title: `撤销 ${model.model_name} 的 API Key？`, body: ['使用它的项目会停在“配置待补”，直到换上新的 Key。'], action: '撤销', danger: true })) return;
-    let notice;
-    try { await api(`/api/models/${model.id}/credentials/revoke`, 'POST', {}); notice = `已撤销 ${model.model_name} 的 API Key`; } catch (err) { error(err); }
-    await after(notice);
-  }));
+  if (model.key_configured) actions.append(probeButton('测试模型', result, () => api(`/api/models/${model.id}/test`, 'POST', {}), testOutcome));
+  actions.append(button('修改模型名', () => modelEdit(model, after)), button('计费单价', () => modelPricing(model, after)));
   actions.append(button('删除', async () => {
     let detail;
     try { detail = (await api(`/api/models/${model.id}`)).model; }
@@ -293,35 +277,24 @@ function modelActions(model, result, after = reloadWith) {
   }, 'quiet destructive'));
   return actions;
 }
-// Changes where a saved model is reached and which model it asks for; the sealed key stays as it is.
+// Model-specific edits do not change its provider's connection settings.
 function modelEdit(model, after) {
-  const modal = document.createElement('dialog'), form = document.createElement('form'), heading = element('h2', `修改 ${model.model_name} 的接口 URL 和模型名`);
+  const modal = document.createElement('dialog'), form = document.createElement('form'), heading = element('h2', `修改 ${model.model_name} 的模型名`);
   modal.id = 'model-edit'; heading.id = 'model-edit-title'; modal.setAttribute('aria-labelledby', heading.id);
-  const url = input('api_url', model.api_url, { type: 'url', required: true }), name = input('model_name', model.model_name, { required: true, maxLength: 200 });
-  const preview = element('div', '', 'endpoint-preview'), message = element('p', '', 'view-error'), actions = element('div', '', 'actions'), save = element('button', '保存');
-  preview.setAttribute('aria-live', 'polite'); message.setAttribute('role', 'alert'); save.type = 'submit';
-  if (model.endpoints) preview.append(...endpointFacts(model.endpoints));
-  watchEndpoint(url, preview);
-  actions.append(button('取消', () => modal.close()), save);
-  form.append(heading, field('接口 URL', url), note(modelUrlRule), preview, field('模型名', name), note('API Key 保持不变。保存后新的模型请求按这里的地址和模型名发送。'), message, actions);
-  form.addEventListener('submit', async event => {
-    event.preventDefault(); message.textContent = '';
-    const changes = { api_url: url.value.trim(), model_name: name.value.trim() };
-    if (!changes.api_url || !changes.model_name) { message.textContent = '接口 URL 和模型名都需要填写'; return; }
-    if (changes.api_url === model.api_url && changes.model_name === model.model_name) { modal.close(); return; }
-    save.disabled = true;
-    try { await api('/api/models/' + model.id, 'PATCH', { version: model.version, ...changes }); modal.close(); await after(`已保存 ${changes.model_name} 的接口 URL 和模型名`); }
-    catch (err) { message.textContent = err.message; } finally { save.disabled = false; }
+  const name = input('model_name', model.model_name, {required:true,maxLength:200}), message = element('p','','view-error'), actions = element('div','','actions'), save = element('button','保存');
+  message.setAttribute('role','alert'); save.type = 'submit'; actions.append(button('取消',()=>modal.close()),save);
+  form.append(heading,field('模型名',name),message,actions);
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();const value=name.value.trim();if(!value){message.textContent='请填写模型名';return;}
+    if(value===model.model_name){modal.close();return;}save.disabled=true;
+    try{await api('/api/models/'+model.id,'PATCH',{version:model.version,model_name:value});modal.close();await after(`已保存模型名 ${value}`);}
+    catch(err){message.textContent=err.message;}finally{save.disabled=false;}
   });
-  modal.append(form); document.body.append(modal); modal.addEventListener('close', () => modal.remove(), { once: true }); modal.showModal();
+  modal.append(form);document.body.append(modal);modal.addEventListener('close',()=>modal.remove(),{once:true});modal.showModal();
 }
-function modelForm(title, repositoryId, after = null) {
-  const details = element('details', '', 'fold add-model'); details.append(element('summary', title));
-  const form = settingsForm(title, [...modelFields(repositoryId),
-    note('兼容 Chat Completions 的接口；Key 加密保存，不会再显示。保存即视为可信接口，可接收本项目的代码和日志。')],
-  async form => { const created = (await api('/api/models', 'POST', { repository_id: repositoryId, api_url: form.elements.api_url.value.trim(), model_name: form.elements.model_name.value.trim(), api_key: form.elements.api_key.value }));
-    return `已添加 ${created.model.model_name}，可在“使用的模型”里选择`; }, { caption: '添加', after });
-  form.querySelector('h3').remove(); details.append(form); return details;
+function providerCreate(repositoryId, after = reloadWith) {
+  const actions=element('div','','actions provider-create');
+  actions.append(button('新增供应商',()=>providerEditor([],repositoryId,after)));return actions;
 }
 
 // Model address, upstream list and test, shared by the project page, global settings and the onboarding wizard
@@ -363,51 +336,74 @@ function modelLabel(model, extra = []) {
 function providerList(models, row, after = reloadWith) {
   const list = element('div', '', 'provider-list');
   for (const group of byProvider(models)) {
-    const section = element('section', '', 'provider-group'), head = element('div', '', 'provider-head'), slot = element('div', ''), rows = element('ul', '', 'history');
+    const section = element('section', '', 'provider-group'), head = element('div', '', 'provider-head'), rows = element('ul', '', 'history');
     head.append(providerTitle(group[0]), element('span', `${group.length} 个模型`, 'muted provider-count'));
-    const source = group.find(model => model.key_configured), editable = me.role === 'super_admin' || group[0].repository_id === current?.id;
-    if (source && editable) head.append(quickAdd(source, group, slot, after));
+    const editable = me.role === 'super_admin' || group[0].repository_id === current?.id;
+    if (editable) head.append(button('编辑供应商',()=>providerEditor(group,group[0].repository_id,after)));
     for (const model of group) rows.append(row(model));
-    section.append(head, slot, rows); list.append(section);
+    section.append(head, rows); list.append(section);
   }
   return list;
 }
-// Lists the provider's upstream models with the key saved on `source`; one click adds a model with that key (the server
-// copies it, so it is never shown or typed again). Names already in the group are marked; the page redraws on 完成.
-function quickAdd(source, group, slot, after) {
-  const open = button('添加该供应商的模型', async () => {
-    if (slot.childElementCount) { slot.replaceChildren(); return; }
-    const panel = element('div', '', 'provider-add'), status = probeResult(), chips = element('div', '', 'model-chips'), have = new Set(group.map(model => model.model_name)), added = [];
-    const filter = input('filter', '', { type: 'search', placeholder: '筛选模型 id' }), manual = input('model_name', '', { maxLength: 200, placeholder: '列表外的模型名' });
-    filter.setAttribute('aria-label', '筛选模型 id'); manual.setAttribute('aria-label', '列表外的模型名');
-    const add = async (name, control) => {
-      control.disabled = true; status.replaceChildren(element('p', `正在添加 ${name}…`, 'view-progress'));
-      try { await api('/api/models', 'POST', { repository_id: source.repository_id, key_from: source.id, model_name: name }); }
-      catch (err) { control.disabled = false; status.replaceChildren(element('p', err.message, 'view-error')); return false; }
-      have.add(name); added.push(name); status.replaceChildren(element('p', `已添加 ${name}`, 'view-success')); return true;
-    };
-    const chip = name => {
-      const item = button(name, async () => { if (await add(name, item)) mark(item); }, 'quiet model-chip'), mark = node => { node.disabled = true; node.title = '已添加'; node.textContent = name + ' ✓'; };
-      item.dataset.name = name.toLowerCase(); if (have.has(name)) mark(item); return item;
-    };
-    const manualAdd = button('添加', async () => {
-      const name = manual.value.trim(); if (!name) return;
-      if (have.has(name)) { status.replaceChildren(element('p', `${name} 已经在这个供应商下`, 'view-error')); return; }
-      if (await add(name, manualAdd)) { manual.value = ''; manualAdd.disabled = false; }
-    }), done = button('完成', async () => { slot.replaceChildren(); if (added.length) await after(`已添加 ${added.join('、')}`); }, '');
-    filter.addEventListener('input', () => { const text = filter.value.trim().toLowerCase(); for (const item of chips.children) item.hidden = !!text && !item.dataset.name.includes(text); });
-    const manualRow = element('div', '', 'actions'), actions = element('div', '', 'actions form-actions');
-    manualRow.append(manual, manualAdd); actions.append(done);
-    panel.append(status, filter, chips, manualRow, note(`添加的模型使用 ${source.model_name} 已保存的 API Key，之后可以各自更换。`), actions); slot.replaceChildren(panel);
-    status.replaceChildren(element('p', '正在获取模型列表…', 'view-progress')); open.disabled = true;
-    try {
-      const value = await api(`/api/models/${source.id}/upstream`, 'POST', {});
-      if (!value.ok) status.replaceChildren(...probeFailure(value));
-      else { status.replaceChildren(element('p', `上游返回 ${value.total} 个模型${value.truncated ? `，只列出按名称排序的前 ${value.models.length} 个` : ''}；点一个即添加。`, 'view-success')); chips.append(...value.models.map(chip)); }
-    } catch (err) { status.replaceChildren(element('p', err.message, 'view-error')); }
-    finally { open.disabled = false; }
+// Adding and editing use one provider form. URL/key changes and newly selected models commit together.
+function providerEditor(group, repositoryId, after) {
+  const editing=!!group.length, source=group.find(model=>model.key_configured)||group[0], existing=new Set(group.map(model=>model.model_name)), selected=new Set();
+  const modal=document.createElement('dialog'),form=document.createElement('form'),head=element('div','','heading'),title=element('h2',editing?'编辑供应商':'新增供应商');
+  modal.id='provider-edit';title.id='provider-edit-title';modal.setAttribute('aria-labelledby',title.id);head.append(title);
+  const fields=document.createElement('fieldset');fields.className='provider-fields';
+  const url=input('api_url',source?.api_url||'',{type:'url',required:true,placeholder:'填写供应商接口地址'}),key=input('api_key','',{type:'password',autocomplete:'new-password',required:!editing,placeholder:editing?'留空保持已保存的 Key':'填写 API Key'});
+  const preview=element('div','','endpoint-preview'),endpointDetail=element('details','','fold'),result=probeResult(),choices=element('div','','model-chips'),picked=element('div','','model-chips provider-selected'),filter=input('filter','',{type:'search',placeholder:'筛选上游模型'}),manual=input('model_name','',{maxLength:200,placeholder:'例如模型列表中没有列出的名称'});
+  filter.setAttribute('aria-label','筛选上游模型');filter.hidden=true;manual.setAttribute('aria-label','手动模型名');
+  endpointDetail.append(element('summary','查看实际请求地址'),preview);if(source?.endpoints)preview.append(...endpointFacts(source.endpoints));
+  const message=element('p','','view-error'),selectedLabel=element('p','待添加','muted');message.setAttribute('role','alert');selectedLabel.hidden=true;let request=0,available=[];
+  const draw=()=>{
+    selectedLabel.hidden=!selected.size;
+    picked.replaceChildren(...[...selected].map(name=>button(name+' ×',()=>{selected.delete(name);draw();},'quiet model-chip')));
+    choices.replaceChildren(...available.filter(name=>name.toLowerCase().includes(filter.value.trim().toLowerCase())).map(name=>{
+      const have=existing.has(name),chosen=selected.has(name),item=button(name+(have?' · 已添加':chosen?' ✓':''),()=>{selected.has(name)?selected.delete(name):selected.add(name);draw();},'quiet model-chip');
+      item.disabled=have;item.setAttribute('aria-pressed',String(chosen));return item;
+    }));
+  };
+  const stale=()=>{request++;available=[];selected.clear();filter.hidden=true;result.replaceChildren();draw();};
+  watchEndpoint(url,preview,stale);key.addEventListener('input',stale);filter.addEventListener('input',draw);
+  const fetchModels=button('获取模型列表',async()=>{
+    const address=url.value.trim();if(!address||!editing&&!key.value.trim()){message.textContent='先填写接口 URL 和 API Key';return;}
+    message.textContent='';const version=++request;fetchModels.disabled=true;result.replaceChildren(element('p','正在获取模型列表…','view-progress'));
+    try{
+      const value=await api(editing?`/api/models/${source.id}/upstream`:'/api/models/upstream','POST',editing?{version:source.version,api_url:address,api_key:key.value}:{repository_id:repositoryId,api_url:address,api_key:key.value});
+      if(version!==request||!modal.isConnected)return;
+      if(!value.ok){result.replaceChildren(...probeFailure(value));return;}available=value.models;filter.hidden=!available.length;draw();
+      result.replaceChildren(element('p',`返回 ${value.total} 个模型${value.truncated?'（仅显示前 '+value.models.length+' 个）':''}，选择要添加的模型后保存。`,'view-success'));
+    }catch(err){if(version===request)result.replaceChildren(element('p',err.message,'view-error'));}finally{fetchModels.disabled=false;}
   });
-  return open;
+  const addManual=button('加入待添加',()=>{const name=manual.value.trim();if(!name)return;if(existing.has(name)){message.textContent='这个模型已经在该供应商下';return;}selected.add(name);manual.value='';message.textContent='';draw();});
+  const manualRow=element('div','','actions provider-manual');manualRow.append(field('手动模型名',manual),addManual);
+  fields.append(field('接口 URL',url),field(editing?'API Key（留空保持不变）':'API Key',key),
+    note(editing?`修改 URL 或填写新 Key 将应用于本供应商的 ${group.length} 个模型。留空则保留各模型现有 Key，页面不会回显。`:'填写连接信息，获取模型列表或手动添加至少一个模型后保存。Key 加密保存，不会回显。'),endpointDetail);
+  if(editing)fields.append(element('h3','已配置模型'),note([...existing].join('、')),note(group.some(model=>model.key_configured)?'Key 已保存；如需更换，在上方填写新 Key。':'Key 已撤销；填写新 Key 后才能调用模型。'));
+  fields.append(element('h3',editing?'添加模型':'选择模型'),fetchModels,result,filter,choices,manualRow,selectedLabel,picked);
+  const actions=element('div','','actions provider-editor-actions'),save=element('button','保存'),cancel=button('取消',()=>modal.close());save.type='submit';
+  const snapshot=()=>group.map(model=>({id:model.id,version:model.version}));
+  if(editing&&group.some(model=>model.key_configured))actions.append(button('撤销供应商 Key',async()=>{
+    const revoked=await confirmDialog({title:'撤销此供应商的 API Key？',body:[`撤销这 ${group.length} 个模型的 Key，使用它们的任务将等待配置。`,'未保存的 URL 和待添加模型不会保存。'],action:'撤销',danger:true,
+      run:()=>api(`/api/models/${source.id}/provider`,'PATCH',{versions:snapshot(),revoke_key:true})});
+    if(revoked){modal.close();await after('已撤销供应商下全部模型的 Key');}
+  },'quiet destructive'));
+  actions.append(cancel,save);form.append(head,fields,message,actions);modal.append(form);document.body.append(modal);
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();message.textContent='';const address=url.value.trim(),name=manual.value.trim();if(name&&!existing.has(name))selected.add(name);
+    if(!address||!editing&&!key.value.trim()){message.textContent='请填写接口 URL 和 API Key';return;}
+    if(!editing&&!selected.size){message.textContent='请先选择或手动添加至少一个模型';return;}
+    const changes={};if(editing){if(address!==source.api_url)changes.api_url=address;if(key.value.trim())changes.api_key=key.value;if(selected.size)changes.model_names=[...selected];}
+    if(editing&&!Object.keys(changes).length){modal.close();return;}
+    fields.disabled=true;for(const control of actions.querySelectorAll('button'))control.disabled=true;
+    try{
+      await api(editing?`/api/models/${source.id}/provider`:'/api/models/provider',editing?'PATCH':'POST',editing?{versions:snapshot(),...changes}:{repository_id:repositoryId,api_url:address,api_key:key.value,model_names:[...selected]});
+      modal.close();await after(editing?'已保存供应商配置'+(selected.size?'，已添加 '+[...selected].join('、'):''):'已新增供应商，已添加 '+[...selected].join('、'));
+    }catch(err){const code=err.message.replace(/^\d+\s*·\s*/,'');message.textContent=({version_conflict:'供应商已被其他页面修改，请关闭后重新打开再保存。',provider_already_exists:'该地址已有供应商，请在对应供应商中编辑。',model_key_missing:'请填写 API Key 后添加模型。',model_already_exists:'要添加的模型已经存在，请重新打开供应商。'})[code]||err.message;}
+    finally{fields.disabled=false;for(const control of actions.querySelectorAll('button'))control.disabled=false;}
+  });
+  modal.addEventListener('close',()=>{request++;key.value='';modal.remove();},{once:true});modal.showModal();
 }
 function probeResult(className = '') { const box = element('div', '', ('probe-result ' + className).trim()); box.setAttribute('role', 'status'); return box; }
 const probeErrors = { upstream_timeout: '上游 15 秒内没有响应', upstream_unreachable: '无法连接上游', upstream_redirect: '上游要求重定向，请改填最终地址',

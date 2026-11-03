@@ -248,10 +248,10 @@ function deployment() {
     if (path === '/api/onboarding/tunnel') { onboarding.tunnel = { ...onboarding.tunnel, token_configured: !body.revoke, state: body.revoke ? 'waiting_token' : 'connected' }; return [201, { tunnel: onboarding.tunnel }]; }
     if (path === '/api/onboarding/use-app') { onboarding.app = { account_id: body.account_id, app_id: '456', slug: 'second-app', installations: 2, webhook_url: onboarding.public_address.origin + '/hooks/github/a2/e2' }; return [201, { app: onboarding.app }]; }
     if (path === '/api/onboarding/model') { onboarding.model_id = body.model_id; return [201, { model_id: body.model_id }]; }
-    if (path === '/api/models' && method === 'POST') { const model = { id: 'm3', ...body, key_configured: true, version: 1 }; delete model.api_key; state.models.push(model); return [201, { model }]; }
+    if (path === '/api/models/provider' && method === 'POST') { const model = { id:'m3',repository_id:body.repository_id,api_url:body.api_url,model_name:body.model_names[0],key_configured:true,version:1 }; state.models.push(model); return [201,{models:[model]}]; }
     const id = /^\/api\/models\/(\w+)$/.exec(path)?.[1], model = state.models.find(row => row.id === id);
     if (model && method === 'GET') return [200, { model: { ...model, used_by: [{ repository_id: '101', full_name: 'fixture/one' }] } }];
-    if (model && method === 'PATCH') { Object.assign(model, { api_url: body.api_url, model_name: body.model_name, version: model.version + 1 }); return [200, { model }]; }
+    if (model && method === 'PATCH') { Object.assign(model, { ...body, version: model.version + 1 }); return [200, { model }]; }
     if (model && method === 'DELETE') {
       state.models = state.models.filter(row => row !== model); if (onboarding.model_id === id) onboarding.model_id = null;
       return [200, { ok: true, cleared_repository_ids: ['101'] }];
@@ -323,11 +323,11 @@ test('global settings change the wizard settings and shared models without a pro
 
   // Shared model rows edit, delete and add in place: no project is loaded or reloaded.
   const row = name => section('部署共享模型').querySelectorAll('li').find(node => text(node).includes(name));
-  buttons(row('second-model'), '修改 URL 和模型名')[0].listeners.click[0]();
-  const edit = page.run("document.body.querySelector('#model-edit')"), [url, name] = edit.querySelectorAll('input');
-  url.value = 'https://two.example.com/v2'; name.value = 'renamed-model'; await submit(edit.querySelector('form'));
-  assert.deepEqual(sent.at(-1), ['PATCH', '/api/models/m2', { version: 1, api_url: 'https://two.example.com/v2', model_name: 'renamed-model' }]);
-  assert.match(text(section('部署共享模型')), /已保存 renamed-model 的接口 URL 和模型名/);
+  buttons(row('second-model'), '修改模型名')[0].listeners.click[0]();
+  const edit = page.run("document.body.querySelector('#model-edit')"), name = edit.querySelector('input');
+  name.value = 'renamed-model'; await submit(edit.querySelector('form'));
+  assert.deepEqual(sent.at(-1), ['PATCH', '/api/models/m2', { version: 1, model_name: 'renamed-model' }]);
+  assert.match(text(section('部署共享模型')), /已保存模型名 renamed-model/);
   const deleting = buttons(row('renamed-model'), '删除')[0].listeners.click[0](); await settle();
   assert.match(view.querySelectorAll('p').map(node => node.textContent).join('\n'), /所有项目都不能再选/);
   assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one']);
@@ -335,11 +335,11 @@ test('global settings change the wizard settings and shared models without a pro
   assert.deepEqual(sent.at(-1), ['DELETE', '/api/models/m2', {}]);
   assert.match(text(section('部署共享模型')), /已删除模型 renamed-model/); assert.doesNotMatch(text(section('部署共享模型')), /renamed-model ·/);
   assert.match(text(section('默认共享模型')), /未设置/);
-  const add = section('部署共享模型').querySelector('details form'), fields = Object.fromEntries(add.querySelectorAll('input').map(node => [node.name, node]));
+  buttons(section('部署共享模型'), '新增供应商')[0].listeners.click[0]();
+  const add = page.run("document.body.querySelector('#provider-edit')").querySelector('form'), fields = Object.fromEntries(add.querySelectorAll('input').map(node => [node.name, node]));
   fields.api_url.value = 'https://four.example.com/v1'; fields.api_key.value = 'sk-fixture'; fields.model_name.value = 'added-model';
-  add.querySelectorAll('input').forEach(node => { node.checkValidity = () => true; }); add.elements = fields;
   await submit(add);
-  assert.deepEqual(sent.at(-1), ['POST', '/api/models', { repository_id: null, api_url: 'https://four.example.com/v1', model_name: 'added-model', api_key: 'sk-fixture' }]);
-  assert.match(text(section('部署共享模型')), /已添加 added-model/); assert.ok(row('added-model'));
+  assert.deepEqual(sent.at(-1), ['POST', '/api/models/provider', { repository_id:null,api_url:'https://four.example.com/v1',api_key:'sk-fixture',model_names:['added-model'] }]);
+  assert.match(text(section('部署共享模型')), /已新增供应商，已添加 added-model/); assert.ok(row('added-model'));
   assert.equal(page.run('reloads'), 0); assert.equal(page.run('current'), null);
 });

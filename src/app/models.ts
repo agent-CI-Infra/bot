@@ -18,6 +18,21 @@ function apiUrl(value: unknown): string {
   catch { return fail(400, 'invalid_api_url'); }
   return result;
 }
+function modelNames(value: unknown, required = false): string[] {
+  if (!Array.isArray(value) || value.length > 200 || required && !value.length) return fail(400, 'invalid_model_names');
+  const names = value.map(name => text(name, 200));
+  if (new Set(names).size !== names.length) return fail(400, 'duplicate_model_names');
+  return names;
+}
+function providerModels(store: Store, row: Row): Row[] {
+  const address = modelEndpoints(String(row.api_url)).chat_url;
+  return store.all('SELECT * FROM models WHERE repository_id IS ?', row.repository_id).filter(model => modelEndpoints(String(model.api_url)).chat_url === address);
+}
+function createModel(store: Store, repo: string | null, endpoint: string, key: string, name: string): Row {
+  const id = randomId();
+  store.run('INSERT INTO models VALUES(?,?,?,?,?,?,?)', id, repo, endpoint, name, store.secrets.seal({value:key}, `model:${id}`), 1, new Date().toISOString());
+  return store.get('SELECT * FROM models WHERE id=?', id)!;
+}
 export async function models(store: Store, user: Actor, method: string, url: URL, body: Json): Promise<Json | undefined> {
   const path = url.pathname;
   if (!path.startsWith('/api/models')) return undefined;
@@ -30,6 +45,18 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     if (repo) repository(store, user, repo);
     const extra = repo ? ' AND (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))' : '';
     return { models: store.all(`SELECT m.* FROM models m WHERE ${visible.sql}${extra} ORDER BY m.updated_at`, ...visible.args, ...(repo ? [repo, repo] : [])).map(row=>publicModel(store,row)) };
+  }
+  if (path === '/api/models/provider' && method === 'POST') {
+    fields(body, ['repository_id','api_url','api_key','model_names']);
+    const repo = body.repository_id == null ? null : text(body.repository_id);
+    if (repo) repository(store,user,repo); else superAdmin(user);
+    const endpoint = apiUrl(body.api_url), key = text(body.api_key,32768), names = modelNames(body.model_names,true);
+    return store.transaction(() => {
+      if (providerModels(store,{repository_id:repo,api_url:endpoint}).length) fail(409,'provider_already_exists');
+      const added = names.map(name => createModel(store,repo,endpoint,key,name));
+      store.audit(user.id,'model.provider_created',added[0]!.id,repo);
+      return {models:added.map(row => publicModel(store,row))};
+    });
   }
   if (path === '/api/models' && method === 'POST') {
     fields(body, ['repository_id', 'api_url', 'api_key', 'model_name', 'pricing', 'key_from']);
@@ -79,6 +106,33 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     return { model };
   }
   if (row.repository_id) repository(store, user, row.repository_id); else superAdmin(user);
+  if (path === `/api/models/${id}/provider` && method === 'PATCH') {
+    fields(body, ['versions','api_url','api_key','revoke_key','model_names']);
+    if (body.revoke_key !== undefined && body.revoke_key !== true) fail(400,'invalid_revoke');
+    if (body.revoke_key && (body.api_key !== undefined || body.api_url !== undefined || body.model_names !== undefined)) fail(400,'conflicting_credentials');
+    const endpoint = body.api_url === undefined ? row.api_url : apiUrl(body.api_url);
+    const key = body.api_key === undefined || typeof body.api_key === 'string' && !body.api_key.trim() ? null : text(body.api_key,32768);
+    const names = body.model_names === undefined ? [] : modelNames(body.model_names);
+    return store.transaction(() => {
+      const members = providerModels(store,row), versions = body.versions;
+      // Membership and every version form one snapshot: concurrent additions, deletion or key rotation must not be lost.
+      if (!Array.isArray(versions) || versions.length !== members.length || members.some(model => !versions.some(v => v && typeof v === 'object' && (v as Json).id === model.id && (v as Json).version === model.version))) fail(409,'version_conflict');
+      const ids = new Set(members.map(model => model.id));
+      if (providerModels(store,{...row,api_url:endpoint}).some(model => !ids.has(model.id))) fail(409,'provider_already_exists');
+      if (names.some(name => members.some(model => model.model_name === name))) fail(409,'model_already_exists');
+      const source = members.find(model => model.api_key !== null);
+      const addKey = key || (source ? String(store.secrets.open(source.api_key,`model:${source.id}`).value || '') : '');
+      if (names.length && !addKey) fail(409,'model_key_missing');
+      const now = new Date().toISOString();
+      for (const model of members) {
+        const sealed = body.revoke_key ? null : key ? store.secrets.seal({value:key},`model:${model.id}`) : model.api_key;
+        store.run('UPDATE models SET api_url=?,api_key=?,version=version+1,updated_at=? WHERE id=?',endpoint,sealed,now,model.id);
+      }
+      const added = names.map(name => createModel(store,row.repository_id,endpoint,addKey,name));
+      store.audit(user.id,body.revoke_key?'model.provider_key_revoked':'model.provider_updated',id,row.repository_id);
+      return {models:[...members.map(model => store.get('SELECT * FROM models WHERE id=?',model.id)!),...added].map(model => publicModel(store,model))};
+    });
+  }
   if (path === `/api/models/${id}` && method === 'DELETE') {
     fields(body, []);
     return store.transaction(() => {
@@ -111,11 +165,13 @@ export async function models(store: Store, user: Actor, method: string, url: URL
   }
   // A saved model is listed and tested with its own URL, key and name, under the same right as editing it.
   if ([`/api/models/${id}/upstream`, `/api/models/${id}/test`].includes(path) && method === 'POST') {
-    fields(body, []);
-    const test = path.endsWith('/test'), key = row.api_key === null ? '' : String(store.secrets.open(row.api_key, `model:${id}`).value || '');
+    const test = path.endsWith('/test');
+    fields(body, test ? [] : ['api_url','api_key','version']);
+    if (body.version !== undefined && body.version !== row.version) fail(409,'version_conflict');
+    const key = !test && typeof body.api_key === 'string' && body.api_key.trim() ? text(body.api_key,32768) : row.api_key === null ? '' : String(store.secrets.open(row.api_key, `model:${id}`).value || '');
     if (!key) return fail(409, 'model_key_missing');
     // A URL saved before the query/fragment rule is checked again rather than probed as written.
-    const endpoint = apiUrl(row.api_url);
+    const endpoint = apiUrl(!test && body.api_url !== undefined ? body.api_url : row.api_url);
     store.audit(user.id, test ? 'model.tested' : 'model.upstream_listed', id, row.repository_id);
     return test ? testUpstreamModel(endpoint, key, row.model_name) : listUpstreamModels(endpoint, key);
   }
