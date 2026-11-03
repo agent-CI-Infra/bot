@@ -312,3 +312,20 @@ test('the control plane starts a failed computer of an enabled project again, wa
   states[101] = 'failed'; await h.projects.reconcile(); assert.deepEqual([starts[101], environment()], [4, 'ready']);
   assert.equal(starts[202], 0);
 });
+
+// A production computer had over a million journal records; reading them all in the start's health check outlasted the
+// Docker request limit, so every start failed with docker_timeout.
+test('a computer is ready without reading its journal, and old journal records are pruned in the background', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const f = fixture(t); await f.projects.register('101');
+  const prunes = () => f.docker.runs.filter(r => r.type === 'prune');
+  // Started right after the computer is ready, without a time limit and outside the project lock.
+  assert.deepEqual(prunes().map(r => r.wait), [0]); assert.equal(f.projects.gates.has('101'), false);
+  await f.projects.check(); assert.equal(prunes().length, 1, 'not again within six hours');
+  t.mock.timers.tick(6 * 3600 * 1000 + 1); await f.projects.check(); assert.equal(prunes().length, 2);
+  // A failed prune is logged and leaves the computer as it was.
+  const lines = []; t.mock.method(console, 'error', (...args) => lines.push(args.join(' ')));
+  const runner = f.docker.runner; f.docker.runner = (container, input, wait) => input.type === 'prune' ? Promise.resolve({ ok: false, error: 'prune_failed' }) : runner.call(f.docker, container, input, wait);
+  t.mock.timers.tick(6 * 3600 * 1000 + 1); await f.projects.check(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual([lines, f.projects.get('101').state], [['[manager] project 101 journal prune failed: prune_failed'], 'ready']);
+});
