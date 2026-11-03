@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real E2E 旅程报告 · GitHub 状态看板</title>
+<style>
+:root { color-scheme: light dark; }
+body { margin: 0 auto; max-width: 1080px; padding: 24px 20px 64px;
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif;
+  line-height: 1.6; color: #1c1f23; background: #fff; }
+a { color: #1769aa; }
+.report-actions { text-align: right; font-size: .88rem; margin-bottom: 8px; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; overflow-wrap: anywhere; }
+h2 { font-size: 1.2rem; margin-top: 36px; border-bottom: 1px solid #e3e6ea; padding-bottom: 6px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: .92rem; }
+th, td { border: 1px solid #e3e6ea; padding: 7px 10px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+th { background: #f6f8fa; font-weight: 600; white-space: nowrap; }
+.report-meta th { width: 165px; }
+.history-table th { width: auto; }
+.outcome { display: inline-block; padding: 3px 12px; border-radius: 999px; font-weight: 700; font-size: .9rem; }
+.outcome.PASS { background: #e3f6e6; color: #1a7f33; }
+.outcome.FAIL { background: #fdeaea; color: #b3261e; }
+.outcome.UNKNOWN { background: #fff4e0; color: #9a6400; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .82rem; white-space: nowrap; }
+.badge.passed { background: #e3f6e6; color: #1a7f33; }
+.badge.failed { background: #fdeaea; color: #b3261e; }
+.badge.unknown { background: #fff4e0; color: #9a6400; }
+.muted { color: #6b7280; font-size: .88rem; }
+.empty { color: #6b7280; }
+.table-wrap { overflow-x: auto; }
+@media (max-width: 620px) { body { padding: 16px 12px 40px; } th, td { padding: 6px 7px; } .report-meta th { width: 104px; } }
+@media (prefers-color-scheme: dark) {
+  body { background: #16181c; color: #e6e8ea; }
+  a { color: #8dbbf3; }
+  th { background: #21242a; }
+  th, td { border-color: #31363d; }
+  h2 { border-color: #31363d; }
+}
+</style>
+</head>
+<body>
+<div class="report-actions"><a href="./#tests">← 返回 E2E 看板</a></div>
+<main id="real-case-detail" aria-live="polite">正在读取用例详情…</main>
+<script src="./real-e2e.js?v=20261019.1" defer></script>
+</body>
+</html>

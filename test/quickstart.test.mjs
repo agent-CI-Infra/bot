@@ -121,7 +121,8 @@ async function fakeGitHub(t) {
 async function fixture(t, { type = 'github_app', templateRepo = 'agent-CI-Infra/CI-workflow' } = {}) {
   const github = await fakeGitHub(t);
   let quickstart;
-  const h = await harness(t, undefined, store => ({ quickstart: quickstart = new Quickstart(store, github.url, templateRepo, 'agent-CI-Infra/dashboard') }));
+  const h = await harness(t, undefined, store => ({ quickstart: quickstart = new Quickstart(store, github.url, templateRepo) }));
+  h.store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: 'https://bot.example' }));
   const { admin } = await setup(h);
   const owner = type === 'github_app' ? await account(admin, { type, app_id: '123', private_key: privateKey, token: undefined }) : await account(admin);
   h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
@@ -145,13 +146,11 @@ const grantOf = (state, token) => state.tokens.get(token);
 const writes = state => state.requests.filter(r => r.method !== 'GET' && !r.path.endsWith('/access_tokens') && r.path !== '/installation/token');
 const tokensFor = (state, installation) => [...state.tokens.values()].filter(grant => grant.installation === installation);
 const gated = state => { state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}'; };
-const boardUrl = 'https://agent-ci-infra.github.io/dashboard/boards/octo/hello/';
+const boardUrl = 'https://bot.example/boards/octo/hello/';
 
-test('the board lives on a lowercase branch of the dashboard repository', () => {
-  assert.deepEqual(boardLocation('agent-CI-Infra/dashboard', 'octo/hello'),
-    { key: 'octo/hello', branch: 'board/octo/hello', url: 'https://agent-ci-infra.github.io/dashboard/boards/octo/hello/' });
-  assert.deepEqual(boardLocation('My-Org/Dashboard', 'My-Org/Hello'),
-    { key: 'my-org/hello', branch: 'board/my-org/hello', url: 'https://my-org.github.io/Dashboard/boards/my-org/hello/' });
+test('the board uses the verified webhook origin and a lowercase stable path', () => {
+  assert.deepEqual(boardLocation('https://bot.example/', 'My-Org/Hello'),
+    { key: 'my-org/hello', url: 'https://bot.example/boards/my-org/hello/' });
 });
 
 test('the gate PR runs on its own with a source-only App token that may write workflows, and every token is revoked', async t => {
@@ -211,128 +210,44 @@ test('bundled release gates accept missing scripts and never choose repository c
   }
 });
 
-test('without the App on the dashboard repository the board and dashboard items stop, while the gate PR still goes ahead', async t => {
-  const { state, run } = await fixture(t);
+test('board and dashboard are local operations and do not require an external dashboard installation', async t => {
+  const { h, state, run } = await fixture(t);
   delete state.installations['agent-CI-Infra'];
-  const result = await run();
-  assert.equal(result.state, 'partial', JSON.stringify(result));
-  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
-    [['done', null], ['blocked', 'dashboard_app_not_installed'], ['blocked', 'dashboard_app_not_installed']]);
-  assert.match(step(result, 'board').detail, /需要把同一个 GitHub App 安装到 agent-CI-Infra\/dashboard，才能创建单仓看板/);
-  assert.match(step(result, 'dashboard').detail, /需要把同一个 GitHub App 安装到 agent-CI-Infra\/dashboard/);
-  assert.ok(!writes(state).some(r => r.path.startsWith('/repos/agent-CI-Infra/')));
-  assert.ok(!state.repos['agent-CI-Infra/dashboard'].dispatched);
-});
-
-test('the board item dispatches Create board with an actions-only dashboard token, then the dashboard registers it', async t => {
-  const { state, run } = await fixture(t);
-  gated(state);
-  const result = await run();
+  const result = await run(['board', 'dashboard']);
   assert.equal(result.state, 'done', JSON.stringify(result));
-  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')], [['skipped', null], ['done', null], ['done', null]]);
-  // The dispatch goes to the dashboard repository with the source repository as input.
-  const dispatch = state.requests.find(r => r.method === 'POST' && r.path === '/repos/agent-CI-Infra/dashboard/actions/workflows/board-create.yml/dispatches');
-  assert.ok(dispatch, JSON.stringify(state.requests));
-  assert.deepEqual(dispatch.body, { ref: 'main', inputs: { source_repository: 'octo/hello' } });
-  assert.deepEqual(grantOf(state, dispatch.auth), { installation: 3, repositories: ['dashboard'], permissions: quickstartPermissions.board });
-  // The collection runs immediately, so the first snapshot does not wait for the daily schedule.
-  const collect = state.requests.find(r => r.method === 'POST' && r.path === '/repos/agent-CI-Infra/dashboard/actions/workflows/board-collect.yml/dispatches');
-  assert.deepEqual(collect.body, { ref: 'main', inputs: { board: 'octo/hello' } });
-  assert.deepEqual(state.repos['agent-CI-Infra/dashboard'].dispatched, { workflow: 'board-collect.yml', ...collect.body });
   assert.equal(step(result, 'board').url, boardUrl);
-  assert.match(step(result, 'board').detail, /已触发「Create board」和首轮「Collect board data」/);
-  // No repository is created; the board token is only issued for the dashboard.
-  assert.deepEqual(tokensFor(state, 3).map(grant => [grant.repositories, grant.permissions]),
-    [[['dashboard'], quickstartPermissions.board], [['dashboard'], quickstartPermissions.dashboard]]);
-  const registration = state.repos['agent-CI-Infra/dashboard'], pull = registration.pulls[0];
-  const source = JSON.parse(registration.branches[pull.head]['config/gate-sources.json']).sources[0];
-  assert.deepEqual([source.id, source.name, source.owner, source.defaultBranch, source.type], ['octo/hello', 'hello', 'octo', 'main', 'status-board-lanes']);
-  assert.deepEqual([source.url, source.dashboardUrl, source.boardUrl], [boardUrl + 'data/snapshot.json', boardUrl, boardUrl]);
-  assert.deepEqual(source.channelMap, [{ channel: 'gate', workflow: ['CI'] }]);
-  assert.ok(!Object.keys(state.repos).some(full => full.startsWith('octo/') && full !== 'octo/hello'));
-  assert.equal(state.revoked.length, 3);
-  assert.ok(!JSON.stringify(result).includes('ghs_'));
-});
-
-test('an existing board branch makes the board item skip without dispatching', async t => {
-  const { state, run } = await fixture(t);
-  state.repos['agent-CI-Infra/dashboard'].branches['board/octo/hello'] = {};
-  const result = await run(['board']);
-  assert.deepEqual([result.state, ...outcome(result, 'board')], ['done', 'skipped', null]);
-  assert.equal(step(result, 'board').url, boardUrl);
-  assert.match(step(result, 'board').detail, /看板分支 board\/octo\/hello 已存在，数据由「Collect board data」定期更新/);
-  assert.ok(!state.requests.some(r => r.path.includes('/dispatches')));
+  assert.equal(step(result, 'dashboard').url, 'https://bot.example/dashboard/');
   assert.deepEqual(writes(state), []);
-  assert.equal(state.revoked.length, 2);
+  assert.equal(tokensFor(state, 3).length, 0);
+  assert.ok(h.store.get('SELECT * FROM public_board_jobs WHERE repository_id=?', '101'));
+  assert.ok(!state.requests.some(r => r.path.includes('/dashboard')));
+  assert.ok([...state.tokens.values()].every(grant => Object.values(grant.permissions).every(value => value === 'read')));
 });
 
-test('a dry run checks the branch but dispatches nothing', async t => {
-  const { state, run } = await fixture(t);
-  const result = await run(['board'], true);
-  assert.deepEqual([result.state, ...outcome(result, 'board')], ['planned', 'skipped', null]);
-  assert.equal(step(result, 'board').url, undefined);
-  assert.match(step(result, 'board').detail, /预演：将在 agent-CI-Infra\/dashboard 触发「Create board」创建分支 board\/octo\/hello/);
-  assert.ok(!state.requests.some(r => r.path.includes('/dispatches')));
+test('private publication requires an explicit local board or dashboard item and dry runs never consent', async t => {
+  const { h, state, run, owner } = await fixture(t);
+  state.repos['octo/hello'].private = true;
+  h.store.run('UPDATE installed_repositories SET private=1');
+  let result = await run(['dashboard'], true);
+  assert.equal(result.state, 'planned');
+  assert.equal(h.store.get('SELECT count(*) n FROM public_board_consents').n, 0);
+  assert.equal(h.store.get('SELECT count(*) n FROM public_board_jobs').n, 0);
+  result = await run(['dashboard']);
+  assert.equal(result.state, 'done', JSON.stringify(result));
+  assert.ok(h.store.get('SELECT * FROM public_board_consents WHERE account_id=? AND repository_id=?', owner.id, '101'));
   assert.deepEqual(writes(state), []);
-  assert.equal(state.revoked.length, 2);
+  assert.match(step(result, 'dashboard').detail, /私有仓快照对外公开/);
 });
 
-test('a missing permission stops only the item that needs it, listed in GitHub names, and that item writes nothing', async t => {
+test('an unavailable gate permission affects only the gate, while hosted boards still enable locally', async t => {
   const { state, run } = await fixture(t);
   delete state.installations.octo.permissions.workflows;
-  delete state.installations['agent-CI-Infra'].permissions.actions;
-  let result = await run();
-  assert.equal(result.state, 'blocked', JSON.stringify(result));
-  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
-    [['blocked', 'app_permissions_missing'], ['blocked', 'app_permissions_missing'], ['blocked', 'board_not_ready']]);
-  assert.match(step(result, 'gate_pr').detail, /octo 的安装里同意：Workflows（Read and write）$/);
-  assert.match(step(result, 'board').detail, /agent-CI-Infra 的安装里同意：Actions（Read and write）$/);
-  assert.deepEqual(writes(state), []);
-  // With the source permissions back, the gate PR is opened while the board still waits for its own.
-  state.installations.octo.permissions.workflows = 'write';
-  result = await run();
-  assert.equal(result.state, 'partial');
-  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
-    [['done', null], ['blocked', 'app_permissions_missing'], ['blocked', 'board_not_ready']]);
-  assert.ok(writes(state).every(r => r.path.startsWith('/repos/octo/hello/')));
-});
-
-test('a private source repository gets all three items; the dashboard secret is named once in the plan', async t => {
-  const { state, run } = await fixture(t);
-  state.repos['octo/hello'].private = true;
-  gated(state);
   const result = await run();
-  assert.equal(result.state, 'done', JSON.stringify(result));
-  assert.deepEqual([outcome(result, 'gate_pr'), outcome(result, 'board'), outcome(result, 'dashboard')],
-    [['skipped', null], ['done', null], ['done', null]]);
-  assert.match(step(result, 'preflight').detail, /PRIVATE_SOURCE_TOKEN/);
-  // Create board and the first collection are both dispatched for the private source.
-  const dispatches = state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/dispatches'));
-  assert.deepEqual(dispatches.map(r => r.body.inputs), [{ source_repository: 'octo/hello' }, { board: 'octo/hello' }]);
-  assert.match(step(result, 'board').detail, /PRIVATE_SOURCE_TOKEN/);
-  const pull = state.repos['agent-CI-Infra/dashboard'].pulls[0];
-  assert.match(pull.body, /可见性：private/);
-  assert.match(pull.body, /PRIVATE_SOURCE_TOKEN/);
-});
-
-test('a private board stops with dashboard_private_token_missing when the dashboard secret is absent', async t => {
-  const { state, run } = await fixture(t);
-  state.repos['octo/hello'].private = true;
-  state.createMissing = true;
-  const result = await run(['board']);
-  assert.deepEqual([result.state, ...outcome(result, 'board')], ['blocked', 'blocked', 'dashboard_private_token_missing']);
-  assert.match(step(result, 'board').detail, /PRIVATE_SOURCE_TOKEN/);
-  // Without the secret Create board fails, so the first collection is not dispatched.
-  assert.ok(!state.requests.some(r => r.method === 'POST' && r.path.endsWith('/board-collect.yml/dispatches')));
-});
-
-test('a private board also maps a missing secret found by the first collection', async t => {
-  const { state, run } = await fixture(t);
-  state.repos['octo/hello'].private = true;
-  state.collectMissing = true;
-  const result = await run(['board']);
-  assert.deepEqual([result.state, ...outcome(result, 'board')], ['blocked', 'blocked', 'dashboard_private_token_missing']);
-  assert.ok(state.requests.some(r => r.method === 'POST' && r.path.endsWith('/board-collect.yml/dispatches')));
+  assert.equal(result.state, 'partial');
+  assert.deepEqual(outcome(result, 'gate_pr'), ['blocked', 'app_permissions_missing']);
+  assert.equal(step(result, 'board').status, 'done');
+  assert.equal(step(result, 'dashboard').status, 'done');
+  assert.deepEqual(writes(state), []);
 });
 
 test('a repository on a bot account is not onboarded and its long-lived token is never sent', async t => {
@@ -341,29 +256,6 @@ test('a repository on a bot account is not onboarded and its long-lived token is
   assert.deepEqual([result.state, result.error], ['blocked', 'github_app_required']);
   assert.deepEqual(['gate_pr', 'board', 'dashboard'].map(id => step(result, id).status), ['blocked', 'blocked', 'blocked']);
   assert.deepEqual(state.requests, []);
-});
-
-test('the dashboard item on its own waits for the board branch and then registers its URL', async t => {
-  const { state, run, admin } = await fixture(t);
-  gated(state);
-  let result = await run(['dashboard']);
-  assert.deepEqual([result.state, ...outcome(result, 'dashboard')], ['blocked', 'blocked', 'board_not_ready']);
-  assert.match(step(result, 'dashboard').detail, /单仓看板 board\/octo\/hello 还没有就绪，先执行「单仓看板」这一项/);
-  assert.deepEqual(writes(state), []);
-  // Only the dashboard-scoped board token is needed for the readiness check.
-  assert.deepEqual(tokensFor(state, 3), [{ installation: 3, repositories: ['dashboard'], permissions: quickstartPermissions.board }]);
-  state.repos['agent-CI-Infra/dashboard'].branches['board/octo/hello'] = {};
-  result = await run(['dashboard']);
-  assert.deepEqual([result.state, ...outcome(result, 'dashboard')], ['done', 'done', null]);
-  const registration = state.repos['agent-CI-Infra/dashboard'], pull = registration.pulls[0];
-  const source = JSON.parse(registration.branches[pull.head]['config/gate-sources.json']).sources[0];
-  assert.deepEqual([source.type, source.url, source.dashboardUrl, source.boardUrl],
-    ['status-board-lanes', boardUrl + 'data/snapshot.json', boardUrl, boardUrl]);
-  assert.ok(!state.requests.some(r => r.path.includes('/dispatches')));
-  // Each item keeps its latest result from the run that executed it.
-  const latest = (await admin('/api/projects/101/quickstart')).value.items;
-  assert.deepEqual([latest.dashboard.status, latest.board, latest.gate_pr], ['done', undefined, undefined]);
-  for (const steps of [[], ['nope'], 'board']) assert.equal((await admin('/api/projects/101/quickstart', 'POST', { steps })).status, 400);
 });
 
 test('a private template repository is read through the App installed on it, or the gate item asks to install it', async t => {

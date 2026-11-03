@@ -10,3 +10,8 @@ they do not include Witden desktop, messaging, or employee delegation code.
 The headless project agent uses Pi (@earendil-works/pi-coding-agent 1.4.0),
 https://github.com/badlogic/pi-mono, under the MIT License.
 The upstream notice is retained in runner/licenses/pi-MIT.txt and the project image.
+
+The public dashboard and single-repository exporter are vendored from
+https://github.com/agent-CI-Infra/dashboard, revision
+9e57dfaf11fa44606517da454c5732a59d1f7996.
+Their MIT and Apache-2.0 license texts are retained in public-board/.

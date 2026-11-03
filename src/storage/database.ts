@@ -112,6 +112,12 @@ export class Store {
     // What GitHub granted on the repository as last read: the installation's permissions for an App, the account's role
     // flags for a bot account. NULL until a sync or permission check has read it.
     extend('installed_repositories', { permissions: 'TEXT', permissions_at: 'TEXT', hidden: 'INTEGER NOT NULL DEFAULT 0' });
+    // Public exports are independent of review/development activation. Private publication requires local consent.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS public_board_consents(account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      repository_id TEXT NOT NULL,PRIMARY KEY(account_id,repository_id));
+      CREATE TABLE IF NOT EXISTS public_board_jobs(account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,repository_id TEXT NOT NULL,
+      generation INTEGER NOT NULL DEFAULT 1,collected_generation INTEGER NOT NULL DEFAULT 0,active_path TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,last_error TEXT,PRIMARY KEY(account_id,repository_id));`);
     // Gate/dashboard connection status per repository and one-click onboarding runs.
     this.db.exec(`CREATE TABLE IF NOT EXISTS repo_integrations(repository_id TEXT PRIMARY KEY,
         gate_state TEXT NOT NULL DEFAULT 'unknown',gate_detail TEXT NOT NULL DEFAULT '',

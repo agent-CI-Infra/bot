@@ -8,7 +8,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run build --workspace=bot-public-dashboard",
     "check": "tsc -p tsconfig.json --noEmit && node scripts/check-runtime.mjs",
     "start": "node dist/main.js",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
@@ -25,5 +25,8 @@
   "dependencies": {
     "jose": "^6.2.13",
     "yaml": "2.9.0"
-  }
+  },
+  "workspaces": [
+    "public-board/dashboard"
+  ]
 }

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>DigitalMate · Nightly E2E 性能看板</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <style>.topbar, #tabs, .footer { display: none; } .page { padding-top: 0; }</style>
+    <header class="topbar">
+      <div class="topbar-main">
+        <p class="eyebrow">DigitalMate · Nightly E2E</p>
+        <h1>用例性能看板</h1>
+        <p class="subtitle">
+          现网模型请求的每日网关耗时与 TTFT、TPOT、P95、Token 指标，按模型和 Asia/Shanghai 自然日聚合。
+        </p>
+      </div>
+      <div class="topbar-meta">
+
+        <span id="device" class="meta-line"></span>
+      </div>
+    </header>
+
+    <main class="page">
+      <div id="error" class="error" hidden></div>
+
+      <nav id="tabs" class="tabs" role="tablist" aria-label="看板视图">
+        <button id="tab-cases" class="tab active" type="button" role="tab" aria-selected="true"
+          aria-controls="view-cases" data-view="cases">用例看板</button>
+        <button id="tab-models" class="tab" type="button" role="tab" aria-selected="false"
+          aria-controls="view-models" data-view="models" tabindex="-1">模型指标</button>
+      </nav>
+
+      <section id="view-cases" class="view" role="tabpanel" aria-labelledby="tab-cases">
+        <section id="summary" class="summary" aria-label="汇总"></section>
+        <section id="perf-strip" class="perf-strip" aria-label="提问基线与失败率"></section>
+
+        <div class="layout">
+          <aside class="panel case-panel">
+            <div class="panel-title">
+              <h2>用例</h2>
+              <span id="case-count" class="muted"></span>
+            </div>
+            <div id="case-list" class="case-list"></div>
+          </aside>
+
+          <section id="detail" class="detail" aria-live="polite"></section>
+        </div>
+      </section>
+
+      <section id="view-models" class="view" role="tabpanel" aria-labelledby="tab-models" hidden>
+        <div id="model-insights"></div>
+
+        <section class="card">
+          <div class="card-head comparison-head">
+            <h2>模型对比</h2>
+            <div id="model-controls" class="comparison-controls">
+              <div class="range-picker" role="group" aria-label="时间范围（影响模型对比及下方明细）">
+                <button class="range-btn" type="button" data-range="7" aria-pressed="false">近 7 天</button>
+                <button class="range-btn" type="button" data-range="30" aria-pressed="false">近 30 天</button>
+                <button class="range-btn active" type="button" data-range="0" aria-pressed="true">全部</button>
+              </div>
+              <span id="model-range" class="muted">—</span>
+              <span id="updated" class="muted comparison-updated">加载中…</span>
+            </div>
+          </div>
+          <div id="model-compare"><p class="empty">加载中…</p></div>
+          <p class="chart-note">
+            所选时间范围内全部模型的汇总指标，按调用数排序；「最新 TTFT 较前日」达到 20% 升幅即标记为回退。
+            点击模型名称或对应行可切换下方明细。
+            <span id="compare-version" class="muted">—</span>
+          </p>
+        </section>
+
+        <div id="current-model" class="current-model" aria-live="polite"></div>
+        <section id="model-summary" class="summary model-summary" aria-label="模型指标汇总">
+          <p class="empty">加载中…</p>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>现网模型性能指标</h2>
+            <span class="muted">按日聚合 · Asia/Shanghai</span>
+          </div>
+          <div id="model-trends" class="trend-grid"><p class="empty">加载中…</p></div>
+          <p class="chart-note">
+            统计此网关的模型请求（未区分测试或其他业务）；TTFT/TPOT 为网关时间戳估算：未能确认是否流式的成功请求也计入，可能偏离真实首 token 指标；耗时 P95 至少需要 20 个成功样本。
+            三张图均可点击图例单独显示或隐藏曲线；请求失败率按所选模型统计；含未知状态的日期留空；当日数据未结束，与前日比较仅供参考；Token 按每次请求统计；缺失值留空，不补 0。
+          </p>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>统计明细</h2>
+            <div class="stats-controls">
+              <label class="granularity-picker" for="granularity-select">
+                <span class="muted">粒度</span>
+                <select id="granularity-select">
+                  <option value="daily" selected>每日</option>
+                  <option value="weekly">每周</option>
+                </select>
+              </label>
+              <span id="daily-range" class="muted">Asia/Shanghai</span>
+            </div>
+          </div>
+          <div id="model-stats"><p class="empty">加载中…</p></div>
+        </section>
+
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>数据：现网网关日志 · 时区：Asia/Shanghai</span>
+      <span>按模型 × 自然日聚合；不含消息正文，耗时口径为网关耗时。</span>
+    </footer>
+
+    <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

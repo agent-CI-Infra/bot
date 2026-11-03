@@ -91,23 +91,25 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 令牌和 PR 检视时运行的仓库测试处在同一台虚拟电脑里，测试代码能读到这些环境变量，所以令牌被设计成只读、只覆盖本仓库，并在模型阶段结束时撤销；GitHub 安装令牌最长有效一小时。评论、标签、行内检视、分支和 PR 仍只由控制面用自己的令牌发布。读取 Actions 和检查状态需要 App 授予 Actions、Checks、Commit statuses 权限；接入向导生成的 manifest 申请 Actions、Checks、Commit statuses 写（写权限留给控制面发布 commit status、检查结果和重跑 CI；任务令牌仍一律降为读）。之前创建的 App 需要在 GitHub 上补加这三项权限，并由安装方同意。检视和开发的令牌刻意不申请 workflows：开发任务改到 `.github/workflows/` 时 GitHub 会拒绝发布。App 本身可以为一键接入获得 Workflows，但它只出现在接入专用的令牌里（见下文「一键接入」），检视、开发和只读令牌都不申请。也不申请 administration、secrets、security_events、vulnerability_alerts、secret_scanning_alerts：任务令牌对 PR 代码可见，不能让它读到仓库设置、密钥或未公开的漏洞告警。
 
-## 一键接入
+## 一键接入与公共看板托管
 
-项目页的「公共配置」包含三项，可以逐项执行，也可以一次全部执行：门禁 PR（给源码仓加 CI-workflow 门禁）、单仓看板（在 dashboard 仓库触发「Create board」，创建 `board/<owner>/<repo>` 数据分支，再触发首轮「Collect board data」）和 Dashboard 登记（向 dashboard `BOT_DASHBOARD_REPO`，默认 `agent-CI-Infra/dashboard`，提登记 PR）。共同的预检只确认仓库挂在 GitHub App 上、App 能读到它；之后每一项只核对自己要用的安装和权限，在自己的第一次写入之前停下，其他项照常执行。只有 Dashboard 登记依赖另一项：它登记的是看板站点，所以看板分支要先就绪。对话框里每一项显示最近一次执行它的结果。
+项目页的「公共配置」保留门禁 PR、单仓看板、Dashboard 登记三个独立项。门禁 PR 仍使用 CI-workflow 模板向源仓提 PR，行为不变。两个看板项只在 bot 本地启用公开快照并返回访问链接，不创建外部仓、看板分支、工作流或登记 PR。预演不写本地启用记录。
 
-全程只用 GitHub App 安装令牌，由控制面用 App 私钥签 JWT 后按用途分别签发，权限取安装已授予的子集，运行结束时撤销；机器人账号的长期 Token 不用于接入，挂在机器人账号上的仓库停在预检。
+公共 Dashboard 位于已验证的 webhook 公网地址 `/dashboard/`，单仓看板位于 `/boards/<owner>/<repo>/`（小写），看板目录位于 `/boards/`。三者只由 webhook 监听端口 8791 提供，不需要控制台登录；管理端口 8792 保留原控制台和其「看板」页面，不提供这些公开路径。公共地址沿用安装向导验证的 `onboarding.public.origin`。
 
-| 令牌 | 范围 | 权限 |
+GitHub App 已安装的公开仓自动提供看板并进入汇总，无需启动检视/开发项目。私有仓默认不公开；超管在现有公共配置中明确执行「单仓看板」或「Dashboard 登记」后，bot 才记录该账号与仓库的公开授权并采集其快照。只执行门禁 PR 不会公开私有仓。升级不读取外部 dashboard 仓的登记：以前登记过的私有仓需在本地重新启用一次。卸载或删除后，公开路由立即排除该仓；没有新增公开开关。
+
+验签通过且未重复的 webhook 在同一数据库事务中递增该仓的采集代数，包括已安装但未启动的仓库。后台持久队列合并投递、按仓采集、失败退避重试；新投递在采集过程中到达会保留为下一代任务。启动时补齐公开仓初始采集，重启后继续未完成的代数。采集失败保留上一份有效快照，新快照校验仓库身份后整体切换。所有公开请求重新核对安装状态和私有仓授权，内部 checkpoint、源码及凭据没有公开路由。
+
+现有 Dashboard React 页面、单仓静态页面、社区统计采集器和增量采集器随 bot 一起构建。页面字段、统计方法和版式沿用原实现；门禁页取消未安装仓的设计占位回退，仅显示真实采集数据。Python 采集器只用标准库。快照、历史与内部增量状态保存在数据库旁的 `public-boards/` 数据目录，容器镜像包含 Python 3 和时区数据。`BOT_DASHBOARD_REPO` 与 GitHub Pages 不再参与托管或接入。
+
+| 操作 | 目标 | 权限 |
 | --- | --- | --- |
-| 源码仓 | 仅该仓库 | contents 写、pull_requests 写、workflows 写、metadata 读（门禁 PR 要提交 `.github/workflows/`） |
-| 单仓看板 | 仅 dashboard 仓库 | contents 读、actions 写、metadata 读（查询 `board/*` 分支，触发「Create board」和首轮「Collect board data」） |
-| Dashboard | 仅 dashboard 仓库 | contents 写、pull_requests 写、metadata 读（登记文件是 JSON） |
+| 门禁 PR | 源仓 | contents 写、pull_requests 写、workflows 写、metadata 读 |
+| 看板采集 | 源仓 | contents、issues、pull_requests、actions、metadata 只读，按安装实际授权裁剪 |
+| 私有仓公开启用 | bot 本地 | 控制台超管；不向 GitHub 写配置 |
 
-模板仓库 CI-workflow（`BOT_CI_TEMPLATE_REPO`）在 App 装有它时用只读令牌读取；没装但仓库公开时，用手上的令牌或不带令牌读取。单仓看板不再复制 `single-repo/`：dashboard 仓库自己的「Create board」工作流创建 orphan 分支 `board/<owner>/<repo>`（小写），`board-config.json` 写入源仓的 `visibility`（public/private）；`Deploy` 汇总发布到 `https://<dashboard 所有者>.github.io/<dashboard 仓库名>/boards/<owner>/<repo>/`。分支已存在时看板这一项跳过，由「Collect board data」定期更新。
-
-公开源仓用 dashboard 自带的 workflow 令牌读取；私有源仓用 dashboard 仓库一次性配置的只读 secret `PRIVATE_SOURCE_TOKEN` 读取，发布看板分支仍用 dashboard 自己的令牌。私有源仓与公开源仓共用同一套 `board/<owner>/<repo>` 分支，不会在用户账号下建仓，也不按源仓配置 secret。看板分支只发布 `site/data/` 快照和静态资源，不包含源码或凭据。缺少 `PRIVATE_SOURCE_TOKEN` 时，首轮采集以 `dashboard_private_token_missing` 返回给单仓看板这一项。
-
-权限不足时，对应项列出 GitHub 上的权限名（Workflows、Actions 等，均为 Read and write）和缺权限的安装，由人在 App 设置里新增并在该安装里同意。dashboard 仓库没有安装 App 时，单仓看板和 Dashboard 登记都说明需要把同一个 App 安装过去。私有仓库同样可以完成三项；Dashboard 登记 PR 会写明 `public` 或 `private` 可见性。
+每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。CI-workflow 模板读取规则和门禁 PR 的权限边界保持原样。
 
 ## 代码快照与发布
 
