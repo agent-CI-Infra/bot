@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视'], ['development', '开发'], ['notes', '项目笔记'], ['rules', '规则总览'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行记录']];
+const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视'], ['development', '开发'], ['release', '发版本'], ['notes', '项目笔记'], ['rules', '规则总览'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行记录']];
 // The bot's rule files: what each one does, which tasks read it, and the section where it is edited.
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
 const ruleFiles = [
@@ -108,11 +108,51 @@ function projectBody(section) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, model: modelSection, review: reviewSection, development: developmentSection, notes: notesSection, rules: rulesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ basic: basicSection, machine: machineSection, model: modelSection, review: reviewSection, development: developmentSection, release: releaseSection, notes: notesSection, rules: rulesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
 const changed = (values, saved) => Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== saved[key]));
+
+function releaseSection() {
+  const section = card('发版本'), endpoint = `/api/repositories/${current.id}/releases`, id = current.id;
+  const version = input('release_version', '', { placeholder: 'v1.2.3 或 v1.2.3-beta.1', maxLength: 256 }), preview = element('div'), status = element('div'), message = element('p', '', 'view-error');
+  const confirm = button('确认打标签', async () => {
+    const p = current.releasePreview;
+    if (!p?.available || p.version !== version.value) return;
+    if (!await askConfirm({ title: `确认打标签 ${p.version}？`, body: [p.target_sha, p.target_title, '工作流成功后生成草稿，正式发布仍需单独确认。'], action: '确认打标签' })) return;
+    try { confirm.disabled = true; await api(endpoint, 'POST', { version: p.version, target_sha: p.target_sha, credential: p.credential }); await refresh(); }
+    catch (err) { message.textContent = err.message; await check(); }
+  }); confirm.disabled = true;
+  const check = async () => {
+    const value = version.value; confirm.disabled = true; message.textContent = '';
+    try {
+      const p = await api(endpoint + '/preflight?version=' + encodeURIComponent(value));
+      if (current.id !== id || value !== version.value) return;
+      current.releasePreview = p;
+      version.pattern = p.version_pattern || '';
+      preview.replaceChildren(...(p.checks || []).map(c => note(c.message + (c.reason ? ' ' + c.reason : ''))));
+      if (p.detail) preview.append(note(p.detail));
+      if (p.target_sha) preview.append(facts([['默认分支', p.default_branch], ['目标提交', link(p.target_url, p.target_sha)], ['提交标题', p.target_title], ['版本', !p.version_valid ? '请填写合法版本号' : p.prerelease ? '预发布' : '稳定版'],
+        ['上一枚版本', p.previous_tag ? `${p.previous_tag.name} · ${p.previous_tag.sha}` : '从仓库历史起算'], ['发行说明规则', `${p.skill.source} · ${p.skill.path || p.skill.version} · ${p.skill.sha} · ${p.skill.hash}`],
+        ['已有标签', p.existing_tag ? p.existing_tag.commit : '无'], ['已有 Release', p.existing_release ? link(p.existing_release.url, p.existing_release.draft ? '已有草稿' : '已由仓库工作流／外部操作发布') : '无']]));
+      confirm.disabled = !p.available;
+    } catch (err) { message.textContent = err.message; }
+  };
+  version.addEventListener('input', () => { confirm.disabled = true; });
+  version.addEventListener('change', check);
+  const refresh = async () => {
+    try {
+      const data = await api(endpoint); if (current.id !== id || current.section !== 'release') return;
+      status.replaceChildren(...data.releases.map(r => releaseRecord(r, endpoint, refresh, message)));
+    } catch (err) { message.textContent = err.message; }
+  };
+  section.append(note('填写版本并确认目标提交。控制面创建标签，复用仓库 Release 工作流，成功后准备发行说明草稿。'), field('版本号', version), button('检查候选提交', check), preview, confirm, message, status);
+  void check(); void refresh();
+  const poll = async () => { if (current?.id !== id || current.section !== 'release') return; await refresh(); projectTimer = setTimeout(poll, 5000); };
+  projectTimer = setTimeout(poll, 5000); return [section];
+}
+function releaseRecord(r) { const section = card(r.version); section.append(facts([['阶段', r.stage], ['目标提交', r.target_sha]])); return section; }
 
 function notesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/notes`, section = card('项目笔记'), list = element('div', '', 'project-notes-list'), message = element('p', '', 'view-error');
