@@ -1,5 +1,6 @@
 import { createSign } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
+import { digest } from '../core/security.js';
 import { errorBody, networkReason, Redactor, safePath, stop } from '../agent/common.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
@@ -73,6 +74,10 @@ export async function revokeInstallationToken(apiUrl: string, token: string) {
     headers:{ Authorization:'Bearer ' + token, Accept:'application/vnd.github+json' } });
   return [204, 401].includes(response.status);
 }
+// The account's actor (an App's bot user, or the bot account's user) rarely changes, so connect looks it up once an hour per
+// account and credential rather than on every task.
+const actors = new Map<string, { at: number, id: string, login: string }>();
+const actorTtlMs = 3600_000;
 export class GitHub {
   token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = ''; permissions: Record<string,string> = {};
   // The repository's HTTPS clone URL as GitHub reports it; the Git cache fetches from it without putting the token in it.
@@ -136,12 +141,17 @@ export class GitHub {
     this.fullName = this.repository.full_name;
     if (account!.type === 'bot_account') {
       if (!secrets.token) stop('github_credentials_missing', 'waiting_configuration', 'GitHub 机器人账号未保存访问令牌，请重新配置凭据。'); this.token = String(secrets.token); this.redactor.add(this.token);
-      if (identifyActor) { const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || ''); }
+      if (identifyActor) {
+        const key = account!.id + ':' + digest(this.token), known = actors.get(key);
+        if (known && Date.now() - known.at < actorTtlMs) Object.assign(this, { actorId: known.id, actorLogin: known.login });
+        else { const actor = await this.request('GET','/user'); this.actorId = String(actor.id); this.actorLogin = String(actor.login || ''); actors.set(key, { at: Date.now(), id: this.actorId, login: this.actorLogin }); }
+      }
     } else {
       if (!secrets.private_key) stop('github_credentials_missing', 'waiting_configuration', 'GitHub App 账号未保存私钥，请重新配置凭据。');
       this.redactor.add(secrets.private_key);
       const jwt = appJwt(String(account!.app_id), String(secrets.private_key)); this.redactor.add(jwt);
-      const app = identifyActor ? await this.request('GET','/app', undefined, false, jwt) : null;
+      const actorKey = account!.id + ':' + String(account!.app_id), known = actors.get(actorKey), fresh = !!known && Date.now() - known.at < actorTtlMs;
+      const app = identifyActor && !fresh ? await this.request('GET','/app', undefined, false, jwt) : null;
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission', `GitHub App 安装 ${installation.id} 的所属账号与仓库登记的所有者不一致。`);
       const requested: Record<string,string> = requiredPermissions || requestedPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
@@ -151,9 +161,10 @@ export class GitHub {
       const access = await this.request('POST',`/app/installations/${installation.id}/access_tokens`, { repository_ids:[Number(this.repository.id)], permissions }, false,jwt);
       this.token = String(access.token || ''); if (!this.token) stop('github_token_missing','waiting_permission', `GitHub 未返回安装 ${installation.id} 的访问令牌。`); this.redactor.add(this.token);
       this.expiresAt=String(access.expires_at||'');this.permissions=access.permissions&&typeof access.permissions==='object'?access.permissions:permissions;
-      if (identifyActor) {
+      if (identifyActor && fresh) Object.assign(this, { actorId: known!.id, actorLogin: known!.login });
+      else if (identifyActor) {
         const actor = await this.request('GET','/users/' + encodeURIComponent(app.slug + '[bot]'));
-        this.actorId = String(actor.id); this.actorLogin = String(actor.login || app.slug + '[bot]');
+        this.actorId = String(actor.id); this.actorLogin = String(actor.login || app.slug + '[bot]'); actors.set(actorKey, { at: Date.now(), id: this.actorId, login: this.actorLogin });
       }
     }
     const repo = await this.request('GET','/repositories/' + this.repository.id);
