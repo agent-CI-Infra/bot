@@ -10,7 +10,7 @@ export const workflow = "name: Release\non:\n  push:\n    tags: ['v*']\njobs:\n 
 export async function releaseFixture(t) {
   const state = { files: { '.github/ci-gates.json': '{}', '.github/workflows/ci.yml': 'name: CI', '.github/workflows/release.yml': workflow },
     head: target, tags: {}, releases: [], runs: [], jobs: [], requests: [], tokens: [], unknown: '', deny: '', registered: true,
-    logs: {}, commits: [{ sha: target, commit: { message: 'Add release lane' }, html_url: 'https://github.com/fixture/project-101/commit/' + target },
+    logs: {}, histories: {}, commits: [{ sha: target, commit: { message: 'Add release lane' }, html_url: 'https://github.com/fixture/project-101/commit/' + target },
       { sha: previous, commit: { message: 'Initial commit' }, html_url: 'https://github.com/fixture/project-101/commit/' + previous }], prs: {}, pages: {}, custom: null };
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -32,7 +32,7 @@ export async function releaseFixture(t) {
     if (suffix.startsWith('/git/blobs/')) { const entry = Object.values(state.files).find(content => createHash('sha1').update(content).digest('hex') === suffix.split('/').at(-1)); return entry === undefined ? send({}, 404) : send({ encoding: 'base64', content: Buffer.from(entry).toString('base64') }); }
     if (suffix === '/actions/workflows/release.yml') return state.registered ? send({ id: 77, path: '.github/workflows/release.yml', state: 'active' }) : send({}, 404);
     if (/^\/commits\/[a-f0-9]{40}$/.test(suffix)) return send({ ...state.commits[0], sha: suffix.split('/').at(-1) });
-    if (suffix === '/commits') { const items = url.searchParams.get('sha') === previous ? state.commits.filter(c => c.sha === previous) : state.commits; return send(state.pages[url.search] ?? (Number(url.searchParams.get('page')) > 1 ? [] : items)); }
+    if (suffix === '/commits') { const sha = url.searchParams.get('sha'), items = state.histories[sha] ?? (sha === previous ? state.commits.filter(c => c.sha === previous) : state.commits); return send(state.pages[url.search] ?? (Number(url.searchParams.get('page')) > 1 ? [] : items)); }
     if (suffix.endsWith('/pulls')) return send(Number(url.searchParams.get('page')) > 1 ? [] : (state.prs[suffix.split('/')[2]] || []));
     if (suffix === '/tags') return send(Number(url.searchParams.get('page')) > 1 ? [] : Object.entries(state.tags).map(([name, value]) => ({ name, commit: { sha: value.commit || value.sha } })));
     if (suffix.startsWith('/git/ref/tags/')) { const value = state.tags[suffix.slice('/git/ref/tags/'.length)]; return value ? send({ object: { sha: value.sha, type: value.type } }) : send({}, 404); }

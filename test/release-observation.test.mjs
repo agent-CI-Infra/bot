@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { releaseFixture, run, writes } from './release-fixtures.mjs';
+import { releaseFixture, run, writes, other } from './release-fixtures.mjs';
 
 const call = (id, name, args = {}) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 const final = advice => ({ content: JSON.stringify({ job_ids: [1], advice }) });
@@ -120,6 +120,9 @@ test('observation does not hold the publishing lease or overwrite concurrent con
   try {
     const before = f.record(); assert.equal(before.lease, null); assert.equal(before.active, 0);
     const writer = f.service.claim(before.id); f.service.save(writer, { detail: '控制面继续更新状态' }, 'failed'); f.service.unlock(writer);
+    // A second version needs a new commit; the previous tag's ancestry stays unchanged.
+    f.state.histories[f.state.head] = [...f.state.commits]; f.state.head = other;
+    f.state.commits.unshift({ sha: other, commit: { message: 'Follow-up change' }, html_url: 'https://github.com/fixture/project-101/commit/' + other });
     const next = await f.create('v1.2.4'); assert.equal(next.status, 201); assert.notEqual(next.value.release.id, before.id);
   } finally { resume(); }
   const result = await pending; assert.equal(result.stage, 'failed'); assert.equal(result.detail, '控制面继续更新状态'); assert.ok(result.observation);
