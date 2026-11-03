@@ -28,8 +28,10 @@ export function record(store: Store, bucket: Bucket, resource: string, window: W
   bucket.key, resource.slice(0, 40), bucket.kind, bucket.account_id, bucket.installation_id || null, bucket.owner || null,
   window.quota, window.remaining, window.used, window.reset_at, new Date().toISOString());
 }
-// The window a response reports in its x-ratelimit-* headers; a response without them changes nothing.
-export function observe(store: Store, bucket: Bucket, headers: Headers): void {
+// The window a response reports in its x-ratelimit-* headers; a response without them changes nothing. A 401 means the
+// credential was not accepted, and its headers describe the anonymous window, not the bucket's.
+export function observe(store: Store, bucket: Bucket, headers: Headers, status = 200): void {
+  if (status === 401) return;
   const quota = count(headers.get('x-ratelimit-limit')), remaining = count(headers.get('x-ratelimit-remaining')), reset = count(headers.get('x-ratelimit-reset'));
   if (quota === null || remaining === null) return;
   record(store, bucket, headers.get('x-ratelimit-resource') || 'core', { quota, remaining, used: count(headers.get('x-ratelimit-used')) ?? quota - remaining, reset_at: reset === null ? null : reset * 1000 });

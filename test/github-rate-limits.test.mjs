@@ -23,7 +23,8 @@ async function fixture(t, { computer = 'ready' } = {}) {
     requests.push(`${req.method} ${path}`);
     const send = (value, status = 200, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...windowHeaders(jwt ? 4990 : 4100, reset), ...headers }); res.end(JSON.stringify(value)); };
     const repo = '/repos/fixture/project-101';
-    if (path === '/rate_limit') return jwt ? send({ message: 'A JSON web token could not be decoded' }, 401) : send({ resources: { core: { limit: 5000, remaining: 4321, used: 679, reset: seconds(reset) }, graphql: { limit: 5000, remaining: 4999, used: 1, reset: seconds(reset) } } });
+    // GET /rate_limit refuses a JWT, and its 401 carries the anonymous window, which must not be recorded for the App.
+    if (path === '/rate_limit') return jwt ? send({ message: 'A JSON web token could not be decoded' }, 401, windowHeaders(60, reset, { 'x-ratelimit-limit': '60' })) : send({ resources: { core: { limit: 5000, remaining: 4321, used: 679, reset: seconds(reset) }, graphql: { limit: 5000, remaining: 4999, used: 1, reset: seconds(reset) } } });
     if (path === '/app') return send({ id: 123, slug: 'fixture-app' });
     if (path === '/app/installations') return send([{ id: 55, account: { id: 10, login: 'fixture-org' }, permissions: { metadata: 'read' } }]);
     if (path === repo + '/installation') return send({ id: 55, account: { id: 10, login: 'fixture-org' }, permissions: { contents: 'read', issues: 'write', pull_requests: 'write', metadata: 'read' } });
