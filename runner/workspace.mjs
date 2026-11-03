@@ -46,14 +46,18 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
     if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_commit');
     await mkdir(root,{recursive:true});
     if(input.author_email){if(!/^[1-9]\d*\+[a-zA-Z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$/.test(input.author_email))throw new Error('invalid_author_email');await writeFile(authorFile,JSON.stringify({email:input.author_email}),{mode:0o600});}
-    if(!await stat(repo+'/.git').then(()=>true,()=>false)){await rm(repo,{recursive:true,force:true});await storeGit(['worktree','add','--detach','--force',repo,input.sha],{cwd:gitRoot+'/repo.git'});}
+    // An existing directory counts only as a worktree of the store at exactly this commit; anything else there, such as an
+    // earlier file copy of the same tree (its own repository, without history), is replaced.
+    const worktree=await stat(repo+'/.git').then(s=>s.isFile(),()=>false),current=worktree?(await storeGit(['rev-parse','HEAD'],{cwd:repo}).catch(()=>Buffer.from(''))).toString().trim():'';
+    if(current!==input.sha){await rm(repo,{recursive:true,force:true});await storeGit(['worktree','prune'],{cwd:gitRoot+'/repo.git'}).catch(()=>{});await storeGit(['worktree','add','--detach','--force',repo,input.sha],{cwd:gitRoot+'/repo.git'});}
     const tree=(await storeGit(['rev-parse','HEAD^{tree}'],{cwd:repo})).toString().trim(),head=(await storeGit(['rev-parse','HEAD'],{cwd:repo})).toString().trim();
     if(tree!==input.tree_sha)throw new Error(`checkout_tree_mismatch: expected ${input.tree_sha}, actual ${tree}`);
     return {tree_sha:tree,local_sha:head};
   }
   const actual=await realpath(repo);if(actual!==repo)throw new Error(`workspace_replaced: expected ${repo}, actual ${actual}`);
   if(input.type==='workspace_context'){
-    if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
+    // The control plane sends context in 45,000-byte chunks, 60,000 base64 characters.
+    if(typeof input.base64!=='string'||input.base64.length>61440||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
     const data=Buffer.from(input.base64,'base64'),target=await contextPath(input.path,true);
     const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_NOFOLLOW|(input.offset===0?constants.O_TRUNC:0),0o600);
     try{if((await handle.stat()).size!==input.offset)throw new Error('offset_mismatch');await handle.write(data,0,data.length,input.offset);}finally{await handle.close();}
