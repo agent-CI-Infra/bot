@@ -299,7 +299,8 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
         else if (repair) { assert.equal(reply.error, 'validation_failed'); write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
         else value = { error: 'fixture_stopped_after_reply' };
       }
-    } else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
+    } else if (r.type === 'workspace_context') value = { written: true };
+    else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
     return { ok: true, result: value };
   } };
   const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');

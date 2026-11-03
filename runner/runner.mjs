@@ -6,6 +6,7 @@ import { command } from './command.mjs';
 import { execFile } from 'node:child_process';
 import { ownership, isRunner, tasksRoot } from './ownership.mjs';
 import { pruneJournal } from './journal.mjs';
+import { storeOperation, pruneTasks } from './store.mjs';
 
 const workspace = '/workspace', journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
@@ -22,6 +23,7 @@ async function filePath(value) {
 async function execute(input) {
   const outputFile = `${journal}/${input.operation_id}.out`;
   if(input.type.startsWith('workspace_')) return workspaceTool({ ...input, output_file: outputFile });
+  if(input.type.startsWith('git_')) return storeOperation(input);
   // Health does not read the journal: a record left running by an earlier container already answers a repeated id
   // with operation_interrupted, and reading every record took longer than a start may on a computer with a large journal.
   if (input.type === 'health') return { ready: true, runner_version: 1 };
@@ -95,7 +97,7 @@ if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operat
 let result;
 if (['tail', 'reap', 'usage', 'prune'].includes(request.type)) {
   // Reading progress or usage, stopping leftovers and removing old journal records are repeatable and never journaled.
-  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'prune' ? await pruneJournal(journal) : await reap(request) }; }
+  try { result = { ok: true, result: request.type === 'tail' ? await tail(request) : request.type === 'usage' ? await usage() : request.type === 'prune' ? { journal: await pruneJournal(journal), tasks: await pruneTasks(tasksRoot) } : await reap(request) }; }
   catch { result = { ok: false, error: request.type + '_failed' }; }
 } else try {
   const existing = await readFile(`${journal}/${request.operation_id}.json`, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });

@@ -33,7 +33,7 @@
 | `.bot/computer.yaml` | 虚拟电脑的资源、软件包、环境变量和初始化脚本 | 空（`{}`） | 按字段合并进项目的机器配置 |
 | `.agents/skills/<名称>/SKILL.md` | 仓库追加的文本 skill | 无 | 追加 |
 
-只有表里这些路径算规则文件。`.agents/skills/` 下各级目录里的 `SKILL.md` 原文会交给模型；只加载文本，不加载 JS 扩展，最多 32 份。
+只有表里这些路径算规则文件。`.agents/skills/` 下各级目录里的 `SKILL.md` 是按需读取的 skill：agent 先只看到每个 skill 的名称、用途（front matter 的 `description`，没有时取第一行）和路径，做到相应工作时再读全文；只加载文本，不加载 JS 扩展，最多 32 份。`.bot/` 下的行为指南和规则则每个任务都直接交给模型。
 
 ## 通用限制
 

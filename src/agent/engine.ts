@@ -12,7 +12,7 @@ import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
-import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors } from '../rules/service.js';
+import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { type GitCache } from './git-cache.js';
 
@@ -211,8 +211,10 @@ export class TaskEngine {
         const ruleBranch=task.kind.endsWith('.pr')?github.defaultBranch:input.bot_pr?baseBranch:null;
         const ruleSha=ruleBranch?(await github.ref(ruleBranch))?.object.sha:ref.object.sha;
         // The repository's mirror is brought up to both commits first; rules and files are then read at those commits.
-        const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[ref.object.sha,ruleSha],
-          refs:[task.kind.endsWith('.pr')?`refs/pull/${task.object_number}/head`:`refs/heads/${input.bot_pr?.head?.ref||baseBranch}`,...(ruleBranch?[`refs/heads/${ruleBranch}`]:[])]}):undefined;
+        // A pull request's base comes into the mirror too, so the agent can compare base and head with git.
+        const pr=task.kind.endsWith('.pr'),prBase=pr&&/^[a-f0-9]{40}$/.test(String(object.base?.sha||''))?String(object.base.sha):null;
+        const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[ref.object.sha,ruleSha,...(prBase?[prBase]:[])],
+          refs:[pr?`refs/pull/${task.object_number}/head`:`refs/heads/${input.bot_pr?.head?.ref||baseBranch}`,...(ruleBranch?[`refs/heads/${ruleBranch}`]:[]),...(prBase&&object.base?.ref?[`refs/heads/${object.base.ref}`]:[])]}):undefined;
         // Rules are checked before the workspace is written. A bad rule file waits for a person with its own code and
         // nothing is published; the retry after the fix then prepares the new commit without earlier writes in the way.
         let effectiveRules:ReturnType<typeof resolveRules>;
@@ -224,7 +226,10 @@ export class TaskEngine {
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
         }
-        const snapshot=await workspace.prepare(github,ref.object.sha,mirror);
+        // A git worktree from the computer's store when the mirror has the commit. Otherwise files are copied as before, in a
+        // fresh workspace, so nothing a checkout left halfway is in the way.
+        let snapshot:any=mirror?await workspace.checkout(github,ref.object.sha,mirror,prBase?[prBase]:[]):null;
+        if(!snapshot){if(mirror?.has(ref.object.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,ref.object.sha,mirror);}
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
         if(files.length>=3000)stop('pull_request_file_limit','failed',`PR #${task.object_number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
         if(Object.entries(effectiveRules.computer).some(([key,value])=>JSON.stringify(environment.computer?.[key])!==JSON.stringify(value))){
@@ -233,12 +238,30 @@ export class TaskEngine {
           environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
         }
         const comments=await github.pages(github.path(`/issues/${task.object_number}/comments`));
+        // The whole discussion and the project's skills are files the agent reads when it needs them, next to the checkout.
+        const reviews=pr?await github.pages(github.path(`/pulls/${task.object_number}/reviews`)):[],reviewComments=pr?await github.pages(github.path(`/pulls/${task.object_number}/comments`)):[];
+        const skills=skillIndex(effectiveRules.files),json=(value:unknown)=>JSON.stringify(value,null,2);
+        await workspace.context({'object.json':json(object),'comments.json':json(comments),
+          ...(pr?{'files.json':json(files),'reviews.json':json(reviews),'review_comments.json':json(reviewComments)}:{}),
+          ...Object.fromEntries(skills.map(skill=>[skill.file,skill.content]))});
+        const kind=pr?'pull request':'Issue',contextFiles=[
+          {path:'../context/object.json',content:`The ${kind} as GitHub returns it: title, full body, author, labels${pr?', base and head':''}`},
+          {path:'../context/comments.json',content:`All ${comments.length} conversation comments, oldest first`},
+          ...(pr?[{path:'../context/files.json',content:`The ${files.length} changed files with GitHub's patch of each`},
+            {path:'../context/reviews.json',content:`All ${reviews.length} reviews of the pull request`},
+            {path:'../context/review_comments.json',content:`All ${reviewComments.length} inline review comments, with path, line and in_reply_to_id`}]:[])];
         // Classification is optional: a repository whose labels cannot be read is reviewed without them.
         const labels=development?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         input={...input,object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
-          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,object,implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
-            comments:development&&task.kind.endsWith('.pr')?[]:comments.slice(-50),...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),files,materials:snapshot.materials,coverage:[...snapshot.coverage,...(comments.length>50?['Discussion context limited to latest 50 comments']:[])],required_test_command:policy.test_command||null,
+          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,
+            object:{number:object.number,title:object.title,state:object.state,author:object.user?.login||null,html_url:object.html_url||null,labels:(object.labels||[]).map((l:any)=>typeof l==='string'?l:l.name),
+              ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},
+            ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
+              diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
+            context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
+            implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
+            ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(development?{}:{repository_labels:labels}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};

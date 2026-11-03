@@ -136,7 +136,9 @@ test('comment Issue reviews publish with trigger context before starting authori
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'waiting_permission');
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);assert.equal(h.comments.length,0);
   const prompt=JSON.parse(JSON.parse(Buffer.concat(config).toString()).prompt);
-  assert.deepEqual(prompt.trigger_comment,comment);assert.equal(prompt.comments.length,50);
+  // The whole discussion is a file the agent reads on demand, no longer the latest 50 comments in the prompt.
+  assert.deepEqual(prompt.trigger_comment,comment);assert.equal(prompt.comments,undefined);
+  assert.equal(prompt.context_files.find(file=>file.path==='../context/comments.json').content,'All 55 conversation comments, oldest first');
   failPublication=false;assert.equal((await h.admin('/api/tasks/'+task.id+'/retry','POST',{})).status,201);
   await Promise.all(h.engine.active.values());
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'succeeded');assert.equal(h.comments.length,1);
