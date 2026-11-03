@@ -95,7 +95,7 @@ export class GitHub {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
     catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
       this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
-    if (window) observe(this.store, window, response.headers);
+    if (window) observe(this.store, window, response.headers, response.status);
     if (response.status === 404 && allow404) return null;
     if (!response.ok) {
       const error=await errorBody(response),detail=errorDetail(error?.message,this.redactor,token,response.status);

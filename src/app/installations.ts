@@ -107,7 +107,7 @@ export class InstallationSync {
       ...(body ? { body: JSON.stringify(body) } : {}) }); }
     catch { throw new Error('github_unavailable'); }
     const window = this.windows.get(token);
-    if (window) observe(this.store, window, response.headers);
+    if (window) observe(this.store, window, response.headers, response.status);
     if (window && [403, 429].includes(response.status) && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after'))) refused(this.store, window, response.headers);
     return response;
   }
