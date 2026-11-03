@@ -22,7 +22,7 @@ test('每个页面都有地址，刷新后停在原页面；全局设置按类�
     const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel h3').allInnerTexts();
     await expect(nav.getByRole('link')).toHaveText(['常规', '公网接入', '机器人账号', '模型', '用户']);
     for (const [caption, key, shown] of [['常规', 'general', ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel']],
-      ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号']], ['模型', 'models', ['默认共享模型', '部署共享模型']], ['用户', 'users', ['用户']]]) {
+      ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['模型', 'models', ['默认共享模型', '部署共享模型']], ['用户', 'users', ['用户']]]) {
       await nav.getByRole('link', { name: caption, exact: true }).click(); await expect(page).toHaveURL(new RegExp(`#/settings/${key}$`));
       await expect(nav.locator('[aria-current=page]')).toHaveText(caption); await expect.poll(cards).toEqual(shown);
     }

@@ -2,7 +2,8 @@ import { projectActivityColumns, projectActivityJoin } from './project-activity.
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
 import { HttpError, fail, fields, text, type Json } from '../core/security.js';
-import { appEvents, appJwt, appPermissions, missingEvents, missingPermissions } from '../github/client.js';
+import { appEvents, appJwt, appPermissions, missingEvents, missingPermissions, revokeInstallationToken } from '../github/client.js';
+import { appBucket, installationBucket, observe, observeAll, rateLimitView, refused, userBucket, type Bucket } from '../github/rate-limits.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
@@ -80,7 +81,14 @@ function githubLink(value: unknown, origin: string): string | null {
 }
 export class InstallationSync {
   private readonly running = new Map<string, Promise<Json>>();
+  // The rate-limit window each credential in use counts against, so every response here updates it too.
+  private readonly windows = new Map<string, Bucket>();
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
+  private keep(token: string, bucket: Bucket): string { if (this.windows.size > 500) this.windows.clear(); if (token) this.windows.set(token, bucket); return token; }
+  private appToken(account: Row, secrets: Json): string { return this.keep(appJwt(String(account.app_id), String(secrets.private_key)), appBucket(account.id)); }
+  private installationToken(account: Row, installation: Json, access: Json): string {
+    return this.keep(String(access.token || ''), installationBucket(account.id, String(installation.id), (installation.account as Json | undefined)?.login ? String((installation.account as Json).login) : null));
+  }
   schedule(accountId: string): void { void this.sync(accountId).catch(() => {}); }
   async syncAll(): Promise<Json[]> {
     const results: Json[] = [];
@@ -93,10 +101,44 @@ export class InstallationSync {
     const run = this.run(accountId).finally(() => this.running.delete(accountId)); this.running.set(accountId, run); return run;
   }
   private async send(path: string, token: string, method = 'GET', body?: Json): Promise<Response> {
-    try { return await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
+    let response: Response;
+    try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}) }); }
     catch { throw new Error('github_unavailable'); }
+    const window = this.windows.get(token);
+    if (window) observe(this.store, window, response.headers);
+    if (window && [403, 429].includes(response.status) && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after'))) refused(this.store, window, response.headers);
+    return response;
+  }
+  // GET /rate_limit reports every window of a credential without counting against them; a failure keeps the last report.
+  private async window(token: string): Promise<void> {
+    const bucket = this.windows.get(token); if (!bucket) return;
+    const value = await this.request('/rate_limit', token).catch(() => null); if (value) observeAll(this.store, bucket, value);
+  }
+  // Reads an account's windows now: the App's own and each installation's, with a metadata token revoked afterwards, or
+  // the bot account's. Installations are read one after another; suspended ones have no window to read.
+  async probe(accountId: string): Promise<Json> {
+    const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) return fail(404, 'account_not_found');
+    const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`);
+    try {
+      if (account.type === 'github_app') {
+        if (!secrets.private_key) throw new Error('github_credentials_missing');
+        const jwt = this.appToken(account, secrets); await this.window(jwt);
+        for (const installation of await this.pages('/app/installations', jwt)) {
+          if (installation.suspended_at) continue;
+          const token = this.installationToken(account, installation, await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } }));
+          await this.window(token); await revokeInstallationToken(this.apiUrl, token).catch(() => false);
+        }
+      } else {
+        if (!secrets.token) throw new Error('github_credentials_missing');
+        await this.window(this.keep(String(secrets.token), userBucket(account.id)));
+      }
+    } catch (error) {
+      const code = (error as Error).message;
+      return fail(code === 'github_credentials_missing' ? 409 : 502, /^[a-z_0-9]+$/.test(code) ? code : 'github_unavailable');
+    }
+    return rateLimitView(this.store);
   }
   private async request(path: string, token: string, method = 'GET', body?: Json): Promise<any> {
     const response = await this.send(path, token, method, body);
@@ -119,7 +161,7 @@ export class InstallationSync {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) return fail(404, 'account_not_found');
     if (account.type !== 'github_app') return fail(409, 'github_app_required');
     const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`); if (!secrets.private_key) return fail(409, 'github_credentials_missing');
-    const jwt = appJwt(String(account.app_id), String(secrets.private_key));
+    const jwt = this.appToken(account, secrets);
     let app: any, installations: Json[];
     try { app = await this.request('/app', jwt); installations = await this.pages('/app/installations', jwt); }
     catch (error) { return fail(502, /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'github_unavailable'); }
@@ -137,7 +179,7 @@ export class InstallationSync {
   async access(accountId: string, repositoryId: string): Promise<Access> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) return fail(404, 'account_not_found');
     const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`);
-    try { return account.type === 'github_app' ? await this.appAccess(account, secrets, repositoryId) : await this.botAccess(secrets, repositoryId); }
+    try { return account.type === 'github_app' ? await this.appAccess(account, secrets, repositoryId) : await this.botAccess(account, secrets, repositoryId); }
     catch (error) {
       if (error instanceof HttpError) throw error;
       const code = (error as Error).message;
@@ -155,7 +197,7 @@ export class InstallationSync {
   }
   private async appAccess(account: Row, secrets: Json, repositoryId: string): Promise<Access> {
     if (!secrets.private_key) throw new Error('github_credentials_missing');
-    const jwt = appJwt(String(account.app_id), String(secrets.private_key)), installations = await this.pages('/app/installations', jwt);
+    const jwt = this.appToken(account, secrets), installations = await this.pages('/app/installations', jwt);
     // An App is installed at most once per GitHub account: the owner's installation, or the one the repository was last listed in.
     const seen = this.store.all('SELECT installation_id,owner_id FROM installed_repositories WHERE account_id=? AND repository_id=?', account.id, repositoryId);
     const owners = new Set([this.store.get('SELECT owner_id FROM repositories WHERE id=?', repositoryId)?.owner_id, ...seen.map(r => r.owner_id)].filter(Boolean).map(String));
@@ -164,7 +206,7 @@ export class InstallationSync {
     if (!candidates.length) return gone('installation_missing');
     for (const installation of candidates.filter(i => !i.suspended_at)) {
       const access = await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } });
-      const token = String(access.token || ''); if (!token) throw new Error('github_token_missing');
+      const token = this.installationToken(account, installation, access); if (!token) throw new Error('github_token_missing');
       // Membership comes from the installation's own listing: an installation token can still read a public repository it does not cover.
       if (!(await this.pages('/installation/repositories', token, 'repositories')).some(r => String(r.id) === repositoryId)) continue;
       const read = await this.read(repositoryId, token);
@@ -172,9 +214,9 @@ export class InstallationSync {
     }
     return gone(candidates.every(i => i.suspended_at) ? 'installation_suspended' : 'repository_not_in_installation');
   }
-  private async botAccess(secrets: Json, repositoryId: string): Promise<Access> {
+  private async botAccess(account: Row, secrets: Json, repositoryId: string): Promise<Access> {
     if (!secrets.token) throw new Error('github_credentials_missing');
-    const token = String(secrets.token), read = await this.read(repositoryId, token); if (read !== 'ok') return gone(read);
+    const token = this.keep(String(secrets.token), userBucket(account.id)), read = await this.read(repositoryId, token); if (read !== 'ok') return gone(read);
     // A public repository stays readable to anyone; only the account's own listing says whether it still has access.
     const row = (await this.pages('/user/repos', token)).find(r => String(r.id) === repositoryId);
     return row ? reachable(permissionGap('bot_account', granted(row.permissions)) || []) : gone('repository_not_in_installation');
@@ -187,11 +229,11 @@ export class InstallationSync {
         const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`), now = new Date().toISOString();
         if (account.type === 'github_app') {
           if (!secrets.private_key) throw new Error('github_credentials_missing');
-          const installations = await this.pages('/app/installations', appJwt(String(account.app_id), String(secrets.private_key)));
+          const installations = await this.pages('/app/installations', this.appToken(account, secrets));
           this.store.transaction(() => { for (const i of installations) grantInstallation(this.store, account.id, String(i.id), i.permissions, now); });
         } else {
           if (!secrets.token) throw new Error('github_credentials_missing');
-          const repos = await this.pages('/user/repos', String(secrets.token));
+          const repos = await this.pages('/user/repos', this.keep(String(secrets.token), userBucket(account.id)));
           this.store.transaction(() => { for (const repo of repos) { const value = granted(repo.permissions);
             if (value) this.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', value, now, account.id, String(repo.id)); } });
         }
@@ -205,18 +247,21 @@ export class InstallationSync {
     try {
       if (account.type === 'github_app') {
         if (!secrets.private_key) throw new Error('github_credentials_missing');
-        const jwt = appJwt(String(account.app_id), String(secrets.private_key));
+        const jwt = this.appToken(account, secrets); await this.window(jwt);
         for (const installation of await this.pages('/app/installations', jwt)) {
           if (installation.suspended_at) continue;
-          // A metadata-only token is enough to list the installation's repositories.
-          const access = await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } });
-          for (const repo of await this.pages('/installation/repositories', String(access.token || ''), 'repositories')) {
+          // A metadata-only token is enough to list the installation's repositories; its window is the installation's.
+          const token = this.installationToken(account, installation, await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } }));
+          for (const repo of await this.pages('/installation/repositories', token, 'repositories')) {
             const row = installed(repo, String(installation.id), installation.permissions); if (row) rows.push(row);
           }
+          await this.window(token);
         }
       } else {
         if (!secrets.token) throw new Error('github_credentials_missing');
-        for (const repo of await this.pages('/user/repos', String(secrets.token))) { const row = installed(repo, null, repo.permissions); if (row) rows.push(row); }
+        const token = this.keep(String(secrets.token), userBucket(account.id));
+        for (const repo of await this.pages('/user/repos', token)) { const row = installed(repo, null, repo.permissions); if (row) rows.push(row); }
+        await this.window(token);
       }
     } catch (error) {
       const code = /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'sync_failed';
@@ -241,6 +286,10 @@ export class InstallationSync {
 export async function installationApi(store: Store, sync: InstallationSync | undefined, user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
   const path = url.pathname, check = /^\/api\/accounts\/([^/]+)\/permissions$/.exec(path);
   if (check && method === 'GET') { superAdmin(user); if (!sync) return fail(503, 'sync_not_configured'); return sync.permissions(check[1]!); }
+  // GitHub's request windows per App, installation (organization) and bot account, as last reported; probe reads them now.
+  if (path === '/api/github/rate-limits' && method === 'GET') { superAdmin(user); return rateLimitView(store); }
+  const probe = /^\/api\/accounts\/([^/]+)\/rate-limits\/probe$/.exec(path);
+  if (probe && method === 'POST') { superAdmin(user); fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); return sync.probe(probe[1]!); }
   if (!path.startsWith('/api/installations')) return undefined;
   superAdmin(user);
   if (path === '/api/installations' && method === 'GET') return list(store);

@@ -29,7 +29,8 @@ test('GitHub distinguishes rate limits from permissions and retains only a short
     {status:403,body:{message:'API rate limit exceeded'},headers:{'Retry-After':'90'},code:'github_rate_limited',delay:90000},
     {status:403,body:{message:'Forbidden'},headers:{'X-RateLimit-Remaining':'0'},code:'github_rate_limited',delay:60000},
     {status:403,body:{message:'You have triggered an abuse detection mechanism.'},headers:{'Retry-After':'900'},code:'github_rate_limited',delay:900000},
-    {status:429,body:{message:'Rate limit exceeded'},headers:{'Retry-After':'901'},code:'github_rate_limited',delay:60000},
+    // GitHub's own wait is honored however long it is; only an unreadable one falls back to a minute.
+    {status:429,body:{message:'Rate limit exceeded'},headers:{'Retry-After':'901'},code:'github_rate_limited',delay:901000},
     {status:429,body:{message:'Slow down'},headers:{'Retry-After':'invalid'},code:'github_rate_limited',delay:60000},
     {status:403,body:{message:'Resource not accessible by integration'},code:'github_permission_403'},
     {status:401,body:{message:'Bad credentials'},code:'github_permission_401'},
@@ -79,20 +80,29 @@ test('a review comment that GitHub answers with a server error waits for retry a
   assert.equal(h.store.get("SELECT state FROM github_effects WHERE task_id=? AND kind='comment'",h.taskId).state,'unknown');
 });
 
-test('rate limits wait a minute by default, honor Retry-After and fail on the fifth attempt without rewriting old pauses',async t=>{
-  let retryAfter;const data=Buffer.from('test'),file={path:'file.txt',type:'blob',mode:'100644',sha:blobSha(data),size:data.length};
+test('rate limits are waited out without using up retries, as long as GitHub asks, and nothing is sent before the pause ends',async t=>{
+  let retryAfter,blobReads=0;const data=Buffer.from('test'),file={path:'file.txt',type:'blob',mode:'100644',sha:blobSha(data),size:data.length};
   const h=await emptyRepositoryFixture(t,{files:[file],github(path,send,res){
     if(!path.includes('/git/blobs/'))return false;
-    if(retryAfter)res.setHeader('Retry-After',retryAfter);
+    blobReads++;if(retryAfter)res.setHeader('Retry-After',retryAfter);
     send({message:'You have exceeded a secondary rate limit.'},403);return true;
   }});h.setBranch('ready');
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,error_code,summary) VALUES('old-pause','101','review.issue','waiting_permission','github_permission_403','old')");
-  for(let attempt=1;attempt<=5;attempt++){
-    retryAfter=attempt===2?'120':attempt===3?'901':undefined;h.due();const before=Date.now(),task=await h.run(),after=Date.now();
-    assert.equal(task.status,attempt===5?'failed':'retry_wait');assert.equal(task.error_code,'github_rate_limited');assert.equal(task.retry_count,attempt);
-    const delay=attempt===2?120000:60000;assert.ok(task.next_run_at>=before+delay);assert.ok(task.next_run_at<=after+delay);
-    const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task.error_detail;assert.match(detail,/secondary rate limit/);
-  }
+  // The pause GitHub asked for has passed (the test does not wait for it).
+  const elapse=()=>h.store.run('UPDATE github_rate_limits SET limited_until=NULL');
+  const attempt=async(least,most)=>{
+    h.due();const before=Date.now(),task=await h.run(),after=Date.now();
+    assert.deepEqual([task.status,task.error_code,task.retry_count],['retry_wait','github_rate_limited',0]);
+    assert.ok(task.next_run_at>=before+least&&task.next_run_at<=after+most,String(task.next_run_at-before));
+    return (await h.admin('/api/tasks/'+h.taskId)).value.task.error_detail;
+  };
+  assert.match(await attempt(60000,65000),/secondary rate limit/);
+  // Retried early (as after a restart), nothing is sent: the task waits out the rest of the pause.
+  const reads=blobReads;assert.match(await attempt(50000,65000),/未发送/);assert.equal(blobReads,reads);
+  elapse();retryAfter='120';await attempt(120000,125000);
+  elapse();retryAfter='901';await attempt(901000,906000);
+  // However often it happens, a rate limit never fails the task.
+  for(let more=0;more<3;more++){elapse();retryAfter=undefined;await attempt(60000,65000);}
   assert.equal(h.store.get("SELECT status FROM tasks WHERE id='old-pause'").status,'waiting_permission');
   await withBusyComputer(h,async()=>{
     assert.equal((await h.admin('/api/tasks/'+h.taskId+'/retry','POST',{})).status,201);

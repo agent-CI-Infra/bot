@@ -319,12 +319,16 @@ export class TaskEngine {
       await this.release(workspace,task);
       const failure=error instanceof TaskError?error:new TaskError('task_runtime_failure',String((error as Error)?.message).includes('manager')?'waiting_environment':'failed',`任务在 ${task.phase} 阶段发生运行异常：${redactor.text(String((error as Error)?.message||'未知错误')).replace(/\s+/g,' ').slice(0,300)}`);
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id);
-      const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
-      // Automatic retries back off (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted
-      // instead of using up all five attempts in half a minute.
-      const delay=failure.code==='github_rate_limited'?(failure.retryAfterMs??60000):state==='waiting_configuration'?30000
-        :state==='retry_wait'?Math.min(5000*3**(retries-1),300000):5000;
-      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,next_run_at:Date.now()+delay});
+      // A GitHub rate limit is waited out until its window resets (the task resumes then, a few seconds apart from others
+      // waiting for the same window); it does not use up the five automatic retries.
+      const limited=failure.code==='github_rate_limited';
+      const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'&&!limited?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
+      // The same stop again waits twice as long as the last time, up to a cap; a different stop starts over. Automatic
+      // retries back off too (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted.
+      const waits=current?.error_code===failure.code?Number(current?.wait_count||0)+1:0,grow=(base:number,cap:number)=>Math.min(base*2**waits,cap);
+      const delay=limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
+        :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
+      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,next_run_at:Date.now()+delay});
       if(failure.code==='execution_interrupted'&&task.phase!=='publish'&&task.attempt<3){
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,attempt:task.attempt+1});
@@ -400,7 +404,7 @@ export class TaskEngine {
       // Pressing 重试 on 发布待确认 is the confirmation the pause waits for: the write is looked up once more and,
       // only if GitHub still has no trace of it, sent again.
       if(task.status==='waiting_publication')this.store.run("UPDATE github_effects SET state='pending' WHERE task_id=? AND state IN ('unknown','inflight')",task.id);
-      this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0 WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
+      this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0 WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
     });this.tick();return {ok:true};
   }
 }
