@@ -221,7 +221,7 @@ export class TaskEngine {
           this.rules.cache(task.repository_id,ruleSha,ruleFiles);
           effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
         }catch(error){
-          if(error instanceof HttpError&&ruleErrors.has(error.code))stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}），请检查 .bot/ 和 .agents/skills/ 配置。`);
+          if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
         }
         const snapshot=await workspace.prepare(github,ref.object.sha,mirror);

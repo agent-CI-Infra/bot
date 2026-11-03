@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { parse } from 'yaml';
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, superAdmin } from '../app/auth.js';
-import { fail, fields, type Json } from '../core/security.js';
+import { fail, fields, HttpError, type Json } from '../core/security.js';
 import { GitHub, repositoryTree } from '../github/client.js';
 import { type Mirror } from '../agent/git-cache.js';
 import { Redactor } from '../agent/common.js';
@@ -23,8 +23,9 @@ export const defaults: Record<string, string> = {
 export const behaviorPath = (path: string) => path === '.bot' || path.startsWith('.bot/') || path === '.agents/skills' || path.startsWith('.agents/skills/');
 const skillPath = (path: string) => /^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path);
 const rulePath = (path: string) => Object.hasOwn(defaults, path) || skillPath(path);
-// One rule file holds at most this many UTF-8 bytes, whether it comes from the console or the repository.
-export const maxRuleBytes = 16384;
+// Rule files and skills have no size limit of their own: they are sent with the task as written. A rule file error
+// names the file, so the person who has to fix it knows which one.
+const ruleError = (code: string, detail: string): never => { throw Object.assign(new HttpError(400, code), { detail }); };
 // Rule file errors a person has to fix; a task that meets one waits for configuration instead of failing.
 export const ruleErrors = new Set(['bot_rule_too_large', 'invalid_bot_label', 'invalid_bot_computer', 'invalid_bot_rule_file', 'invalid_rule_content', 'too_many_bot_skills', 'unsafe_bot_rule']);
 // The fields of .bot/computer.yaml, the same as the manager's project computer spec.
@@ -39,8 +40,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   if(Object.keys(files).filter(skillPath).length>32)fail(400,'too_many_bot_skills');
   const repositoryRules=Object.entries(files).filter(([path])=>rulePath(path));
   // A NUL byte means the file is not text; it is rejected, not read as missing, also when an older version cached it.
-  if(repositoryRules.some(([,content])=>content.includes('\0')))fail(400,'invalid_rule_content');
-  if(repositoryRules.some(([,content])=>Buffer.byteLength(content)>maxRuleBytes))fail(400,'bot_rule_too_large');
+  const binary=repositoryRules.find(([,content])=>content.includes('\0'));if(binary)ruleError('invalid_rule_content',`${binary[0]} 不是文本文件（含 NUL 字节）`);
   const overrides = JSON.parse(policy.rule_overrides || '{}'), rows: any[] = [];
   const consoleRules: Record<string, string> = { ...overrides };
   // The existing manager computer is the console layer, not a new resource system.
@@ -125,11 +125,10 @@ export class RuleService {
     const entries = tree.tree.filter((f: any) => rulePath(f.path));
     if (entries.length > 38) fail(400, 'too_many_bot_skills'); const files: Record<string, string> = {};
     for (const file of entries) {
-      if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode)) fail(400, 'invalid_bot_rule_file');
-      if (file.size > maxRuleBytes) fail(400, 'bot_rule_too_large');
+      if (file.type !== 'blob' || !['100644', '100755'].includes(file.mode)) ruleError('invalid_bot_rule_file', `${file.path} 不是普通文件（符号链接或子模块）`);
       const data = (cached ? await mirror!.blob(file.sha) : null) ?? Buffer.from((await github.request('GET', github.path('/git/blobs/' + file.sha))).content, 'base64');
-      if (data.includes(0)) fail(400, 'invalid_rule_content');
-      const content = data.toString('utf8'); if (Buffer.byteLength(content) > maxRuleBytes) fail(400, 'bot_rule_too_large'); files[file.path] = content;
+      if (data.includes(0)) ruleError('invalid_rule_content', `${file.path} 不是文本文件（含 NUL 字节）`);
+      files[file.path] = data.toString('utf8');
     }
     return files;
   }
@@ -144,8 +143,7 @@ export class RuleService {
     if (method === 'GET' && !match[2]) return { rules: await this.view(id) };
     if (method === 'PUT' && !match[2]) {
       fields(input, ['path', 'content']); if (!Object.hasOwn(defaults, String(input.path)) || input.path === '.bot/computer.yaml') fail(400, 'invalid_rule_path');
-      // The limit counts UTF-8 bytes, as for repository files; longer text is rejected, never cut.
-      if (input.content !== null && (typeof input.content !== 'string' || Buffer.byteLength(input.content) > maxRuleBytes || input.content.includes('\0'))) fail(400, 'invalid_rule_content');
+      if (input.content !== null && (typeof input.content !== 'string' || input.content.includes('\0'))) fail(400, 'invalid_rule_content');
       const row = this.store.get('SELECT * FROM policies WHERE repository_id=?', id)!, values = JSON.parse(row.rule_overrides || '{}');
       if (input.content === null) delete values[String(input.path)]; else values[String(input.path)] = input.content;
       resolveRules({ ...row, rule_overrides: JSON.stringify(values) }, {});
