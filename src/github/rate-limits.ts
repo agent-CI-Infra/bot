@@ -45,15 +45,17 @@ export function observeAll(store: Store, bucket: Bucket, body: any): void {
   }
 }
 // A refused request: the bucket waits until the window resets when it is used up, otherwise (a secondary limit, for
-// requests sent too fast) for as long as GitHub asks, or a minute. Returns when requests may be sent again.
-export function refused(store: Store, bucket: Bucket | undefined, headers: Headers, now = Date.now()): number {
+// requests sent too fast) for as long as GitHub asks. Returns when requests may be sent again, and whether GitHub said
+// so: without Retry-After or a reset the bucket pauses a minute, and the task that was refused backs off on its own.
+export function refused(store: Store, bucket: Bucket | undefined, headers: Headers, now = Date.now()): { until: number, reported: boolean } {
   if (bucket) observe(store, bucket, headers);
   const retryAfter = count(headers.get('retry-after')), reset = count(headers.get('x-ratelimit-reset')), remaining = count(headers.get('x-ratelimit-remaining'));
-  const until = retryAfter !== null ? now + retryAfter * 1000 : remaining === 0 && reset !== null && reset * 1000 > now ? reset * 1000 : now + 60_000;
+  const reported = retryAfter !== null || remaining === 0 && reset !== null && reset * 1000 > now;
+  const until = retryAfter !== null ? now + retryAfter * 1000 : reported ? reset! * 1000 : now + 60_000;
   if (bucket) store.run(`INSERT INTO github_rate_limits(bucket,resource,kind,account_id,installation_id,owner,limited_until,observed_at) VALUES(?,'core',?,?,?,?,?,?)
     ON CONFLICT(bucket,resource) DO UPDATE SET limited_until=MAX(COALESCE(limited_until,0),excluded.limited_until),observed_at=excluded.observed_at`,
   bucket.key, bucket.kind, bucket.account_id, bucket.installation_id || null, bucket.owner || null, until, new Date(now).toISOString());
-  return until;
+  return { until, reported };
 }
 // When the bucket's REST window can be used again, if it is used up or refused right now; null when requests may go.
 export function blockedUntil(store: Store, bucket: Bucket, now = Date.now()): number | null {
@@ -70,11 +72,14 @@ export const utcTime = (ms: number) => new Date(ms).toISOString().replace('T', '
 
 // The windows grouped by account, with how many tasks wait for each one to reset.
 export function rateLimitView(store: Store, now = Date.now()) {
+  // A task counts against the window that refused it (an App's JWT window or its installation's, say); a task stopped
+  // before that was recorded counts against its repository's installation, or the Token account's user.
   const waiting = new Map<string, number>();
-  for (const row of store.all(`SELECT a.id AS account_id,ir.installation_id,count(*) AS n FROM tasks t JOIN repositories r ON r.id=t.repository_id
-      JOIN accounts a ON a.id=r.account_id LEFT JOIN installed_repositories ir ON ir.account_id=r.account_id AND ir.repository_id=r.id
-      WHERE t.status='retry_wait' AND t.error_code='github_rate_limited' GROUP BY a.id,ir.installation_id`))
-    waiting.set(row.installation_id ? 'installation:' + row.installation_id : 'user:' + row.account_id, Number(row.n));
+  for (const row of store.all(`SELECT COALESCE(t.rate_limit_bucket,CASE WHEN ir.installation_id IS NOT NULL THEN 'installation:'||ir.installation_id ELSE 'user:'||a.id END) AS bucket,
+      count(*) AS n FROM tasks t JOIN repositories r ON r.id=t.repository_id JOIN accounts a ON a.id=r.account_id
+      LEFT JOIN installed_repositories ir ON ir.account_id=r.account_id AND ir.repository_id=r.id
+      WHERE t.status='retry_wait' AND t.error_code='github_rate_limited' GROUP BY 1`))
+    waiting.set(String(row.bucket), Number(row.n));
   const accounts = new Map<string, any>();
   for (const row of store.all(`SELECT l.*,a.name AS account_name,a.type AS account_type FROM github_rate_limits l JOIN accounts a ON a.id=l.account_id
       ORDER BY a.created_at,a.id,CASE l.kind WHEN 'app' THEN 0 WHEN 'user' THEN 1 ELSE 2 END,l.owner,l.bucket,l.resource`)) {

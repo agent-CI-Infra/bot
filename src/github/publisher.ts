@@ -13,7 +13,9 @@ export class Publisher {
     if(!row){this.store.run("INSERT INTO github_effects VALUES(?,?,?,?, 'pending',NULL,?)",id,this.task.id,kind,JSON.stringify(request),marker);row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);}
     if(row!.state==='sent')return JSON.parse(row!.response);
     // pending means never sent, or refused for certain: only an inflight or unknown request can have landed, so only then
-    // is GitHub searched for it. The task is validated right before sending either way.
+    // is GitHub searched for it. recheck is an unconfirmed write a person released with 重试: it is searched for once
+    // more (it may have appeared since the pause) and sent only if still missing. The task is validated right before
+    // sending either way.
     const existing=row!.state==='pending'?null:await find();
     if(existing){this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(existing),id);return existing;}
     if(!replayable&&['unknown','inflight'].includes(row!.state))return stop('github_publication_unknown','waiting_publication',`GitHub 发布操作 ${key}（${kind}）上次请求没有得到确定结果（状态=${row!.state}），在 GitHub 上也没找到这次写入，已暂停以免重复发布。`);

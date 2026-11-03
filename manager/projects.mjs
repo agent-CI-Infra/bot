@@ -435,14 +435,14 @@ export class Projects {
           this.restartAlone(repo, input.generation, 'its container stopped or restarted outside the manager'); throw error;
         }
         // A task's failed runner call ends that task's processes; when that works, the computer and the other tasks on it
-        // keep running. Otherwise, as for any uncertain exec result, the whole environment stops before the slot is released.
+        // keep running. When they cannot be ended, the computer is restarted alone, which ends them too: this call holds a
+        // shared slot, and stopping the computer here would fail the other tasks' calls running beside it.
         const workspace = action === 'execute' ? input.request.workspace_id : undefined, current = this.get(repo);
         if (workspace && current?.generation === input.generation && ['ready', 'busy'].includes(current.state)) {
           const reaped = await this.docker.runner(this.names(repo, input.generation).container, { operation_id: randomId(), type: 'reap', workspace_id: workspace }).catch(() => null);
-          if (reaped?.ok) {
-            this.kept(repo).delete(workspace); this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
-            throw error;
-          }
+          this.kept(repo).delete(workspace); this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
+          if (!reaped?.ok) this.restartAlone(repo, input.generation, `a failed ${input.request.type} left processes that could not be ended`, error);
+          throw error;
         }
         // On an uncertain exec result, kill the entire environment before releasing its lock.
         logFailure(`project ${repo} ${action === 'execute' ? input.request.type : action} failed, computer stopped`, error);

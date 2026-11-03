@@ -59,8 +59,14 @@ export class ProjectService {
     for (const op of this.store.all("SELECT * FROM environment_operations WHERE state='pending'")) {
       if (this.removing.has(op.repository_id)) continue;
       // Keep the last durable manager state; the operation API exposes failure and the log says why.
-      try { await this.send(op); this.failures.clear(`operation ${op.action} ${op.id} of ${op.repository_id}`); }
-      catch (error) { this.failures.report(`operation ${op.action} ${op.id} of ${op.repository_id}`, error); }
+      const key = `operation ${op.action} ${op.id} of ${op.repository_id}`;
+      try { await this.send(op); this.failures.clear(key); }
+      catch (error) {
+        // send() marks an operation the manager refused for certain as failed; it is not sent again, so the log says so once.
+        const abandoned = this.store.get('SELECT state FROM environment_operations WHERE id=?', op.id)?.state === 'failed';
+        this.failures.report(key, abandoned ? `${(error as Error)?.message || error} (given up, not retried)` : error);
+        if (abandoned) this.failures.forget(key);
+      }
     }
     for (const repo of this.store.all('SELECT r.id,p.enabled FROM repositories r JOIN policies p ON p.repository_id=r.id')) {
       if (this.removing.has(repo.id)) continue;
@@ -92,6 +98,7 @@ export class ProjectService {
         const result = await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
         // A start that brought the computer up ends the backoff, so a later failure is retried at once.
         if (result?.state !== 'failed') this.restarts.delete(repo.id);
+        if (result?.state) state = result;
       } else if (repo.enabled && state.state === 'ready' && state.computer?.resources_pending) {
         // The resource defaults changed: a computer that follows them is rebuilt once no task runs on it. The engine claims no
         // task on it while the refresh is pending; checking for claims and recording it in one step leaves no gap between.
@@ -102,7 +109,8 @@ export class ProjectService {
         });
         if (queued) await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
       }
-      this.failures.clear('project ' + repo.id);
+      // A pass that did not throw has not fixed a computer the manager still reports as failed.
+      if (!['failed', 'reset_failed'].includes(state.state)) this.failures.clear('project ' + repo.id);
     } catch (error) { /* The environment page retains a visible fault instead of claiming readiness. */
       this.failures.report('project ' + repo.id, error);
       if (this.removing.has(repo.id) || !this.store.get('SELECT 1 FROM repositories WHERE id=?', repo.id)) return;

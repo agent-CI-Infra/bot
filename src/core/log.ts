@@ -10,4 +10,6 @@ export class FailureLog {
     this.last.set(key, reason); console.error(`[${this.scope}] ${key}: ${reason}`);
   }
   clear(key: string): void { if (this.last.delete(key)) console.error(`[${this.scope}] ${key}: works again`); }
+  // Work that is given up will not work again: its key goes without a line.
+  forget(key: string): void { this.last.delete(key); }
 }

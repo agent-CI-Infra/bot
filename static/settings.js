@@ -104,7 +104,7 @@ function resourceDefaultsBody(view, redraw) {
 const windowNames = { core: 'REST', graphql: 'GraphQL', search: '搜索' };
 function rateLimitBody(view, redraw) {
   const nodes = [note('GitHub 按发出请求的身份分别计算每小时的请求额度。GitHub App 按安装计算：装在几个组织（或个人账号）上就有几份，每份由那个组织下所有仓库的检视、开发和任务 agent 的请求共用，一个组织用完不影响其他组织。Token 账号按 Token 所属的 GitHub 用户计算，只有一份，它处理的所有仓库和这个用户的其他 Token 共用。'),
-    note('额度用完时，任务等到窗口重置再继续，不在窗口内重试。数据来自 GitHub 每次响应和每 10 分钟的同步；「探测」立即读取一次，不消耗额度。App 自身（JWT）的请求只在 GitHub 报告额度时列出。')];
+    note('额度用完时，任务等到窗口重置再继续，不在窗口内重试。数据来自 GitHub 每次响应和每 10 分钟的同步；「探测」立即读取一次；读窗口不计入额度，App 签发临时令牌、Token 账号首次读取登录名会各用少量请求。App 自身（JWT）的请求只在 GitHub 报告额度时列出。')];
   if (!view.limits) { nodes.push(element('p', '暂时读不到请求额度。', 'view-error')); return nodes; }
   for (const account of view.accounts) {
     const recorded = view.limits.accounts.find(row => row.account_id === account.id), head = element('div', '', 'actions settings-list-head');

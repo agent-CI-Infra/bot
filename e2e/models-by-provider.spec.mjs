@@ -23,13 +23,18 @@ test('供应商新增和编辑使用同一表单，连接管理集中在供应�
   await expect(ownCard.locator('.provider-group')).toHaveCount(2);await expect(ownCard.getByRole('button',{name:'获取模型列表',exact:true})).toHaveCount(0);await expect(ownCard.getByRole('button',{name:/修改 URL|更换 Key|撤销 Key/})).toHaveCount(0);
   const group=ownCard.locator('.provider-group').first();await group.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
   await dialog.getByRole('button',{name:'获取模型列表',exact:true}).click();await expect(dialog.locator('.model-chips').first().getByRole('button',{name:'beta · 已添加',exact:true})).toBeDisabled();
-  await dialog.getByRole('button',{name:'gamma',exact:true}).click();await dialog.getByLabel('手动模型名',{exact:true}).fill('custom-x');await dialog.getByRole('button',{name:'加入待添加',exact:true}).click();
+  await dialog.getByRole('button',{name:'gamma',exact:true}).click();await dialog.getByLabel('手动模型名',{exact:true}).fill('custom-x');
+  // Enter in the manual name box adds the name; it does not save the provider.
+  await dialog.getByLabel('手动模型名',{exact:true}).press('Enter');await expect(dialog.getByRole('button',{name:'custom-x ×',exact:true})).toBeVisible();await expect(dialog.getByLabel('手动模型名',{exact:true})).toHaveValue('');
   await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(dialog).toHaveCount(0);await expect(ownCard.locator('.provider-group').filter({hasText:origin+'/v1'}).locator('.model-address')).toHaveText(['beta','gamma','custom-x']);
   expect(requests.at(-1).key).toBe('Bearer '+ownKey);expect((await admin('/api/repositories/101')).value.policy.model_id).toBe(own[0].id);
   // The same editor is used in global settings, with no per-model connection/list actions.
   await page.goto(h.admin+'/#/settings/models');const shared=page.locator('.side-card').filter({has:page.getByRole('heading',{name:'部署共享模型',exact:true})});await expect(shared.locator('.provider-group')).toHaveCount(1);
   await shared.getByRole('button',{name:'新增供应商',exact:true}).click();await expect(dialog.getByRole('heading',{name:'新增供应商',exact:true})).toBeVisible();await expect(dialog.getByRole('button',{name:'获取模型列表',exact:true})).toHaveCount(1);
   await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/other/v1');await dialog.getByLabel('API Key',{exact:true}).fill(sharedKey);await dialog.getByRole('button',{name:'获取模型列表',exact:true}).click();await dialog.getByRole('button',{name:'beta',exact:true}).click();await dialog.getByRole('button',{name:'gamma',exact:true}).click();
+  // Enter in the filter only filters: with the URL, Key and models filled in, it must not create the provider.
+  const filter=dialog.getByLabel('筛选上游模型',{exact:true});await filter.fill('gam');await filter.press('Enter');
+  await expect(dialog.locator('.model-chips').first().getByRole('button')).toHaveText(['gamma ✓']);await expect(shared.locator('.provider-group')).toHaveCount(1);await filter.fill('');
   await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/provider-editor/create-desktop.png',fullPage:true});await dialog.getByRole('button',{name:'保存',exact:true}).click();await expect(shared.locator('.provider-group')).toHaveCount(2);
   const added=shared.locator('.provider-group').filter({hasText:origin+'/other/v1'});await added.getByRole('button',{name:'编辑供应商',exact:true}).click();await expect(dialog.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
   await dialog.getByLabel('接口 URL',{exact:true}).fill(origin+'/new/v1');await dialog.getByLabel('API Key（留空保持不变）',{exact:true}).fill(rotated);await dialog.getByRole('button',{name:'获取模型列表',exact:true}).click();await expect(dialog.getByRole('status')).toContainText('返回 3 个模型');expect(requests.at(-1).key).toBe('Bearer '+rotated);expect(requests.at(-1).url).toBe('/new/v1/models');

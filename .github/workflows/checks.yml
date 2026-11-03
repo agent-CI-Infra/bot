@@ -58,26 +58,36 @@ jobs:
       # cache afterwards, together with the Chinese font the console is drawn with (for readable failure screenshots).
       # The runner image already has the browser's shared libraries; of Playwright's system packages only fonts are
       # missing there, and installing them through apt takes 10-15 seconds, so a cache hit skips apt unless a library is missing.
+      # Only main saves the entry: Actions caches are per ref, and pull requests and the merge queue can read main's, so
+      # they share one copy instead of each storing its own (about 116 MiB) against the repository's cache quota.
       - name: Playwright version
         id: playwright
         run: echo "version=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      - uses: actions/cache/restore@v6
         id: browsers
         with:
           path: |
             ~/.cache/ms-playwright
             ~/.cache/e2e-fonts
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium-headless-shell-fonts
+      # The font only makes failure screenshots readable; a Playwright version that no longer installs it must not fail the job.
       - if: steps.browsers.outputs.cache-hit != 'true'
         run: |
           npx playwright install --with-deps chromium --only-shell
-          mkdir -p ~/.cache/e2e-fonts && cp /usr/share/fonts/truetype/wqy/wqy-zenhei.ttc ~/.cache/e2e-fonts/
+          mkdir -p ~/.cache/e2e-fonts && { cp /usr/share/fonts/truetype/wqy/wqy-zenhei.ttc ~/.cache/e2e-fonts/ 2>/dev/null || echo 'wqy-zenhei font not installed'; }
+      - if: steps.browsers.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cache/ms-playwright
+            ~/.cache/e2e-fonts
+          key: ${{ steps.browsers.outputs.cache-primary-key }}
       - if: steps.browsers.outputs.cache-hit == 'true'
         run: |
           if ldd ~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell | grep 'not found'; then
             npx playwright install-deps chromium-headless-shell
           fi
-          mkdir -p ~/.local/share/fonts && cp ~/.cache/e2e-fonts/* ~/.local/share/fonts/
+          mkdir -p ~/.local/share/fonts && { cp ~/.cache/e2e-fonts/* ~/.local/share/fonts/ 2>/dev/null || echo 'no cached fonts'; }
 
       - run: npm run test:e2e
 

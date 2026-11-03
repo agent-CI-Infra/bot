@@ -13,7 +13,7 @@ const updates = h => h.store.all("SELECT * FROM tasks WHERE unique_key LIKE '%:u
 test('Issue edits and comments queue another review, merged while one waits; the bot and closed Issues never trigger', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
-  const issue = { number: 1, state: 'open', title: 'Fix the parser', body: 'The parser drops the last line.' };
+  const issue = { number: 1, state: 'open', title: 'Fix the parser', body: 'The parser drops the last line.', user: { id: 5 } };
   const send = (delivery, payload, event = 'issues') => h.hook(a.path, a.secret, delivery, { repository: { id: 101 }, sender: user, ...payload }, { 'X-GitHub-Event': event });
   assert.equal((await send('opened', { action: 'opened', issue })).value.tasks_created, 1); finish(h);
 
@@ -27,7 +27,15 @@ test('Issue edits and comments queue another review, merged while one waits; the
   // While that review waits, another edit and a comment join it instead of queueing more.
   assert.equal((await send('edited-again', { ...edited, changes: { title: { from: 'Old title' } } })).value.tasks_created, 0);
   assert.equal((await send('comment-while-waiting', { action: 'created', issue, comment: { id: 11, body: 'Also CR-only files.' } }, 'issue_comment')).value.tasks_created, 0);
+  // The waiting review is told about both.
+  assert.deepEqual(JSON.parse(updates(h)[0].input).merged_updates.map(update => update.reason), ['issue_edited', 'comment']);
   assert.equal(updates(h).length, 1); finish(h);
+
+  // A comment from someone who neither wrote the Issue nor has a role in the repository reviews nothing; a collaborator's does.
+  const stranger = { type: 'User', login: 'mallory', id: 9 };
+  assert.equal((await send('stranger', { action: 'created', sender: stranger, issue, comment: { id: 17, body: 'Please.', author_association: 'NONE' } }, 'issue_comment')).value.tasks_created, 0);
+  assert.equal((await send('collaborator', { action: 'created', sender: stranger, issue, comment: { id: 18, body: 'Confirmed.', author_association: 'COLLABORATOR' } }, 'issue_comment')).value.tasks_created, 1);
+  finish(h);
 
   // A plain reply in the conversation reviews again with the comment as the trigger.
   const comment = { id: 12, body: 'I attached a sample file.', html_url: 'https://github.invalid/issue/1#issuecomment-12' };
@@ -53,7 +61,7 @@ test('Issue edits and comments queue another review, merged while one waits; the
   assert.equal((await send('issues-off', { ...edited, changes: { title: { from: 'x' } } })).value.tasks_created, 0);
   assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { review_pr_discussion: 'yes' })).status, 400);
   const policy = (await admin('/api/repositories/101')).value.policy; assert.deepEqual([policy.review_issue_updates, policy.review_pr_discussion], [1, 1]);
-  assert.equal(updates(h).length, 2);
+  assert.equal(updates(h).length, 3);
 });
 
 test('PR comments, reviews, replies to review comments and description edits review the current head once', async t => {
@@ -82,7 +90,7 @@ test('PR comments, reviews, replies to review comments and description edits rev
   // An edited description reviews again; a conversation comment needs the PR read from GitHub for its head.
   assert.equal(queue('pull_request', { action: 'edited', pull_request: { ...pr, body: 'Adds CRLF and CR support.' }, changes: { body: { from: pr.body } } }), 1);
   assert.equal(JSON.parse(updates(h).at(-1).input).trigger.reason, 'pull_request_edited'); finish(h);
-  const conversation = { action: 'created', issue: { number: 7, state: 'open', pull_request: { url: 'https://api.github.invalid/pulls/7' } }, comment: { id: 40, body: 'Ready for another look.' } };
+  const conversation = { action: 'created', issue: { number: 7, state: 'open', user: { id: 5 }, pull_request: { url: 'https://api.github.invalid/pulls/7' } }, comment: { id: 40, body: 'Ready for another look.' } };
   assert.equal(pullRequestNeeded(h.store, '101', 'issue_comment', { repository: { id: 101 }, sender: user, ...conversation }), true);
   assert.equal(queue('issue_comment', conversation), 0);
   assert.equal(queue('issue_comment', { ...conversation, comment: { id: 41, body: 'Ready.' } }, { ...pr, head: { sha: 'd'.repeat(40) } }), 1);
@@ -99,6 +107,11 @@ test('PR comments, reviews, replies to review comments and description edits rev
     ['pull_request_review_comment', { action: 'created', pull_request: { ...pr, state: 'closed' }, comment: replyComment }],
     ['pull_request_review_comment', { action: 'edited', pull_request: pr, comment: replyComment }],
   ]) assert.equal(queue(event, payload), 0, JSON.stringify(payload).slice(0, 80));
+  // Reviews and review comments from strangers do not count; a member's do.
+  const stranger = { type: 'User', login: 'mallory', id: 9 };
+  assert.equal(queue('pull_request_review_comment', { action: 'created', sender: stranger, pull_request: pr, comment: { ...replyComment, id: 60, author_association: 'NONE' } }), 0);
+  assert.equal(queue('pull_request_review', { action: 'submitted', sender: stranger, pull_request: pr, review: { id: 61, state: 'commented', body: 'LGTM?', author_association: 'CONTRIBUTOR' } }), 0);
+  assert.equal(queue('pull_request_review', { action: 'submitted', sender: stranger, pull_request: pr, review: { id: 62, state: 'commented', body: 'Check the CR case.', author_association: 'MEMBER' } }), 1); finish(h);
   // A person editing the bot's PR description still counts.
   assert.equal(queue('pull_request', { action: 'edited', sender: { type: 'User', login: 'bob', id: 6 }, pull_request: { ...pr, body: 'Implemented.\n\n<!-- dept-bot:z -->' }, changes: { title: { from: 'x' } } }), 1); finish(h);
 
@@ -116,6 +129,20 @@ test('an update review of a PR never starts a bot PR revision or a head-triggere
   const task = { id: 'review', repository_id: '101', kind: 'review.pr', object_number: 7, head_sha: 'c'.repeat(40), source_delivery_id: null };
   engine.queueDevelopment({}, task, { object: {}, trigger: { reason: 'pull_request_edited' } }, result, true);
   assert.equal(ownershipChecks, 0); assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n, 0);
+});
+
+test('an Issue review continues the bot PR for that Issue only within the revision budget', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true, max_revisions: 2 });
+  const engine = new TaskEngine(h.store, {}), result = { requires_code_change: true, clarification_required: false, findings: [] };
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,summary) VALUES('dev-1','101','development.issue',1,'pr_opened','')");
+  h.store.run("INSERT INTO bot_pull_requests VALUES('101',9,'9009','999','101','bot/issue-1-dev-1','a',?,2)", 'dev-1');
+  const task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1, source_delivery_id: null };
+  const object = { title: 'Fix it', body: 'Please fix the parser.', labels: [] }, development = () => h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue' AND id<>'dev-1'").n;
+  const requested = { ...result, request_quote: 'Please fix the parser.', issue_requests_code: true, implementation_goal: 'Fix the parser.' };
+  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, true); assert.equal(development(), 0);
+  h.store.run("UPDATE bot_pull_requests SET revisions=1"); h.store.run("UPDATE tasks SET status='completed' WHERE id='dev-1'");
+  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, true); assert.equal(development(), 1);
 });
 
 test('a stale PR update review is superseded without queueing a head-triggered review', async t => {

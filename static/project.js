@@ -377,6 +377,10 @@ function providerEditor(group, repositoryId, after) {
     }catch(err){if(version===request)result.replaceChildren(element('p',err.message,'view-error'));}finally{fetchModels.disabled=false;}
   });
   const addManual=button('加入待添加',()=>{const name=manual.value.trim();if(!name)return;if(existing.has(name)){message.textContent='这个模型已经在该供应商下';return;}selected.add(name);manual.value='';message.textContent='';draw();});
+  // Enter in a text box submits its form, which here saves the provider: in the filter it only filters, in the manual
+  // name box it adds the name to the list. An Enter that ends an input method composition is left alone.
+  filter.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing){event.preventDefault();draw();}});
+  manual.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing){event.preventDefault();addManual.click();}});
   const manualRow=element('div','','actions provider-manual');manualRow.append(field('手动模型名',manual),addManual);
   fields.append(field('接口 URL',url),field(editing?'API Key（留空保持不变）':'API Key',key),
     note(editing?`修改 URL 或填写新 Key 将应用于本供应商的 ${group.length} 个模型。留空则保留各模型现有 Key，页面不会回显。`:'填写连接信息，获取模型列表或手动添加至少一个模型后保存。Key 加密保存，不会回显。'),endpointDetail);

@@ -257,6 +257,22 @@ test('a failed runner call ends only its own task workspace; the computer and th
 // The incident behind these two tests: on a computer running four tasks, a reap that could not end leftover processes
 // restarted the container from its shared slot; another task's call then found the container changed, which stopped the
 // computer as failed (recovery_required) and left every task waiting for it.
+test('a failed call whose processes cannot be ended restarts the computer alone; the call beside it finishes', async t => {
+  const lines = []; t.mock.method(console, 'error', (...args) => lines.push(args.join(' ')));
+  const f = fixture(t); await f.projects.register('101'); f.projects.parallelism('101', 2); const g = gatedRunner(f.docker);
+  const gated = f.docker.runner, mine = id(), starts = f.docker.starts;
+  f.docker.runner = (container, input, wait) => input.type === 'reap' && input.workspace_id === mine ? Promise.resolve({ ok: false, error: 'reap_incomplete' }) : gated(container, input, wait);
+  const run = (workspace, command) => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request: { type: 'workspace_command', workspace_id: workspace, command } });
+  const long = run(id(), 'long'); await settle();
+  await assert.rejects(run(mine, 'boom'), /runner_failed/); await settle();
+  // The other task's call is untouched: the computer is not stopped under it, and the restart waits for it.
+  assert.deepEqual([f.projects.get('101').state, f.docker.starts], ['busy', starts]);
+  g.finish('long'); assert.equal((await long).ok, true); await settle();
+  const project = f.projects.get('101');
+  assert.deepEqual([f.docker.starts, project.state, project.desired, project.error], [starts + 1, 'ready', 'ready', null]);
+  assert.deepEqual(lines, ['[manager] project 101 restart queued: a failed workspace_command left processes that could not be ended: runner_failed']);
+});
+
 test('a restart after leftover processes survive a reap runs alone, and calls around it keep the computer ready', async t => {
   const lines = []; t.mock.method(console, 'error', (...args) => lines.push(args.join(' ')));
   const f = fixture(t); await f.projects.register('101'); f.projects.parallelism('101', 3); const g = gatedRunner(f.docker);
