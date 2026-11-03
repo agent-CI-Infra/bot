@@ -6,6 +6,7 @@ import { validateReview } from '../review/findings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
 import { beginModelRequest, finishModelRequest } from '../metrics/accounting.js';
+import { modelIdleMs, readModelResponse } from './model-stream.js';
 
 export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>) {
   try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest); }
@@ -88,33 +89,48 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     if (state.request && !answered.has(state.request.id)) {
       const model = selectedModel(store, task.repository_id); redactor.add(model.key);
       const body = state.request.body;
-      if (!body || !Array.isArray(body.messages) || JSON.stringify(body).length > 2 * 1024 * 1024) stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
+      if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024) stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
       const endpoint = modelEndpoints(model.url).chat_url;
       // Name the model and its host in failures; the saved address itself may carry more than a host.
       const target = `模型 ${model.model}（${(() => { try { return new URL(endpoint).host; } catch { return '地址无效'; } })()}）`;
-      let response: Response;
+      let response: Response | undefined, value: any;
       const { stream_options: _streamOptions, max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...requestBody } = body;
       // Providers reject a request that sets both output limits, so send exactly one: keep the runner's own field,
       // preferring max_completion_tokens (the current OpenAI name) when it sent both or neither.
       const limit = 'max_tokens' in body && !('max_completion_tokens' in body) ? 'max_tokens' : 'max_completion_tokens';
       const requestLog=beginModelRequest(store,task,String(state.request.id),model);
+      const controller = new AbortController();
+      let idle = false, timer: ReturnType<typeof setTimeout>, lastProgress = -Infinity, sequence = 0;
+      const reset = () => { clearTimeout(timer); timer = setTimeout(() => { idle = true; controller.abort(); }, modelIdleMs); };
+      reset();
       // Anything the task's redactor knows, such as an exchanged GitHub token echoed by a command, never reaches the provider.
-      try { response = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(90000), headers: { Authorization: 'Bearer ' + model.key, 'Content-Type': 'application/json' }, body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, [limit]: 8192, stream: false })) }); }
-      catch (error) { finishModelRequest(store,requestLog,null,null,'transport_error');return stop('model_unavailable', 'retry_wait', redactor.text(`${target}请求失败：${networkReason(error,90000)}。`)); }
+      try {
+        response = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: controller.signal, headers: { Authorization: 'Bearer ' + model.key, 'Content-Type': 'application/json' }, body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, [limit]: 8192, stream: true, stream_options: { include_usage: true } })) });
+        value = response.ok ? await readModelResponse(response, async () => {
+          reset();
+          // Coalesce busy streams; the runner receives activity only after actual token output.
+          if (Date.now() - lastProgress < 1000) return;
+          lastProgress = Date.now();
+          const sent = await workspace.deliver({ type: 'workspace_agent_progress', request_id: state.request.id, sequence: ++sequence });
+          if (sent.error) stop('execution_interrupted', 'waiting_environment', '向任务执行进程发送模型 token 活动通知时中断。');
+        }) : await errorBody(response);
+      } catch (error) {
+        finishModelRequest(store,requestLog,null,response?.status ?? null,error instanceof TaskError ? 'invalid_response' : 'transport_error');
+        if (error instanceof TaskError) throw error;
+        return stop('model_unavailable', 'retry_wait', redactor.text(`${target}请求失败：${idle ? '连续 90 秒没有 token 输出' : networkReason(error,modelIdleMs)}。`));
+      } finally { clearTimeout(timer!); }
       if (!response.ok) {
         finishModelRequest(store,requestLog,null,response.status,'http_error');
         // The provider's own short explanation (such as an exceeded context or an unknown model) names the cause.
-        const value=await errorBody(response),error=value?.error,found=[error?.message,error,value?.message,value?.detail,value?.msg].find(item=>typeof item==='string'&&item.trim());
+        const error=value?.error,found=[error?.message,error,value?.message,value?.detail,value?.msg].find(item=>typeof item==='string'&&item.trim());
         const said=found?'：'+redactor.text(found).replace(/\s+/g,' ').trim().slice(0,320):'';
         if ([401,403].includes(response.status)) stop('model_authentication_failed','waiting_configuration', `${target}拒绝认证或访问，HTTP ${response.status}${said}。请检查模型 API Key 和权限。`);
         stop('model_http_'+response.status,response.status===429||response.status>=500?'retry_wait':'failed', `${target}返回 HTTP ${response.status}${said}`);
       }
-      let raw: string;
-      try { raw=await response.text(); } catch (error) { finishModelRequest(store,requestLog,null,response.status,'transport_error');return stop('model_unavailable','retry_wait', redactor.text(`读取${target}的响应时失败：${networkReason(error,90000)}，HTTP ${response.status}。`)); }
-      if (raw.length>2*1024*1024) { finishModelRequest(store,requestLog,null,response.status,'invalid_response');stop('model_response_too_large', undefined, `模型响应长度 ${raw.length}，超过 2 MiB 上限。`); }
-      let usage;try { usage=JSON.parse(raw).usage; } catch { /* The response validation below reports malformed model output. */ }
+      let raw = JSON.stringify(value);
+      if (Buffer.byteLength(raw)>2*1024*1024) { finishModelRequest(store,requestLog,null,response.status,'invalid_response');stop('model_response_too_large', undefined, '模型响应超过 2 MiB 上限。'); }
       // Persist the provider's usage before forwarding: a runner failure does not undo an already billed call.
-      finishModelRequest(store,requestLog,usage,response.status);
+      finishModelRequest(store,requestLog,value.usage,response.status);
       // Refuse note writes before masking model output; a masked secret must not silently become a saved note.
       const rejectedNoteCalls: string[] = [];
       try { const parsed = JSON.parse(raw); for (const call of parsed.choices?.[0]?.message?.tool_calls || []) {

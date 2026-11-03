@@ -52,6 +52,12 @@ export async function agentOperation(input,root){
     const path=dir+'/token-reply-'+input.request_id;
     await writeFile(path+'.tmp',Buffer.from(input.base64,'base64'),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
   }
+  if(input.type==='workspace_agent_progress'){
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||!Number.isSafeInteger(input.sequence)||input.sequence<1)throw new Error('invalid_agent_progress');
+    const current=JSON.parse(await readFile(dir+'/request.json','utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
+    const path=dir+'/progress-'+input.request_id;
+    await writeFile(path+'.tmp',JSON.stringify({sequence:input.sequence}),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
+  }
   if(input.type==='workspace_agent_reply'||input.type==='workspace_agent_pull_request'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
     const pr=input.type==='workspace_agent_pull_request';

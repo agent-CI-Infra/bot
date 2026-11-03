@@ -4,6 +4,7 @@ import {once} from 'node:events';
 import {randomBytes} from 'node:crypto';
 import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager} from '@earendil-works/pi-coding-agent';
 import {workspace} from './workspace.mjs';
+import {waitModelReply} from './model-reply.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const save=async value=>{await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
@@ -24,7 +25,7 @@ async function exchange(){
   }finally{await unlink(dir+'/token-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
 }
 // Publication can include a long-running policy command. Wait for the control plane instead of
-// ending the session or imposing the model proxy's two-minute request timeout.
+// ending the session or imposing a request deadline.
 async function createPullRequest(args){
   const id=randomBytes(24).toString('hex'),reply=dir+'/pr-reply-'+id+'.json';
   await writeFile(dir+'/pr-request.tmp',JSON.stringify({id,arguments:args}),{mode:0o600});await rename(dir+'/pr-request.tmp',dir+'/pr-request.json');
@@ -39,11 +40,9 @@ const server=createServer(async(req,res)=>{
   try{
     // Any number of model requests per task; only the chat completion endpoint is proxied.
     if(req.url!=='/v1/chat/completions'||req.method!=='POST')throw new Error('model_request_not_allowed');
-    let raw='';for await(const chunk of req){raw+=chunk.toString();if(raw.length>2*1024*1024)throw new Error('model_request_too_large');}
+    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes>2*1024*1024)throw new Error('model_request_too_large');chunks.push(chunk);}const raw=Buffer.concat(chunks).toString('utf8');
     const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:JSON.parse(raw)}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
-    const end=Date.now()+120000;let response;
-    while(Date.now()<end){response=await readFile(dir+'/reply-'+id+'.json','utf8').then(JSON.parse).catch(()=>null);if(response)break;await new Promise(resolve=>setTimeout(resolve,100));}
-    if(!response)throw new Error('model_proxy_timeout');await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
+    const response=await waitModelReply(dir,id);await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
     for(const call of response.rejected_note_calls||[])rejectedNotes.add(call);
     res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
   }catch{res.writeHead(502,{'Content-Type':'application/json'});res.end('{"error":"model_proxy_unavailable"}');}
