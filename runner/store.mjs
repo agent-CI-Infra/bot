@@ -46,10 +46,11 @@ export async function storeOperation(input, root = storeRoot) {
   if (input.type === 'git_import') {
     if (!Array.isArray(input.commits) || !input.commits.length || input.commits.some(sha => !objectId.test(sha))) throw new Error('invalid_commits');
     // index-pack checks every object it stores; the commits must then be complete in the store.
-    const pack = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { await run(['index-pack', '--stdin', '--fix-thin'], { input: pack.createReadStream() }); } finally { await pack.close().catch(() => {}); }
-    for (const sha of input.commits) { await run(['cat-file', '-e', sha + '^{commit}']); await run(['update-ref', 'refs/bot/commits/' + sha, sha]); }
-    await rm(file, { force: true });
+    try {
+      const pack = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try { await run(['index-pack', '--stdin', '--fix-thin'], { input: pack.createReadStream() }); } finally { await pack.close().catch(() => {}); }
+      for (const sha of input.commits) { await run(['cat-file', '-e', sha + '^{commit}']); await run(['update-ref', 'refs/bot/commits/' + sha, sha]); }
+    } finally { await rm(file, { force: true }); }
     return { imported: input.commits };
   }
   throw new Error('unsupported_store_operation');
@@ -57,7 +58,12 @@ export async function storeOperation(input, root = storeRoot) {
 // Old task directories go after three days without activity, with their worktree registrations; the store is repacked
 // when git thinks it is due. A task still running keeps touching its agent files.
 export async function pruneTasks(tasksRoot, olderThanMs = 3 * 24 * 3600 * 1000, now = Date.now(), root = storeRoot) {
-  const { store } = paths(root);
+  const { store, incoming } = paths(root);
+  // A pack whose transfer stopped halfway is of no use to anyone after a few hours.
+  for (const name of await readdir(incoming).catch(() => [])) {
+    const path = incoming + '/' + name, modified = await stat(path).then(s => s.mtimeMs, () => now);
+    if (now - modified > 6 * 3600 * 1000) await rm(path, { force: true });
+  }
   let removed = 0;
   for (const name of await readdir(tasksRoot).catch(() => [])) {
     if (!/^[a-f0-9]{48}$/.test(name)) continue;
