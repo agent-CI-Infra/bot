@@ -22,11 +22,12 @@ import { quickstartApi } from './app/quickstart.js';
 import { RuleService } from './rules/service.js';
 import { settingsApi } from './app/settings.js';
 import { ProjectRemoval } from './projects/removal.js';
+import { ReleaseService } from './releases/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
-  integrations?: IntegrationChecker; quickstart?: Quickstart; githubUrl?: string;
+  integrations?: IntegrationChecker; quickstart?: Quickstart; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
   imageTag?: string; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -47,6 +48,7 @@ export function createControlPlane(options: Options) {
   const onboarding = options.onboarding || new Onboarding(store);
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
+  const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
   const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${options.secureCookies ? '; Secure' : ''}`;
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
@@ -164,11 +166,11 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await quickstartApi(store, options.quickstart, user, method, url, input) ?? await management(store, user, method, path, input) ?? await models(store, user, method, url, input)
+    const result = await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await quickstartApi(store, options.quickstart, user, method, url, input) ?? await management(store, user, method, path, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     // Hiding/restoring a list row and editing notes never change the desired state of a project computer.
-    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/restore)?$/.test(path) || /^\/api\/repositories\/[^/]+\/notes(?:\/[^/]+)?$/.test(path);
+    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/restore)?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|releases)(?:\/.*)?$/.test(path);
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
     respond(res, method === 'POST' ? 201 : 200, result);
   }));
