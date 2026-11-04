@@ -164,14 +164,14 @@ test('a model detail failure stays on the row through a status refresh without s
   assert.equal(page.run('outcome').querySelector('p'), failure); assert.deepEqual(page.requests, ['GET /api/models/m']); assert.equal(page.run('reloads'), 0);
 });
 
-test('the project model page keeps the shared model card for super administrators', async () => {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], () => [200, { models: [{ id: 's', repository_id: null, model_name: 'shared', api_url: 'https://model.invalid/v1', key_configured: true }] }]);
-  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; current = { id: '101', section: 'model', policy: { model_id: null } };");
-  const cards = page.run('modelSection()'); await settle();
+test('the task overview keeps the shared model card for super administrators', async () => {
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], () => [200, {}]);
+  page.run("me = { role: 'super_admin', csrf_token: 'csrf' }; current = { id: '101', section: 'tasks', policy: { model_id: null }, models: [{ id: 's', repository_id: null, model_name: 'shared', api_url: 'https://model.invalid/v1', key_configured: true }] };");
+  const cards = page.run('modelManagementSections()'); await settle();
   const shared = cards.find(card => card.querySelector('h3').textContent === '部署共享模型');
   // The model sits under its provider: the heading carries the address, the row the model name.
   assert.deepEqual(shared.querySelectorAll('.model-address').map(node => node.textContent), ['shared']);
   assert.deepEqual(['.provider-title strong', '.provider-title .muted'].map(selector => shared.querySelector(selector).textContent), ['model.invalid', 'https://model.invalid/v1']);
   assert.ok(shared.querySelectorAll('button').some(node => node.textContent === '新增供应商'));
-  page.run("me.role = 'project_admin';"); assert.ok(!page.run('modelSection()').some(card => card.querySelector('h3').textContent === '部署共享模型'));
+  page.run("me.role = 'project_admin';"); assert.ok(!page.run('modelManagementSections()').some(card => card.querySelector('h3').textContent === '部署共享模型'));
 });

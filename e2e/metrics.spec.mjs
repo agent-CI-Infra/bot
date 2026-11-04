@@ -29,7 +29,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await page.locator('[data-card-key="101/issue/1"][data-card-category=review] .board-card-title').click();
     await expect(page.locator('#task-picker')).toBeHidden();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
     await page.goto(h.admin+'/#/projects/101/activity');await expect(page.getByRole('heading',{name:'最近任务',exact:true})).toBeVisible();await expect(page.locator('#project-page .task-metrics')).toHaveCount(2);
-    await page.goto(h.admin+'/#/projects/101/model');await page.getByRole('button',{name:'计费单价',exact:true}).click();
+    await page.goto(h.admin+'/#/projects/101/tasks');await page.getByRole('button',{name:'计费单价',exact:true}).click();
     await expect(page.getByLabel('输入单价 / 百万 token',{exact:true})).toHaveValue('2');await page.getByLabel('输入单价 / 百万 token',{exact:true}).fill('5');
     await page.getByRole('button',{name:'保存单价',exact:true}).click();await expect(page.locator('#model-pricing')).toHaveCount(0);
     expect(h.store.get("SELECT cost FROM model_requests WHERE task_id='review-usage'").cost).toBe(1.56);
