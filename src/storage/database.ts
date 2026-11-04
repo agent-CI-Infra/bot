@@ -113,7 +113,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS installation_syncs(account_id TEXT PRIMARY KEY REFERENCES accounts(id),synced_at TEXT,error TEXT,repositories INTEGER);`);
     // What GitHub granted on the repository as last read: the installation's permissions for an App, the account's role
     // flags for a bot account. NULL until a sync or permission check has read it.
-    extend('installed_repositories', { permissions: 'TEXT', permissions_at: 'TEXT', hidden: 'INTEGER NOT NULL DEFAULT 0' });
+    extend('installed_repositories', { permissions: 'TEXT', events: 'TEXT', permissions_at: 'TEXT', hidden: 'INTEGER NOT NULL DEFAULT 0' });
     // Public exports are independent of review/development activation. Private publication requires local consent.
     this.db.exec(`CREATE TABLE IF NOT EXISTS public_board_consents(account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
       repository_id TEXT NOT NULL,PRIMARY KEY(account_id,repository_id));

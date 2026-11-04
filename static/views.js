@@ -513,11 +513,29 @@ function permissionGapText(missing) {
   return missing.map(item => item.permission === 'repository_role' ? `仓库角色需要「${roleNames.write}」，现在「${roleNames[item.current] || item.current || '无'}」`
     : `${permissionNames[item.permission] || item.permission} 需要「${accessNames[item.required] || item.required}」，现在「${item.current ? accessNames[item.current] || item.current : 'No access'}」`).join('；');
 }
+function eventGapText(missing) { return '事件未订阅：' + missing.map(event => eventNames[event] || event).join('、'); }
+// Use the full sync's installation snapshots: one installation can cover many repositories, including hidden ones.
+function installationSyncMessage(result) {
+  const failed = result.results.filter(row => row.error), installations = result.results.flatMap(row => row.installations || []);
+  const gaps = installations.filter(row => row.missing.length || row.missing_events.length).map(row => `${row.account || '安装'}（安装 ${row.id}）：` +
+    [row.missing.length ? '权限不足：' + permissionGapText(row.missing) : '', row.missing_events.length ? eventGapText(row.missing_events) : ''].filter(Boolean).join('；'));
+  for (const row of result.repositories || []) if (!row.installation_id && row.permission_missing?.length)
+    gaps.push(row.full_name + '：权限不足：' + permissionGapText(row.permission_missing));
+  const parts = [failed.length ? '部分账号同步失败：' + failed.map(row => (accounts.find(account => account.id === row.account_id)?.name || row.account_id) + '（' + row.error + '）').join('、') + '，因此还不能判断全部安装的权限和事件订阅是否正常。'
+    : gaps.length ? '安装列表已同步，权限和事件订阅并非全部正常。' : `安装列表已同步，${installations.length} 个安装的权限和事件订阅都正常。`];
+  if (gaps.length) parts.push(gaps.join('；') + '。');
+  if (result.results.some(row => row.app && (row.app.missing?.length || row.app.missing_events?.length)))
+    parts.push('App 定义仍有缺口，请到「全局设置 → 机器人账号」查看。');
+  if (result.results.some(row => row.app?.error)) parts.push('App 定义暂时无法核对，请到「全局设置 → 机器人账号」检查。');
+  return parts.join('');
+}
 // A repository the account still lists but with less than the bot needs. Always drawn (hidden when nothing is missing) so
 // that a later permission check can swap it in place.
 function permissionBadge(row) {
-  const missing = row.permission_missing?.length ? row.permission_missing : null, chip = missing ? badge('权限不足', 'warning') : element('span', '');
-  if (missing) chip.title = `仍能看到这个仓库，但授予的权限低于所需：${permissionGapText(missing)}。这种仓库不能删除。`; else chip.hidden = true;
+  const missing = row.permission_missing || [], events = row.events_missing || [], labels = [missing.length ? '权限不足' : '', events.length ? '事件未订阅' : ''].filter(Boolean);
+  const chip = labels.length ? badge(labels.join(' · '), 'warning') : element('span', '');
+  if (labels.length) chip.title = [missing.length ? `仍能看到这个仓库，但授予的权限低于所需：${permissionGapText(missing)}。这种仓库不能删除。` : '', events.length ? eventGapText(events) + '。请在 GitHub 安装设置接受所需事件。' : ''].filter(Boolean).join('');
+  else chip.hidden = true;
   chip.dataset.permission = ''; return chip;
 }
 // Replaces the permission badge of rows already on the list; nothing else in a row is redrawn.
@@ -610,7 +628,7 @@ function installedActions(row, after) {
     await after();
   };
   // Gate onboarding keeps its existing PR flow; boards are managed by the list switch.
-  actions.append(button('公共配置', () => openQuickstart(row, after), ''));
+  actions.append(button('接入门禁', () => openQuickstart(row, after), ''));
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
   if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
@@ -655,7 +673,7 @@ $('activation-form').addEventListener('submit', async event => {
 
 // Source gate onboarding; board execution items have moved to the repository list switch.
 const quickstartView = document.createElement('dialog'); quickstartView.id = 'quickstart-view'; quickstartView.setAttribute('aria-labelledby', 'quickstart-title');
-quickstartView.innerHTML = `<h2 id="quickstart-title">公共配置</h2>
+quickstartView.innerHTML = `<h2 id="quickstart-title">接入门禁</h2>
 <p class="muted" id="quickstart-hint"></p>
 <p id="quickstart-preflight" class="muted"></p>
 <ol id="quickstart-steps" class="quickstart-steps"></ol>
@@ -708,7 +726,7 @@ async function startQuickstart(steps) {
 }
 async function openQuickstart(row, after) {
   quickstartRow = row; quickstartAfter = after; quickstartState = { run: null, items: {} }; quickstartWasBusy = false;
-  $('quickstart-title').textContent = '公共配置 · ' + row.full_name;
+  $('quickstart-title').textContent = '接入门禁 · ' + row.full_name;
   $('quickstart-hint').textContent = '向源仓提出门禁配置 PR。看板由仓库列表的开关管理，不会随门禁 PR 自动开启。';
   $('quickstart-error').textContent = ''; renderQuickstart();
   quickstartView.showModal();

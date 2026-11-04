@@ -50,8 +50,8 @@ test('repository list switches replace legacy board execution and control public
     await expect(privateSwitch).toBeEnabled();
     await expect(publicSwitch).toHaveAttribute('aria-checked', 'true');
     await expect(row('101')).toContainText('未启动');
-    await row('101').getByRole('button', { name: '公共配置', exact: true }).click();
-    await expect(page.getByRole('heading', { name: '公共配置 · octo/hello', exact: true })).toBeVisible();
+    await row('101').getByRole('button', { name: '接入门禁', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '接入门禁 · octo/hello', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '执行单仓看板', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '执行Dashboard 登记', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '执行门禁 PR', exact: true })).toBeVisible();

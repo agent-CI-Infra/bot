@@ -81,7 +81,7 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 - 关闭后立即停止对外展示，包括已经生成的快照；设置在刷新、同步安装和重启后保留。
 - 以前已明确启用的私有仓会保留开启状态。已保存的开或关在仓库可见性变化后也保持不变；未保存选择的仓库按新可见性使用默认值。
 
-**公共配置** 中的门禁 PR 按钮只负责从 `CI-workflow` 复制原门禁框架并提出源仓 PR，不改变看板开关。
+**接入门禁** 中的门禁 PR 按钮只负责从 `CI-workflow` 复制原门禁框架并提出源仓 PR，不改变看板开关。
 
 门禁 PR 同时就是发版本的接入示例，不另建示例仓库。`release.yml` 优先来自 `agent-CI-Infra/CI-workflow` 的 `template/.github/workflows/release.yml`，缺少时使用同样只运行 release 门禁 lane 的本地模板；`v1.2.3`、`v1.2.3-beta.1` 等标签会触发 Release Actions。框架不含 PyPI、npm 或镜像发布步骤。
 

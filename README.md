@@ -28,7 +28,7 @@ App 已经创建好了，不需要自己再建。安装地址只用这一个：
 
 相对上一枚可达的合法版本标签，没有新增提交时，页面说明跳过，服务端拒绝确认，不创建发布记录、标签或 Release；还没有这样的版本标签时，现有历史可作为首次发布。已有发布记录仍可查看和按原规则恢复，同名标签始终不会移动或删除。
 
-「公共配置」的门禁 PR 就是接入框架，包含由版本标签触发的 `.github/workflows/release.yml`，优先使用 `CI-workflow` 上游模板，缺少时使用本地门禁模板。控制面只提供框架并在人工确认后打标签，不根据 `package.json` 选择检查命令，也不发布 PyPI、npm 包或镜像。`.github/ci-gates.json` 保留 lane 名字、命令留空；仓库开发者填写实际检查项，并决定是否在自己的 Release workflow 中增加发包或镜像发布步骤，由标签触发 Release Actions。空 lane 的 `not_applicable` 报告不代表实际检查通过；详见[接入说明](docs/onboarding-guide.md)。
+「接入门禁」的门禁 PR 就是接入框架，包含由版本标签触发的 `.github/workflows/release.yml`，优先使用 `CI-workflow` 上游模板，缺少时使用本地门禁模板。控制面只提供框架并在人工确认后打标签，不根据 `package.json` 选择检查命令，也不发布 PyPI、npm 包或镜像。`.github/ci-gates.json` 保留 lane 名字、命令留空；仓库开发者填写实际检查项，并决定是否在自己的 Release workflow 中增加发包或镜像发布步骤，由标签触发 Release Actions。空 lane 的 `not_applicable` 报告不代表实际检查通过；详见[接入说明](docs/onboarding-guide.md)。
 
 ## 部署和管理
 

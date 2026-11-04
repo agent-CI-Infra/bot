@@ -5,7 +5,7 @@ import { releaseWorkflow } from './workflow.js';
 import { file, tag, releases, skillPath } from './github.js';
 import type { GitHub } from '../github/client.js';
 import { previousTag, newCommits } from './range.js';
-export const noCI = '这个仓库还没有接入发布用的 CI。请先在「公共配置」接入门禁。';
+export const noCI = '这个仓库还没有接入发布用的 CI。请先在「接入门禁」中创建门禁 PR。';
 export const noRelease = '已接入门禁，但默认分支没有由版本标签触发的 Release 工作流，发版本不可用。';
 export const builtinRule = 'release-notes-v1: list only verified commits and merged pull requests with source links; never infer features, tests or performance.';
 export async function inspect(github: GitHub, version: string) {

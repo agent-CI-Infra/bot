@@ -90,7 +90,7 @@ async function reloadWith(notice) { if (notice) current.flash = notice; await re
 function projectStatus() {
   const { policy, installed } = current;
   const status = !policy.enabled ? badge('已禁用', 'warning') : policy.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning');
-  const permission = installed?.permission_missing?.length ? [permissionBadge(installed)] : [];
+  const permission = installed?.permission_missing?.length || installed?.events_missing?.length ? [permissionBadge(installed)] : [];
   return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...permission, ...(current.environment ? [state(current.environment.environment.state)] : [])];
 }
 function projectHeader() {
