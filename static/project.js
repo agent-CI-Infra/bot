@@ -74,7 +74,6 @@ async function renderProject(route) {
   if (current.focusAnchor) { page.querySelector(`[data-overview-anchor="${CSS.escape(current.focusAnchor)}"]`)?.scrollIntoView({ block: 'start' }); current.focusAnchor = null; }
   // Opening a rule file from the overview, or saving one, brings its card into view.
   if (current.focusRule) { if (section === 'tasks') openProjectRule(current.focusRule); else page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
-  if (legacyFocus === 'rule-sources') openRuleSources();
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
 }
 async function loadProject(id,section=current.section) {
@@ -785,7 +784,10 @@ function ruleCard(path) {
   const save = async content => {
     try { const { rules } = await api(`/api/repositories/${id}/rules`, 'PUT', { path, content }); if (current?.id !== id) return; current.rules = rules;
       current.ruleNotice = { path, text: content === null ? '已清除控制台覆盖' : '已保存控制台覆盖' };
-      if ($('project-detail')) $('project-detail').redraw();
+      updateRuleSources();
+      const common = section.closest('details.common-rule');
+      if (common) common.querySelector('.common-rule-body').replaceChildren(ruleCard(path));
+      else if ($('project-detail')?.redraw) $('project-detail').redraw();
       else { current.focusRule = path; renderProject({ id: current.id, section: current.section }); } }
     catch (err) { message.textContent = err.message; }
   };
@@ -803,61 +805,72 @@ function ruleCard(path) {
   return section;
 }
 
-function ruleSourceOverview() {
-  const id = current.id, rules = current.rules, overview = card('规则来源与层级'), message = element('p', '', 'view-error'), head = element('div', '', 'actions');
-  overview.classList.add('rule-overview'); overview.dataset.overviewAnchor = 'rule-sources'; message.setAttribute('role', 'alert');
-  overview.append(note('优先级：内置默认 → 项目控制台 → 默认分支仓库文件，后一层存在时整份覆盖前一层；PR 里改动的规则文件合入默认分支后才生效。'));
-  if (!rules) { overview.append(note('暂时读不到规则文件，稍后再试。')); return overview; }
-  const source = note(rules.sha ? `仓库文件来自默认分支提交 ${rules.sha.slice(0, 12)} · ${timestamp(rules.updated_at)}` : '尚未读取默认分支，下表只含内置与控制台配置。'); if (rules.sha) source.title = rules.sha;
-  overview.append(source, head, message);
-  const refresh = button('刷新默认分支文件', async () => {
-    refresh.disabled = true; refresh.textContent = '正在读取默认分支…'; message.textContent = '';
-    try { const result = await api(`/api/repositories/${id}/rules/refresh`, 'POST', {}); current.rules = result.rules; $('project-detail').redraw(`已读取默认分支提交 ${result.rules.sha.slice(0, 12)}`); }
-    catch (err) { message.textContent = err.message; refresh.disabled = false; refresh.textContent = '刷新默认分支文件'; }
-  });
-  head.append(refresh);
-  const table = document.createElement('table'), body = document.createElement('tbody'); table.className = 'rule-table';
-  const headRow = document.createElement('tr'); for (const caption of ['作用', '文件', '用于', ...Object.values(layerNames), '']) headRow.append(element('th', caption));
-  table.createTHead().append(headRow); table.append(body);
-  const known = ruleFiles.map(([path]) => path), skills = rules.files.filter(file => !known.includes(file.path));
-  for (const path of [...known, ...skills.map(file => file.path)]) {
-    const [, purpose, task, target] = ruleInfo(path), row = rules.files.find(file => file.path === path), tr = document.createElement('tr');
-    const cell = (label, ...nodes) => { const td = document.createElement('td'); td.dataset.label = label; td.append(...nodes); tr.append(td); };
-    cell('作用', element('strong', purpose)); cell('文件', element('code', path)); cell('用于', task);
-    for (const [source] of Object.entries(layerNames)) cell(layerNames[source], !row?.layers.some(layer => layer.source === source) ? element('span', '—', 'muted') : row.source === source ? badge('生效', 'success') : badge('被覆盖'));
-    const open = () => { if (target === 'tasks') openProjectRule(path); else { $('project-detail')?.close(); current.focusRule = path; openProject(id, target); } };
-    cell('', button(path.startsWith('.agents/') ? '查看' : '编辑', open));
-    body.append(tr);
-  }
-  const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); overview.append(wrap);
-  return overview;
+function ruleSource(path) {
+  const row = current.rules?.files.find(file => file.path === path), source = element('span', '', 'task-rule-source');
+  if (path) source.dataset.ruleSource = path;
+  const name = row ? layerNames[row.source] : !path ? '内置默认' : current.rules ? '未配置' : '暂未读取';
+  source.append(badge(name, row?.source === 'repository' ? 'info' : row?.source === 'console' ? 'success' : ''));
+  source.title = Object.entries(layerNames).map(([key, label]) => `${label}：${row?.source === key ? '生效' : row?.layers.some(layer => layer.source === key) ? '被覆盖' : '未配置'}`).join('；');
+  return source;
 }
-// Keep long forms and rule text off the overview; open one detail panel at a time.
+function updateRuleSources() {
+  $('project-page')?.querySelectorAll('[data-rule-source]').forEach(node => node.replaceWith(ruleSource(node.dataset.ruleSource)));
+}
+function commonRule(path, title) {
+  const details = element('details', '', 'common-rule'), summary = element('summary'), body = element('div', '', 'common-rule-body');
+  details.dataset.commonRule = path;
+  summary.append(element('strong', title), ruleSource(path), element('span', '展开内容与编辑', 'muted'));
+  details.append(summary, body);
+  details.addEventListener('toggle', () => { if (details.open && !body.querySelector('form')) body.replaceChildren(ruleCard(path)); });
+  return details;
+}
+function ruleSync() {
+  const id = current.id, section = element('div', '', 'rule-sync'), source = note(''), message = element('p', '', 'view-error');
+  section.dataset.overviewAnchor = 'rule-sources'; message.setAttribute('role', 'status');
+  const describe = () => { source.textContent = current.rules?.sha ? `默认分支提交 ${current.rules.sha.slice(0, 12)} · ${timestamp(current.rules.updated_at)}` : current.rules ? '尚未读取默认分支，当前显示内置与控制台配置。' : '暂时无法读取规则，点击刷新重试。'; };
+  const refresh = button('刷新默认分支文件', async () => {
+    refresh.disabled = true; refresh.textContent = '正在读取默认分支…'; message.className = 'view-error'; message.textContent = '';
+    try {
+      const { rules } = await api(`/api/repositories/${id}/rules/refresh`, 'POST', {});
+      if (current?.id !== id) return;
+      current.rules = rules; updateRuleSources(); describe();
+      // Refresh saved content without discarding an editor's unsaved draft.
+      $('project-page').querySelectorAll('.common-rule').forEach(details => {
+        const body = details.querySelector('.common-rule-body');
+        if (!body.querySelector('form')) body.replaceChildren(...(details.open ? [ruleCard(details.dataset.commonRule)] : []));
+      });
+      const detail = $('project-detail'); if (detail?.redraw && !detail.hidden && !detail.querySelector('form')) detail.redraw();
+      message.className = 'view-success flash'; message.textContent = `已读取默认分支提交 ${rules.sha.slice(0, 12)}`;
+    } catch (err) { message.textContent = err.message; }
+    finally { refresh.disabled = false; refresh.textContent = '刷新默认分支文件'; }
+  });
+  describe(); section.append(source, refresh, message); return section;
+}
+// Details stay in the project page instead of covering the table with a modal.
 function showProjectDetails(title, render) {
-  const previous = $('project-detail'); if (previous) { previous.close(); previous.remove(); }
-  const dialog = document.createElement('dialog'), head = element('div', '', 'heading'), heading = element('h2', title), body = element('div', '', 'project-detail-body');
-  dialog.id = 'project-detail'; dialog.className = 'project-detail'; heading.id = 'project-detail-title'; dialog.setAttribute('aria-labelledby', heading.id);
-  head.append(heading, button('关闭', () => dialog.close(), 'quiet'));
-  dialog.redraw = notice => { body.replaceChildren(...(notice ? [element('p', notice, 'view-success flash')] : []), ...render()); };
-  const leave = () => dialog.close();
-  window.addEventListener('hashchange', leave);
-  dialog.append(head, body); document.body.append(dialog);
-  dialog.addEventListener('close', () => { window.removeEventListener('hashchange', leave); dialog.remove(); }, { once: true });
-  dialog.redraw(); dialog.showModal(); return dialog.redraw;
+  const redraw = notice => {
+    const detail = $('project-detail'); if (!detail) return;
+    const head = element('div', '', 'heading'), heading = element('h3', title);
+    heading.id = 'project-detail-title'; head.append(heading, button('收起', () => { detail.hidden = true; detail.replaceChildren(); }, 'quiet'));
+    detail.hidden = false; detail.redraw = redraw; detail.setAttribute('aria-labelledby', heading.id);
+    detail.replaceChildren(head, ...(notice ? [element('p', notice, 'view-success flash')] : []), ...render());
+  };
+  redraw(); $('project-detail')?.scrollIntoView({ block: 'nearest' }); return redraw;
 }
 function openProjectRule(path) { showProjectDetails(ruleInfo(path)[1], () => [ruleCard(path)]); }
-function openRuleSources() { showProjectDetails('规则来源与层级', () => [ruleSourceOverview()]); }
 function openTaskSettings(kind) {
   const review = kind === 'review', id = current.id;
   const after = async notice => { if (current?.id !== id) return; await renderProject({ id, section: current.section }); redraw(notice); };
   const redraw = showProjectDetails(review ? '检视设置' : '开发设置', () => [review ? reviewSettings({ after }) : developmentSettings({ after })]);
 }
+function taskRulePath(definition) {
+  if (definition.kind === 'release.notes') return current.rules?.files.some(file => file.path === releaseNotesSkill) ? releaseNotesSkill : null;
+  return definition.rule || (definition.kind === 'development.pr' ? '.bot/rules/issue-development.md' : '.bot/guide.md');
+}
 function openTaskRule(definition) {
-  if (definition.kind === 'release.notes') {
-    if (current.rules?.files.some(file => file.path === releaseNotesSkill)) return openProjectRule(releaseNotesSkill);
-    return showProjectDetails('发行说明规则', () => [note('使用内置 release-notes-v1：仅整理已核验的提交和合并 PR，保留来源链接，不推断功能、测试或性能。默认分支存在 .agents/skills/release-notes/SKILL.md 时以该 skill 为准。'), button('查看行为指南', () => openProjectRule('.bot/guide.md'))]);
-  }
-  openProjectRule(definition.rule || (definition.kind === 'development.pr' ? '.bot/rules/issue-development.md' : '.bot/guide.md'));
+  const path = taskRulePath(definition);
+  if (path) return openProjectRule(path);
+  showProjectDetails('发行说明规则', () => [note('使用内置 release-notes-v1：仅整理已核验的提交和合并 PR，保留来源链接，不推断功能、测试或性能。默认分支存在 .agents/skills/release-notes/SKILL.md 时以该 skill 为准。')]);
 }
 function projectTable(captions, name) {
   const table = document.createElement('table'), head = document.createElement('tr'), body = document.createElement('tbody');
@@ -869,11 +882,13 @@ function tableCell(row, caption, ...nodes) {
   const td = document.createElement('td'); td.dataset.label = caption; td.append(...nodes); row.append(td); return td;
 }
 function tasksSection() {
-  const section = card('任务总览'), toolbar = element('div', '', 'actions task-toolbar');
-  toolbar.dataset.overviewAnchor = 'rule-sources';
-  toolbar.append(button('检视设置', () => openTaskSettings('review')), button('开发设置', () => openTaskSettings('development')), button('规则来源', openRuleSources));
-  section.append(note('查看支持的任务和规则。模型选择与供应商配置在「模型」中管理。'), toolbar);
-  const { table, body } = projectTable(['任务', '触发方式', '状态', '规则'], '支持的任务');
+  const section = card('任务总览'), toolbar = element('div', '', 'actions task-toolbar'), common = element('section', '', 'common-rules');
+  section.append(note('规则来源直接显示在表中。模型选择与供应商配置在「模型」中管理。'));
+  common.append(element('h4', '通用准则'), commonRule('.bot/guide.md', '行为指南'), commonRule('.bot/rules/labels.md', '检视标签'));
+  section.append(common, note('规则优先级：内置默认 → 项目控制台 → 默认分支仓库文件，后一层整份覆盖前一层。'), ruleSync());
+  toolbar.append(button('检视设置', () => openTaskSettings('review')), button('开发设置', () => openTaskSettings('development')));
+  section.append(toolbar);
+  const { table, body } = projectTable(['任务', '触发方式', '状态', '规则来源', '操作'], '支持的任务');
   const { policy } = current;
   const triggers = ['新 Issue 或更新', '新 PR、提交或讨论', 'Issue 检视后衔接', 'bot PR 更新或讨论', '发行工作流运行', '发行工作流完成'];
   builtInTasks.forEach((definition, index) => {
@@ -882,12 +897,25 @@ function tasksSection() {
     tableCell(row, '任务', title); tableCell(row, '触发方式', triggers[index]);
     const enabled = policy.enabled && policy.review_enabled && (definition.group === '开发' ? policy.development_enabled : definition.kind === 'review.issue' ? policy.review_issues || policy.review_issue_updates : policy.review_pull_requests || policy.review_pr_updates || policy.review_pr_discussion);
     tableCell(row, '状态', definition.group === '发版本' ? badge(policy.enabled ? '按需执行' : '项目禁用', policy.enabled ? '' : 'warning') : badge(enabled ? '已开启' : '未开启', enabled ? 'success' : 'warning'));
-    tableCell(row, '规则', button('查看规则', () => openTaskRule(definition), 'quiet')); body.append(row);
+    const path = taskRulePath(definition);
+    tableCell(row, '规则来源', ruleSource(path), element('code', path || 'release-notes-v1'));
+    tableCell(row, '操作', button('展开规则', () => openTaskRule(definition), 'quiet')); body.append(row);
   });
-  section.append(table);
-  const common = element('div', '', 'actions task-common-rules');
-  common.append(element('span', '通用规则', 'muted'), button('行为指南', () => openProjectRule('.bot/guide.md'), 'quiet'), button('检视标签', () => openProjectRule('.bot/rules/labels.md'), 'quiet'));
-  section.append(common); return [section];
+  const others = current.rules?.files.filter(file => file.path === '.bot/computer.yaml' || !ruleFiles.some(([path]) => path === file.path) && file.path !== releaseNotesSkill) || [];
+  if (others.length) {
+    const extra = document.createElement('tbody'); extra.className = 'other-rule-rows';
+    for (const file of others) {
+      const row = document.createElement('tr'), [, purpose, task, target] = ruleInfo(file.path); row.dataset.ruleFile = file.path;
+      tableCell(row, '任务', element('strong', purpose)); tableCell(row, '触发方式', task); tableCell(row, '状态', element('span', '配置文件', 'muted'));
+      tableCell(row, '规则来源', ruleSource(file.path), element('code', file.path));
+      if (target === 'machine') { const entry = element('a', '查看机器配置'); entry.href = `#/projects/${current.id}/machine`; tableCell(row, '操作', entry); }
+      else tableCell(row, '操作', button('展开规则', () => openProjectRule(file.path), 'quiet'));
+      extra.append(row);
+    }
+    table.append(extra);
+  }
+  const detail = element('section', '', 'project-inline-detail'); detail.id = 'project-detail'; detail.hidden = true; detail.setAttribute('role', 'region');
+  section.append(table, detail); return [section];
 }
 function modelsSection() {
   const section = card('任务模型'), { table, body } = projectTable(['任务', '模型选择'], '任务模型');
