@@ -22,7 +22,9 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   // The overview stays compact; settings and rules open on demand.
   const close=async()=>page.locator('#project-detail').getByRole('button',{name:'收起',exact:true}).click();
   await page.goto(h.admin+'/#/projects/101/tasks');await expect(page.locator('#project-page')).not.toContainText('项目检视指引');await page.getByRole('button',{name:'检视设置',exact:true}).click();
-  await page.getByLabel('PR 推送新提交后',{exact:false}).uncheck();const reviewSettings=page.getByRole('region',{name:'检视设置',exact:true});await reviewSettings.getByRole('button',{name:'保存',exact:true}).click();await expect(reviewSettings.locator('.flash')).toHaveText('已保存');await close();await expect(page.locator('#project-page')).not.toContainText('[object Object]');
+  const reviewSettings=page.getByRole('region',{name:'检视设置',exact:true}),reviewForm=reviewSettings.locator('form').filter({has:page.locator('[name="review_pr_updates"]')});
+  await reviewForm.getByLabel('PR 推送新提交后',{exact:false}).uncheck();await reviewForm.getByRole('button',{name:'保存',exact:true}).click();
+  await expect(reviewSettings.locator(':scope > .flash')).toHaveText('已保存');await expect(reviewForm.locator('[name="review_pr_updates"]')).not.toBeChecked();await close();await expect(page.locator('#project-page')).not.toContainText('[object Object]');
   const issueRule=page.locator('[data-rule-path=".bot/rules/issue-review.md"]'),prRule=page.locator('[data-rule-path=".bot/rules/pr-review.md"]');
   const task=kind=>page.locator(`[data-task-kind="${kind}"]`);
   await task('review.pr').getByRole('button',{name:'展开规则',exact:true}).click();await expect(prRule).toContainText('生效：仓库文件');await expect(prRule).toContainText('Final repository review only.');await close();
