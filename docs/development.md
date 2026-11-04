@@ -41,3 +41,19 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 ## CI 与合入
 
 `main` 只能经 Pull request 合入，合入方式只有 rebase，并且经合并队列（merge queue）排队，不能强推或删除。必需检查在 Pull request 和合并队列上都运行：[`checks.yml`](../.github/workflows/checks.yml) 的 `unit`（`npm run check`、`npm test` 和两个 Compose 文件的校验）与 `e2e`（`npm run test:e2e`，失败时上传 `.tmp/e2e-results`），以及 [`images.yml`](../.github/workflows/images.yml) 构建的四个镜像。新增必需检查的工作流要同时监听 `pull_request` 和 `merge_group`，否则合并队列等不到结果。版本发布见[版本发布与服务器部署](deployment.md#版本发布与服务器部署)。
+
+共享执行入口、任务扩展方式与权限边界见[共享 Agent 后端](agent-runtime.md)。
+
+## 按任务选择模型
+
+在项目「使用的模型」中保留一个默认模型，并可新增任务模型映射。任务标识精确匹配，例如 `review.issue`、`review.pr`、`development.issue`、`development.pr`、`release.observe`、`release.notes`；扩展任务可以使用自己的标识，不要求修改模型选择器。
+
+`PATCH /api/repositories/:id/policy` 接受 `task_models` 对象，例如：
+
+```json
+{"task_models":{"review.pr":"review-model-id","development.issue":"coding-model-id","release.notes":"summary-model-id"}}
+```
+
+该对象完整替换映射；省略字段保持原值，发送 `{}` 清除全部任务覆盖并恢复项目默认。未配置覆盖的任务使用 `model_id`；已配置但不可用、已删除、撤销凭据或撤销项目共享授权的覆盖会等待配置，不静默切换到默认模型。模型必须属于当前项目或被明确共享给该项目；超级管理员选择共享模型时与默认模型选择一样同时授权该项目使用。
+
+此配置仅由经过项目授权检查的管理 API 写入。Issue、PR、工具输出不能指定模型 ID、端点或密钥。调用 `selectedModel` 时由可信任务描述传入 task kind，模型请求账本仍保存实际使用模型及其计价快照。

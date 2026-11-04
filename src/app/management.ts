@@ -237,7 +237,7 @@ export async function management(store: Store, user: Actor, method: string, path
     if (method === 'PATCH' && repoMatch[2]) {
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
       fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency']);
+        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models']);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates', 'review_issue_updates', 'review_pr_discussion']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       if (body.review_language !== undefined && (typeof body.review_language !== 'string' || !['auto', 'zh', 'en'].includes(body.review_language))) fail(400, 'invalid_review_language');
@@ -251,6 +251,22 @@ export async function management(store: Store, user: Actor, method: string, path
       const grant = !!model && user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', model);
       if (model && !grant && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
         (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)))`, model, id, id)) fail(400, 'model_not_available');
+      // Replace the exact-profile map atomically; {} restores repository defaults for all profiles.
+      let taskModels: Record<string, string> | undefined;
+      const taskModelGrants: string[] = [];
+      if (body.task_models !== undefined) {
+        if (!body.task_models || typeof body.task_models !== 'object' || Array.isArray(body.task_models) || Object.keys(body.task_models).length > 64) fail(400, 'invalid_task_models');
+        taskModels = Object.create(null) as Record<string, string>;
+        for (const [kind, value] of Object.entries(body.task_models as Json)) {
+          if (!/^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$/.test(kind) || kind.length > 100 || ['constructor', 'prototype', '__proto__'].includes(kind) || typeof value !== 'string' || !value.trim() || value.length > 200) fail(400, 'invalid_task_models');
+          const chosen = value as string;
+          const shared = user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', chosen);
+          if (!shared && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
+            (SELECT 1 FROM model_projects WHERE model_id=models.id AND repository_id=?)))`, chosen, id, id)) fail(400, 'model_not_available');
+          taskModels[kind] = chosen;
+          if (shared) taskModelGrants.push(chosen);
+        }
+      }
       let automation = previous.automation as string;
       if (body.automation !== undefined) {
         if (!body.automation || typeof body.automation !== 'object' || Array.isArray(body.automation)) fail(400, 'invalid_automation_config');
@@ -263,6 +279,10 @@ export async function management(store: Store, user: Actor, method: string, path
           body.development_enabled === undefined ? previous.development_enabled : Number(body.development_enabled),
           body.enabled === undefined ? previous.enabled : Number(body.enabled), id);
         if (grant) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model, id);
+        if (taskModels !== undefined) {
+          for (const chosen of taskModelGrants) store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', chosen, id);
+          store.run('UPDATE policies SET task_models=? WHERE repository_id=?', JSON.stringify(taskModels), id);
+        }
         const keep = (key: string, value: unknown) => body[key] === undefined ? previous[key] : value;
         store.run('UPDATE policies SET review_issues=?,review_pull_requests=?,review_pr_updates=?,review_issue_updates=?,review_pr_discussion=?,review_language=? WHERE repository_id=?',
           keep('review_issues', Number(body.review_issues)), keep('review_pull_requests', Number(body.review_pull_requests)), keep('review_pr_updates', Number(body.review_pr_updates)),

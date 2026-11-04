@@ -103,7 +103,7 @@ export class Store {
       review_issue_updates: 'INTEGER NOT NULL DEFAULT 1', review_pr_discussion: 'INTEGER NOT NULL DEFAULT 1',
       review_language: "TEXT NOT NULL DEFAULT 'auto'", review_instructions: "TEXT NOT NULL DEFAULT ''", rule_overrides: "TEXT NOT NULL DEFAULT '{}'" });
     // How many tasks the project computer runs at once; NULL follows the global default in settings.
-    extend('policies', { task_concurrency: 'INTEGER' });
+    extend('policies', { task_concurrency: 'INTEGER', task_models: "TEXT NOT NULL DEFAULT '{}'" });
     // Repositories each account can see on GitHub. Seeing a repository does not register or enable it.
     this.db.exec(`CREATE TABLE IF NOT EXISTS installed_repositories(account_id TEXT NOT NULL REFERENCES accounts(id),repository_id TEXT NOT NULL,
         installation_id TEXT,full_name TEXT NOT NULL,owner_id TEXT NOT NULL,owner_login TEXT NOT NULL DEFAULT '',private INTEGER NOT NULL DEFAULT 0,

@@ -5,6 +5,7 @@ import {randomBytes} from 'node:crypto';
 import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
 import {workspace} from './workspace.mjs';
 import {waitModelReply} from './model-reply.mjs';
+import {toolCapabilityError} from './capabilities.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
@@ -67,7 +68,9 @@ try{
       // Start metadata deliberately excludes file contents and publication payloads.
       await writeEvent({type:'tool_start',name,call_id:id,...(['read_file','write_file'].includes(name)?{path:args.path}:name==='run_command'?{command:args.command}:{})});
       let result;
-      if(tool.function.name==='finish_review'){finished=args;result={finished:true};}
+      const denied=toolCapabilityError(config,name,args);
+      if(denied) result={error:denied};
+      else if(tool.function.name==='finish_review'){finished=args;result={finished:true};}
       else if(tool.function.name==='create_pull_request'){
         result=await createPullRequest(args);
         if(result.pr||result.status==='no_changes'){finished={...args,...result};setTimeout(()=>void session.abort(),10);}
@@ -75,11 +78,8 @@ try{
       else if(tool.function.name==='read_file')result=await workspace({type:'workspace_read',workspace_id:config.workspace_id,path:args.path});
       else if(tool.function.name==='write_file'){
         const note=typeof args.path==='string'&&args.path.startsWith('../notes/');
-        if(!note&&!config.tools.some(tool=>tool.function.name==='create_pull_request'))result={error:'review_repository_write_forbidden'};
-        else {
-          try{const data=Buffer.from(args.content);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:config.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});}
-          catch(error){result={error:String(error.message)};}
-        }
+        try{const data=Buffer.from(args.content);if(!note&&data.length>48000)throw new Error('file_too_large');result=await workspace({type:'workspace_write',workspace_id:config.workspace_id,path:args.path,base64:data.toString('base64'),offset:0,final:true,mode:'100644'});}
+        catch(error){result={error:String(error.message)};}
       }else if(tool.function.name==='run_command'){
         // Commands have no time limit; the model may still bound one that could hang.
         const timeout=args.timeout_seconds>0?args.timeout_seconds*1000:null;

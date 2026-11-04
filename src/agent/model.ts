@@ -1,12 +1,23 @@
 import { type Store } from '../storage/database.js';
 import { stop } from './common.js';
 import { pricingFor } from '../metrics/accounting.js';
-export function selectedModel(store: Store, repositoryId: string) {
-  const row=store.get(`SELECT m.* FROM policies p JOIN models m ON m.id=p.model_id WHERE p.repository_id=? AND
-    (m.repository_id=p.repository_id OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=p.repository_id)))`,repositoryId);
-  if(!row?.api_key)return stop('model_not_configured','waiting_configuration',`仓库 ${repositoryId} 未配置可用模型或模型凭据。`);
+// Exact task-profile overrides are trusted administrator configuration, never model/tool input.
+// Keep invalid/deleted overrides visible: falling back would silently change the user's chosen model.
+export function selectedModel(store: Store, repositoryId: string, taskKind?: string) {
+  const policy = store.get('SELECT model_id,task_models FROM policies WHERE repository_id=?', repositoryId);
+  let overrides: Record<string, string>;
+  try {
+    overrides = JSON.parse(policy?.task_models || '{}');
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error();
+  } catch { return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。'); }
+  const overridden = !!taskKind && Object.hasOwn(overrides, taskKind);
+  const modelId = overridden ? overrides[taskKind!] : policy?.model_id;
+  if (overridden && (typeof modelId !== 'string' || !modelId)) return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。');
+  const row = modelId ? store.get(`SELECT m.* FROM models m WHERE m.id=? AND
+    (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`, modelId, repositoryId, repositoryId) : undefined;
+  if (!row?.api_key) return stop('model_not_configured','waiting_configuration',`仓库 ${repositoryId}${overridden ? ' 的任务 ' + taskKind : ''} 未配置可用模型或模型凭据；不会自动切换到其他模型。`);
   const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration',`模型 ${row.id} 的凭据为空，请重新配置。`);
-  return {id:String(row.id),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id))};
+  return {id:String(row.id),version:Number(row.version),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id))};
 }
 // The one place a saved model URL becomes request addresses (tasks, model listing and model tests all use it).
 // Only a trailing slash and a trailing /chat/completions are removed; /v1 is never added or removed, so the base the
@@ -18,12 +29,13 @@ export function modelEndpoints(url:string){
 }
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};
-export function tools(development:boolean){
+export function tools(profile: { workspaceWrite: boolean; completion: 'review' | 'publication' }){
+  const development = profile.completion === 'publication';
   const result=[fn('read_file','Read a file in this task workspace',{path:string},['path']),fn('run_command','Run a shell command in this task workspace inside the long-lived project container (internet access available for dependencies). Output is streamed to the console.',
     {command:string,timeout_seconds:{type:'integer',minimum:1,description:'Optional. Without it the command runs until it ends; set it only for a command that might hang'},
       keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command']),
     fn('github_read_token','Exchange a short-lived read-only GitHub token for this repository. Later run_command calls get it as GH_TOKEN and GITHUB_TOKEN for https://api.github.com; it can read code, Issues, pull requests, comments, reviews, Actions runs and checks, and cannot write anything. The token value is never shown to you',{},[])];
-  result.push(fn('write_file',development?'Replace a repository text file or a persistent project note at ../notes/<name>':'Replace a persistent project note at ../notes/<name> only. Repository writes are forbidden',{path:string,content:string},['path','content']));
+  result.push(fn('write_file',profile.workspaceWrite?'Replace a repository text file or a persistent project note at ../notes/<name>':'Replace a persistent project note at ../notes/<name> only. Repository writes are forbidden',{path:string,content:string},['path','content']));
   if(development)result.push(
     fn('create_pull_request','Create or update the bot pull request from the working tree now. test_command records a command you already ran; only the project policy command is run by the control plane. On validation_failed, fix the problem and call again. Remove generated files before calling',
       {summary:string,test_command:string,change_title:{type:'string',description:'Concise code-change subject only. No review passphrase or review template.'}},['summary','test_command','change_title']));

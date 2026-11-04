@@ -7,7 +7,17 @@ import { chromium } from '@playwright/test';
 
 mkdirSync('.tmp/review-dev',{recursive:true});
 const project='dept-bot-agent-e2e-'+randomBytes(4).toString('hex'),override=resolve('.tmp/review-dev/compose.test.yaml');
+// Never replace another checkout's :local images while running an isolated test deployment.
+const image=name=>`department-bot-${name}:${project}`;
 writeFileSync(override,`services:
+  key-init:
+    image: ${image('control-plane')}
+  webhook:
+    image: ${image('control-plane')}
+  tunnel:
+    image: ${image('cloudflare-tunnel')}
+  project-image:
+    image: ${image('project-computer')}
   fixtures:
     image: node:22-bookworm-slim
     command: [node, /fixtures/agent-server.mjs]
@@ -17,12 +27,16 @@ writeFileSync(override,`services:
     read_only: true
     cap_drop: [ALL]
   bot:
+    image: ${image('control-plane')}
     environment:
       BOT_GITHUB_API_URL: http://fixtures:9100/github
     depends_on:
       fixtures:
         condition: service_started
   manager:
+    image: ${image('computer-manager')}
+    environment:
+      BOT_PROJECT_IMAGE: ${image('project-computer')}
     ports: ["127.0.0.1:18893:8793"]
 `);
 const env={...process.env,DOCKER_CONFIG:resolve('.cache/docker'),BUILDX_CONFIG:resolve('.cache/buildx'),BOT_WEBHOOK_PORT:'18891',BOT_ADMIN_PORT:'18892'};
@@ -64,7 +78,8 @@ try{
   await api('/api/repositories/202/policy','PATCH',{review_enabled:false});
   await api('/api/users','POST',{username:'member',password:memberPassword,repository_ids:['101']});
   const model=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'fixture-model'})).model;
-  await api('/api/repositories/101/policy','PATCH',{model_id:model.id,review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2});
+  const coding=(await api('/api/models','POST',{repository_id:'101',api_url:'http://fixtures:9100/model',api_key:modelKey,model_name:'coding-model'})).model;
+  await api('/api/repositories/101/policy','PATCH',{model_id:null,task_models:{'review.issue':model.id,'review.pr':model.id,'development.issue':coding.id,'development.pr':coding.id},review_enabled:true,development_enabled:true,test_command:'node --test',max_revisions:2});
   const disabled=await hook('202',2);assert.equal(disabled.tasks_created,0);passed('review-disabled repository only archives');
   // The account sees three repositories; 303 is installed but not started, so its events only archive until an administrator starts it.
   const listed=(await api('/api/installations/sync','POST',{})).repositories;
@@ -84,6 +99,9 @@ try{
   assert.ok(state.models.some(m=>m.repository==='101'&&JSON.stringify(m.messages).includes('a - b')&&JSON.stringify(m.messages).includes('REPO_101_ONLY')));
   assert.ok(state.refWrites.every(r=>r.branch.startsWith('bot/issue-')&&r.branch!=='trunk'&&r.force!==true));
   assert.deepEqual(state.labels.filter(l=>l.repository_id===101&&l.number===1).map(l=>l.labels),[['bot-reviewed']]);
+  assert.ok(state.models.some(m=>m.repository==='101'&&m.number===1&&m.model==='fixture-model'));
+  assert.ok(state.models.some(m=>m.repository==='101'&&m.number===1&&m.model==='coding-model'));
+  passed('review and development use separate task models without a project default');
   passed('Issue reviews once, executes code and tests in project container, and opens an owned bot PR');
   assert.equal((await hook('101',1)).tasks_created,0);state=await fake('state');assert.equal(state.comments.filter(c=>c.repository_id===101&&c.number===1).length,2);
   assert.equal((await tasks('101',1)).length,2);passed('duplicate and repeated opened deliveries do not duplicate tasks, comments, or PRs');
@@ -144,16 +162,16 @@ try{
   assert.deepEqual((await api('/api/status')),{review_available:true,development_available:true,project_environments_available:true,model_calls_available:true});
   const browser=await chromium.launch();try{
     const page=await browser.newPage({viewport:{width:1365,height:900}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
-    await page.goto(base);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'检视',exact:true}).click();await page.locator('#rows').getByText(/fixture\/project-101/).first().waitFor();
-    assert.ok((await page.locator('#rows').innerText()).includes('fixture/project-101'));assert.ok((await page.locator('#rows').innerText()).includes('fixture/project-202'));await page.screenshot({path:'.tmp/review-dev/admin-desktop.png'});
+    await page.goto(base);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('#board-columns').getByText(/fixture\/project-101/).first().waitFor();
+    assert.ok((await page.locator('#board-columns').innerText()).includes('fixture/project-101'));assert.ok((await page.locator('#board-columns').innerText()).includes('fixture/project-202'));await page.screenshot({path:'.tmp/review-dev/admin-desktop.png'});
     // The process view shows the model's steps and the commands it ran in the project computer.
-    await page.locator('#rows .row',{hasText:'Issue #1 · fixture/project-101'}).getByRole('button',{name:'查看过程',exact:true}).click();await page.locator('#timeline .step-model').first().waitFor();
+    await page.locator('[data-card-key="101/issue/1"][data-card-category="review"] .board-card-title').click();await page.locator('#timeline .step-model').first().waitFor();
     assert.ok(await page.locator('#timeline .step-tool').count()>=1);assert.match(await page.locator('#task-side').innerText(),/dbot-[0-9a-f]+-101-g\d/);await page.screenshot({path:'.tmp/review-dev/task-process.png'});
     await page.getByRole('button',{name:'打开项目机器配置',exact:true}).click();await page.locator('#machine-status').waitFor();
     await page.locator('.project-nav').getByRole('link',{name:'运行记录',exact:true}).click();await page.locator('#activity-status .commands li').first().waitFor();
-    await page.getByRole('button',{name:'开发',exact:true}).click();await page.locator('#rows .row',{hasText:'Issue #1 · fixture/project-101'}).waitFor();
-    await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'检视',exact:true}).click();await page.locator('#rows').getByText(/fixture\/project-101/).first().waitFor();
-    assert.ok(!(await page.locator('#rows').innerText()).includes('fixture/project-202'));await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/review-dev/project-mobile.png'});assert.deepEqual(errors,[]);
+    await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('[data-card-key="101/issue/1"][data-card-category="development"]').waitFor();
+    await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('#board-columns').getByText(/fixture\/project-101/).first().waitFor();
+    assert.ok(!(await page.locator('#board-columns').innerText()).includes('fixture/project-202'));await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/review-dev/project-mobile.png'});assert.deepEqual(errors,[]);
     const foreignTask=(await tasks('202',3,'development.issue'))[0].id;
     const denied=await page.evaluate(async id=>{const me=await(await fetch('/api/auth/me')).json();return Promise.all([
       fetch('/api/tasks/'+id).then(r=>r.status),fetch('/api/tasks/'+id+'/logs').then(r=>r.status),

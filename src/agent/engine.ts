@@ -123,7 +123,7 @@ export class TaskEngine {
     };
     let workspace:Workspace|undefined;
     try{
-      await guard();const config=selectedModel(this.store,task.repository_id);redactor.add(config.key);await this.share(task.repository_id);
+      await guard();const config=selectedModel(this.store,task.repository_id,task.kind);redactor.add(config.key);await this.share(task.repository_id);
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
       // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.

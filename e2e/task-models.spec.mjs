@@ -1,0 +1,63 @@
+import { test, expect } from '@playwright/test';
+import { mkdirSync, rmSync } from 'node:fs';
+import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
+
+test('项目任务模型可新增、继承默认、清空，保存错误保留草稿，重新加载保持配置', async ({ page }) => {
+  const h = await harness(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  mkdirSync('.tmp/task-models', { recursive: true });
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    const create = async name => (await admin('/api/models', 'POST', { repository_id: '101', model_name: name, api_url: 'https://model.invalid/v1', api_key: testPassword() })).value.model;
+    const defaultModel = await create('Project default'), review = await create('Review model');
+    await admin('/api/repositories/101/policy', 'PATCH', { model_id: defaultModel.id });
+    await page.goto(h.admin + '/#/projects/101/model');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const section = page.getByRole('heading', { name: '按任务选择模型', exact: true }).locator('..');
+    const add = section.getByRole('button', { name: '增加任务模型', exact: true });
+    const save = section.getByRole('button', { name: '保存任务模型', exact: true });
+    const policy = async () => (await admin('/api/repositories/101')).value.policy;
+    await expect(section.getByText('尚未设置任务模型，所有任务继承项目默认。', { exact: true })).toBeVisible();
+    await add.click(); await save.click();
+    await expect(section.locator('.view-error')).toContainText('每行需要唯一');
+    await section.getByLabel('任务标识', { exact: true }).fill('review.pr');
+    await section.getByRole('combobox', { name: '任务模型', exact: true }).selectOption(review.id);
+    await save.click();
+    await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({ 'review.pr': review.id });
+    await page.reload();
+    await expect(section.getByRole('combobox', { name: '任务模型', exact: true })).toHaveValue(review.id);
+    await add.click();
+    await section.getByLabel('任务标识', { exact: true }).nth(1).fill('custom.science');
+    await section.getByRole('combobox', { name: '任务模型', exact: true }).nth(1).selectOption(defaultModel.id);
+    await page.route('**/api/repositories/101/policy', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"storage_unavailable"}' }));
+    await save.click();
+    await expect(section.locator('.view-error')).toContainText('storage_unavailable');
+    await expect(save).toBeEnabled();
+    await expect(section.getByLabel('任务标识', { exact: true }).nth(1)).toHaveValue('custom.science');
+    await section.screenshot({ path: '.tmp/task-models/save-error.png' });
+    await page.unroute('**/api/repositories/101/policy'); await save.click();
+    await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({ 'review.pr': review.id, 'custom.science': defaultModel.id });
+    await page.reload();
+    await expect(section.getByLabel('任务标识', { exact: true })).toHaveCount(2);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await section.screenshot({ path: '.tmp/task-models/list-desktop.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await section.screenshot({ path: '.tmp/task-models/list-mobile.png' });
+    // Removing one override preserves the other and the default; removing all persists {}.
+    await section.getByRole('button', { name: '移除', exact: true }).first().click(); await save.click();
+    await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({ 'custom.science': defaultModel.id });
+    expect((await policy()).model_id).toBe(defaultModel.id);
+    await page.reload();
+    await expect(section.getByLabel('任务标识', { exact: true })).toHaveValue('custom.science');
+    await section.getByRole('button', { name: '移除', exact: true }).click(); await save.click();
+    await expect.poll(async () => JSON.parse((await policy()).task_models)).toEqual({});
+    await page.reload();
+    await expect(section.getByText('尚未设置任务模型，所有任务继承项目默认。', { exact: true })).toBeVisible();
+    await expect(section.getByLabel('任务标识', { exact: true })).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});

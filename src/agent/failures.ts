@@ -8,9 +8,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','branch_not_owned','release_uninstalled','release_app_required'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
-  model: { label:'模型服务或模型配置', codes:['model_not_configured','model_key_missing','model_authentication_failed','model_response_invalid',
+  model: { label:'模型服务或模型配置', codes:['model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',
-    'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid'] },
+    'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','agent_tool_not_allowed','agent_output_invalid','agent_tool_calls_invalid','agent_turn_limit'] },
   environment: { label:'项目电脑或运行环境', codes:['environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
     'workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
@@ -25,7 +25,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'release_disabled','release_run_changed','release_attempt_changed','release_duplicate','release_range_changed','release_record_changed',
     'release_lease_lost','release_tag_conflict','release_run_ambiguous','release_run_missing','release_rerun_unavailable','release_tag_missing','release_ci_evidence_changed'] },
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown'] },
-  bot: { label:'Bot 自身问题', codes:['task_runtime_failure','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
+  bot: { label:'Bot 自身问题', codes:['task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed',
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
     'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid'] },
@@ -49,6 +49,10 @@ const automatic = new Set(['retry_wait','waiting_configuration','waiting_environ
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
+  task_models_invalid:'在项目模型设置中重新保存任务模型映射，修复后任务自动继续。',
+  model_not_available:'任务所选模型已不可用。请重新授权该项目使用模型或选择其他任务模型，修复后自动继续。',
+  model_configuration_changed:'模型配置在运行期间变化，本次请求已停止；任务会按最新配置重新开始。',
+  agent_turn_limit:'Agent 已达到本次运行轮次上限。先检查已有结果，再调整任务范围或运行限制后重试。',
   repository_has_no_commit:'向仓库推送第一个提交后自动继续。',
   pr_head_pending:'正在等待 GitHub 把 PR head 更新到刚推送的提交，确认后自动继续。',
   object_closed_or_draft:'Issue 或 PR 已关闭或转为草稿，任务已结束，无需处理。',

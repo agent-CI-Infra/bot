@@ -343,3 +343,23 @@ test('global settings change the wizard settings and shared models without a pro
   assert.match(text(section('部署共享模型')), /已新增供应商，已添加 added-model/); assert.ok(row('added-model'));
   assert.equal(page.run('reloads'), 0); assert.equal(page.run('current'), null);
 });
+
+test('TaskEngine runs an override-only review without a default model', {timeout: 5000}, async t => {
+  const f = await fixture(t);
+  const model = f.h.store.get("SELECT model_id FROM policies WHERE repository_id='101'").model_id;
+  await f.admin('/api/repositories/101/policy', 'PATCH', {model_id: null, task_models: {'review.issue': model}});
+  f.engine.tick(); await f.reached(1);
+  assert.equal(f.task(1).status, 'running'); await f.finish(1);
+  assert.equal(f.task(1).status, 'succeeded');
+});
+
+test('TaskEngine rejects a revoked override before workspace execution, even with a valid default', {timeout: 5000}, async t => {
+  const f = await fixture(t);
+  const chosen = (await f.admin('/api/models', 'POST', {repository_id: '101', api_url: 'https://other.invalid/v1', api_key: testPassword(), model_name: 'override'})).value.model;
+  await f.admin('/api/repositories/101/policy', 'PATCH', {task_models: {'review.issue': chosen.id}});
+  await f.admin(`/api/models/${chosen.id}/credentials/revoke`, 'POST', {});
+  f.engine.tick(); await f.engine.active.get(f.task(1).id);
+  assert.equal(f.task(1).status, 'waiting_configuration');
+  assert.equal(f.task(1).error_code, 'model_not_configured');
+  assert.equal(f.calls.filter(call => call.body?.request?.type === 'workspace_agent_start').length, 0);
+});
