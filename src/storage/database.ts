@@ -78,7 +78,8 @@ export class Store {
     extend('tasks', { unique_key: 'TEXT', input: "TEXT NOT NULL DEFAULT '{}'", result: 'TEXT', phase: "TEXT NOT NULL DEFAULT 'prepare'",
       object_number: 'INTEGER', head_sha: 'TEXT', source_task_id: 'TEXT', source_delivery_id: 'TEXT', generation: 'INTEGER',
       workspace_id: 'TEXT', messages: 'TEXT', claim_token: 'TEXT', error_code: 'TEXT', attempt: 'INTEGER NOT NULL DEFAULT 1',
-      next_run_at: 'INTEGER NOT NULL DEFAULT 0',retry_count:'INTEGER NOT NULL DEFAULT 0', created_at: "TEXT NOT NULL DEFAULT ''", updated_at: "TEXT NOT NULL DEFAULT ''" });
+      next_run_at: 'INTEGER NOT NULL DEFAULT 0',retry_count:'INTEGER NOT NULL DEFAULT 0',retry_error_code:'TEXT',retry_cycle_started_at:'INTEGER',
+      created_at: "TEXT NOT NULL DEFAULT ''", updated_at: "TEXT NOT NULL DEFAULT ''" });
     // A running task holds its own claim; a repository may hold several, up to its concurrency. The earlier
     // one-row-per-repository lock table is replaced (claims never survive a restart, so nothing is migrated).
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS task_unique_key ON tasks(unique_key);

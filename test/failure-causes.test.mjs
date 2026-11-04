@@ -115,17 +115,20 @@ test('a write that landed despite a 500 is found on retry and never sent twice',
   h.due();const task=await h.run();assert.deepEqual([task.status,h.comments.length],['succeeded',1]);
 });
 
-test('automatic retries back off, and the retry that gives up is logged as its own 失败 entry with the next step',async t=>{
+test('automatic retries back off, then keep one opportunity every eight hours with a distinct fault explanation',async t=>{
   const h=await emptyRepositoryFixture(t,{github(path,send){if(path!=='/user')return false;send({message:'Server Error'},502);return true;}});
   for(let attempt=1;attempt<=5;attempt++){
-    h.due();const before=Date.now(),task=await h.run(),after=Date.now();if(attempt===5)break;
+    h.due();const before=Date.now(),task=await h.run(),after=Date.now();
     // Automatic retries back off: 5 s, 15 s, 45 s, 135 s.
-    const delay=5000*3**(attempt-1);assert.ok(task.next_run_at>=before+delay&&task.next_run_at<=after+delay,`attempt ${attempt}`);
+    const delay=attempt===5?8*60*60*1000:5000*3**(attempt-1);assert.ok(task.next_run_at>=before+delay&&task.next_run_at<=after+delay,`attempt ${attempt}`);
   }
-  const task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);assert.deepEqual([task.status,task.error_code,task.retry_count],['failed','github_http_502',5]);
-  assert.deepEqual(faults(h).map(log=>log.state),['retry_wait','failed']);
+  const task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);assert.deepEqual([task.status,task.error_code,task.retry_count],['retry_wait','github_http_502',5]);
+  assert.deepEqual(faults(h).map(log=>log.state),['retry_wait','retry_wait']);
+  assert.equal(faults(h)[1].retry_cycle_started_at,task.retry_cycle_started_at);
   assert.equal(faults(h)[1].detail,'GitHub 请求 GET /user 返回 HTTP 502：Server Error');
-  const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task;assert.equal(detail.error_cause.cause,'external');assert.match(detail.error_cause.action,/已自动重试 5 次仍失败/);
+  const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task;assert.equal(detail.error_cause.cause,'external');assert.match(detail.error_cause.action,/每 8 小时/);
+  assert.equal(detail.next_run_at,task.next_run_at);
+  const logs=(await h.admin('/api/tasks/'+h.taskId+'/logs')).value.logs.filter(log=>log.cause);assert.match(logs.at(-1).cause.action,/大约 8 小时后再试/);
 });
 
 test('model failures name the model, its host and the provider explanation without the key',async t=>{
@@ -170,7 +173,9 @@ test('the console names the cause and the next step in the timeline, the live li
   // A log read from an older server has no cause and keeps the previous rendering.
   assert.match(text(`step({id:'2',content:${JSON.stringify(fault)}})`),/任务暂停或失败[\s\S]*github_response_unknown/);
   const task={id:'t',kind:'development.issue',object_number:1,status:'retry_wait',phase:'publish',error_code:'github_response_unknown',error_cause:cause,retry_count:2};
-  assert.equal(page.run(`liveText(${JSON.stringify(task)})`),'已暂停：等待重试 · 外部服务或网络波动（github_response_unknown）。已连续失败 2 次，满 5 次转为失败。不是配置问题，bot 会自动重试，一般无需处理。');
+  assert.equal(page.run(`liveText(${JSON.stringify(task)})`),'已暂停：等待重试 · 外部服务或网络波动（github_response_unknown）。同一种失败已连续出现 2 次，满 5 次后改为每 8 小时重试。不是配置问题，bot 会自动重试，一般无需处理。');
+  const slow={...task,retry_count:5,retry_cycle_started_at:Date.now(),next_run_at:Date.now()+8*60*60*1000,error_cause:explainFailure(task.error_code,task.status,undefined,Date.now())};
+  assert.match(page.run(`liveText(${JSON.stringify(slow)})`),/大约 8 小时后再试[\s\S]*下次重试：/);
   const replan={...task,status:'needs_replan',error_code:'base_branch_changed',error_cause:{cause:'task_changed',label:'任务条件已变化',action:'点「重试」会基于最新的基础分支重新规划。'}};
   assert.equal(page.run(`liveText(${JSON.stringify(replan)})`),'已暂停：需重新规划 · 任务条件已变化（base_branch_changed）。点「重试」会基于最新的基础分支重新规划。');
   assert.equal(page.run(`faultSummary('github_permission_403',{label:'GitHub 权限或配置'})`),'GitHub 权限或配置（github_permission_403）');

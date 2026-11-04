@@ -37,7 +37,9 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         }
       }
     }
-    const started = await workspace.call('pi:' + (conversation?.resume ? 'continue:' + randomId() : 'start'), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' });
+    // A stored started receipt is not evidence that its PID still exists. Ask the runner again on every entry;
+    // it checks the saved process before returning started, including after a control-plane restart.
+    const started = await workspace.call('pi:' + (conversation?.resume ? 'continue:' : 'start:') + randomId(), { type: conversation?.resume ? 'workspace_agent_continue' : 'workspace_agent_start' });
     if (started.error) stop('execution_interrupted', 'waiting_environment', '启动任务执行进程时中断。');
     // No deadline and no model request budget: the task runs until the agent finishes. Disabling the project or
     // stopping its computer ends it (guard() and the interrupted poll below).

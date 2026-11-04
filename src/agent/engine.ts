@@ -18,6 +18,8 @@ import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpd
 import { type GitCache } from './git-cache.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
+const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
+const retryCycleMs=8*60*60*1000;
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 // A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run
@@ -118,6 +120,7 @@ export class TaskEngine {
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
     const update=(values:Record<string,unknown>)=>{
+      if(values.status&&(terminal.includes(String(values.status))||values.status==='needs_replan'))Object.assign(values,{retry_cycle_started_at:null,retry_error_code:null,retry_count:0});
       Object.assign(task,values);const keys=Object.keys(values);
       this.store.run(`UPDATE tasks SET ${keys.map(k=>k+'=?').join(',')},updated_at=? WHERE id=? AND claim_token=?`,...keys.map(k=>values[k] as any),new Date().toISOString(),id,token);
     };
@@ -311,6 +314,8 @@ export class TaskEngine {
       for(;;){
       try{
       if(task.phase==='model'){
+        // A resumed development must recheck its goal, approval and PR ownership before starting the agent too.
+        await validate();
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl),development?async(requestId,args)=>{
           // Fix the only candidate snapshot before any policy command can create or modify files.
@@ -346,6 +351,7 @@ export class TaskEngine {
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
       }
       if(task.phase==='publish'){
+        await validate();
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log,development?undefined:()=>{
           // No await between checking the inbox and fencing the first GitHub write.
           if(this.store.get('SELECT publication_started FROM tasks WHERE id=?',id)?.publication_started)return;
@@ -399,25 +405,35 @@ export class TaskEngine {
       // A GitHub rate limit is waited out until its window resets (the task resumes then, a few seconds apart from others
       // waiting for the same window); it does not use up the five automatic retries.
       const limited=failure.code==='github_rate_limited';
-      const retries=Number(current?.retry_count||0)+(failure.state==='retry_wait'&&!limited?1:0),state=failure.state==='retry_wait'&&retries>=5?'failed':failure.state;
+      const state=failure.state,retrying=automaticRetry.has(state),now=Date.now();
+      const previousCode=current?.retry_error_code||current?.error_code;
+      const retries=limited?Number(current?.retry_count||0):retrying?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:0;
+      // Once in the slow cycle, a task never starts another burst. Its slots stay relative to its own entry time,
+      // including after a restart or a different transient failure; GitHub rate-limit windows take precedence.
+      const cycle=retrying?(current?.retry_cycle_started_at??(!limited&&retries>=5?now:null)):null;
       // The same stop again waits twice as long as the last time, up to a cap; a different stop starts over. Automatic
       // retries back off too (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted.
       const waits=current?.error_code===failure.code?Number(current?.wait_count||0)+1:0,grow=(base:number,cap:number)=>Math.min(base*2**waits,cap);
       const delay=limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
+        :cycle!=null?cycle+(Math.floor(Math.max(0,now-cycle)/retryCycleMs)+1)*retryCycleMs-now
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
-        rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:Date.now()+delay});
-      if(!task.kind.startsWith('development.')&&!['cancelled','superseded'].includes(failure.state)&&(task.phase==='model'||task.phase==='publish'&&!task.publication_started) || failure.code==='execution_interrupted'&&task.phase!=='publish'&&task.attempt<3){
+        retry_error_code:limited?current.retry_error_code:retrying?failure.code:null,retry_cycle_started_at:cycle,
+        rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});
+      // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
+      // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
+      if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
+        (task.phase==='model'||task.kind.startsWith('review.')&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
         if(task.kind.startsWith('review.')&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});
       }
       // Waiting conditions can be polled every five seconds; retain one copy of an unchanged reason. The state is the one
-      // the task is left in, so the retry that gives up shows as its own 失败 entry.
+      // the task is left in; entering the slow cycle is a distinct event even when the reason stays the same.
       const previous=this.store.get("SELECT content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='fault' ORDER BY rowid DESC LIMIT 1",id);
       const last=previous?JSON.parse(previous.content):null,detail=redactor.clean(failure.detail);
-      if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
-        log({type:'fault',state,code:failure.code,...(detail?{detail,detail_sha:sha(detail)}:{})});
+      if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||last?.retry_cycle_started_at!==(cycle??undefined)||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
+        log({type:'fault',state,code:failure.code,...(cycle!=null?{retry_cycle_started_at:cycle}:{}),...(detail?{detail,detail_sha:sha(detail)}:{})});
     }
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.
@@ -489,7 +505,7 @@ export class TaskEngine {
       // Pressing 重试 on 发布待确认 is the confirmation the pause waits for: the write is looked up once more and,
       // only if GitHub still has no trace of it, sent again.
       if(task.status==='waiting_publication')this.store.run("UPDATE github_effects SET state='recheck' WHERE task_id=? AND state IN ('unknown','inflight')",task.id);
-      this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0 WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
+      this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
     });this.tick();return {ok:true};
   }
 }
