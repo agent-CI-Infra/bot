@@ -25,7 +25,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await expect(page.locator('#task-side .task-metrics')).toContainText('输出 100,000');await expect(page.locator('#task-side .task-metrics')).toContainText('缓存 800,000');await expect(page.locator('#task-side .task-metrics')).toContainText('命中率 80.0%');
     await page.screenshot({path:'.tmp/metrics-evidence/task-detail.png',fullPage:true});await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
     await page.goto(h.admin+'/#/developments');await page.locator('[data-card-key="101/issue/1"] .board-card-title').click();await expect(page.locator('#task-side')).toContainText('统计不完整');
-    await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();await page.getByLabel('工作类别',{exact:true}).selectOption('');
+    await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();await page.getByRole('group',{name:'工作类别',exact:true}).getByRole('button',{name:'全部类别',exact:true}).click();
     await page.locator('[data-card-key="101/issue/1"][data-card-category=review] .board-card-title').click();
     await expect(page.locator('#task-picker')).toBeHidden();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
     await page.goto(h.admin+'/#/projects/101/activity');await expect(page.getByRole('heading',{name:'最近任务',exact:true})).toBeVisible();await expect(page.locator('#project-page .task-metrics')).toHaveCount(2);
@@ -52,7 +52,42 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
       expect(await member.getByLabel('统计项目',{exact:true}).locator('option').count()).toBe(2);
       await member.screenshot({path:'.tmp/metrics-evidence/cost-member.png',fullPage:true});
     }finally{await context.close();}
-    await page.goto(h.admin+'/#/reviews');await expect(page.getByLabel('工作类别',{exact:true})).toHaveValue('review');await page.locator('[data-card-key="101/issue/1"][data-card-category=review] .board-card-title').click();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);
+    await page.goto(h.admin+'/#/reviews');await expect(page.getByRole('group',{name:'工作类别',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','review');await page.locator('[data-card-key="101/issue/1"][data-card-category=review] .board-card-title').click();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/metrics-evidence/task-mobile.png',fullPage:true});expect(errors).toEqual([]);
+  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
+});
+
+test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累计并遵守项目范围',async({page,browser})=>{
+  const h=await harness(),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');
+  const model=(await admin('/api/models','POST',{repository_id:null,api_url:'https://model.invalid/v1',api_key:testPassword(),model_name:'Unpriced fixture'})).value.model;
+  metricTask(h.store,'unpriced-own');metricTask(h.store,'unpriced-foreign','202');
+  usageRequest(h.store,'unpriced-own',model.id,{priced:false,usage:{prompt_tokens:1000,completion_tokens:100,prompt_cache_hit_tokens:800}});
+  usageRequest(h.store,'unpriced-foreign',model.id,{priced:false,usage:{prompt_tokens:2000,completion_tokens:200,prompt_cache_hit_tokens:1600}});
+  usageRequest(h.store,'unpriced-own',model.id,{date:'2026-10-23',priced:false,usage:null});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));mkdirSync('.tmp/metrics-evidence',{recursive:true});
+  const filter=async(from,to)=>{
+    await page.getByLabel('开始日期（本地）',{exact:true}).fill(from);await page.getByLabel('结束日期（本地）',{exact:true}).fill(to);
+    await page.getByRole('button',{name:'查看统计',exact:true}).click();
+  };
+  try{
+    await page.setViewportSize({width:1440,height:1000});await login(page,h.admin,'administrator',password);await page.getByRole('button',{name:'统计',exact:true}).click();await filter('2026-10-22','2026-10-23');
+    await expect(page.getByRole('heading',{name:'每日 token · 按项目堆叠',exact:true})).toBeVisible();
+    const chart=page.locator('.cost-chart-section');await expect(chart.locator('svg')).toHaveAttribute('data-metric','tokens');await expect(chart.locator('rect')).toHaveCount(2);
+    const own=chart.locator('rect[data-project="101"]');await expect(own).toHaveAttribute('data-value','1100');await own.focus();
+    await expect(page.locator('.cost-chart-detail')).toContainText('1,100 token（输入 1,000，输出 100）');await expect(page.locator('.cost-chart-detail')).toContainText('当日 33.3%');
+    await expect(chart).toContainText('缓存命中已包含在输入中，不重复相加');await expect(page.locator('.cost-summary')).toContainText('暂无可计价记录');
+    await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-desktop.png'});
+    await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-mobile.png'});
+    await page.getByLabel('统计项目',{exact:true}).selectOption('101');await filter('2026-10-22','2026-10-23');
+    await expect(chart.locator('rect[data-project="202"]')).toHaveCount(0);await expect(chart.locator('rect')).toHaveCount(1);
+    await filter('2026-10-23','2026-10-23');await expect(chart).toContainText('没有可靠的 token 记录');await expect(chart.locator('svg')).toHaveCount(0);
+    await filter('2026-10-24','2026-10-24');await expect(chart).toContainText('没有模型请求记录');await expect(chart.locator('svg')).toHaveCount(0);
+    const memberPassword=testPassword();await admin('/api/users','POST',{username:'token-member',password:memberPassword,repository_ids:['101']});
+    const context=await browser.newContext(),member=await context.newPage();
+    try{
+      await login(member,h.admin,'token-member',memberPassword);await member.getByRole('button',{name:'统计',exact:true}).click();
+      await expect(member.locator('.cost-chart-section svg')).toHaveAttribute('data-metric','tokens');await expect(member.locator('rect[data-project="202"]')).toHaveCount(0);await expect(member.locator('.cost-legend')).not.toContainText('project-202');
+    }finally{await context.close();}
+    expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
