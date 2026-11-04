@@ -27,6 +27,21 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
     if(create)await mkdir(dirname(target),{recursive:true});
     const parent=await realpath(dirname(target));if(parent!==context&&!parent.startsWith(context+sep))throw new Error('invalid_parent');return target;
   };
+  if(input.type==='workspace_cache'){
+    await writeFile(root+'/review-cache.json',JSON.stringify({sha:input.sha,tree_sha:input.tree_sha}),{mode:0o600});return {written:true};
+  }
+  if(input.type==='workspace_reuse'){
+    const cache=await readFile(root+'/review-cache.json','utf8').then(JSON.parse).catch(()=>null);
+    if(!cache||cache.sha!==input.sha||!await realpath(repo).then(actual=>actual===repo,()=>false))return {reused:false};
+    const dirty=await storeGit(['status','--porcelain'],{cwd:repo}).catch(()=>Buffer.from('missing'));
+    const tree=(await storeGit(['rev-parse','HEAD^{tree}'],{cwd:repo}).catch(()=>Buffer.from(''))).toString().trim();
+    if(dirty.length||tree!==input.tree_sha)return {reused:false};
+    if(await stat(repo+'/.git').then(s=>s.isFile(),()=>false)){
+      const head=(await storeGit(['rev-parse','HEAD'],{cwd:repo})).toString().trim();if(head!==input.sha)return {reused:false};
+    }
+    // Only the checkout is cached. The agent, mailbox and session belong to the new task.
+    await rm(root+'/agent',{recursive:true,force:true});return {reused:true,tree_sha:cache.tree_sha};
+  }
   const authorFile=root+'/author.json';
   const author=await readFile(authorFile,'utf8').then(JSON.parse).catch(()=>({email:'department-bot@invalid.local'}));
   // Snapshot plumbing has no command timeout or execFile output cap. Large cat-file output goes to disk.

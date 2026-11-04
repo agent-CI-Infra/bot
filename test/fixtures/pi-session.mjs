@@ -6,6 +6,7 @@ Object.assign(environment,{HOME:process.env.BOT_RUNNER_TEST_ROOT,TMPDIR:process.
 export const workspace=request=>run(request,process.env.BOT_RUNNER_TEST_ROOT,undefined,process.env.BOT_RUNNER_TEST_ROOT+'/project-notes');
 export const createExtensionRuntime=()=>({});
 export const ModelRuntime={create:async()=>({getModel:()=>({})})};
+export const estimateTokens=message=>Math.ceil(JSON.stringify(message).length/4);
 export const SessionManager={inMemory:()=>({})};
 export const SettingsManager={inMemory:()=>({})};
 export async function createAgentSession({customTools}){

@@ -14,6 +14,7 @@
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
     "test:e2e": "npm run build && playwright test",
     "test:docker": "npm run build && node test/docker-env.mjs",
+    "test:review-session": "npm run build && node --test test/review-session-runner.mjs",
     "test:agent": "npm run build && node test/review-dev-docker.mjs",
     "test:external:docker": "node test/external-docker.mjs"
   },

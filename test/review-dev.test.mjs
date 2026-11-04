@@ -20,7 +20,7 @@ function mentionNames(t,value) {
   if(value===undefined)delete process.env.BOT_MENTION_NAMES;else process.env.BOT_MENTION_NAMES=value;
 }
 
-test('Issue comment mentions queue independently of opened events and deduplicate comments and deliveries',async t=>{
+test('Issue comment mentions join pending reviews, queue after success and deduplicate comments and deliveries',async t=>{
   mentionNames(t,undefined);
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   // Only the mention rule here; comments and edits as updates are covered in test/review-updates.test.mjs.
@@ -31,11 +31,13 @@ test('Issue comment mentions queue independently of opened events and deduplicat
   const comment={id:123,body:'@bot please review this change.',html_url:'https://github.invalid/issue/1#issuecomment-123'};
   const payload={repository:{id:101},action:'created',sender:{type:'User'},issue,comment};
   const send=(delivery,value=payload,event='issue_comment')=>h.hook(a.path,a.secret,delivery,value,{'X-GitHub-Event':event});
-  assert.equal((await send('comment')).value.tasks_created,1);
-  const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.issue:1:comment:123'");
-  assert.equal(task.kind,'review.issue');assert.equal(task.head_sha,null);assert.deepEqual(JSON.parse(task.input).comment,comment);
+  assert.equal((await send('comment')).value.tasks_created,0);
+  const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.issue:1:opened'");
+  assert.equal(task.kind,'review.issue');assert.equal(task.head_sha,null);assert.deepEqual(JSON.parse(h.store.get('SELECT data FROM review_updates WHERE task_id=?',task.id).data).comment,comment);
   const replay=(await send('comment')).value;assert.equal(replay.duplicate,true);assert.equal(replay.tasks_created,0);
   assert.equal((await send('same-comment-new-delivery')).value.tasks_created,0);
+  assert.equal(h.store.get('SELECT count(*) n FROM review_updates').n,1);
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE id=?",task.id);
   assert.equal((await send('another-comment',{...payload,comment:{...comment,id:124,body:'Please, @Agent-CI-Infra-Bot!'}})).value.tasks_created,1);
   assert.ok(h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:comment:124'"));
   assert.ok(h.store.get("SELECT id FROM tasks WHERE unique_key='101:review.issue:1:opened'"));
@@ -50,7 +52,7 @@ test('Issue comment mentions queue independently of opened events and deduplicat
   assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n,0);
   // Comment deliveries do not start an external event's 24-hour authorization window.
   assert.equal(h.store.get('SELECT count(*) n FROM external_events').n,2);
-  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,3);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,2);
 });
 
 test('mention configuration can disable comments or replace default names, with literal case-insensitive boundaries',async t=>{
@@ -62,7 +64,7 @@ test('mention configuration can disable comments or replace default names, with 
   for(const off of ['off',' OFF ']){process.env.BOT_MENTION_NAMES=off;assert.equal((await send('@bot @agent-ci-infra-bot')).value.tasks_created,0);}
   process.env.BOT_MENTION_NAMES='  Custom-Reviewer , Robot.v2 , ';
   for(const body of ['@bot','@agent-ci-infra-bot','@custom-reviewer-extra','mail@custom-reviewer','@robotXv2'])assert.equal((await send(body)).value.tasks_created,0,body);
-  for(const body of ['@CUSTOM-reviewer please','(@Robot.v2)','_@custom-reviewer','-@custom-reviewer'])assert.equal((await send(body)).value.tasks_created,1,body);
+  for(const body of ['@CUSTOM-reviewer please','(@Robot.v2)','_@custom-reviewer','-@custom-reviewer']){assert.equal((await send(body)).value.tasks_created,1,body);h.store.run("UPDATE tasks SET status='succeeded'");}
   process.env.BOT_MENTION_NAMES='';assert.equal((await send('@bot')).value.tasks_created,0);
 });
 
@@ -90,17 +92,19 @@ test('PR conversation mentions read the current head with read-only permissions,
   const task=h.store.get("SELECT * FROM tasks WHERE unique_key='101:review.pr:7:comment:400'");
   assert.equal(task.head_sha,pull.head.sha);assert.deepEqual(JSON.parse(task.input).pull_request,pull);assert.deepEqual(JSON.parse(task.input).comment,payload.comment);
   const count=requests.length;assert.equal((await send('pr-comment')).value.tasks_created,0);assert.equal(requests.length,count);
-  assert.equal((await send('another-pr-comment',{...payload,comment:{...payload.comment,id:'401'}})).value.tasks_created,1);
+  assert.equal((await send('another-pr-comment',{...payload,comment:{...payload.comment,id:'401'}})).value.tasks_created,0);
+  assert.equal(JSON.parse(h.store.get('SELECT data FROM review_updates WHERE task_id=?',task.id).data).comment.id,'401');
   for(const [id,change] of [[402,{draft:true}],[403,{state:'closed'}],[404,{head:{sha:'bad'}}]]){
     const previous=pull;pull={...pull,...change};assert.equal((await send('skip-'+id,{...payload,comment:{...payload.comment,id}})).value.tasks_created,0);pull=previous;
   }
   const before=h.store.get('SELECT count(*) n FROM deliveries').n;failRead=true;
   assert.equal((await send('retryable-read',{...payload,comment:{...payload.comment,id:405}})).status,503);
   assert.equal(h.store.get('SELECT count(*) n FROM deliveries').n,before);
-  failRead=false;assert.equal((await send('retryable-read',{...payload,comment:{...payload.comment,id:405}})).value.tasks_created,1);
+  failRead=false;assert.equal((await send('retryable-read',{...payload,comment:{...payload.comment,id:405}})).value.tasks_created,0);
   const concurrent=await Promise.all([send('concurrent',{...payload,comment:{...payload.comment,id:406}}),send('concurrent',{...payload,comment:{...payload.comment,id:406}})]);
-  assert.equal(concurrent.reduce((sum,response)=>sum+response.value.tasks_created,0),1);
+  assert.equal(concurrent.reduce((sum,response)=>sum+response.value.tasks_created,0),0);
   assert.equal(concurrent.filter(response=>response.value.duplicate).length,1);
+  assert.equal(h.store.get('SELECT count(*) n FROM review_updates WHERE task_id=?',task.id).n,3);
   const reads=requests.length;
   for(const change of [{sender:{type:'Bot'}},{action:'edited'},{comment:{...payload.comment,body:'No mention'}},{issue:{...payload.issue,state:'closed'}}])assert.equal((await send('no-read-'+requests.length+JSON.stringify(change),{...payload,...change})).value.tasks_created,0);
   await admin('/api/repositories/101/policy','PATCH',{review_pull_requests:false});assert.equal((await send('pr-disabled')).value.tasks_created,0);

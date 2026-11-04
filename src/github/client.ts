@@ -78,6 +78,8 @@ export class GitHub {
   token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = ''; permissions: Record<string,string> = {};
   // The repository's HTTPS clone URL as GitHub reports it; the Git cache fetches from it without putting the token in it.
   cloneUrl = '';
+  // A publication fence runs after guards and quota checks, immediately before a write is sent.
+  beforeWrite?: () => void;
   // The rate-limit windows this client's credentials count against: the App's JWT, and the installation (or the bot
   // account's user) for the token.
   private jwt = ''; private appWindow?: Bucket; private tokenWindow?: Bucket;
@@ -90,6 +92,7 @@ export class GitHub {
     const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
     let response: Response;
+    if(method!=='GET')this.beforeWrite?.();
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: jobLogs ? 'manual' : 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
