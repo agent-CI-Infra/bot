@@ -1,17 +1,17 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['model', '使用的模型'], ['review', '检视'], ['development', '开发'], ['release', '发版本'], ['notes', '项目笔记'], ['rules', '规则总览'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行记录']];
-// The bot's rule files: what each one does, which tasks read it, and the section where it is edited.
+const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['tasks', '任务总览'], ['release', '发版本'], ['notes', '项目笔记'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行记录']];
+const legacyProjectSections = { model: 'project-default-model', review: 'review.issue', development: 'development.issue', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
 const ruleFiles = [
-  ['.bot/guide.md', '行为指南', '全部任务', 'rules'],
-  ['.bot/rules/issue-review.md', 'Issue 检视规则', 'Issue 检视', 'review'],
-  ['.bot/rules/pr-review.md', 'PR 检视规则', 'PR 检视', 'review'],
-  ['.bot/rules/labels.md', '检视标签', 'Issue 与 PR 检视', 'review'],
-  ['.bot/rules/issue-development.md', '开发规则', '开发', 'development'],
+  ['.bot/guide.md', '行为指南', '全部任务', 'tasks'],
+  ['.bot/rules/issue-review.md', 'Issue 检视规则', 'Issue 检视', 'tasks'],
+  ['.bot/rules/pr-review.md', 'PR 检视规则', 'PR 检视', 'tasks'],
+  ['.bot/rules/labels.md', '检视标签', 'Issue 与 PR 检视', 'tasks'],
+  ['.bot/rules/issue-development.md', '开发规则', '开发与跟进 bot PR', 'tasks'],
   ['.bot/computer.yaml', '虚拟电脑', '全部任务', 'machine']];
 const layerNames = { builtin: '内置默认', console: '项目控制台', repository: '仓库文件' };
-const ruleInfo = path => ruleFiles.find(([p]) => p === path) || [path, '仓库 skill', '全部任务', 'rules'];
+const ruleInfo = path => ruleFiles.find(([p]) => p === path) || [path, '仓库 skill', '全部任务', 'tasks'];
 const specFields = ['cpus', 'memory_mb', 'pids', 'tmp_mb'];
 const packagesText = list => (list || []).join(' '), envText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
 const bytes = value => value == null ? '—' : value >= 1073741824 ? (value / 1073741824).toFixed(2) + ' GB' : value >= 1048576 ? (value / 1048576).toFixed(1) + ' MB' : Math.round(value / 1024) + ' KB';
@@ -58,22 +58,30 @@ function settingsForm(title, nodes, save, { editable = true, caption = '保存',
 let current = null, projectTimer = null, renderToken = 0;
 // Loads the project once per visit and re-renders the active section; status cards refresh on their own.
 async function renderProject(route) {
+  const legacyFocus = legacyProjectSections[route.section];
+  if (legacyFocus !== undefined) {
+    route = { ...route, section: 'tasks' };
+    history.replaceState(null, '', `#/projects/${route.id}/tasks`);
+  }
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
   if (current?.id !== route.id) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
+  if (legacyFocus) current.focusAnchor = legacyFocus;
   try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) page.replaceChildren(element('p', err.message, 'view-error')); return; }
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   current.section = section; page.replaceChildren(projectHeader(), projectBody(section));
-  if(section==='rules')page.querySelector('.project-nav [aria-current=page]')?.scrollIntoView({block:'nearest',inline:'nearest'});
+  if(section==='tasks')page.querySelector('.project-nav [aria-current=page]')?.scrollIntoView({block:'nearest',inline:'nearest'});
+  if (current.focusAnchor) { page.querySelector(`[data-overview-anchor="${CSS.escape(current.focusAnchor)}"]`)?.scrollIntoView({ block: 'start' }); current.focusAnchor = null; }
   // Opening a rule file from the overview, or saving one, brings its card into view.
   if (current.focusRule) { page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
 }
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
-  const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api('/api/models?repository_id='+id).catch(()=>null)]);
+  const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules, models:models?.models||[] });
+  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+    models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
 // Reloads the project with the outcome of an action shown at the top of the section.
@@ -108,7 +116,7 @@ function projectBody(section) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, model: modelSection, review: reviewSection, development: developmentSection, release: releaseSection, notes: notesSection, rules: rulesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ basic: basicSection, machine: machineSection, tasks: tasksSection, release: releaseSection, notes: notesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
@@ -289,7 +297,7 @@ function machineSection() {
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
   const number = (name, step) => input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
     placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
-  const sourceLink=element('a','查看规则总览');sourceLink.href=`#/projects/${current.id}/rules`;
+  const sourceLink=element('a','查看任务总览');sourceLink.href=`#/projects/${current.id}/tasks`;
   const sourceActions=element('div','','actions');sourceActions.append(sourceLink);
   // Tasks apply the repository file when they prepare; a super administrator can apply it right away.
   if(source?.source==='repository'&&editable){const apply=button('立即应用仓库文件',async()=>{apply.disabled=true;apply.textContent='正在按仓库文件重建虚拟电脑…';
@@ -376,72 +384,98 @@ async function refreshProjectStatus(token) {
   projectTimer = setTimeout(() => refreshProjectStatus(token), 5000);
 }
 
-function modelSection() {
-  const { policy } = current, superUser = me.role === 'super_admin', chooser = card('使用的模型'), list = element('div', '', 'model-list');
-  chooser.append(note('这里选择项目默认模型；下方可以为不同任务单独选择模型。部署共享模型由超级管理员提供，本项目专属模型只对这个项目可见。'), list);
-  const own = card('本项目专属模型'), ownList = element('div', '', 'provider-list'), shared = card('部署共享模型'), sharedList = element('div', '', 'provider-list');
-  own.append(ownList); shared.append(sharedList);
-  (async () => {
-    const models = (await api(superUser ? '/api/models' : '/api/models?repository_id=' + current.id)).models.filter(m => m.repository_id === null || m.repository_id === current.id);
-    const choices = element('div', '', 'choices'), save = element('button', '保存选择'), message = element('p', '', 'view-error');
-    const option = (value, title, detail, checked) => { const label = element('label', '', 'choice'), radio = input('model', value, { type: 'radio', checked }); label.append(radio, element('strong', title), element('span', detail, 'muted')); return label; };
-    choices.append(option('', '不使用默认模型', '未配置专属模型的任务会停在“配置待补”', !policy.model_id));
-    for (const group of byProvider(models)) {
-      choices.append(providerTitle(group[0], 'choice-group'));
-      for (const m of group) choices.append(option(m.id, m.model_name, `${m.repository_id ? '本项目专属' : '部署共享'}${m.key_configured ? '' : ' · Key 已撤销'}`, policy.model_id === m.id));
-    }
-    save.type = 'button'; save.addEventListener('click', async () => {
-      const value = choices.querySelector('input:checked')?.value || null; save.disabled = true;
-      try { await patchPolicy(changed({ model_id: value }, { model_id: policy.model_id || null })); await reloadProject(); } catch (err) { message.textContent = err.message; save.disabled = false; }
-    });
-    const actions = element('div', '', 'actions form-actions'); actions.append(save); list.replaceChildren(choices, message, actions);
-    list.append(taskModelChoices(policy, models));
-    const row = m => { const li = element('li', '', 'model-entry'), result = probeResult('wide-cell'); li.append(modelLabel(m), modelActions(m, result), result); return li; };
-    const ownModels = models.filter(m => m.repository_id === current.id), sharedModels = models.filter(m => m.repository_id === null);
-    ownList.replaceChildren(...(ownModels.length ? [providerList(ownModels, row)] : [element('p', '还没有专属模型。', 'muted')]));
-    sharedList.replaceChildren(...(sharedModels.length ? [providerList(sharedModels, row)] : [element('p', '还没有共享模型。', 'muted')]));
-  })().catch(err => list.replaceChildren(element('p', err.message, 'view-error')));
-  own.append(providerCreate(current.id));
-  const sections = [chooser, own];
-  if (superUser) { shared.append(providerCreate(null)); sections.push(shared); }
-  return sections;
+const builtInTasks = [
+  { kind: 'review.issue', group: '检视', title: '检视 Issue', description: '检视新 Issue，判断意图、核对代码证据，并按规则决定是否衔接开发。', rule: '.bot/rules/issue-review.md' },
+  { kind: 'review.pr', group: '检视', title: '检视 PR', description: '检视 PR 的变更、测试与证据，发布 COMMENT 检视结论。', rule: '.bot/rules/pr-review.md' },
+  { kind: 'development.issue', group: '开发', title: '开发 Issue', description: 'Issue 明确要求改代码时，在虚拟电脑里实现、测试并创建 bot PR。', rule: '.bot/rules/issue-development.md' },
+  { kind: 'development.pr', group: '开发', title: '跟进 bot PR', description: '跟进 bot 自己创建的 PR：新提交或讨论触发后，按开发 Issue 的同一份规则自动修订。' },
+  { kind: 'release.observe', group: '发版本', title: 'CI 观察', description: '只读分析一次 Release 工作流运行并汇总失败线索；观察操作仍留在「发版本」。' },
+  { kind: 'release.notes', group: '发版本', title: '发行说明', description: '把已核验的提交和合并 PR 整理成发行说明；起草与正式发布仍留在「发版本」。' }
+];
+const releaseNotesSkill = '.agents/skills/release-notes/SKILL.md';
+function taskModelMap(policy) {
+  const values = JSON.parse(policy.task_models || '{}');
+  if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('当前任务模型配置无效，请先在仓库配置中修正。');
+  return { ...values };
 }
-// An extensible map, not a hard-coded workflow: presets only make common task profile IDs easy to pick.
-function taskModelChoices(policy, models) {
-  const section = element('section'), title = element('h3', '按任务选择模型'), rows = element('div', '', 'task-model-list');
-  const empty = element('p', '尚未设置任务模型，所有任务继承项目默认。', 'muted');
-  const message = element('p', '', 'view-error'), save = element('button', '保存任务模型'), add = button('增加任务模型', () => append('', ''));
-  section.append(title, note('精确匹配任务标识；未设置的任务使用项目默认模型。移除一行后恢复默认。已删除或撤销的模型会等待配置，不会悄悄切换。'), empty, rows);
-  const kinds = ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'release.observe', 'release.notes'];
-  const options = element('datalist'); options.id = 'task-model-kinds';
-  for (const kind of kinds) { const option = element('option'); option.value = kind; options.append(option); }
-  section.append(options);
-  function append(kind, modelId) {
-    const row = element('div', '', 'task-model-row'), name = input('task_kind', kind, {placeholder: '例如 review.pr', maxLength: 100});
-    name.setAttribute('list', options.id); name.setAttribute('aria-label', '任务标识');
-    const select = element('select'); select.setAttribute('aria-label', '任务模型');
-    const choice = (value, label) => { const option = element('option', label); option.value = value; select.append(option); };
-    choice('', '请选择模型');
-    for (const m of models) choice(m.id, `${m.model_name} · ${hostOf(m.api_url)}${m.key_configured ? '' : ' · Key 已撤销'}`);
-    if (modelId && !models.some(m => m.id === modelId)) choice(modelId, `模型不可用（${modelId}）`);
-    select.value = modelId;
-    row.append(field('任务标识', name), field('模型', select), button('移除', () => { row.remove(); empty.hidden = rows.children.length > 0; }, 'quiet'));
-    rows.append(row); empty.hidden = true;
-  }
-  let initial = {}; try { initial = JSON.parse(policy.task_models || '{}'); } catch { message.textContent = '当前任务模型配置无效，请重新保存。'; }
-  for (const [kind, modelId] of Object.entries(initial)) append(kind, modelId);
-  save.type = 'button'; save.addEventListener('click', async () => {
-    const values = Object.create(null); message.textContent = '';
-    for (const row of rows.children) {
-      const kind = row.querySelector('input').value.trim(), model = row.querySelector('select').value;
-      if (!kind || !model || Object.hasOwn(values, kind)) { message.textContent = '每行需要唯一的任务标识和一个模型；不需要的行请移除。'; return; }
-      values[kind] = model;
-    }
-    save.disabled = true;
-    try { await patchPolicy({task_models: values}); await reloadProject(); }
+function modelOption(select, value, caption) { const option = element('option', caption); option.value = value; select.append(option); }
+function modelOptions(select, models, selected, empty = null) {
+  if (empty) modelOption(select, '', empty);
+  for (const model of models) modelOption(select, model.id, `${model.model_name} · ${model.repository_id ? '本项目专属' : '部署共享'} · ${hostOf(model.api_url)}${model.key_configured ? '' : ' · Key 已撤销'}`);
+  if (selected && !models.some(model => model.id === selected)) modelOption(select, selected, `模型不可用（${selected}）`);
+  select.value = selected || '';
+}
+function projectDefaultModelCard(policy, models) {
+  const section = card('项目默认模型'), select = document.createElement('select'), message = element('p', '', 'view-error');
+  section.dataset.overviewAnchor = 'project-default-model'; message.setAttribute('role', 'alert');
+  const selected = models.find(model => model.id === policy.model_id);
+  modelOptions(select, models, policy.model_id, '不使用默认模型（继承它的任务会等待配置）');
+  const save = button('保存默认模型', async () => {
+    save.disabled = true; message.textContent = '';
+    try { await patchPolicy({ model_id: select.value || null }); current.focusAnchor = 'project-default-model'; await reloadWith('已保存项目默认模型'); }
     catch (err) { message.textContent = err.message; save.disabled = false; }
-  });
-  const actions = element('div', '', 'actions form-actions'); actions.append(add, save); section.append(message, actions); return section;
+  }, '');
+  const actions = element('div', '', 'actions form-actions'); actions.append(save);
+  section.append(note('未单独指定模型的任务继承这里的选择。部署共享模型由超级管理员提供，本项目专属模型只对这个项目可见。'),
+    note(policy.model_id && !selected ? `当前默认模型不可用（${policy.model_id}），不会自动换成其他模型。` : selected?.key_configured === false ? `当前默认模型 ${selected.model_name} 的 Key 已撤销，任务会等待配置。` : '默认模型只决定继承关系；在每个任务卡片里可以单独覆盖。'),
+    field('默认模型', select), message, actions);
+  return section;
+}
+function modelManagementSections() {
+  const models = current.models, own = card('本项目专属模型'), shared = card('部署共享模型');
+  own.dataset.overviewAnchor = 'project-own-models'; shared.dataset.overviewAnchor = 'deployment-shared-models';
+  const row = model => { const li = element('li', '', 'model-entry'), result = probeResult('wide-cell'); li.append(modelLabel(model), modelActions(model, result), result); return li; };
+  const ownModels = models.filter(model => model.repository_id === current.id), sharedModels = models.filter(model => model.repository_id === null);
+  own.append(...(ownModels.length ? [providerList(ownModels, row)] : [note('还没有专属模型。点击「新增供应商」添加。')]), providerCreate(current.id));
+  shared.append(...(sharedModels.length ? [providerList(sharedModels, row)] : [note('还没有共享模型。点击「新增供应商」添加。')]), providerCreate(null));
+  return me.role === 'super_admin' ? [own, shared] : [own];
+}
+function taskModelEditor(kind, title, policy, models, { custom = false } = {}) {
+  const section = element('section', '', 'task-model-editor'), select = document.createElement('select'), message = element('p', '', 'view-error');
+  message.setAttribute('role', 'alert');
+  let initial = {}; try { initial = taskModelMap(policy); } catch (err) { message.textContent = err.message; }
+  const configured = Object.hasOwn(initial, kind), selected = configured ? initial[kind] : policy.model_id;
+  const defaultModel = models.find(model => model.id === policy.model_id);
+  modelOptions(select, models, configured ? selected : '', custom ? null : `继承项目默认${defaultModel ? `（${defaultModel.model_name}）` : policy.model_id ? `（模型不可用 ${policy.model_id}）` : '（未选择）'}`);
+  const selectedModel = models.find(model => model.id === selected);
+  const currentText = configured
+    ? selectedModel ? `${selectedModel.model_name} · 此任务指定${selectedModel.key_configured ? '' : ' · Key 已撤销，不会自动切换'}` : `模型不可用（${selected}） · 此任务指定，不会自动切换`
+    : selectedModel ? `${selectedModel.model_name} · 继承项目默认${selectedModel.key_configured ? '' : ' · Key 已撤销'}` : policy.model_id ? `模型不可用（${policy.model_id}） · 继承项目默认，不会自动切换` : '未选择项目默认模型，任务会等待配置';
+  const actions = element('div', '', 'actions form-actions');
+  const persist = async (value, notice) => {
+    message.textContent = ''; for (const control of actions.querySelectorAll('button')) control.disabled = true;
+    try {
+      const values = taskModelMap(current.policy);
+      if (value) values[kind] = value; else delete values[kind];
+      await patchPolicy({ task_models: values }); current.focusAnchor = kind; await reloadWith(notice);
+    } catch (err) { message.textContent = err.message; }
+    finally { for (const control of actions.querySelectorAll('button')) control.disabled = false; }
+  };
+  actions.append(button('保存模型', () => persist(select.value, `已保存${title}的模型`)));
+  if (!custom && configured) actions.append(button('恢复继承', () => persist('', `已恢复${title}继承项目默认模型`)));
+  if (custom) actions.append(button('移除自定义任务', () => persist('', `已移除自定义任务 ${kind}`), 'quiet destructive'));
+  section.append(note(`当前使用：${currentText}`), field('任务模型', select), message, actions);
+  return section;
+}
+function ruleReference(path, caption) {
+  const wrap = element('div', '', 'task-rule-reference'), text = element('p', '', 'muted'), actions = element('div', '', 'actions');
+  text.append('读取规则：', element('code', path));
+  actions.append(button(caption, async () => { current.focusRule = path; await renderProject({ id: current.id, section: 'tasks' }); }));
+  wrap.append(text, actions); return wrap;
+}
+function builtInTaskCard(definition, models) {
+  const section = card(definition.title); section.classList.add('task-card'); section.dataset.taskKind = definition.kind; section.dataset.overviewAnchor = definition.kind;
+  const identity = element('p', '', 'muted task-kind'); identity.append(element('code', definition.kind));
+  section.append(identity, note(definition.description), taskModelEditor(definition.kind, definition.title, current.policy, models));
+  if (definition.kind === 'development.issue') section.append(developmentSettings());
+  if (definition.rule) section.append(ruleCard(definition.rule));
+  if (definition.kind === 'development.pr') section.append(ruleReference('.bot/rules/issue-development.md', '查看共用开发规则'));
+  if (definition.kind === 'release.observe') section.append(note('没有专用规则文件，沿用对全部任务生效的行为指南。'), ruleReference('.bot/guide.md', '查看行为指南'));
+  if (definition.kind === 'release.notes') {
+    if (current.rules?.files.some(file => file.path === releaseNotesSkill)) section.append(note('发行说明使用下面的仓库 skill，只读查看；同时沿用行为指南。'), ruleCard(releaseNotesSkill));
+    else section.append(note('规则：仓库存在 .agents/skills/release-notes/SKILL.md 时只读使用该 skill；否则使用内置 release-notes-v1：仅整理已核验的提交和合并 PR，保留来源链接，不推断功能、测试或性能。'), ruleReference('.bot/guide.md', '查看通用行为指南'));
+  }
+  return section;
 }
 function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
 // Connections belong to the provider editor; testing, naming, pricing and deletion stay with each model.
@@ -667,9 +701,9 @@ function modelFields(repositoryId) {
   return [field('接口 URL', url), note(modelUrlRule), preview, field('API Key', key), field('模型名', name), pick, actions, result];
 }
 
-function reviewSection() {
+function reviewSettings() {
   const { policy } = current, language = document.createElement('select'); language.name = 'review_language';
-  for (const [value, caption] of [['auto', '跟随 Issue／PR 的语言'], ['zh', '简体中文'], ['en', 'English']]) language.add(new Option(caption, value));
+  for (const [value, caption] of [['auto', '跟随 Issue／PR 的语言'], ['zh', '简体中文'], ['en', 'English']]) modelOption(language, value, caption);
   language.value = policy.review_language || 'auto';
   const nodes = [checkbox('review_enabled', policy.review_enabled, '检视这个项目的 Issue 和 PR'),
     element('h4', '何时检视'), checkbox('review_issues', policy.review_issues, '新打开的 Issue'), checkbox('review_pull_requests', policy.review_pull_requests, '新打开或从草稿转为可检视的 PR'),
@@ -678,24 +712,28 @@ function reviewSection() {
     checkbox('review_pr_discussion', policy.review_pr_discussion, 'PR 的标题或描述被修改、有新评论、提交检视或回复检视意见后'),
     note('草稿 PR 和已关闭的 Issue／PR 不检视；bot 自己的评论和检视不会触发。上一次检视还在排队时，新的修改和评论并入那一次，不重复检视。评论里提到 bot 时总会再检视一次。行内评论固定 COMMENT，不会批准、请求修改或合并。'),
     field('评论语言', language)];
-  return [settingsForm('检视开关', nodes, form => patchPolicy(changed({
-    review_enabled: form.elements.review_enabled.checked, review_issues: form.elements.review_issues.checked, review_pull_requests: form.elements.review_pull_requests.checked,
-    review_pr_updates: form.elements.review_pr_updates.checked, review_issue_updates: form.elements.review_issue_updates.checked,
-    review_pr_discussion: form.elements.review_pr_discussion.checked, review_language: form.elements.review_language.value }, { review_enabled: !!policy.review_enabled,
-    review_issues: !!policy.review_issues, review_pull_requests: !!policy.review_pull_requests, review_pr_updates: !!policy.review_pr_updates, review_issue_updates: !!policy.review_issue_updates,
-    review_pr_discussion: !!policy.review_pr_discussion, review_language: policy.review_language || 'auto' }))),
-    ...['.bot/rules/issue-review.md', '.bot/rules/pr-review.md', '.bot/rules/labels.md'].map(ruleCard)];
+  return settingsForm('检视触发与评论', nodes, async form => {
+    await patchPolicy(changed({
+      review_enabled: form.elements.review_enabled.checked, review_issues: form.elements.review_issues.checked, review_pull_requests: form.elements.review_pull_requests.checked,
+      review_pr_updates: form.elements.review_pr_updates.checked, review_issue_updates: form.elements.review_issue_updates.checked,
+      review_pr_discussion: form.elements.review_pr_discussion.checked, review_language: form.elements.review_language.value }, { review_enabled: !!policy.review_enabled,
+      review_issues: !!policy.review_issues, review_pull_requests: !!policy.review_pull_requests, review_pr_updates: !!policy.review_pr_updates, review_issue_updates: !!policy.review_issue_updates,
+      review_pr_discussion: !!policy.review_pr_discussion, review_language: policy.review_language || 'auto' }));
+    current.focusAnchor = 'review.issue';
+  });
 }
 
-function developmentSection() {
+function developmentSettings() {
   const { policy } = current;
   const nodes = [checkbox('development_enabled', policy.development_enabled, '自动开发：Issue 明确要求改代码时，在虚拟电脑里实现、测试并开 bot PR'),
     field('测试命令', input('test_command', policy.test_command, { maxLength: 2048, placeholder: '如 npm test；留空时使用模型给出的命令' })),
     field('bot PR 自动修订轮数', input('max_revisions', policy.max_revisions, { type: 'number', min: 0, max: 10, step: 1 })),
     note('开发只在检视开启时衔接：Issue 检视认定需要改代码、给出原文依据且不缺信息时才创建开发任务。测试不通过不推分支、不开 PR；别人的 PR 只评论，不会推送到作者分支。')];
-  return [settingsForm('开发开关', nodes, form => patchPolicy(changed({ development_enabled: form.elements.development_enabled.checked, test_command: form.elements.test_command.value,
-    max_revisions: Number(form.elements.max_revisions.value) }, { development_enabled: !!policy.development_enabled, test_command: policy.test_command || '', max_revisions: policy.max_revisions }))),
-    ruleCard('.bot/rules/issue-development.md')];
+  return settingsForm('开发设置', nodes, async form => {
+    await patchPolicy(changed({ development_enabled: form.elements.development_enabled.checked, test_command: form.elements.test_command.value,
+      max_revisions: Number(form.elements.max_revisions.value) }, { development_enabled: !!policy.development_enabled, test_command: policy.test_command || '', max_revisions: policy.max_revisions }));
+    current.focusAnchor = 'development.issue';
+  });
 }
 
 function membersSection() {
@@ -753,9 +791,8 @@ function ruleCard(path) {
   const meta = element('div', '', 'rule-meta'); meta.append(element('code', path), badge('生效：' + layerNames[row.source], row.source === 'builtin' ? '' : 'info'), element('span', '用于' + (/^[A-Za-z]/.test(task) ? ' ' : '') + task, 'muted'));
   section.append(meta);
   if (current.ruleNotice?.path === path) { const done = element('p', current.ruleNotice.text, 'view-success flash'); done.setAttribute('role', 'status'); section.append(done); current.ruleNotice = null; }
-  // Short files are shown open; long ones stay folded with their size so the page remains scannable.
   const lines = row.effective.split('\n').length;
-  section.append(collapsible(lines > 15 ? `当前生效内容（${lines} 行）` : '当前生效内容', row.effective, lines <= 15));
+  section.append(collapsible(`当前生效内容（${lines} 行）`, row.effective));
   for (const layer of row.layers) if (layer.source !== row.source) section.append(collapsible(`${layerNames[layer.source]}（被覆盖）`, layer.content));
   if (!path.startsWith('.bot/rules/') && path !== '.bot/guide.md') return section;
   const consoleLayer = row.layers.find(layer => layer.source === 'console'), actions = element('div', '', 'actions'), message = element('p', '', 'view-error');
@@ -781,17 +818,16 @@ function ruleCard(path) {
   return section;
 }
 
-// One place to see every rule file: purpose, path, tasks, and which layer wins.
-function rulesSection() {
-  const id = current.id, rules = current.rules, overview = card('规则总览'), message = element('p', '', 'view-error'), head = element('div', '', 'actions');
-  overview.classList.add('rule-overview'); message.setAttribute('role', 'alert');
-  overview.append(note('每个任务读取自己的规则文件，行为指南和虚拟电脑对全部任务生效。优先级：内置默认 → 项目控制台 → 默认分支仓库文件，后一层存在时整份覆盖前一层；PR 里改动的规则文件合入默认分支后才生效。'));
-  if (!rules) { overview.append(note('暂时读不到规则文件，稍后再试。')); return [overview]; }
+function ruleSourceOverview() {
+  const id = current.id, rules = current.rules, overview = card('规则来源与层级'), message = element('p', '', 'view-error'), head = element('div', '', 'actions');
+  overview.classList.add('rule-overview'); overview.dataset.overviewAnchor = 'rule-sources'; message.setAttribute('role', 'alert');
+  overview.append(note('优先级：内置默认 → 项目控制台 → 默认分支仓库文件，后一层存在时整份覆盖前一层；PR 里改动的规则文件合入默认分支后才生效。'));
+  if (!rules) { overview.append(note('暂时读不到规则文件，稍后再试。')); return overview; }
   const source = note(rules.sha ? `仓库文件来自默认分支提交 ${rules.sha.slice(0, 12)} · ${timestamp(rules.updated_at)}` : '尚未读取默认分支，下表只含内置与控制台配置。'); if (rules.sha) source.title = rules.sha;
   overview.append(source, head, message);
   const refresh = button('刷新默认分支文件', async () => {
     refresh.disabled = true; refresh.textContent = '正在读取默认分支…'; message.textContent = '';
-    try { const result = await api(`/api/repositories/${id}/rules/refresh`, 'POST', {}); current.rules = result.rules; current.flash = `已读取默认分支提交 ${result.rules.sha.slice(0, 12)}`; renderProject({ id, section: 'rules' }); }
+    try { const result = await api(`/api/repositories/${id}/rules/refresh`, 'POST', {}); current.rules = result.rules; current.flash = `已读取默认分支提交 ${result.rules.sha.slice(0, 12)}`; current.focusAnchor = 'rule-sources'; renderProject({ id, section: 'tasks' }); }
     catch (err) { message.textContent = err.message; refresh.disabled = false; refresh.textContent = '刷新默认分支文件'; }
   });
   head.append(refresh);
@@ -803,13 +839,42 @@ function rulesSection() {
     const [, purpose, task, target] = ruleInfo(path), row = rules.files.find(file => file.path === path), tr = document.createElement('tr');
     const cell = (label, ...nodes) => { const td = document.createElement('td'); td.dataset.label = label; td.append(...nodes); tr.append(td); };
     cell('作用', element('strong', purpose)); cell('文件', element('code', path)); cell('用于', task);
-    // Each layer is the winner, present but overridden, or absent.
-    for (const [source, caption] of Object.entries(layerNames)) cell(caption, !row?.layers.some(layer => layer.source === source) ? element('span', '—', 'muted') : row.source === source ? badge('生效', 'success') : badge('被覆盖'));
+    for (const [source] of Object.entries(layerNames)) cell(layerNames[source], !row?.layers.some(layer => layer.source === source) ? element('span', '—', 'muted') : row.source === source ? badge('生效', 'success') : badge('被覆盖'));
     const open = () => { current.focusRule = path; if (current.section === target) renderProject({ id, section: target }); else openProject(id, target); };
     cell('', button(path.startsWith('.agents/') ? '查看' : '编辑', open));
     body.append(tr);
   }
   const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); overview.append(wrap);
-  // The behavior guide applies to every task, so it is edited here; repository skills are read-only text.
-  return [overview, ruleCard('.bot/guide.md'), ...skills.map(file => ruleCard(file.path))];
+  return overview;
+}
+function taskGroup(title) {
+  const group = element('section', '', 'task-group'), heading = element('h2', title); group.append(heading); return group;
+}
+function tasksSection() {
+  const sections = [projectDefaultModelCard(current.policy, current.models)];
+  for (const title of ['检视', '开发', '发版本']) {
+    const group = taskGroup(title);
+    if (title === '检视') group.append(reviewSettings());
+    for (const definition of builtInTasks.filter(task => task.group === title)) group.append(builtInTaskCard(definition, current.models));
+    if (title === '检视') {
+      const labels = ruleCard('.bot/rules/labels.md'); labels.dataset.overviewAnchor = 'review-labels'; labels.append(note('Issue 检视和 PR 检视共用这份标签规则，只在这里编辑一次。')); group.append(labels);
+    }
+    sections.push(group);
+  }
+  let overrides = {}; try { overrides = taskModelMap(current.policy); } catch {}
+  const customKinds = Object.keys(overrides).filter(kind => !builtInTasks.some(task => task.kind === kind));
+  if (customKinds.length) {
+    const group = taskGroup('其他已配置任务'); group.append(note('这些任务标识来自现有配置。可以更换模型或移除配置；移除后不再保留任务专属覆盖。'));
+    for (const kind of customKinds) {
+      const section = card(kind); section.classList.add('task-card', 'custom-task-card'); section.dataset.taskKind = kind; section.dataset.overviewAnchor = kind;
+      section.append(note('自定义任务标识'), taskModelEditor(kind, kind, current.policy, current.models, { custom: true })); group.append(section);
+    }
+    sections.push(group);
+  }
+  const common = taskGroup('全部任务'), guide = ruleCard('.bot/guide.md'); guide.dataset.overviewAnchor = 'behavior-guide';
+  common.append(note('行为指南对全部六个内置任务和自定义任务生效，只在这里编辑一次。'), guide); sections.push(common);
+  sections.push(...modelManagementSections(), ruleSourceOverview());
+  const skills = (current.rules?.files || []).filter(file => !ruleFiles.some(([path]) => path === file.path) && file.path !== releaseNotesSkill);
+  if (skills.length) { const group = taskGroup('其他仓库 skill'); group.append(note('列表外的仓库 skill 只读查看。')); for (const file of skills) group.append(ruleCard(file.path)); sections.push(group); }
+  return sections;
 }

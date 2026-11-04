@@ -70,27 +70,35 @@ test('invalid task maps and failed audit do not partially change model selection
   assert.deepEqual(JSON.parse(h.store.get('SELECT task_models FROM policies WHERE repository_id=?', '101').task_models), {});
 });
 
-test('task model console supports custom task IDs, stale models and removal to default', async () => {
+test('task overview console preserves custom task IDs, shows stale models and restores inheritance', async () => {
   const {loadConsole} = await import('./console-page.mjs');
   const bodies = [];
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], (method, path, body) => {
     assert.equal(method, 'PATCH'); assert.equal(path, '/api/repositories/101/policy'); bodies.push(body); return [200, {}];
   });
-  page.run(`me={role:'super_admin',csrf_token:'csrf'}; current={id:'101',section:'model'};
-    var reloads=0; reloadProject=async()=>{reloads++;};
-    var chooser=taskModelChoices({task_models:JSON.stringify({'review.pr':'deleted'})}, [{id:'model',model_name:'Fixture',api_url:'https://model.invalid/v1',key_configured:true}]);`);
-  const chooser = page.run('chooser'), click = async label => {
-    await chooser.querySelectorAll('button').find(button => button.textContent === label).listeners.click[0]();
+  page.run(`me={role:'super_admin',csrf_token:'csrf'}; current={id:'101',section:'tasks',policy:{model_id:'model',task_models:JSON.stringify({'review.pr':'deleted','custom.science':'model'})}};
+    var reloads=0; reloadWith=async()=>{reloads++;};
+    var chooser=taskModelEditor('review.pr','检视 PR',current.policy,[{id:'model',repository_id:'101',model_name:'Fixture',api_url:'https://model.invalid/v1',key_configured:true}]);`);
+  const click = async (root, label) => {
+    await root.querySelectorAll('button').find(button => button.textContent === label).listeners.click[0]();
   };
+  const chooser = page.run('chooser');
   assert.ok(chooser.querySelectorAll('option').some(option => option.textContent.includes('模型不可用')));
-  assert.ok(chooser.querySelectorAll('datalist option').some(option => option.value === 'release.observe'));
-  chooser.querySelector('input').value = 'custom.quality'; chooser.querySelector('select').value = 'model';
-  await click('保存任务模型');
-  assert.deepEqual(bodies, [{task_models: {'custom.quality': 'model'}}]); assert.equal(page.run('reloads'), 1);
-  await click('增加任务模型'); await click('保存任务模型');
-  assert.equal(bodies.length, 1); assert.match(chooser.querySelector('.view-error').textContent, /每行需要唯一/);
-  await click('移除'); await click('移除'); await click('保存任务模型');
-  assert.deepEqual(bodies[1], {task_models: {}});
+  chooser.querySelector('select').value = 'model'; await click(chooser, '保存模型');
+  assert.deepEqual(bodies[0], {task_models: {'review.pr': 'model', 'custom.science': 'model'}});
+  page.run("current.policy.task_models=JSON.stringify({'review.pr':'model','custom.science':'model'});");
+  await click(chooser, '恢复继承');
+  assert.deepEqual(bodies[1], {task_models: {'custom.science': 'model'}});
+  page.run(`current.policy.task_models=JSON.stringify({'custom.science':'model'});
+    var inherited=taskModelEditor('review.pr','检视 PR',current.policy,[{id:'model',repository_id:'101',model_name:'Fixture',api_url:'https://model.invalid/v1',key_configured:true}]);
+    var custom=taskModelEditor('custom.science','custom.science',current.policy,[{id:'model',repository_id:'101',model_name:'Fixture',api_url:'https://model.invalid/v1',key_configured:true}],{custom:true});`);
+  const inherited = page.run('inherited');
+  assert.equal(inherited.querySelector('select').value, ''); await click(inherited, '保存模型');
+  assert.deepEqual(bodies[2], {task_models: {'custom.science': 'model'}});
+  await click(page.run('custom'), '移除自定义任务');
+  assert.deepEqual(bodies[3], {task_models: {}}); assert.equal(page.run('reloads'), 4);
+  assert.equal(page.run("projectSections.map(([id,title])=>id+':'+title).join(',')"), 'basic:基本设置,machine:机器配置,tasks:任务总览,release:发版本,notes:项目笔记,external:外部执行,members:成员,activity:运行记录');
+  assert.equal(page.run("kindLabels['release.observe']+'/'+kindLabels['release.notes']"), 'CI 观察/发行说明');
 });
 
 test('task model configuration failures identify model configuration rather than bot defects', async () => {

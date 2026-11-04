@@ -46,7 +46,7 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 ## 按任务选择模型
 
-在项目「使用的模型」中保留一个默认模型，并可新增任务模型映射。任务标识精确匹配，例如 `review.issue`、`review.pr`、`development.issue`、`development.pr`、`release.observe`、`release.notes`；扩展任务可以使用自己的标识，不要求修改模型选择器。
+在项目「任务总览」顶部选择项目默认模型，再在六个内置任务的中文卡片里按需覆盖模型；继承项目默认的任务不写入覆盖。任务标识仍精确匹配，例如 `review.issue`、`review.pr`、`development.issue`、`development.pr`、`release.observe`、`release.notes`。已经保存在配置中的扩展任务标识会单独显示，可以改模型或移除，不要求修改选择器，也不需要用户手填内部标识。
 
 `PATCH /api/repositories/:id/policy` 接受 `task_models` 对象，例如：
 
