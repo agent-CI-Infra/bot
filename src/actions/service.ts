@@ -54,9 +54,17 @@ export class ActionsFailures {
       if (!github.installationEvents?.includes('workflow_run')) stop('actions_workflow_run_subscription_missing');
       this.store.run('UPDATE actions_failure_scans SET error=NULL,configured_at=? WHERE repository_id=? AND lease=?', new Date().toISOString(), repo.id, lease);
       // Poll sent/uncertain reruns even when discovery no longer returns their original creation window.
+      let pendingError: unknown;
       for (const run of this.store.all(`SELECT * FROM actions_failure_runs WHERE repository_id=? AND
-        (tracking=1 OR EXISTS(SELECT 1 FROM actions_failure_attempts a WHERE a.repository_id=? AND a.run_id=actions_failure_runs.run_id AND a.state='pending'))`, repo.id, repo.id))
-        await this.processRun(github, run.run_id);
+        (tracking=1 OR EXISTS(SELECT 1 FROM actions_failure_attempts a WHERE a.repository_id=? AND a.run_id=actions_failure_runs.run_id AND a.state='pending'))`, repo.id, repo.id)) {
+        try { await this.processRun(github, run.run_id); }
+        catch (error) {
+          if (error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost', 'github_rate_limited'].includes(error.code)) throw error;
+          pendingError ??= error;
+        }
+      }
+      // Keep this scan page in place, but do not let one uncertain report strand other tracked reruns.
+      if (pendingError) throw pendingError;
       await this.scan(github);
       this.store.run('UPDATE actions_failure_scans SET next_scan=? WHERE repository_id=? AND lease=?', Date.now() + scanInterval, repo.id, lease);
     } finally { if (github.token) await revokeInstallationToken(this.apiUrl, github.token).catch(() => false); }

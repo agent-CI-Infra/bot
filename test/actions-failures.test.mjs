@@ -292,3 +292,15 @@ test('distinct job names remain distinct even when their public display needs es
   f.state.jobs[0].name = 'test matrix'; f.state.runs = [run({ id: 801 })]; await f.hook(); await f.tick();
   assert.equal(f.state.issues.length, 2); assert.equal(f.state.comments.length, 0);
 });
+
+test('an uncertain report cannot prevent another already-sent rerun from reaching completion', async t => {
+  const f = await fixture(t);
+  f.state.runs = [run({ status: 'in_progress', conclusion: null }), run({ id: 801 })];
+  for (const r of f.state.runs) recordActionsRun(f.h.store, '101', r); await f.tick(); assert.equal(f.reruns().length, 1);
+  Object.assign(f.state.runs[0], { status: 'completed', conclusion: 'failure' }); f.state.log = log('AssertionError: failed'); f.state.unknownIssue = true;
+  f.state.custom = ({ path, req, send }) => { if (req.method === 'GET' && path.endsWith('/issues')) { send([]); return true; } return false; };
+  await f.hook(); await f.tick(); assert.equal(f.state.issues.length, 1);
+  Object.assign(f.state.runs[1], { status: 'completed', conclusion: 'success' }); await f.tick();
+  assert.equal(f.h.store.get('SELECT tracking FROM actions_failure_runs WHERE run_id=801').tracking, 0);
+  assert.equal(f.reruns().length, 1); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'actions_report_write_unknown');
+});
