@@ -1,5 +1,6 @@
 import { stop } from '../agent/common.js';
 export function validateReview(value: any) {
+  if (value?.product_defect !== undefined && typeof value.product_defect !== 'boolean') stop('model_review_invalid');
   if (!value || typeof value.summary !== 'string' || value.summary.length > 16000 || !Array.isArray(value.findings) || value.findings.length > 100
     || ['requires_code_change','issue_requests_code','clarification_required'].some(k => typeof value[k] !== 'boolean')
     || typeof value.implementation_goal !== 'string' || typeof value.request_quote !== 'string' || value.event !== undefined

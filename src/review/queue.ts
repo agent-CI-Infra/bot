@@ -2,6 +2,7 @@ import { type Store } from '../storage/database.js';
 import { randomId, type Json } from '../core/security.js';
 import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
+import { actionsDevelopmentAllowed } from '../actions/safety.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
 // A person's go-ahead for development: the development label is on the Issue and nobody has claimed it.
@@ -117,7 +118,7 @@ function queueLabeledDevelopment(store: Store, repositoryId: string, policy: any
   if (!sameLabel(payload.label?.name, label) || !developmentReady(issue, label)) return false;
   const review = store.get("SELECT id,result FROM tasks WHERE repository_id=? AND kind='review.issue' AND object_number=? AND status='succeeded' ORDER BY created_at DESC LIMIT 1", repositoryId, number);
   const result = review?.result ? JSON.parse(review.result) : null;
-  if (!result || !reviewRequestsCode(issue, result)) return false;
+  if (!result || !reviewRequestsCode(issue, result) || !actionsDevelopmentAllowed(store, repositoryId, number, issue, result)) return false;
   return !!enqueue(store, repositoryId, 'development.issue', number, null, { review: result, object_hash: result.object_hash }, delivery, review!.id);
 }
 
@@ -125,6 +126,7 @@ function queueLabeledDevelopment(store: Store, repositoryId: string, policy: any
 export function enqueue(store: Store, repositoryId: string, kind: string, number: number, head: string | null, input: Json,
   delivery: string | null = null, sourceTask: string | null = null, commentId: string | null = null, updateId: string | null = null): string | null {
   if (!Number.isSafeInteger(number) || number < 1 || kind.endsWith('.pr') && !/^[a-f0-9]{40}$/.test(head || '')) return null;
+  if (kind === 'development.issue' && !actionsDevelopmentAllowed(store, repositoryId, number)) return null;
   if (commentId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[1-9]\d*$/.test(commentId))) return null;
   if (updateId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[\w-]{1,200}$/.test(updateId))) return null;
   if (kind === 'development.issue' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=?
@@ -149,6 +151,7 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
   }
   if (!policy?.enabled || !policy.review_enabled) return 0;
+  if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number)) return 0;
   if (event === 'issue_comment') {
     const kind = commentReviewKind(store, repositoryId, event, payload);
     // A comment without a mention may still be an update to review.

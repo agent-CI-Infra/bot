@@ -3,6 +3,7 @@ import { GitHub } from './client.js';
 import { blobSha, operationId, stop, TaskError, treeSha } from '../agent/common.js';
 import { implementationText, reviewText } from './text.js';
 import { inlineLocation } from '../review/findings.js';
+import { applyReleaseCategory, releaseCategory } from './release-label.js';
 
 export class Publisher {
   constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly onHeadWait:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){}
@@ -115,6 +116,7 @@ export class Publisher {
     return commit.sha;
   }
   async pullRequest(candidate:any,sha:string){
+    const releaseLabel = await releaseCategory(this.github, candidate.release_label);
     if(candidate.pr_number){
       const owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',this.task.repository_id,candidate.pr_number);
       let pr:any;
@@ -135,6 +137,7 @@ export class Publisher {
       },true);
       // Only count a confirmed head and its refreshed description, once across retries.
       this.store.run('UPDATE bot_pull_requests SET revisions=revisions+CASE WHEN sha<>? THEN 1 ELSE 0 END,sha=? WHERE repository_id=? AND number=?',sha,sha,this.task.repository_id,candidate.pr_number);
+      await applyReleaseCategory(this.github, pr.number, releaseLabel);
       return {...pr,...payload};
     }
     const marker=this.marker('pr'),path=this.github.path('/pulls'),body=implementationText(candidate,this.task.object_number).body+'\n\n'+marker;
@@ -143,6 +146,7 @@ export class Publisher {
       (await this.github.pages(path+'?state=all&head='+encodeURIComponent(this.github.fullName.split('/')[0]+':'+candidate.branch))).find(p=>p.head?.ref===candidate.branch&&String(p.head?.repo?.id)===this.task.repository_id&&String(p.body).includes(marker)));
     if(String(pr.user?.id)!==this.github.actorId||String(pr.head?.repo?.id)!==this.task.repository_id||pr.head?.ref!==candidate.branch||pr.head.sha!==sha)stop('bot_pr_ownership_unconfirmed','waiting_permission',`新建 PR #${pr.number} 的作者、来源仓库、分支或提交与候选分支 ${candidate.branch} 不一致。`);
     this.store.run(`INSERT INTO bot_pull_requests VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(repository_id,number) DO NOTHING`,this.task.repository_id,pr.number,String(pr.id),String(pr.user.id),String(pr.head.repo.id),candidate.branch,sha,this.task.id);
+    await applyReleaseCategory(this.github, pr.number, releaseLabel);
     return pr;
   }
 }

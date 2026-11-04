@@ -44,6 +44,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 共享执行入口、任务扩展方式与权限边界见[共享 Agent 后端](agent-runtime.md)。
 
+默认关闭的 Actions 失败处理及其扫描、分类和一次重跑设计见 [Actions 失败分类与提报](actions-failures.md)。
+
 ## 按任务选择模型
 
 在项目「模型」页选择项目默认模型，再在「任务模型」表格中按需为六个内置任务覆盖模型；继承项目默认的任务不写入覆盖。任务标识仍精确匹配，例如 `review.issue`、`review.pr`、`development.issue`、`development.pr`、`release.observe`、`release.notes`。已经保存在配置中的扩展任务标识会单独显示，可以改模型或移除，不要求修改选择器，也不需要用户手填内部标识。

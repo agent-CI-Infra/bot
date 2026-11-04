@@ -4,8 +4,10 @@ import { randomId, fields, fail, HttpError, type Json } from '../core/security.j
 import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
+import { releaseCategory } from '../github/release-label.js';
 import { testEvidence } from '../github/text.js';
 import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
+import { actionsDevelopmentAllowed, actionsSourceIssue } from '../actions/safety.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop } from './loop.js';
 import { ReadTokens } from './read-token.js';
@@ -117,6 +119,8 @@ export class TaskEngine {
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
       const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
+      const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
+      if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
@@ -159,6 +163,18 @@ export class TaskEngine {
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
         // The go-ahead must still hold until publication: the label stays on and nobody else has taken the Issue.
         if(task.kind==='development.issue'&&!developmentReady(current,this.label(task)))stop('development_not_approved','needs_replan',`Issue #${task.object_number} 不再满足开发条件：开发标签缺失或已有人接手。`);
+        if(task.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,current,input.review))stop('actions_development_not_approved','needs_replan');
+        const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
+        if(actionsIssue!==null){
+          if(!github.installationEvents?.includes('workflow_run')){
+            this.store.run("UPDATE actions_failure_scans SET error='actions_workflow_run_subscription_missing',configured_at=NULL WHERE repository_id=?",task.repository_id);
+            stop('actions_workflow_run_subscription_missing','waiting_configuration');
+          }
+          if(development&&task.kind.endsWith('.pr')){
+            const issue=await github.object('development.issue',actionsIssue);
+            if(issue.state!=='open'||!developmentReady(issue,this.label(task))||!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue,issue))stop('actions_development_not_approved','needs_replan');
+          }
+        }
         if(development){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=saved?JSON.parse(saved.data):null;
           // Once the branch is on GitHub, only its PR is left to open, and a base that moved on since is normal for a PR.
@@ -277,6 +293,7 @@ export class TaskEngine {
         input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
           files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,
+            ...(!pr ? {actions_failure:this.store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?',task.repository_id,task.object_number)||null} : {}),
             object:{number:object.number,title:object.title,state:object.state,author:object.user?.login||null,html_url:object.html_url||null,labels:(object.labels||[]).map((l:any)=>typeof l==='string'?l:l.name),
               ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},
             ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
@@ -322,6 +339,11 @@ export class TaskEngine {
         validatedPhase=undefined;
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl),development?async(requestId,args)=>{
+          // A missing category can be corrected in the same tool conversation, before any branch is published.
+          try{await releaseCategory(github,args.release_label);}catch(error){
+            if(error instanceof TaskError&&error.code==='pr_release_category_required')return {error:error.code,message:'Read the current contribution guide and create-github-pr skill, choose exactly one release:* category, and call create_pull_request again with release_label.'};
+            throw error;
+          }
           // Fix the only candidate snapshot before any policy command can create or modify files.
           const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
           if(snapshot.tree_sha===input.snapshot_tree){
@@ -341,7 +363,7 @@ export class TaskEngine {
             const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-          const candidate={...snapshot,files:await workspace!.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,summary:args.summary,change_title:args.change_title,test_command:args.test_command,
+          const candidate={...snapshot,files:await workspace!.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,summary:args.summary,change_title:args.change_title,test_command:args.test_command,release_label:args.release_label,
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
             branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
@@ -478,6 +500,7 @@ export class TaskEngine {
     // A PR conversation mention or update requests another review, including on a bot-owned PR, never a revision.
     if(task.kind==='review.pr'&&(input.comment||input.trigger))return;
     if(task.kind==='review.issue'){
+      if(!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,input.object,result))return;
       if(!approved||!reviewRequestsCode(input.object,result))return;
       // Development that continues the bot's PR for this Issue revises that PR, so it counts against the same budget.
       const owned=this.store.get(`SELECT p.revisions FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
@@ -486,8 +509,10 @@ export class TaskEngine {
       enqueue(this.store,task.repository_id,'development.issue',task.object_number,null,{review:result,object_hash:input.object_hash},task.source_delivery_id,task.id);
     }else{
       let owned:Row;try{owned=this.owned(github,task,input.object);}catch{return;}
+      const source=this.store.get('SELECT * FROM tasks WHERE id=?',owned.source_task_id);
+      if(source&&source.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,source.object_number))return;
       const findings=result.findings.filter(actionableFinding);
-      const source=this.store.get('SELECT input FROM tasks WHERE id=?',owned.source_task_id),goal=source?JSON.parse(source.input).review?.implementation_goal:'';
+      const goal=source?JSON.parse(source.input).review?.implementation_goal:'';
       if(owned.revisions>=policy.max_revisions||!findings.length||!goal)return;
       enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:{...result,implementation_goal:goal,findings}},task.source_delivery_id,task.id);
     }

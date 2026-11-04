@@ -53,7 +53,7 @@ test('任务表按需配置规则，模型独立管理且项目不能修改共�
     await page.getByRole('button', { name: '检视设置', exact: true }).click();
     const reviewSettings = page.getByRole('region', { name: '检视设置', exact: true });
     await reviewSettings.getByLabel('检视这个项目的 Issue 和 PR', { exact: true }).check();
-    await reviewSettings.getByRole('button', { name: '保存', exact: true }).click();
+    await reviewSettings.locator('form').filter({ has: page.locator('[name="review_enabled"]') }).getByRole('button', { name: '保存', exact: true }).click();
     await expect(reviewSettings.locator('.flash')).toHaveText('已保存');
     expect((await policy()).review_enabled).toBe(1); await close();
     await expect(row('review.issue')).toContainText('已开启');

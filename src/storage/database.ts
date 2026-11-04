@@ -6,6 +6,7 @@ import { externalStorage } from '../external/storage.js';
 import { boardStorage } from '../board/storage.js';
 import { metricsStorage } from '../metrics/storage.js';
 import { rateLimitStorage } from '../github/rate-limits.js';
+import { actionsStorage } from '../actions/storage.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -143,6 +144,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS review_sessions(repository_id TEXT NOT NULL REFERENCES repositories(id),kind TEXT NOT NULL,object_number INTEGER NOT NULL,
         task_id TEXT NOT NULL REFERENCES tasks(id),messages TEXT NOT NULL,workspace_id TEXT,generation INTEGER,head_sha TEXT,snapshot TEXT NOT NULL,
         PRIMARY KEY(repository_id,kind,object_number));`);
+    actionsStorage(this);
     rateLimitStorage(this);
     externalStorage(this);
     boardStorage(this);

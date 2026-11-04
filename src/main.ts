@@ -13,6 +13,7 @@ import { Quickstart } from './projects/quickstart.js';
 import { GitCache } from './agent/git-cache.js';
 import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
+import { ActionsFailures } from './actions/service.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
@@ -42,6 +43,7 @@ const boards = new PublicBoards(store, resolve(dirname(databasePath), 'public-bo
 const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_URL || undefined);
 const quickstart = new Quickstart(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
+const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, quickstart, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL });
@@ -55,6 +57,6 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer);
   let remaining = 2;
-  for (const server of Object.values(servers)) server.close(async () => { if (--remaining === 0) { await Promise.all([engine.close(),external.forwarder.close(),releases.close(),boards.close()]); store.close(); process.exit(0); } });
+  for (const server of Object.values(servers)) server.close(async () => { if (--remaining === 0) { await Promise.all([engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close()]); store.close(); process.exit(0); } });
   setTimeout(() => process.exit(1), 100_000).unref();
 });
