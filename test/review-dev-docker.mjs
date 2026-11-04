@@ -39,7 +39,7 @@ writeFileSync(override,`services:
       BOT_PROJECT_IMAGE: ${image('project-computer')}
     ports: ["127.0.0.1:18893:8793"]
 `);
-const env={...process.env,DOCKER_CONFIG:resolve('.cache/docker'),BUILDX_CONFIG:resolve('.cache/buildx'),BOT_WEBHOOK_PORT:'18891',BOT_ADMIN_PORT:'18892'};
+const env={...process.env,DOCKER_CONFIG:resolve('.tmp/review-dev/docker'),BUILDX_CONFIG:resolve('.tmp/review-dev/buildx'),BOT_WEBHOOK_PORT:'18891',BOT_ADMIN_PORT:'18892'};
 const docker=args=>execFileSync('docker',args,{env,encoding:'utf8',maxBuffer:8*1024*1024});
 const compose=args=>docker(['compose','-f','compose.yaml','-f','compose.build.yaml','-f',override,'-p',project,...args]);
 const base='http://127.0.0.1:18892',fixture='http://127.0.0.1:18894',id=()=>randomBytes(24).toString('hex');
