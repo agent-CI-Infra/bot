@@ -69,7 +69,8 @@ async function loadCosts(version) {
   const projectTable=costTable(['项目','已计价费用',tokenMode?'token 占比':'已计价费用占比',...costTokenFields.map(([,label])=>label),'未计价请求']);
   for(const project of projects){
     const row=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,document.createTextNode(project.full_name));
-    row.append(name,element('td',project.requests===project.unpriced_requests?'—':money(project.cost,data.currency)),element('td',costChartValue(data.summary,tokenMode)>0?((costChartValue(project,tokenMode)||0)/costChartValue(data.summary,tokenMode)*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
+    const amount=costChartValue(project,tokenMode),total=costChartValue(data.summary,tokenMode);
+    row.append(name,element('td',project.requests===project.unpriced_requests?'—':money(project.cost,data.currency)),element('td',amount!=null&&total>0?(amount/total*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
   }
   const breakdown=element('section','','cost-breakdown');breakdown.append(element('h2','项目占比'),projectTable.wrap);if(!projects.length)breakdown.append(element('p','暂无项目费用记录。','muted'));body.append(breakdown);
   const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）','已计价费用','模型请求',...costTokenFields.map(([,label])=>label),'未计价请求']);detail.append(element('summary','每日费用与 token 明细'));

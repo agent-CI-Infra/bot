@@ -63,7 +63,7 @@ test('unpriced charts stack recorded input and output tokens, without counting c
   const data=chartData({cost:0,requests:3,unpriced_requests:3,usage_missing_requests:1,input_tokens:3000,output_tokens:300,cached_input_tokens:2400},[
     {date:'2026-10-22',repository_id:'101',full_name:'first',cost:0,requests:1,unpriced_requests:1,input_tokens:1000,output_tokens:100,cached_input_tokens:800},
     {date:'2026-10-22',repository_id:'202',full_name:'second',cost:0,requests:1,unpriced_requests:1,input_tokens:2000,output_tokens:200,cached_input_tokens:1600},
-    {date:'2026-10-23',repository_id:'101',full_name:'first',cost:0,requests:1,unpriced_requests:1,input_tokens:null,output_tokens:null,cached_input_tokens:null}]);
+    {date:'2026-10-23',repository_id:'303',full_name:'missing',cost:0,requests:1,unpriced_requests:1,input_tokens:null,output_tokens:null,cached_input_tokens:null}]);
   const page=chartPage(data);await page.run('loadCosts(0)');const body=page.$('cost-body'),chart=body.querySelector('.cost-chart-section'),svg=chart.querySelector('svg');
   assert.equal(svg.dataset.metric,'tokens');assert.match(text(chart),/每日 token/);assert.match(text(chart),/不重复相加/);
   const bars=svg.querySelectorAll('rect');assert.equal(bars.length,2);
@@ -71,6 +71,8 @@ test('unpriced charts stack recorded input and output tokens, without counting c
   assert.match(bars[1].getAttribute('aria-label'),/1,100 token（输入 1,000，输出 100） · 当日 33.3%/);
   assert.match(text(body.querySelectorAll('thead')[0]),/token 占比/);
   assert.match(text(body.querySelectorAll('tbody')[0]),/66.7%/);
+  const missing=body.querySelectorAll('tbody')[0].children.find(row=>text(row).includes('missing'));
+  assert.equal(missing.children[2].textContent,'—','unknown project usage is not a measured zero share');
 });
 test('known zero pricing and partially priced ranges retain currency charts; missing tokens stay unknown',async()=>{
   const day={date:'2026-10-22',repository_id:'101',full_name:'first',cost:0,requests:1,unpriced_requests:0,input_tokens:100,output_tokens:20,cached_input_tokens:50};
