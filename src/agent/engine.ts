@@ -11,6 +11,7 @@ import { agentLoop } from './loop.js';
 import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
+import { isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
@@ -405,20 +406,21 @@ export class TaskEngine {
       // A GitHub rate limit is waited out until its window resets (the task resumes then, a few seconds apart from others
       // waiting for the same window); it does not use up the five automatic retries.
       const limited=failure.code==='github_rate_limited';
-      const state=failure.state,retrying=automaticRetry.has(state),now=Date.now();
+      const state=failure.state,retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
       const previousCode=current?.retry_error_code||current?.error_code;
-      const retries=limited?Number(current?.retry_count||0):retrying?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:0;
+      const retries=counted?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:retrying?Number(current?.retry_count||0):0;
       // Once in the slow cycle, a task never starts another burst. Its slots stay relative to its own entry time,
-      // including after a restart or a different transient failure; GitHub rate-limit windows take precedence.
-      const cycle=retrying?(current?.retry_cycle_started_at??(!limited&&retries>=5?now:null)):null;
+      // including after a restart or a different transient failure. Conditions and rate limits preserve the burst
+      // and cycle but use their own wait, so a computer becoming ready need not wait for an eight-hour slot.
+      const cycle=retrying?(current?.retry_cycle_started_at??(counted&&retries>=5?now:null)):null;
       // The same stop again waits twice as long as the last time, up to a cap; a different stop starts over. Automatic
       // retries back off too (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted.
       const waits=current?.error_code===failure.code?Number(current?.wait_count||0)+1:0,grow=(base:number,cap:number)=>Math.min(base*2**waits,cap);
       const delay=limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
-        :cycle!=null?cycle+(Math.floor(Math.max(0,now-cycle)/retryCycleMs)+1)*retryCycleMs-now
+        :counted&&cycle!=null?cycle+(Math.floor(Math.max(0,now-cycle)/retryCycleMs)+1)*retryCycleMs-now
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
-        retry_error_code:limited?current.retry_error_code:retrying?failure.code:null,retry_cycle_started_at:cycle,
+        retry_error_code:counted?failure.code:retrying?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
         rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.

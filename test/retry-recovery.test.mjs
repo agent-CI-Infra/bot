@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {TaskEngine} from '../dist/agent/engine.js';
-import {sha,operationId} from '../dist/agent/common.js';
+import {sha,operationId,TaskError} from '../dist/agent/common.js';
 import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
+import {loadConsole} from './console-page.mjs';
 
 const cycleMs=8*60*60*1000;
 const review={summary:'Reviewed.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''};
@@ -57,7 +58,8 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
       h.due();const before=Date.now(),task=await h.run();
       assert.deepEqual([task.status,task.phase,task.workspace_id,task.attempt,task.retry_count],[fault==='transport'?'retry_wait':'waiting_environment','prepare',null,3+failure,failure]);
       assert.equal(starts.length,failure);assert.ok([...processes.values()].every(process=>!process.alive));
-      if(failure===5)assert.ok(task.next_run_at>=before+cycleMs&&task.next_run_at<=Date.now()+cycleMs);
+      const delay=failure===5?cycleMs:5000*(fault==='transport'?3:2)**(failure-1);
+      assert.ok(task.next_run_at>=before+delay&&task.next_run_at<=Date.now()+delay);
     }
     const saved=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId),receipts=h.store.all("SELECT id,request FROM task_tools WHERE task_id=? AND json_extract(request,'$.request.type')='workspace_agent_start'",h.taskId);
     assert.equal(new Set(receipts.map(row=>row.id)).size,5);
@@ -178,3 +180,85 @@ test('manual retries and close webhooks leave the eight-hour cycle',async t=>{
   task=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);assert.equal(task.status,'cancelled');assert.equal(task.retry_cycle_started_at,null);
   h.due();await h.run();assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',h.taskId).status,'cancelled');
 });
+
+const waits=[
+  ['environment_not_ready','waiting_environment',5000,300000],
+  ['environment_generation_changed','waiting_environment',5000,300000],
+  ['repository_has_no_commit','waiting_configuration',30000,1800000],
+  ['pr_head_pending','waiting_pr_head',5000,300000],
+  ['task_runtime_failure','waiting_environment',5000,300000],
+  ['model_authentication_failed','waiting_configuration',30000,1800000],
+];
+for(const [code,state,base,cap] of waits)for(const inCycle of [false,true]){
+  test(`${code} keeps capped condition polling after five waits, with ${inCycle?'an existing':'no'} eight-hour cycle`,async t=>{
+    const h=await emptyRepositoryFixture(t);if(code!=='repository_has_no_commit')h.setBranch('ready');
+    const call=h.engine.manager.call.bind(h.engine.manager);
+    h.engine.manager.call=async(method,path,body)=>{
+      if(method==='GET'&&path==='/v1/projects/101'){
+        if(code==='environment_not_ready')return {...await call(method,path,body),state:'failed'};
+        if(code==='task_runtime_failure')throw new Error('manager temporarily unavailable');
+        if(!['repository_has_no_commit','environment_generation_changed'].includes(code))throw new TaskError(code,state,'Condition is not ready.');
+      }
+      return call(method,path,body);
+    };
+    if(code==='task_runtime_failure')t.mock.method(console,'error',()=>{});
+    const entered=inCycle?Date.now()-60000:null;
+    h.store.run("UPDATE tasks SET retry_count=4,retry_error_code='model_unavailable',retry_cycle_started_at=?,generation=? WHERE id=?",entered,code==='environment_generation_changed'?99:null,h.taskId);
+    for(let i=0;i<10;i++){
+      h.due();const before=Date.now(),task=await h.run(),after=Date.now(),delay=Math.min(base*2**i,cap);
+      assert.deepEqual([task.status,task.error_code,task.retry_count,task.retry_error_code,task.retry_cycle_started_at],[state,code,4,'model_unavailable',entered]);
+      assert.ok(task.next_run_at>=before+delay&&task.next_run_at<=after+delay,`${code} wait ${i+1}: ${task.next_run_at-before} ms`);
+    }
+    const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task;
+    assert.equal(detail.retry_cycle_started_at,entered);assert.ok(!detail.error_cause.retry_cycle);assert.doesNotMatch(detail.error_cause.action,/8 小时/);
+    const page=loadConsole(['static/app.js','static/views.js'],()=>[404,{}]);
+    const shown=page.run(`liveText(${JSON.stringify(detail)})`),next=page.run(`timestamp(${detail.next_run_at})`);
+    assert.doesNotMatch(shown,/8 小时|满 5 次/);assert.ok(shown.includes('下次重试：'+next),shown);
+    if(code==='repository_has_no_commit')assert.match(shown,/仓库还没有提交；默认分支出现提交后会自动继续/);
+    if(code==='pr_head_pending')assert.match(shown,/PR 尚未指向/);
+    const logs=(await h.admin('/api/tasks/'+h.taskId+'/logs')).value.logs.filter(log=>log.cause);
+    assert.equal(logs.length,1,'unchanged conditions are logged once even while a cycle is retained');
+    assert.doesNotMatch(logs[0].cause.action,/8 小时/);
+  });
+}
+
+for(const code of ['workspace_init_failed','workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable']){
+  test(`${code} still enters an eight-hour cycle on its fifth failed attempt`,async t=>{
+    const h=await emptyRepositoryFixture(t),call=h.engine.manager.call.bind(h.engine.manager);
+    h.engine.manager.call=async(method,path,body)=>{
+      if(method==='GET'&&path==='/v1/projects/101')throw new TaskError(code,'waiting_environment','Attempt failed.');
+      return call(method,path,body);
+    };
+    for(let i=0;i<6;i++){
+      h.due();const before=Date.now(),task=await h.run(),after=Date.now();
+      assert.equal(task.retry_count,i+1);
+      if(i<4){const delay=5000*2**i;assert.equal(task.retry_cycle_started_at,null);assert.ok(task.next_run_at>=before+delay&&task.next_run_at<=after+delay);}
+      else {assert.ok(task.retry_cycle_started_at);assert.equal(task.next_run_at,task.retry_cycle_started_at+cycleMs);assert.ok(task.next_run_at>=before+cycleMs-1000);}
+    }
+  });
+}
+
+for(const code of ['execution_interrupted','github_http_502'])for(const inCycle of [false,true]){
+  test(`an environment wait preserves ${code} ${inCycle?'inside the cycle':'before the fifth failure'}`,async t=>{
+    let waiting=false;
+    const h=await emptyRepositoryFixture(t,{
+      github(path,send){if(code==='github_http_502'&&path==='/user'){send({message:'Server Error'},502);return true;}},
+      execute(request){if(request.type==='workspace_agent_poll')return {ok:true,result:{state:'interrupted'}};},
+    });h.setBranch('ready');
+    const call=h.engine.manager.call.bind(h.engine.manager);
+    h.engine.manager.call=async(method,path,body)=>{
+      const result=await call(method,path,body);
+      return waiting&&method==='GET'&&path==='/v1/projects/101'?{...result,state:'failed'}:result;
+    };
+    const failures=inCycle?5:4;
+    for(let i=0;i<failures;i++){h.due();await h.run();}
+    const saved=h.store.get('SELECT * FROM tasks WHERE id=?',h.taskId);
+    waiting=true;h.due();const before=Date.now(),condition=await h.run();
+    assert.deepEqual([condition.error_code,condition.retry_count,condition.retry_error_code,condition.retry_cycle_started_at],['environment_not_ready',failures,code,saved.retry_cycle_started_at]);
+    assert.ok(condition.next_run_at>=before+5000&&condition.next_run_at<=Date.now()+5000);
+    waiting=false;h.due();const resumedAt=Date.now(),task=await h.run();
+    assert.deepEqual([task.error_code,task.retry_count,task.retry_error_code],[code,failures+1,code]);
+    if(inCycle){assert.equal(task.retry_cycle_started_at,saved.retry_cycle_started_at);assert.equal(task.next_run_at,saved.next_run_at);}
+    else assert.ok(task.next_run_at>=resumedAt+cycleMs&&task.next_run_at<=Date.now()+cycleMs);
+  });
+}
