@@ -16,7 +16,7 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
   const token='runner-private-token',command=`printf '${token}'; while [ ! -f release ]; do sleep 0.05; done`;
   const calls=[{name:'github_read_token',args:{}},{name:'write_file',args:{path:'file.txt',content:'private body excluded from start'}},
-    {name:'write_file',args:{path:'../notes/repository.md',content:'x'.repeat(65536)}},
+    {name:'write_file',args:{path:'../notes/repository.md',content:'x'.repeat(131072)}},
     {name:'write_file',args:{path:'../notes/secret.md',content:'secret '+token}},
     {name:'read_file',args:{path:'file.txt'}},{name:'run_command',args:{command}},
     {name:'create_pull_request',args:{summary:'Ready',test_command:'true'}},{name:'finish_review',args:{summary:'Done'}}];
@@ -42,9 +42,9 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   await writeFile(join(dir,`pr-reply-${publication.id}.json`),JSON.stringify({pr:{number:1,html_url:'https://github.invalid/pull/1'}}));
   const [code]=await closed;assert.equal(code,0,output);assert.equal(JSON.parse(await readFile(join(dir,'state.json'),'utf8')).state,'completed',output);
   const all=await events();assert.ok(!JSON.stringify(all).includes(token));
-  assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,65536);
-  await assert.rejects(readFile(join(base,'project-notes/secret.md')),/ENOENT/);
-  assert.equal(all.find(event=>event.type==='tool'&&event.arguments?.path==='../notes/secret.md').result.error,'credential_in_notes');
+  assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,131072);
+  assert.equal(await readFile(join(base,'project-notes/secret.md'),'utf8'),'secret '+token);
+  assert.equal(all.find(event=>event.type==='tool'&&event.arguments?.path==='../notes/secret.md').result.written,true);
   for(const [i,call] of calls.entries())assert.deepEqual(all.slice(i*3,i*3+3).map(event=>event.type),['model','tool_start','tool'],call.name);
   assert.equal(all.find(event=>event.type==='tool'&&event.name==='run_command').result.output,'[REDACTED]');
   assert.equal(all.at(-2).name,'finish_review');

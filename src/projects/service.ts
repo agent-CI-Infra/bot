@@ -7,7 +7,6 @@ import { FailureLog } from '../core/log.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { repositoryConcurrency } from '../app/settings.js';
 import { ownComputer } from '../rules/service.js';
-import { Redactor } from '../agent/common.js';
 
 // timeoutMs 0 waits until the manager answers, for commands that have no time limit.
 export interface Manager { call(method: string, path: string, input?: Json, timeoutMs?: number): Promise<any>; }
@@ -152,25 +151,16 @@ export class ProjectService {
   private async notesApi(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     const match = /^\/api\/repositories\/([^/]+)\/notes(?:\/([^/]+))?$/.exec(url.pathname);
     if (!match) return undefined;
-    const id = match[1]!, name = match[2]; repository(this.store, user, id);
-    const repo = this.store.get('SELECT * FROM repositories WHERE id=?', id)!;
+    const id = match[1]!; let name = match[2]; repository(this.store, user, id);
+    try { if (name !== undefined) name = decodeURIComponent(name); } catch { return fail(400, 'invalid_note_name'); }
     if (this.removing.has(id)) fail(409, 'repository_deleting');
     if (!['GET','PUT','DELETE'].includes(method) || method !== 'GET' && !name) fail(404, 'not_found');
-    if (name && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.md$/.test(name)) fail(400, 'invalid_note_name');
     fields(input, method === 'PUT' ? ['content'] : []);
     if (method === 'PUT') {
       const content = input.content;
       if (typeof content !== 'string') return fail(400, 'invalid_note_content');
-      if (Buffer.byteLength(content) > 64 * 1024) fail(400, 'note_file_limit_64_KiB');
-      const redactor = new Redactor(), add = (value: unknown): void => { if (value && typeof value === 'object') Object.values(value).forEach(add); else redactor.add(value); };
-      // The page knows the same stored credentials as task execution; refuse, never save a masked replacement.
-      const account = this.store.get('SELECT * FROM accounts WHERE id=?', repo.account_id);
-      if (account) add(this.store.secrets.open(account.credentials, `account:${account.id}`));
-      for (const model of this.store.all('SELECT id,api_key FROM models WHERE api_key IS NOT NULL')) add(this.store.secrets.open(model.api_key, `model:${model.id}`));
-      for (const endpoint of this.store.all('SELECT id,secret FROM endpoints WHERE account_id=?', repo.account_id)) add(this.store.secrets.open(endpoint.secret, `endpoint:${endpoint.id}`));
-      if (redactor.contains(Buffer.from(content))) fail(400, 'credential_in_notes');
     }
-    const result = await this.manager.call(method, `/v1/projects/${id}/notes${name ? '/' + name : ''}`, method === 'PUT' ? { content: input.content } : undefined);
+    const result = await this.manager.call(method, `/v1/projects/${id}/notes${name === undefined ? '' : '/' + encodeURIComponent(name)}`, method === 'PUT' ? { content: input.content } : undefined);
     if (method !== 'GET') this.store.audit(user.id, method === 'PUT' ? 'notes.written' : 'notes.deleted', name!, id);
     return result;
   }

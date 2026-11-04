@@ -3,7 +3,7 @@ import { stop } from './common.js';
 export const modelIdleMs = 90000;
 const responseLimit = 2 * 1024 * 1024;
 
-// Keep provider output in the control plane until usage, credential checks and note checks finish.
+// Keep provider output in the control plane until usage accounting and response redaction finish.
 export async function readModelResponse(response: Response, onToken: () => Promise<void>): Promise<any> {
   const reader = response.body?.getReader();
   if (!reader) return stop('model_response_invalid', undefined, '模型响应没有正文。');

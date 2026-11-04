@@ -235,11 +235,11 @@ function notesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/notes`, section = card('项目笔记'), list = element('div', '', 'project-notes-list'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert');
   section.append(note('这是这个项目的长期经验，检视和开发会读也会改；不是规则文件，不进 Git。电脑未启动或项目已禁用时仍可编辑。'),
-    note('最多 32 个 Markdown 文件，单文件 64 KiB、合计 512 KiB。文件名以字母或数字开头，主体最多 64 个字母、数字、下划线或连字符，以 .md 结尾。不要保存凭据或当前任务流水。'), list, message);
+    list, message);
   const edit = async (name, content) => {
-    const filename = input('note_name', name, { required: true, maxLength: 67, pattern: '[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.md', readOnly: !!name, placeholder: 'repository.md' });
+    const filename = input('note_name', name, { required: true, readOnly: !!name, placeholder: 'repository.md' });
     const editor = textarea('note_content', content, { rows: 18, spellcheck: false, className: 'code' });
-    const form = settingsForm(name ? `编辑 ${name}` : '新建笔记', [field('文件名', filename), field('Markdown 内容', editor)], async () => {
+    const form = settingsForm(name ? `编辑 ${name}` : '新建笔记', [field('文件名', filename), field('笔记内容', editor)], async () => {
       await api(endpoint + '/' + encodeURIComponent(filename.value), 'PUT', { content: editor.value });
     }, { after: async () => { form.remove(); await refresh(); } });
     list.replaceChildren(form); editor.focus();
@@ -252,13 +252,13 @@ function notesSection() {
       for (const file of files) {
         const row = element('li', '');
         row.append(element('code', file.name), element('span', bytes(file.bytes), 'muted'), button('查看／编辑', async () => {
-          try { await edit(file.name, (await api(endpoint + '/' + file.name)).content); } catch (err) { message.textContent = err.message; }
+          try { await edit(file.name, (await api(endpoint + '/' + encodeURIComponent(file.name))).content); } catch (err) { message.textContent = err.message; }
         }), button('删除', async () => {
           if (!await askConfirm({ title: `删除 ${file.name}？`, body: ['这份长期经验将从项目笔记中删除。'], action: '删除', danger: true })) return;
-          try { await api(endpoint + '/' + file.name, 'DELETE', {}); await refresh(); } catch (err) { message.textContent = err.message; }
+          try { await api(endpoint + '/' + encodeURIComponent(file.name), 'DELETE', {}); await refresh(); } catch (err) { message.textContent = err.message; }
         }, 'quiet destructive')); rows.append(row);
       }
-      actions.append(button('新建 Markdown', () => edit('', '')));
+      actions.append(button('新建笔记', () => edit('', '')));
       list.replaceChildren(files.length ? rows : note('还没有项目笔记。有可复用的经验时再记录，无需创建占位文件。'), actions);
     } catch (err) { message.textContent = err.message; }
   };

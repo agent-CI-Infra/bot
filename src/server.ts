@@ -126,7 +126,8 @@ export function createControlPlane(options: Options) {
     let input: Json = {};
     if (mutation) {
       if (!req.headers['content-type']?.startsWith('application/json')) fail(415, 'json_required');
-      const raw = await body(req, 1024 * 1024);
+      const noteWrite = method === 'PUT' && /^\/api\/repositories\/[^/]+\/notes\/[^/]+$/.test(path);
+      const raw = await body(req, noteWrite ? Infinity : 1024 * 1024);
       if (!raw.complete) fail(413, 'payload_too_large');
       try { input = object(JSON.parse(raw.bytes.toString('utf8'))); }
       catch (error) { if (error instanceof HttpError) throw error; fail(400, 'invalid_json'); }

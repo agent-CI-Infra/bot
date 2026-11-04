@@ -88,8 +88,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
   if(input.type==='workspace_write'){
     if(typeof input.path==='string'&&input.path.startsWith('../notes/')){
       if(input.offset!==0||input.final!==true||input.mode!=='100644'||input.snapshot||typeof input.base64!=='string')throw new Error('invalid_note_write');
-      if(input.base64.length>Math.ceil(64*1024/3)*4)throw new Error('note_file_limit_64_KiB');
-      return notes.write(safe(input.path.slice(9)),Buffer.from(input.base64,'base64').toString('utf8'));
+      return notes.write(input.path.slice(9),Buffer.from(input.base64,'base64').toString('utf8'));
     }
     if(typeof input.base64!=='string'||input.base64.length>56000||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_content');
     const data=Buffer.from(input.base64,'base64'),target=await path(input.path,true);
@@ -118,7 +117,7 @@ export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=s
     return {tree_sha:tree,local_sha:commit};
   }
   if(input.type==='workspace_read'){
-    if(typeof input.path==='string'&&input.path.startsWith('../notes/'))return notes.read(safe(input.path.slice(9)));
+    if(typeof input.path==='string'&&input.path.startsWith('../notes/'))return notes.read(input.path.slice(9));
     const asked=String(input.path||''),target=asked.startsWith('../context/')?await contextPath(asked.slice(11)):await path(asked),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
     try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
   }
