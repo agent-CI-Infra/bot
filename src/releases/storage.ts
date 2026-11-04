@@ -13,4 +13,10 @@ export function releaseStorage(store: Store): void {
     token TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS release_attempts(release_id TEXT NOT NULL REFERENCES project_releases(id) ON DELETE CASCADE,
     run_id INTEGER NOT NULL,attempt INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(release_id,run_id,attempt));`);
+  releaseIdleDrafts(store);
+}
+
+export function releaseIdleDrafts(store: Store): void {
+  // Older drafts held the repository indefinitely. Keep only an unexpired editor/publisher claim.
+  store.run("UPDATE project_releases SET active=0,lease=NULL,lease_until=0 WHERE stage='draft' AND (lease IS NULL OR lease_until<=?)", Date.now());
 }
