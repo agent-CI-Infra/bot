@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
-import { Notes, noteLimits, noteName } from '../runner/notes.mjs';
+import { Notes, noteName } from '../runner/notes.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -187,12 +187,12 @@ export class Projects {
       await this.notesVolume(repo);
       const notes = new Notes(this.notesRoot + '/' + repo);
       try {
-        if (method === 'GET') return name === undefined ? { files: await notes.list(), limits: noteLimits } : await notes.read(name);
+        if (method === 'GET') return name === undefined ? { files: await notes.list() } : await notes.read(name);
         if (method === 'PUT') return await notes.write(name, input.content);
         return await notes.delete(name);
       } catch (error) {
         if (error.code === 'ENOENT') throw new ManagerError('note_not_found', 404);
-        if (/^(invalid_note|note_file_limit|notes_(?:file_count_limit|total_limit|busy))/.test(error.message)) throw new ManagerError(error.message, 400);
+        if (/^(invalid_note|notes_(?:lock_expired|busy))/.test(error.message)) throw new ManagerError(error.message, 400);
         throw error;
       }
     });

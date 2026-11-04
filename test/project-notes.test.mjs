@@ -8,6 +8,8 @@ import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { workspace } from '../runner/workspace.mjs';
 import { Notes } from '../runner/notes.mjs';
+import { createManagerServer } from '../manager/server.mjs';
+import { ManagerClient } from '../dist/projects/service.js';
 import { Docker } from '../manager/docker.mjs';
 import { Projects } from '../manager/projects.mjs';
 import { FakeDocker } from './fake-docker.mjs';
@@ -27,7 +29,7 @@ async function managerFixture(t) {
   let projects = new Projects(options); t.after(() => projects.db.close());
   const manager = { async call(method, path, input) {
     const [, repo, action, name] = /^\/v1\/projects\/(\d+)(?:\/(\w+)(?:\/(.+))?)?$/.exec(path);
-    if (action === 'notes') return projects.notes(repo, method, name, input);
+    if (action === 'notes') return projects.notes(repo, method, name === undefined ? undefined : decodeURIComponent(name), input);
     if (method === 'GET') return projects.describe(repo);
     if (method === 'PUT') return projects.register(repo);
     return projects.operate(repo, action, input);
@@ -48,10 +50,15 @@ test('notes are shared by task workspaces, commands keep their checkout cwd, and
     const result = await run(task, { type: 'workspace_command', command: 'pwd; printf shell > ../notes/preferences.md', timeout_ms: 5000 });
     assert.equal(result.output.trim(), join(tasks, task, 'repo'));
     assert.equal((await new Notes(notes).read('preferences.md')).content, 'shell');
+    const content = '任务输出与已知凭据 fixture-token\n' + '界'.repeat(30000);
+    for (const name of ['仓库经验','x'.repeat(100),'-commands.txt','.hidden','name #?% with spaces']) {
+      await run(task, { type:'workspace_write',path:'../notes/'+name,base64:Buffer.from(content).toString('base64'),offset:0,final:true,mode:'100644' });
+      assert.equal((await run(other,{type:'workspace_read',path:'../notes/'+name})).content,content);
+    }
     const candidate = await run(task, { type: 'workspace_finalize' });
     assert.deepEqual(candidate.files, []); assert.equal(candidate.tree_sha, treeSha([]));
     assert.equal(execFileSync('git', ['ls-tree','-r',candidate.local_sha], { cwd: join(tasks, task, 'repo') }).toString(), '');
-    for (const path of ['../notes/../repo/x.md','../notes/../../x.md','../notes//x.md','../notes/./x.md','../notes/.git/x.md','../notes/a/b.md','../notes/a\\b.md','../notes/.hidden.md','../notes/a.txt','/workspace/project-notes/x.md','../notes/' + 'a'.repeat(65) + '.md']) {
+    for (const path of ['../notes/../repo/x.md','../notes/../../x.md','../notes//x.md','../notes/./x.md','../notes/.git/x.md','../notes/a/b.md','../notes/a\\b.md','../notes/.write-lock','../notes/.write-reserved','../notes/.expired-reserved','/workspace/project-notes/x.md']) {
       await assert.rejects(run(task, { type: 'workspace_read', path }), /invalid_(?:path|note_name)/, path);
       await assert.rejects(run(task, { type: 'workspace_write', path, base64: 'eA==', offset: 0, final: true, mode: '100644' }), /invalid_(?:path|note_name)/, path);
     }
@@ -61,28 +68,31 @@ test('notes are shared by task workspaces, commands keep their checkout cwd, and
   }
 });
 
-test('note quotas reject the entire write without truncation, including UTF-8 bytes and concurrent writers', async t => {
+test('notes accept many large files and unrestricted single-segment names while preserving atomic writes and locks', async t => {
   const root = await directory(t), notes = new Notes(join(root,'notes'));
-  await notes.write('repository.md', 'before');
-  await assert.rejects(notes.write('repository.md', '界'.repeat(22000)), /note_file_limit_64_KiB/);
-  assert.equal((await notes.read('repository.md')).content, 'before');
-  await notes.delete('repository.md');
-  for (let i = 0; i < 32; i++) await notes.write('note' + i + '.md', 'x');
-  await assert.rejects(notes.write('extra.md','x'), /notes_file_count_limit_32/);
-  assert.equal((await notes.list()).length,32);
-  await notes.write('note0.md','updated'); assert.equal((await notes.read('note0.md')).content, 'updated');
-  for (const file of await notes.list()) await notes.delete(file.name);
-  for (let i = 0; i < 7; i++) await notes.write('large' + i + '.md','x'.repeat(65536));
-  const writes = await Promise.allSettled(['last1.md','last2.md'].map(name => new Notes(notes.root).write(name,'y'.repeat(65536))));
-  assert.equal(writes.filter(w => w.status === 'fulfilled').length, 1);
-  assert.match(writes.find(w => w.status === 'rejected').reason.message, /notes_total_limit_512_KiB/);
-  assert.equal((await notes.list()).reduce((n,file) => n + file.bytes,0),512*1024);
-  await assert.rejects(notes.write('large0.md','z'.repeat(65537)), /note_file_limit_64_KiB/);
-  assert.equal((await notes.read('large0.md')).content, 'x'.repeat(65536));
-  // A process killed during a reset must not leave the stable volume permanently locked.
+  const content = '任务流水、一次性输出与 token: fixture-known-token\n' + '界'.repeat(30000);
+  for (let i = 0; i < 33; i++) await notes.write('note' + i, content);
+  assert.equal((await notes.list()).length,33);
+  assert.ok((await notes.list()).reduce((n,file) => n + file.bytes,0)>512*1024);
+  assert.equal((await notes.read('note32')).content,content);
+  for (const name of ['仓库经验','x'.repeat(100),'-commands.txt','.hidden','name #?% with spaces']) {
+    await notes.write(name,content); assert.equal((await notes.read(name)).content,content);
+    assert.ok((await notes.list()).some(file=>file.name===name));
+  }
+  await Promise.all(['parallel1','parallel2'].map(name=>new Notes(notes.root).write(name,content)));
+  for (const name of ['parallel1','parallel2']) assert.equal((await notes.read(name)).content,content);
+  // Internal lock and temporary files are not user notes, even after allowing ordinary dotfiles.
   await mkdir(join(notes.root,'.write-lock')); await writeFile(join(notes.root,'.write-lock/owner'),'stopped writer');
+  await writeFile(join(notes.root,'.write-leftover'),'temporary'); await writeFile(join(notes.root,'.expired-leftover'),'temporary');
+  const listed = (await notes.list()).map(file=>file.name);
+  assert.ok(listed.includes('.hidden')); assert.ok(!listed.some(name=>name.startsWith('.write-')||name.startsWith('.expired-')));
+  for (const name of ['.write-lock','.write-leftover','.expired-leftover']) {
+    await assert.rejects(notes.read(name),/invalid_note_name/);
+    await assert.rejects(notes.write(name,'overwrite'),/invalid_note_name/);
+    await assert.rejects(notes.delete(name),/invalid_note_name/);
+  }
   await utimes(join(notes.root,'.write-lock'),new Date(0),new Date(0));
-  await notes.write('large0.md','recovered'); assert.equal((await notes.read('large0.md')).content,'recovered');
+  await notes.write('note0','recovered'); assert.equal((await notes.read('note0')).content,'recovered');
   const outside = join(root,'outside'); await writeFile(outside,'outside');
   await symlink(outside,join(notes.root,'link.md'));
   await assert.rejects(notes.read('link.md'), /ELOOP/);
@@ -123,7 +133,7 @@ test('page edits work before boot; stop, disable, rebuild, manager restart and r
   assert.ok(f.docker.volumes.has(name),'deleting only the computer retains notes');
 });
 
-test('project administrators can CRUD their notes but cannot access another project; credentials never reach storage or logs', async t => {
+test('project administrators can store credentials verbatim in notes but cannot access another project', async t => {
   const f = await managerFixture(t), h = await harness(t,f.manager), { admin } = await setup(h), a = await account(admin);
   await repository(admin,a.id,'101'); await repository(admin,a.id,'202');
   await h.projects.reconcile();
@@ -138,19 +148,48 @@ test('project administrators can CRUD their notes but cannot access another proj
     const result = await member('/api/repositories/202/notes/repository.md',method,method==='GET'?undefined:{ content:'no' });
     assert.equal(result.status,403); assert.equal(result.value.error,'repository_forbidden');
   }
-  const rejected = await member(path+'/repository.md','PUT',{ content:'secret: '+a.token });
-  assert.equal(rejected.status,400); assert.equal(rejected.value.error,'credential_in_notes');
-  assert.equal((await admin(path+'/repository.md')).value.content,'shared');
+  const content = '任务流水与一次性输出：secret: '+a.token;
+  assert.equal((await member(path+'/repository.md','PUT',{ content })).status,200);
+  assert.equal((await admin(path+'/repository.md')).value.content,content);
   const redactor = new Redactor(); redactor.add(a.token); const logs=[];
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('secret','101','review.issue','running','fixture')");
-  const work = new Workspace(h.store,{call:async()=>assert.fail('must refuse before manager')},h.store.get("SELECT * FROM tasks WHERE id='secret'"),redactor,async()=>{},entry=>logs.push(entry));
-  assert.deepEqual(await work.call('write',{type:'workspace_write',path:'../notes/secret.md',base64:Buffer.from(a.token).toString('base64')}),{error:'credential_in_notes'});
-  assert.equal(h.store.get("SELECT count(*) n FROM task_tools WHERE task_id='secret'").n,0);
+  const task = {...h.store.get("SELECT * FROM tasks WHERE id='secret'"),workspace_id:id(),generation:1,attempt:1};
+  const work = new Workspace(h.store,{call:async(_method,_path,input)=>({ok:true,result:await workspace(input.request,join(f.root,'tasks'),undefined,join(f.projects.notesRoot,'101'))})},task,redactor,async()=>{},entry=>logs.push(entry));
+  await workspace({type:'workspace_init',workspace_id:task.workspace_id},join(f.root,'tasks'),undefined,join(f.projects.notesRoot,'101'));
+  assert.deepEqual(await work.call('write',{type:'workspace_write',path:'../notes/secret.md',base64:Buffer.from(content).toString('base64'),offset:0,final:true,mode:'100644'}),{written:true});
+  assert.equal((await admin(path+'/secret.md')).value.content,content);
   assert.ok(!JSON.stringify(logs).includes(a.token));
   assert.ok(!JSON.stringify(h.store.all('SELECT content FROM task_logs')).includes(a.token));
+  assert.equal((await member(path+'/secret.md','DELETE',{})).status,200);
   assert.equal((await member(path+'/repository.md','DELETE',{})).status,200);
   assert.deepEqual((await member(path)).value.files,[]);
   assert.equal(f.docker.containers.size,computers); assert.equal(f.docker.starts,starts,'none of the page operations boots a computer');
+});
+
+test('project-page HTTP APIs accept Unicode names and large contents through both control plane and manager',async t=>{
+  const f=await managerFixture(t),token=Buffer.from('notes-http-fixture');
+  const {server,recovered}=createManagerServer({projects:f.projects,token}); await recovered;
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+  const manager=new ManagerClient(`http://127.0.0.1:${server.address().port}`,token);
+  const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const path='/api/repositories/101/notes',content='任务流水：'+a.token+'\n'+'中文输出🙂'.repeat(131072);
+  assert.ok(Buffer.byteLength(content)>1500000,'exercises both existing generic JSON body limits');
+  for(let i=0;i<33;i++)assert.equal((await admin(path+'/'+i,'PUT',{content:'entry '+i})).status,200);
+  for(const name of ['仓库经验','x'.repeat(100),'-commands.txt','.hidden','name #?% with spaces']){
+    const endpoint=path+'/'+encodeURIComponent(name);
+    assert.equal((await admin(endpoint,'PUT',{content})).status,200);
+    assert.equal((await admin(endpoint)).value.content,content);
+    assert.equal((await new Notes(join(f.projects.notesRoot,'101')).read(name)).content,content);
+  }
+  const listing=(await admin(path)).value;
+  assert.equal(listing.files.length,38);assert.ok(!('limits' in listing));
+  assert.ok(listing.files.some(file=>file.name==='.hidden'));
+  for(const name of ['nested/file','back\\slash','.write-lock','.write-staging','.expired-staging','.git','\0']){
+    const endpoint=path+'/'+encodeURIComponent(name);
+    for(const method of ['GET','PUT','DELETE'])assert.equal((await admin(endpoint,method,method==='GET'?undefined:{content:'escape'})).status,400,name);
+  }
+  assert.equal((await admin(path+'/'+encodeURIComponent('name #?% with spaces'),'DELETE',{})).status,200);
 });
 
 test('project removal deletes notes, but environment, volume or record-deletion failures retain project records and notes', async t => {
@@ -187,12 +226,14 @@ test('review and development system prompts require useful maintained notes even
       return {};
     }};
     await agentLoop(h.store,{id:'prompt',repository_id:'101',workspace_id:id(),kind},work,new Redactor(),async()=>{},{effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Replacement rules'}]}},undefined,async()=>({status:'no_changes'}));
-    for(const text of ['At task start','../notes/','repository.md','preferences.md','corrections.md','correct or remove','Do not create empty','Issue or PR language','existing language','Never store keys','not rules','change review events','override .bot rules','Review may write','must not modify','Neither review nor development','32 files','64 KiB','512 KiB','Replacement rules'])assert.ok(config.system.includes(text),kind+': '+text);
-    assert.ok(config.tools.some(tool=>tool.function.name==='write_file'));
+    for(const text of ['At task start','../notes/','repository.md','preferences.md','corrections.md','correct or remove','Do not create empty','Issue or PR language','existing language','not rules','change review events','override .bot rules','Review may write','must not modify','Neither review nor development','Replacement rules'])assert.ok(config.system.includes(text),kind+': '+text);
+    for(const removed of ['32 files','64 KiB','512 KiB','Never store keys','known credentials are rejected','Note names must match'])assert.ok(!config.system.includes(removed),kind+': '+removed);
+    const writeTool=config.tools.find(tool=>tool.function.name==='write_file');assert.ok(writeTool);
+    assert.doesNotMatch(writeTool.function.description, /<name>\.md/);
   }
 });
 
-test('model responses containing a known credential mark the note call rejected before any runner or log sees the content',async t=>{
+test('model responses preserve known credentials in note writes while other output remains redacted',async t=>{
   const key='model-credential-must-not-be-saved',callId='secret-call';
   const server=createServer(async(req,res)=>{for await(const _ of req);res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',tool_calls:[{id:callId,type:'function',function:{name:'write_file',arguments:JSON.stringify({path:'../notes/secret.md',content:key})}}]}}]}));});
   server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -200,24 +241,23 @@ test('model responses containing a known credential mark the note call rejected 
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:`http://127.0.0.1:${server.address().port}/v1`,api_key:key,model_name:'fixture'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('model-secret','101','review.pr','running','fixture')");
-  const replies=[],logs=[],requests=[];let replied=false;
+  const replies=[],logs=[];let replied=false;
   const finish={summary:'Done',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
   const work={log:entry=>logs.push(entry),call:async(_key,input)=>{
-    requests.push(input);
     if(input.type==='workspace_agent_reply'){replies.push(Buffer.from(input.base64,'base64'));replied=input.final;}
     if(input.type==='workspace_agent_poll')return replied?{state:'completed',result:finish}:{state:'running',request:{id:id(),body:{messages:[{role:'user',content:'review'}]}}};
     return {};
   }};
   await agentLoop(h.store,{id:'model-secret',repository_id:'101',kind:'review.pr',workspace_id:id()},work,new Redactor(),async()=>{},{});
-  const reply=JSON.parse(Buffer.concat(replies));assert.deepEqual(reply.rejected_note_calls,[callId]);
-  assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,'');
-  assert.ok(!JSON.stringify(requests).includes(key));assert.ok(!JSON.stringify(logs).includes(key));
+  const reply=JSON.parse(Buffer.concat(replies));assert.ok(!('rejected_note_calls' in reply));
+  assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,key);
+  assert.ok(!JSON.stringify(logs).includes(key));
 });
 
 test('the project notes page browses first, expands one editor, saves and returns to the list', async () => {
-  const files=new Map([['repository.md','Existing notes']]);
+  const files=new Map([['仓库 #?%.txt','Existing notes']]);
   const page=loadConsole(['static/app.js','static/views.js','static/project.js'],async(method,path,body)=>{
-    const name=path.split('/')[5];
+    const segment=path.split('/')[5],name=segment===undefined?undefined:decodeURIComponent(segment);
     if(method==='PUT'){files.set(name,body.content);return [200,{written:true}];}
     return [200,name?{content:files.get(name)}:{files:[...files].map(([name])=>({name,bytes:10}))}];
   });
@@ -225,13 +265,16 @@ test('the project notes page browses first, expands one editor, saves and return
   await new Promise(resolve=>setTimeout(resolve,0));
   assert.ok(page.run("projectSections.some(([id,title])=>id==='notes'&&title==='项目笔记')"));
   const root=page.$('project-page'); assert.equal(root.querySelectorAll('textarea').length,0);
+  const text=node=>node.textContent+node.children.map(text).join('');
+  assert.doesNotMatch(text(root),/32|64 KiB|512 KiB|最多 64|不要保存凭据|当前任务流水/);
   const edit=root.querySelectorAll('button').find(b=>b.textContent==='查看／编辑');await edit.listeners.click[0]();
   const editor=root.querySelector('textarea'); assert.equal(editor.value,'Existing notes');editor.value='Updated notes';
   root.querySelector('input').checkValidity=()=>true;
   await root.querySelector('form').listeners.submit[0]({preventDefault(){}});
-  assert.equal(files.get('repository.md'),'Updated notes');assert.equal(root.querySelectorAll('textarea').length,0);
-  await root.querySelectorAll('button').find(b=>b.textContent==='新建 Markdown').listeners.click[0]();
+  assert.equal(files.get('仓库 #?%.txt'),'Updated notes');assert.equal(root.querySelectorAll('textarea').length,0);
+  await root.querySelectorAll('button').find(b=>b.textContent==='新建笔记').listeners.click[0]();
   assert.equal(root.querySelector('textarea').value,'');
+  assert.equal(root.querySelector('input').pattern,undefined);assert.equal(root.querySelector('input').maxLength,undefined);
   await root.querySelectorAll('button').find(b=>b.textContent==='取消').listeners.click[0]();
   assert.equal(root.querySelectorAll('textarea').length,0);assert.equal(files.size,1);
 });

@@ -103,14 +103,14 @@ test('the 90-second deadline resets on a token, then expires after the last toke
   t.mock.timers.tick(1);await assert.rejects(f.running,error=>error.code==='model_unavailable'&&/连续 90 秒没有 token 输出/.test(error.detail));
 });
 
-test('fragmented credentials are rejected in note calls before forwarding, and text and reasoning are masked',async t=>{
+test('fragmented credentials reach note writes verbatim while text and reasoning remain masked',async t=>{
   const f=await fixture(t,{stream:false});
   const args=JSON.stringify({path:'../notes/secret.md',content:key}),at=args.indexOf(key)+8;
   await f.send(sse({content:key.slice(0,8),reasoning_content:key.slice(0,8),tool_calls:[{index:0,id:'note',function:{name:'write_file',arguments:args.slice(0,at)}}]}));
   await f.send(sse({content:key.slice(8),reasoning_content:key.slice(8),tool_calls:[{index:0,function:{arguments:args.slice(at)}}]}));
   await f.send(sse({},{finish_reason:'tool_calls'})+'data: [DONE]\n\n');await f.running;
   const reply=JSON.parse(Buffer.concat(f.replies)),message=JSON.parse(reply.body).choices[0].message;
-  assert.deepEqual(reply.rejected_note_calls,['note']);assert.equal(JSON.parse(message.tool_calls[0].function.arguments).content,'');
+  assert.ok(!('rejected_note_calls' in reply));assert.equal(JSON.parse(message.tool_calls[0].function.arguments).content,key);
   assert.equal(message.content,'[REDACTED]');assert.equal(message.reasoning_content,'[REDACTED]');
   assert.ok(!JSON.stringify(f.requests).includes(key));
 });

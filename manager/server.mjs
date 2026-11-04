@@ -9,10 +9,11 @@ export function createManagerServer({ projects, token }) {
   const bearer = 'Bearer ' + token.toString('base64');
   let ready = false;
   const recovered = Promise.resolve().then(() => projects.recover()).then(() => { ready = true; });
-  // A JSON object request body of at most 1.5 MB.
-  async function json(req) {
-    let bytes = ''; for await (const chunk of req) { bytes += chunk; if (Buffer.byteLength(bytes) > 1500000) throw new ManagerError('payload_too_large', 413); }
-    let input; try { input = JSON.parse(bytes); } catch { throw new ManagerError('invalid_json', 400); }
+  // General operations retain their transport bound; note contents have no application size limit.
+  async function json(req, limit = 1500000) {
+    const chunks = []; let size = 0;
+    for await (const chunk of req) { size += chunk.length; if (size > limit) throw new ManagerError('payload_too_large', 413); chunks.push(chunk); }
+    let input; try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new ManagerError('invalid_json', 400); }
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ManagerError('invalid_input', 400);
     return input;
   }
@@ -35,7 +36,8 @@ export function createManagerServer({ projects, token }) {
       else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
       else if (/^\/v1\/projects\/[1-9]\d{0,19}\/notes(?:\/[^/]+)?$/.test(path)) {
         const parts = path.split('/');
-        result = await projects.notes(parts[3], req.method, parts[5], req.method === 'PUT' ? await json(req) : {});
+        let name; try { if (parts[5] !== undefined) name = decodeURIComponent(parts[5]); } catch { throw new ManagerError('invalid_note_name', 400); }
+        result = await projects.notes(parts[3], req.method, name, req.method === 'PUT' ? await json(req, Infinity) : {});
       }
       else if (req.method === 'GET' && /^\/v1\/projects\/[1-9]\d{0,19}\/stats$/.test(path)) result = await projects.stats(path.split('/')[3]);
       else if (req.method === 'PUT' && /^\/v1\/projects\/[1-9]\d{0,19}\/parallel$/.test(path)) {
