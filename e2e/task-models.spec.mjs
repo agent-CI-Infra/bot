@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
+import { RuleService } from '../dist/rules/service.js';
 
 test('任务表按需配置规则，模型独立管理且项目不能修改共享模型', async ({ page }) => {
   test.setTimeout(60000);
@@ -10,6 +11,7 @@ test('任务表按需配置规则，模型独立管理且项目不能修改共�
   try {
     const { admin, password } = await setup(h), a = await account(admin);
     await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/guide.md': 'Repository behavior guide', '.agents/skills/demo/SKILL.md': 'Demo skill' });
     const create = async (name, repository_id = '101') => (await admin('/api/models', 'POST', { repository_id, model_name: name, api_url: 'https://model.invalid/v1', api_key: testPassword() })).value.model;
     const defaultModel = await create('Project default'), review = await create('Review model'), obsolete = await create('Deleted model'), shared = await create('Shared model', null);
     await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['101', '202'] });
@@ -20,7 +22,7 @@ test('任务表按需配置规则，模型独立管理且项目不能修改共�
     await admin(`/api/models/${obsolete.id}`, 'DELETE', {});
     const policy = async () => (await admin('/api/repositories/101')).value.policy;
     const row = kind => page.locator(`[data-task-kind="${kind}"]`);
-    const close = async () => page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click();
+    const close = async () => page.locator('#project-detail').getByRole('button', { name: '收起', exact: true }).click();
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(h.admin + '/#/projects/101/tasks');
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -29,48 +31,58 @@ test('任务表按需配置规则，模型独立管理且项目不能修改共�
     await expect(page.getByRole('link', { name: '任务总览', exact: true })).toHaveAttribute('aria-current', 'page');
     for (const caption of ['使用的模型', '检视', '开发', '规则总览']) await expect(page.getByRole('link', { name: caption, exact: true })).toHaveCount(0);
     const table = page.getByRole('table', { name: '支持的任务', exact: true });
-    await expect(table.locator('tbody tr')).toHaveCount(6);
+    await expect(table.locator('tr[data-task-kind]')).toHaveCount(6);
     await expect(page.locator('#project-page select, #project-page form, #project-page .rule-card')).toHaveCount(0);
     for (const [kind, title] of [['review.issue', '检视 Issue'], ['review.pr', '检视 PR'], ['development.issue', '开发 Issue'], ['development.pr', '跟进 bot PR'], ['release.observe', 'CI 观察'], ['release.notes', '发行说明']]) {
       await expect(row(kind)).toContainText(title);
     }
+    const common = page.locator('.common-rules');
+    await expect(common).toContainText('通用准则');
+    await expect(common.locator('[data-rule-source=".bot/guide.md"]')).toHaveText('仓库文件');
+    await expect(row('review.pr').locator('[data-rule-source]')).toHaveText('内置默认');
+    await expect(row('review.pr')).toContainText('.bot/rules/pr-review.md');
+    await expect(page.getByRole('button', { name: '规则来源', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    expect((await common.boundingBox()).y).toBeLessThan((await table.boundingBox()).y);
     expect((await table.boundingBox()).height).toBeLessThan(650);
     await page.screenshot({ path: '.tmp/task-overview/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/task-overview/mobile.png', fullPage: true });
     await page.getByRole('button', { name: '检视设置', exact: true }).click();
-    const reviewSettings = page.getByRole('dialog', { name: '检视设置', exact: true });
+    const reviewSettings = page.getByRole('region', { name: '检视设置', exact: true });
     await reviewSettings.getByLabel('检视这个项目的 Issue 和 PR', { exact: true }).check();
     await reviewSettings.getByRole('button', { name: '保存', exact: true }).click();
     await expect(reviewSettings.locator('.flash')).toHaveText('已保存');
     expect((await policy()).review_enabled).toBe(1); await close();
     await expect(row('review.issue')).toContainText('已开启');
     await page.getByRole('button', { name: '开发设置', exact: true }).click();
-    const developmentSettings = page.getByRole('dialog', { name: '开发设置', exact: true });
+    const developmentSettings = page.getByRole('region', { name: '开发设置', exact: true });
     await developmentSettings.getByLabel('测试命令', { exact: true }).fill('npm test');
     await developmentSettings.getByRole('button', { name: '保存', exact: true }).click();
     await expect(developmentSettings.locator('.flash')).toHaveText('已保存');
     expect((await policy()).test_command).toBe('npm test'); await close();
-    await row('review.pr').getByRole('button', { name: '查看规则', exact: true }).click();
+    await row('review.pr').getByRole('button', { name: '展开规则', exact: true }).click();
     const rule = page.locator('[data-rule-path=".bot/rules/pr-review.md"]');
     await rule.getByRole('button', { name: '添加控制台覆盖', exact: true }).click();
     await rule.getByLabel('.bot/rules/pr-review.md 控制台覆盖', { exact: true }).fill('Console PR review rule');
     await rule.getByRole('button', { name: '保存', exact: true }).click();
     await expect(rule.locator('.flash')).toHaveText('已保存控制台覆盖');
     await expect(rule).toContainText('生效：项目控制台');
+    await expect(row('review.pr').locator('[data-rule-source]')).toHaveText('项目控制台');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
     await page.screenshot({ path: '.tmp/task-overview/rules-mobile.png', fullPage: true }); await close();
-    await page.reload(); await row('review.pr').getByRole('button', { name: '查看规则', exact: true }).click();
+    await page.reload(); await row('review.pr').getByRole('button', { name: '展开规则', exact: true }).click();
     await expect(rule).toContainText('Console PR review rule'); await close();
-    await row('release.notes').getByRole('button', { name: '查看规则', exact: true }).click();
-    await expect(page.getByRole('dialog', { name: '发行说明规则', exact: true })).toContainText('release-notes-v1'); await close();
+    await row('release.notes').getByRole('button', { name: '展开规则', exact: true }).click();
+    await expect(page.getByRole('region', { name: '发行说明规则', exact: true })).toContainText('release-notes-v1'); await close();
     for (const legacy of ['review', 'development', 'rules']) {
       await page.goto(h.admin + '/#/projects/101/' + legacy);
       await expect(page).toHaveURL(/#\/projects\/101\/tasks$/);
-      if (legacy === 'rules') { await expect(page.getByRole('dialog', { name: '规则来源与层级', exact: true })).toBeVisible(); await close(); }
+      if (legacy === 'rules') { await expect(page.getByRole('button', { name: '刷新默认分支文件', exact: true })).toBeVisible(); await expect(page.getByRole('dialog')).toHaveCount(0); }
     }
-    await page.getByRole('button', { name: '行为指南', exact: true }).click();
-    await expect(page.getByRole('dialog')).toBeVisible();
+    await common.locator('summary').filter({ hasText: '行为指南' }).click();
+    await expect(page.locator('[data-rule-path=".bot/guide.md"]')).toContainText('Repository behavior guide');
     await page.goto(h.admin + '/#/projects/101/model');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);
