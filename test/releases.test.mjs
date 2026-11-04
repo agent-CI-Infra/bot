@@ -487,3 +487,20 @@ test('release notes provider outage stops for explicit retry instead of holding 
   assert.equal(f.state.releases.length, 0); assert.equal(calls, 1);
   await f.service.worker.process(result.id); assert.equal(calls, 1);
 });
+
+test('disabling a project during notes generation rejects the result before advancing to a draft', async t => {
+  const f = await releaseFixture(t);
+  f.state.files['.agents/skills/release-notes/SKILL.md'] = 'Group verified sources.';
+  const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'notes-disable-key', model_name: 'notes-disable' })).value.model;
+  await f.admin('/api/repositories/101/policy', 'PATCH', { task_models: {'release.notes': model.id} });
+  f.state.custom = async ({path,body,send}) => {
+    if (path !== '/v1/chat/completions') return false;
+    f.h.store.run("UPDATE policies SET enabled=0 WHERE repository_id='101'");
+    const input = JSON.parse(body.messages[1].content);
+    send({choices:[{message:{content:JSON.stringify({groups:[{heading:'Changes',source_ids:input.sources.map(source=>source.id)}]})}}]});
+    return true;
+  };
+  const result = await toDraft(f);
+  assert.equal(result.stage,'waiting_permission'); assert.equal(result.error,'release_disabled');
+  assert.equal(result.body,''); assert.equal(f.state.releases.length,0);
+});
