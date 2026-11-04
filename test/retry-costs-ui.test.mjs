@@ -52,3 +52,34 @@ test('cost view shows token totals, per-project and daily tokens, and all saved 
   assert.match(text(tables[1]),/3,000 300 1,750/);assert.match(text(tables[2]),/1,000 100 750/);assert.match(text(tables[2]),/2,000 200 1,000/);
   data.prices=[];await page.run('loadCosts(0)');assert.equal(body.querySelectorAll('tbody').length,2);assert.ok(!text(body).includes('范围内已保存的单价'));
 });
+
+function chartPage(data){
+  const page=loadConsole(['static/app.js','static/metrics.js','static/costs.js'],()=>[200,data]);
+  page.run("me={id:'admin'};tab='costs';costState={from:'2026-10-22',to:'2026-10-23',currency:'USD'};document.createTextNode=text=>element('span',text);document.createElementNS=(_ns,tag)=>document.createElement(tag);");
+  return page;
+}
+const chartData=(summary,days)=>({from:'2026-10-22',to:'2026-10-23',currency:'USD',collection_started_at:null,summary,days});
+test('unpriced charts stack recorded input and output tokens, without counting cached input twice',async()=>{
+  const data=chartData({cost:0,requests:3,unpriced_requests:3,usage_missing_requests:1,input_tokens:3000,output_tokens:300,cached_input_tokens:2400},[
+    {date:'2026-10-22',repository_id:'101',full_name:'first',cost:0,requests:1,unpriced_requests:1,input_tokens:1000,output_tokens:100,cached_input_tokens:800},
+    {date:'2026-10-22',repository_id:'202',full_name:'second',cost:0,requests:1,unpriced_requests:1,input_tokens:2000,output_tokens:200,cached_input_tokens:1600},
+    {date:'2026-10-23',repository_id:'101',full_name:'first',cost:0,requests:1,unpriced_requests:1,input_tokens:null,output_tokens:null,cached_input_tokens:null}]);
+  const page=chartPage(data);await page.run('loadCosts(0)');const body=page.$('cost-body'),chart=body.querySelector('.cost-chart-section'),svg=chart.querySelector('svg');
+  assert.equal(svg.dataset.metric,'tokens');assert.match(text(chart),/每日 token/);assert.match(text(chart),/不重复相加/);
+  const bars=svg.querySelectorAll('rect');assert.equal(bars.length,2);
+  assert.deepEqual(bars.map(bar=>Number(bar.dataset.value)),[2200,1100]);assert.ok(bars.every(bar=>Number(bar.getAttribute('height'))>0));
+  assert.match(bars[1].getAttribute('aria-label'),/1,100 token（输入 1,000，输出 100） · 当日 33.3%/);
+  assert.match(text(body.querySelectorAll('thead')[0]),/token 占比/);
+  assert.match(text(body.querySelectorAll('tbody')[0]),/66.7%/);
+});
+test('known zero pricing and partially priced ranges retain currency charts; missing tokens stay unknown',async()=>{
+  const day={date:'2026-10-22',repository_id:'101',full_name:'first',cost:0,requests:1,unpriced_requests:0,input_tokens:100,output_tokens:20,cached_input_tokens:50};
+  const data=chartData({...day},[day]),page=chartPage(data);await page.run('loadCosts(0)');
+  assert.equal(page.$('cost-body').querySelector('svg').dataset.metric,'cost','a recorded zero price is fee information');
+  data.summary={...day,cost:2,requests:2,unpriced_requests:1};data.days=[{...day,cost:2}, {...day,date:'2026-10-23',unpriced_requests:1}];await page.run('loadCosts(0)');
+  const chart=page.$('cost-body').querySelector('.cost-chart-section');assert.equal(chart.querySelector('svg').dataset.metric,'cost');assert.equal(chart.querySelectorAll('rect').length,1);
+  data.summary={cost:0,requests:1,unpriced_requests:1,input_tokens:null,output_tokens:null};data.days=[{...day,unpriced_requests:1,input_tokens:null,output_tokens:null}];await page.run('loadCosts(0)');
+  assert.equal(page.$('cost-body').querySelectorAll('svg').length,0);assert.match(text(page.$('cost-body')),/没有可靠的 token 记录/);
+  data.summary={cost:0,requests:0,unpriced_requests:0};data.days=[];await page.run('loadCosts(0)');
+  assert.equal(page.$('cost-body').querySelectorAll('svg').length,0);assert.match(text(page.$('cost-body')),/没有模型请求记录/);
+});

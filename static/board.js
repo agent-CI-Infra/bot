@@ -13,6 +13,21 @@ function boardSelect(labelText, choices, value) {
   select.setAttribute('aria-label',labelText);
   choices.forEach(([id,name])=>select.add(new Option(name,id))); select.value=value; label.append(select); return {label,select};
 }
+function boardOptions(labelText,choices,value,change) {
+  const group=element('div','','board-options'),list=element('div','','board-options-list');
+  group.setAttribute('role','group');group.setAttribute('aria-label',labelText);
+  group.append(element('span',labelText,'board-options-label'),list);
+  const select=next=>{value=next;for(const control of list.children)control.setAttribute('aria-pressed',String(control.dataset.value===value));};
+  for(const [id,name]of choices){
+    const control=boardButton(name,async()=>{
+      if(id===value)return;const previous=value;select(id);
+      // Creating a custom view can defer activation until the dialog is submitted.
+      try{if(await change(id)===false)select(previous);}catch(err){select(previous);throw err;}
+    },'quiet board-option');
+    control.dataset.value=id;control.title=name;list.append(control);
+  }
+  select(value);return group;
+}
 function boardView() { return boardState.views.find(v=>v.id===boardState.viewId); }
 function boardTypeName(type=boardState.type) { return type==='pr'?'PR':type==='release'?'发版本':'Issue'; }
 const boardCategories=[['','全部类别'],['review','检视'],['development','开发'],['release','发版本']];
@@ -91,36 +106,31 @@ function boardShell() {
   const apply=async(field,value,rebuild=false)=>{boardSetFilter(field,value);if(rebuild)boardShell();else boardChips();await boardLoadCards().catch(error);};
   const repoChoices=[['','全部仓库'],...repositories.map(r=>[r.id,r.full_name])],repo=boardFilter('repository_id');
   if(repo&&!repoChoices.some(c=>c[0]===repo))repoChoices.push([repo,'仓库不可访问']);
-  const repository=boardSelect('仓库',repoChoices,repo||'');repository.select.classList.add('board-repository');
-  repository.select.addEventListener('change',()=>apply('repository_id',repository.select.value));
-  const categories=boardSelect('工作类别',boardCategories,category==='all'?'':category);
-  categories.select.addEventListener('change',()=>apply('category',categories.select.value,true));
-  const execution=boardSelect('执行状态',[['','全部状态'],...boardExecutionStatuses],boardFilter('execution_status')||'');
-  execution.select.addEventListener('change',()=>apply('execution_status',execution.select.value));
-  const types=boardSelect('对象类型',boardTypes,boardState.type==='all'?'':boardState.type);types.label.hidden=category==='release';
-  types.select.addEventListener('change',()=>{boardSetType(types.select.value);boardShell();boardLoadCards().catch(error);});
+  const repository=boardOptions('仓库',repoChoices,repo||'',value=>apply('repository_id',value));
+  const categories=boardOptions('工作类别',boardCategories,category==='all'?'':category,value=>apply('category',value,true));
+  const execution=boardOptions('执行状态',[['','全部状态'],...boardExecutionStatuses],boardFilter('execution_status')||'',value=>apply('execution_status',value));
+  const types=boardOptions('对象类型',boardTypes,boardState.type==='all'?'':boardState.type,async value=>{
+    boardSetType(value);boardShell();await boardLoadCards();
+  });types.hidden=category==='release';
   const search=element('label','搜索','board-search'),input=document.createElement('input');
   input.type='search';input.maxLength=200;input.placeholder='编号、标题或版本';input.setAttribute('aria-label','搜索编号或标题');input.value=boardFilter('text')||'';
   let timer;input.addEventListener('input',event=>{if(event.isComposing)return;clearTimeout(timer);timer=setTimeout(()=>{
     if((boardFilter('text')||'')===input.value.trim())return;apply('text',input.value.trim());},300);});search.append(input);
   const closed=element('label','','board-check'),check=document.createElement('input');check.type='checkbox';check.checked=boardFilter('include_closed')===true;
   check.addEventListener('change',()=>apply('include_closed',check.checked));closed.append(check,document.createTextNode('含已关闭'));closed.hidden=category==='release';
-  controls.append(repository.label,categories.label,execution.label,types.label,search,closed);filters.append(controls);
+  controls.append(repository,categories,execution,types,search,closed);filters.append(controls);
   const chips=element('div','','board-chips');chips.id='board-chips';chips.setAttribute('aria-label','当前筛选');
   const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','排列与视图');
-  const groups=boardSelect('按…分列',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','类别'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group);groups.label.className='board-field';
-  groups.select.addEventListener('change',async()=>{
-    if(boardView().builtin&&!boardStandardGroups.includes(groups.select.value)){
-      const target=groups.select.value;groups.select.value=boardState.group;boardSaveAs(target);return;
-    }
-    boardState.group=groups.select.value;boardState.hidden=[];boardState.mobileColumn=null;boardDirty();boardShell();await boardLoadCards().catch(error);
-  });
+  const groups=boardOptions('按…分列',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','类别'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group,async value=>{
+    if(boardView().builtin&&!boardStandardGroups.includes(value)){boardSaveAs(value);return false;}
+    boardState.group=value;boardState.hidden=[];boardState.mobileColumn=null;boardDirty();boardShell();await boardLoadCards();
+  });groups.classList.add('board-grouping');
   const views=boardSelect('视图',boardState.views.map(v=>[v.id,v.name]),boardState.viewId);views.label.className='board-field board-view-choice';
   views.select.addEventListener('change',()=>{boardState.viewId=views.select.value;boardUseView();boardLoadCards().catch(error);});
   const save=boardButton('保存视图',boardSave,'board-menu-item');save.id='board-save';
   const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';more.panel.append(views.label,save);
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
-  arrangement.append(groups.label,more.menu,element('span','','board-spacer'),status,boardButton('刷新',()=>boardLoadCards()));
+  arrangement.append(groups,more.menu,element('span','','board-spacer'),status,boardButton('刷新',()=>boardLoadCards()));
   toolbar.append(filters,chips,arrangement);
   const mobile=boardSelect('当前分组',[],'');mobile.label.className='board-mobile-group';mobile.select.id='board-mobile-group';
   mobile.select.addEventListener('change',()=>{boardState.mobileColumn=mobile.select.value;boardRenderCards();});
