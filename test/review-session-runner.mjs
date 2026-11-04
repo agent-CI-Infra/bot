@@ -128,6 +128,20 @@ test('finish_review can be revised until the first GitHub write, and only the fi
   assert.ok(events.some(event=>event.type==='review_update'&&event.actor==='alice'));
 });
 
+test('resuming an unpublished review retains its pinned model configuration',async t=>{
+  let inserted=false;
+  const d=await live(t,{objectRead:({h,update})=>{
+    if(!h||inserted||!h.store.get("SELECT 1 FROM tasks WHERE phase='publish' AND publication_started=0"))return;
+    inserted=true;
+    h.store.run("UPDATE models SET version=version+1,model_name='changed' WHERE repository_id='101'");
+    assert.equal(update('revise after model configuration changed',true),0);
+  }});
+  const [task]=await d.run();
+  assert.equal(task.status,'waiting_configuration');assert.equal(task.error_code,'model_configuration_changed');
+  assert.equal(d.requests.length,1,'the resumed turn must not call a new model configuration');
+  assert.equal(d.h.comments.filter(comment=>comment.body.includes('dept-bot:')).length,0);
+});
+
 test('an update during publication waits for completion and restores that successful conversation',async t=>{
   let inserted=false;
   const d=await live(t,{github:(path,send,res,body,{h,update})=>{

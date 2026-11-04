@@ -6,8 +6,9 @@ import { type Redactor, stop, TaskError } from './common.js';
 import { validateReview } from '../review/findings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
+import type { AgentModel } from './gateway.js';
 
-export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
+export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
 
 export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation) {
   try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation); }
@@ -18,7 +19,9 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const profile = workspaceProfile(String(task.kind), context);
   const system = profile.system;
   const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation };
-  return runAgent({ store, task, redactor, guard, system, prompt: config.prompt, tools: profile.tools, adapter: async ({ request }) => {
+  return runAgent({ store, task, redactor, guard, system, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: async ({ request, model }) => {
+    // Revising an unpublished result continues this execution; later tasks choose a fresh model.
+    if (conversation) conversation.model = model;
     const bytes = Buffer.from(JSON.stringify(redactor.clean(config))); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);
     if (!conversation?.resume) {
       for (let offset = 0; offset < bytes.length; offset += 30000) {

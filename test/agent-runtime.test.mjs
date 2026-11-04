@@ -6,6 +6,7 @@ import { Store } from '../dist/storage/database.js';
 import { Redactor } from '../dist/agent/common.js';
 import { HttpError } from '../dist/core/security.js';
 import { runAgent } from '../dist/agent/runtime.js';
+import { agentLoop } from '../dist/agent/loop.js';
 
 async function fixture(t) {
   const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
@@ -37,6 +38,7 @@ test('generic agent records repository usage and does not require a synthetic ta
   assert.equal(row.task_id, null); assert.equal(row.repository_id, 'r'); assert.match(row.request_id, /custom.analysis:domain-run/);
   assert.equal(row.input_tokens, 5); assert.equal(row.output_tokens, 2); assert.equal(row.state, 'received');
   assert.equal(f.requests[0].stream, true);
+  assert.equal(Object.hasOwn(f.requests[0], 'temperature'), false);
 });
 test('generic agent allowlist denies invented tools, redacts tool output and validates results', async t => {
   const f = await fixture(t); let turn = 0, invoked = 0;
@@ -127,4 +129,70 @@ test('mapping changes affect future runs while a pinned run rechecks credential 
   assert.ok(f.requests.every(request=>request.model==='fixture'));
   await assert.rejects(runAgent(f.spec),{code:'model_not_configured'});
   assert.equal(f.requests.length,2);
+});
+
+test('workspace review conversations retain history and boundaries while using the pinned gateway', async t => {
+  for (const changeModel of [false, true]) await t.test(changeModel ? 'changed model stops the next request' : 'ready history is persisted', async t => {
+    const f = await fixture(t), task = {id:'review',repository_id:'r',kind:'review.pr',workspace_id:'workspace'};
+    f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('review','r','review.pr','running','Review')");
+    const history = [{role:'user',content:'Earlier discussion secret-model-key'}], configBytes = [], restoreBytes = [], stages = [];
+    const ready = {summary:'Reviewed',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
+    let config, boundaryDone = false, replies = 0;
+    const workspace = { log() {}, async call(_key, request) {
+      if (request.type === 'workspace_agent_poll') assert.fail('Conversation polls must use deliver, not the old cached path');
+      if (request.type === 'workspace_agent_config') {
+        configBytes.push(Buffer.from(request.base64,'base64'));
+        if (request.final) config = JSON.parse(Buffer.concat(configBytes));
+      }
+      if (request.type === 'workspace_agent_boundary' && request.final) boundaryDone = true;
+      if (request.type === 'workspace_agent_reply' && request.final) {
+        replies++;
+        if (changeModel && replies === 1) f.store.run("UPDATE models SET version=version+1,model_name='changed' WHERE id='m'");
+      }
+      return {};
+    }, async deliver(request) {
+      if (request.type === 'workspace_agent_history') restoreBytes.push(Buffer.from(request.base64,'base64'));
+      if (request.type === 'workspace_agent_session') {
+        const bytes = Buffer.from(JSON.stringify(history)); return {size:bytes.length,base64:bytes.toString('base64')};
+      }
+      if (request.type === 'workspace_agent_poll') {
+        if (!boundaryDone) return {state:'running',boundary:{id:'b'.repeat(48),stage:'start'}};
+        if (!replies || changeModel && replies === 1) return {state:'running',request:{id:(replies?'d':'c').repeat(48),body:{messages:[{role:'user',content:'Current review'}],tools:config.tools}}};
+        return {state:'review_ready',offset:12,result:ready};
+      }
+      return {};
+    }};
+    const conversation = {history,boundary:async stage => {stages.push(stage);return {prompt:'Current discussion'};}};
+    const running = agentLoop(f.store,task,workspace,f.spec.redactor,f.spec.guard,{},undefined,undefined,conversation);
+    if (changeModel) await assert.rejects(running,{code:'model_configuration_changed'});
+    else {
+      assert.equal((await running).summary,'Reviewed');
+      assert.deepEqual(JSON.parse(f.store.get("SELECT messages FROM tasks WHERE id='review'").messages),[{role:'user',content:'Earlier discussion [REDACTED]'}]);
+      assert.equal(conversation.offset,12);
+    }
+    assert.equal(config.review_session,true); assert.equal(config.capabilities.workspace.write,false);
+    assert.ok(!config.tools.some(tool=>tool.function.name==='create_pull_request'));
+    assert.deepEqual(stages,['start']);
+    assert.deepEqual(JSON.parse(Buffer.concat(restoreBytes)),[{role:'user',content:'Earlier discussion [REDACTED]'}]);
+    assert.equal(f.requests.length,1);
+    assert.equal(f.store.get("SELECT model_started FROM tasks WHERE id='review'").model_started,1);
+    assert.match(f.store.get('SELECT request_id FROM model_requests').request_id,/^review\.pr:review:/);
+  });
+});
+
+test('workspace development keeps publication tools and write capabilities after session integration', async t => {
+  const f = await fixture(t), configBytes = []; let config, published = false;
+  const workspace = {log(){},async call(_key,request){
+    if (request.type === 'workspace_agent_config') {
+      configBytes.push(Buffer.from(request.base64,'base64'));
+      if (request.final) config = JSON.parse(Buffer.concat(configBytes));
+    }
+    if (request.type === 'workspace_agent_poll') return published ? {state:'completed'} : {state:'running',pull_request:{id:'a'.repeat(48),arguments:{summary:'Fixed',test_command:'npm test'}}};
+    return {};
+  }};
+  const result = await agentLoop(f.store,{...f.spec.task,kind:'development.issue'},workspace,f.spec.redactor,f.spec.guard,{},undefined,async()=>{published=true;return {pr:{number:1}};});
+  assert.equal(result.pr.number,1); assert.equal(config.review_session,false);
+  assert.equal(config.capabilities.workspace.write,true); assert.equal(config.capabilities.github.publication,'pull_request');
+  assert.ok(config.tools.some(tool=>tool.function.name==='create_pull_request'));
+  assert.ok(!config.tools.some(tool=>tool.function.name==='finish_review'));
 });

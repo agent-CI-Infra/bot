@@ -15,6 +15,9 @@ export interface AgentSpec<T> {
   guard: () => Promise<void>;
   system: string;
   prompt: string;
+  /** Reuse an execution's trusted snapshot when an adapter resumes before publication. */
+  model?: AgentModel;
+  temperature?: number;
   tools?: any[];
   maxTurns?: number;
   maxOutputChars?: number;
@@ -35,7 +38,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
     new Set(tools.map(tool => tool.function.name)).size !== tools.length)
     return stop('agent_tools_invalid', 'waiting_configuration', 'Agent 工具配置无效或重复。');
   const allowed = new Map(tools.map(tool => [tool.function.name, tool]));
-  const model = selectedModel(spec.store, spec.task.repository_id, spec.task.kind);
+  const model = spec.model ?? selectedModel(spec.store, spec.task.repository_id, spec.task.kind);
   spec.redactor.add(model.key);
   const services: AgentServices = {
     model, guard: spec.guard,
@@ -62,7 +65,8 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
   const messages: any[] = [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
-    const { value } = await services.request({ tools, tool_choice: tools.length ? 'auto' : 'none', messages }, `turn:${turn}`);
+    const { value } = await services.request({ tools, tool_choice: tools.length ? 'auto' : 'none', messages,
+      ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) }, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
     if (!message || JSON.stringify(message).length > 2 * 1024 * 1024) return stop('agent_output_invalid', undefined, 'Agent 没有返回有效结果。');
     if (Array.isArray(message.tool_calls) && message.tool_calls.length) {

@@ -137,6 +137,7 @@ test('observation selects the release.observe model override rather than the def
   f.state.custom = async ({ path, body, req, send }) => {
     if (path !== '/v1/chat/completions') return false;
     requested = body.model; assert.equal(req.headers.authorization, 'Bearer observe-specific-key');
+    assert.equal(Object.hasOwn(body, 'temperature'), false);
     send({ choices: [{ message: final('仅分析当前运行。') }] }); return true;
   };
   const result = await f.analyze();
