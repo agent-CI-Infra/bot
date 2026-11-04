@@ -91,6 +91,59 @@ test('SSE guard failures retain cancellation and changed-attempt semantics', asy
   }
 });
 
+const streamContent = count => ({ sse: Array.from({ length: count }, () =>
+  'data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: 'x' } }] }) + '\n\n').join('') + 'data: [DONE]\n\n' });
+
+test('SSE bursts throttle full guards while retaining request boundaries and every progress callback', async t => {
+  const f = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: 1000000 });
+  let streaming = false, tokens = 0;
+  const guards = { before: 0, stream: 0, after: 0 };
+  f.respond(() => { streaming = true; return streamContent(50); });
+  const value = await runAgent({ ...f.spec,
+    guard: async () => { guards[streaming ? 'stream' : tokens ? 'after' : 'before']++; },
+    adapter: async services => (await services.request({ messages: [] }, 'burst', async () => {
+      if (++tokens === 50) streaming = false;
+    })).value
+  });
+  assert.equal(value.choices[0].message.content, 'x'.repeat(50));
+  assert.equal(tokens, 50);
+  assert.deepEqual(guards, { before: 2, stream: 1, after: 2 });
+  assert.equal(f.store.get('SELECT state FROM model_requests').state, 'received');
+});
+
+test('SSE streams recheck the full guard once a second without throttling progress', async t => {
+  const f = await fixture(t);
+  t.mock.timers.enable({ apis: ['Date'], now: 1000000 });
+  let streaming = false, tokens = 0;
+  const checks = [];
+  f.respond(() => { streaming = true; return streamContent(10); });
+  await runAgent({ ...f.spec,
+    guard: async () => { if (streaming) checks.push(Date.now()); },
+    adapter: services => services.request({ messages: [] }, 'paced', async () => {
+      t.mock.timers.tick(400);
+      if (++tokens === 10) streaming = false;
+    })
+  });
+  assert.equal(tokens, 10);
+  assert.deepEqual(checks, [1000000, 1001200, 1002400, 1003600]);
+});
+
+test('a later throttled SSE guard preserves the original lease failure and stops progress', async t => {
+  const f = await fixture(t), failure = new HttpError(409, 'release_attempt_changed');
+  t.mock.timers.enable({ apis: ['Date'], now: 1000000 });
+  let streaming = false, tokens = 0;
+  f.respond(() => { streaming = true; return streamContent(10); });
+  await assert.rejects(runAgent({ ...f.spec,
+    guard: async () => { if (streaming && Date.now() >= 1001000) throw failure; },
+    adapter: services => services.request({ messages: [] }, 'cancelled', async () => {
+      tokens++; t.mock.timers.tick(400);
+    })
+  }), error => error === failure);
+  assert.equal(tokens, 3);
+  assert.equal(f.store.get('SELECT state FROM model_requests').state, 'guard_failed');
+});
+
 test('concurrent task overrides isolate messages and bill the actual models at their own prices', async t => {
   const f = await fixture(t);
   f.store.run(`INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at)
