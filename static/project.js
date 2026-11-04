@@ -378,14 +378,14 @@ async function refreshProjectStatus(token) {
 
 function modelSection() {
   const { policy } = current, superUser = me.role === 'super_admin', chooser = card('使用的模型'), list = element('div', '', 'model-list');
-  chooser.append(note('检视和开发都用这里选择的模型。部署共享模型由超级管理员提供，本项目专属模型只对这个项目可见。'), list);
+  chooser.append(note('这里选择项目默认模型；下方可以为不同任务单独选择模型。部署共享模型由超级管理员提供，本项目专属模型只对这个项目可见。'), list);
   const own = card('本项目专属模型'), ownList = element('div', '', 'provider-list'), shared = card('部署共享模型'), sharedList = element('div', '', 'provider-list');
   own.append(ownList); shared.append(sharedList);
   (async () => {
     const models = (await api(superUser ? '/api/models' : '/api/models?repository_id=' + current.id)).models.filter(m => m.repository_id === null || m.repository_id === current.id);
     const choices = element('div', '', 'choices'), save = element('button', '保存选择'), message = element('p', '', 'view-error');
     const option = (value, title, detail, checked) => { const label = element('label', '', 'choice'), radio = input('model', value, { type: 'radio', checked }); label.append(radio, element('strong', title), element('span', detail, 'muted')); return label; };
-    choices.append(option('', '不使用模型', '检视和开发任务会停在“配置待补”', !policy.model_id));
+    choices.append(option('', '不使用默认模型', '未配置专属模型的任务会停在“配置待补”', !policy.model_id));
     for (const group of byProvider(models)) {
       choices.append(providerTitle(group[0], 'choice-group'));
       for (const m of group) choices.append(option(m.id, m.model_name, `${m.repository_id ? '本项目专属' : '部署共享'}${m.key_configured ? '' : ' · Key 已撤销'}`, policy.model_id === m.id));
@@ -395,6 +395,7 @@ function modelSection() {
       try { await patchPolicy(changed({ model_id: value }, { model_id: policy.model_id || null })); await reloadProject(); } catch (err) { message.textContent = err.message; save.disabled = false; }
     });
     const actions = element('div', '', 'actions form-actions'); actions.append(save); list.replaceChildren(choices, message, actions);
+    list.append(taskModelChoices(policy, models));
     const row = m => { const li = element('li', '', 'model-entry'), result = probeResult('wide-cell'); li.append(modelLabel(m), modelActions(m, result), result); return li; };
     const ownModels = models.filter(m => m.repository_id === current.id), sharedModels = models.filter(m => m.repository_id === null);
     ownList.replaceChildren(...(ownModels.length ? [providerList(ownModels, row)] : [element('p', '还没有专属模型。', 'muted')]));
@@ -404,6 +405,43 @@ function modelSection() {
   const sections = [chooser, own];
   if (superUser) { shared.append(providerCreate(null)); sections.push(shared); }
   return sections;
+}
+// An extensible map, not a hard-coded workflow: presets only make common task profile IDs easy to pick.
+function taskModelChoices(policy, models) {
+  const section = element('section'), title = element('h3', '按任务选择模型'), rows = element('div', '', 'task-model-list');
+  const empty = element('p', '尚未设置任务模型，所有任务继承项目默认。', 'muted');
+  const message = element('p', '', 'view-error'), save = element('button', '保存任务模型'), add = button('增加任务模型', () => append('', ''));
+  section.append(title, note('精确匹配任务标识；未设置的任务使用项目默认模型。移除一行后恢复默认。已删除或撤销的模型会等待配置，不会悄悄切换。'), empty, rows);
+  const kinds = ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'release.observe', 'release.notes'];
+  const options = element('datalist'); options.id = 'task-model-kinds';
+  for (const kind of kinds) { const option = element('option'); option.value = kind; options.append(option); }
+  section.append(options);
+  function append(kind, modelId) {
+    const row = element('div', '', 'task-model-row'), name = input('task_kind', kind, {placeholder: '例如 review.pr', maxLength: 100});
+    name.setAttribute('list', options.id); name.setAttribute('aria-label', '任务标识');
+    const select = element('select'); select.setAttribute('aria-label', '任务模型');
+    const choice = (value, label) => { const option = element('option', label); option.value = value; select.append(option); };
+    choice('', '请选择模型');
+    for (const m of models) choice(m.id, `${m.model_name} · ${hostOf(m.api_url)}${m.key_configured ? '' : ' · Key 已撤销'}`);
+    if (modelId && !models.some(m => m.id === modelId)) choice(modelId, `模型不可用（${modelId}）`);
+    select.value = modelId;
+    row.append(field('任务标识', name), field('模型', select), button('移除', () => { row.remove(); empty.hidden = rows.children.length > 0; }, 'quiet'));
+    rows.append(row); empty.hidden = true;
+  }
+  let initial = {}; try { initial = JSON.parse(policy.task_models || '{}'); } catch { message.textContent = '当前任务模型配置无效，请重新保存。'; }
+  for (const [kind, modelId] of Object.entries(initial)) append(kind, modelId);
+  save.type = 'button'; save.addEventListener('click', async () => {
+    const values = Object.create(null); message.textContent = '';
+    for (const row of rows.children) {
+      const kind = row.querySelector('input').value.trim(), model = row.querySelector('select').value;
+      if (!kind || !model || Object.hasOwn(values, kind)) { message.textContent = '每行需要唯一的任务标识和一个模型；不需要的行请移除。'; return; }
+      values[kind] = model;
+    }
+    save.disabled = true;
+    try { await patchPolicy({task_models: values}); await reloadProject(); }
+    catch (err) { message.textContent = err.message; save.disabled = false; }
+  });
+  const actions = element('div', '', 'actions form-actions'); actions.append(add, save); section.append(message, actions); return section;
 }
 function hostOf(url) { try { return new URL(url).host; } catch { return url; } }
 // Connections belong to the provider editor; testing, naming, pricing and deletion stay with each model.
@@ -416,10 +454,10 @@ function modelActions(model, result, after = reloadWith) {
     let detail;
     try { detail = (await api(`/api/models/${model.id}`)).model; }
     catch (err) { result.hidden = false; result.replaceChildren(element('p', err.message, 'view-error')); return; }
-    const used = detail.used_by, body = [
+    const used = detail.used_by || [], body = [
       '只从本系统删除这条模型配置，并销毁封存的 API Key；页面和日志都不会显示它。',
       '不会删除 GitHub 上的任何东西。已有成本记录保留，仍使用当时记下的模型名和单价。'];
-    if (used.length) body.push('以下项目会改回“不使用模型”，之后的检视和开发会停在“配置待补”：', used.map(repo => repo.full_name));
+    if (used.length) body.push('以下项目正在使用它。默认选择会改回“不使用模型”；任务专属选择保留为不可用，相关任务进入“配置待补”：', used.map(repo => repo.full_name));
     else body.push('当前没有项目选用它。');
     if (detail.repository_id === null) body.push('这是部署共享模型，删除后所有项目都不能再选它。');
     const deleted = await confirmDialog({ title: `删除模型 ${detail.model_name}？`, body, action: '删除', danger: true,

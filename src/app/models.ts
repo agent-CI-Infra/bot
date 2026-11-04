@@ -101,7 +101,7 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     if (user.role === 'super_admin' || row.repository_id && user.repositories.includes(row.repository_id)) {
       const usedScope = scope(user, 'p.repository_id');
       model.used_by = store.all(`SELECT p.repository_id,r.full_name FROM policies p JOIN repositories r ON r.id=p.repository_id
-        WHERE p.model_id=? AND ${usedScope.sql} ORDER BY p.repository_id`, id, ...usedScope.args);
+        WHERE (p.model_id=? OR EXISTS(SELECT 1 FROM json_each(p.task_models) WHERE value=?)) AND ${usedScope.sql} ORDER BY p.repository_id`, id, id, ...usedScope.args);
     }
     return { model };
   }
@@ -137,7 +137,8 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     fields(body, []);
     return store.transaction(() => {
       const cleared = store.all('SELECT repository_id FROM policies WHERE model_id=? ORDER BY repository_id', id);
-      // Clear every foreign key before destroying the sealed key; historical requests keep their own snapshots.
+      // Clear the default foreign key. Keep task overrides as unavailable references (fail closed),
+      // rather than silently moving those tasks to a potentially different/default provider.
       store.run('UPDATE policies SET model_id=NULL WHERE model_id=?', id);
       store.run('DELETE FROM model_pricing WHERE model_id=?', id);
       store.run('DELETE FROM model_projects WHERE model_id=?', id);

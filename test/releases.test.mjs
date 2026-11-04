@@ -336,11 +336,15 @@ test('repository release-notes Skill is explicitly loaded at the target SHA into
   const f = await releaseFixture(t), skill = 'Group real commits under Changes. Do not invent results.';
   f.state.files['.agents/skills/release-notes/SKILL.md'] = skill;
   await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-model-release-key', model_name: 'notes-fixture' });
-  const model = f.h.store.get('SELECT id FROM models WHERE repository_id=?', '101'); await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
+  const model = f.h.store.get('SELECT id FROM models WHERE repository_id=?', '101');
+  const fallback = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-default-model-key', model_name: 'default-fixture' })).value.model;
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: fallback.id, task_models: {'release.notes': model.id} });
   let request;
   f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; const input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: JSON.stringify({ groups: [{ heading: 'Changes', source_ids: input.sources.map(s => s.id) }] }) } }] }); return true; } };
   const r = await toDraft(f); assert.equal(r.stage, 'draft'); assert.equal(r.skill.source, 'repository'); assert.equal(r.skill.sha, target);
   const modelInput = JSON.parse(request.messages[1].content); assert.equal(modelInput.skill, skill); assert.equal(modelInput.skill_sha, target); assert.deepEqual(request.tools, []); assert.equal(request.tool_choice, 'none');
+  assert.equal(request.model, 'notes-fixture');
+  assert.equal(f.h.store.get('SELECT model_id FROM model_requests').model_id, model.id);
   assert.ok(!JSON.stringify(request).includes('fixture-installation-')); assert.match(r.body, /## Changes/);
 });
 test('invalid Skill content, unsupported model claims and known secrets cannot enter a release body', async t => {
@@ -466,4 +470,20 @@ test('disabled and uninstalled projects and bot-account credentials cannot write
   f.h.store.run('UPDATE policies SET enabled=1 WHERE repository_id=?', '101'); f.h.store.run('UPDATE installed_repositories SET installed=0 WHERE repository_id=?', '101'); assert.equal((await f.preview()).error, 'release_uninstalled');
   f.h.store.run('UPDATE installed_repositories SET installed=1 WHERE repository_id=?', '101'); f.h.store.run("UPDATE accounts SET type='bot_account'"); assert.equal((await f.preview()).error, 'release_app_required');
   assert.equal(writes(f.state).length, 0);
+});
+
+test('release notes provider outage stops for explicit retry instead of holding an automatic retry loop', async t => {
+  const f = await releaseFixture(t);
+  f.state.files['.agents/skills/release-notes/SKILL.md'] = 'Group verified sources.';
+  const model = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'notes-outage-key', model_name: 'notes-outage' });
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id });
+  let calls = 0;
+  f.state.custom = async ({ path, res }) => {
+    if (path !== '/v1/chat/completions') return false;
+    calls++; res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'unavailable' } })); return true;
+  };
+  const result = await toDraft(f);
+  assert.equal(result.stage, 'failed'); assert.equal(result.error, 'release_notes_model_failed');
+  assert.equal(f.state.releases.length, 0); assert.equal(calls, 1);
+  await f.service.worker.process(result.id); assert.equal(calls, 1);
 });

@@ -182,7 +182,7 @@ export class ReleaseWorker {
     const sensitive = data.input_sensitive || redactor.contains(Buffer.from(JSON.stringify(input)));
     this.service.save(row, { sources: redactor.clean(input), input_sensitive: !!sensitive });
     if (sensitive) return stop('release_sensitive_body', 'failed', '发行说明来源包含已登记的密钥，已拒绝写入。');
-    const generated = await notes(this.service.store, row, input, redactor);
+    const generated = await notes(this.service.store, row, input, redactor, () => this.service.guard(row));
     this.service.save(row, { body: generated.body, notes_input_hash: generated.input_hash, note_groups: generated.groups }, 'creating_draft');
   }
   async createDraft(github: GitHub, row: any, redactor: Redactor) {
