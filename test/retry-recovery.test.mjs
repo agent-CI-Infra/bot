@@ -212,10 +212,10 @@ for(const [code,state,base,cap] of waits)for(const inCycle of [false,true]){
     const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task;
     assert.equal(detail.retry_cycle_started_at,entered);assert.ok(!detail.error_cause.retry_cycle);assert.doesNotMatch(detail.error_cause.action,/8 小时/);
     const page=loadConsole(['static/app.js','static/views.js'],()=>[404,{}]);
-    const shown=page.run(`liveText(${JSON.stringify(detail)})`),next=page.run(`timestamp(${detail.next_run_at})`);
-    assert.doesNotMatch(shown,/8 小时|满 5 次/);assert.ok(shown.includes('下次重试：'+next),shown);
-    if(code==='repository_has_no_commit')assert.match(shown,/仓库还没有提交；默认分支出现提交后会自动继续/);
-    if(code==='pr_head_pending')assert.match(shown,/PR 尚未指向/);
+    const shown=page.run(`liveText(${JSON.stringify(detail)})`);
+    assert.doesNotMatch(shown,/8 小时|满 5 次|下次重试/);assert.equal(detail.error_cause.attempt_retry,false);
+    if(code==='repository_has_no_commit')assert.equal(shown,'仓库还没有提交；默认分支出现提交后会自动继续。');
+    if(code==='pr_head_pending')assert.equal(shown,'PR 尚未指向刚推送的提交 （读取中）；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。');
     const logs=(await h.admin('/api/tasks/'+h.taskId+'/logs')).value.logs.filter(log=>log.cause);
     assert.equal(logs.length,1,'unchanged conditions are logged once even while a cycle is retained');
     assert.doesNotMatch(logs[0].cause.action,/8 小时/);
