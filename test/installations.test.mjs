@@ -319,14 +319,17 @@ test('the global permission check measures only the App definition and keeps its
 test('sync conclusions count installations and retain gaps, account failures and App definition warnings', () => {
   const page = loadConsole(['static/app.js', 'static/views.js']);
   page.run("accounts = [{ id: 'broken', name: 'Broken App' }]");
-  const message = result => page.run('installationSyncMessage(' + JSON.stringify(result) + ')');
+  const conclusion = result => page.run('installationSyncNotice(' + JSON.stringify(result) + ')');
+  const message = result => conclusion(result).text;
   const installation = { id: '7', account: 'fixture', missing: [], missing_events: [] };
   const good = { results: [{ account_id: 'app', installations: [installation], app: { missing: [], missing_events: [] } }], repositories: [{ id: '101' }, { id: '202' }] };
   assert.equal(message(good), '安装列表已同步，1 个安装的权限和事件订阅都正常。');
+  assert.equal(conclusion(good).tone, 'view-success');
   const missing = structuredClone(good); missing.results[0].installations[0].missing_events = ['pull_request_review'];
   missing.results[0].installations[0].missing = [{ permission: 'actions', required: 'write', current: 'read' }];
   missing.results[0].app.missing_events = ['issue_comment'];
   assert.match(message(missing), /并非全部正常。fixture（安装 7）：权限不足：Actions.*事件未订阅：Pull request review/);
+  assert.equal(conclusion(missing).tone, '');
   assert.match(message(missing), /App 定义仍有缺口，请到「全局设置 → 机器人账号」查看/);
   missing.results.push({ account_id: 'broken', error: 'github_http_503' });
   assert.match(message(missing), /部分账号同步失败：Broken App（github_http_503），因此还不能判断全部安装/);

@@ -515,7 +515,7 @@ function permissionGapText(missing) {
 }
 function eventGapText(missing) { return '事件未订阅：' + missing.map(event => eventNames[event] || event).join('、'); }
 // Use the full sync's installation snapshots: one installation can cover many repositories, including hidden ones.
-function installationSyncMessage(result) {
+function installationSyncNotice(result) {
   const failed = result.results.filter(row => row.error), installations = result.results.flatMap(row => row.installations || []);
   const gaps = installations.filter(row => row.missing.length || row.missing_events.length).map(row => `${row.account || '安装'}（安装 ${row.id}）：` +
     [row.missing.length ? '权限不足：' + permissionGapText(row.missing) : '', row.missing_events.length ? eventGapText(row.missing_events) : ''].filter(Boolean).join('；'));
@@ -524,10 +524,11 @@ function installationSyncMessage(result) {
   const parts = [failed.length ? '部分账号同步失败：' + failed.map(row => (accounts.find(account => account.id === row.account_id)?.name || row.account_id) + '（' + row.error + '）').join('、') + '，因此还不能判断全部安装的权限和事件订阅是否正常。'
     : gaps.length ? '安装列表已同步，权限和事件订阅并非全部正常。' : `安装列表已同步，${installations.length} 个安装的权限和事件订阅都正常。`];
   if (gaps.length) parts.push(gaps.join('；') + '。');
-  if (result.results.some(row => row.app && (row.app.missing?.length || row.app.missing_events?.length)))
+  const appMissing = result.results.some(row => row.app && (row.app.missing?.length || row.app.missing_events?.length)), appUnknown = result.results.some(row => row.app?.error);
+  if (appMissing)
     parts.push('App 定义仍有缺口，请到「全局设置 → 机器人账号」查看。');
-  if (result.results.some(row => row.app?.error)) parts.push('App 定义暂时无法核对，请到「全局设置 → 机器人账号」检查。');
-  return parts.join('');
+  if (appUnknown) parts.push('App 定义暂时无法核对，请到「全局设置 → 机器人账号」检查。');
+  return { text: parts.join(''), tone: failed.length || gaps.length || appMissing || appUnknown ? '' : 'view-success' };
 }
 // A repository the account still lists but with less than the bot needs. Always drawn (hidden when nothing is missing) so
 // that a later permission check can swap it in place.

@@ -74,6 +74,7 @@ test('App 定义只在机器人账号检查，安装权限和事件缺口在项�
     await page.getByRole('link', { name: '← 全部项目', exact: true }).click();
     installations[0].events = events; await sync.click();
     await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。');
+    await expect(message.locator('span')).toHaveClass('view-success');
     await expect(row('101').locator('[data-permission]')).toBeHidden(); await expect(row('202').locator('[data-permission]')).toBeHidden();
     // A failed account sync cannot turn cached grants into an all-normal conclusion.
     failInstallations = true; await sync.click();
