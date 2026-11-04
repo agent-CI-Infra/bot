@@ -172,8 +172,8 @@ const DICT = {
     en: 'Gate onboarding happens in the source repository; this site hosts and aggregates repository boards, with no separate board repository.',
   },
   'gate.onboarding.issueHint': {
-    zh: '公开仓安装后即可查看；私有仓请管理员在公共配置中本地启用一次。',
-    en: 'Installed public repositories are available automatically; ask an administrator to enable private snapshots locally in Public configuration.',
+    zh: '公开仓默认开启看板；私有仓请管理员在仓库列表开启看板。',
+    en: 'Boards are enabled by default for installed public repositories; ask an administrator to enable private snapshots locally in the repository list using the Board switch.',
   },
   'gate.onboarding.tutorial': {
     zh: '打开模板教程',
@@ -218,8 +218,8 @@ const DICT = {
     en: 'Repository boards are hosted here',
   },
   'gate.onboarding.boardNote': {
-    zh: '公开仓安装后自动提供 /boards/<owner>/<repo>/ 看板，由已验证 webhook 更新；私有仓需要管理员在公共配置中本地启用一次，启用后快照对外公开。门禁报告仍显示 lane 结论与用例数。',
-    en: 'Installed public repositories are hosted at /boards/<owner>/<repo>/ and updated by verified webhooks. An administrator must enable private snapshots locally in Public configuration before they become public. Gate reports retain lane verdicts and case counts.',
+    zh: '公开仓安装后默认提供 /boards/<owner>/<repo>/ 看板，由已验证 webhook 更新；私有仓需要管理员在仓库列表开启看板，启用后快照对外公开。门禁报告仍显示 lane 结论与用例数。',
+    en: 'Installed public repositories default to hosting boards at /boards/<owner>/<repo>/ and updated by verified webhooks. An administrator must enable private snapshots locally in the repository list using the Board switch before they become public. Gate reports retain lane verdicts and case counts.',
   },
   'gate.onboarding.boardTemplate': {
     zh: '查看单仓看板',

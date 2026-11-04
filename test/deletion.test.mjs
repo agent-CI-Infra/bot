@@ -102,6 +102,7 @@ test('a project whose repository GitHub answers 404 for is deleted with its reco
   h.store.run("INSERT INTO external_subscriptions(id,client_id,repository_id,name,url,secret,filters,created_at) VALUES('sub-101','client-101','101','s','https://receiver.invalid','x','{}',?)", now);
   h.store.run("INSERT INTO external_deliveries(id,subscription_id,repository_id,source_id,version,created_at) VALUES('forward-101','sub-101','101',?,1,?)", delivery, now);
   h.store.run("INSERT INTO external_event_cursors VALUES('client-101',1)");
+  h.store.run("INSERT INTO public_board_settings VALUES('101',0)");
   h.store.run("INSERT INTO repo_integrations(repository_id,checked_at) VALUES('101',?)", now);
   h.store.run("INSERT INTO quickstart_runs(id,repository_id,state,steps,created_at,updated_at) VALUES('quickstart-101','101','done','[]',?,?)", now, now);
   const field = (await admin('/api/board/fields', 'POST', { name: 'Priority' })).value.field, option = (await admin(`/api/board/fields/${field.id}/options`, 'POST', { name: 'High' })).value.option;

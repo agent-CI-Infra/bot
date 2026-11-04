@@ -1,7 +1,6 @@
 import { randomId, type Json } from '../core/security.js';
 import type { Store } from '../storage/database.js';
 import { appJwt, missingPermissions, revokeInstallationToken } from '../github/client.js';
-import { boardLocation, publicOrigin, queueBoard } from '../public-board/state.js';
 export { boardLocation } from '../public-board/state.js';
 import { workflowSet } from './gate-templates.js';
 
@@ -13,10 +12,10 @@ type Permissions = Record<string, string>;
 /** One run's GitHub App credentials; every installation token it mints is revoked when the run ends. */
 interface AppSession { appId: string; privateKey: string; issued: string[] }
 
-/** The onboarding items; each can be executed alone or together with the others. */
-export const quickstartItems = ['gate_pr', 'board', 'dashboard'] as const;
+/** The gate onboarding item; publication is configured separately. */
+export const quickstartItems = ['gate_pr'] as const;
 export type Item = typeof quickstartItems[number];
-const itemTitles: Record<Item, string> = { gate_pr: '门禁 PR', board: '单仓看板', dashboard: 'Dashboard 登记' };
+const itemTitles: Record<Item, string> = { gate_pr: '门禁 PR' };
 /** How one item ended. */
 interface Outcome { status: StepStatus; detail: string; code?: string; url?: string }
 const blocked = (detail: string, code: string): Outcome => ({ status: 'blocked', detail, code });
@@ -48,15 +47,7 @@ function permissionGap(installation: any, required: Permissions): Outcome | null
   return blocked(`GitHub App 缺少权限，需要在 App 设置里新增，并在 ${String(installation.account?.login || installation.id)} 的安装里同意：${names}`, 'app_permissions_missing');
 }
 
-/**
- * One-click onboarding as three items that run on their own:
- *  - gate_pr   — open a PR that adds the CI-workflow gate files to the source repository (the user merges it);
- *  - board     — enable the bot-hosted public board locally;
- *  - dashboard — enable local public dashboard collection.
- * A shared preflight reads the source repository; after that each item checks only what it needs, so an item that cannot
- * run is reported and the others still go ahead. The gate writes only to its proposed source branch; board publication
- * is local. Nothing is pushed to a default branch, and only GitHub App installation tokens are used.
- */
+/** Gate onboarding opens a source PR; board publication is managed by the repository list switch. */
 export class Quickstart {
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com',
     readonly templateRepo = process.env.BOT_CI_TEMPLATE_REPO || 'agent-CI-Infra/CI-workflow') {}
@@ -179,7 +170,7 @@ export class Quickstart {
     const full = String(row.full_name), [owner = '', name = ''] = full.split('/');
     // Only GitHub App installation tokens; a bot account's long-lived token is never read here.
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', String(row.account_id));
-    if (account?.type !== 'github_app') return stop(blocked('公共配置只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上，需要改为安装 GitHub App', 'github_app_required'));
+    if (account?.type !== 'github_app') return stop(blocked('门禁接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上，需要改为安装 GitHub App', 'github_app_required'));
     const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`);
     if (!secrets.private_key) return stop(blocked('GitHub App 账号没有保存私钥', 'github_credentials_missing'));
     const app: AppSession = { appId: String(account.app_id), privateKey: String(secrets.private_key), issued: [] };
@@ -190,11 +181,11 @@ export class Quickstart {
         mark('preflight', { status: 'running', detail: '读取仓库信息…' });
         const installation = await this.installation(app, `/repos/${full}/installation`);
         if (!installation) return stop(blocked('GitHub App 没有安装到该仓库', 'repository_not_found'));
-        const token = await this.token(app, installation, selected.includes('gate_pr') ? quickstartPermissions.source : { contents: 'read', metadata: 'read' }, { repository_ids: [Number(repositoryId)] });
+        const token = await this.token(app, installation, quickstartPermissions.source, { repository_ids: [Number(repositoryId)] });
         const meta = await this.request('GET', `/repos/${full}`, token);
         if (!meta) return stop(blocked('没有该仓库的访问权限', 'repository_not_found'));
         source = { app, appAccountId: String(account.id), id, dryRun, full, owner, name, repositoryId, installation, token, defaultBranch: String(meta.default_branch || 'main'), private: !!meta.private };
-        mark('preflight', { status: 'done', detail: `默认分支 ${source.defaultBranch} · ${source.private ? '私有仓库 · 启用看板后快照将对外公开' : '公开仓库'}` });
+        mark('preflight', { status: 'done', detail: `默认分支 ${source.defaultBranch} · ${source.private ? '私有仓库' : '公开仓库'}` });
       } catch (error) { const code = (error as Error).message; return stop({ status: 'failed', detail: `失败：${code}`, code }); }
 
       // Each item checks what it needs before its first write and stops on its own; the others still run.
@@ -204,7 +195,7 @@ export class Quickstart {
         progress('检查条件…');
         let outcome: Outcome;
         try {
-          outcome = item === 'gate_pr' ? await this.gate(source, progress) : this.hostedBoard(source, item);
+          outcome = await this.gate(source, progress);
         } catch (error) { const code = (error as Error).message; outcome = { status: 'failed', detail: `失败：${code}`, code }; }
         outcomes[item] = outcome; mark(item, outcome);
         if (outcome.status === 'done' && outcome.url && item === 'gate_pr') this.store.run('UPDATE quickstart_runs SET pr_url=? WHERE id=?', outcome.url, id);
@@ -267,20 +258,6 @@ export class Quickstart {
       body: `提供 CI-workflow 门禁框架及版本标签触发的 .github/workflows/release.yml。\n\n<!-- dept-bot:quickstart:${id} -->\n\nci-gates.json 的 lane 命令留空，由仓库开发者填写；空 lane 只报告 not_applicable，不表示实际检查通过。控制面只提供框架，并在人工确认后打标签。具体检查项和是否发布 PyPI、npm 包或镜像，由仓库开发者写进自己的 Release workflow，由标签触发 Release Actions。手动发版本仍先生成草稿，再由人正式发布。` });
     if (!pr?.html_url) return { status: 'failed', detail: 'PR 创建失败', code: 'pr_failed' };
     return { status: 'done', detail: `已创建 PR #${pr.number}，合入后门禁生效`, url: String(pr.html_url) };
-  }
-
-  /** Local consent replaces external board branches, workflow dispatches and registration PRs. */
-  private hostedBoard(source: Source, item: 'board' | 'dashboard'): Outcome {
-    const origin = publicOrigin(this.store);
-    if (!origin) return blocked('请先在安装向导验证 webhook 公网地址', 'public_address_not_verified');
-    const location = boardLocation(origin, source.full), url = item === 'board' ? location.url : `${origin}/dashboard/`;
-    if (source.dryRun) return { status: 'skipped', detail: `预演：由 bot 托管，webhook 自动更新${source.private ? '；执行后私有仓快照将对外公开' : ''}`, url };
-    this.store.transaction(() => {
-      this.store.run('UPDATE installed_repositories SET private=? WHERE account_id=? AND repository_id=?', Number(source.private), source.appAccountId, source.repositoryId);
-      if (source.private) this.store.run('INSERT OR IGNORE INTO public_board_consents VALUES(?,?)', source.appAccountId, source.repositoryId);
-      queueBoard(this.store, source.appAccountId, source.repositoryId);
-    });
-    return { status: 'done', detail: `已在 bot 本地启用，数据由 webhook 自动更新${source.private ? '；私有仓快照对外公开' : ''}`, url };
   }
 
   private async workflowTemplates(scripts: Record<string, unknown>, token: string): Promise<Record<string, string>> {

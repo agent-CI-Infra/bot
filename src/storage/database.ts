@@ -118,6 +118,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS public_board_jobs(account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,repository_id TEXT NOT NULL,
       generation INTEGER NOT NULL DEFAULT 1,collected_generation INTEGER NOT NULL DEFAULT 0,active_path TEXT,
       attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,last_error TEXT,PRIMARY KEY(account_id,repository_id));`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS public_board_settings(repository_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL CHECK(enabled IN (0,1)));
+      INSERT OR IGNORE INTO public_board_settings(repository_id,enabled)
+        SELECT DISTINCT repository_id,1 FROM public_board_consents;`);
     // Gate/dashboard connection status per repository and one-click onboarding runs.
     this.db.exec(`CREATE TABLE IF NOT EXISTS repo_integrations(repository_id TEXT PRIMARY KEY,
         gate_state TEXT NOT NULL DEFAULT 'unknown',gate_detail TEXT NOT NULL DEFAULT '',

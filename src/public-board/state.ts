@@ -9,15 +9,22 @@ export function publicOrigin(store: Store): string {
   const row = store.get("SELECT value FROM settings WHERE key='onboarding.public'");
   return row ? String(JSON.parse(row.value).origin || '') : '';
 }
-/** Installation alone never authorizes exporting a private repository. */
+/** Saved publication choices persist; only repositories without a choice use visibility defaults. */
 export function publishedRepositories(store: Store): Row[] {
   const rows = store.all(`SELECT i.*,j.active_path,j.generation,j.collected_generation FROM installed_repositories i
     LEFT JOIN public_board_jobs j ON j.account_id=i.account_id AND j.repository_id=i.repository_id
-    WHERE i.installed=1 AND (i.private=0 OR EXISTS(SELECT 1 FROM public_board_consents c
-      WHERE c.account_id=i.account_id AND c.repository_id=i.repository_id))
+    LEFT JOIN public_board_settings s ON s.repository_id=i.repository_id
+    WHERE i.installed=1 AND (s.enabled=1 OR (s.repository_id IS NULL AND i.private=0))
     ORDER BY i.full_name,i.account_id`).filter(row => validRepository(String(row.full_name)));
   // Multiple App accounts can cover the same GitHub repository; publish one dataset per repository.
   return [...new Map(rows.reverse().map(row => [String(row.repository_id), row])).values()].reverse();
+}
+/** Live publication state, independent of project activation and cached integration checks. */
+export function boardStatus(store: Store, repositoryId: string) {
+  const row = publishedRepositories(store).find(repo => String(repo.repository_id) === repositoryId);
+  const origin = publicOrigin(store);
+  return { enabled: !!row, state: !row ? 'off' : row.active_path ? 'published' : 'collecting',
+    url: row && origin ? boardLocation(origin, String(row.full_name)).url : null };
 }
 export function queueBoard(store: Store, accountId: string, repositoryId: string): void {
   store.run(`INSERT INTO public_board_jobs(account_id,repository_id,generation) VALUES(?,?,1)

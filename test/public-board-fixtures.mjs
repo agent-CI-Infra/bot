@@ -41,12 +41,14 @@ export async function publicBoardFixture(t, collector) {
   let boards, quickstart;
   const h = await harness(t, undefined, store => ({ githubUrl: api,
     boards: boards = new PublicBoards(store, directory, api, collector), quickstart: quickstart = new Quickstart(store, api) }));
-  const stop = h.stop; h.stop = async () => { await boards.close(); await stop(); rmSync(directory, { recursive: true, force: true }); };
-  const { admin } = await setup(h), owner = await account(admin, { type: 'github_app', app_id: '123', private_key: privateKey, token: undefined });
+  const stop = h.stop; h.stop = async () => { await boards.close(); await stop(); };
+  // A service restart preserves snapshots; remove them only when the entire test finishes.
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const { admin, password } = await setup(h), owner = await account(admin, { type: 'github_app', app_id: '123', private_key: privateKey, token: undefined });
   h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
     VALUES(?,?,?,?,?,?,0,1,?)`, owner.id, '101', '1', 'octo/hello', '10', 'octo', new Date().toISOString());
   h.store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: h.webhook }));
   const hook = (id, headers) => h.hook(owner.path, owner.secret, id, { repository: { id: 101, full_name: 'octo/hello', private: state.private } }, { 'X-GitHub-Event': 'push', ...headers });
   const get = async path => { const response = await fetch(h.webhook + path); return { status: response.status, data: await response.json() }; };
-  return { h, boards, quickstart, owner, admin, state, hook, get };
+  return { h, boards, quickstart, owner, admin, password, state, hook, get };
 }
