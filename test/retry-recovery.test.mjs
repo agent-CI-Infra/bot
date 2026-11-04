@@ -132,6 +132,33 @@ for(const phase of ['model','publish'])for(const [condition,kind,status,code] of
   });
 }
 
+for(const [change,status,code] of [['closed','cancelled','object_closed_or_draft'],['draft','cancelled','object_closed_or_draft'],['head','superseded','pull_request_head_changed']]){
+  test(`ReviewUpdated rechecks ${change} before continuing the model in the same run`,async t=>{
+    let h,inserted=false,resumeChecks=0;const object=structuredClone(pull);
+    h=await emptyRepositoryFixture(t,{github(path,send){
+      if(!path.endsWith('/pulls/1'))return false;
+      const phase=h.store.get('SELECT phase FROM tasks WHERE id=?',h.taskId).phase,response=structuredClone(object);
+      if(inserted&&phase==='model')resumeChecks++;
+      if(!inserted&&phase==='publish'){
+        // The object read for the pending write is open, then new discussion invalidates that result. The object
+        // changes before ReviewUpdated returns to the model, so that entry must read it again before continue.
+        h.store.run('INSERT INTO review_updates(task_id,event_key,data) VALUES(?,?,?)',h.taskId,'before-publication',JSON.stringify({reason:'comment',actor:'alice'}));
+        inserted=true;
+        if(change==='closed')object.state='closed';
+        if(change==='draft')object.draft=true;
+        if(change==='head')object.head.sha='f'.repeat(40);
+      }
+      send(response);return true;
+    }});
+    const input={object:pull,context:{mode:'review'},files:[],coverage:[]};
+    h.store.run("UPDATE tasks SET kind='review.pr',phase='model',workspace_id='existing',generation=1,head_sha=?,input=? WHERE id=?",pull.head.sha,JSON.stringify(input),h.taskId);
+    const task=await h.run();
+    assert.equal(inserted,true);assert.equal(resumeChecks,1);assert.deepEqual([task.status,task.error_code],[status,code]);
+    assert.equal(h.operations.filter(type=>type==='workspace_agent_start').length,1);
+    assert.equal(h.operations.includes('workspace_agent_continue'),false);assert.equal(h.comments.length,0);
+  });
+}
+
 test('different transient failures reset the consecutive count, and entering the cycle does not synchronize tasks',async t=>{
   let code=502;const h=await emptyRepositoryFixture(t,{github(path,send){if(path==='/user'){send({message:'Server Error'},code);return true;}}});
   for(let i=0;i<4;i++){h.due();await h.run();}
