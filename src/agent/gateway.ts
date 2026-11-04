@@ -42,6 +42,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   const requestLog = beginModelRequest(store, ledgerTask, `${task.kind}:${task.id ?? 'run'}:${requestId}`, model);
   const controller = new AbortController();
   let callbackFailed = false;
+  let lastGuard = -Infinity;
   let idle = false, timer: ReturnType<typeof setTimeout> | undefined, response: Response | undefined, value: any;
   const reset = () => { clearTimeout(timer); timer = setTimeout(() => { idle = true; controller.abort(); }, modelIdleMs); };
   reset();
@@ -53,7 +54,13 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
     });
     value = response.ok ? await readModelResponse(response, async () => {
       reset();
-      try { await input.guard?.(); await input.onToken?.(); }
+      try {
+        // Full guards can call the workspace manager. Check the first token and
+        // then at most once a second, while retaining per-token idle/progress updates.
+        const now = Date.now();
+        if (now - lastGuard >= 1000) { lastGuard = now; await input.guard?.(); }
+        await input.onToken?.();
+      }
       catch (error) { callbackFailed = true; throw error; }
     }) : await errorBody(response);
   } catch (error) {
