@@ -80,7 +80,7 @@ const causeActions: Record<FailureCause,(state:string)=>string> = {
   github_access: () => '按说明核对 GitHub App 是否安装到该仓库、授权的权限和仓库范围、账号凭据是否有效，' + retry,
   github_rejected: () => 'GitHub 收到了请求但不接受，通常是仓库当前状态与请求冲突（例如分支或 PR 已存在、分支保护规则）。按说明核对仓库后点「重试」；无法解释时请反馈给 bot 维护者。',
   model: () => '检查项目的模型地址、模型名和 API Key；模型输出不符合要求时可以点「重试」，或换用其他模型。',
-  environment: state => automatic.has(state) ? '通常会自行恢复，恢复后任务自动继续；长时间不恢复请在项目页检查虚拟电脑。'
+  environment: state => automatic.has(state) ? 'bot 会自动重试；长时间不恢复请在项目页检查虚拟电脑。'
     : '请在项目页检查虚拟电脑后点「重试」。',
   repository: () => '按说明修改仓库内容或 bot 规则后点「重试」。',
   task_changed: () => '按说明处理后点「重试」。',
@@ -88,9 +88,13 @@ const causeActions: Record<FailureCause,(state:string)=>string> = {
   bot: () => '这是 bot 内部校验失败或运行异常，与外部服务和权限无关。可以先点「重试」；反复出现请把任务链接和上面的说明反馈给 bot 维护者。',
 };
 
-export function explainFailure(code: string|null|undefined, state = 'failed', detail?: string) {
+export function explainFailure(code: string|null|undefined, state = 'failed', detail?: string, retryCycleStartedAt?: number|null) {
   if (!code) return null;
   const cause = failureCause(code, state);
+  if(retryCycleStartedAt!=null&&automatic.has(state)&&code!=='github_rate_limited')return {
+    cause,label:code==='model_unavailable'&&detail?.includes('连续 90 秒没有 token 输出')?'模型连续 90 秒没有 token 输出':causes[cause].label,
+    action:'同一种失败已连续出现 5 次，已进入每 8 小时一次的自动重试周期；下次大约 8 小时后再试，也可以点「重试」立即尝试。',automatic:true,
+  };
   // Only token inactivity gets this explanation; DNS, connection failures and old logs keep their cause.
   if (code === 'model_unavailable' && detail?.includes('连续 90 秒没有 token 输出')) return {
     cause, label: '模型连续 90 秒没有 token 输出', automatic: automatic.has(state),

@@ -7,11 +7,12 @@ import { explainFailure } from '../agent/failures.js';
 // Faults are classified when read, so logs written before a cause existed are explained the same way.
 function faultCause(log:Record<string,any>){
   if(!String(log.content).startsWith('{"type":"fault"'))return log;
-  try{const value=JSON.parse(log.content);return {...log,cause:explainFailure(value.code,value.state,value.detail)};}catch{return log;}
+  try{const value=JSON.parse(log.content);return {...log,cause:explainFailure(value.code,value.state,value.detail,value.retry_cycle_started_at)};}catch{return log;}
 }
 const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.repository_id,full_name:row.full_name,kind:row.kind,status:row.status,summary:row.summary,
   object_number:row.object_number,head_sha:row.head_sha,source_task_id:row.source_task_id,generation:row.generation,phase:row.phase,
-  error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail),retry_count:row.retry_count,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
+  error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail,row.retry_cycle_started_at),retry_count:row.retry_count,
+  retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
 
 const pushedSha="(SELECT json_extract(data,'$.remote_sha') FROM development_candidates WHERE task_id=tasks.id) AS pushed_sha";
 const repositoryName='(SELECT full_name FROM repositories WHERE id=tasks.repository_id) AS full_name';

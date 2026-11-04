@@ -145,7 +145,7 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   const number = Number(object?.number || payload.number), action = payload.action;
   if (object && Number.isSafeInteger(number) && number>0 && ['opened','reopened','closed'].includes(String(action))) reviewObjectState(store, repositoryId, event === 'issues' ? 'review.issue' : 'review.pr', number, action === 'closed');
   if (object && (action === 'closed' || action === 'converted_to_draft')) {
-    store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft' WHERE repository_id=? AND object_number=? AND kind LIKE ? AND status NOT IN ('succeeded','pr_opened','completed')",
+    store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0 WHERE repository_id=? AND object_number=? AND kind LIKE ? AND status NOT IN ('succeeded','pr_opened','completed')",
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
   }
   if (!policy?.enabled || !policy.review_enabled) return 0;
