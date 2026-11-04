@@ -14,11 +14,11 @@ async function api(path, method = 'GET', body) {
   if (!response.ok) throw new Error(`${response.status} · ${value.error}`);
   return value;
 }
-function notice(id, text = '') {
+function notice(id, text = '', tone = '') {
   const box = $(id); box.replaceChildren();
   if (!text) return;
   const close = element('button', '关闭提示', 'quiet'); close.type = 'button'; close.addEventListener('click', () => notice(id));
-  box.append(element('span', text), close);
+  box.append(element('span', text, tone), close);
 }
 function retryErrorText(err) {
   if (/\btask_already_running\b/.test(err.message)) return '这个任务已经在执行或排队，不用再次重试。';
@@ -330,7 +330,7 @@ $('refresh').addEventListener('click', () => start().catch(error));
 window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).then(() => start()).catch(() => {});
 $('sync').addEventListener('click', async () => {
   $('sync').disabled = true; $('message').textContent = '正在从 GitHub 同步安装列表…';
-  try { const result = await api('/api/installations/sync', 'POST', {}); await start(); notice('message', installationSyncMessage(result)); }
+  try { const result = await api('/api/installations/sync', 'POST', {}); await start(); const conclusion = installationSyncNotice(result); notice('message', conclusion.text, conclusion.tone); }
   catch (err) { notice('message', '安装列表同步失败：' + err.message + '，还不能判断全部正常。'); } finally { $('sync').disabled = false; }
 });
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
