@@ -97,17 +97,17 @@ const causeActions: Record<FailureCause,(state:string)=>string> = {
 
 export function explainFailure(code: string|null|undefined, state = 'failed', detail?: string, retryCycleStartedAt?: number|null) {
   if (!code) return null;
-  const cause = failureCause(code, state);
-  if(retryCycleStartedAt!=null&&isAttemptFailure(code,state))return {
+  const cause = failureCause(code, state), attempt_retry = isAttemptFailure(code,state);
+  if(retryCycleStartedAt!=null&&attempt_retry)return {
     cause,label:code==='model_unavailable'&&detail?.includes('连续 90 秒没有 token 输出')?'模型连续 90 秒没有 token 输出':causes[cause].label,
-    action:'同一种失败已连续出现 5 次，已进入每 8 小时一次的自动重试周期；下次大约 8 小时后再试，也可以点「重试」立即尝试。',automatic:true,retry_cycle:true,
+    action:'同一种失败已连续出现 5 次，已进入每 8 小时一次的自动重试周期；下次大约 8 小时后再试，也可以点「重试」立即尝试。',automatic:true,retry_cycle:true,attempt_retry,
   };
   // Only token inactivity gets this explanation; DNS, connection failures and old logs keep their cause.
   if (code === 'model_unavailable' && detail?.includes('连续 90 秒没有 token 输出')) return {
-    cause, label: '模型连续 90 秒没有 token 输出', automatic: automatic.has(state),
+    cause, label: '模型连续 90 秒没有 token 输出', automatic: automatic.has(state), attempt_retry,
     action: ended.has(state) ? '任务已结束，无需处理。' : automatic.has(state) ? '模型连续 90 秒没有 token 输出，bot 会自动重试。'
       : '模型连续 90 秒没有 token 输出，已自动重试 5 次仍失败。请检查模型服务的输出是否中断，恢复后点「重试」。',
   };
   const action = codeActions[code] || (ended.has(state) ? '任务已结束，无需处理。' : causeActions[cause](state));
-  return { cause, label: causes[cause].label, action, automatic: automatic.has(state) };
+  return { cause, label: causes[cause].label, action, automatic: automatic.has(state), attempt_retry };
 }

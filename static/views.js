@@ -213,9 +213,9 @@ const ownershipErrors={bot_pr_identity_changed:'PR 身份改变，需要核对�
 function liveText(task) {
   if (terminalStates.includes(task.status)) return null;
   if (task.status === 'queued') return '排队中，等待这个仓库的虚拟电脑空闲…';
-  const next = task.error_cause?.automatic && task.next_run_at ? `下次重试：${timestamp(task.next_run_at)}。` : '';
-  if (task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit') return emptyRepositoryMessage + next;
-  if(task.status==='waiting_pr_head')return `PR 尚未指向刚推送的提交 ${task.pushed_sha||'（读取中）'}；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。${next}`;
+  const next = task.error_cause?.attempt_retry && task.next_run_at ? `下次重试：${timestamp(task.next_run_at)}。` : '';
+  if (task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit') return emptyRepositoryMessage;
+  if(task.status==='waiting_pr_head')return `PR 尚未指向刚推送的提交 ${task.pushed_sha||'（读取中）'}；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。`;
   if (task.status === 'publishing') return '正在发布到 GitHub…';
   if(ownershipErrors[task.error_code])return ownershipErrors[task.error_code]+'；已暂停，不会推送其他作者或分支。';
   if (task.status.startsWith('waiting_') || task.status === 'retry_wait' || task.status === 'needs_replan') {

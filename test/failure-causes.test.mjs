@@ -174,6 +174,11 @@ test('the console names the cause and the next step in the timeline, the live li
   assert.match(text(`step({id:'2',content:${JSON.stringify(fault)}})`),/任务暂停或失败[\s\S]*github_response_unknown/);
   const task={id:'t',kind:'development.issue',object_number:1,status:'retry_wait',phase:'publish',error_code:'github_response_unknown',error_cause:cause,retry_count:2};
   assert.equal(page.run(`liveText(${JSON.stringify(task)})`),'已暂停：等待重试 · 外部服务或网络波动（github_response_unknown）。同一种失败已连续出现 2 次，满 5 次后改为每 8 小时重试。不是配置问题，bot 会自动重试，一般无需处理。');
+  for(const [code,status] of [['github_response_unknown','retry_wait'],['execution_interrupted','waiting_environment']]){
+    const next_run_at=Date.now()+5000,short={...task,status,error_code:code,error_cause:explainFailure(code,status),next_run_at};
+    assert.equal(short.error_cause.attempt_retry,true);
+    assert.ok(page.run(`liveText(${JSON.stringify(short)})`).includes('下次重试：'+page.run(`timestamp(${next_run_at})`)));
+  }
   const slow={...task,retry_count:5,retry_cycle_started_at:Date.now(),next_run_at:Date.now()+8*60*60*1000,error_cause:explainFailure(task.error_code,task.status,undefined,Date.now())};
   assert.match(page.run(`liveText(${JSON.stringify(slow)})`),/大约 8 小时后再试[\s\S]*下次重试：/);
   const replan={...task,status:'needs_replan',error_code:'base_branch_changed',error_cause:{cause:'task_changed',label:'任务条件已变化',action:'点「重试」会基于最新的基础分支重新规划。'}};
