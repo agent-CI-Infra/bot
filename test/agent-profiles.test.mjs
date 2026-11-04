@@ -26,3 +26,14 @@ test('a create_pull_request tool does not grant workspace write capability', () 
 test('unknown task kinds cannot accidentally receive development defaults', () => {
   for (const kind of ['release.unknown','toString','constructor','__proto__']) assert.throws(()=>workspaceProfile(kind,{}),/not_registered/);
 });
+
+test('all workspace profiles retain unrestricted notes without advertising removed quotas or content bans', () => {
+  for (const kind of ['review.issue','review.pr','development.issue','development.pr']) {
+    const profile = workspaceProfile(kind, {});
+    assert.doesNotMatch(profile.system, /Note names must match|at most 32 files|64 KiB per file|512 KiB total|containing known credentials are rejected|Never store keys/);
+    const write = profile.tools.find(tool => tool.function.name === 'write_file');
+    assert.ok(write);
+    assert.doesNotMatch(write.function.description, /<name>\.md/);
+    assert.equal(toolCapabilityError(profile, 'write_file', { path: '../notes/仓库经验.txt' }), null);
+  }
+});

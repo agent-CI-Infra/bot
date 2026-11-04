@@ -104,15 +104,19 @@ test('the 90-second deadline resets on a token, then expires after the last toke
 });
 
 test('fragmented credentials reach note writes verbatim while text and reasoning remain masked',async t=>{
-  const f=await fixture(t,{stream:false});
-  const args=JSON.stringify({path:'../notes/secret.md',content:key}),at=args.indexOf(key)+8;
-  await f.send(sse({content:key.slice(0,8),reasoning_content:key.slice(0,8),tool_calls:[{index:0,id:'note',function:{name:'write_file',arguments:args.slice(0,at)}}]}));
-  await f.send(sse({content:key.slice(8),reasoning_content:key.slice(8),tool_calls:[{index:0,function:{arguments:args.slice(at)}}]}));
-  await f.send(sse({},{finish_reason:'tool_calls'})+'data: [DONE]\n\n');await f.running;
-  const reply=JSON.parse(Buffer.concat(f.replies)),message=JSON.parse(reply.body).choices[0].message;
-  assert.ok(!('rejected_note_calls' in reply));assert.equal(JSON.parse(message.tool_calls[0].function.arguments).content,key);
-  assert.equal(message.content,'[REDACTED]');assert.equal(message.reasoning_content,'[REDACTED]');
-  assert.ok(!JSON.stringify(f.requests).includes(key));
+  for (const stream of [false,true]) await t.test(stream?'streamed runner reply':'JSON runner reply',async t=>{
+    const f=await fixture(t,{stream});
+    const args=JSON.stringify({path:'../notes/私有笔记.txt',content:key}),at=args.indexOf(key)+8;
+    await f.send(sse({content:key.slice(0,8),reasoning_content:key.slice(0,8),tool_calls:[{index:0,id:'note',function:{name:'write_file',arguments:args.slice(0,at)}}]}));
+    await f.send(sse({content:key.slice(8),reasoning_content:key.slice(8),tool_calls:[{index:0,function:{arguments:args.slice(at)}}]}));
+    await f.send(sse({},{finish_reason:'tool_calls'})+'data: [DONE]\n\n');await f.running;
+    const reply=JSON.parse(Buffer.concat(f.replies));
+    const value=await readModelResponse(new Response(reply.body,{headers:{'Content-Type':reply.content_type}}),async()=>{});
+    const message=value.choices[0].message;
+    assert.ok(!('rejected_note_calls' in reply));assert.equal(JSON.parse(message.tool_calls[0].function.arguments).content,key);
+    assert.equal(message.content,'[REDACTED]');assert.equal(message.reasoning_content,'[REDACTED]');
+    assert.ok(!JSON.stringify(f.requests).includes(key));
+  });
 });
 
 test('a disconnected runner does not undo provider usage already recorded from the stream',async t=>{
