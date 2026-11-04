@@ -173,6 +173,9 @@ export class TaskEngine {
         }
       };
       workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
+      // Reuse a check only at the immediately following phase boundary in this run. A resumed run or a
+      // ReviewUpdated loop starts without this credit and must read the current object before continuing.
+      let validatedPhase:'model'|'publish'|undefined;
       const publishDevelopment=async()=>{
         update({status:'publishing'});log({type:'phase',phase:'publish',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
@@ -284,7 +287,7 @@ export class TaskEngine {
             review_rules:{language:policy.review_language},...(development?{}:{repository_labels:labels}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
-        update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
+        update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
       }
       if(task.phase==='validate')stop('create_pull_request_required','needs_replan','任务停在 validate 阶段，需要重新规划并通过 create_pull_request 提交候选修改。');
       // Every attempt refreshes GitHub before its first request. Turn boundaries do the same for pending updates.
@@ -315,8 +318,8 @@ export class TaskEngine {
       for(;;){
       try{
       if(task.phase==='model'){
-        // A resumed development must recheck its goal, approval and PR ownership before starting the agent too.
-        await validate();
+        if(validatedPhase!=='model')await validate();
+        validatedPhase=undefined;
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl),development?async(requestId,args)=>{
           // Fix the only candidate snapshot before any policy command can create or modify files.
@@ -348,11 +351,12 @@ export class TaskEngine {
         if(!development){
           if(input.behavior_changes?.length){result.summary+='\n\n这些文件改变了 bot 的行为，需要人来决定：'+input.behavior_changes.join('、');result.clarification_required=true;}
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};
-          update({result:JSON.stringify(result),phase:'publish'});
+          update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
       }
       if(task.phase==='publish'){
-        await validate();
+        if(validatedPhase!=='publish')await validate();
+        validatedPhase=undefined;
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log,development?undefined:()=>{
           // No await between checking the inbox and fencing the first GitHub write.
           if(this.store.get('SELECT publication_started FROM tasks WHERE id=?',id)?.publication_started)return;
@@ -388,7 +392,7 @@ export class TaskEngine {
       }
       break;
       }catch(error){
-        if(error instanceof ReviewUpdated&&conversation){conversation.resume=true;this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);update({phase:'model',result:null,status:'running'});continue;}
+        if(error instanceof ReviewUpdated&&conversation){validatedPhase=undefined;conversation.resume=true;this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);update({phase:'model',result:null,status:'running'});continue;}
         throw error;
       }
       }
