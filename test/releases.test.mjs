@@ -143,7 +143,7 @@ test('rerun refuses a moved tag and never issues a dispatch or tag write', async
   assert.equal((await f.admin(f.endpoint + '/' + r.id)).value.release.error, 'release_tag_conflict');
 });
 async function toDraft(f, version = 'v1.2.3') {
-  f.state.runs = [run({ head_branch: version })]; f.state.jobs = [job()];
+  f.state.runs = [run({ head_branch: version, head_sha: f.state.head })]; f.state.jobs = [job()];
   const created = await f.create(version); assert.equal(created.status, 201);
   for (let i = 0; i < 4; i++) await f.service.worker.process(created.value.release.id);
   return (await f.admin(f.endpoint + '/' + created.value.release.id)).value.release;
@@ -184,6 +184,96 @@ test('an empty source range blocks preflight and confirmation without creating a
     assert.deepEqual(f.state.tags, tags); assert.deepEqual(f.state.releases, []); assert.deepEqual(writes(f.state), []);
   }
 });
+function advanceHead(f) {
+  f.state.histories[f.state.head] = structuredClone(f.state.commits);
+  f.state.head = other;
+  f.state.commits.unshift({ sha: other, commit: { message: 'Add another change' }, html_url: 'https://github.com/fixture/project-101/commit/' + other });
+}
+test('an idle draft does not bypass no-changes confirmation and a new commit creates a second draft', async t => {
+  const f = await releaseFixture(t), first = await toDraft(f);
+  assert.equal(first.stage, 'draft');
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 0);
+  const tags = structuredClone(f.state.tags), releases = structuredClone(f.state.releases), before = writes(f.state).length;
+  f.h.store.run('UPDATE project_releases SET active=1 WHERE id=?', first.id);
+  const p = await f.preview('v1.2.4'); assert.equal(p.no_changes, true); assert.equal(p.available, false);
+  for (let i = 0; i < 2; i++) {
+    const result = await f.admin(f.endpoint, 'POST', { version: p.version, target_sha: p.target_sha, credential: p.credential });
+    assert.equal(result.status, 409); assert.equal(result.value.error, 'release_no_changes'); assert.equal(result.value.release, undefined);
+  }
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 1);
+  assert.deepEqual(f.state.tags, tags); assert.deepEqual(f.state.releases, releases); assert.equal(writes(f.state).length, before);
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 0);
+  const again = await f.create(first.version); assert.equal(again.status, 201); assert.equal(again.value.release.id, first.id);
+  advanceHead(f);
+  assert.equal((await f.preview('v1.2.4')).available, true);
+  const second = await toDraft(f, 'v1.2.4');
+  assert.equal(second.stage, 'draft'); assert.equal(second.version, 'v1.2.4'); assert.equal(second.target_sha, other); assert.notEqual(second.id, first.id);
+  assert.equal(second.previous_tag.sha, target); assert.deepEqual(second.sources.map(source => source.sha), [other]);
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 2);
+  assert.ok(f.h.store.all('SELECT active,lease,stage FROM project_releases').every(row => row.active === 0 && row.lease === null && row.stage === 'draft'));
+  assert.equal(f.state.tags[first.version].commit, target); assert.equal(f.state.tags[second.version].commit, other);
+  assert.equal(f.state.releases.length, 2); assert.ok(f.state.releases.every(release => release.draft === true));
+  assert.deepEqual(f.state.releases[0], releases[0]);
+  assert.ok(!writes(f.state).some(request => request.body?.draft === false || request.method === 'DELETE'));
+  const listed = (await f.admin(f.endpoint)).value.releases;
+  assert.deepEqual(new Set(listed.map(release => release.id)), new Set([first.id, second.id]));
+  assert.equal((await f.create(first.version)).value.release.id, first.id);
+  assert.equal((await f.create(second.version)).value.release.id, second.id);
+});
+test('another active version returns repository busy while same-version confirmation keeps its own record', async t => {
+  const f = await releaseFixture(t), created = await f.create(), first = created.value.release;
+  const p = await f.preview('v1.2.4'); assert.equal(p.available, true);
+  for (const stage of ['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'publishing', 'waiting_permission', 'write_unknown']) {
+    f.h.store.run('UPDATE project_releases SET stage=? WHERE id=?', stage, first.id);
+    const result = await f.admin(f.endpoint, 'POST', { version: p.version, target_sha: p.target_sha, credential: p.credential });
+    assert.equal(result.status, 409, stage); assert.equal(result.value.error, 'release_repository_busy', stage); assert.equal(result.value.release, undefined);
+    assert.equal((await f.create(first.version)).value.release.id, first.id);
+    assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 1);
+  }
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 1); assert.deepEqual(writes(f.state), []);
+  f.h.store.run("UPDATE project_releases SET stage='tagging' WHERE id=?", first.id); await f.service.worker.process(first.id);
+  assert.equal((await f.preview('v1.2.4')).no_changes, true);
+  const blocked = await f.create('v1.2.4'); assert.equal(blocked.status, 409); assert.equal(blocked.value.error, 'release_repository_busy');
+  assert.equal(blocked.value.release, undefined); assert.equal((await f.create(first.version)).value.release.id, first.id);
+});
+test('concurrent different-version confirmations return one record and one repository-busy response', async t => {
+  const f = await releaseFixture(t), results = await Promise.all([f.create('v1.2.3'), f.create('v1.2.4')]);
+  assert.deepEqual(results.map(result => result.status).sort(), [201, 409]);
+  const accepted = results.find(result => result.status === 201), busy = results.find(result => result.status === 409);
+  assert.equal(accepted.value.release.version, results[0] === accepted ? 'v1.2.3' : 'v1.2.4');
+  assert.equal(busy.value.error, 'release_repository_busy'); assert.equal(busy.value.release, undefined);
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 1); assert.deepEqual(writes(f.state), []);
+});
+test('startup frees legacy and expired draft claims while preserving live claims and active workflow stages', async t => {
+  const f = await releaseFixture(t), created = await f.create(), id = created.value.release.id;
+  for (const [lease, leaseUntil, active] of [[null, 0, 0], ['expired', Date.now() - 1, 0], ['live', Date.now() + 300000, 1]]) {
+    f.h.store.run("UPDATE project_releases SET stage='draft',active=1,lease=?,lease_until=? WHERE id=?", lease, leaseUntil, id);
+    new ReleaseService(f.h.store, f.apiUrl);
+    const row = f.h.store.get('SELECT * FROM project_releases WHERE id=?', id);
+    assert.equal(row.active, active); assert.equal(row.lease, active ? lease : null);
+  }
+  for (const stage of ['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'publishing', 'waiting_permission', 'write_unknown']) {
+    f.h.store.run('UPDATE project_releases SET stage=?,active=1,lease=NULL,lease_until=0 WHERE id=?', stage, id);
+    new ReleaseService(f.h.store, f.apiUrl);
+    const row = f.service.claim(id); f.service.save(row, {}); f.service.unlock(row);
+    assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', id).active, 1, stage);
+  }
+  for (const stage of ['draft', 'failed', 'published', 'externally_published']) {
+    f.h.store.run('UPDATE project_releases SET stage=? WHERE id=?', stage, id);
+    const row = f.service.claim(id); f.service.save(row, {}); f.service.unlock(row);
+    assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', id).active, 0, stage);
+  }
+});
+test('expired draft claims are released on confirmation without restarting the service', async t => {
+  const f = await releaseFixture(t), first = await toDraft(f), row = f.service.claim(first.id);
+  f.h.store.run('UPDATE project_releases SET lease_until=? WHERE id=?', Date.now() - 1, first.id);
+  advanceHead(f);
+  const second = await f.create('v1.2.4'); assert.equal(second.status, 201); assert.equal(second.value.release.version, 'v1.2.4');
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 0);
+  await assert.rejects(() => f.service.guard(row), error => error.code === 'release_lease_lost');
+  f.service.unlock(row);
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', second.value.release.id).active, 1);
+});
 test('confirmation rechecks the range when another version tags the candidate after preflight', async t => {
   const f = await releaseFixture(t), p = await f.preview(); assert.equal(p.available, true);
   f.state.tags['v1.2.2'] = { type: 'commit', sha: target };
@@ -216,12 +306,31 @@ test('draft saving enforces both revisions and preserves external edits instead 
   const f = await releaseFixture(t), r = await toDraft(f);
   const saved = await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: r.revision, body_revision: r.body_revision, body: 'Human edited notes' });
   assert.equal(saved.status, 200); assert.equal(f.state.releases[0].body, 'Human edited notes');
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', r.id).active, 0);
   assert.equal((await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: r.revision, body_revision: r.body_revision, body: 'Stale overwrite' })).status, 409);
   const current = saved.value.release; f.state.releases[0].body = 'Edited directly on GitHub';
   assert.equal((await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: current.revision, body_revision: current.body_revision, body: 'Overwrite external changes' })).status, 409);
   assert.equal(f.state.releases[0].body, 'Edited directly on GitHub');
   assert.equal((await f.admin(f.endpoint + '/' + r.id)).value.release.body, 'Edited directly on GitHub');
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', r.id).active, 0);
   assert.ok(writes(f.state).filter(r => r.method === 'PATCH').every(r => Object.keys(r.body).join() === 'body'));
+});
+test('manual draft saving holds the repository only until the edit finishes', async t => {
+  const f = await releaseFixture(t), first = await toDraft(f); advanceHead(f);
+  let checked = false;
+  f.state.custom = async ({ method, path }) => {
+    if (method !== 'PATCH' || !path.endsWith('/releases/' + first.release_id)) return false;
+    const row = f.h.store.get('SELECT active,lease FROM project_releases WHERE id=?', first.id);
+    assert.equal(row.active, 1); assert.ok(row.lease);
+    new ReleaseService(f.h.store, f.apiUrl);
+    assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 1);
+    const blocked = await f.create('v1.2.4'); assert.equal(blocked.status, 409); assert.equal(blocked.value.error, 'release_repository_busy');
+    checked = true; return false;
+  };
+  const saved = await f.admin(f.endpoint + '/' + first.id + '/draft', 'PATCH', { revision: first.revision, body_revision: first.body_revision, body: 'Reviewed notes' });
+  assert.equal(saved.status, 200); assert.ok(checked); assert.equal(saved.value.release.stage, 'draft');
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 0);
+  assert.equal((await f.create('v1.2.4')).status, 201); assert.equal(f.state.releases[0].draft, true);
 });
 test('repository release-notes Skill is explicitly loaded at the target SHA into a tool-free model call', async t => {
   const f = await releaseFixture(t), skill = 'Group real commits under Changes. Do not invent results.';
@@ -261,8 +370,18 @@ test('complete beta release journey requires an explicit publish, preserves prer
   assert.ok(!writes(f.state).some(r => r.body?.draft === false));
   const saved = await f.admin(f.endpoint + '/' + r.id + '/draft', 'PATCH', { revision: r.revision, body_revision: r.body_revision, body: 'Release notes reviewed by a maintainer' });
   assert.equal(saved.status, 200); const current = saved.value.release;
+  let publishingClaim = false;
+  f.state.custom = async ({ method, path, body }) => {
+    if (method === 'PATCH' && path.endsWith('/releases/' + r.release_id) && body.draft === false) {
+      const row = f.h.store.get('SELECT stage,active,lease FROM project_releases WHERE id=?', r.id);
+      assert.equal(row.stage, 'publishing'); assert.equal(row.active, 1); assert.ok(row.lease); publishingClaim = true;
+    }
+    return false;
+  };
   const published = await f.admin(f.endpoint + '/' + r.id + '/publish', 'POST', { revision: current.revision, body_revision: current.body_revision });
   assert.equal(published.status, 201); assert.equal(published.value.release.stage, 'published'); assert.ok(published.value.release.publish_actor); assert.ok(published.value.release.published_at);
+  assert.ok(publishingClaim);
+  assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', r.id).active, 0);
   assert.equal(f.state.releases[0].draft, false); assert.equal(f.state.releases[0].prerelease, true);
   const again = await f.admin(f.endpoint + '/' + r.id + '/publish', 'POST', { revision: current.revision, body_revision: current.body_revision });
   assert.equal(again.value.release.release_id, r.release_id);

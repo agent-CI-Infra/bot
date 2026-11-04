@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { releaseFixture, run, target, writes } from '../test/release-fixtures.mjs';
+import { releaseFixture, run, target, other, writes } from '../test/release-fixtures.mjs';
 import { workflowSet } from '../dist/projects/gate-templates.js';
 import { testPassword } from '../test/helpers.mjs';
 
@@ -74,6 +74,43 @@ test('候选提交已被上一版本包含时说明跳过并禁用确认，已�
     await expect(page.getByRole('button', { name: '确认打标签', exact: true })).toBeDisabled();
     await expect(page.locator('#project-page')).toContainText(existing.value.release.version);
     expect(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n).toBe(1); expect(writes(f.state)).toHaveLength(0);
+  } finally { for (const close of cleanup.reverse()) await close(); }
+});
+test('已有草稿后跳过同提交的新版本，有新提交时确认并展示第二份草稿', async ({ page }) => {
+  const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) });
+  try {
+    f.state.runs = [run()];
+    f.state.jobs = [{ id: 1, run_id: 800, run_attempt: 1, name: 'release', status: 'completed', conclusion: 'success' }];
+    const created = await f.create(), first = created.value.release;
+    for (let i = 0; i < 4; i++) await f.service.worker.process(first.id);
+    const firstDraft = structuredClone(f.state.releases[0]); expect(firstDraft.draft).toBe(true);
+    await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
+    await login(page, f.h.admin, 'administrator', f.password); await page.goto(f.h.admin + '/#/projects/101/release');
+    const version = page.getByLabel('版本号', { exact: true }), confirm = page.getByRole('button', { name: '确认打标签', exact: true });
+    await version.fill('v1.2.4'); await page.getByRole('button', { name: '检查候选提交' }).click();
+    await expect(page.locator('#project-page')).toContainText('没有新变更，跳过本次发布'); await expect(confirm).toBeDisabled();
+    await expect(page.locator('.release-record').getByRole('heading', { name: first.version, exact: true })).toBeVisible();
+    mkdirSync('.tmp/project-release-active-draft', { recursive: true });
+    await page.screenshot({ path: '.tmp/project-release-active-draft/no-changes.png', fullPage: true });
+    f.state.histories[target] = structuredClone(f.state.commits); f.state.head = other;
+    f.state.commits.unshift({ sha: other, commit: { message: 'Add another change' }, html_url: 'https://github.com/fixture/project-101/commit/' + other });
+    await page.getByRole('button', { name: '检查候选提交' }).click(); await expect(confirm).toBeEnabled();
+    await confirm.click(); const dialog = page.getByRole('dialog'); await expect(dialog).toContainText('v1.2.4'); await expect(dialog).toContainText(other);
+    const response = page.waitForResponse(result => result.url() === f.h.admin + f.endpoint && result.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '确认打标签', exact: true }).click();
+    const confirmed = await response, second = (await confirmed.json()).release;
+    expect(confirmed.status()).toBe(201); expect(second.version).toBe('v1.2.4'); expect(second.target_sha).toBe(other); expect(second.id).not.toBe(first.id);
+    f.state.runs = [run({ id: 801, head_branch: second.version, head_sha: other })]; f.state.jobs[0].run_id = 801;
+    for (let i = 0; i < 4; i++) await f.service.worker.process(second.id);
+    await page.reload(); await expect(page.locator('.release-record')).toHaveCount(2);
+    for (const name of [first.version, second.version]) {
+      const record = page.locator('.release-record').filter({ has: page.getByRole('heading', { name, exact: true }) });
+      await expect(record).toContainText('草稿待发布'); await expect(record.getByLabel('发行说明草稿')).toBeVisible();
+    }
+    expect(f.state.releases).toHaveLength(2); expect(f.state.releases.every(release => release.draft === true)).toBe(true);
+    expect(f.state.releases[0]).toEqual(firstDraft); expect(f.h.store.all('SELECT active FROM project_releases').every(row => row.active === 0)).toBe(true);
+    expect(writes(f.state).some(request => request.body?.draft === false || request.method === 'DELETE')).toBe(false);
+    await page.screenshot({ path: '.tmp/project-release-active-draft/two-drafts.png', fullPage: true });
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
 test('运行分析按需申请只读令牌并在页面展示脱敏日志证据', async ({ page }) => {

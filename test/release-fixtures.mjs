@@ -9,7 +9,7 @@ const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.expor
 export const workflow = "name: Release\non:\n  push:\n    tags: ['v*']\njobs:\n  release:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo release\n";
 export async function releaseFixture(t) {
   const state = { files: { '.github/ci-gates.json': '{}', '.github/workflows/ci.yml': 'name: CI', '.github/workflows/release.yml': workflow },
-    head: target, tags: {}, releases: [], runs: [], jobs: [], requests: [], tokens: [], unknown: '', deny: '', registered: true,
+    head: target, tags: {}, tagObjects: {}, releases: [], runs: [], jobs: [], requests: [], tokens: [], unknown: '', deny: '', registered: true,
     logs: {}, histories: {}, commits: [{ sha: target, commit: { message: 'Add release lane' }, html_url: 'https://github.com/fixture/project-101/commit/' + target },
       { sha: previous, commit: { message: 'Initial commit' }, html_url: 'https://github.com/fixture/project-101/commit/' + previous }], prs: {}, pages: {}, custom: null };
   const server = createServer(async (req, res) => {
@@ -36,9 +36,9 @@ export async function releaseFixture(t) {
     if (suffix.endsWith('/pulls')) return send(Number(url.searchParams.get('page')) > 1 ? [] : (state.prs[suffix.split('/')[2]] || []));
     if (suffix === '/tags') return send(Number(url.searchParams.get('page')) > 1 ? [] : Object.entries(state.tags).map(([name, value]) => ({ name, commit: { sha: value.commit || value.sha } })));
     if (suffix.startsWith('/git/ref/tags/')) { const value = state.tags[suffix.slice('/git/ref/tags/'.length)]; return value ? send({ object: { sha: value.sha, type: value.type } }) : send({}, 404); }
-    if (suffix.startsWith('/git/tags/') && method === 'GET') { const value = Object.values(state.tags).find(v => v.sha === suffix.split('/').at(-1)); return send({ object: { type: 'commit', sha: value?.commit || target } }); }
-    if (suffix === '/git/tags' && method === 'POST') return done({ sha: tagObject }, 201);
-    if (suffix === '/git/refs' && method === 'POST') { const version = body.ref.slice('refs/tags/'.length); if (state.tags[version]) return send({}, 422); state.tags[version] = { sha: body.sha, type: 'tag', commit: target }; return done({ ref: body.ref, object: { sha: body.sha, type: 'tag' } }, 201); }
+    if (suffix.startsWith('/git/tags/') && method === 'GET') { const sha = suffix.split('/').at(-1), value = Object.values(state.tags).find(v => v.sha === sha); return send({ object: { type: 'commit', sha: state.tagObjects[sha] || value?.commit || target } }); }
+    if (suffix === '/git/tags' && method === 'POST') { const sha = Object.keys(state.tagObjects).length ? createHash('sha1').update(JSON.stringify(body)).digest('hex') : tagObject; state.tagObjects[sha] = body.object; return done({ sha }, 201); }
+    if (suffix === '/git/refs' && method === 'POST') { const version = body.ref.slice('refs/tags/'.length); if (state.tags[version]) return send({}, 422); state.tags[version] = { sha: body.sha, type: 'tag', commit: state.tagObjects[body.sha] || target }; return done({ ref: body.ref, object: { sha: body.sha, type: 'tag' } }, 201); }
     if (suffix === '/actions/workflows/77/runs') return send({ total_count: state.runs.length, workflow_runs: Number(url.searchParams.get('page')) > 1 ? [] : state.runs });
     let match;
     if ((match = /^\/actions\/jobs\/(\d+)\/logs$/.exec(suffix))) { const content = state.logs[match[1]]; if (content === undefined) return send({ message: 'Logs not available' }, 404); res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end(content); return; }

@@ -3,7 +3,7 @@ import type { Actor } from '../app/auth.js';
 import { repository } from '../app/auth.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 import { stop } from '../agent/common.js';
-import { releaseStorage } from './storage.js';
+import { releaseStorage, releaseIdleDrafts } from './storage.js';
 import { inspect, fingerprint, preflightToken } from './preflight.js';
 import { enabled, releaseRedactor, withGitHub } from './github.js';
 import { validVersion } from './version.js';
@@ -50,7 +50,12 @@ export class ReleaseService {
       fields(input, ['version', 'target_sha', 'credential']);
       if (typeof input.version !== 'string' || !validVersion(input.version)) return fail(400, 'release_invalid_version');
       enabled(this.store, id);
-      const existing = this.current(id, input.version); if (existing) return { release: this.view(existing) };
+      const existing = this.store.transaction(() => {
+        releaseIdleDrafts(this.store);
+        const found = this.current(id, input.version as string); if (found) return found;
+        if (this.store.get('SELECT id FROM project_releases WHERE repository_id=? AND active=1', id)) return fail(409, 'release_repository_busy');
+      });
+      if (existing) return { release: this.view(existing) };
       const saved = this.store.get('SELECT * FROM release_preflights WHERE token=? AND repository_id=? AND actor_id=? AND expires_at>?', String(input.credential || ''), id, user.id, Date.now());
       if (!saved || input.target_sha !== JSON.parse(saved.data).target_sha) return fail(409, 'release_preflight_expired');
       const redactor = releaseRedactor(this.store, id);
@@ -59,10 +64,13 @@ export class ReleaseService {
       if (preview.no_changes) return fail(409, 'release_no_changes');
       if (!preview.available) return fail(409, 'release_preflight_failed');
       const row = this.store.transaction(() => {
+        releaseIdleDrafts(this.store);
         const found = this.current(id, input.version as string); if (found) return found;
+        if (this.store.get('SELECT id FROM project_releases WHERE repository_id=? AND active=1', id)) return fail(409, 'release_repository_busy');
         const releaseId = randomId(), now = new Date().toISOString();
-        this.store.run(`INSERT INTO project_releases(id,repository_id,version,target_sha,actor_id,stage,data,created_at,updated_at) VALUES(?,?,?,?,?,'tagging',?,?,?)`,
+        const inserted = this.store.run(`INSERT INTO project_releases(id,repository_id,version,target_sha,actor_id,stage,data,created_at,updated_at) VALUES(?,?,?,?,?,'tagging',?,?,?) ON CONFLICT DO NOTHING`,
           releaseId, id, preview.version, preview.target_sha, user.id, JSON.stringify(redactor.clean({ ...preview, body: '', body_revision: 0, failure_step: null })), now, now);
+        if (!inserted.changes) return this.current(id, input.version as string) ?? fail(409, 'release_repository_busy');
         this.store.audit(user.id, 'release.confirm', releaseId, id);
         return this.find(id, releaseId);
       });
@@ -161,8 +169,7 @@ export class ReleaseService {
     return fail(404, 'not_found');
   }
   current(id: string, version: string) {
-    return this.store.get('SELECT * FROM project_releases WHERE repository_id=? AND active=1', id)
-      || this.store.get('SELECT * FROM project_releases WHERE repository_id=? AND version=?', id, version);
+    return this.store.get('SELECT * FROM project_releases WHERE repository_id=? AND version=?', id, version);
   }
   find(repositoryId: string, id: string) {
     return this.store.get('SELECT * FROM project_releases WHERE id=? AND repository_id=?', id, repositoryId) ?? fail(404, 'release_not_found');
@@ -171,7 +178,7 @@ export class ReleaseService {
     const data = JSON.parse(row.data); if (data.skill) delete data.skill.content;
     return releaseRedactor(this.store, row.repository_id).clean({ ...data, id: row.id, repository_id: row.repository_id, version: row.version, target_sha: row.target_sha, stage: row.stage, revision: row.revision, created_at: row.created_at, updated_at: row.updated_at });
   }
-  save(row: any, patch: any, stage = row.stage, active = !['failed', 'published', 'externally_published'].includes(stage)) {
+  save(row: any, patch: any, stage = row.stage, active = !['failed', 'published', 'externally_published'].includes(stage) && (stage !== 'draft' || !!row.lease)) {
     this.store.transaction(() => {
       const latest = this.store.get('SELECT data FROM project_releases WHERE id=?', row.id);
       const data = JSON.stringify({ ...JSON.parse(latest?.data || row.data), ...patch }), now = new Date().toISOString();
@@ -183,13 +190,15 @@ export class ReleaseService {
   }
   claim(id: string, revision?: unknown): any {
     return this.store.transaction(() => {
+      releaseIdleDrafts(this.store);
       const row = this.store.get('SELECT * FROM project_releases WHERE id=?', id); if (!row) return fail(404, 'release_not_found');
       if (revision !== undefined && row.revision !== revision) return fail(409, 'release_revision_conflict');
       if (row.lease_until > Date.now()) return fail(409, 'release_busy');
       const active = this.store.get('SELECT id FROM project_releases WHERE repository_id=? AND active=1 AND id<>?', row.repository_id, row.id);
       if (active) return fail(409, 'release_repository_busy');
       const token = randomId();
-      this.store.run('UPDATE project_releases SET lease=?,lease_until=?,active=1 WHERE id=?', token, Date.now() + 300_000, id);
+      if (!this.store.run('UPDATE OR IGNORE project_releases SET lease=?,lease_until=?,active=1 WHERE id=?', token, Date.now() + 300_000, id).changes)
+        return fail(409, 'release_repository_busy');
       return { ...row, lease: token, active: 1 };
     });
   }
@@ -197,5 +206,5 @@ export class ReleaseService {
     const found = this.store.run('UPDATE project_releases SET lease_until=? WHERE id=? AND lease=? AND lease_until>?', Date.now() + 300_000, row.id, row.lease, Date.now());
     if (!found.changes) return stop('release_lease_lost', 'write_unknown', '发布租约已失效，停止写入并等待查证。');
   }
-  unlock(row: any) { this.store.run("UPDATE project_releases SET lease=NULL,lease_until=0,active=CASE WHEN stage IN ('failed','published','externally_published') THEN 0 ELSE active END WHERE id=? AND lease=?", row.id, row.lease); }
+  unlock(row: any) { this.store.run("UPDATE project_releases SET lease=NULL,lease_until=0,active=CASE WHEN stage IN ('draft','failed','published','externally_published') THEN 0 ELSE active END WHERE id=? AND lease=?", row.id, row.lease); }
 }
