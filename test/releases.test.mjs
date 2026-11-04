@@ -344,6 +344,7 @@ test('repository release-notes Skill is explicitly loaded at the target SHA into
   const r = await toDraft(f); assert.equal(r.stage, 'draft'); assert.equal(r.skill.source, 'repository'); assert.equal(r.skill.sha, target);
   const modelInput = JSON.parse(request.messages[1].content); assert.equal(modelInput.skill, skill); assert.equal(modelInput.skill_sha, target); assert.deepEqual(request.tools, []); assert.equal(request.tool_choice, 'none');
   assert.equal(request.model, 'notes-fixture');
+  assert.equal(request.temperature, 0);
   assert.equal(f.h.store.get('SELECT model_id FROM model_requests').model_id, model.id);
   assert.ok(!JSON.stringify(request).includes('fixture-installation-')); assert.match(r.body, /## Changes/);
 });

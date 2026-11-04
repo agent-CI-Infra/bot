@@ -19,7 +19,7 @@ export async function notes(store: Store, row: any, input: Source[], redactor: R
     const content = await runAgent({
       store, task: { id: row.id, repository_id: row.repository_id, kind: 'release.notes' }, redactor,
       guard, system: messages[0]!.content, prompt: messages[1]!.content,
-      tools: [], maxTurns: 1, maxOutputChars: 131072,
+      tools: [], temperature: 0, maxTurns: 1, maxOutputChars: 131072,
       validate: content => {
         if (redactor.contains(Buffer.from(content))) return stop('release_notes_invalid', 'failed', '发行说明模型输出包含敏感内容，未写入草稿。');
         return content;
