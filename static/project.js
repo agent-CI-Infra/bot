@@ -808,13 +808,16 @@ function ruleCard(path) {
 function ruleSource(path) {
   const row = current.rules?.files.find(file => file.path === path), source = element('span', '', 'task-rule-source');
   if (path) source.dataset.ruleSource = path;
-  const name = row ? layerNames[row.source] : !path ? '内置默认' : current.rules ? '未配置' : '暂未读取';
+  const name = row ? layerNames[row.source] : !current.rules ? '暂未读取' : !path ? '内置默认' : '未配置';
   source.append(badge(name, row?.source === 'repository' ? 'info' : row?.source === 'console' ? 'success' : ''));
-  source.title = !path ? '内置默认：生效（release-notes-v1）' : Object.entries(layerNames).map(([key, label]) => `${label}：${row?.source === key ? '生效' : row?.layers.some(layer => layer.source === key) ? '被覆盖' : '未配置'}`).join('；');
+  source.title = !current.rules ? '暂时无法读取规则，无法确定生效来源。' : !path ? '内置默认：生效（release-notes-v1）' : Object.entries(layerNames).map(([key, label]) => `${label}：${row?.source === key ? '生效' : row?.layers.some(layer => layer.source === key) ? '被覆盖' : '未配置'}`).join('；');
   return source;
 }
 function updateRuleSources() {
   $('project-page')?.querySelectorAll('[data-rule-source]').forEach(node => node.replaceWith(ruleSource(node.dataset.ruleSource)));
+  // Release notes can switch between a repository skill and a built-in rule, changing both source and path.
+  const releaseSource = $('project-page')?.querySelector('[data-task-kind="release.notes"] [data-label="规则来源"]');
+  if (releaseSource) releaseSource.replaceChildren(...taskRuleLocation({ kind: 'release.notes' }));
 }
 function commonRule(path, title) {
   const details = element('details', '', 'common-rule'), summary = element('summary'), body = element('div', '', 'common-rule-body');
@@ -867,9 +870,14 @@ function taskRulePath(definition) {
   if (definition.kind === 'release.notes') return current.rules?.files.some(file => file.path === releaseNotesSkill) ? releaseNotesSkill : null;
   return definition.rule || (definition.kind === 'development.pr' ? '.bot/rules/issue-development.md' : '.bot/guide.md');
 }
+function taskRuleLocation(definition) {
+  const path = taskRulePath(definition);
+  return [ruleSource(path), element('code', path || (current.rules ? 'release-notes-v1' : '—'))];
+}
 function openTaskRule(definition) {
   const path = taskRulePath(definition);
   if (path) return openProjectRule(path);
+  if (!current.rules) return showProjectDetails('发行说明规则', () => [note('暂时无法读取规则，无法确定是否存在仓库 skill。请刷新默认分支文件后重试。')]);
   showProjectDetails('发行说明规则', () => [note('使用内置 release-notes-v1：仅整理已核验的提交和合并 PR，保留来源链接，不推断功能、测试或性能。默认分支存在 .agents/skills/release-notes/SKILL.md 时以该 skill 为准。')]);
 }
 function projectTable(captions, name) {
@@ -897,8 +905,7 @@ function tasksSection() {
     tableCell(row, '任务', title); tableCell(row, '触发方式', triggers[index]);
     const enabled = policy.enabled && policy.review_enabled && (definition.group === '开发' ? policy.development_enabled : definition.kind === 'review.issue' ? policy.review_issues || policy.review_issue_updates : policy.review_pull_requests || policy.review_pr_updates || policy.review_pr_discussion);
     tableCell(row, '状态', definition.group === '发版本' ? badge(policy.enabled ? '按需执行' : '项目禁用', policy.enabled ? '' : 'warning') : badge(enabled ? '已开启' : '未开启', enabled ? 'success' : 'warning'));
-    const path = taskRulePath(definition);
-    tableCell(row, '规则来源', ruleSource(path), element('code', path || 'release-notes-v1'));
+    tableCell(row, '规则来源', ...taskRuleLocation(definition));
     tableCell(row, '操作', button('展开规则', () => openTaskRule(definition), 'quiet')); body.append(row);
   });
   const others = current.rules?.files.filter(file => file.path === '.bot/computer.yaml' || !ruleFiles.some(([path]) => path === file.path) && file.path !== releaseNotesSkill) || [];

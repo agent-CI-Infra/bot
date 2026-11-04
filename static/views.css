@@ -72,7 +72,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;align-items:start}
 .choices{display:flex;flex-direction:column;gap:6px}.choice{flex-direction:row;align-items:center;gap:10px;padding:8px 10px;border:1px solid #e3eaf0;border-radius:6px;font-size:13px;color:#183142;flex-wrap:wrap}
 .choice input{width:auto}.choice:has(input:checked){border-color:#16636b;background:#eef6f6}
-.task-toolbar{margin:12px 0}.task-common-rules{margin-top:12px;padding-top:12px;border-top:1px solid #e3eaf0}
+.task-toolbar{margin:12px 0}
 .project-table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
 .project-table th{text-align:left;color:#637c89;font-size:12px;padding:10px 8px;border-bottom:1px solid #d7e3e8}
 .project-table td{padding:12px 8px;border-bottom:1px solid #edf1f4;vertical-align:middle;overflow-wrap:anywhere}

@@ -40,7 +40,7 @@ async function loadCosts(version) {
   }
   const tokens=element('div','','cost-token-summary');
   for(const [key,label]of costTokenFields){const item=element('div','','cost-stat');item.append(element('span',label,'muted'),element('strong',metricNumber(data.summary[key])));tokens.append(item);}
-  body.append(summary,tokens,element('p','输入包含缓存命中 token。— 表示没有可靠记录；用量不完整时仅汇总已记录的 token。','cost-note'),element('p','费用和 token 按请求发生时的浏览器本地日期汇总。费用按当时保存的模型单价估算；不同币种分别展示，不作汇率换算。币种筛选仅影响费用和 token，不影响任务统计。单价可在项目“任务总览”中配置。','cost-note'));
+  body.append(summary,tokens,element('p','输入包含缓存命中 token。— 表示没有可靠记录；用量不完整时仅汇总已记录的 token。','cost-note'),element('p','费用和 token 按请求发生时的浏览器本地日期汇总。费用按当时保存的模型单价估算；不同币种分别展示，不作汇率换算。币种筛选仅影响费用和 token，不影响任务统计。项目专属模型的单价在项目「模型」页配置；部署共享模型的单价在「全局设置 → 模型」配置。','cost-note'));
   if(data.summary.unpriced_requests)body.append(element('p',`有 ${data.summary.unpriced_requests} 次请求缺少单价或完整用量，`+(tokenMode?'当前按已记录的 token 绘图。':'未计入柱状图金额。占比仅针对已计价费用。'),'cost-incomplete'));
   body.append(element('p','统计开始于 '+timestamp(data.collection_started_at)+'；此前未记录的用量与费用无法补算。','cost-note'));
   body.append(element('p','范围：费用和 token 只统计经控制面代理的模型请求，任务只统计控制面自己的任务；不含外部执行端自行发起的模型调用及项目容器内其他服务。','cost-note'));
