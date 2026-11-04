@@ -6,6 +6,7 @@ import { fail, fields, hashPassword, password, randomId, text, type Json } from 
 import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
+import { activateActions } from '../actions/storage.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 interface Grants { repositories?: string[]; organizations?: string[] }
@@ -233,15 +234,16 @@ export async function management(store: Store, user: Actor, method: string, path
     // The project's own concurrency is task_concurrency (null follows the default); the default comes with it so a project
     // administrator sees what an empty field means without reading the global settings.
     const concurrency = () => ({ task_concurrency_default: defaultConcurrency(store) });
-    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, ...concurrency() };
+    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!,
+      actions_failures: store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', id) || null, ...concurrency() };
     if (method === 'PATCH' && repoMatch[2]) {
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
-      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
+      fields(body, ['model_id', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
         'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models']);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
       for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates', 'review_issue_updates', 'review_pr_discussion']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       if (body.review_language !== undefined && (typeof body.review_language !== 'string' || !['auto', 'zh', 'en'].includes(body.review_language))) fail(400, 'invalid_review_language');
-      for (const key of ['review_enabled', 'development_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
+      for (const key of ['review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       const previous = store.get('SELECT * FROM policies WHERE repository_id=?', id)!;
       if(body.test_command!==undefined&&(typeof body.test_command!=='string'||body.test_command.length>2048))fail(400,'invalid_test_command');
       if(body.base_branch!==undefined&&(typeof body.base_branch!=='string'||body.base_branch.length>256||body.base_branch.includes('\0')))fail(400,'invalid_base_branch');
@@ -274,6 +276,10 @@ export async function management(store: Store, user: Actor, method: string, path
         catch { fail(400, 'invalid_automation_config'); }
       }
       return store.transaction(() => {
+        if (body.actions_failures_enabled !== undefined) {
+          store.run('UPDATE policies SET actions_failures_enabled=? WHERE repository_id=?', Number(body.actions_failures_enabled), id);
+          if (body.actions_failures_enabled && !previous.actions_failures_enabled) activateActions(store, id);
+        }
         store.run('UPDATE policies SET model_id=?,review_enabled=?,development_enabled=?,enabled=? WHERE repository_id=?', model,
           body.review_enabled === undefined ? previous.review_enabled : Number(body.review_enabled),
           body.development_enabled === undefined ? previous.development_enabled : Number(body.development_enabled),

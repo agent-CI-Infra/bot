@@ -9,6 +9,7 @@ import { recordAutomation } from '../automation/runner.js';
 import type { AutomationConfig } from '../automation/config.js';
 import { recordInstallationEvent } from './installations.js';
 import { enqueueForwards } from '../external/forward.js';
+import { actionsWebhook } from '../actions/storage.js';
 
 export async function ingest(
   store: Store,
@@ -79,6 +80,7 @@ export async function ingest(
         store.run('UPDATE policies SET enabled=0 WHERE repository_id IN (SELECT id FROM repositories WHERE account_id=? AND id=?)', accountId, String(removed.id || ''));
     }
     if (status === 200 && !duplicate && owner && payload) {
+      actionsWebhook(store, String(owner.id), event, payload);
       if(['issues','pull_request'].includes(event)){
         store.run('DELETE FROM external_events WHERE received_at<=?',new Date(Date.now()-86400000).toISOString());
         // Cross-endpoint redeliveries must not restart the first delivery's 24-hour window.

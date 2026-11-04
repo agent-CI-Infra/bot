@@ -75,12 +75,13 @@ async function renderProject(route) {
   // Opening a rule file from the overview, or saving one, brings its card into view.
   if (current.focusRule) { if (section === 'tasks') openProjectRule(current.focusRule); else page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
+  if (section === 'tasks' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
 }
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
@@ -718,6 +719,37 @@ function developmentSettings({ after = null } = {}) {
   }, { after });
 }
 
+function actionsFailureSettings({ after = null } = {}) {
+  const enabled = !!current.policy.actions_failures_enabled, status = current.actionsFailures;
+  const nodes = [checkbox('actions_failures_enabled', enabled, '分析默认分支 Actions 失败：外部原因最多重跑原运行一次，代码缺陷或不明原因提报 Issue'),
+    note('默认关闭；首次开启不补报之前已完成的运行。需要 App 管理员为已有 App 订阅 workflow_run；没有新增权限时无需重新批准安装。'),
+    note('代码缺陷提报仍需通过现有检视，并由人添加配置的开发标签。关闭开发设置仍会分类、按策略重跑和提报。')];
+  const message = element('p'); message.dataset.actionsStatus = ''; message.setAttribute('role', 'status'); message.hidden = !enabled;
+  showActionsFailureStatus(message, status); nodes.push(message);
+  const section = settingsForm('Actions 失败处理', nodes, async form => {
+    await patchPolicy(changed({ actions_failures_enabled: form.elements.actions_failures_enabled.checked }, { actions_failures_enabled: enabled }));
+    current.focusAnchor = 'actions-failures';
+  }, { after });
+  section.dataset.overviewAnchor = 'actions-failures'; return section;
+}
+function showActionsFailureStatus(message, status) {
+  message.className = status?.error ? 'endpoint-warning' : 'muted';
+  message.textContent = status?.error ? status.error === 'actions_workflow_run_subscription_missing'
+    ? '配置错误：此仓库使用的 App 安装未订阅 workflow_run。本功能已停止写入，请 App 管理员添加事件订阅。'
+    : `Actions 失败处理已暂停：${status.error}。请检查账号授权或日志读取状态。`
+    : status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。';
+}
+async function refreshActionsFailureStatus(token) {
+  if (token !== renderToken || current?.section !== 'tasks' || !current.policy.actions_failures_enabled) return;
+  try {
+    const value = await api('/api/repositories/' + current.id);
+    if (token !== renderToken) return;
+    current.actionsFailures = value.actions_failures;
+    const message = document.querySelector('[data-actions-status]'); if (message) showActionsFailureStatus(message, value.actions_failures);
+  } catch { /* Keep the last visible status; the next poll can recover. */ }
+  if (token === renderToken) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
+}
+
 function membersSection() {
   const section = card('项目管理员'), list = element('ul', '', 'history'), add = element('div', '', 'actions member-add');
   section.append(note('项目管理员可以管理这个项目的检视、开发、模型和虚拟电脑启停，看到它的任务、日志和投递；不能修改机器配置或其他项目。'), list, add);
@@ -864,7 +896,8 @@ function openProjectRule(path) { showProjectDetails(ruleInfo(path)[1], () => [ru
 function openTaskSettings(kind) {
   const review = kind === 'review', id = current.id;
   const after = async notice => { if (current?.id !== id) return; await renderProject({ id, section: current.section }); redraw(notice); };
-  const redraw = showProjectDetails(review ? '检视设置' : '开发设置', () => [review ? reviewSettings({ after }) : developmentSettings({ after })]);
+  const redraw = showProjectDetails(review ? '检视设置' : '开发设置', () => review
+    ? [reviewSettings({ after }), actionsFailureSettings({ after })] : [developmentSettings({ after })]);
 }
 function taskRulePath(definition) {
   if (definition.kind === 'release.notes') return current.rules?.files.some(file => file.path === releaseNotesSkill) ? releaseNotesSkill : null;

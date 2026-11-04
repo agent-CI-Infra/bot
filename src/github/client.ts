@@ -75,6 +75,7 @@ export async function revokeInstallationToken(apiUrl: string, token: string) {
 const actors = new Map<string, { at: number, id: string, login: string }>();
 const actorTtlMs = 3600_000;
 export class GitHub {
+  installationEvents: string[] | null = null;
   token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = ''; permissions: Record<string,string> = {};
   // The repository's HTTPS clone URL as GitHub reports it; the Git cache fetches from it without putting the token in it.
   cloneUrl = '';
@@ -195,6 +196,7 @@ export class GitHub {
       const actorKey = account!.id + ':' + String(account!.app_id), known = actors.get(actorKey), fresh = !!known && Date.now() - known.at < actorTtlMs;
       const app = identifyActor && !fresh ? await this.request('GET','/app', undefined, false, jwt) : null;
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
+      this.installationEvents = Array.isArray(installation.events) ? installation.events.map(String) : null;
       this.tokenWindow = installationBucket(account!.id, String(installation.id), installation.account?.login ? String(installation.account.login) : null);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission', `GitHub App 安装 ${installation.id} 的所属账号与仓库登记的所有者不一致。`);
       const requested: Record<string,string> = requiredPermissions || requestedPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };
