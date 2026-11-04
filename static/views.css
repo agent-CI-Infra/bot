@@ -72,15 +72,19 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;align-items:start}
 .choices{display:flex;flex-direction:column;gap:6px}.choice{flex-direction:row;align-items:center;gap:10px;padding:8px 10px;border:1px solid #e3eaf0;border-radius:6px;font-size:13px;color:#183142;flex-wrap:wrap}
 .choice input{width:auto}.choice:has(input:checked){border-color:#16636b;background:#eef6f6}
-.task-group{display:flex;flex-direction:column;gap:12px;min-width:0;padding-top:12px;border-top:1px solid #e3eaf0}
-.task-group>h2{margin:2px 0 0;font-size:18px;color:#183142}.task-group>.muted{margin:0}
-.task-card{display:flex;flex-direction:column;gap:10px;padding:16px;border-color:#d7e3e8}
-.task-card>h3{margin:0!important;font-size:17px!important;color:#183142}.task-card>.muted,.task-card>.task-kind{margin:0}.task-kind code{font-size:12px}
-.task-model-editor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;align-items:end;padding:10px 12px;border:1px solid #e3eaf0;border-radius:6px;background:#f5f9fa;min-width:0}
-.task-model-editor>.muted{grid-column:1/-1;margin:0}.task-model-editor>label{min-width:0}.task-model-editor>.view-error{grid-column:1/-1}.task-model-editor>.actions{margin:0;justify-content:flex-end;align-self:end}
-.task-card>.side-card{margin:0;background:#fbfdfd}.task-card .rule-card>h3{font-size:14px}.task-card .actions button{height:auto;white-space:normal}
-.task-rule-reference{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap;padding-top:2px}.task-rule-reference p{margin:0;overflow-wrap:anywhere}.task-rule-reference .actions{margin:0}
-@media(max-width:560px){.task-model-editor{grid-template-columns:minmax(0,1fr)}.task-model-editor>.actions{grid-column:1;justify-content:flex-start}.task-model-editor select{font-size:13px}.task-card{padding:14px}}
+.task-toolbar{margin:12px 0}.task-common-rules{margin-top:12px;padding-top:12px;border-top:1px solid #e3eaf0}
+.project-table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+.project-table th{text-align:left;color:#637c89;font-size:12px;padding:10px 8px;border-bottom:1px solid #d7e3e8}
+.project-table td{padding:12px 8px;border-bottom:1px solid #edf1f4;vertical-align:middle;overflow-wrap:anywhere}
+.project-table tr:last-child td{border-bottom:0}.project-table td>code{display:block;margin-top:4px;font-size:11px;color:#637c89}
+.project-table[aria-label="支持的任务"] th:first-child{width:22%}.project-table[aria-label="支持的任务"] th:nth-child(2){width:34%}
+.project-table[aria-label="任务模型"] th:first-child{width:24%}.project-table button{white-space:nowrap}
+.task-model-editor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:end;min-width:0}
+.task-model-editor>.muted{grid-column:1/-1;margin:0;font-size:12px}.task-model-editor>label{min-width:0}.task-model-editor select{width:100%;min-width:0}
+.task-model-editor>.view-error{grid-column:1/-1;margin:0}.task-model-editor>.view-error:empty{display:none}.task-model-editor>.actions{margin:0;justify-content:flex-end;align-self:end}
+.project-detail{width:min(900px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:90svh;padding:20px;box-sizing:border-box}
+.project-detail>.heading{margin-bottom:12px;gap:12px}.project-detail>.heading h2{margin:0;font-size:18px}.project-detail-body{min-width:0;overflow-wrap:anywhere}.project-detail-body>.side-card{margin:0}
+@media(max-width:560px){.project-table th,.project-table td{padding:10px 4px}.project-table button{padding:6px;min-height:36px;font-size:12px}.task-model-editor{grid-template-columns:minmax(0,1fr)}.task-model-editor>.actions{grid-column:1;justify-content:flex-start}.task-model-editor select{font-size:13px}.project-detail{padding:14px}.project-table[aria-label="任务模型"] th:first-child{width:28%}}
 .add-model{margin-top:8px}.add-model>summary{font-weight:600;color:#16636b}.add-model .side-card{border:0;padding:8px 0 0}
 .member-add{margin-top:8px}.member-add select{width:auto;min-width:220px}
 @media(max-width:760px){
