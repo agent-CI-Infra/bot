@@ -49,9 +49,9 @@ export function renderIndex(boards) {
 <main>
   <a class="back" href="/dashboard/">← 公共多仓 Dashboard</a>
   <h1>单仓看板</h1>
-  <p class="lead">每个代码仓一个看板，由 bot 在 webhook 入口托管；公开仓自动提供，私有仓需管理员在公共配置中本地启用。</p>
+  <p class="lead">每个代码仓一个看板，由 bot 在 webhook 入口托管；公开仓默认提供，私有仓需管理员在仓库列表开启看板。</p>
   <div class="grid">
-${cards || '    <div class="empty">还没有看板。安装覆盖公开仓后将自动提供；私有仓需管理员在公共配置中本地启用。</div>'}
+${cards || '    <div class="empty">还没有看板。安装覆盖公开仓后默认提供；私有仓需管理员在仓库列表开启看板。</div>'}
   </div>
   <footer>已验证的 webhook 自动触发数据更新。</footer>
 </main>

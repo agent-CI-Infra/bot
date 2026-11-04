@@ -1,6 +1,7 @@
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
+import { boardStatus, publishedRepositories, queueBoard } from '../public-board/state.js';
 import { HttpError, fail, fields, text, type Json } from '../core/security.js';
 import { appEvents, appJwt, appPermissions, missingEvents, missingPermissions, revokeInstallationToken } from '../github/client.js';
 import { appBucket, installationBucket, observe, observeAll, rateLimitView, refused, userBucket, type Bucket } from '../github/rate-limits.js';
@@ -301,6 +302,23 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   if (!path.startsWith('/api/installations')) return undefined;
   superAdmin(user);
   if (path === '/api/installations' && method === 'GET') return list(store);
+  const board = /^\/api\/installations\/([1-9]\d*)\/board$/.exec(path);
+  if (board && method === 'PATCH') {
+    fields(input, ['enabled']);
+    if (typeof input.enabled !== 'boolean') return fail(400, 'invalid_board_enabled');
+    const id = board[1]!, installed = store.all('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', id);
+    if (!installed.length) return fail(404, 'repository_not_installed');
+    return store.transaction(() => {
+      store.run(`INSERT INTO public_board_settings VALUES(?,?) ON CONFLICT(repository_id) DO UPDATE SET
+        enabled=excluded.enabled`, id, Number(input.enabled));
+      if (input.enabled) {
+        const source = publishedRepositories(store).find(row => String(row.repository_id) === id);
+        if (source) queueBoard(store, String(source.account_id), id);
+      }
+      store.audit(user.id, 'repository.board.updated', id, id);
+      return { board: boardStatus(store, id) };
+    });
+  }
   if (path === '/api/installations/hidden' && method === 'GET') return hiddenList(store);
   if (path === '/api/installations/sync' && method === 'POST') { fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const results = await sync.syncAll(); return { results, ...list(store) }; }
   // The list asks for this when it opens with stale grants and swaps only the permission badges with the answer.
@@ -329,7 +347,7 @@ function list(store: Store): Json {
   }
   const ids = [...new Set([...scope.keys(), ...registered.keys()])], now = Date.now();
   const repositories = ids.map(id => {
-    const seen = scope.get(id), reg = registered.get(id), listed = !!seen?.installed;
+    const seen = scope.get(id), reg = registered.get(id), listed = !!seen?.installed, publication = boardStatus(store, id);
     // Only a repository the account still lists can be short of permissions; one that left the installation has its own badge.
     const permissions = { permission_missing: listed ? permissionGap(seen!.account_type, seen!.permissions) : null, permissions_checked_at: listed ? seen!.permissions_at || null : null,
       permissions_stale: listed && (!seen!.permissions_at || now - Date.parse(seen!.permissions_at) > PERMISSIONS_FRESH_MS) };
@@ -337,7 +355,8 @@ function list(store: Store): Json {
       account_id: reg?.account_id || seen!.account_id, account_name: seen?.account_name || null, installation_id: seen?.installation_id || null,
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
       review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
-      running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions };
+      running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions,
+      board_enabled: publication.enabled, board_state: publication.state, board_url: publication.url };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));
   return { repositories, syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
 }

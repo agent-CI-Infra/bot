@@ -55,7 +55,7 @@ test('a full sync lists every installation repository and marks the rest as no l
   // A failed App check is still cached as unknown with the time of the check; the caller does not see an error.
   const checker = new IntegrationChecker(h.store, 'http://127.0.0.1:9'), cached = id => h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', id);
   await checker.check('303'); await checker.check('101');
-  assert.deepEqual([cached('303').gate_detail, cached('101').dashboard_detail], ['github_unavailable', '私有仓快照尚未在本地启用公开']);
+  assert.deepEqual([cached('303').gate_detail, cached('101').dashboard_detail], ['github_unavailable', '看板已关闭']);
   assert.deepEqual([cached('303').gate_state, cached('101').dashboard_state], ['unknown', 'none']);
   const requests = [];
   const server = createServer((req, res) => {
@@ -213,16 +213,18 @@ test('a background check of stale integration chips updates them in place and ne
   const settle = () => new Promise(r => setTimeout(r, 50)), gate = line => line.querySelectorAll('[data-integration]').map(chip => chip.textContent);
   const once = ['GET /api/integrations', 'GET /api/installations', 'POST /api/integrations/check'];
   await page.run('render()'); const [line] = page.$('rows').children;
-  assert.deepEqual(gate(line), ['门禁已配置', '看板未接入']);
+  assert.deepEqual(gate(line), ['门禁已配置']);
+  const boardChip = line.querySelector('[data-board-status]'); assert.equal(boardChip.textContent, '看板已关闭');
   await settle();
   // The check ran once and only the chips changed, although the answer is still stale: the same row stays on the list.
   assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
-  assert.equal(page.$('rows').children[0], line); assert.deepEqual(gate(line), ['门禁已生效', '看板未接入']);
+  assert.equal(page.$('rows').children[0], line); assert.deepEqual(gate(line), ['门禁已生效']);
+  assert.equal(line.querySelector('[data-board-status]'), boardChip);
   // A failed check leaves the chips as they are and is not retried either.
   check = () => [502, { error: 'github_unavailable' }]; page.requests.length = 0;
   await page.run('render()'); const [next] = page.$('rows').children; await settle();
   assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
-  assert.equal(page.$('rows').children[0], next); assert.deepEqual(gate(next), ['门禁已配置', '看板未接入']);
+  assert.equal(page.$('rows').children[0], next); assert.deepEqual(gate(next), ['门禁已配置']);
   // Refresh and "check integrations" still reload the page.
   page.$('refresh').listeners.click[0](); page.$('check').listeners.click[0]();
   assert.equal(page.run('startCalls'), 2);

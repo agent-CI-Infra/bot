@@ -146,7 +146,6 @@ const grantOf = (state, token) => state.tokens.get(token);
 const writes = state => state.requests.filter(r => r.method !== 'GET' && !r.path.endsWith('/access_tokens') && r.path !== '/installation/token');
 const tokensFor = (state, installation) => [...state.tokens.values()].filter(grant => grant.installation === installation);
 const gated = state => { state.repos['octo/hello'].files['.github/ci-gates.json'] = '{}'; };
-const boardUrl = 'https://bot.example/boards/octo/hello/';
 
 test('the board uses the verified webhook origin and a lowercase stable path', () => {
   assert.deepEqual(boardLocation('https://bot.example/', 'My-Org/Hello'),
@@ -158,7 +157,7 @@ test('the gate PR runs on its own with a source-only App token that may write wo
   const result = await run(['gate_pr']);
   assert.equal(result.state, 'done', JSON.stringify(result));
   assert.equal(step(result, 'gate_pr').status, 'done');
-  assert.deepEqual(['board', 'dashboard'].map(id => [step(result, id).selected, step(result, id).status]), [[false, 'skipped'], [false, 'skipped']]);
+  assert.deepEqual(result.steps.map(item => item.id), ['preflight', 'gate_pr']);
   // A source token, and a read-only token for the template repository the App is installed on.
   assert.deepEqual([...state.tokens.values()], [{ installation: 1, repository_ids: [101], permissions: quickstartPermissions.source },
     { installation: 3, repositories: ['CI-workflow'], permissions: quickstartPermissions.template }]);
@@ -210,43 +209,25 @@ test('bundled release gates accept missing scripts and never choose repository c
   }
 });
 
-test('board and dashboard are local operations and do not require an external dashboard installation', async t => {
+test('legacy board execution items are rejected and the default onboarding only creates the gate PR', async t => {
+  const { h, admin, run } = await fixture(t);
+  for (const item of ['board', 'dashboard']) {
+    const response = await admin('/api/projects/101/quickstart', 'POST', { steps: [item] });
+    assert.deepEqual([response.status, response.value.error], [400, 'invalid_quickstart_steps']);
+  }
+  const result = await run();
+  assert.equal(result.state, 'done');
+  assert.deepEqual(result.steps.map(item => item.id), ['preflight', 'gate_pr']);
+  assert.equal(h.store.get('SELECT count(*) n FROM public_board_settings').n, 0);
+});
+
+test('gate permission checks still block without changing board publication', async t => {
   const { h, state, run } = await fixture(t);
-  delete state.installations['agent-CI-Infra'];
-  const result = await run(['board', 'dashboard']);
-  assert.equal(result.state, 'done', JSON.stringify(result));
-  assert.equal(step(result, 'board').url, boardUrl);
-  assert.equal(step(result, 'dashboard').url, 'https://bot.example/dashboard/');
-  assert.deepEqual(writes(state), []);
-  assert.equal(tokensFor(state, 3).length, 0);
-  assert.ok(h.store.get('SELECT * FROM public_board_jobs WHERE repository_id=?', '101'));
-  assert.ok(!state.requests.some(r => r.path.includes('/dashboard')));
-  assert.ok([...state.tokens.values()].every(grant => Object.values(grant.permissions).every(value => value === 'read')));
-});
-
-test('private publication requires an explicit local board or dashboard item and dry runs never consent', async t => {
-  const { h, state, run, owner } = await fixture(t);
-  state.repos['octo/hello'].private = true;
-  h.store.run('UPDATE installed_repositories SET private=1');
-  let result = await run(['dashboard'], true);
-  assert.equal(result.state, 'planned');
-  assert.equal(h.store.get('SELECT count(*) n FROM public_board_consents').n, 0);
-  assert.equal(h.store.get('SELECT count(*) n FROM public_board_jobs').n, 0);
-  result = await run(['dashboard']);
-  assert.equal(result.state, 'done', JSON.stringify(result));
-  assert.ok(h.store.get('SELECT * FROM public_board_consents WHERE account_id=? AND repository_id=?', owner.id, '101'));
-  assert.deepEqual(writes(state), []);
-  assert.match(step(result, 'dashboard').detail, /私有仓快照对外公开/);
-});
-
-test('an unavailable gate permission affects only the gate, while hosted boards still enable locally', async t => {
-  const { state, run } = await fixture(t);
   delete state.installations.octo.permissions.workflows;
   const result = await run();
-  assert.equal(result.state, 'partial');
+  assert.equal(result.state, 'blocked');
   assert.deepEqual(outcome(result, 'gate_pr'), ['blocked', 'app_permissions_missing']);
-  assert.equal(step(result, 'board').status, 'done');
-  assert.equal(step(result, 'dashboard').status, 'done');
+  assert.equal(h.store.get('SELECT count(*) n FROM public_board_settings').n, 0);
   assert.deepEqual(writes(state), []);
 });
 
@@ -254,7 +235,7 @@ test('a repository on a bot account is not onboarded and its long-lived token is
   const { state, run } = await fixture(t, { type: 'bot_account' });
   const result = await run();
   assert.deepEqual([result.state, result.error], ['blocked', 'github_app_required']);
-  assert.deepEqual(['gate_pr', 'board', 'dashboard'].map(id => step(result, id).status), ['blocked', 'blocked', 'blocked']);
+  assert.equal(step(result, 'gate_pr').status, 'blocked');
   assert.deepEqual(state.requests, []);
 });
 

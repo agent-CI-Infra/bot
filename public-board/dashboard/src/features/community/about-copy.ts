@@ -100,20 +100,20 @@ const ZH: AboutCopy = {
     repoLabel: '仓库：',
     siteLabel: '在线访问：',
     p1: '前端不携带任何 Token，所有展示数据都来自 bot 在 webhook 入口提供的公开数据快照；GitHub Token 只在数据采集时通过环境变量注入，不会写入任何产物。',
-    p2: '页面包括社区总览、Pull Requests、Issues、社区成长、生态影响力（暂未开放）与质量门禁。已安装的公开仓自动进入汇总，私有仓需要管理员在公共配置中本地启用；{config} 仅保留内部贡献者分类规则。',
+    p2: '页面包括社区总览、Pull Requests、Issues、社区成长、生态影响力（暂未开放）与质量门禁。已安装的公开仓默认进入汇总，私有仓需要管理员在仓库列表开启看板；{config} 仅保留内部贡献者分类规则。',
   },
   add: {
     title: '新增一个受监控仓库',
-    description: '社区指标随已安装的公开仓自动提供；私有仓需要管理员在公共配置中本地启用。',
+    description: '社区指标随已安装的公开仓默认提供；私有仓需要管理员在仓库列表开启看板。',
     step1: {
-      text: '**安装仓库并确认公开范围。** 公开仓安装后自动提供；私有仓需管理员本地启用。可在 {config} 维护该仓库的 **内部贡献者** 分类规则，键为 `owner/name`，值为登录名数组：',
+      text: '**安装仓库并确认公开范围。** 公开仓安装后默认提供；私有仓需管理员本地启用。可在 {config} 维护该仓库的 **内部贡献者** 分类规则，键为 `owner/name`，值为登录名数组：',
       rulesTitle: '该仓库的内 / 外部分类规则：',
       rules: [
         '数组内的登录名记为 **内部**；',
         '该仓库其余非 bot 作者记为 **外部**；',
         'bot 记为未知，不计入内部或外部。',
       ],
-      note: '这份文件仅定义内部贡献者分类，不控制公开范围。私有仓必须由管理员在公共配置中明确启用。',
+      note: '这份文件仅定义内部贡献者分类，不控制公开范围。私有仓必须由管理员在仓库列表开启看板。',
     },
     step2: {
       text: '**采集数据。** bot 使用源仓只读安装令牌采集，后续由已验证的 webhook 触发更新，无需运行外部工作流：',
@@ -251,7 +251,7 @@ const ZH: AboutCopy = {
   notes: {
     title: '注意事项',
     bullets: [
-      '公开仓自动提供；私有仓只有管理员在公共配置中本地启用后才公开，启用会公开仓库名称与指标。',
+      '公开仓默认提供；私有仓只有管理员在仓库列表开启看板后才公开，启用会公开仓库名称与指标。',
       '私有仓公开启用需要控制台超管操作，不需要源仓写权限。',
       '新增后等待首轮本地采集；后续已验证 webhook 触发更新。',
       '不要把 Token 写进 `.env` 并提交；本地调试用命令行环境变量，CI 用 Actions secret。',
@@ -284,7 +284,7 @@ const EN: AboutCopy = {
   add: {
     title: 'Add a monitored repository',
     description:
-      'Installed public repositories are monitored automatically. An administrator must enable private snapshots locally in Public configuration.',
+      'Boards are enabled by default for installed public repositories. An administrator must enable private snapshots locally in the repository list using the Board switch.',
     step1: {
       text: '**Register the repository and its internal contributors.** Add an entry to the {config} file. The key is the full repository name `owner/name`, and the value is the array of GitHub logins for the repository’s **internal contributors** (leave it empty if you do not have any yet):',
       rulesTitle:

@@ -22,7 +22,7 @@ test('项目列表直接切换检视和开发，保存失败保留状态，任�
     let release,count=0;const held=new Promise(done=>release=done);
     await page.route('**/api/repositories/101/policy',async route=>{count++;expect(route.request().postDataJSON()).toEqual({development_enabled:true});await held;await route.continue();});
     await development.click();await expect(development).toBeDisabled();await expect(review).toBeDisabled();await development.evaluate(node=>node.click());expect(count).toBe(1);release();await expect(development).toBeEnabled();await expect(development).toHaveAttribute('aria-checked','true');await expect(row('101').getByRole('status')).toHaveText('开发已开启');await page.unroute('**/api/repositories/101/policy');
-    await expect(row('404').getByRole('switch').first()).toBeDisabled();await expect(row('404').getByRole('switch').last()).toBeDisabled();
+    await expect(row('404').getByRole('switch').first()).toBeDisabled();await expect(row('404').getByRole('switch',{name:'fixture/new-project 开发',exact:true})).toBeDisabled();await expect(row('404').getByRole('switch',{name:'fixture/new-project 看板',exact:true})).toBeEnabled();
     const disabledDevelopment=row('303').getByRole('switch',{name:'fixture/project-303 开发',exact:true});await disabledDevelopment.click();await expect(disabledDevelopment).toHaveAttribute('aria-checked','true');await expect(row('303').getByRole('status')).toHaveText('开发已开启；项目仍已禁用');expect((await admin('/api/repositories/303')).value.policy.enabled).toBe(0);
     h.store.run("UPDATE tasks SET status='succeeded' WHERE id='active'");h.store.run("UPDATE tasks SET status='running' WHERE id='queue-0'");
     await expect(row('101')).toContainText('排队 64',{timeout:10000});await expect(row('101')).toContainText('执行中 1');

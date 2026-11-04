@@ -406,7 +406,7 @@ function resultCard(task) {
 taskView.addEventListener('close', () => { clearTimeout(taskTimer); openTaskId = null; });
 $('logout').addEventListener('click', () => { if (taskView.open) taskView.close(); });
 
-// Add future project feature switches here; each one updates only its own policy field.
+// Project automation switches update their own policy fields; board publication is independent.
 const projectFeatures = [['review_enabled', '检视'], ['development_enabled', '开发']];
 function updateProjectTaskPreview(preview, row) {
   preview.replaceChildren(element('span', `执行中 ${row.running_tasks}`, row.running_tasks ? 'task-count-active' : ''));
@@ -422,18 +422,32 @@ function projectListControls(row) {
   if (row.installed === false) features.append(badge('已移出安装', 'danger'));
   else if (row.installed === null) features.append(badge('不在安装列表'));
   const feedback = element('p', '', 'project-control-feedback'); feedback.setAttribute('role', 'status'); feedback.setAttribute('aria-live', 'polite');
-  let pending = false; const switches = [];
+  let pending = false, boardSavedAt = 0; const switches = [];
   const sync = () => switches.forEach(({control, value, key, caption}) => {
     const on = !!row[key]; control.setAttribute('aria-checked', String(on)); value.textContent = on ? '开' : '关';
+    if (key === 'board_enabled') {
+      control.disabled = pending || row.installed !== true;
+      control.title = row.installed !== true ? '仓库不在安装范围' : '开启后单仓看板与 Dashboard 汇总无需登录即可访问；未保存选择时公开仓默认开、私有仓默认关，保存后不随可见性变化';
+      return;
+    }
     control.disabled = pending || !registered;
     control.title = !registered ? '请先启动项目' : !row.enabled ? '项目已禁用；此开关只保存配置，重新启用项目后才会生效' : row.installed === false ? '项目已移出安装范围；此开关只保存配置' : caption === '开发' ? 'Issue 明确要求改代码时自动开发；只修改 bot 自己的分支' : '检视这个项目的 Issue 和 PR';
   });
-  for (const [key, caption] of projectFeatures) {
+  const featuresToShow = [...projectFeatures, ...(me.role === 'super_admin' ? [['board_enabled', '看板']] : [])];
+  for (const [key, caption] of featuresToShow) {
     const control = button('', async () => {
       if (pending) return; pending = true; sync(); features.setAttribute('aria-busy', 'true'); feedback.className = 'project-control-feedback'; feedback.textContent = `正在保存${caption}…`;
       try {
-        const {policy} = await api(`/api/repositories/${row.id}/policy`, 'PATCH', {[key]: !row[key]});
-        Object.assign(row, policy); feedback.textContent = `${caption}已${row[key] ? '开启' : '关闭'}${!row.enabled ? '；项目仍已禁用' : ''}`;
+        if (key === 'board_enabled') {
+          const {board} = await api(`/api/installations/${row.id}/board`, 'PATCH', {enabled: !row.board_enabled});
+          Object.assign(row, {board_enabled: board.enabled, board_state: board.state, board_url: board.url});
+          boardSavedAt = Date.now();
+          updateBoardChip(group, row);
+          feedback.textContent = board.enabled ? '看板已开启；数据公开可访问' : '看板已关闭；不再公开展示';
+        } else {
+          const {policy} = await api(`/api/repositories/${row.id}/policy`, 'PATCH', {[key]: !row[key]});
+          Object.assign(row, policy); feedback.textContent = `${caption}已${row[key] ? '开启' : '关闭'}${!row.enabled ? '；项目仍已禁用' : ''}`;
+        }
       } catch (err) { feedback.classList.add('control-error'); feedback.textContent = `${caption}保存失败：${err.message}`; }
       finally { pending = false; features.removeAttribute('aria-busy'); sync(); }
     }, 'project-feature-switch');
@@ -441,6 +455,11 @@ function projectListControls(row) {
     const track = element('span', '', 'switch-track'), value = element('span', '', 'switch-value'); track.setAttribute('aria-hidden', 'true');
     control.append(element('span', caption), track, value); features.append(control); switches.push({control, value, key, caption});
   }
+  group.updateBoard = (next, requestedAt) => {
+    if (pending || next.board_enabled === undefined || requestedAt <= boardSavedAt) return;
+    Object.assign(row, {board_enabled: next.board_enabled, board_state: next.board_state, board_url: next.board_url});
+    sync(); updateBoardChip(group, row);
+  };
   sync();
   const preview = element(registered ? 'a' : 'span', '', 'project-task-preview');
   if (registered) preview.href = `#/projects/${row.id}/activity`;
@@ -448,20 +467,23 @@ function projectListControls(row) {
 }
 let projectActivityPending = false;
 async function refreshProjectActivity() {
-  if (projectActivityPending) return; projectActivityPending = true; const request = renderVersion;
+  if (projectActivityPending) return; projectActivityPending = true; const request = renderVersion, requestedAt = Date.now();
   try {
     const {repositories} = await api(me.role === 'super_admin' ? '/api/installations' : '/api/repositories');
     if (request !== renderVersion || tab !== 'projects' || projectRoute()) return;
     const rows = new Map(repositories.map(row => [row.id, row]));
     for (const line of document.querySelectorAll('#rows .project-list-row')) {
-      const row = rows.get(line.dataset.repositoryId); if (row) updateProjectTaskPreview(line.querySelector('.project-task-preview'), row);
+      const row = rows.get(line.dataset.repositoryId); if (row) {
+        updateProjectTaskPreview(line.querySelector('.project-task-preview'), row);
+        line.querySelector('.project-controls')?.updateBoard?.(row, requestedAt);
+      }
     }
   } catch (err) {
     if (request === renderVersion) for (const preview of document.querySelectorAll('#rows .project-task-preview')) preview.title = `任务数更新失败：${err.message}；点击刷新重试`;
   } finally { projectActivityPending = false; }
 }
 
-// Installed repositories (super administrator): GitHub shows what is installed; nothing works until it is started here.
+// Installed repositories: automation needs activation; board publication has its own switch.
 function syncSummary(syncs = []) {
   if (!syncs.length) return '尚未同步';
   return syncs.map(s => s.error ? `${s.account_name} 同步失败（${s.error}）` : `${s.account_name} 同步于 ${timestamp(s.synced_at).slice(11, 19)}`).join(' · ');
@@ -517,7 +539,7 @@ const removalErrors = {
   repository_deleting: '这个项目正在删除。',
   last_super_admin: '不能删除最后一名活跃的超级管理员。',
   account_has_projects: '还有项目使用这个账号，请先删除这些项目。',
-  project_account_pending: '项目的虚拟电脑或公共配置还有未完成的操作，稍后再删除。',
+  project_account_pending: '项目的虚拟电脑或门禁接入还有未完成的操作，稍后再删除。',
 };
 function removalMessage(err) {
   const code = String(err.message).replace(/^\d+\s*·\s*/, '');
@@ -547,25 +569,30 @@ async function restoreInstalled(row, after) {
   await after();
 }
 const gateLabels = { none: ['门禁未接入', 'info'], configured: ['门禁已配置', 'warning'], live: ['门禁已生效', 'success'], unknown: ['门禁未知', 'info'] };
-const dashboardLabels = { none: ['看板未接入', 'info'], registered: ['看板待发布', 'warning'], published: ['看板已接入', 'success'], unknown: ['看板未知', 'info'] };
 function integrationChip(caption, tone, href, title) {
   if (!href) { const chip = badge(caption, tone); if (title) chip.title = title; return chip; }
   const link = element('a', caption, `status status-${tone} status-link`);
   link.href = href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = title || href;
   return link;
 }
-function installedIntegration(integration) {
-  let chips = [badge('接入未检查', 'info')];
-  if (integration) {
-    const gate = gateLabels[integration.gate_state] || gateLabels.unknown, dashboard = dashboardLabels[integration.dashboard_state] || dashboardLabels.unknown;
-    chips = [integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail),
-      integrationChip(dashboard[0], dashboard[1], integration.dashboard_url, integration.dashboard_detail)];
-  }
-  // Marked so that updateIntegrationChips can swap them in place.
-  chips.forEach(chip => { chip.dataset.integration = ''; });
-  return chips;
+function boardChip(row) {
+  const published = row.board_enabled && row.board_state === 'published';
+  const chip = integrationChip(!row.board_enabled ? '看板已关闭' : published ? '查看看板' : '看板采集中',
+    !row.board_enabled ? 'info' : published ? 'success' : 'warning', published ? row.board_url : null,
+    row.board_enabled ? '看板数据公开可访问' : '开启仓库列表中的看板开关后对外提供');
+  chip.dataset.boardStatus = ''; return chip;
 }
-// Replaces the gate and dashboard chips of rows already on the list; nothing else in a row is redrawn.
+function updateBoardChip(group, row) {
+  const current = group.closest('.project-list-row')?.querySelector('[data-board-status]');
+  if (current) current.replaceWith(boardChip(row));
+}
+function installedIntegration(integration, row) {
+  const gate = integration ? gateLabels[integration.gate_state] || gateLabels.unknown : null;
+  const chip = gate ? integrationChip(gate[0], gate[1], integration.gate_url, integration.gate_detail) : badge('门禁未检查', 'info');
+  chip.dataset.integration = '';
+  return row ? [chip, boardChip(row)] : [chip];
+}
+// Gate checks and board publication refresh independently without redrawing the row.
 function updateIntegrationChips(integrations) {
   const byId = new Map(integrations.map(item => [item.repository_id, item]));
   for (const line of document.querySelectorAll('#rows .project-list-row')) {
@@ -581,7 +608,7 @@ function installedActions(row, after) {
     try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); $('message').textContent = ''; } catch (err) { error(err); }
     await after();
   };
-  // Gate PR, board branch and dashboard registration live in one dialog and run item by item.
+  // Gate onboarding keeps its existing PR flow; boards are managed by the list switch.
   actions.append(button('公共配置', () => openQuickstart(row, after), ''));
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
@@ -625,26 +652,23 @@ $('activation-form').addEventListener('submit', async event => {
   } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
 });
 
-// Shared configuration: the gate PR, the board branch and the dashboard registration. Each item has its own checks
-// and can run alone; running all of them still lets an item that cannot run stop without stopping the others.
+// Source gate onboarding; board execution items have moved to the repository list switch.
 const quickstartView = document.createElement('dialog'); quickstartView.id = 'quickstart-view'; quickstartView.setAttribute('aria-labelledby', 'quickstart-title');
 quickstartView.innerHTML = `<h2 id="quickstart-title">公共配置</h2>
 <p class="muted" id="quickstart-hint"></p>
 <p id="quickstart-preflight" class="muted"></p>
 <ol id="quickstart-steps" class="quickstart-steps"></ol>
 <p id="quickstart-error" class="view-error" role="alert"></p>
-<div class="actions"><button type="button" id="quickstart-start">全部执行</button><button type="button" class="quiet" id="quickstart-close">关闭</button></div>`;
+<div class="actions"><button type="button" class="quiet" id="quickstart-close">关闭</button></div>`;
 document.body.append(quickstartView);
-let quickstartRow = null, quickstartAfter = null, quickstartTimer = null, quickstartState = { run: null, items: {} }, quickstartWasBusy = false;
+let quickstartRow = null, quickstartAfter = null, quickstartTimer = null, quickstartState = { run: null, items: {} }, quickstartWasBusy = false, quickstartStarting = false;
 const quickstartStepStatus = { pending: '等待', running: '进行中', done: '完成', skipped: '跳过', blocked: '需人工', failed: '失败' };
 const quickstartErrors = { repository_not_found: 'GitHub App 读不到这个仓库。',
-  github_app_required: '公共配置只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', github_credentials_missing: 'GitHub App 账号没有保存私钥。',
+  github_app_required: '门禁接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', github_credentials_missing: 'GitHub App 账号没有保存私钥。',
   public_address_not_verified: '请先在安装向导验证 webhook 公网地址。' };
 const quickstartBusy = run => !!run && ['running', 'queued'].includes(run.state);
-function quickstartItemList(row) {
-  return [['gate_pr', '门禁 PR', '给源码仓开一个 PR，加入 CI-workflow 门禁和工作流，合入后门禁生效。'],
-    ['board', '单仓看板', `由 bot 在 webhook 入口托管 ${row.full_name} 的看板并自动更新。公开仓安装后自动提供；执行此项会公开私有仓快照。`],
-    ['dashboard', 'Dashboard 登记', '由 bot 提供公共 Dashboard 并自动汇总已启用的仓库；执行此项会公开私有仓快照，无需外部仓库或登记 PR。']];
+function quickstartItemList() {
+  return [['gate_pr', '门禁 PR', '给源码仓开一个 PR，加入 CI-workflow 门禁和工作流，合入后门禁生效。']];
 }
 function renderQuickstart() {
   if (!quickstartRow) return;
@@ -658,13 +682,12 @@ function renderQuickstart() {
     li.append(element('strong', `${title} · ${item ? (quickstartStepStatus[item.status] || item.status) : '未执行'}`), element('p', description, 'muted'));
     if (item) li.append(element('p', item.detail));
     if (item?.url) { const link = element('a', '查看详情', 'result-link'); link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; li.append(link); }
-    const execute = button('执行', () => startQuickstart([id])); execute.disabled = busy; execute.setAttribute('aria-label', '执行' + title); li.append(execute);
+    const execute = button('执行', () => startQuickstart([id])); execute.disabled = busy || quickstartStarting; execute.setAttribute('aria-label', '执行' + title); li.append(execute);
     list.append(li);
   }
   // Item problems are explained on the item; only a run the preflight stopped needs a message here.
   const stopped = run && preflight && ['blocked', 'failed'].includes(preflight.status);
   $('quickstart-error').textContent = stopped ? quickstartErrors[run.error] || run.error || '' : '';
-  $('quickstart-start').disabled = busy;
 }
 async function refreshQuickstart() {
   if (!quickstartRow) return;
@@ -675,18 +698,19 @@ async function refreshQuickstart() {
   else if (quickstartWasBusy) { quickstartWasBusy = false; if (quickstartAfter) quickstartAfter(); }
 }
 async function startQuickstart(steps) {
-  if (!quickstartRow) return;
-  $('quickstart-error').textContent = ''; $('quickstart-start').disabled = true;
+  if (!quickstartRow || quickstartStarting || quickstartBusy(quickstartState.run)) return;
+  quickstartStarting = true; $('quickstart-error').textContent = '';
+  $('quickstart-steps').querySelectorAll('button').forEach(button => { button.disabled = true; });
   try { await api(`/api/projects/${quickstartRow.id}/quickstart`, 'POST', steps ? { steps } : {}); quickstartWasBusy = true; await refreshQuickstart(); }
-  catch (err) { $('quickstart-error').textContent = err.message; $('quickstart-start').disabled = false; }
+  catch (err) { $('quickstart-error').textContent = err.message; }
+  finally { quickstartStarting = false; $('quickstart-steps').querySelectorAll('button').forEach(button => { button.disabled = quickstartBusy(quickstartState.run); }); }
 }
 async function openQuickstart(row, after) {
   quickstartRow = row; quickstartAfter = after; quickstartState = { run: null, items: {} }; quickstartWasBusy = false;
   $('quickstart-title').textContent = '公共配置 · ' + row.full_name;
-  $('quickstart-hint').textContent = '三项可以单独执行，也可以全部执行；某一项条件不满足只停这一项，其他照常进行。全程使用 GitHub App 安装令牌，缺少权限时在对应项里列出。';
+  $('quickstart-hint').textContent = '向源仓提出门禁配置 PR。看板由仓库列表的开关管理，不会随门禁 PR 自动开启。';
   $('quickstart-error').textContent = ''; renderQuickstart();
   quickstartView.showModal();
   try { await refreshQuickstart(); } catch {}
 }
 $('quickstart-close').addEventListener('click', () => { clearTimeout(quickstartTimer); quickstartRow = null; quickstartView.close(); });
-$('quickstart-start').addEventListener('click', () => startQuickstart(null));

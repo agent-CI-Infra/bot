@@ -1,4 +1,4 @@
-import { boardLocation, publicOrigin, publishedRepositories } from '../public-board/state.js';
+import { boardLocation, publicOrigin, publishedRepositories, boardStatus } from '../public-board/state.js';
 import type { Json } from '../core/security.js';
 import type { Store, Row } from '../storage/database.js';
 import { appJwt, revokeInstallationToken } from '../github/client.js';
@@ -100,7 +100,7 @@ export class IntegrationChecker {
 
   private async dashboard(full: string, _token: string): Promise<{ state: DashboardState; detail: string }> {
     const row = publishedRepositories(this.store).find(row => String(row.full_name).toLowerCase() === full.toLowerCase());
-    return !row ? { state: 'none', detail: '私有仓快照尚未在本地启用公开' }
+    return !row ? { state: 'none', detail: '看板已关闭' }
       : row.active_path ? { state: 'published', detail: '已由 bot 在 webhook 入口托管' }
       : { state: 'registered', detail: '已由 bot 托管，等待首轮采集' };
   }
@@ -150,8 +150,10 @@ export class IntegrationChecker {
   private view(repositoryId: string): Json | null {
     const row: Row | undefined = this.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', repositoryId);
     if (!row) return null;
+    const publication = boardStatus(this.store, repositoryId);
     return { repository_id: row.repository_id, gate_state: row.gate_state, gate_detail: row.gate_detail,
-      dashboard_state: row.dashboard_state, dashboard_detail: row.dashboard_detail, checked_at: row.checked_at,
+      dashboard_state: publication.state === 'off' ? 'none' : publication.state === 'published' ? 'published' : 'registered',
+      dashboard_detail: !publication.enabled ? '看板已关闭' : publication.state === 'published' ? '已由 bot 在 webhook 入口托管' : '已由 bot 托管，等待首轮采集', checked_at: row.checked_at,
       dashboard_url: publicOrigin(this.store) ? publicOrigin(this.store) + '/dashboard/' : null,
       board_url: publicOrigin(this.store) ? boardLocation(publicOrigin(this.store), String(this.store.get('SELECT full_name FROM installed_repositories WHERE repository_id=? LIMIT 1', repositoryId)?.full_name)).url : null,
       stale: Date.now() - Date.parse(String(row.checked_at)) > CACHE_MS };
