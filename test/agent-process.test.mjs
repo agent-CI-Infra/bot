@@ -6,6 +6,9 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import childProcess from 'node:child_process';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Workspace } from '../dist/agent/workspace.js';
@@ -417,6 +420,31 @@ test('publication still rejects a registered branch outside bot/issue-', async t
   h.store.run("INSERT INTO bot_branches VALUES('101','contributor','owner')");
   const publisher = new Publisher(h.store, { defaultBranch: 'main' }, h.store.get("SELECT * FROM tasks WHERE id='owner'"), async () => assert.fail('must reject before network access'));
   await assert.rejects(publisher.branch({ branch: 'contributor', owner_task_id: 'owner' }), error => error.code === 'branch_not_owned');
+});
+
+test('fresh start keys reuse a living runner PID without killing it or spawning another process',async t=>{
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:'living-fixture-key',model_name:'fixture'})).value.model;
+  await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
+  const root=join(h.directory,'living-agent'),dir=join(root,'agent');mkdirSync(dir,{recursive:true});
+  const saved={state:'running',pid:process.pid,boot:'fixture-boot'};writeFileSync(join(dir,'state.json'),JSON.stringify(saved));
+  // Keep the computer's boot identity local to this fixture; the saved PID and signal-0 liveness checks are real.
+  const readFile=fsPromises.readFile,read=t.mock.method(fsPromises,'readFile',(path,...args)=>path==='/proc/1/stat'
+    ?Promise.resolve('1 (fixture) '+[...Array(19).fill('0'),saved.boot].join(' ')):readFile(path,...args));
+  const spawned=t.mock.method(childProcess,'spawn',()=>assert.fail('a living agent must not be spawned again'));
+  const kill=process.kill.bind(process),signals=t.mock.method(process,'kill',(pid,signal)=>{assert.equal(pid,saved.pid);assert.equal(signal,0);return kill(pid,signal);});
+  syncBuiltinESMExports();
+  try{
+    const starts=[],manager={call:async(_method,_path,input)=>{
+      if(input.request.type==='workspace_agent_start'){starts.push(input.operation_id);return {ok:true,result:await agentOperation(input.request,root)};}
+      return {ok:true,result:input.request.type==='workspace_agent_poll'?{state:'completed',result:{summary:'Reviewed.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}}:{written:true}};
+    }};
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,workspace_id,generation) VALUES('living','101','review.issue','running','living',1,'living-workspace',1)");
+    const task=h.store.get("SELECT * FROM tasks WHERE id='living'"),workspace=new Workspace(h.store,manager,task,new Redactor(),async()=>{},()=>{});
+    for(let i=0;i<2;i++)await agentLoop(h.store,task,workspace,new Redactor(),async()=>{},{mode:'review'});
+    assert.equal(new Set(starts).size,2);assert.equal(signals.mock.callCount(),2);assert.equal(spawned.mock.callCount(),0);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir,'state.json'),'utf8')),saved);
+  }finally{read.mock.restore();spawned.mock.restore();signals.mock.restore();syncBuiltinESMExports();}
 });
 
 test('the runner mailbox waits for publication replies and preserves only the exact waiting Pi process', async t => {

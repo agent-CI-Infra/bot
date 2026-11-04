@@ -46,6 +46,13 @@ export function failureCause(code: string, state?: string): FailureCause {
 
 // These states are polled by the engine and continue on their own; every other paused or failed state waits for 重试.
 const automatic = new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
+const environmentFailures = new Set(['execution_interrupted','workspace_init_failed','workspace_write_failed',
+  'workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable']);
+// waiting_environment covers both unmet conditions and failed attempts. Only the latter consume the retry burst;
+// configuration/PR-head waits and manager availability checks keep polling on their own schedule.
+export function isAttemptFailure(code: string|null|undefined, state: string) {
+  return state==='retry_wait'&&code!=='github_rate_limited'||state==='waiting_environment'&&environmentFailures.has(code||'');
+}
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
@@ -91,9 +98,9 @@ const causeActions: Record<FailureCause,(state:string)=>string> = {
 export function explainFailure(code: string|null|undefined, state = 'failed', detail?: string, retryCycleStartedAt?: number|null) {
   if (!code) return null;
   const cause = failureCause(code, state);
-  if(retryCycleStartedAt!=null&&automatic.has(state)&&code!=='github_rate_limited')return {
+  if(retryCycleStartedAt!=null&&isAttemptFailure(code,state))return {
     cause,label:code==='model_unavailable'&&detail?.includes('连续 90 秒没有 token 输出')?'模型连续 90 秒没有 token 输出':causes[cause].label,
-    action:'同一种失败已连续出现 5 次，已进入每 8 小时一次的自动重试周期；下次大约 8 小时后再试，也可以点「重试」立即尝试。',automatic:true,
+    action:'同一种失败已连续出现 5 次，已进入每 8 小时一次的自动重试周期；下次大约 8 小时后再试，也可以点「重试」立即尝试。',automatic:true,retry_cycle:true,
   };
   // Only token inactivity gets this explanation; DNS, connection failures and old logs keep their cause.
   if (code === 'model_unavailable' && detail?.includes('连续 90 秒没有 token 输出')) return {
