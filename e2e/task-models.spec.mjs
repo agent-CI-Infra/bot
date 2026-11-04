@@ -41,6 +41,7 @@ test('任务表按需配置规则，模型独立管理且项目不能修改共�
     await expect(common.locator('[data-rule-source=".bot/guide.md"]')).toHaveText('仓库文件');
     await expect(row('review.pr').locator('[data-rule-source]')).toHaveText('内置默认');
     await expect(row('review.pr')).toContainText('.bot/rules/pr-review.md');
+    await expect(row('release.notes').locator('.task-rule-source')).toHaveAttribute('title', '内置默认：生效（release-notes-v1）');
     await expect(page.getByRole('button', { name: '规则来源', exact: true })).toHaveCount(0);
     await expect(page.getByRole('dialog')).toHaveCount(0);
     expect((await common.boundingBox()).y).toBeLessThan((await table.boundingBox()).y);

@@ -810,7 +810,7 @@ function ruleSource(path) {
   if (path) source.dataset.ruleSource = path;
   const name = row ? layerNames[row.source] : !path ? '内置默认' : current.rules ? '未配置' : '暂未读取';
   source.append(badge(name, row?.source === 'repository' ? 'info' : row?.source === 'console' ? 'success' : ''));
-  source.title = Object.entries(layerNames).map(([key, label]) => `${label}：${row?.source === key ? '生效' : row?.layers.some(layer => layer.source === key) ? '被覆盖' : '未配置'}`).join('；');
+  source.title = !path ? '内置默认：生效（release-notes-v1）' : Object.entries(layerNames).map(([key, label]) => `${label}：${row?.source === key ? '生效' : row?.layers.some(layer => layer.source === key) ? '被覆盖' : '未配置'}`).join('；');
   return source;
 }
 function updateRuleSources() {
