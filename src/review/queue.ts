@@ -1,5 +1,6 @@
 import { type Store } from '../storage/database.js';
 import { randomId, type Json } from '../core/security.js';
+import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
@@ -17,7 +18,7 @@ export function reviewRequestsCode(issue: any, result: any) {
 // Mentions are plain text, independent of GitHub accounts. Escape configured names before matching.
 export function commentReviewKind(store: Store, repositoryId: string, event: string, payload: Json): 'review.issue' | 'review.pr' | null {
   const issue = payload.issue as any, comment = payload.comment as any, configured = process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot';
-  if (event !== 'issue_comment' || payload.action !== 'created' || (payload.sender as Json | undefined)?.type === 'Bot' || issue?.state !== 'open'
+  if (event !== 'issue_comment' || payload.action !== 'created' || byBot(payload, comment?.body) || issue?.state !== 'open'
     || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof comment?.body !== 'string'
     || !/^[1-9]\d*$/.test(String(comment.id ?? '')) || typeof comment.id === 'number' && !Number.isSafeInteger(comment.id)
     || configured.trim().toLowerCase() === 'off') return null;
@@ -75,25 +76,37 @@ export function pullRequestNeeded(store: Store, repositoryId: string, event: str
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   return !!policy?.enabled && !!policy.review_enabled && updateTrigger(event, payload)?.kind === 'review.pr' && updateEnabled(policy, 'review.pr');
 }
-// Updates arriving close together review once: while a review of the object waits to start, it will read the latest state
-// anyway, and is given the updates that joined it.
-const waitingStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment'];
-function queueUpdate(store: Store, repositoryId: string, policy: any, event: string, payload: Json, delivery: string, currentPullRequest?: Json) {
-  const update = updateTrigger(event, payload);
-  if (!update || !updateEnabled(policy, update.kind)) return 0;
-  const pending = store.get(`SELECT id,input FROM tasks WHERE repository_id=? AND kind=? AND object_number=? AND status IN (${waitingStates.map(() => '?').join(',')}) ORDER BY created_at LIMIT 1`,
-    repositoryId, update.kind, update.number, ...waitingStates);
+// A durable inbox keeps updates independent of prepare's asynchronous input snapshot.
+const activeStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'running', 'preparing', 'publishing', 'result_ready'];
+function queueUpdate(store: Store, repositoryId: string, policy: any, event: string, payload: Json, delivery: string, currentPullRequest?: Json, mention?: 'review.issue' | 'review.pr') {
+  const update = mention ? { kind: mention, number: Number((payload.issue as any).number), trigger: { reason: 'mention', actor: String((payload.sender as any)?.login || ''), url: String((payload.comment as any)?.html_url || '') } } : updateTrigger(event, payload);
+  if (!update || !mention && !updateEnabled(policy, update.kind)) return 0;
+  const commentKey=mention?`${repositoryId}:${update.kind}:${update.number}:comment:${(payload.comment as any).id}`:null;
+  if(commentKey&&(store.get('SELECT 1 FROM tasks WHERE unique_key=?',commentKey)||store.get('SELECT 1 FROM review_updates WHERE event_key=?',commentKey)))return 0;
+  const pr = ((update as any).pullRequest || currentPullRequest) as any;
+  if (update.kind === 'review.pr' && (!pr || pr.number !== update.number || pr.state !== 'open' || pr.draft === true)) return 0;
+  const active = store.all(`SELECT * FROM tasks WHERE repository_id=? AND kind=? AND object_number=? AND status IN (${activeStates.map(() => '?').join(',')})
+    ORDER BY CASE WHEN status IN ('running','preparing','publishing','result_ready') THEN 0 ELSE 1 END,
+    (SELECT claimed_at FROM task_claims WHERE task_id=tasks.id) DESC,created_at DESC,rowid DESC`, repositoryId, update.kind, update.number, ...activeStates);
+  // A discussion on a new head must never enter the old checkout.
+  const running = active.find(task => ['running','preparing','publishing','result_ready'].includes(task.status));
+  const sameHead = (task: any) => update.kind !== 'review.pr' || task.head_sha === pr.head?.sha;
+  const pending = running && !running.publication_started && sameHead(running) ? running
+    : active.find(task => !['running','preparing','publishing','result_ready'].includes(task.status) && !task.publication_started && sameHead(task));
+  const trigger = { event, action: payload.action, ...update.trigger };
   if (pending) {
-    // The waiting review is told what happened meanwhile (the discussion it reads holds the content), up to 20 updates.
-    const waiting = JSON.parse(pending.input || '{}'), merged = Array.isArray(waiting.merged_updates) ? waiting.merged_updates : [];
-    if (merged.length < 20) store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...waiting, merged_updates: [...merged, { event, action: payload.action, ...update.trigger }] }), pending.id);
+    const data = { ...trigger, object: payload.issue || payload.pull_request, comment: payload.comment, review: payload.review };
+    const inserted = store.run('INSERT OR IGNORE INTO review_updates(task_id,event_key,data) VALUES(?,?,?)', pending.id, commentKey||'delivery:'+delivery, JSON.stringify(data));
+    if (inserted.changes) {
+      const input = JSON.parse(pending.input || '{}');
+      store.run('UPDATE tasks SET input=? WHERE id=?', JSON.stringify({ ...input, merged_updates: [...(input.merged_updates || []), trigger] }), pending.id);
+    }
     return 0;
   }
-  const input = { ...payload, trigger: { event, action: payload.action, ...update.trigger } };
-  if (update.kind === 'review.issue') return enqueue(store, repositoryId, 'review.issue', update.number, null, input, delivery, null, null, delivery) ? 1 : 0;
-  const pr = (update.pullRequest || currentPullRequest) as any;
-  if (!pr || pr.number !== update.number || pr.state !== 'open' || pr.draft === true) return 0;
-  return enqueue(store, repositoryId, 'review.pr', update.number, String(pr.head?.sha || ''), { ...input, pull_request: pr }, delivery, null, null, delivery) ? 1 : 0;
+  const publishing = active.find(task => task.publication_started);
+  const input = { ...payload, trigger, ...(publishing ? { wait_for_review: publishing.id } : {}) };
+  return enqueue(store, repositoryId, update.kind, update.number, update.kind === 'review.pr' ? String(pr.head?.sha || '') : null,
+    update.kind === 'review.pr' ? { ...input, pull_request: pr } : input, delivery, null, mention ? String((payload.comment as any).id) : null, mention ? null : delivery) ? 1 : 0;
 }
 // A person adding the development label after the review starts the development that review found requested.
 // Labels added before the review finishes are checked when the review is published instead.
@@ -130,6 +143,7 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   const object = (event === 'issues' ? payload.issue : payload.pull_request) as Json | undefined;
   const number = Number(object?.number || payload.number), action = payload.action;
+  if (object && Number.isSafeInteger(number) && number>0 && ['opened','reopened','closed'].includes(String(action))) reviewObjectState(store, repositoryId, event === 'issues' ? 'review.issue' : 'review.pr', number, action === 'closed');
   if (object && (action === 'closed' || action === 'converted_to_draft')) {
     store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft' WHERE repository_id=? AND object_number=? AND kind LIKE ? AND status NOT IN ('succeeded','pr_opened','completed')",
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
@@ -139,11 +153,7 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
     const kind = commentReviewKind(store, repositoryId, event, payload);
     // A comment without a mention may still be an update to review.
     if (!kind) return queueUpdate(store, repositoryId, policy, event, payload, delivery, currentPullRequest);
-    const issue = payload.issue as Json, commentId = String((payload.comment as Json).id), issueNumber = Number(issue.number);
-    if (kind === 'review.issue') return enqueue(store, repositoryId, kind, issueNumber, null, payload, delivery, null, commentId) ? 1 : 0;
-    if (!currentPullRequest || currentPullRequest.number !== issue.number || currentPullRequest.state !== 'open' || currentPullRequest.draft === true) return 0;
-    return enqueue(store, repositoryId, kind, issueNumber, String((currentPullRequest.head as Json | undefined)?.sha || ''),
-      { ...payload, pull_request: currentPullRequest }, delivery, null, commentId) ? 1 : 0;
+    return queueUpdate(store, repositoryId, policy, event, payload, delivery, currentPullRequest, kind);
   }
   // Each trigger can be turned off per repository; drafts and closed pull requests are never reviewed.
   if (event === 'issues' && action === 'opened' && object && !object.pull_request) return policy.review_issues && enqueue(store, repositoryId, 'review.issue', number, null, payload, delivery) ? 1 : 0;
@@ -153,5 +163,5 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
     const head = object.head as Json | undefined;
     return enqueue(store, repositoryId, 'review.pr', number, String(head?.sha || ''), payload, delivery) ? 1 : 0;
   }
-  return queueUpdate(store, repositoryId, policy, event, payload, delivery);
+  return queueUpdate(store, repositoryId, policy, event, payload, delivery, currentPullRequest);
 }

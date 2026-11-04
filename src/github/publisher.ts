@@ -5,7 +5,7 @@ import { implementationText, reviewText } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 
 export class Publisher {
-  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly onHeadWait:(value:any)=>void=()=>{}){}
+  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly onHeadWait:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){}
   // replayable effects (such as adding a label) are idempotent on GitHub, so an unknown response may be sent again.
   async effect(key:string,kind:string,request:any,send:()=>Promise<any>,find:()=>Promise<any>,replayable=false){
     const id=operationId(this.task.id+':'+key),marker=`<!-- dept-bot:${id} -->`;
@@ -20,8 +20,10 @@ export class Publisher {
     if(existing){this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(existing),id);return existing;}
     if(!replayable&&['unknown','inflight'].includes(row!.state))return stop('github_publication_unknown','waiting_publication',`GitHub 发布操作 ${key}（${kind}）上次请求没有得到确定结果（状态=${row!.state}），在 GitHub 上也没找到这次写入，已暂停以免重复发布。`);
     this.store.run("UPDATE github_effects SET state='inflight' WHERE id=?",id);
-    try{await this.validate();const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
+    const previous=this.github.beforeWrite;
+    try{await this.validate();if(this.beforeWrite)this.github.beforeWrite=this.beforeWrite;const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
     catch(error){this.store.run('UPDATE github_effects SET state=? WHERE id=?',error instanceof TaskError&&error.code==='github_response_unknown'?'unknown':'pending',id);throw error;}
+    finally{this.github.beforeWrite=previous;}
   }
   marker(key:string){return `<!-- dept-bot:${operationId(this.task.id+':'+key)} -->`;}
   async discussion(key:string,body:string){

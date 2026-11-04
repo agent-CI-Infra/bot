@@ -130,6 +130,14 @@ export class Store {
     extend('tasks', { wait_count: 'INTEGER NOT NULL DEFAULT 0' });
     // rate_limit_bucket: the GitHub window (github_rate_limits.bucket) that refused the task's last request, while it waits.
     extend('tasks', { rate_limit_bucket: 'TEXT' });
+    extend('tasks', { review_update_cursor: 'INTEGER NOT NULL DEFAULT 0', model_started: 'INTEGER NOT NULL DEFAULT 0', publication_started: 'INTEGER NOT NULL DEFAULT 0' });
+    this.db.exec(`CREATE TABLE IF NOT EXISTS review_updates(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL REFERENCES tasks(id),event_key TEXT NOT NULL UNIQUE,data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS review_updates_task ON review_updates(task_id,id);
+      CREATE TABLE IF NOT EXISTS review_objects(repository_id TEXT NOT NULL REFERENCES repositories(id),kind TEXT NOT NULL,object_number INTEGER NOT NULL,closed_at INTEGER,
+        PRIMARY KEY(repository_id,kind,object_number));
+      CREATE TABLE IF NOT EXISTS review_sessions(repository_id TEXT NOT NULL REFERENCES repositories(id),kind TEXT NOT NULL,object_number INTEGER NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id),messages TEXT NOT NULL,workspace_id TEXT,generation INTEGER,head_sha TEXT,snapshot TEXT NOT NULL,
+        PRIMARY KEY(repository_id,kind,object_number));`);
     rateLimitStorage(this);
     externalStorage(this);
     boardStorage(this);

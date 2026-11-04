@@ -64,7 +64,7 @@ const codeActions: Record<string,string> = {
   bot_branch_history_changed:'点「重试」会基于当前分支重新规划。',
   revision_scope_unconfirmed:'在 PR 上给出明确的修改意见后点「重试」。',
   create_pull_request_required:'模型没有通过 create_pull_request 提交修改。点「重试」会重新开始一次尝试；反复出现可换用更强的模型。',
-  agent_context_too_large:'减少仓库 bot 规则或提示文件的大小后点「重试」。',
+  agent_context_too_large:'压缩后仍超过请求上限。点「重试」会用空检视会话重新读取最新讨论；仍超限时减少仓库 bot 规则或提示文件。',
   // Raised only by versions that still limited rule file sizes.
   bot_rule_too_large:'规则文件和 skill 已不再限制大小，点「重试」即可继续。',
   too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',

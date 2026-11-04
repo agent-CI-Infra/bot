@@ -20,11 +20,29 @@ export async function agentOperation(input,root){
     if(end<bytes.length)while(end>start&&(bytes[end]&0xc0)===0x80)end--;
     return {...live,running:true,output:bytes.subarray(start,end).toString('utf8'),offset:end,state:'running'};
   }
-  if(input.type==='workspace_agent_config'){
-    if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_config');
-    const path=dir+'/input.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
+  if(input.type==='workspace_agent_session'){
+    if(!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_session_offset');
+    const data=await readFile(dir+'/history.json');
+    return {base64:data.subarray(input.offset,input.offset+45000).toString('base64'),size:data.length};
+  }
+  if(input.type==='workspace_agent_continue'){
+    await writeFile(dir+'/continue.json','{}',{mode:0o600});return {written:true};
+  }
+  if(input.type==='workspace_agent_boundary'){
+    if(!/^[a-f0-9]{48}$/.test(input.request_id||''))throw new Error('invalid_agent_boundary');
+    const current=JSON.parse(await readFile(dir+'/boundary.json','utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
+    const bytes=Buffer.from(input.base64||'','base64');
+    if(bytes.length>45000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>32*1024*1024)throw new Error('invalid_boundary_reply');
+    const path=dir+'/boundary-reply-'+input.request_id,file=await open(path+'.tmp',input.offset===0?'w':'r+',0o600);
+    try{if((await file.stat()).size!==input.offset)throw new Error('boundary_reply_offset');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
+    if(input.final)await rename(path+'.tmp',path+'.json');return {written:true};
+  }
+  if(input.type==='workspace_agent_config'||input.type==='workspace_agent_history'){
+    if(typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>(input.type==='workspace_agent_history'?32:2)*1024*1024)throw new Error('invalid_agent_config');
+    const prefix=input.type==='workspace_agent_history'?'/restore':'/input';
+    const path=dir+prefix+'.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
     try{if((await file.stat()).size!==input.offset)throw new Error('agent_config_offset');const bytes=Buffer.from(input.base64,'base64');await file.write(bytes,0,bytes.length,input.offset);}finally{await file.close();}
-    if(input.final)await rename(path,dir+'/input.json');return {written:true};
+    if(input.final)await rename(path,dir+prefix+'.json');return {written:true};
   }
   if(input.type==='workspace_agent_start'){
     const old=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>null);
@@ -37,13 +55,14 @@ export async function agentOperation(input,root){
   }
   if(input.type==='workspace_agent_poll'){
     const state=await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({state:'missing'}));
-    if(state.state==='running')try{if(state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
+    if(['running','review_ready','review_resuming'].includes(state.state)&&state.pid)try{if(state.boot!==undefined&&state.boot!==boot)throw new Error();process.kill(state.pid,0);}catch{state.state='interrupted';}
+    const boundary=await readFile(dir+'/boundary.json','utf8').then(JSON.parse).catch(()=>null);
     const request=await readFile(dir+'/request.json','utf8').then(JSON.parse).catch(()=>null);
     const token_request=await readFile(dir+'/token-request.json','utf8').then(JSON.parse).catch(()=>null);
     const pull_request=await readFile(dir+'/pr-request.json','utf8').then(JSON.parse).catch(()=>null);
     const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').filter(Boolean);
     const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-    return {...state,request,token_request,pull_request,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
+    return {...state,boundary,request,token_request,pull_request,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
   }
   // The answer to the agent's github_read_token request: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){

@@ -6,7 +6,7 @@ import {TaskEngine} from '../dist/agent/engine.js';
 import {treeSha} from '../dist/agent/common.js';
 
 export async function emptyRepositoryFixture(t,options={}){
-  let branch='empty',engine;const comments=[],operations=[],commit='a'.repeat(40),tree=options.files?treeSha(options.files):'b'.repeat(40);
+  let branch='empty',generation=1,engine;const comments=[],operations=[],commit='a'.repeat(40),tree=options.files?treeSha(options.files):'b'.repeat(40);
   const server=createServer(async(req,res)=>{
     let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},path=new URL(req.url,'http://fixture').pathname;
     const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
@@ -34,7 +34,7 @@ export async function emptyRepositoryFixture(t,options={}){
       const result=body.request.type==='workspace_snapshot'?{tree_sha:body.request.tree_sha}:body.request.type==='workspace_agent_poll'?{state:'completed',result:{summary:'Reviewed the initial commit.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}}:{};
       return {ok:true,result};
     }
-    return {repository_id:'101',state:'ready',generation:1,desired:'ready',revision:1};
+    return {repository_id:'101',state:'ready',generation,desired:'ready',revision:1};
   }};
   const h=await harness(undefined,manager,store=>({engine:engine=new TaskEngine(store,manager,githubUrl)})),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:'fixture-key',model_name:'fixture-model'})).value.model;
@@ -43,6 +43,7 @@ export async function emptyRepositoryFixture(t,options={}){
   const taskId=h.store.get('SELECT id FROM tasks').id;
   const result={...h,adminBase:h.admin,admin,password,engine,taskId,githubUrl,comments,operations,commit,
     setBranch(value){branch=value;},
+    setGeneration(value){generation=value;},
     async run(){engine.tick();await Promise.all(engine.active.values());return h.store.get('SELECT * FROM tasks WHERE id=?',taskId);},
     due(){h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',taskId);},
     async close(){await engine.close();await h.stop();await new Promise(resolve=>server.close(resolve));rmSync(h.directory,{recursive:true,force:true});}};

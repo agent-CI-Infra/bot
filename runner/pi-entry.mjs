@@ -2,13 +2,14 @@ import {readFile,writeFile,rename,unlink,appendFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {randomBytes} from 'node:crypto';
-import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager} from '@earendil-works/pi-coding-agent';
+import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
 import {workspace} from './workspace.mjs';
 import {waitModelReply} from './model-reply.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
-const save=async value=>{await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let steps=0,session,finished,grant=null;
+const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
+const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
+let steps=0,session,finished,grant=null,requestFailure;
 // Serialize model and tool events in execution order; mask every issued token before it reaches disk.
 const secrets=new Set(),rejectedNotes=new Set();let events=Promise.resolve();
 const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
@@ -36,11 +37,19 @@ async function createPullRequest(args){
     }
   }finally{await unlink(dir+'/pr-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
 }
+// The control plane answers only between turns, after all tool results have entered history.
+async function boundary(stage){
+  const id=randomBytes(24).toString('hex'),reply=dir+'/boundary-reply-'+id+'.json';
+  await writeFile(dir+'/boundary.tmp',JSON.stringify({id,stage}),{mode:0o600});await rename(dir+'/boundary.tmp',dir+'/boundary.json');
+  try{for(;;){const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;await new Promise(resolve=>setTimeout(resolve,50));}}
+  finally{await unlink(dir+'/boundary.json').catch(()=>{});await unlink(reply).catch(()=>{});}
+}
 const server=createServer(async(req,res)=>{
   try{
     // Any number of model requests per task; only the chat completion endpoint is proxied.
     if(req.url!=='/v1/chat/completions'||req.method!=='POST')throw new Error('model_request_not_allowed');
-    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes>2*1024*1024)throw new Error('model_request_too_large');chunks.push(chunk);}const raw=Buffer.concat(chunks).toString('utf8');
+    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes>2*1024*1024){requestFailure='agent_context_too_large';throw new Error(requestFailure);};chunks.push(chunk);}const raw=Buffer.concat(chunks).toString('utf8');
+    if(estimateTokens({role:'user',content:raw,timestamp:Date.now()})+8192>128000){requestFailure='agent_context_too_large';throw new Error(requestFailure);}
     const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:JSON.parse(raw)}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
     const response=await waitModelReply(dir,id);await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
     for(const call of response.rejected_note_calls||[])rejectedNotes.add(call);
@@ -59,7 +68,7 @@ try{
       // Start metadata deliberately excludes file contents and publication payloads.
       await writeEvent({type:'tool_start',name,call_id:id,...(['read_file','write_file'].includes(name)?{path:args.path}:name==='run_command'?{command:args.command}:{})});
       let result;
-      if(tool.function.name==='finish_review'){finished=args;setTimeout(()=>void session.abort(),10);result={finished:true};}
+      if(tool.function.name==='finish_review'){finished=args;result={finished:true};}
       else if(tool.function.name==='create_pull_request'){
         result=await createPullRequest(args);
         if(result.pr||result.status==='no_changes'){finished={...args,...result};setTimeout(()=>void session.abort(),10);}
@@ -84,17 +93,52 @@ try{
         if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange();if(reply.error)result={error:reply.error};else {grant=reply;secrets.add(grant.token);}}
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else throw new Error('tool_not_allowed');
-      await writeEvent({type:'tool',name:tool.function.name,call_id:id,arguments:result?.error==='credential_in_notes'?{path:args.path}:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{}};
+      await writeEvent({type:'tool',name:tool.function.name,call_id:id,arguments:result?.error==='credential_in_notes'?{path:args.path}:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(name==='finish_review'?{terminate:true}:{})};
     }}));
+  const history=await readFile(dir+'/restore.json','utf8').then(JSON.parse).catch(()=>[]),sessionManager=SessionManager.inMemory(cwd);
+  for(const message of history)sessionManager.appendMessage(message);
   ({session}=await createAgentSession({cwd,agentDir:dir,modelRuntime:runtime,model:runtime.getModel('department-proxy','selected'),thinkingLevel:'off',resourceLoader:loader,
-    tools:tools.map(tool=>tool.name),customTools:tools,sessionManager:SessionManager.inMemory(cwd),settingsManager:SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false}})}));
+    tools:tools.map(tool=>tool.name),customTools:tools,sessionManager,settingsManager:SettingsManager.inMemory({compaction:{enabled:true,reserveTokens:24000,keepRecentTokens:16000},retry:{enabled:false}})}));
   session.subscribe(event=>{if(event.type==='message_end'&&event.message.role==='assistant'){
     const m=event.message;void writeEvent({type:'model',step:++steps,reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
   }});
-  try{await session.prompt(config.prompt);}catch(error){if(!finished)throw error;}
-  await events;
-  const result=finished||JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,''));await save({state:'completed',result,agent:'pi',version:'1.4.0'});
+  if(config.review_session){
+    session.setSteeringMode('all');
+    const previousFinish=session.agent.finishTurn;
+    session.agent.finishTurn=async(turn,signal)=>{
+      const reply=await boundary('turn');
+      for(const message of reply.messages||[])await session.steer(message);
+      if(reply.messages?.length)finished=undefined;
+      const previous=await previousFinish?.(turn,signal);
+      return finished?{action:'end'}:previous;
+    };
+  }
+  let prompt=config.prompt;
+  if(config.review_session)prompt=(await boundary('start')).prompt||prompt;
+  if(config.review_session&&history.length&&(history.reduce((sum,message)=>sum+estimateTokens(message),0)+estimateTokens({role:'user',content:prompt+config.system,timestamp:Date.now()})>104000||Buffer.byteLength(JSON.stringify(history))>1536*1024)){
+    try{await session.compact();}catch(error){requestFailure='agent_context_too_large';throw error;}
+  }
+  for(;;){
+    try{await session.prompt(prompt);}catch(error){if(!finished||requestFailure)throw error;}
+    if(requestFailure)throw new Error(requestFailure);
+    await events;
+    const result=finished||JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,''));
+    if(!config.review_session){await save({state:'completed',result,agent:'pi',version:'1.4.0'});break;}
+    // Persist the compacted projection, not old system prompts, model selection or discarded raw entries.
+    const messages=clean(session.messages.filter(message=>['user','assistant','toolResult','compactionSummary'].includes(message.role)).map(message=>message.role==='compactionSummary'
+      ?{role:'user',content:[{type:'text',text:'Previous conversation summary:\n'+message.summary}],timestamp:message.timestamp}:message));
+    const encoded=JSON.stringify(messages);if(Buffer.byteLength(encoded)>32*1024*1024)throw new Error('agent_context_too_large');
+    await writeFile(dir+'/history.json',encoded,{mode:0o600});
+    await save({state:'review_ready',result,agent:'pi',version:'1.4.0'});
+    for(;;){if(await readFile(dir+'/continue.json','utf8').catch(()=>null))break;await new Promise(resolve=>setTimeout(resolve,50));}
+    await unlink(dir+'/continue.json');finished=undefined;
+    await save({state:'review_resuming'});
+    const reply=await boundary('resume');
+    // Each update remains a distinct user message, in delivery order.
+    const messagesToSend=reply.messages||[];prompt=messagesToSend.shift()||'Recheck the current discussion and finish the review.';
+    for(const message of messagesToSend)await session.followUp(message);
+  }
 }catch(error){await events.catch(()=>{});
   // The reason goes into the task log; issued tokens are masked like every event.
-  await save({state:'failed',error:'pi_execution_failed',detail:clean(String(error?.message||error||'unknown')).slice(0,1000)});}
+  await save({state:'failed',error:requestFailure||((error?.message==='agent_context_too_large')?'agent_context_too_large':'pi_execution_failed'),detail:clean(String(error?.message||error||'unknown')).slice(0,1000)});}
 finally{session?.dispose();server.closeAllConnections();server.close();}
