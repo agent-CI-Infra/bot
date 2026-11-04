@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, forceIntegrationCheck = false, integrationAutoRefresh = false, permissionAutoRefresh = false;
+let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, integrationAutoRefresh = false, permissionAutoRefresh = false;
 // Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
 let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null, editorKind = null;
 const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递' };
@@ -103,7 +103,7 @@ async function render(quiet = false) {
   $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=['external','onboarding','board','costs','settings'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('sync').hidden=true;$('check').hidden=true;$('hidden-filter-label').hidden=true;
+  $('rows').hidden=['external','onboarding','board','costs','settings'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = new URLSearchParams({ offset: String(offset), limit: '50' });
   if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
@@ -117,7 +117,7 @@ async function render(quiet = false) {
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.
-  const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView; $('check').hidden = !installedView;
+  const installedView = tab === 'projects' && me.role === 'super_admin'; $('sync').hidden = !installedView;
   $('hidden-filter-label').hidden = !installedView;
   // The 已隐藏 filter swaps the list for the rows an administrator removed from it; each one can be restored.
   const hiddenView = installedView && $('hidden-filter').checked;
@@ -125,8 +125,8 @@ async function render(quiet = false) {
   const integrationMap = new Map(); let staleIntegrations = false;
   if (installedView && !hiddenView) {
     let integrations = [], checked = false; try { integrations = (await api('/api/integrations')).integrations || []; } catch {}
-    if (!integrations.length || forceIntegrationCheck) {
-      forceIntegrationCheck = false; checked = true;
+    if (!integrations.length) {
+      checked = true;
       try { $('count').textContent = '正在检查门禁和看板的接入状态…'; integrations = (await api('/api/integrations/check', 'POST', {})).integrations || []; } catch {}
     }
     integrations.forEach(item => integrationMap.set(item.repository_id, item));
@@ -326,14 +326,12 @@ $('logout').addEventListener('click', async () => { try { await api('/api/auth/l
 $('tabs').addEventListener('click', event => { const name = event.target.dataset.tab; if (!name) return;
   if (location.hash !== tabAddresses[name]) history.pushState(null, '', tabAddresses[name]); offset = 0; route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));
-$('check').addEventListener('click', () => { forceIntegrationCheck = true; start().catch(error); });
 // The onboarding dialog calls this once a run reaches a terminal state.
 window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).then(() => start()).catch(() => {});
 $('sync').addEventListener('click', async () => {
   $('sync').disabled = true; $('message').textContent = '正在从 GitHub 同步安装列表…';
-  try { const { results } = await api('/api/installations/sync', 'POST', {}); await start(); const failed = results.filter(r => r.error);
-    $('message').textContent = failed.length ? '部分账号同步失败：' + failed.map(r => r.error).join('，') : ''; }
-  catch (err) { error(err); } finally { $('sync').disabled = false; }
+  try { const result = await api('/api/installations/sync', 'POST', {}); await start(); notice('message', installationSyncMessage(result)); }
+  catch (err) { notice('message', '安装列表同步失败：' + err.message + '，还不能判断全部正常。'); } finally { $('sync').disabled = false; }
 });
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });
 $('hidden-filter').addEventListener('change', () => { offset = 0; render().catch(error); });

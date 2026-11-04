@@ -225,9 +225,10 @@ test('a background check of stale integration chips updates them in place and ne
   await page.run('render()'); const [next] = page.$('rows').children; await settle();
   assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
   assert.equal(page.$('rows').children[0], next); assert.deepEqual(gate(next), ['门禁已配置']);
-  // Refresh and "check integrations" still reload the page.
-  page.$('refresh').listeners.click[0](); page.$('check').listeners.click[0]();
-  assert.equal(page.run('startCalls'), 2);
+  // Refresh still reloads the page; the manual integration-check control has been removed.
+  page.$('refresh').listeners.click[0]();
+  assert.equal(page.run('startCalls'), 1);
+  assert.equal(page.$('check').listeners.click, undefined);
 });
 
 test('the console reads the output of the command a running task is executing', async t => {
@@ -285,19 +286,15 @@ test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKE
   assert.equal(JSON.parse(readFileSync(join(dir, `agent/token-reply-${id}.json`), 'utf8')).token, token);
 });
 
-test('the permission check lists the permissions and events an App and its installations lack and links the GitHub pages that fix them', async t => {
+test('the global permission check measures only the App definition and keeps its GitHub settings link', async t => {
   const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
   const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
-  // An App created before comment triggers subscribes only to issues and pull_request.
   const app = { slug: 'fixture-app', html_url: 'https://github.com/apps/fixture-app', owner: { login: 'fixture', type: 'Organization' },
     permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read', statuses: 'read' }, events: ['issues', 'pull_request'] };
-  const installations = [{ id: 7, account: { login: 'fixture' }, html_url: 'https://github.com/organizations/fixture/settings/installations/7', permissions: { contents: 'write', issues: 'write', pull_requests: 'write', metadata: 'read' }, events: ['issues', 'pull_request'] },
-    { id: 8, account: { login: 'paused' }, suspended_at: '2026-01-01', permissions: {}, events: [] }];
-  const server = createServer((req, res) => {
-    const url = new URL(req.url, 'http://fake'); res.setHeader('Content-Type', 'application/json');
+  const requests = [], server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://fake'); requests.push(url.pathname); res.setHeader('Content-Type', 'application/json');
     if (url.pathname === '/app') return res.end(JSON.stringify(app));
-    if (url.pathname === '/app/installations') return res.end(JSON.stringify(url.searchParams.get('page') === '1' ? installations : []));
-    res.statusCode = 404; res.end('{}');
+    res.statusCode = 503; res.end('{}');
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => new Promise(r => server.close(r)));
   const h = await harness(t, undefined, store => ({ installations: new InstallationSync(store, `http://127.0.0.1:${server.address().port}`) })), { admin } = await setup(h);
@@ -307,21 +304,35 @@ test('the permission check lists the permissions and events an App and its insta
   let report = await check();
   assert.equal(report.ok, false); assert.deepEqual(report.required, full); assert.deepEqual(report.required_events, events);
   assert.deepEqual(report.app.missing_events, ['issue_comment', 'pull_request_review', 'pull_request_review_comment']);
-  assert.deepEqual(report.installations.map(i => i.missing_events), [['issue_comment', 'pull_request_review', 'pull_request_review_comment'], events]);
   assert.deepEqual(report.app.missing.map(m => [m.permission, m.required, m.current]), [['statuses', 'write', 'read'], ['actions', 'write', null], ['checks', 'write', null]]);
   assert.equal(report.app.settings_url, 'https://github.com/organizations/fixture/settings/apps/fixture-app/permissions');
-  assert.deepEqual(report.installations.map(i => [i.account, i.suspended, i.missing.map(m => m.permission).join(','), i.review_url]),
-    [['fixture', false, 'statuses,actions,checks', 'https://github.com/organizations/fixture/settings/installations/7'], ['paused', true, Object.keys(full).join(','), null]]);
-  // After the App owner saves and the installation accepts, the check passes; a suspended installation does not hold it back.
-  app.permissions = full; installations[0].permissions = full; report = await check();
-  // Permissions alone are not enough while events are still missing, first on the App and then on the installation.
-  assert.equal(report.ok, false); app.events = events; report = await check();
-  assert.equal(report.ok, false); assert.deepEqual(report.app.missing_events, []); installations[0].events = [...events, 'push']; report = await check();
-  assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []); assert.deepEqual(report.installations[0].missing_events, []);
-  // A personal App links the personal settings page; a review link on another host is never shown.
-  app.owner = { login: 'someone', type: 'User' }; installations[0].html_url = 'https://elsewhere.example/settings'; report = await check();
-  assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions'); assert.equal(report.installations[0].review_url, null);
+  assert.equal(report.installations, undefined);
+  app.permissions = full; report = await check(); assert.equal(report.ok, false);
+  // Even when installation listing is unavailable, a complete App definition passes; workflow_run is not required.
+  app.events = events; report = await check(); assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []);
+  app.owner = { login: 'someone', type: 'User' }; report = await check();
+  assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions');
+  assert.deepEqual(requests, ['/app', '/app', '/app', '/app']);
   assert.equal((await admin(`/api/accounts/${bot.id}/permissions`)).status, 409);
+});
+
+test('sync conclusions count installations and retain gaps, account failures and App definition warnings', () => {
+  const page = loadConsole(['static/app.js', 'static/views.js']);
+  page.run("accounts = [{ id: 'broken', name: 'Broken App' }]");
+  const message = result => page.run('installationSyncMessage(' + JSON.stringify(result) + ')');
+  const installation = { id: '7', account: 'fixture', missing: [], missing_events: [] };
+  const good = { results: [{ account_id: 'app', installations: [installation], app: { missing: [], missing_events: [] } }], repositories: [{ id: '101' }, { id: '202' }] };
+  assert.equal(message(good), '安装列表已同步，1 个安装的权限和事件订阅都正常。');
+  const missing = structuredClone(good); missing.results[0].installations[0].missing_events = ['pull_request_review'];
+  missing.results[0].installations[0].missing = [{ permission: 'actions', required: 'write', current: 'read' }];
+  missing.results[0].app.missing_events = ['issue_comment'];
+  assert.match(message(missing), /并非全部正常。fixture（安装 7）：权限不足：Actions.*事件未订阅：Pull request review/);
+  assert.match(message(missing), /App 定义仍有缺口，请到「全局设置 → 机器人账号」查看/);
+  missing.results.push({ account_id: 'broken', error: 'github_http_503' });
+  assert.match(message(missing), /部分账号同步失败：Broken App（github_http_503），因此还不能判断全部安装/);
+  assert.match(message(missing), /fixture（安装 7）/);
+  const unchecked = structuredClone(good); unchecked.results[0].app = { error: 'app_check_failed' };
+  assert.match(message(unchecked), /App 定义暂时无法核对/);
 });
 
 test('an installed but never started repository is hidden from the list, survives sync, and can be restored', async t => {

@@ -20,7 +20,7 @@ Cloudflare 自带的无主机名 `http_status:404` 兜底规则表示：未匹�
 
 优先使用已有 GitHub App。选择「使用此 App」会检查 App 和安装，并将 webhook 更新到验证过的域名及该账号已登记的 webhook 路径。凭据不会返回浏览器。
 
-没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 3 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 读（之前创建的 App 在「全局设置 → 机器人账号」或本步「使用已登记的 App」下点「检查权限和事件订阅」：页面列出 App 和各安装缺少的权限和未订阅的事件，链接到 App 的 Permissions & events 页和各安装的确认页；GitHub 不提供修改 App 权限和事件订阅的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 为 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment。已有 App 的所有者还需在 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存，代码更新不会自动修改已有订阅。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
+没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 3 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 读（之前创建的 App 在「全局设置 → 机器人账号」或本步「使用已登记的 App」下点「检查权限和事件订阅」：页面只列出 App 定义缺少的权限和未订阅的事件，保留 App 的 Permissions & events 链接；安装未接受的权限和事件在项目列表对应仓库行显示，悬浮徽章可查看缺项；GitHub 不提供修改 App 权限和事件订阅的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 为 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment。已有 App 的所有者还需在 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存，代码更新不会自动修改已有订阅。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
 
 GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥与 webhook secret 只在控制面加密保存，client secret 不需要则丢弃。回调成功后，浏览器打开向导第 3 步「安装」，显示刚创建的 App 和安装入口。
 
@@ -35,6 +35,8 @@ GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管
 ![指定 GitHub 安装账号（390px）](images/account-install-mobile.png)
 
 ## 项目列表的快捷设置
+
+项目列表的「同步安装列表」会留下权限和事件是否全部正常的结论；部分账号失败时说明无法判断全部正常。仓库行的「接入门禁」打开原门禁 PR 流程，「看板」仍由行上开关控制。
 
 项目列表右侧将项目状态、检视／开发开关和任务数放在同一区域。点击开关即保存对应项目策略；保存中暂时锁定该项目的两个开关，成功显示结果，失败显示原因并保留原状态。超级管理员可配置全部项目，项目管理员只能配置分配给自己的项目。未启动的仓库需先启动；已禁用项目可以预先保存开关，但不会因此启用项目或启动任务。
 

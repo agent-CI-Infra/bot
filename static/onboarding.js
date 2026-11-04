@@ -19,28 +19,18 @@ function addressedStep(){
   if(!/^#onboarding(?:\/|$)/.test(location.hash))return onboardingStep;
   return Number(onboardingAddress.exec(location.hash)?.[1]||0);
 }
-// GitHub has no API that changes an App's permissions or event subscriptions. The check lists what is missing in GitHub's own
-// wording and links the App's Permissions & events page (one save) and each installation's review page (one acceptance each).
+// GitHub has no API that changes an App's permissions or event subscriptions. Global settings describe only the App definition.
 // Names come from views.js.
 function githubLinkElement(text,href){const link=element('a',text);link.href=href;link.target='_blank';link.rel='noopener';return link;}
 function permissionReport(report){
-  if(report.ok)return [element('p',report.installations.length?`权限和事件订阅齐全：App 和 ${report.installations.length} 个安装都已具备所需权限，并订阅了所需事件。`:'App 权限和事件订阅齐全，还没有安装。','view-success')];
   const rows=[],name=item=>permissionNames[item.permission]||item.permission,events=list=>list.map(event=>eventNames[event]||event).join('、');
-  const appEvents=report.app.missing_events||[],installationEvents=item=>item.missing_events||[];
+  const appEvents=report.app.missing_events||[];
+  if(!report.app.missing.length&&!appEvents.length)return [element('p','App 权限和事件订阅齐全。','view-success'),githubLinkElement('打开 App 的 Permissions & events',report.app.settings_url)];
   if(report.app.missing.length||appEvents.length){
     const list=element('ul','');
     for(const item of report.app.missing)list.append(element('li',`${name(item)}：改为「${accessNames[item.required]}」（当前「${item.current?accessNames[item.current]||item.current:'No access'}」）`));
     if(appEvents.length)list.append(element('li',`Subscribe to events：勾选 ${events(appEvents)}（缺少时评论、检视或检视回复不会触发检视）`));
-    rows.push(element('p','第 1 步：App 所有者打开 Permissions & events，把下列各项改好，然后点一次「Save changes」。'),list,githubLinkElement('打开 App 的 Permissions & events',report.app.settings_url));
-  }
-  const pending=report.installations.filter(item=>!item.suspended&&(item.missing.length||installationEvents(item).length));
-  if(pending.length){
-    const list=element('ul','');
-    for(const item of pending){
-      const gaps=[...(item.missing.length?['权限 '+item.missing.map(name).join('、')]:[]),...(installationEvents(item).length?['事件 '+events(installationEvents(item))]:[])];
-      const row=element('li',`${item.account||'安装 '+item.id}：${gaps.join('；')} `);if(item.review_url)row.append(githubLinkElement('前往接受',item.review_url));list.append(row);
-    }
-    rows.push(element('p',(report.app.missing.length||appEvents.length?'第 2 步：':'')+'App 保存后，GitHub 会向下列安装发出权限和事件请求，需要该账号的管理员打开链接接受。'),list);
+    rows.push(element('p','App 所有者打开 Permissions & events，把下列各项改好，然后点一次「Save changes」。'),list,githubLinkElement('打开 App 的 Permissions & events',report.app.settings_url));
   }
   rows.push(element('p','改完后点「重新检查」。','muted'));return rows;
 }
