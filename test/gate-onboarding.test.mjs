@@ -200,7 +200,7 @@ test('with a merge queue the gate runs on pull requests and in the queue, not ag
   assert.deepEqual(config.lanes.daily, { commands: ['make e2e'], enforcement: 'observe', continueOnError: true });
   assert.match(pull.body, /进入队列后，在队列的合并结果上先跑 pr-ready 再跑 pr-merge（merge_group），合入默认分支后不再重复运行/);
   assert.match(pull.body, /可以把 `gate` 设为必需检查/);
-  assert.match(pull.body, /\*\*daily\*\*（.*，失败只记录（observe））：`make e2e`/);
+  assert.match(pull.body, /\*\*daily\*\*（每天定时.*通常只记录失败）：`make e2e`（observe：失败只记录，不让门禁失败）/);
   // release.yml runs on version tags, not after merging.
   assert.deepEqual(Object.keys(parse(files['.github/workflows/release.yml']).on.push), ['tags']);
 });
@@ -366,7 +366,7 @@ test('a merged gate job keeps the existing job name, and a default-branch change
 });
 
 test('a stale revision, an open gate PR, a secret or an Actions expression stops confirmation without writing', async t => {
-  const { state, open, confirm, admin } = await fixture(t);
+  const { state, open, confirm } = await fixture(t);
   let session = await open();
   let refused = await confirm({ ...session, revision: session.revision + 1 });
   assert.deepEqual([refused.status, refused.value.error], [409, 'gate_plan_changed']);
