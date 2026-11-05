@@ -188,7 +188,7 @@ export class ProjectService {
       throw error;
     }
   }
-  // One project computer: its fixed spec from manager, the tasks running on it, and what recently ran inside.
+  // One project computer: its fixed spec, current queue and recent execution history.
   async detail(id: string): Promise<Json> {
     const saved = this.store.get(`SELECT r.full_name,p.enabled,e.* FROM repositories r JOIN policies p ON p.repository_id=r.id
       LEFT JOIN project_environments e ON e.repository_id=r.id WHERE r.id=?`, id)!;
@@ -209,6 +209,9 @@ export class ProjectService {
         operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
       running_tasks: this.store.all(`SELECT t.id,t.kind,t.status,t.phase,t.object_number,c.claimed_at FROM task_claims c JOIN tasks t ON t.id=c.task_id
         WHERE c.repository_id=? ORDER BY c.claimed_at,t.id`, id),
+      // The queue is independent of the recent-history window, so older waiting tasks stay visible.
+      queued_tasks: this.store.all(`SELECT id,kind,status,phase,object_number,created_at FROM tasks
+        WHERE repository_id=? AND status='queued' ORDER BY created_at,id`, id),
       task_concurrency: repositoryConcurrency(this.store, id), tasks:withTaskMetrics(this.store,tasks), commands };
   }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {

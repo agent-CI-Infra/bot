@@ -29,18 +29,18 @@ test('browser daylight-saving rules apply, and missing or invalid timestamps sta
   assert.equal(inZone('UTC','timestamp(0)'),'1970-01-01 00:00:00');
 });
 
-test('timeline, snapshot stream, project commands, sampling and sync use the same local clock',async t=>{
+test('timeline, snapshot stream, project tasks, sampling and sync use the same local clock',async t=>{
   for(const [zone,full] of [['Asia/Shanghai','2026-10-28 04:30:00'],['America/Los_Angeles','2026-10-27 13:30:00']])await t.test(zone,()=>{
     const result=inZone(zone,`(() => {
       const at='2026-10-27T20:30:00.123Z',log={created_at:at,content:JSON.stringify({type:'queued',detail:'排队'})};
       const visible=node=>[node.textContent,...node.children.map(visible)].filter(Boolean).join(' ');
       const timeline=step(log).querySelector('time');
       appendSnapshotProgress($('timeline'),log,{type:'snapshot_progress',sha:'abc',files:100,bytes:1000,detail:'已写入 100 个文件'});
-      current={id:'101',environment:{tasks:[],commands:[{command:'npm test',created_at:at,kind:'review.issue',object_number:1,exit_code:0}]}};
+      current={id:'101',environment:{tasks:[{id:'recent',updated_at:at,kind:'review.issue',object_number:1,status:'succeeded'}]}};
       usage={id:'101',stats:{running:true,sampled_at:at}};
       return {full:timestamp(at),clock:timeline.textContent,title:timeline.title,dateTime:timeline.dateTime,
         snapshotClock:snapshotProgress.time.textContent,snapshotTitle:snapshotProgress.time.title,snapshotDateTime:snapshotProgress.time.dateTime,
-        snapshotOutput:visible(snapshotProgress.output),commands:visible(activityCards()[2]),sampling:visible(usageCard()),
+        snapshotOutput:visible(snapshotProgress.output),tasks:visible(activityCards()[2]),sampling:visible(usageCard()),
         sync:syncSummary([{account_name:'Fixture',synced_at:at}]),board:boardTime(at)};
     })()`,['static/app.js','static/views.js','static/metrics.js','static/project.js','static/board.js']);
     const clock=full.slice(11,19);
@@ -48,7 +48,7 @@ test('timeline, snapshot stream, project commands, sampling and sync use the sam
     assert.equal(result.snapshotClock,clock);assert.equal(result.snapshotTitle,full);
     assert.equal(result.dateTime,'2026-10-27T20:30:00.123Z');assert.equal(result.snapshotDateTime,result.dateTime);
     assert.ok(result.snapshotOutput.includes('['+clock+'] 已写入 100 个文件'));
-    assert.ok(result.commands.includes(clock+' · 检视 Issue #1'));assert.ok(result.sampling.includes('采样 '+clock));
+    assert.ok(result.tasks.includes(full));assert.ok(result.sampling.includes('采样 '+clock));
     assert.ok(result.sync.includes('同步于 '+clock));assert.ok(result.board.endsWith(full.slice(5,16)));
   });
 });

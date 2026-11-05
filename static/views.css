@@ -70,6 +70,8 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .release-panel>label,.release-panel>details,.release-record>label,.release-record>details{margin-top:10px}.release-history{display:grid;gap:12px;margin-top:10px}.release-panel .release-jobs{display:grid;gap:8px;margin-top:10px}.release-job{padding:8px 10px;border:1px solid #e3eaf0;border-radius:5px}.release-job p{margin:0 0 4px}.release-panel summary{cursor:pointer;color:#16636b;font-size:13px}.release-record textarea{font:13px/1.5 ui-monospace,monospace;min-height:240px}.release-record .actions a{font-size:13px}.release-panel>.view-error:empty{display:none}.release-panel .release-check-failed{color:#a2292b;font-weight:600}
 .form-actions{justify-content:flex-start}.view-success{margin:0;color:#24603d}.flash{padding:8px 12px;border-radius:5px;background:#e5f2e9}.view-progress{margin:0;color:#2c5791}.view-success:empty,.view-progress:empty{display:none}
 .status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;align-items:start}
+#activity-status{grid-template-columns:repeat(2,minmax(0,1fr))}
+#activity-status .activity-history{grid-column:1/-1}
 .choices{display:flex;flex-direction:column;gap:6px}.choice{flex-direction:row;align-items:center;gap:10px;padding:8px 10px;border:1px solid #e3eaf0;border-radius:6px;font-size:13px;color:#183142;flex-wrap:wrap}
 .choice input{width:auto}.choice:has(input:checked){border-color:#16636b;background:#eef6f6}
 .task-toolbar{margin:12px 0}
@@ -94,7 +96,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 @media(max-width:760px){
   .project-body{grid-template-columns:minmax(0,1fr);min-height:0}
   .project-nav{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid #e3eaf0;padding:8px}.project-nav a{white-space:nowrap;padding:6px 10px}
-  .project-content{padding:12px}.status-grid{grid-template-columns:minmax(0,1fr)}
+  .project-content{padding:12px}.status-grid,#activity-status{grid-template-columns:minmax(0,1fr)}
   .project-head .title-group{flex-basis:100%;flex-direction:row;align-items:center}.project-head h1{font-size:17px;flex-basis:100%}
 }
 

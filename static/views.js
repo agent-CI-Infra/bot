@@ -414,7 +414,7 @@ function updateProjectTaskPreview(preview, row) {
   preview.replaceChildren(element('span', `执行中 ${row.running_tasks}`, row.running_tasks ? 'task-count-active' : ''));
   if (row.queued_tasks) preview.append(element('span', `排队 ${row.queued_tasks}`, 'muted'));
   preview.title = `正在执行 ${row.running_tasks} 个任务，排队 ${row.queued_tasks} 个任务`;
-  preview.setAttribute('aria-label', `${row.full_name}：${preview.title}，查看运行记录`);
+  preview.setAttribute('aria-label', `${row.full_name}：${preview.title}，查看运行状态`);
 }
 function projectListControls(row) {
   const registered = row.registered !== false, group = element('div', '', 'project-controls'), features = element('div', '', 'project-features');

@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['notes', '项目笔记'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行记录']];
+const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['notes', '项目笔记'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
 // Older addresses open the workflows page: the task overview it replaced, and the review, development and rule pages.
 const legacyProjectSections = { tasks: '', review: 'review.issue', development: 'development.issue', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -742,24 +742,25 @@ function membersSection() {
 
 function activitySection() { const box = element('div', '', 'status-grid'); box.id = 'activity-status'; box.append(...activityCards()); return [box]; }
 function activityCards() {
-  const environment = current.environment; if (!environment) return [note('暂时读不到运行记录。')];
-  const { running_tasks: running = [], task_concurrency: limit, tasks, commands } = environment, work = card(`正在执行 ${running.length}／${limit ?? 1}`);
+  const environment = current.environment; if (!environment) return [note('暂时读不到运行状态。')];
+  const { running_tasks: running = [], queued_tasks: queued = [], task_concurrency: limit, tasks } = environment, work = card(`正在执行 ${running.length}／${limit ?? 1}`);
   const list = element('ul', '', 'history');
   for (const task of running) { const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status)); list.append(row); }
-  work.append(running.length ? list : note('空闲。'), note(`这台虚拟电脑最多同时执行 ${limit ?? 1} 个任务，其余任务排队。`));
+  work.append(running.length ? list : note('暂无正在执行的任务。'), note(`这台虚拟电脑最多同时执行 ${limit ?? 1} 个任务，其余任务排队。`));
+  const queue = card(`排队任务 ${queued.length}`), queueList = element('ul', '', 'history');
+  for (const task of queued) {
+    const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status));
+    row.append(element('span', `入队 ${timestamp(task.created_at)}`, 'muted wide-cell')); queueList.append(row);
+  }
+  queue.append(queued.length ? queueList : note('暂无排队任务。'));
   const recent = card('最近任务'), taskList = element('ul', '', 'history');
+  recent.classList.add('activity-history');
   for (const task of tasks) {
     const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status));
     row.append(element('span', `${task.generation ? 'g' + task.generation + ' · ' : ''}${timestamp(task.updated_at)}`, 'muted wide-cell'),taskMetricsLine(task)); taskList.append(row);
   }
   recent.append(tasks.length ? taskList : note('还没有任务。'));
-  const history = card('最近在虚拟电脑上执行的命令'), commandList = element('ul', '', 'history commands');
-  for (const command of commands) {
-    const row = element('li', ''); row.append(element('code', '$ ' + clipText(command.command, 160)), exitBadge(command));
-    row.append(element('span', `${command.created_at ? timestamp(command.created_at).slice(11, 19) + ' · ' : ''}${kindLabels[command.kind] || command.kind} #${command.object_number}`, 'muted wide-cell')); commandList.append(row);
-  }
-  history.append(commands.length ? commandList : note('还没有命令记录。'));
-  return [work, recent, history];
+  return [work, queue, recent];
 }
 
 // One rule file: what it does, where the effective text comes from, and the project console override (edited on demand).
