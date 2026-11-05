@@ -8,7 +8,8 @@ import { previousTag, newCommits } from './range.js';
 export const noCI = '这个仓库还没有接入发布用的 CI。请先在「接入门禁」中创建门禁 PR。';
 export const noRelease = '已接入门禁，但默认分支没有由版本标签触发的 Release 工作流，发版本不可用。';
 export const builtinRule = 'release-notes-v1: list only verified commits and merged pull requests with source links; never infer features, tests or performance.';
-export async function inspect(github: GitHub, version: string) {
+// consolePrompt: the release.notes workflow's console prompt, used when the repository has no release-notes skill.
+export async function inspect(github: GitHub, version: string, consolePrompt?: string | null) {
   const ref = await github.ref(github.defaultBranch), target = ref?.object?.sha;
   if (!/^[a-f0-9]{40}$/.test(target)) stop('release_empty_repository', 'failed', '默认分支还没有可发布的提交。');
   const commit = await github.request('GET', github.path('/commits/' + target));
@@ -38,7 +39,9 @@ export async function inspect(github: GitHub, version: string) {
     target_title: String(commit.commit?.message || '').split('\n')[0], target_url: commit.html_url, default_branch: github.defaultBranch,
     workflow_id: workflowId, workflow, files: { config: config?.sha, ci: ci?.sha, release: workflowFile?.sha },
     previous_tag: previous, no_changes: noChanges, existing_tag: existingTag, existing_release: existingRelease ? { id: existingRelease.id, draft: existingRelease.draft, url: existingRelease.html_url } : null,
-    skill: { source: skill ? 'repository' : 'builtin', path: skill ? skillPath : null, sha: target, hash: sha(skill?.content ?? builtinRule), version: skill ? null : 'release-notes-v1', content: skill?.content ?? builtinRule } };
+    skill: skill ? { source: 'repository', path: skillPath, sha: target, hash: sha(skill.content), version: null, content: skill.content }
+      : consolePrompt ? { source: 'console', path: null, sha: target, hash: sha(consolePrompt), version: null, content: consolePrompt }
+      : { source: 'builtin', path: null, sha: target, hash: sha(builtinRule), version: 'release-notes-v1', content: builtinRule } };
 }
 export const fingerprint = (preview: unknown) => digest(JSON.stringify(preview));
 export const preflightToken = () => randomId();

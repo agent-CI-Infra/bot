@@ -19,10 +19,14 @@ import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, 
 import { repositoryConcurrency } from '../app/settings.js';
 import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState } from '../review/sessions.js';
 import { type GitCache } from './git-cache.js';
+import { taskWorkflow, workflowPermissions, savedWorkflow } from '../workflows/resolve.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
 const retryCycleMs=8*60*60*1000;
+// Reviews and custom workflows reply on the object; development publishes a branch and PR.
+const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
+const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%')";
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 // A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run
@@ -46,7 +50,7 @@ export class TaskEngine {
     // A previous process may have stopped between checkpoints; never charge server downtime as task runtime.
     this.store.run('UPDATE task_metrics SET active_since=NULL,complete=0 WHERE active_since IS NOT NULL');
     this.store.run('DELETE FROM task_claims');
-    this.store.run("UPDATE tasks SET status='queued',claim_token=NULL WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND status IN ('running','preparing','implementing','validating','publishing','result_ready')");
+    this.store.run(`UPDATE tasks SET status='queued',claim_token=NULL WHERE ${engineKinds} AND status IN ('running','preparing','implementing','validating','publishing','result_ready')`);
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
     this.timer=setInterval(()=>this.tick(),1000);this.tick();
   }
@@ -54,7 +58,7 @@ export class TaskEngine {
     if(this.closing)return;
     const checkpoint=Date.now();pruneReviewSessions(this.store,checkpoint);
     this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
-    const tasks=this.store.all(`SELECT * FROM tasks WHERE (kind LIKE 'review.%' OR kind LIKE 'development.%') AND
+    const tasks=this.store.all(`SELECT * FROM tasks WHERE ${engineKinds} AND
       status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY created_at,id`,Date.now());
     const limits=new Map<string,number>();
     for(const task of tasks){
@@ -122,6 +126,8 @@ export class TaskEngine {
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
+      // A custom workflow that was switched off or deleted stops its tasks the same way.
+      if(task.kind.startsWith('workflow.')&&!savedWorkflow(this.store,task.repository_id,taskWorkflow(task as any))?.enabled)stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
     const update=(values:Record<string,unknown>)=>{
@@ -131,7 +137,7 @@ export class TaskEngine {
     };
     let workspace:Workspace|undefined;
     try{
-      await guard();const config=selectedModel(this.store,task.repository_id,task.kind);redactor.add(config.key);await this.share(task.repository_id);
+      await guard();const config=selectedModel(this.store,task.repository_id,taskWorkflow(task as any));redactor.add(config.key);await this.share(task.repository_id);
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
       // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.
@@ -143,21 +149,22 @@ export class TaskEngine {
       }
       const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.'));
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
-      const development=task.kind.startsWith('development.');
-      const prior=!development&&task.attempt===1?latestReviewSession(this.store,task):undefined;
+      const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');
+      // Only the built-in reviews continue an earlier conversation; a custom workflow starts fresh every time.
+      const prior=review&&task.attempt===1?latestReviewSession(this.store,task):undefined;
       if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
       // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
       let seen:any=null;
       const validate=async(fetched?:any)=>{
         await guard();const current=seen=fetched||await github.object(task.kind,task.object_number);
-        if(!development)reviewObjectState(this.store,task.repository_id,task.kind,task.object_number,current.state!=='open');
+        if(review)reviewObjectState(this.store,task.repository_id,task.kind,task.object_number,current.state!=='open');
         if(current.state!=='open'||current.draft===true)stop('object_closed_or_draft','cancelled',`任务目标 #${task.object_number} 已关闭或变为草稿，state=${current.state}，draft=${current.draft===true}。`);
         if(task.kind.endsWith('.pr')){
           if(development)this.owned(github,task,current);
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
           if(current.head?.sha!==task.head_sha&&!(development&&candidate?.remote_sha===current.head?.sha)){
             // A stale comment or update review must not turn into a head-triggered review that could start a bot PR revision.
-            if(!input.comment&&!input.trigger)this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
+            if(task.kind==='review.pr'&&!input.comment&&!input.trigger)this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
             stop('pull_request_head_changed','superseded',`PR #${task.object_number} 的 head 已变化：预期 ${task.head_sha}，当前 ${current.head?.sha}。`);
           }
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
@@ -289,10 +296,10 @@ export class TaskEngine {
             {path:'../context/reviews.json',content:`All ${reviews.length} reviews of the pull request`},
             {path:'../context/review_comments.json',content:`All ${reviewComments.length} inline review comments, with path, line and in_reply_to_id`}]:[])];
         // Classification is optional: a repository whose labels cannot be read is reviewed without them.
-        const labels=development?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
+        const labels=!review?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
-          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
+          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':review?'review':'workflow',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
             ...(!pr ? {actions_failure:this.store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?',task.repository_id,task.object_number)||null} : {}),
             object:{number:object.number,title:object.title,state:object.state,author:object.user?.login||null,html_url:object.html_url||null,labels:(object.labels||[]).map((l:any)=>typeof l==='string'?l:l.name),
               ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},
@@ -301,14 +308,14 @@ export class TaskEngine {
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
             implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
-            review_rules:{language:policy.review_language},...(development?{}:{repository_labels:labels}),
+            review_rules:{language:policy.review_language},...(review?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
       }
       if(task.phase==='validate')stop('create_pull_request_required','needs_replan','任务停在 validate 阶段，需要重新规划并通过 create_pull_request 提交候选修改。');
       // Every attempt refreshes GitHub before its first request. Turn boundaries do the same for pending updates.
-      const conversation=development?undefined:{history:prior?JSON.parse(prior.messages):[],resume:false,boundary:async(stage:string)=>{
+      const conversation=!review?undefined:{history:prior?JSON.parse(prior.messages):[],resume:false,boundary:async(stage:string)=>{
         const updates=pendingReviewUpdates(this.store,task);
         if(stage!=='start'&&!updates.length)return {messages:[]};
         const object=await github.object(task.kind,task.object_number);await validate(object);
@@ -338,7 +345,7 @@ export class TaskEngine {
         if(validatedPhase!=='model')await validate();
         validatedPhase=undefined;
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
-        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl),development?async(requestId,args)=>{
+        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any)).github),development?async(requestId,args)=>{
           // A missing category can be corrected in the same tool conversation, before any branch is published.
           try{await releaseCategory(github,args.release_label);}catch(error){
             if(error instanceof TaskError&&error.code==='pr_release_category_required')return {error:error.code,message:'Read the current contribution guide and create-github-pr skill, choose exactly one release:* category, and call create_pull_request again with release_label.'};
@@ -372,7 +379,7 @@ export class TaskEngine {
         }:undefined,conversation);await validate();
         if(!development){
           // Files that change the bot's own behavior are a person's decision; the summary comment lists them with the others.
-          if(input.behavior_changes?.length){result.behavior_changes=input.behavior_changes;result.clarification_required=true;}
+          if(review&&input.behavior_changes?.length){result.behavior_changes=input.behavior_changes;result.clarification_required=true;}
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};
           update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
@@ -383,10 +390,17 @@ export class TaskEngine {
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log,development?undefined:()=>{
           // No await between checking the inbox and fencing the first GitHub write.
           if(this.store.get('SELECT publication_started FROM tasks WHERE id=?',id)?.publication_started)return;
-          if(pendingReviewUpdates(this.store,task).length)throw new ReviewUpdated();
+          if(review&&pendingReviewUpdates(this.store,task).length)throw new ReviewUpdated();
           update({publication_started:1});
         });
-        if(!development){
+        if(!development&&!review){
+          // A custom workflow publishes its reply and stops: no labels, no development, no conversation to keep.
+          log({type:'phase',phase:'publish',target:'workflow',detail:'正在发布到 GitHub：发送工作流回复…'});
+          const outputs=await publisher.reply(result,input.files);
+          log({type:'published',outputs:outputs.map((o:any)=>({html_url:o.html_url,inline_comments:o.inline_comments?.length||0}))});
+          update({result:JSON.stringify({...result,outputs}),phase:'done',status:'succeeded',error_code:null});
+        }
+        else if(!development){
           log({type:'phase',phase:'publish',target:'review',detail:'正在发布到 GitHub：发送检视评论…'});
           const setting=this.store.get('SELECT review_language FROM policies WHERE repository_id=?',task.repository_id)?.review_language;
           // A review a person's comment asked for names that person in the summary comment, which also notifies them of the edit.
@@ -455,8 +469,8 @@ export class TaskEngine {
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        (task.phase==='model'||task.kind.startsWith('review.')&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
-        if(task.kind.startsWith('review.')&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
+        (task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
+        if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});
       }
@@ -532,9 +546,9 @@ export class TaskEngine {
     this.store.transaction(()=>{
       // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
       const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);
-      if(task.kind.startsWith('review.')&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status)){
+      if(replies(task.kind)&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status)){
         this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,review_update_cursor=0,publication_started=0,attempt=attempt+1 WHERE id=?",task.id);
-        if(task.kind.startsWith('review.'))this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task.id);
+        if(replies(task.kind))this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task.id);
       }
       // Pressing 重试 on 发布待确认 is the confirmation the pause waits for: the write is looked up once more and,

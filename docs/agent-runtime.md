@@ -6,7 +6,7 @@
 
 两种 transport 使用同一入口：
 
-- 工作区任务使用 `loop.ts` 的 Pi mailbox adapter，在隔离项目电脑中读取文件、执行命令和产生修改。`profiles.ts` 组合内置检视/开发提示词、工具及显式 capabilities。
+- 工作区任务使用 `loop.ts` 的 Pi mailbox adapter，在隔离项目电脑中读取文件、执行命令和产生修改。`profiles.ts` 把固定的硬限制和工作流提示词组合成系统提示，并按工作流保存的权限生成工具和显式 capabilities。
 - `release.observe` 和 `release.notes` 使用运行时默认的 tool loop，在控制面调用有限工具或生成结构化结果。CI 观察与工作区任务共享仓库只读探索工具，发布说明仍检查完整且不重复的来源 ID。
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
@@ -53,11 +53,13 @@ const result = await runAgent({
 
 任务调度、触发与持久化仍由调用方负责。工具 schema、executor、guard 必须来自可信控制面配置，不能从 Issue/PR/模型结果直接生成权限。默认 tool loop 有轮数、输出和工具调用上限；它只执行已公布工具，且每次工具/模型调用前检查 guard。Pi adapter 保留原来的无总轮数限制行为。
 
-现有项目规则/行为文件可改变具体检查关注点和执行策略。`task_models` 管理 API 可按任意精确 task kind 选择模型，见[开发说明](development.md#按任务选择模型)。此版本没有新增“任意用户 YAML 动态注册全部任务/工具”的配置语言；添加新的工作区 profile 或 trigger 仍需要可信代码注册，而不需要复制模型后端。
+项目通过[工作流](workflows.md)配置任务：触发源、提示词（含流程图）、权限和模型都保存在控制面，管理员在网页上新增的工作流不需要代码注册。工具、执行器和 guard 仍由可信代码按保存的权限生成；工作流只能在固定上限内选择，不能从 Issue、PR、仓库文件或模型结果取得权限。`task_models` 管理 API 仍可按任意精确 task kind 选择模型，内置工作流的 id 就是 task kind，见[开发说明](development.md#按任务选择模型)。
 
 ## 权限与隔离
 
-显式 capabilities 分开声明本地读取、修改、笔记、shell 和远端发布能力。不再从工具列表是否出现 `create_pull_request` 推断写权限。检视的 GitHub token 只有读权限。开发也只向 shell 发放短期 GitHub 读 token；写 PR/推送由已有受控 publisher 执行。发布的写操作由既有状态机和授权控制，运行中的 Agent 不持有可任意写 GitHub 的凭据。
+显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，取自工作流保存的权限，每次任务从存储读取。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
+
+`start_agent` 启动独立 agent：新会话的系统提示是固定说明加调用方写的角色说明，第一条消息是任务，不带调用方的消息；工具是调用方工具按收窄后的权限过滤出的子集，不含发布、结束任务和再启动 agent。Pi 在同一进程里另建会话，模型请求经同一个邮箱逐个转发；默认 tool loop 用 `AgentSpec.agents` 另起一组消息。检视的 GitHub token 只有读权限。开发也只向 shell 发放短期 GitHub 读 token；写 PR/推送由已有受控 publisher 执行。发布的写操作由既有状态机和授权控制，运行中的 Agent 不持有可任意写 GitHub 的凭据。
 
 这是有意保留的安全边界：能力检查限制工具调用，不是任意 shell 的 OS 级只读沙箱。检视可运行测试，测试可能修改本地工作区，但不能因此获得 GitHub 写权限。项目电脑的网络与容器隔离仍依赖原 manager/runner 配置。
 

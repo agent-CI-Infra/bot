@@ -128,7 +128,7 @@ async function renderOnboarding(request){
   }else if(onboardingStep===4){
     panel.append(note('四个内置 skill 覆盖标签、Issue 检视、PR 检视和明确要求改代码时的开发。优先级：内置默认 → 项目控制台 → 默认分支仓库文件。PR 修改行为文件时必须由人决定，不能自动合并。'));
     for(const [path,content]of Object.entries(data.defaults))panel.append(collapsible(path+' · 内置默认',content));
-    panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目「模型」页配置项目默认模型和各任务的模型覆盖；「任务总览」在任务表内直接显示规则来源和路径，通用准则位于表格上方，规则正文与控制台覆盖可在页内展开；computer.yaml 接到现有机器配置，不另建资源系统。'));next();
+    panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目「模型」页配置项目默认模型和各工作流的模型；「工作流」页列出每条工作流的触发源、流程、提示词来源和模型，在页内编辑提示词（含流程图）、权限和触发源，通用准则位于表格上方；computer.yaml 接到现有机器配置，不另建资源系统。'));next();
   }else{
     const summary=card('接入状态');summary.append(facts([['公网地址',data.public_address?.origin||'待验证'],['App',data.app?.slug||'待选择'],['安装',data.installation_skipped?'已跳过':data.app?.installations?'已确认':'待安装'],['默认模型',models.find(m=>m.id===data.model_id)?.model_name||'待配置'],['Agent','Pi 1.4.0 · 每仓库长期容器 · 模型请求经控制面代理']]));panel.append(summary);
     const projects=card('选择项目开始检视'),sync=button('同步已安装仓库',async()=>{sync.disabled=true;sync.textContent='正在同步安装范围…';try{const result=await api('/api/installations/sync','POST',{});if(result.results.some(r=>r.error))throw new Error('安装同步失败：'+result.results.filter(r=>r.error).map(r=>r.error).join('，'));await render();}catch(e){error(e);}finally{sync.disabled=false;sync.textContent='同步已安装仓库';}});projects.append(sync);

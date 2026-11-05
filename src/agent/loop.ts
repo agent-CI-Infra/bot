@@ -3,7 +3,8 @@ import { type Workspace } from './workspace.js';
 import { workspaceProfile } from './profiles.js';
 import { runAgent } from './runtime.js';
 import { type Redactor, stop, TaskError } from './common.js';
-import { validateReview } from '../review/findings.js';
+import { validateReview, validateReply } from '../review/findings.js';
+import { taskWorkflow, workflowPermissions, savedWorkflow } from '../workflows/resolve.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
 import type { AgentModel } from './gateway.js';
@@ -17,10 +18,14 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
   finally { await tokens?.revoke(); }
 }
 async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation) {
-  const profile = workspaceProfile(String(task.kind), context);
-  const explorer = tokens ? new RepositoryExplorer(tokens, redactor, guard) : null;
+  // Permissions and a custom workflow's prompt are read from trusted storage here, for every caller and every attempt.
+  const workflowId = taskWorkflow(task as any), saved = String(task.kind).startsWith('workflow.') ? savedWorkflow(store, task.repository_id, workflowId) : undefined;
+  if (String(task.kind).startsWith('workflow.') && !saved) stop('workflow_not_found', 'cancelled', `工作流 ${workflowId} 已删除。`);
+  const profile = workspaceProfile(String(task.kind), context, workflowPermissions(store, task.repository_id, workflowId), saved ? { id: workflowId, name: String(saved.name), prompt: String(saved.prompt ?? '') } : undefined);
+  const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
   const system = profile.system;
-  const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation };
+  const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
+    ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
   return runAgent({ store, task, redactor, guard, system, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: async ({ request, model }) => {
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
     if (conversation) conversation.model = model;
@@ -84,6 +89,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         }
         const result = redactor.clean(state.result);
         if (profile.completion === 'review') return validateReview(result);
+        if (profile.completion === 'reply') return validateReply(result);
         if (!publication) stop('create_pull_request_required', undefined, '开发执行已结束，但没有通过 create_pull_request 创建或更新 PR。');
         return publication;
       }
@@ -115,6 +121,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         const id = String(state.token_request.id);
         let reply: any;
         try {
+          if (!Object.keys(profile.capabilities.github.permissions).length) stop('github_read_token_not_allowed', undefined, '这条工作流没有 GitHub 读取权限。');
           if (!tokens || !explorer) stop('github_read_token_unavailable', undefined, '当前任务未配置 GitHub 只读令牌服务。');
           const client = await explorer!.connect();
           reply = { token: client.token, repository: client.fullName, permissions: client.permissions, expires_at: client.expiresAt };

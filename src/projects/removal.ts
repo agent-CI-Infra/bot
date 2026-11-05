@@ -27,7 +27,7 @@ export function deleteProjectRecords(store: Store, id: string): void {
     ['DELETE FROM task_claims WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1],
     ['DELETE FROM tasks WHERE repository_id=?', 1], ['DELETE FROM automation_runs WHERE repository_id=?', 1], ['DELETE FROM deliveries WHERE repository_id=?', 1],
     ['DELETE FROM environment_operations WHERE repository_id=?', 1], ['DELETE FROM project_environments WHERE repository_id=?', 1],
-    ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
+    ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM workflows WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
     // Models only this repository may use, with their prices and grants; a shared model only loses its grant to this repository.
     [`UPDATE policies SET model_id=NULL WHERE model_id IN (${models})`, 1], [`DELETE FROM model_pricing WHERE model_id IN (${models})`, 1],
     [`DELETE FROM model_projects WHERE repository_id=? OR model_id IN (${models})`, 2], ['DELETE FROM policies WHERE repository_id=?', 1], ['DELETE FROM models WHERE repository_id=?', 1],

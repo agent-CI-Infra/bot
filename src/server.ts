@@ -20,6 +20,7 @@ import { type Quickstart } from './projects/quickstart.js';
 import { integrationsApi } from './app/integrations.js';
 import { quickstartApi } from './app/quickstart.js';
 import { RuleService } from './rules/service.js';
+import { WorkflowService } from './workflows/service.js';
 import { settingsApi } from './app/settings.js';
 import { ProjectRemoval } from './projects/removal.js';
 import { ReleaseService } from './releases/service.js';
@@ -49,6 +50,7 @@ export function createControlPlane(options: Options) {
   const external = options.external || new ExternalService(store);
   const onboarding = options.onboarding || new Onboarding(store);
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
+  const workflows = new WorkflowService(store, rules);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
@@ -106,7 +108,7 @@ export function createControlPlane(options: Options) {
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
-      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
+      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/workflows.js': ['workflows.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
@@ -126,7 +128,8 @@ export function createControlPlane(options: Options) {
     let input: Json = {};
     if (mutation) {
       if (!req.headers['content-type']?.startsWith('application/json')) fail(415, 'json_required');
-      const noteWrite = method === 'PUT' && /^\/api\/repositories\/[^/]+\/notes\/[^/]+$/.test(path);
+      // Notes and workflow configuration are written as administrators write them, without a size limit of their own.
+      const noteWrite = method === 'PUT' && /^\/api\/repositories\/[^/]+\/notes\/[^/]+$/.test(path) || /^\/api\/repositories\/[^/]+\/workflows(?:\/[^/]+)?$/.test(path);
       const raw = await body(req, noteWrite ? Infinity : 1024 * 1024);
       if (!raw.complete) fail(413, 'payload_too_large');
       try { input = object(JSON.parse(raw.bytes.toString('utf8'))); }
@@ -173,7 +176,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await quickstartApi(store, options.quickstart, user, method, url, input) ?? await management(store, user, method, path, input) ?? await models(store, user, method, url, input)
+    const result = await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await quickstartApi(store, options.quickstart, user, method, url, input) ?? await management(store, user, method, path, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.

@@ -10,8 +10,10 @@ export function selectedModel(store: Store, repositoryId: string, taskKind?: str
     overrides = JSON.parse(policy?.task_models || '{}');
     if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error();
   } catch { return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。'); }
-  const overridden = !!taskKind && Object.hasOwn(overrides, taskKind);
-  const modelId = overridden ? overrides[taskKind!] : policy?.model_id;
+  // A custom workflow keeps its model on its own row; built-in workflows are task kinds in task_models.
+  const custom = taskKind?.startsWith('custom.') ? store.get('SELECT model_id FROM workflows WHERE repository_id=? AND id=?', repositoryId, taskKind) : undefined;
+  const overridden = custom ? !!custom.model_id : !!taskKind && Object.hasOwn(overrides, taskKind);
+  const modelId = custom ? custom.model_id || policy?.model_id : overridden ? overrides[taskKind!] : policy?.model_id;
   if (overridden && (typeof modelId !== 'string' || !modelId)) return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。');
   const row = modelId ? store.get(`SELECT m.* FROM models m WHERE m.id=? AND
     (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`, modelId, repositoryId, repositoryId) : undefined;
@@ -29,17 +31,24 @@ export function modelEndpoints(url:string){
 }
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};
-export function tools(profile: { workspaceWrite: boolean; completion: 'review' | 'publication' }){
-  const development = profile.completion === 'publication';
-  const result=[fn('read_file','Read a file in this task workspace',{path:string},['path']),fn('run_command','Run a shell command in this task workspace inside the long-lived project container (internet access available for dependencies). Output is streamed to the console.',
+// The tools a workspace agent gets follow its trusted capabilities: a tool the workflow does not allow is not offered.
+export function tools(profile: { workspaceWrite: boolean; completion: 'review' | 'publication' | 'reply'; read?: boolean; shell?: boolean; notes?: boolean; github?: boolean }){
+  const development = profile.completion === 'publication', allow = (flag?: boolean) => flag !== false;
+  const result:any[]=[];
+  if(allow(profile.read))result.push(fn('read_file','Read a file in this task workspace',{path:string},['path']));
+  if(allow(profile.shell))result.push(fn('run_command','Run a shell command in this task workspace inside the long-lived project container (internet access available for dependencies). Output is streamed to the console.',
     {command:string,timeout_seconds:{type:'integer',minimum:1,description:'Optional. Without it the command runs until it ends; set it only for a command that might hang'},
-      keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command']),
-    fn('github_read_token','Exchange a short-lived read-only GitHub token for this repository. Later run_command calls get it as GH_TOKEN and GITHUB_TOKEN for https://api.github.com; it can read code, Issues, pull requests, comments, reviews, Actions runs and checks, and cannot write anything. The token value is never shown to you',{},[])];
-  result.push(fn('write_file',profile.workspaceWrite?'Replace a repository text file or a persistent project note at ../notes/<name>':'Replace a persistent project note at ../notes/<name> only. Repository writes are forbidden',{path:string,content:string},['path','content']));
+      keep_background:{type:'boolean',description:'Keep processes started in the background (redirect their output to a file) for later commands of this task; they stop when the task ends'}},['command']));
+  if(allow(profile.github))result.push(fn('github_read_token','Exchange a short-lived read-only GitHub token for this repository. Later run_command calls get it as GH_TOKEN and GITHUB_TOKEN for https://api.github.com; it can read code, Issues, pull requests, comments, reviews, Actions runs and checks, and cannot write anything. The token value is never shown to you',{},[]));
+  if(profile.workspaceWrite||allow(profile.notes))result.push(fn('write_file',profile.workspaceWrite?'Replace a repository text file or a persistent project note at ../notes/<name>':'Replace a persistent project note at ../notes/<name> only. Repository writes are forbidden',{path:string,content:string},['path','content']));
   if(development)result.push(
     fn('create_pull_request','Create or update the bot pull request from the working tree now. test_command records a command you already ran; only the project policy command is run by the control plane. On validation_failed, fix the problem and call again. Remove generated files before calling',
       {summary:string,test_command:string,change_title:{type:'string',description:'Concise code-change subject only. No review passphrase or review template.'},
         release_label:{type:'string',description:'For openJiuwen-ai/sciencediscovery: choose exactly one release:* category using current CONTRIBUTING.md, .github/release.yml and .agents/skills/create-github-pr/SKILL.md. Category follows the change, not its author. Other repositories may omit this.'}},['summary','test_command','change_title']));
+  // A custom workflow replies: a summary comment and findings, without the Issue authorization fields of a review.
+  else if(profile.completion==='reply')result.push(fn('finish_review','Finish this workflow with the reply the control plane publishes; only real diff locations of a pull request can be inline',{
+    summary:string,findings:{type:'array',items:{type:'object',properties:{body:string,format:{type:'string',enum:['discussion','inline']},selection_reason:string,path:string,line:{type:'integer'},side:{type:'string',enum:['LEFT','RIGHT']},start_line:{type:'integer'},start_side:{type:'string',enum:['LEFT','RIGHT']}},required:['body','format','selection_reason'],additionalProperties:false}}
+  },['summary','findings']));
   else result.push(fn('finish_review','Finish review with evidence and explicit issue intent; only real diff locations can be inline',{
     summary:string,labels:{type:'array',items:string,description:'Classification labels for this Issue or PR, chosen only from repository_labels. The control plane adds the valid ones after publishing; never apply labels yourself'},requires_code_change:{type:'boolean'},issue_requests_code:{type:'boolean'},clarification_required:{type:'boolean'},implementation_goal:string,request_quote:string,
     resolved_comments:{type:'array',items:{type:'integer'},description:'Ids (from review_comments.json) of this bot\'s earlier top-level inline comments that the reviewed head has fixed; the control plane resolves their threads'},

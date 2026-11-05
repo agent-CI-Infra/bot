@@ -3,6 +3,7 @@ import { randomId, type Json } from '../core/security.js';
 import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
 import { actionsDevelopmentAllowed } from '../actions/safety.js';
+import { queueWorkflows, workflowNeedsPullRequest } from '../workflows/triggers.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
 // A person's go-ahead for development: the development label is on the Issue and nobody has claimed it.
@@ -17,14 +18,19 @@ export function reviewRequestsCode(issue: any, result: any) {
     && !!String(result.implementation_goal || '').trim() && !!quote.trim() && text.includes(quote);
 }
 // Mentions are plain text, independent of GitHub accounts. Escape configured names before matching.
-export function commentReviewKind(store: Store, repositoryId: string, event: string, payload: Json): 'review.issue' | 'review.pr' | null {
+// A new comment on an open Issue or PR that mentions one of the configured names; any workflow may trigger on it.
+export function mentionsBot(event: string, payload: Json): boolean {
   const issue = payload.issue as any, comment = payload.comment as any, configured = process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot';
   if (event !== 'issue_comment' || payload.action !== 'created' || byBot(payload, comment?.body) || issue?.state !== 'open'
     || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof comment?.body !== 'string'
     || !/^[1-9]\d*$/.test(String(comment.id ?? '')) || typeof comment.id === 'number' && !Number.isSafeInteger(comment.id)
-    || configured.trim().toLowerCase() === 'off') return null;
+    || configured.trim().toLowerCase() === 'off') return false;
   const names = configured.split(',').map(name => name.trim()).filter(Boolean);
-  if (!names.some(name => new RegExp(`(^|[^a-z0-9])@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9-])`, 'i').test(comment.body))) return null;
+  return names.some(name => new RegExp(`(^|[^a-z0-9])@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9-])`, 'i').test(comment.body));
+}
+export function commentReviewKind(store: Store, repositoryId: string, event: string, payload: Json): 'review.issue' | 'review.pr' | null {
+  const issue = payload.issue as any;
+  if (!mentionsBot(event, payload)) return null;
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   if (!policy?.enabled || !policy.review_enabled) return null;
   if (issue.pull_request) return policy.review_pull_requests ? 'review.pr' : null;
@@ -74,6 +80,7 @@ function updateEnabled(policy: any, kind: string) { return kind === 'review.issu
 export function pullRequestNeeded(store: Store, repositoryId: string, event: string, payload: Json) {
   if (event !== 'issue_comment' || !(payload.issue as any)?.pull_request) return false;
   if (commentReviewKind(store, repositoryId, event, payload) === 'review.pr') return true;
+  if (workflowNeedsPullRequest(store, repositoryId, event, payload)) return true;
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
   return !!policy?.enabled && !!policy.review_enabled && updateTrigger(event, payload)?.kind === 'review.pr' && updateEnabled(policy, 'review.pr');
 }
@@ -150,8 +157,13 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
     store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0 WHERE repository_id=? AND object_number=? AND kind LIKE ? AND status NOT IN ('succeeded','pr_opened','completed')",
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
   }
-  if (!policy?.enabled || !policy.review_enabled) return 0;
+  if (!policy?.enabled) return 0;
   if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number)) return 0;
+  // Custom workflows run beside the built-in ones on the same events, with the same filters.
+  const custom = queueWorkflows(store, repositoryId, event, payload, delivery, currentPullRequest);
+  return custom + (policy.review_enabled ? queueBuiltin(store, repositoryId, policy, event, payload, delivery, currentPullRequest, object, number, action) : 0);
+}
+function queueBuiltin(store: Store, repositoryId: string, policy: any, event: string, payload: Json, delivery: string, currentPullRequest: Json | undefined, object: Json | undefined, number: number, action: unknown): number {
   if (event === 'issue_comment') {
     const kind = commentReviewKind(store, repositoryId, event, payload);
     // A comment without a mention may still be an update to review.

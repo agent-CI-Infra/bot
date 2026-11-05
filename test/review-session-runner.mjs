@@ -13,6 +13,7 @@ import {queueWebhook} from '../dist/review/queue.js';
 import {workspace} from '../runner/workspace.mjs';
 import {pruneTasks} from '../runner/store.mjs';
 import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
+import {subagentSystem} from '../dist/agent/runtime.js';
 
 const text=message=>typeof message.content==='string'?message.content:message.content.map(block=>block.text||'').join('');
 const actor={type:'User',login:'alice',id:5};
@@ -139,6 +140,38 @@ for(const siblings of [false,true])test(`real Pi checks repository results again
   d.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?",d.h.store.secrets.seal({private_key:pem},'account:'+repo.account_id),repo.account_id);
   const [task]=await d.run();assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(d.requests.length,3);assert.ok(!d.requests.some(request=>JSON.stringify(request).includes('context-read-token')));
+});
+
+test('real Pi starts a sub-agent as a new session that sees only its own instructions and a narrowed tool set',async t=>{
+  const seen=[];
+  const d=await live(t,{model:async(request,n)=>{
+    seen.push(request);
+    const system=text(request.messages[0]);
+    if(system.startsWith(subagentSystem)){
+      // The sub-agent's first and only request: its own system prompt and task, nothing of the main conversation.
+      return {body:{choices:[{message:{role:'assistant',content:'README is consistent with the code.'}}]}};
+    }
+    if(!request.messages.some(message=>message.role==='tool'))return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('start_agent',{name:'reader',instructions:'Check README only.',task:'Read README and report problems.',permissions:{run_commands:false,write_notes:false}})]}}]}};
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('finish_review',result('Checked with an independent reader.'))]}}]}};
+  }});
+  const permissions={workspace:{read:true,write:false,notes:true,shell:true},github:['contents','issues'],agents:true};
+  assert.equal((await d.h.admin('/api/repositories/101/workflows/review.issue','PUT',{permissions})).status,200);
+  const [task]=await d.run();
+  assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  const child=seen.filter(request=>text(request.messages[0]).startsWith(subagentSystem)),main=seen.filter(request=>!text(request.messages[0]).startsWith(subagentSystem));
+  assert.equal(child.length,1);assert.equal(main.length,2);
+  assert.deepEqual(child[0].messages.map(message=>message.role),['system','user']);
+  // Pi appends the working directory to every system prompt; the rest is the sub-agent's own frame and instructions.
+  assert.ok(text(child[0].messages[0]).startsWith(subagentSystem+'\n\nCheck README only.'));assert.doesNotMatch(text(child[0].messages[0]),/review mode|## \.bot\//);assert.equal(text(child[0].messages[1]),'Read README and report problems.');
+  assert.doesNotMatch(JSON.stringify(child[0].messages),/First issue|context_files|finish_review/);
+  const tools=child[0].tools.map(tool=>tool.function.name).sort();
+  for(const name of ['finish_review','start_agent','run_command','write_file','create_pull_request'])assert.ok(!tools.includes(name),name);
+  assert.ok(tools.includes('read_file')&&tools.includes('github_read_token'));
+  // The main agent continues its own conversation and gets the sub-agent's answer as a tool result.
+  assert.match(JSON.stringify(main[1].messages),/README is consistent with the code\./);assert.match(JSON.stringify(main[1].messages),/First issue/);
+  const events=d.h.store.all('SELECT content FROM task_logs').map(row=>JSON.parse(row.content));
+  assert.ok(events.some(event=>event.type==='agent_start'&&event.capabilities.workspace.shell===false&&event.capabilities.agents===false));
+  assert.ok(events.some(event=>event.type==='model'&&event.agent));
 });
 
 test('real Pi keeps 26 waiting updates, injects after a model request and tool results, then restores only successful history',async t=>{
