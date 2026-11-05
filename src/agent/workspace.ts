@@ -40,7 +40,7 @@ export class Workspace {
     await this.guard();
     const response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,{operation_id:randomId(),generation:this.task.generation,
       request:{...request,workspace_id:this.task.workspace_id}},90000).catch(()=>null);
-    return response?.ok?response.result:{error:response?.error||'runner_operation_failed'};
+    return response?.ok?response.result:{error:response?.error||'runner_operation_failed',...(response?.detail?{detail:response.detail}:{})};
   }
   // Ends the processes this task left, kept background work included. Other tasks on the computer keep theirs; the last
   // task to finish (idle) clears every leftover process, so the next task starts on a clean project computer.
