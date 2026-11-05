@@ -1,12 +1,12 @@
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
 import { blobSha, operationId, stop, TaskError, treeSha } from '../agent/common.js';
-import { implementationText, reviewText } from './text.js';
+import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 import { applyReleaseCategory, releaseCategory } from './release-label.js';
 
 export class Publisher {
-  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly onHeadWait:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){}
+  constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly log:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){}
   // replayable effects (such as adding a label) are idempotent on GitHub, so an unknown response may be sent again.
   async effect(key:string,kind:string,request:any,send:()=>Promise<any>,find:()=>Promise<any>,replayable=false){
     const id=operationId(this.task.id+':'+key),marker=`<!-- dept-bot:${id} -->`;
@@ -32,10 +32,17 @@ export class Publisher {
     return this.effect(key,'comment',payload,()=>this.github.request('POST',path,payload),async()=>
       (await this.github.pages(path)).find(c=>String(c.user?.id)===this.github.actorId&&String(c.body).includes(marker)));
   }
-  async review(result:any,files:any[]){
-    const inline:any[]=[], locations = new Map<string, any>();
-    for (const finding of result.findings) { const location = this.task.kind==='review.pr' && finding.format==='inline' ? inlineLocation(finding,files) : null; if(location)locations.set(finding.id,location); }
-    const text = reviewText(result.summary, result.findings, new Set(locations.keys()));
+  // language: the words of the summary comment; trigger: the person's comment this review answers, if any.
+  async review(result:any,files:any[],options:{language:'zh'|'en',trigger?:{actor?:string|null,url?:string|null}}={language:'en'}){
+    const inline:any[]=[], locations = new Map<string, any>(), language=options.language,pr=this.task.kind==='review.pr';
+    // The bot's earlier top-level inline comments, when the review refers to them: a finding that is one of them still
+    // applying (comment_id) is not posted again, and the ones it says are fixed (resolved_comments) get their threads resolved.
+    const refers=pr&&((result.resolved_comments||[]).length||result.findings.some((f:any)=>f.comment_id!==undefined));
+    const earlier=new Map<number,any>(refers?(await this.github.pages(this.github.path(`/pulls/${this.task.object_number}/comments`)))
+      .filter(c=>String(c.user?.id)===this.github.actorId&&!c.in_reply_to_id).map(c=>[Number(c.id),c]):[]);
+    const kept=new Map<string,any>();for(const f of result.findings){const c=earlier.get(Number(f.comment_id));if(c)kept.set(f.id,c);}
+    for (const finding of result.findings) { const location = pr && finding.format==='inline' && !kept.has(finding.id) ? inlineLocation(finding,files) : null; if(location)locations.set(finding.id,location); }
+    const text = reviewText(result.summary, result.findings.map((finding:any)=>({...finding,body:markHuman(language,finding)})), new Set([...locations.keys(),...kept.keys()]));
     for(const finding of text.findings){
       const location=locations.get(finding.id);
       if(location)inline.push({body:finding.body+`\n\n<!-- dept-bot-finding:${finding.id} -->`,...location});
@@ -52,9 +59,86 @@ export class Publisher {
         finding_id:result.findings.find((f:any)=>String(c.body).includes('dept-bot-finding:'+f.id))?.id||null}))};
       this.store.run('UPDATE github_effects SET response=? WHERE id=?',JSON.stringify(output),operationId(this.task.id+':inline'));outputs.push(output);
     }
-    // Every review publishes one summary discussion comment, even when all findings are inline.
-    outputs.push(await this.discussion('discussion',[text.overview,text.discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
+    const urls=new Map<string,string>([...(outputs[0]?.inline_comments||[]).filter((c:any)=>c.finding_id).map((c:any)=>[c.finding_id,c.html_url]),
+      ...[...kept].map(([id,c]):[string,string]=>[id,String(c.html_url||'')])]);
+    const shown=new Set(text.findings.map((f:any)=>f.id)),human:HumanItem[]=humanItems(language,{...result,findings:result.findings.filter((f:any)=>shown.has(f.id))},urls);
+    const still=new Set([...kept.values()].map(c=>Number(c.id))),place=(c:any):Place=>({path:String(c.path||''),line:c.line??c.original_line??null,html_url:String(c.html_url||'')});
+    const resolved=await this.resolveFixed((result.resolved_comments||[]).map(Number).filter((id:number)=>!still.has(id)).map((id:number)=>earlier.get(id)).filter(Boolean),result.reviewed_sha);
+    // Every review publishes one summary discussion comment, even when all findings are inline; later reviews of the same
+    // Issue or PR edit it.
+    const count=this.earlierReviews(),body=summaryComment({language,overview:text.overview,discussion:text.discussion,coverage,human,resolved,open:[...kept.values()].map(place),
+      review:{count:count+1,at:new Date().toISOString().replace('T',' ').slice(0,16)+' UTC',sha:result.reviewed_sha,actor:options.trigger?.actor,url:options.trigger?.url}});
+    outputs.push({...await this.summary(body),...(resolved.length?{resolved_threads:resolved.map(r=>r.id)}:{})});
     await this.validate();return outputs;
+  }
+  // How many other reviews of this Issue or PR published a summary comment.
+  earlierReviews():number{
+    return Number(this.store.get(`SELECT count(DISTINCT e.task_id) AS n FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE t.repository_id=? AND t.object_number=?
+      AND t.kind IN ('review.issue','review.pr') AND e.kind='comment' AND e.state='sent' AND e.task_id<>?`,this.task.repository_id,this.task.object_number,this.task.id)!.n);
+  }
+  // The summary comment later reviews edit: the one recorded for the object, or for objects reviewed before that was
+  // recorded, the earliest summary comment a review of it published.
+  summaryAnchor():string|null{
+    const row=this.store.get('SELECT comment_id FROM review_summaries WHERE repository_id=? AND object_number=?',this.task.repository_id,this.task.object_number);
+    if(row)return String(row.comment_id);
+    const first=this.store.get(`SELECT e.response FROM github_effects e JOIN tasks t ON t.id=e.task_id WHERE t.repository_id=? AND t.object_number=?
+      AND t.kind IN ('review.issue','review.pr') AND e.kind='comment' AND e.state='sent' AND e.task_id<>? ORDER BY t.created_at,t.rowid LIMIT 1`,this.task.repository_id,this.task.object_number,this.task.id);
+    const id=first?.response?JSON.parse(first.response)?.id:null;return /^[1-9]\d*$/.test(String(id??''))?String(id):null;
+  }
+  // The first review posts the summary comment; later ones replace its body (an edit, so it is safe to repeat). A comment
+  // that is gone is posted again and becomes the one later reviews edit.
+  async summary(body:string){
+    const issues=this.github.path(`/issues/${this.task.object_number}/comments`),marker=this.marker('discussion'),payload={body:body+'\n\n'+marker};
+    const anchor=this.summaryAnchor(),comment=(id:string)=>this.github.path('/issues/comments/'+id);
+    const result=await this.effect('discussion','comment',payload,async()=>{
+      if(anchor){const updated=await this.github.request('PATCH',comment(anchor),payload,true);if(updated)return updated;}
+      return this.github.request('POST',issues,payload);
+    },async()=>{
+      if(anchor){const current=await this.github.request('GET',comment(anchor),undefined,true);if(current&&String(current.body).includes(marker))return current;}
+      return (await this.github.pages(issues)).find(c=>String(c.user?.id)===this.github.actorId&&String(c.body).includes(marker));
+    },!!anchor);
+    if(/^[1-9]\d*$/.test(String(result?.id??'')))this.store.run(`INSERT INTO review_summaries VALUES(?,?,?,?) ON CONFLICT(repository_id,object_number)
+      DO UPDATE SET comment_id=excluded.comment_id,updated_at=excluded.updated_at`,this.task.repository_id,this.task.object_number,String(result.id),new Date().toISOString());
+    return result;
+  }
+  // The bot's earlier inline comments that the reviewed head fixes, as the review judged, get their threads resolved. Only
+  // comments made on an earlier commit qualify (the author changed the code after them). GitHub lets an App resolve a
+  // thread only with contents: write, which review tokens do not have: a token with it is made for these writes alone.
+  // An installation that does not grant it leaves the threads open and the review is published anyway; the log says why.
+  async resolveFixed(comments:any[],reviewedSha:string):Promise<(Place&{id:number})[]>{
+    const fixed=comments.filter(c=>c.original_commit_id&&c.original_commit_id!==reviewedSha);
+    if(!fixed.length)return [];
+    try{
+      const threads=await this.reviewThreads(),open=fixed.filter(c=>threads.get(Number(c.id))?.isResolved===false);
+      if(!open.length)return [];
+      const resolved=await this.github.withPermissions({contents:'write',pull_requests:'write'},async token=>{
+        const done:any[]=[];
+        for(const c of open){
+          const thread=threads.get(Number(c.id))!;
+          await this.effect('resolve:'+c.id,'resolve',{thread_id:thread.id},()=>this.github.graphql('mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}',{id:thread.id},token),
+            async()=>(await this.reviewThreads()).get(Number(c.id))?.isResolved?{thread_id:thread.id}:null,true);
+          done.push(c);
+        }
+        return done;
+      });
+      this.log({type:'review_threads_resolved',comments:resolved.map(c=>c.id)});
+      return resolved.map(c=>({id:c.id,path:String(c.path||''),line:c.line??c.original_line??null,html_url:String(c.html_url||'')}));
+    }catch(error){
+      if(!(error instanceof TaskError)||!(error.code.startsWith('github_permission_')||['github_graphql_failed','github_http_422'].includes(error.code)))throw error;
+      this.log({type:'review_threads_unresolved',code:error.code,detail:error.detail||null});return [];
+    }
+  }
+  // The pull request's review threads, keyed by the database id of each thread's first comment.
+  async reviewThreads(){
+    const [owner,name]=this.github.fullName.split('/'),threads=new Map<number,{id:string,isResolved:boolean}>();let after:string|null=null;
+    for(let page=0;page<20;page++){
+      const data=await this.github.graphql(`query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){
+        reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}`,{owner,name,number:Number(this.task.object_number),after});
+      const list=data?.repository?.pullRequest?.reviewThreads;
+      for(const node of list?.nodes||[]){const first=node?.comments?.nodes?.[0]?.databaseId;if(Number.isSafeInteger(first))threads.set(first,{id:String(node.id),isResolved:node.isResolved===true});}
+      if(!list?.pageInfo?.hasNextPage)break;after=list.pageInfo.endCursor;
+    }
+    return threads;
   }
   async label(name:string){return this.labels([name]);}
   // Issues and pull requests share the issue labels endpoint; GitHub creates a missing repository label on first use,
@@ -125,7 +209,7 @@ export class Publisher {
         await this.validate(); pr=await this.github.object('review.pr',candidate.pr_number);
         assertOwnedPR(owned,pr,this.github.actorId,this.task.repository_id);
         if(pr.head.sha===sha)break;
-        this.onHeadWait({type:'pr_head_wait',expected_sha:sha,observed_sha:pr.head.sha,pr_number:candidate.pr_number});
+        this.log({type:'pr_head_wait',expected_sha:sha,observed_sha:pr.head.sha,pr_number:candidate.pr_number});
       }
       if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head',`PR #${candidate.pr_number} 尚未更新到提交 ${sha}，当前 head=${pr?.head.sha||'未知'}。`);
       const source=this.store.get('SELECT object_number FROM tasks WHERE id=?',owned!.source_task_id);
