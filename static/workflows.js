@@ -1,8 +1,8 @@
 // Workflows page (#/projects/<id>/workflows/<item>). Every workflow, built-in or added here, has the same parts: a name, a
-// switch, triggers, a prompt (whose ```mermaid flowchart is drawn here, with the triggers on its left) and a model. What
-// its agent may do is not configured: reading is open to every workflow and writing follows its type. The page lists the
-// workflows on the left and edits the selected one on the right, in tabs; a floating assistant drafts triggers and prompt,
-// and nothing takes effect until the administrator saves. Unsaved edits and assistant conversations are kept in this browser
+// switch, triggers, a prompt (whose ```mermaid flowchart is drawn here, with the triggers on its left), writes and a
+// model. Reading is open to every workflow; each write is a platform tool the agent may call, chosen here. The page lists
+// the workflows on the left and edits the selected one on the right, in tabs; a floating assistant drafts triggers, prompt
+// and writes, and nothing takes effect until the administrator saves. Unsaved edits and assistant conversations are kept in this browser
 // per project and workflow, so leaving the page loses neither. Loaded after project.js.
 
 // The first ```mermaid flowchart block of a prompt: nodes in order of appearance, and every edge with its label.
@@ -111,15 +111,8 @@ function flowFigure(flow, title = '流程图', triggers = null) {
   figure.append(scroll, caption); return figure;
 }
 
-const publicationNames = { reply: '回复：控制面发布一条评论（PR 上可附 COMMENT 行内检视）', pull_request: 'bot 分支与 PR：控制面在测试通过并复核开发条件后发布',
-  release_notes: '发行说明草稿：控制面核验来源完整且不重复', actions: '重跑原运行一次或提报 Issue：控制面按固定分类规则执行', none: '不发布：结果只显示在控制台' };
-// How the agent hands over what the control plane then writes to GitHub, per kind of publication.
-const writeTools = { reply: 'agent 调用 finish_review 交出总结和意见；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出。',
-  pull_request: 'agent 调用 create_pull_request 交出修改；控制面固定快照、跑项目测试，复核开发标签和指派人后推 bot 分支、开或更新 PR。',
-  release_notes: '模型只给已核验的来源分组；控制面写出说明正文，起草和发布仍在「发版本」页由人操作。',
-  actions: '模型只给出分类和依据；控制面按分类最多重跑原运行一次，或提报、评论 Issue。', none: '不写 GitHub。' };
-// What every workflow may read; a workflow outside the virtual computer has no workspace, so it reads GitHub only.
-const workflowReads = workflow => (workflow?.computer === false ? ['启动独立 agent', '读取 GitHub'] : ['读取工作区', '运行命令', '写项目笔记', '启动独立 agent', '读取 GitHub']);
+// What every workflow may read: all of them run in the project computer, on a checkout of the commit concerned.
+const workflowReads = () => ['读取工作区', '运行命令', '写项目笔记', '启动独立 agent', '读取 GitHub'];
 const githubReadScope = '代码、Issue、PR、Actions、检查和提交状态';
 const workflowTabs = [['overview', '概览'], ['prompt', '提示词与流程'], ['access', '权限与模型']];
 const workflowModelName = workflow => {
@@ -241,7 +234,8 @@ const promptMeta = workflow => [badge('生效：' + layerNames[workflow.prompt.s
 function workflowEditor(workflow, { chat, notice }) {
   const custom = !workflow?.builtin, catalog = current.workflows.triggers;
   const options = workflow?.trigger_options || catalog.filter(entry => ['issue', 'pr', 'any'].includes(entry.object)).map(({ id, title, short, label, note }) => ({ id, title, short, label: !!label, ...(note ? { note } : {}) }));
-  const permissions = workflow?.permissions || { workspace: { read: true, write: false, notes: true, shell: true }, agents: true, publication: 'reply' };
+  // A new workflow starts with the custom workflows' default writes.
+  const writeChoices = workflow?.write_options || current.workflows.custom_write_options, savedWrites = workflow?.permissions.writes || current.workflows.custom_writes;
   const form = document.createElement('form'), message = element('p', '', 'view-error'), shell = element('div', '', 'workflow-shell');
   form.className = 'project-form workflow-editor'; form.noValidate = true; form.setAttribute('aria-label', workflow ? `工作流 ${workflow.name}` : '新工作流'); message.setAttribute('role', 'alert');
   // Header: what it is and whether it runs, with the actions that apply to the whole form.
@@ -310,16 +304,26 @@ function workflowEditor(workflow, { chat, notice }) {
     columns.append(left, right); panel('prompt').append(columns);
   }
   // Permissions are not configured: reading is open to every workflow, writing follows the workflow's type.
-  const reads = element('div', '', 'workflow-permissions'), computer = workflow?.computer !== false;
+  const reads = element('div', '', 'workflow-permissions');
   reads.append(element('p', workflowReads(workflow).join('、') + '：所有工作流都允许，不需要配置。'),
-    note(`GitHub 用只读令牌读取仓库的${githubReadScope}，令牌由执行器保管、任务结束即撤销。` + (computer ? '' : '这条工作流在控制面运行，没有虚拟电脑，所以没有工作区、命令和项目笔记。')),
+    note(`所有工作流都在项目电脑里运行，检出相关提交（Issue、PR、发版本的提交或失败的 Actions 运行）。GitHub 用只读令牌读取仓库的${githubReadScope}，令牌由执行器保管、任务结束即撤销。`),
     note('独立 agent（start_agent）有自己的会话，权限不超过主 agent，启动时还可以再收窄；它不能发布，也不能再启动 agent。'));
-  // GitHub writes are not agent permissions: the agent hands its result to a platform tool and the control plane writes it.
+  // Writes are chosen here: each is a platform tool the agent calls when it needs it; the control plane performs it.
   const writes = element('div', '', 'workflow-writes');
-  writes.append(element('p', permissions.workspace.write ? '修改工作区代码：只在虚拟电脑里这次任务的检出中修改。' : computer ? '不修改工作区代码：检出只读。' : '没有工作区。'),
-    element('p', publicationNames[permissions.publication]), note(writeTools[permissions.publication]),
-    note('写入由控制面用 GitHub App 安装令牌（或登记的机器人账号）完成：先核对对象、head 和权限条件，再经发布队列写入，结果不明时先对账、不重复写。agent 只拿得到只读令牌，不能在命令里推送、评论、加标签或合并。'));
-  panel('access').append(element('h3', '读取（不限制）'), reads, element('h3', '写入（由工作流类型决定）'), writes);
+  for (const option of writeChoices) {
+    const box = checkbox('write:' + option.id, savedWrites.includes(option.id), option.title), input = box.querySelector('input');
+    if (option.locked) { input.disabled = true; input.checked = true; box.title = '这条工作流以这项写入结束任务，不能去掉'; }
+    const row = element('div', '', 'workflow-write'); row.append(box, element('code', option.tool), element('span', option.detail, 'muted'));
+    writes.append(row);
+  }
+  // Opening a PR needs the code write; ticking one ticks the other.
+  writes.addEventListener('change', event => {
+    const code = writes.querySelector('[name="write:code"]'), pr = writes.querySelector('[name="write:pull_request"]');
+    if (event.target === pr && pr.checked && code) code.checked = true;
+    if (event.target === code && !code.checked && pr && !pr.disabled) pr.checked = false;
+  });
+  writes.append(note('写入由控制面用 GitHub App 安装令牌（或登记的机器人账号）完成：先核对对象、head 和条件，再经发布队列写入，结果不明时先对账、不重复写。agent 只拿得到只读令牌，不能在命令里推送、评论、加标签或合并。'));
+  panel('access').append(element('h3', '读取（不限制）'), reads, element('h3', '写入（按需勾选）'), writes);
   const model = document.createElement('select'); model.name = 'model_id';
   {
     const defaultModel = current.models.find(entry => entry.id === current.policy.model_id);
@@ -344,7 +348,8 @@ function workflowEditor(workflow, { chat, notice }) {
   }
   const values = () => {
     const elements = form.elements;
-    return { name: elements.name.value, description: elements.description.value, enabled: elements.enabled.checked, prompt: editor.value, triggers: chosenTriggers(), model_id: model.value || null };
+    return { name: elements.name.value, description: elements.description.value, enabled: elements.enabled.checked, prompt: editor.value, triggers: chosenTriggers(),
+      writes: writeChoices.filter(option => elements['write:' + option.id]?.checked).map(option => option.id), model_id: model.value || null };
   };
   // A chat draft fills the editor; it is saved only with 保存.
   const apply = draft => {
@@ -354,6 +359,7 @@ function workflowEditor(workflow, { chat, notice }) {
     if (typeof draft.enabled === 'boolean') elements.enabled.checked = draft.enabled;
     if (draft.model_id !== undefined) model.value = draft.model_id || '';
     if (typeof draft.prompt === 'string') editor.value = draft.prompt;
+    if (Array.isArray(draft.writes)) for (const option of writeChoices) { const box = elements['write:' + option.id]; if (box && !box.disabled) box.checked = draft.writes.includes(option.id); }
     if (Array.isArray(draft.triggers)) { for (const option of options) {
       const picked = draft.triggers.find(trigger => trigger.id === option.id); elements['trigger:' + option.id].checked = !!picked;
       if (option.label) elements['trigger-label:' + option.id].value = picked?.label || '';
@@ -373,7 +379,7 @@ function workflowEditor(workflow, { chat, notice }) {
     const value = values(), trigger = list => JSON.stringify(list.map(entry => entry.id + ':' + (entry.label || '').toLowerCase()).sort());
     try {
       let body;
-      if (custom) body = { name: value.name, description: value.description, enabled: value.enabled, triggers: value.triggers, prompt: value.prompt, model_id: value.model_id, ...(workflow ? { version: workflow.version } : {}) };
+      if (custom) body = { name: value.name, description: value.description, enabled: value.enabled, triggers: value.triggers, prompt: value.prompt, writes: value.writes, model_id: value.model_id, ...(workflow ? { version: workflow.version } : {}) };
       else {
         // Only what changed is written, so untouched parts keep following their defaults.
         body = { version: workflow.version };
@@ -381,6 +387,7 @@ function workflowEditor(workflow, { chat, notice }) {
         if (value.description !== workflow.description) body.description = value.description;
         if (value.enabled !== workflow.enabled) body.enabled = value.enabled;
         if (trigger(value.triggers) !== trigger(workflow.triggers)) body.triggers = value.triggers;
+        if ([...value.writes].sort().join() !== [...workflow.permissions.writes].sort().join()) body.writes = value.writes;
         {
           if (form.elements.clear_prompt?.checked) body.prompt = null; else if (value.prompt !== startText) body.prompt = value.prompt;
           if ((value.model_id || null) !== (workflow.model.inherited ? null : workflow.model.id)) body.model_id = value.model_id;
@@ -428,7 +435,7 @@ function workflowSummary(workflow) {
   if (!workflow.triggers.length) row('触发源', '没有触发源，不会运行');
   row('提示词', `${layerNames[workflow.prompt.source]} · ${promptLocation(workflow)}`);
   row('读取', workflowReads(workflow).join('、') + '（所有工作流都允许）');
-  row('写入', (workflow.permissions.workspace.write ? '修改工作区代码；' : '') + publicationNames[workflow.permissions.publication]);
+  row('写入', workflow.permissions.writes.length ? workflow.write_options.filter(option => workflow.permissions.writes.includes(option.id)).map(option => option.title).join('、') : '不写 GitHub');
   row('模型', workflowModelName(workflow));
   return list;
 }
@@ -443,7 +450,7 @@ function actionsStatusLine(workflow) {
   return line;
 }
 const workflowErrors = { workflow_version_conflict: '工作流已被别人修改，请刷新页面后再保存。', invalid_workflow_trigger_label: '按标签触发时需要填写标签名。',
-  invalid_workflow_name: '请填写工作流名称。', invalid_workflow_prompt: '请填写提示词。', invalid_bot_label: '提示词里的标签声明不合法（最长 50 个字符，首尾不能有空白）。', model_not_configured: '项目还没有可用的模型，请先在「模型」页选择项目默认模型。',
+  invalid_workflow_writes: '写入能力不在这条工作流可选的范围里，或开 PR 时没有同时允许修改代码。', invalid_workflow_name: '请填写工作流名称。', invalid_workflow_prompt: '请填写提示词。', invalid_bot_label: '提示词里的标签声明不合法（最长 50 个字符，首尾不能有空白）。', model_not_configured: '项目还没有可用的模型，请先在「模型」页选择项目默认模型。',
   model_not_available: '选择的模型不可用于这个项目。', assistant_reply_invalid: '助手没有返回可用的草稿，请换个说法再试。', duplicate_workflow_trigger: '同一个触发源只能选一次。' };
 const workflowError = code => workflowErrors[code] || code;
 // Unsaved editor contents and assistant conversations, per project and workflow, in this browser.
@@ -515,7 +522,9 @@ function assistantTurn(turn) {
     } else if (part.type === 'draft') {
       const draft = part.draft, card = element('div', '', 'workflow-draft');
       const options = workflowById(assistant.item)?.trigger_options || current?.workflows?.triggers || [];
+      const choices = workflowById(assistant.item)?.write_options || current?.workflows?.custom_write_options || [];
       card.append(flowFigure(parseFlow(draft.prompt), '草稿流程图', (draft.triggers || []).map(trigger => triggerName(options, trigger))), ...(part.warnings || []).map(warning => element('p', warning, 'endpoint-warning')),
+        ...(Array.isArray(draft.writes) ? [element('p', '草稿写入：' + (draft.writes.length ? choices.filter(option => draft.writes.includes(option.id)).map(option => option.title).join('、') : '不写 GitHub'), 'muted')] : []),
         collapsible('草稿提示词', draft.prompt || ''), button('填入编辑器', () => fillFromAssistant(draft), ''));
       item.append(card);
     } else if (part.type === 'error') item.append(element('p', part.text, 'view-error'));
@@ -526,7 +535,7 @@ function assistantTurn(turn) {
 function drawAssistantLog() {
   const log = $('workflow-assistant')?.querySelector('.assistant-log'); if (!log) return;
   const turns = assistant.history.turns;
-  log.replaceChildren(...(turns.length ? turns.map(assistantTurn) : [element('li', '描述你想要的流程：助手会先看现有工作流和仓库，再起草触发源和提示词（含流程图）。草稿填入编辑器后要点「保存」才会生效。', 'muted assistant-empty')]));
+  log.replaceChildren(...(turns.length ? turns.map(assistantTurn) : [element('li', '描述你想要的流程：助手会先看现有工作流和仓库，再起草触发源、提示词（含流程图）和写入能力。草稿填入编辑器后要点「保存」才会生效。', 'muted assistant-empty')]));
   log.scrollTop = log.scrollHeight;
   const box = $('workflow-assistant'), running = !!assistant.controller;
   box.querySelector('.assistant-input button[type=submit]').disabled = running; box.querySelector('.assistant-input .actions button:not([type=submit])').hidden = !running;

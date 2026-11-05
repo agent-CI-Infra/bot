@@ -157,6 +157,12 @@ export class Publisher {
     }
     return threads;
   }
+  // A new Issue a workflow filed through create_issue: found again by its marker among the bot's recent Issues.
+  async issue(key:string,title:string,body:string){
+    const marker=this.marker(key),path=this.github.path('/issues'),payload={title,body:body+'\n\n'+marker};
+    return this.effect(key,'issue',payload,()=>this.github.request('POST',path,payload),async()=>
+      (await this.github.request('GET',path+'?state=all&sort=created&direction=desc&per_page=100')).find((i:any)=>String(i.user?.id)===this.github.actorId&&String(i.body).includes(marker)));
+  }
   async label(name:string){return this.labels([name]);}
   // Issues and pull requests share the issue labels endpoint; GitHub creates a missing repository label on first use,
   // which only the policy's review label can reach: classification labels are checked against the repository first.

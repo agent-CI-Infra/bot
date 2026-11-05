@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { releaseFixture, run, target, previous, other, writes } from '../test/release-fixtures.mjs';
 import { releaseWorkflowFile, emptyPlan } from '../dist/projects/gate-plan.js';
 import { testPassword } from '../test/helpers.mjs';
+import { runEventTasks, releaseGitHub, observationAgent } from '../test/event-tasks.mjs';
 
 async function login(page, address, username, password) {
   await page.goto(address); await page.getByLabel('用户名', { exact: true }).fill(username); await page.getByLabel('密码', { exact: true }).fill(password);
@@ -158,8 +159,11 @@ test('运行分析从失败探索代码、其他Issue与PR，并展示脱敏日�
     };
     await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
     await login(page, f.h.admin, 'administrator', f.password); await page.goto(f.h.admin + '/#/projects/101/release');
-    const analyze = page.getByRole('button', { name: /让智能体看这次运行/ }); await analyze.click(); await expect(analyze).toBeDisabled();
-    await page.waitForTimeout(5200); await expect(analyze).toBeDisabled(); release();
+    // Asking queues a task of the CI observation workflow; the page says so until the project computer has finished it.
+    const analyze = page.getByRole('button', { name: /让智能体看这次运行/ }); await analyze.click();
+    await expect(page.locator('#project-page')).toContainText('运行分析在项目电脑里排队或执行中');
+    const observed = runEventTasks(f.h.store, 'release.observe', observationAgent(f.h.store, f.apiUrl), { github: releaseGitHub(f.h.store, f.apiUrl) });
+    await page.waitForTimeout(1000); await expect(page.locator('#project-page')).toContainText('运行分析在项目电脑里排队或执行中'); release(); await observed;
     await expect(page.locator('#project-page')).toContainText('日志第 1 行显示 package missing');
     await page.getByText('release 日志 · 第 1–2 行', { exact: true }).click();
     const primaryLog=page.locator('#project-page details').filter({has:page.getByText('release 日志 · 第 1–2 行',{exact:true})}).locator('pre');

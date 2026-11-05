@@ -338,3 +338,18 @@ test('an update arriving after prepare but before the first request refreshes bo
   const [task]=await d.run();assert.equal(task.status,'succeeded');assert.equal(d.requests.length,1);
   assert.equal(d.h.store.get('SELECT count(*) n FROM tasks').n,1);
 });
+
+test('real Pi forwards a write tool to the control plane: create_issue files one Issue and the review still finishes',async t=>{
+  const filed=[];
+  const d=await live(t,{model:async(request,n)=>n===1?{body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('create_issue',{title:'Follow-up for @alice',body:'Track the docs; ping @alice.'})]}}]}}:undefined,
+    github:async(path,send,_res,body)=>{if(path.endsWith('/issues')&&body?.title){filed.push(body);send({number:77,html_url:'https://github.invalid/issues/77',user:{id:999}},201);return true;}return false;}});
+  // The review workflow may file Issues once an administrator gives it the issue write.
+  assert.equal((await d.h.admin('/api/repositories/101/workflows/review.issue','PUT',{writes:['reply','labels','issue']})).status,200);
+  const [task]=await d.run();
+  assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  assert.equal(filed.length,1);assert.match(filed[0].body,/ping &#64;alice/);assert.doesNotMatch(filed[0].title,/@/);
+  // Pi received the control plane's answer as the tool result, then finished the review as usual.
+  assert.match(JSON.stringify(d.requests[1].messages),/"number\\":77/);
+  assert.ok(d.requests[0].tools.some(tool=>tool.function.name==='create_issue'));
+  assert.equal(d.h.store.get("SELECT count(*) n FROM github_effects WHERE kind='issue' AND state='sent'").n,1);
+});

@@ -1,5 +1,3 @@
-import { createServer } from 'node:http';
-import { once } from 'node:events';
 
 // The analysis model of the Actions failure tests. It answers with the rules the bot used before a model classified failures:
 // an error line from outside the repository is external, an assertion or compiler error is code, anything else or a mix is
@@ -29,17 +27,24 @@ export function classifyOutput(job) {
   const kind = kinds.size === 1 && !kinds.has('unknown') ? [...kinds][0] : 'unknown';
   return { kind, reason: kind === 'external' ? 'A service outside the repository failed.' : kind === 'code' ? 'The repository code failed its own check.' : 'The evidence does not tell.', evidence };
 }
-export async function actionsModel(t, respond) {
+// The analysis agent of the Actions failure tests: it plays the workflow's task in the project computer (see
+// event-tasks.mjs). By default it answers with the rules above, through the same tools the agent has: an external job is
+// handed to rerun_failed_run, every other job to report_failure. respond(input, request, n) may answer instead with
+// { content } (the JSON of {jobs:[...]} or text that is not), or { status } for a model that does not answer.
+export function actionsModel(_t, respond) {
   const requests = [];
-  const server = createServer(async (req, res) => {
-    let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
-    const input = JSON.parse(body.messages.find(message => message.role === 'user').content);
-    const reply = respond ? await respond(input, body, requests.length) : { content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, ...classifyOutput(job) })) }) };
-    if (reply.status) { res.writeHead(reply.status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'fixture outage' } })); return; }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, ...reply } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
-  });
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  return { url: `http://127.0.0.1:${server.address().port}/v1`, requests };
+  const agent = async ({ input, target, tools }) => {
+    requests.push({ input, target });
+    const reply = respond ? await respond(input, requests.at(-1), requests.length) : { content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, ...classifyOutput(job) })) }) };
+    if (reply.status) return { wait: 'model_http_' + reply.status };
+    let value; try { value = JSON.parse(reply.content); } catch { value = null; }
+    if (!Array.isArray(value?.jobs)) throw Object.assign(new Error('unusable output'), { code: 'actions_classification_invalid', state: 'failed' });
+    for (const job of value.jobs) {
+      const args = { reason: job.reason, evidence: job.evidence };
+      if (job.kind === 'external' && tools.rerun_failed_run) await tools.rerun_failed_run('call', { job_ids: [job.job_id], ...args });
+      else await tools.report_failure?.('call', { job_id: job.job_id, kind: job.kind, ...args });
+    }
+    return { summary: 'Analyzed.' };
+  };
+  return { url: 'https://model.invalid/v1', requests, agent };
 }

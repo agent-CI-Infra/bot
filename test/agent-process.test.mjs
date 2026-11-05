@@ -250,12 +250,13 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 
 // Run the control-plane publication path against real Git objects and a local GitHub fixture.
 // The manager substitutes for the project computer; no deployment or external API is used.
-async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults } = {}) {
+// custom: run a custom workflow with these writes instead of development; it files an Issue, opens the PR and replies.
+async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
   const endpoint = 'http://127.0.0.1:' + githubFixture.address().port;
   let repoDirectory, step = 0, started = false, terminal, bytes = [], snapshots = 0, revision = 0;
-  const replies = [], commands = [], requests = [], ids = [], manifests = [];
+  const replies = [], commands = [], requests = [], ids = [], manifests = [], toolReplies = [];let toolBytes = [], filed = false;
   const gitBytes = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoDirectory, stdio: ['ignore', 'pipe', 'pipe'] });
   const git = (...args) => gitBytes(...args).toString().trim();
   const write = (path, content) => { mkdirSync(dirname(join(repoDirectory, path)), { recursive: true }); writeFileSync(join(repoDirectory, path), content); };
@@ -268,7 +269,9 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     else if (r.type === 'workspace_snapshot') { git('add', '--all'); value = { tree_sha: git('write-tree') }; }
     else if (r.type === 'workspace_agent_config' || r.type === 'workspace_agent_start') value = { written: true, started: true };
     else if (r.type === 'workspace_agent_poll') {
-      if (terminal) value = { state: 'completed', result: { ...args, ...terminal } };
+      if (custom && terminal) value = { state: 'completed', result: { summary: 'Opened a fix for the addition.', findings: [] } };
+      else if (terminal) value = { state: 'completed', result: { ...args, ...terminal } };
+      else if (custom?.writes.includes('issue') && !filed) value = { state: 'running', repository_tool: { id: 'f'.repeat(48), name: 'create_issue', arguments: { title: 'Follow-up: @someone document add', body: 'Ask @someone to document add.' } } };
       else {
         if (!started) { started = true; if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n'); }
         ids[step] ||= randomBytes(24).toString('hex');
@@ -302,7 +305,10 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
         else if (repair) { assert.equal(reply.error, 'validation_failed'); write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
         else value = { error: 'fixture_stopped_after_reply' };
       }
-    } else if (r.type === 'workspace_context') value = { written: true };
+    } else if (r.type === 'workspace_agent_repository_tool') {
+      toolBytes.push(Buffer.from(r.base64, 'base64'));
+      if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; filed = true; }
+    } else if (r.type === 'workspace_context' || r.type === 'workspace_cache') value = { written: true };
     else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
     return { ok: true, result: value };
   } };
@@ -311,9 +317,10 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   await fetch(endpoint + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: a.token }) });
   if (faults) await fetch(endpoint + '/fixture/faults', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(faults) });
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
-  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: true, test_command: policy });
-  const taskId = randomBytes(24).toString('hex'), input = { review: { implementation_goal: 'Fix requested addition' } };
-  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101','development.issue','running','dev',1,'claim',?,?)", taskId, JSON.stringify(input), new Date().toISOString());
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: custom?.development ?? true, test_command: policy });
+  const taskId = randomBytes(24).toString('hex'), input = custom ? {} : { review: { implementation_goal: 'Fix requested addition' } };
+  const workflow = custom && (await admin('/api/repositories/101/workflows', 'POST', { name: 'Fix it', prompt: 'Fix what the Issue asks.', triggers: [{ id: 'issue.opened' }], writes: custom.writes })).value.workflow;
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at,workflow_id) VALUES(?,'101',?,'running','dev',1,'claim',?,?,?)", taskId, custom ? 'workflow.issue' : 'development.issue', JSON.stringify(input), new Date().toISOString(), workflow?.id ?? null);
   h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", taskId, new Date().toISOString());
   const engine = new TaskEngine(h.store, manager, endpoint + '/github');
   await engine.run(taskId, 'claim');
@@ -327,7 +334,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     await engine.run(nextId, 'claim');
     return { task: h.store.get('SELECT * FROM tasks WHERE id=?', nextId), candidate: JSON.parse(h.store.get('SELECT data FROM development_candidates WHERE task_id=?', nextId)?.data || 'null') };
   };
-  return { h, task, candidate: saved && JSON.parse(saved.data), replies, commands, requests, snapshots, manifests, repoDirectory, endpoint, engine, git, continueIssue };
+  return { h, task, candidate: saved && JSON.parse(saved.data), replies, toolReplies, commands, requests, snapshots, manifests, repoDirectory, endpoint, engine, git, continueIssue };
 }
 
 test('create_pull_request with empty policy never reruns agent evidence and returns the published call-time tree', async t => {
@@ -344,6 +351,79 @@ test('create_pull_request with empty policy never reruns agent evidence and retu
   assert.match(state.prs.at(-1).body, /not rerun by the control plane/); assert.doesNotMatch(state.prs.at(-1).body, /Exit code:/);
   // Only the one edited file goes to GitHub, on top of the snapshot's source tree, and GitHub's tree is the verified one.
   assert.deepEqual(state.trees.at(-1), { repository_id: 101, base_tree: d.candidate.source_tree, entries: 1 });
+});
+
+test('a custom workflow with the Issue and PR writes files an Issue, opens a bot PR and still finishes with its reply', async t => {
+  const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request', 'issue'] } });
+  assert.equal(d.task.status, 'succeeded', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), result = JSON.parse(d.task.result);
+  // create_issue: one Issue, mentions escaped, answered to the agent.
+  const issue = state.issues.at(-1); assert.match(issue.body, /Ask &#64;someone/); assert.doesNotMatch(issue.title, /@/);
+  assert.deepEqual(d.toolReplies, [{ number: issue.number, html_url: issue.html_url }]);
+  // create_pull_request did not end the task: the PR is in its result and the reply was posted after it.
+  assert.deepEqual(d.replies, [{ pr: result.pull_request }]); assert.equal(state.prs.at(-1).number, result.pull_request.number);
+  assert.equal(d.h.store.get('SELECT source_task_id FROM bot_pull_requests').source_task_id, d.task.id);
+  assert.match(state.comments.at(-1).body, /Opened a fix for the addition\./);
+  // No development-result comment and no development task: only what the workflow asked for.
+  assert.deepEqual(d.h.store.all('SELECT kind FROM github_effects ORDER BY rowid').map(row => row.kind), ['issue', 'branch', 'pull_request', 'comment']);
+  assert.equal(d.h.store.get("SELECT count(*) n FROM tasks WHERE kind LIKE 'development.%'").n, 0);
+});
+
+test('a custom workflow cannot open a PR while the project development switch is off, and keeps going', async t => {
+  const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request'], development: false }, repair: false });
+  assert.equal(d.replies[0].error, 'development_disabled');
+  // The fixture GitHub is shared by this file's tests, so the absence of writes is read from this task's own outbox.
+  assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n, 0); assert.equal(d.h.store.get('SELECT count(*) n FROM development_candidates').n, 0);
+});
+
+test('an Actions failure analysis runs as a task in the project computer: the failed commit checked out, its failed steps as context, rerun and report through the mailbox', async t => {
+  githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
+  t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
+  const endpoint = 'http://127.0.0.1:' + githubFixture.address().port, head = (await fetch(endpoint + '/fixture/state').then(r => r.json())).repositories.find(r => r.id === 101).refs.trunk;
+  let repoDirectory, config, configBytes = [], step = 0, toolBytes = [];
+  const context = {}, toolReplies = [], git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: repoDirectory, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+  const write = (path, content) => { mkdirSync(dirname(join(repoDirectory, path)), { recursive: true }); writeFileSync(join(repoDirectory, path), content); };
+  // The agent: it hands job 91 to rerun_failed_run and job 92 to report_failure, then finishes.
+  const calls = [{ name: 'rerun_failed_run', arguments: { job_ids: [91], reason: 'Rate limited by the package index.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] } },
+    { name: 'report_failure', arguments: { job_id: 92, kind: 'code', reason: 'The addition test fails.', evidence: ['AssertionError: 1 + 1 !== 2'] } }];
+  const manager = { call: async (_method, path, input) => {
+    if (!path.endsWith('/execute')) return { state: 'ready', generation: 1, computer: resolveRules({}, {}).computer };
+    const r = input.request; let value = {};
+    if (r.type === 'workspace_init') git('init', '--initial-branch=bot-local');
+    else if (r.type === 'workspace_write') write(r.path, Buffer.from(r.base64, 'base64'));
+    else if (r.type === 'workspace_snapshot') { git('add', '--all'); value = { tree_sha: git('write-tree') }; }
+    else if (r.type === 'workspace_context') { context[r.path] = (context[r.path] || '') + Buffer.from(r.base64, 'base64').toString(); value = { written: true }; }
+    else if (r.type === 'workspace_cache') value = { written: true };
+    else if (r.type === 'workspace_agent_config') { configBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) config = JSON.parse(Buffer.concat(configBytes)); value = { written: true }; }
+    else if (r.type === 'workspace_agent_start') value = { started: true };
+    else if (r.type === 'workspace_agent_poll') value = step < calls.length ? { state: 'running', repository_tool: { id: String(step).repeat(48), ...calls[step] } } : { state: 'completed', result: { summary: 'One external, one code failure.' } };
+    else if (r.type === 'workspace_agent_repository_tool') { toolBytes.push(Buffer.from(r.base64, 'base64')); if (r.final) { toolReplies.push(JSON.parse(Buffer.concat(toolBytes))); toolBytes = []; step++; } }
+    else if (r.type !== 'reap') throw new Error('Unexpected fixture operation ' + r.type);
+    return { ok: true, result: value };
+  } };
+  const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+  repoDirectory = join(h.directory, 'repo'); mkdirSync(repoDirectory);
+  await fetch(endpoint + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: a.token }) });
+  const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'analysis-fixture-key', model_name: 'fixture' })).value.model;
+  await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, actions_failures_enabled: true });
+  h.store.run("INSERT INTO actions_failure_attempts(repository_id,run_id,attempt) VALUES('101',800,1)");
+  const input = { run: { id: 800, attempt: 1, workflow: 'CI', head_sha: head, url: 'https://github.com/fixture/project-101/actions/runs/800' },
+    failed_jobs: [{ job_id: 91, name: 'install', failed_steps: [{ number: 2, name: 'Install' }], failed_step_output: 'HTTPError: HTTP 429 Too Many Requests' },
+      { job_id: 92, name: 'test', failed_steps: [{ number: 3, name: 'Test' }], failed_step_output: 'AssertionError: 1 + 1 !== 2' }] };
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,head_sha,claim_token,created_at) VALUES('analysis','101','actions.failures','running','analysis','101:actions.failures:800:1',?,?,'claim',?)", JSON.stringify(input), head, new Date().toISOString());
+  h.store.run("INSERT INTO task_claims VALUES('analysis','101','claim',?)", new Date().toISOString());
+  await new TaskEngine(h.store, manager, endpoint + '/github').run('analysis', 'claim');
+  const task = h.store.get("SELECT * FROM tasks WHERE id='analysis'");
+  assert.equal(task.status, 'succeeded', JSON.stringify(h.store.all("SELECT content FROM task_logs WHERE task_id='analysis'")));
+  // A checkout of the failed commit, with the failed steps' output as files next to it.
+  assert.equal(JSON.parse(task.input).snapshot_sha, head); assert.equal(context['failed-steps/92.log'], 'AssertionError: 1 + 1 !== 2'); assert.match(context['run.json'], /"head_sha"/);
+  // The workflow's own tools reach the control plane through the mailbox and are recorded; finish_analysis ends the agent.
+  assert.deepEqual(config.finish_tools, ['finish_analysis']); assert.deepEqual(config.capabilities.writes, ['issue', 'actions_rerun']);
+  for (const name of ['rerun_failed_run', 'report_failure', 'finish_analysis', 'read_job_log', 'run_command']) assert.ok(config.tools.some(tool => tool.function.name === name), name);
+  assert.deepEqual(toolReplies.map(reply => [reply.recorded, reply.cited_lines_found]), [[true, [{ job_id: 91, found: 1 }]], [true, [{ job_id: 92, found: 1 }]]]);
+  assert.deepEqual(JSON.parse(task.result).verdicts.map(v => [v.job_id, v.kind]), [[91, 'external'], [92, 'code']]);
+  // Nothing is written to GitHub by the task itself: the Actions module acts on the result.
+  assert.equal(h.store.get('SELECT count(*) n FROM github_effects').n, 0);
 });
 
 test('a later call for the same Issue appends to the same bot branch and PR', async t => {

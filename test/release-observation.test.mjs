@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { releaseFixture, run, writes, other } from './release-fixtures.mjs';
+import { runEventTasks, releaseGitHub, observationAgent } from './event-tasks.mjs';
 
 const call = (id, name, args = {}) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 const final = advice => ({ content: JSON.stringify({ job_ids: [1], advice }) });
@@ -12,7 +13,15 @@ async function fixture(t) {
   const m = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'observation-fixture-secret', model_name: 'fixture' });
   await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: m.value.model.id });
   const record = () => f.h.store.get('SELECT * FROM project_releases WHERE id=?', created.value.release.id);
-  return Object.assign(f, { record, analyze: async () => (await f.admin(f.endpoint + '/' + created.value.release.id + '/observe', 'POST', { revision: record().revision })).value.release });
+  // The observation is a task of the release.observe workflow; its agent is played by the control plane's own loop.
+  const github = releaseGitHub(f.h.store, f.apiUrl), agent = observationAgent(f.h.store, f.apiUrl);
+  const analyze = async () => {
+    const asked = await f.admin(f.endpoint + '/' + created.value.release.id + '/observe', 'POST', { revision: record().revision });
+    if (asked.status !== 201) return asked.value;
+    await runEventTasks(f.h.store, 'release.observe', agent, { github });
+    return (await f.admin(f.endpoint + '/' + created.value.release.id)).value.release;
+  };
+  return Object.assign(f, { record, analyze });
 }
 test('observation actively exchanges a repository-read-only token, reads redacted log windows and revokes it', async t => {
   const f = await fixture(t), requests = []; let turn = 0;
@@ -27,7 +36,10 @@ test('observation actively exchanges a repository-read-only token, reads redacte
   const read = f.state.requests.find(r => r.path.endsWith('/actions/jobs/1/logs')), token = read.token.slice(7);
   assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token' && r.token === 'Bearer ' + token));
   const transcript = JSON.stringify(requests); assert.ok(!transcript.includes(token)); assert.ok(!transcript.includes('observation-fixture-secret')); assert.match(transcript, /missing release script/); assert.match(transcript, /REDACTED/);
-  assert.deepEqual(requests[0].tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'start_agent']);
+  // The workflow's own tools: reading, the read-only repository tools and its finishing tool; nothing that writes GitHub.
+  const names = requests[0].tools.map(t => t.function.name);
+  for (const name of ['read_file', 'run_command', 'github_read_token', 'github_read', 'github_search', 'read_job_log', 'start_agent', 'finish_observation']) assert.ok(names.includes(name), name);
+  for (const name of ['create_issue', 'create_pull_request', 'finish_review']) assert.ok(!names.includes(name), name);
   assert.equal(result.observation.logs[0].first_line, 2); assert.equal(result.observation.logs[0].last_line, 4);
   assert.ok(!JSON.stringify(f.h.store.all('SELECT data FROM project_releases')).includes(token));
   assert.ok(writes(f.state).filter(r => r.path !== '/v1/chat/completions').every(r => r.path.endsWith('/git/tags') || r.path.endsWith('/git/refs')));
@@ -65,12 +77,14 @@ test('observation receives a tool error for an oversized repository result and c
   assert.deepEqual(replies[3], mailboxResult, 'observation retains the 2 MiB capacity independently of Pi context checks');
   assert.ok(f.state.requests.some(request => request.method === 'DELETE' && request.path === '/installation/token'));
 });
-test('a rerun during observation stops log reads from the old attempt and still revokes the token', async t => {
+test('a rerun recorded during observation stops log reads from the old attempt and still revokes the token', async t => {
   const f = await fixture(t); let turn = 0;
+  // The release records the new attempt (as its worker does once it sees the rerun); the observation is bound to the old one.
+  const rerun = () => { const row = f.record(), data = JSON.parse(row.data); f.h.store.run('UPDATE project_releases SET data=? WHERE id=?', JSON.stringify({ ...data, run_attempt: 2 }), row.id); };
   f.state.custom = async ({ path, send }) => {
     if (path !== '/v1/chat/completions') return false;
     if (turn++ === 0) send({ choices: [{ message: invoke(call('t', 'github_read_token')) }] });
-    else { f.state.runs[0].run_attempt = 2; f.state.jobs[0].run_attempt = 2; send({ choices: [{ message: invoke(call('log', 'read_job_log', { job_id: 1 })) }] }); }
+    else { f.state.runs[0].run_attempt = 2; f.state.jobs[0].run_attempt = 2; rerun(); send({ choices: [{ message: invoke(call('log', 'read_job_log', { job_id: 1 })) }] }); }
     return true;
   };
   const result = await f.analyze(); assert.equal(result.stage, 'failed'); assert.match(result.observation_error, /attempt/);

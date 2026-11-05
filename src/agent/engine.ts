@@ -7,9 +7,9 @@ import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { testEvidence, reviewLanguage } from '../github/text.js';
 import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
-import { actionsDevelopmentAllowed, actionsSourceIssue } from '../actions/safety.js';
+import { actionsDevelopmentAllowed, actionsSourceIssue, publicText } from '../actions/safety.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
-import { agentLoop } from './loop.js';
+import { agentLoop, type PlatformTools } from './loop.js';
 import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
 import { selectedModel } from './model.js';
@@ -20,13 +20,18 @@ import { repositoryConcurrency } from '../app/settings.js';
 import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState } from '../review/sessions.js';
 import { type GitCache } from './git-cache.js';
 import { taskWorkflow, workflowPermissions, workflowEnabled, activeTrigger } from '../workflows/resolve.js';
+import { eventWorkflow } from '../workflows/events.js';
+// The modules that own event workflows register them when loaded.
+import '../releases/observe.js';
+import '../releases/notes.js';
+import '../actions/analysis.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
 const retryCycleMs=8*60*60*1000;
 // Reviews and custom workflows reply on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
-const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%')";
+const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures'))";
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 // A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run
@@ -102,7 +107,7 @@ export class TaskEngine {
   }
   async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled(this.active.values());}
   async run(id:string,token:string){
-    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const redactor=new Redactor();
+    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const redactor=new Redactor(),event=eventWorkflow(task.kind);
     const log=(value:any)=>{
       const clean=redactor.clean(value);
       // A waiting retry can re-enter a phase. Keep one start per attempt (or policy operation).
@@ -128,6 +133,8 @@ export class TaskEngine {
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
       // A workflow that was switched off (or a custom one deleted) stops its tasks the same way.
       if(!workflowEnabled(this.store,task.repository_id,taskWorkflow(task as any)))stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
+      // An event that moved on (another run attempt, a release no longer waiting) ends its task at once.
+      if(event)event.validate(this.store,current!,JSON.parse(current!.input||'{}'));
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
     const update=(values:Record<string,unknown>)=>{
@@ -147,7 +154,11 @@ export class TaskEngine {
         if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
       }
-      const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.'));
+      // The writes this workflow may ask for decide the platform tools; a workflow that may open a PR needs contents write.
+      const writes=workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any)).writes,eventState:Record<string,any>={};
+      // An event workflow reads Actions runs and logs; it writes only through its own tools.
+      const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.')||writes.includes('pull_request'),undefined,
+        event?{contents:'read',actions:'read',checks:'read',statuses:'read',issues:'write',pull_requests:'read'}:undefined);
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');
       // Only the built-in reviews continue an earlier conversation; a custom workflow starts fresh every time.
@@ -156,13 +167,16 @@ export class TaskEngine {
       // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
       let seen:any=null;
       const validate=async(fetched?:any)=>{
-        await guard();const current=seen=fetched||await github.object(task.kind,task.object_number);
+        await guard();
+        if(event){event.validate(this.store,task,input);return;}
+        const current=seen=fetched||await github.object(task.kind,task.object_number);
         if(review)reviewObjectState(this.store,task.repository_id,task.kind,task.object_number,current.state!=='open');
         if(current.state!=='open'||current.draft===true)stop('object_closed_or_draft','cancelled',`任务目标 #${task.object_number} 已关闭或变为草稿，state=${current.state}，draft=${current.draft===true}。`);
         if(task.kind.endsWith('.pr')){
           if(development)this.owned(github,task,current);
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
-          if(current.head?.sha!==task.head_sha&&!(development&&candidate?.remote_sha===current.head?.sha)){
+          // This task's own push (development, or any workflow that updated the bot's PR) moved the head on purpose.
+          if(current.head?.sha!==task.head_sha&&!(candidate?.remote_sha===current.head?.sha)){
             // A stale comment or update review must not turn into a head-triggered review that could start a bot PR revision.
             if(task.kind==='review.pr'&&!input.comment&&!input.trigger)this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
             stop('pull_request_head_changed','superseded',`PR #${task.object_number} 的 head 已变化：预期 ${task.head_sha}，当前 ${current.head?.sha}。`);
@@ -199,6 +213,17 @@ export class TaskEngine {
       // Reuse a check only at the immediately following phase boundary in this run. A resumed run or a
       // ReviewUpdated loop starts without this credit and must read the current object before continuing.
       let validatedPhase:'model'|'publish'|undefined;
+      // Another workflow's pull request: published like development's, recorded on its candidate, and the task carries on.
+      const publishPullRequest=async()=>{
+        log({type:'phase',phase:'pull_request',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
+        const publisher=new Publisher(this.store,github,task,validate,undefined,log);
+        const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+        const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
+        log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
+        const published={number:pr.number,html_url:pr.html_url,sha:commit};
+        this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify({...JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data),published}),id);
+        return {pr:published};
+      };
       const publishDevelopment=async()=>{
         update({status:'publishing'});log({type:'phase',phase:'publish',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
@@ -209,6 +234,37 @@ export class TaskEngine {
         update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
       };
+      // An event workflow works on a checkout of the commit its event concerns, with the event as context files.
+      if(task.phase==='prepare'&&event){
+        update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
+        await validate();
+        const target=await event.prepare(this.store,github,task,input,redactor),policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
+        const ruleSha=(await github.ref(github.defaultBranch))?.object?.sha||target.sha;
+        const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target.sha,ruleSha],refs:[`refs/heads/${github.defaultBranch}`]}):undefined;
+        let effectiveRules:ReturnType<typeof resolveRules>;
+        try{
+          const ruleFiles=await this.rules.fetch(github,ruleSha,mirror);this.rules.cache(task.repository_id,ruleSha,ruleFiles);
+          effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
+        }catch(error){
+          if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
+          throw error;
+        }
+        let snapshot:any=mirror?await workspace.checkout(github,target.sha,mirror,[]):null;
+        if(!snapshot){if(mirror?.has(target.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,target.sha,mirror);}
+        await workspace.deliver({type:'workspace_cache',sha:target.sha,tree_sha:snapshot.tree_sha});
+        const computer=computerRequest(effectiveRules.computer,environment.computer);
+        if(computer){
+          this.rules.rememberComputer(task.repository_id,environment.computer);
+          environment=await this.manager.call('POST',`/v1/projects/${task.repository_id}/configure`,{operation_id:randomId(),generation:environment.generation,request:redactor.clean(computer)},35*60000);
+          environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);
+        }
+        const skills=skillIndex(effectiveRules.files);
+        await workspace.context({...target.files,...Object.fromEntries(skills.map(skill=>[skill.file,skill.content]))});
+        input={...input,snapshot_sha:target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
+          context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
+            effective_rules:effectiveRules,computer:computerSummary(environment.computer),...target.context}};
+        update({input:JSON.stringify(redactor.clean(input)),head_sha:target.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:target.sha});
+      }
       if(task.phase==='prepare'){
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         const object=await github.object(task.kind,task.object_number);await validate(object);
@@ -296,7 +352,8 @@ export class TaskEngine {
             {path:'../context/reviews.json',content:`All ${reviews.length} reviews of the pull request`},
             {path:'../context/review_comments.json',content:`All ${reviewComments.length} inline review comments, with path, line and in_reply_to_id`}]:[])];
         // Classification is optional: a repository whose labels cannot be read is reviewed without them.
-        const labels=!review?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
+        const labeling=review||writes.includes('labels');
+        const labels=!labeling?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
           files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':review?'review':'workflow',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
@@ -308,7 +365,7 @@ export class TaskEngine {
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
             implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
-            review_rules:{language:policy.review_language},...(review?{repository_labels:labels}:{}),
+            review_rules:{language:policy.review_language},...(labeling?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
@@ -345,7 +402,27 @@ export class TaskEngine {
         if(validatedPhase!=='model')await validate();
         validatedPhase=undefined;
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
-        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any)).github),development?async(requestId,args)=>{
+        // create_issue: a new Issue the workflow files, once per tool call, with mentions escaped and secrets removed.
+        // An event workflow's own write tools (Actions rerun and report) come from its module; it reports through them.
+        const platform:PlatformTools={...(event?.tools?.(this.store,task,input,writes,eventState)??{})};
+        if(writes.includes('issue')&&task.kind!=='actions.failures')platform.create_issue=async(callId,args)=>{
+          if(typeof args?.title!=='string'||!args.title.trim()||args.title.length>256||typeof args.body!=='string'||args.body.length>60000)return {error:'create_issue_invalid',message:'title (up to 256 characters) and body are required.'};
+          const safe=(text:string)=>publicText(text,redactor).replace(/@/g,'&#64;');
+          const issue=await new Publisher(this.store,github,task,validate,undefined,log).issue('issue:'+callId,safe(args.title).replace(/[\r\n]+/g,' ').trim(),safe(args.body));
+          log({type:'published',outputs:[{html_url:issue.html_url,issue:issue.number}]});
+          return {number:issue.number,html_url:issue.html_url};
+        };
+        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any)).github),writes.includes('pull_request')?async(requestId,args)=>{
+          // Any workflow other than development may publish one PR per task, while the project's development switch is on,
+          // from an Issue or onto the bot's own PR.
+          if(!development){
+            if(!this.store.get('SELECT development_enabled FROM policies WHERE repository_id=?',task.repository_id)?.development_enabled)
+              return {error:'development_disabled',message:'The project\'s development switch is off, so no pull request can be published. Finish without one.'};
+            const earlier=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=earlier?JSON.parse(earlier.data).published:null;
+            if(published)return {error:'pull_request_already_published',pr:published,message:'This task already published its pull request.'};
+            if(task.kind.endsWith('.pr')&&!this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number))
+              return {error:'pull_request_not_owned',message:'This pull request is not the bot\'s own, so its branch cannot be updated. Report your changes in your reply instead.'};
+          }
           // A missing category can be corrected in the same tool conversation, before any branch is published.
           try{await releaseCategory(github,args.release_label);}catch(error){
             if(error instanceof TaskError&&error.code==='pr_release_category_required')return {error:error.code,message:'Read the current contribution guide and create-github-pr skill, choose exactly one release:* category, and call create_pull_request again with release_label.'};
@@ -354,7 +431,7 @@ export class TaskEngine {
           // Fix the only candidate snapshot before any policy command can create or modify files.
           const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
           if(snapshot.tree_sha===input.snapshot_tree){
-            update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
+            if(development)update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
           }
           await validate();
@@ -366,7 +443,7 @@ export class TaskEngine {
             if(validation.error||validation.exit_code!==0||validation.timed_out||validation.truncated)return {...validation,error:'validation_failed'};
           }
           let branch:string,ownerTask=id,prNumber:number|null=null;
-          if(task.kind==='development.pr'||input.bot_pr){
+          if(task.kind.endsWith('.pr')||input.bot_pr){
             const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
@@ -374,13 +451,20 @@ export class TaskEngine {
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
             branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
+          if(!development)return publishPullRequest();
           update({result:JSON.stringify(args),phase:'publish'});
           return publishDevelopment();
-        }:undefined,conversation);await validate();
-        if(!development){
+        }:undefined,conversation,platform);await validate();
+        if(event){
+          // The module checks the finished result and takes it; the task keeps what it returns.
+          const kept=await event.finish(this.store,task,input,result,eventState);
+          update({result:JSON.stringify(redactor.clean(kept)),phase:'done',status:'succeeded',error_code:null});
+        }else if(!development){
           // Files that change the bot's own behavior are a person's decision; the summary comment lists them with the others.
           if(review&&input.behavior_changes?.length){result.behavior_changes=input.behavior_changes;result.clarification_required=true;}
-          result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};
+          // A pull request this workflow published on the way is part of its result.
+          const candidate=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=candidate?JSON.parse(candidate.data).published:null;
+          result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash,...(published?{pull_request:published}:{})};
           update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
       }
@@ -394,10 +478,18 @@ export class TaskEngine {
           update({publication_started:1});
         });
         if(!development&&!review){
-          // A custom workflow publishes its reply and stops: no labels, no development, no conversation to keep.
-          log({type:'phase',phase:'publish',target:'workflow',detail:'正在发布到 GitHub：发送工作流回复…'});
-          const outputs=await publisher.reply(result,input.files);
-          log({type:'published',outputs:outputs.map((o:any)=>({html_url:o.html_url,inline_comments:o.inline_comments?.length||0}))});
+          // A custom workflow publishes what its writes allow and stops: no development, no conversation to keep.
+          const outputs:any[]=[];
+          if(writes.includes('reply')){
+            log({type:'phase',phase:'publish',target:'workflow',detail:'正在发布到 GitHub：发送工作流回复…'});
+            outputs.push(...await publisher.reply(result,input.files));
+          }
+          if(writes.includes('labels')&&result.labels?.length){
+            const current=(seen||await github.object(task.kind,task.object_number)).labels;
+            const names=classificationLabels(result.labels,input.repository_labels,current,[input.review_label,input.development_label]);
+            if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
+          }
+          if(outputs.length)log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
           update({result:JSON.stringify({...result,outputs}),phase:'done',status:'succeeded',error_code:null});
         }
         else if(!development){
@@ -409,9 +501,11 @@ export class TaskEngine {
           // Labels go on only after the summary comment was published: the policy's review label, plus the classification
           // labels the model named that pass classificationLabels against the repository and the object's current labels.
           // publisher.review ends by validating the object, so its labels are current.
-          const label=input.review_label,current=(seen||await github.object(task.kind,task.object_number)).labels;
-          const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label])];
-          if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
+          if(writes.includes('labels')){
+            const label=input.review_label,current=(seen||await github.object(task.kind,task.object_number)).labels;
+            const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label])];
+            if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
+          }
           log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0,...(o.resolved_threads?{resolved_threads:o.resolved_threads.length}:{})})});
           result={...result,outputs};
           // A review that finds a code request starts development only with a person's go-ahead already on the Issue;
@@ -463,6 +557,8 @@ export class TaskEngine {
       const delay=limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
         :counted&&cycle!=null?cycle+(Math.floor(Math.max(0,now-cycle)/retryCycleMs)+1)*retryCycleMs-now
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
+      // An event workflow's module hears that its task ended without a result (a waiting or retried task has not ended).
+      if(event&&current?.claim_token===token&&['failed','cancelled','superseded','needs_replan'].includes(state))event.ended?.(this.store,task,failure.code,redactor.text(String(failure.detail||'')));
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
         retry_error_code:counted?failure.code:retrying?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
         rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});

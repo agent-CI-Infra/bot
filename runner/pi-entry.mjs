@@ -5,7 +5,7 @@ import {randomBytes} from 'node:crypto';
 import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,SettingsManager,estimateTokens} from '@earendil-works/pi-coding-agent';
 import {workspace} from './workspace.mjs';
 import {waitModelReply} from './model-reply.mjs';
-import {toolCapabilityError} from './capabilities.mjs';
+import {toolCapabilityError,platformWrites} from './capabilities.mjs';
 import {createRepositoryTool} from './repository-tool.mjs';
 import {createTokenExchange} from './token-exchange.mjs';
 import {createRepositoryResultGuard} from './repository-context.mjs';
@@ -22,8 +22,10 @@ const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='s
 const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
 const exchange=createTokenExchange(dir);
-// Repository exploration runs in the control plane, using the same executor as CI observation.
+// Repository exploration and the platform's write tools run in the control plane, through one mailbox.
 const repositoryTool=createRepositoryTool(dir);
+// The tools that end the task: finish_review unless the configuration names others (a development task ends with its PR).
+const finishTools=new Set(config.finish_tools||['finish_review']);
 // Publication can include a long-running policy command. Wait for the control plane instead of
 // ending the session or imposing a request deadline.
 async function createPullRequest(args){
@@ -72,11 +74,12 @@ try{
       let result;
       const denied=toolCapabilityError(cfg,name,args);
       if(denied) result={error:denied};
-      else if(['github_read','github_search','read_job_log'].includes(name))result=await repositoryTool(name,args,signal);
-      else if(name==='finish_review'&&!agent){finished=args;result={finished:true};}
+      else if(['github_read','github_search','read_job_log'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent)result=await repositoryTool(name,args,signal);
+      else if(finishTools.has(name)&&!agent){finished=args;result={finished:true};}
       else if(name==='create_pull_request'&&!agent){
         result=await createPullRequest(args);
-        if(result.pr||result.status==='no_changes'){finished={...args,...result};setTimeout(()=>void session.abort(),10);}
+        // Development ends with its pull request; other workflows publish one and carry on to their own finish.
+        if(config.finish_on_pull_request!==false&&(result.pr||result.status==='no_changes')){finished={...args,...result};setTimeout(()=>void session.abort(),10);}
       }
       // A sub-agent is a new session built from its own configuration; it never sees this conversation.
       else if(name==='start_agent'&&!agent)result=await runSubagent({config:cfg,args,id:'agent-'+randomBytes(6).toString('hex'),createSession:(child,childId)=>createSession(child,childId,[]),writeEvent});
@@ -97,7 +100,7 @@ try{
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else result={error:'tool_not_allowed'};
       result=await guard.check(id,name,result);
-      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(name==='finish_review'&&!agent?{terminate:true}:{})};
+      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(finishTools.has(name)&&!agent?{terminate:true}:{})};
     }}));
   // A Pi session from one configuration: its system prompt, its tools and the history it is given (none for a sub-agent).
   async function createSession(cfg,agent,history){

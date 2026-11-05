@@ -8,8 +8,7 @@ import { inspect, fingerprint, preflightToken } from './preflight.js';
 import { enabled, releaseRedactor, withGitHub } from './github.js';
 import { validVersion } from './version.js';
 import { ReleaseWorker } from './worker.js';
-import { runSnapshot } from './actions.js';
-import { explainRun } from './observe.js';
+import { requestObservation } from './observe.js';
 import { savedWorkflow, activeTrigger } from '../workflows/resolve.js';
 // The release.notes workflow's console prompt; a repository skill still replaces it at preflight.
 const releaseNotesPrompt = (store: Store, id: string) => savedWorkflow(store, id, 'release.notes')?.prompt ?? null;
@@ -135,41 +134,12 @@ export class ReleaseService {
       if (!Number.isSafeInteger(input.revision)) return fail(400, 'release_revision_required');
       // The CI observation workflow can be switched off, or lose its trigger, on the Workflows page.
       if (!activeTrigger(this.store, id, 'release.observe', 'release.manual')) return fail(409, 'workflow_disabled');
-      // Analysis owns only its observer lease. CI polling and publication keep their own write lease.
-      const row = this.find(id, observation[1]!), redactor = releaseRedactor(this.store, id), observer = randomId();
+      // The analysis is a task of the CI observation workflow; the release page shows it once it is done.
+      const row = this.find(id, observation[1]!);
       if (row.revision !== input.revision) return fail(409, 'release_revision_conflict');
-      const initial = JSON.parse(row.data);
-      if (!initial.run_id) return fail(409, 'release_no_bound_run');
-      const claimed = this.store.run(`INSERT INTO release_observers VALUES(?,?,?) ON CONFLICT(release_id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE release_observers.expires_at<=?`, row.id, observer, Date.now() + 300000, Date.now());
-      if (!claimed.changes) return fail(409, 'release_observation_busy');
-      const guard = async () => {
-        enabled(this.store, id);
-        if (!this.store.run('UPDATE release_observers SET expires_at=? WHERE release_id=? AND token=? AND expires_at>?', Date.now() + 300000, row.id, observer, Date.now()).changes)
-          return stop('release_lease_lost', 'failed', '本次运行分析已失效，请重新查看。');
-        const latest = JSON.parse(this.find(id, row.id).data);
-        if (latest.run_id !== initial.run_id || latest.run_attempt !== initial.run_attempt) return fail(409, 'release_attempt_changed');
-      };
-      const save = (patch: Json) => this.store.transaction(() => {
-        if (!this.store.get('SELECT 1 FROM release_observers WHERE release_id=? AND token=? AND expires_at>?', row.id, observer, Date.now())) return;
-        const latest = this.find(id, row.id), data = JSON.parse(latest.data);
-        if (data.run_id !== initial.run_id || data.run_attempt !== initial.run_attempt) return fail(409, 'release_attempt_changed');
-        // Observer metadata does not invalidate a pending body edit or the worker's authoritative revision.
-        this.store.run('UPDATE project_releases SET data=? WHERE id=?', JSON.stringify({ ...data, ...patch }), row.id);
-      });
-      try {
-        const data = JSON.parse(row.data); if (!data.run_id) return fail(409, 'release_no_bound_run');
-        this.store.audit(user.id, 'release.observe', row.id, id);
-        const result = await withGitHub(this.store, id, this.apiUrl, {}, redactor, async github => {
-          const current = await runSnapshot(github, row);
-          if (current.run.run_attempt !== data.run_attempt) return fail(409, 'release_attempt_changed');
-          return explainRun(this.store, id, current.snapshot, redactor, github, row);
-        }, guard);
-        await guard(); save({ observation: result, observation_error: null });
-      } catch (error) {
-        if ((error as any).status) throw error;
-        const e = error as any;
-        save({ observation_error: redactor.text(e.detail || '本次分析失败，Actions 状态不受影响。') });
-      } finally { this.store.run('DELETE FROM release_observers WHERE release_id=? AND token=?', row.id, observer); }
+      if (!JSON.parse(row.data).run_id) return fail(409, 'release_no_bound_run');
+      this.store.audit(user.id, 'release.observe', row.id, id);
+      requestObservation(this.store, row);
       return { release: this.view(this.find(id, row.id)) };
     }
     return fail(404, 'not_found');

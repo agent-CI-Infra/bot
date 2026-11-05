@@ -7,6 +7,9 @@ import { harness, setup, account, repository } from './helpers.mjs';
 import { ActionsFailures, scanPageSize } from '../dist/actions/service.js';
 import { failedStepOutput, verifiedEvidence, classifyFailure, normalizeSignature } from '../dist/actions/classifier.js';
 import { actionsModel } from './actions-model.mjs';
+import { runEventTasks } from './event-tasks.mjs';
+import { workspaceProfile } from '../dist/agent/profiles.js';
+import { workflowAccess } from '../dist/workflows/catalog.js';
 import { actionsDevelopmentAllowed, publicText } from '../dist/actions/safety.js';
 import { recordActionsRun } from '../dist/actions/storage.js';
 import { TaskEngine } from '../dist/agent/engine.js';
@@ -76,15 +79,17 @@ async function fixture(t, options = {}) {
   const a = await account(admin, { type: 'github_app', app_id: '1', private_key: pem, token: undefined }); await repository(admin, a.id, '101');
   const policy = changes => admin('/api/repositories/101/policy', 'PATCH', changes);
   // The workflow's model analyzes each failed run; by default it answers with the rules in actions-model.mjs.
-  const analysis = await actionsModel(t, options.respond);
+  const analysis = actionsModel(t, options.respond);
   const model = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'analysis', api_url: analysis.url, api_key: 'actions-analysis-model-key' })).value.model;
   const enabled = await policy({ actions_failures_enabled: true, review_enabled: true, development_enabled: true, model_id: model.id }); assert.equal(enabled.status, 200);
   let service = new ActionsFailures(h.store, apiUrl);
-  const tick = async () => { h.store.run('UPDATE actions_failure_scans SET next_scan=0'); await service.tick(); };
+  // A scan queues the analysis task; the project computer runs it; the next scan acts on its result.
+  const scan = async () => { h.store.run('UPDATE actions_failure_scans SET next_scan=0'); await service.tick(); };
+  const tick = async () => { await scan(); if (await runEventTasks(h.store, 'actions.failures', analysis.agent)) await scan(); };
   const hook = (r = state.runs[0], delivery = 'actions-' + Math.random()) => h.hook(a.path, a.secret, delivery, { action: 'completed', repository: { id: 101 }, workflow_run: r }, { 'X-GitHub-Event': 'workflow_run' });
   const restart = async () => { await service.close(); await h.stop(); await h.start(); service = new ActionsFailures(h.store, apiUrl); };
   const reruns = () => state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/rerun'));
-  return { state, h, a, admin, policy, hook, tick, restart, reruns, apiUrl, analysis };
+  return { state, h, a, admin, policy, hook, tick, scan, restart, reruns, apiUrl, analysis };
 }
 
 test('the analysis reads only the failed steps, and cited lines must be lines they printed', () => {
@@ -103,10 +108,16 @@ test('the workflow model decides external and code; unsupported, unusable or fai
   await f.tick();
   assert.equal(f.reruns().length, 0); assert.match(f.state.issues[0].body, /classification: \*\*unknown\*\*/);
   assert.match(f.state.issues[0].body, /The analysis cited no line that the failed steps printed\./);
-  // The prompt carries the failed step's output, the workflow prompt and the tools of its saved permissions.
-  const request = f.analysis.requests[0], prompt = JSON.parse(request.messages[1].content);
-  assert.deepEqual(prompt.failed_jobs.map(job => [job.job_id, job.failed_step_output]), [[91, 'HTTPError: HTTP 429 Too Many Requests']]);
-  assert.match(request.messages[0].content, /# Actions failure analysis/); assert.ok(request.tools.some(tool => tool.function.name === 'read_job_log'));
+  // The task runs in the project computer on the failed commit: the failed step's output is a context file, and the agent
+  // has the workflow prompt, the read tools and the writes of its workflow (rerun and report), which it finishes after.
+  const request = f.analysis.requests[0], task = f.h.store.get("SELECT * FROM tasks WHERE kind='actions.failures'");
+  assert.deepEqual([task.head_sha, task.status], ['a'.repeat(40), 'succeeded']); assert.equal(request.target.sha, 'a'.repeat(40));
+  assert.deepEqual(request.input.failed_jobs.map(job => [job.job_id, job.failed_step_output]), [[91, 'HTTPError: HTTP 429 Too Many Requests']]);
+  assert.equal(request.target.files['failed-steps/91.log'], 'HTTPError: HTTP 429 Too Many Requests');
+  const profile = workspaceProfile('actions.failures', request.target.context, workflowAccess('actions.failures')), names = profile.tools.map(tool => tool.function.name);
+  assert.match(profile.system, /# Actions failure analysis/); assert.deepEqual(profile.finishTools, ['finish_analysis']);
+  for (const name of ['read_file', 'run_command', 'read_job_log', 'rerun_failed_run', 'report_failure', 'finish_analysis', 'start_agent']) assert.ok(names.includes(name), name);
+  assert.ok(!names.includes('create_issue'));
   // A model that names a cause outside the old rules is followed when its line is real.
   f = await fixture(t, { log: log('pip install failed: mirror returned an empty index'), respond: input => ({ content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'external',
     reason: 'The package mirror returned an empty index.', evidence: ['pip install failed: mirror returned an empty index'] })) }) }) });
@@ -118,7 +129,7 @@ test('the workflow model decides external and code; unsupported, unusable or fai
   let down = true;
   f = await fixture(t, { respond: input => down ? { status: 503 } : { content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'code', reason: 'Broken test, ping @owner\nnow.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] })) }) } });
   await f.tick(); assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 0);
-  assert.match(f.h.store.get('SELECT error FROM actions_failure_scans').error, /^model_/);
+  assert.match(f.h.store.get('SELECT error FROM actions_failure_scans').error, /^model_/); assert.equal(f.h.store.get("SELECT status FROM tasks WHERE kind='actions.failures'").status, 'retry_wait');
   down = false; await f.tick(); assert.equal(f.state.issues.length, 1); assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/);
   // The model's reason is published as one line that mentions nobody.
   assert.ok(f.state.issues[0].body.includes('Broken test, ping &#64;owner now.'));
@@ -233,7 +244,8 @@ test('scan persists the current page, retries failed items, and never passes an 
   const f = await fixture(t, { log: log('AssertionError: failed') }), created = new Date(Date.now() - 30_000).toISOString(); f.state.runs = Array.from({ length: scanPageSize + 1 }, (_, i) => run({ id: 800 + i, created_at: created }));
   let broken = true; f.state.custom = ({ path, send }) => { if (broken && path.endsWith('/actions/runs/801')) { send({}, 503); return true; } return false; };
   await f.tick(); let scan = f.h.store.get('SELECT * FROM actions_failure_scans'); assert.equal(JSON.parse(scan.windows)[0].page, 1); assert.equal(JSON.parse(scan.page_data).index, 1);
-  assert.equal(f.state.issues.length, 1); broken = false; await f.restart(); await f.tick(); scan = f.h.store.get('SELECT * FROM actions_failure_scans');
+  // One scan finishes the first page (its runs wait for their analysis) and stops at the second.
+  assert.equal(f.state.issues.length, 1); broken = false; await f.restart(); await f.scan(); scan = f.h.store.get('SELECT * FROM actions_failure_scans');
   assert.equal(JSON.parse(scan.windows)[0].page, 2); await f.tick(); assert.equal(f.h.store.get('SELECT windows FROM actions_failure_scans').windows, '[]');
   assert.equal(f.state.issues.length, 1); assert.equal(f.state.comments.length, scanPageSize); assert.equal(f.reruns().length, 0);
 });

@@ -24,7 +24,7 @@ function makeRepo(id){
 }
 for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
 let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0;
-const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[]};
+const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[],issues:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function model(input){
   const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw),repoId=context.repository.split('-').at(-1),repo=repositories.get(repoId),number=context.object.number;
@@ -98,6 +98,11 @@ export const server=createServer(async(req,res)=>{
     }
     // A maintainer added the development label to every Issue that asks for a fix.
     if((m=/^\/issues\/(\d+)\/events$/.exec(suffix))){const labels=repo.issues.get(Number(m[1]))?.labels||[];return send(Number(url.searchParams.get('page')||1)===1?labels.map(label=>({event:'labeled',label,actor:{id:700,login:'maintainer',type:'User'}})):[]);}
+    // Issues the bot files; listed back newest first for reconciliation.
+    if(suffix==='/issues'){
+      if(method==='POST'){const number=1000+stats.issues.length,value={number,title:body.title,body:body.body,user:{id:999},html_url:'https://github.invalid/issues/'+number};stats.issues.push({repository_id:repo.id,...value});return send(value,201);}
+      return send(stats.issues.filter(issue=>issue.repository_id===repo.id).reverse());
+    }
     if((m=/^\/issues\/(\d+)$/.exec(suffix)))return send(repo.issues.get(Number(m[1]))||{},repo.issues.has(Number(m[1]))?200:404);
     if((m=/^\/pulls\/(\d+)\/files$/.exec(suffix))){
       if(Number(url.searchParams.get('page')||1)>1)return send([]);

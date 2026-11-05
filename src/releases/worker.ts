@@ -5,7 +5,8 @@ import { stop, type Redactor } from '../agent/common.js';
 import { tag, releases, releaseRedactor, withGitHub } from './github.js';
 import { actionPages, ambiguousBranch, matchesRun, runSnapshot } from './actions.js';
 import { sources } from './range.js';
-import { notes } from './notes.js';
+import { builtinGroups, checkGroups, notesUseModel, renderNotes, requestNotes } from './notes.js';
+import { eventTaskActive } from '../workflows/events.js';
 import { prerelease } from './version.js';
 
 export class ReleaseWorker {
@@ -49,9 +50,17 @@ export class ReleaseWorker {
     if (value && value.commit !== row.target_sha) return stop('release_tag_conflict', 'failed', `标签 ${row.version} 指向 ${value.commit}，确认的提交是 ${row.target_sha}；不会移动或删除标签。`);
     return value;
   }
+  // The release.notes task this release waits for, while it still runs: nothing is asked of GitHub meanwhile.
+  private notesRunning(row: any) {
+    const data = JSON.parse(row.data), task = data.notes_task ? this.service.store.get('SELECT * FROM tasks WHERE id=?', data.notes_task) : undefined;
+    // Provider downtime fails the step at once instead of keeping the release waiting: the release has explicit retry controls.
+    if (task && ['retry_wait', 'waiting_configuration'].includes(task.status) && /^model_/.test(String(task.error_code || ''))) return false;
+    return row.stage === 'preparing_notes' && eventTaskActive(task);
+  }
   async process(id: string) {
     let row: any; try { row = this.service.claim(id); } catch { return; }
     const redactor = releaseRedactor(this.service.store, row.repository_id);
+    if (this.notesRunning(row)) { this.service.store.run('UPDATE project_releases SET next_poll=? WHERE id=? AND lease=?', Date.now() + 5000, row.id, row.lease); this.service.unlock(row); return; }
     try {
       await withGitHub(this.service.store, row.repository_id, this.service.apiUrl, ['tagging', 'creating_draft'].includes(row.stage) ? { contents: 'write' } : { pull_requests: 'read' }, redactor,
         async github => {
@@ -70,7 +79,9 @@ export class ReleaseWorker {
   failed(row: any, error: any, redactor: Redactor, failureStep = row.stage) {
     const retryRead = error.state === 'retry_wait' && !['tagging', 'creating_draft', 'publishing'].includes(row.stage);
     const stage = retryRead ? row.stage : error.state === 'waiting_permission' ? 'waiting_permission' : error.state === 'write_unknown' ? 'write_unknown' : 'failed';
-    this.service.save(row, { failure_step: failureStep, error: error.code || 'release_failed', detail: redactor.text(error.detail || '发布步骤失败，请检查接入和 GitHub 状态。') }, stage);
+    // A failed notes step asks for a new release.notes task when it is resumed.
+    this.service.save(row, { failure_step: failureStep, error: error.code || 'release_failed', detail: redactor.text(error.detail || '发布步骤失败，请检查接入和 GitHub 状态。'),
+      ...(row.stage === 'preparing_notes' && !retryRead ? { notes_task: null } : {}) }, stage);
     if (retryRead) this.pollLater(row, error.retryAfterMs);
   }
   async tagging(github: GitHub, row: any, redactor: Redactor) {
@@ -182,7 +193,24 @@ export class ReleaseWorker {
     const sensitive = data.input_sensitive || redactor.contains(Buffer.from(JSON.stringify(input)));
     this.service.save(row, { sources: redactor.clean(input), input_sensitive: !!sensitive });
     if (sensitive) return stop('release_sensitive_body', 'failed', '发行说明来源包含已登记的密钥，已拒绝写入。');
-    const generated = await notes(this.service.store, row, input, redactor, github);
+    // The release.notes workflow groups the sources in the project computer; the release waits for its task.
+    let groups = builtinGroups(input);
+    if (notesUseModel(this.service.store, row, input)) {
+      const store = this.service.store, task = data.notes_task ? store.get('SELECT * FROM tasks WHERE id=?', data.notes_task) : undefined;
+      if (!task) {
+        const queued = requestNotes(store, row, input, (data.notes_attempts || 0) + 1);
+        this.service.save(row, { notes_task: queued.id, notes_attempts: (data.notes_attempts || 0) + 1 });
+        store.run('UPDATE project_releases SET next_poll=? WHERE id=? AND lease=?', Date.now() + 5000, row.id, row.lease); return;
+      }
+      if (eventTaskActive(task) && /^model_/.test(String(task.error_code || ''))) {
+        store.run("UPDATE tasks SET status='cancelled',error_code='release_notes_model_failed' WHERE id=?", task.id);
+        return stop('release_notes_model_failed', 'failed', '发行说明模型请求失败，可人工重试发行说明步骤。');
+      }
+      if (task.status !== 'succeeded') return stop(task.error_code === 'release_notes_invalid' ? 'release_notes_invalid' : 'release_notes_model_failed', 'failed',
+        task.error_code === 'release_notes_invalid' ? '发行说明分组无法核验。' : `发行说明整理没有完成（${task.error_code || task.status}），可人工重试发行说明步骤。`);
+      groups = checkGroups(JSON.parse(task.result).groups, input);
+    }
+    const generated = renderNotes(row, input, groups, redactor);
     this.service.save(row, { body: generated.body, notes_input_hash: generated.input_hash, note_groups: generated.groups }, 'creating_draft');
   }
   async createDraft(github: GitHub, row: any, redactor: Redactor) {

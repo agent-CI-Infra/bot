@@ -205,6 +205,11 @@ function releaseRecord(r, endpoint, refresh, message) {
   if (r.stage === 'failed' && ['release_ci_unsuccessful', 'release_rerun_not_started'].includes(r.error) && r.run_id) actions.append(action('重跑', 'rerun'));
   if (['failed', 'write_unknown', 'waiting_permission'].includes(r.stage) && r.error !== 'release_ci_unsuccessful') actions.append(action('继续／查证此步骤', 'resume'));
   if (r.run_id) actions.append(action('让智能体看这次运行（只读）', 'observe'));
+  // The analysis is a task of the CI observation workflow in the project computer; this page refreshes until it is done.
+  if (r.observation_task) {
+    const pending = element('p', '运行分析在项目电脑里排队或执行中，完成后显示在这里。', 'muted');
+    pending.append(' ', button('查看分析过程', () => openTask(r.observation_task), 'quiet')); section.append(pending);
+  }
   if (r.observation_error) section.append(note(r.observation_error));
   if (r.observation) {
     section.append(note(`运行分析 · run ${r.observation.run_id} / attempt ${r.observation.attempt} · 仅供排查的建议`), note(r.observation.advice));

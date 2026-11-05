@@ -1,13 +1,15 @@
-import {narrowCapabilities,toolCapabilityError} from './capabilities.mjs';
+import {narrowCapabilities,toolCapabilityError,platformWrites} from './capabilities.mjs';
 
-// Tools a sub-agent never gets: publishing, finishing the task and starting more agents stay with the main agent.
-const reserved=new Set(['finish_review','create_pull_request','start_agent']);
+// Tools a sub-agent never gets: publishing, any other write, finishing the task and starting more agents stay with the
+// main agent. Finishing tools are named by the task configuration.
+const reserved=config=>new Set(['finish_review','create_pull_request','start_agent',...Object.keys(platformWrites),...(config.finish_tools||[])]);
 const offered=(config,name)=>name==='write_file'?config.capabilities.workspace.notes===true||config.capabilities.workspace.write===true:!toolCapabilityError(config,name,{});
 // The configuration of one sub-agent: its own system prompt (the control plane's frame plus the instructions the main
 // agent wrote) and the main agent's tools that its narrowed capabilities still allow.
 export function subagentConfig(config,args){
   const capabilities=narrowCapabilities(config.capabilities,args?.permissions),child={...config,capabilities,review_session:false};
-  return {...child,system:config.subagent_system+'\n\n'+String(args.instructions),prompt:String(args.task),tools:config.tools.filter(tool=>!reserved.has(tool.function.name)&&offered(child,tool.function.name))};
+  const withheld=reserved(config);
+  return {...child,system:config.subagent_system+'\n\n'+String(args.instructions),prompt:String(args.task),tools:config.tools.filter(tool=>!withheld.has(tool.function.name)&&offered(child,tool.function.name))};
 }
 // Runs one sub-agent to its final answer. createSession builds a new Pi session from the child configuration alone, with
 // an empty history: the sub-agent never sees the main agent's messages, only its instructions and task.

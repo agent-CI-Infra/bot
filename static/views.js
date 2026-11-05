@@ -1,6 +1,6 @@
 // Task process and project computer views. Loaded after app.js and reuses its helpers ($, api, element, state, states, timestamp).
 const terminalStates = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
-const kindLabels = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR', 'release.observe': 'CI 观察', 'release.notes': '发行说明',
+const kindLabels = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR', 'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败分析',
   'workflow.issue': '自定义工作流 Issue', 'workflow.pr': '自定义工作流 PR' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', publish: '发布', done: '完成' };
@@ -26,7 +26,8 @@ const environmentFaultCause = {
 function environmentFault(code) { return code ? `${environmentErrors[code] || '未归类的故障'}（${code}）。${environmentFaultCause[code] || '原因见日志：docker compose -p bot logs manager bot'}` : null; }
 function taskState(task) { return task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit' ? badge('仓库还没有提交', 'warning') : state(task.status); }
 
-function objectLabel(task) { return `${task.kind.endsWith('.pr') ? 'PR' : 'Issue'} #${task.object_number}`; }
+// An event workflow's task has no Issue or PR: it names its summary instead (the release or the Actions run).
+function objectLabel(task) { return task.object_number == null ? String(task.summary || kindLabels[task.kind] || task.kind) : `${task.kind.endsWith('.pr') ? 'PR' : 'Issue'} #${task.object_number}`; }
 function githubUrl(task) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(task.full_name || '') || !task.object_number) return null;
   return `https://github.com/${task.full_name}/${task.kind.endsWith('.pr') ? 'pull' : 'issues'}/${task.object_number}`;
@@ -180,7 +181,7 @@ async function refreshTask() {
   } catch (err) { if(openTaskId!==id||!taskView.open)return;if(!$('task-error').childElementCount)notice('task-error',err.message);taskTimer = setTimeout(refreshTask, 5000); }
 }
 function renderTaskHeader(task) {
-  $('task-title').textContent = `${modeLabels[task.kind] || task.kind} · ${objectLabel(task)}`;
+  $('task-title').textContent = task.object_number == null ? objectLabel(task) : `${modeLabels[task.kind] || task.kind} · ${objectLabel(task)}`;
   $('task-badges').replaceChildren(taskState(task), element('span', task.full_name || '仓库 ' + task.repository_id, 'muted'));
   const actions = $('task-actions'), url = githubUrl(task); actions.replaceChildren();
   if (url) actions.append(link(url, '在 GitHub 打开', 'button-link'));

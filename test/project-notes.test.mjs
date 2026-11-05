@@ -226,7 +226,9 @@ test('review and development system prompts require useful maintained notes even
       return {};
     }};
     await agentLoop(h.store,{id:'prompt',repository_id:'101',workspace_id:id(),kind},work,new Redactor(),async()=>{},{effective_rules:{files:[{path:'.bot/rules/pr-review.md',source:'repository',effective:'Replacement rules'}]}},undefined,async()=>({status:'no_changes'}));
-    for(const text of ['At task start','../notes/','repository.md','preferences.md','corrections.md','correct or remove','Do not create empty','Issue or PR language','existing language','not rules','change review events','override .bot rules','Review may write','must not modify','Neither review nor development','Replacement rules'])assert.ok(config.system.includes(text),kind+': '+text);
+    for(const text of ['At task start','../notes/','repository.md','preferences.md','corrections.md','correct or remove','Do not create empty','Issue or PR language','existing language','not rules','change review events','override .bot rules','Notes are never committed','Replacement rules'])assert.ok(config.system.includes(text),kind+': '+text);
+    // Only a workflow without the code write is told to leave the checkout alone.
+    assert.equal(config.system.includes('must not modify files in the repository checkout'),!kind.startsWith('development'),kind);
     for(const removed of ['32 files','64 KiB','512 KiB','Never store keys','known credentials are rejected','Note names must match'])assert.ok(!config.system.includes(removed),kind+': '+removed);
     const writeTool=config.tools.find(tool=>tool.function.name==='write_file');assert.ok(writeTool);
     assert.doesNotMatch(writeTool.function.description, /<name>\.md/);

@@ -11,20 +11,24 @@ import type { AgentModel } from './gateway.js';
 import { RepositoryExplorer, repositoryTools } from './exploration.js';
 
 export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
+/** The platform's write tools for this task, by tool name: the control plane performs the write and answers the agent. */
+export type PlatformTools = Record<string, (id: string, args: any) => Promise<any>>;
 
-export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation) {
-  try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation); }
+export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}) {
+  try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation, platform); }
   // A token the agent exchanged is useless after the model phase; revoke it however the phase ends.
   finally { await tokens?.revoke(); }
 }
-async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation) {
+async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}) {
   // Permissions and a custom workflow's prompt are read from trusted storage here, for every caller and every attempt.
   const workflowId = taskWorkflow(task as any), saved = String(task.kind).startsWith('workflow.') ? savedWorkflow(store, task.repository_id, workflowId) : undefined;
   if (String(task.kind).startsWith('workflow.') && !saved) stop('workflow_not_found', 'cancelled', `工作流 ${workflowId} 已删除。`);
   const profile = workspaceProfile(String(task.kind), context, workflowPermissions(store, task.repository_id, workflowId), saved ? { id: workflowId, name: String(saved.name), prompt: String(saved.prompt ?? '') } : undefined);
   const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
   const system = profile.system;
+  // Only development ends with its pull request; any other workflow that may open one carries on to its own finish.
   const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
+    finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
   return runAgent({ store, task, redactor, guard, system, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: async ({ request, model }) => {
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
@@ -90,6 +94,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         const result = redactor.clean(state.result);
         if (profile.completion === 'review') return validateReview(result);
         if (profile.completion === 'reply') return validateReply(result);
+        // An event workflow's result is checked by its own module; the log windows the agent read go with it.
+        if (profile.completion !== 'publication') return { ...result, read_logs: redactor.clean(explorer?.logs ?? []) };
         if (!publication) stop('create_pull_request_required', undefined, '开发执行已结束，但没有通过 create_pull_request 创建或更新 PR。');
         return publication;
       }
@@ -114,7 +120,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
           const sent = await workspace.call(`pi:pr-reply:${id}:${at}`, { type: 'workspace_agent_pull_request', request_id: id, base64: bytes.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= bytes.length });
           if (sent.error) stop('execution_interrupted', 'waiting_environment', `发送 PR 发布结果时中断，offset=${at}。`);
         }
-        if (reply.pr || reply.status === 'no_changes') publication = { ...args, ...reply };
+        if (profile.completion === 'publication' && (reply.pr || reply.status === 'no_changes')) publication = { ...args, ...reply };
         answered.add('pr:' + id); continue;
       }
       if (state.token_request && !answered.has('token:' + state.token_request.id)) {
@@ -136,10 +142,16 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       if (state.repository_tool && !answered.has('repository:' + state.repository_tool.id)) {
         const { id, name, arguments: args } = state.repository_tool;
         if (typeof id !== 'string' || !/^[a-f0-9]{48}$/.test(id)) stop('model_request_invalid');
-        const allowed = repositoryTools.some(tool => tool.function.name === name) && profile.tools.some(tool => tool.function.name === name);
-        // A living Pi may retain its read token across a control-plane restart; establish this executor's client too.
-        const access = allowed && explorer ? await explorer.execute('github_read_token', {}) : null;
-        const result = !allowed ? { error: 'tool_not_allowed' } : !explorer ? { error: 'github_read_token_unavailable' } : access?.error ? access : await explorer.execute(name, args);
+        const offered = profile.tools.some(tool => tool.function.name === name);
+        let result: any;
+        // A write tool the workflow allows is performed by the control plane; its answer goes back like a repository read.
+        if (Object.hasOwn(platform, name)) result = offered ? await platform[name]!(id, args) : { error: 'write_not_allowed' };
+        else {
+          const allowed = repositoryTools.some(tool => tool.function.name === name) && offered;
+          // A living Pi may retain its read token across a control-plane restart; establish this executor's client too.
+          const access = allowed && explorer ? await explorer.execute('github_read_token', {}) : null;
+          result = !allowed ? { error: 'tool_not_allowed' } : !explorer ? { error: 'github_read_token_unavailable' } : access?.error ? access : await explorer.execute(name, args);
+        }
         const reply = Buffer.from(JSON.stringify(redactor.clean(result)));
         for (let at = 0; at < reply.length; at += 30000) {
           const sent = await workspace.deliver({ type: 'workspace_agent_repository_tool', request_id: id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });

@@ -7,6 +7,12 @@ import { releaseFixture, workflow, writes, target, previous, other, tagObject, r
 import { Store } from '../dist/storage/database.js';
 import { ReleaseService } from '../dist/releases/service.js';
 import { testPassword } from './helpers.mjs';
+import { runEventTasks } from './event-tasks.mjs';
+import { workspaceProfile } from '../dist/agent/profiles.js';
+import { workflowPermissions } from '../dist/workflows/resolve.js';
+import { selectedModel } from '../dist/agent/model.js';
+import { GitHub } from '../dist/github/client.js';
+import { Redactor } from '../dist/agent/common.js';
 
 test('release versions and precedence follow SemVer without metadata or precision loss', () => {
   for (const v of ['v0.1.0', 'v1.2.3-beta', 'v1.2.3-beta.1', 'v1.2.3-rc.1', 'v999999999999999999.0.0']) assert.ok(validVersion(v), v);
@@ -142,10 +148,11 @@ test('rerun refuses a moved tag and never issues a dispatch or tag write', async
   assert.equal(writes(f.state).length, before);
   assert.equal((await f.admin(f.endpoint + '/' + r.id)).value.release.error, 'release_tag_conflict');
 });
-async function toDraft(f, version = 'v1.2.3') {
+// notes: the agent of the release.notes task (which runs in the project computer), when the release asks for one.
+async function toDraft(f, version = 'v1.2.3', notes) {
   f.state.runs = [run({ head_branch: version, head_sha: f.state.head })]; f.state.jobs = [job()];
   const created = await f.create(version); assert.equal(created.status, 201);
-  for (let i = 0; i < 4; i++) await f.service.worker.process(created.value.release.id);
+  for (let i = 0; i < 5; i++) { await f.service.worker.process(created.value.release.id); if (notes) await runEventTasks(f.h.store, 'release.notes', notes); }
   return (await f.admin(f.endpoint + '/' + created.value.release.id)).value.release;
 }
 test('release notes freeze the highest reachable SemVer tag and verified merge, squash and rebase PR sources', async t => {
@@ -381,23 +388,26 @@ test('manual draft saving holds the repository only until the edit finishes', as
   assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 0);
   assert.equal((await f.create('v1.2.4')).status, 201); assert.equal(f.state.releases[0].draft, true);
 });
-test('repository release-notes Skill is explicitly loaded at the target SHA into a model call that can only read', async t => {
+test('repository release-notes Skill is explicitly loaded at the target SHA into a release.notes task that can only read', async t => {
   const f = await releaseFixture(t), skill = 'Group real commits under Changes. Do not invent results.';
   f.state.files['.agents/skills/release-notes/SKILL.md'] = skill;
   await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-model-release-key', model_name: 'notes-fixture' });
   const model = f.h.store.get('SELECT id FROM models WHERE repository_id=?', '101');
   const fallback = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-default-model-key', model_name: 'default-fixture' })).value.model;
   await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: fallback.id, task_models: {'release.notes': model.id} });
-  let request;
-  f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; const input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: JSON.stringify({ groups: [{ heading: 'Changes', source_ids: input.sources.map(s => s.id) }] }) } }] }); return true; } };
-  const r = await toDraft(f); assert.equal(r.stage, 'draft'); assert.equal(r.skill.source, 'repository'); assert.equal(r.skill.sha, target);
-  const modelInput = JSON.parse(request.messages[1].content); assert.equal(modelInput.skill, skill); assert.equal(modelInput.skill_sha, target);
-  // Like every workflow it may read GitHub and start agents; nothing it is given writes.
-  assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'start_agent']);
-  assert.equal(request.model, 'notes-fixture');
-  assert.equal(request.temperature, 0);
-  assert.equal(f.h.store.get('SELECT model_id FROM model_requests').model_id, model.id);
-  assert.ok(!JSON.stringify(request).includes('fixture-installation-')); assert.match(r.body, /## Changes/);
+  let seen;
+  const r = await toDraft(f, 'v1.2.3', ({ input, target: event }) => { seen = { input, event }; return { groups: [{ heading: 'Changes', source_ids: input.sources.map(s => s.id) }] }; });
+  assert.equal(r.stage, 'draft'); assert.equal(r.skill.source, 'repository'); assert.equal(r.skill.sha, target); assert.match(r.body, /## Changes/);
+  // The task works on a checkout of the release commit, with the verified sources and the Skill as context files.
+  const task = f.h.store.get("SELECT * FROM tasks WHERE kind='release.notes'");
+  assert.deepEqual([task.status, task.head_sha, seen.event.sha], ['succeeded', target, target]);
+  assert.equal(seen.event.files['release-notes-skill.md'], skill); assert.deepEqual(JSON.parse(seen.event.files['sources.json']).map(s => s.id), seen.input.sources.map(s => s.id));
+  assert.equal(selectedModel(f.h.store, '101', 'release.notes').model, 'notes-fixture');
+  // Like every workflow it may read GitHub and start agents; its only write is the notes it hands back.
+  const profile = workspaceProfile('release.notes', seen.event.context, workflowPermissions(f.h.store, '101', 'release.notes')), names = profile.tools.map(t => t.function.name);
+  for (const name of ['read_file', 'github_read_token', 'github_read', 'read_job_log', 'start_agent', 'finish_release_notes']) assert.ok(names.includes(name), name);
+  for (const name of ['create_issue', 'create_pull_request', 'finish_review']) assert.ok(!names.includes(name), name);
+  assert.ok(profile.system.includes(skill)); assert.deepEqual(profile.finishTools, ['finish_release_notes']);
 });
 test('invalid Skill content, unsupported model claims and known secrets cannot enter a release body', async t => {
   const f = await releaseFixture(t); f.state.files['.agents/skills/release-notes/SKILL.md'] = '';
@@ -405,8 +415,8 @@ test('invalid Skill content, unsupported model claims and known secrets cannot e
   const g = await releaseFixture(t); g.state.files['.agents/skills/release-notes/SKILL.md'] = 'Write notes';
   const m = await g.admin('/api/models', 'POST', { repository_id: '101', api_url: g.apiUrl + '/v1', api_key: 'fixture-secret-note-key', model_name: 'notes-fixture' });
   await g.admin('/api/repositories/101/policy', 'PATCH', { model_id: m.value.model.id });
-  g.state.custom = async ({ path, send }) => { if (path === '/v1/chat/completions') { send({ choices: [{ message: { content: '{"groups":[{"heading":"All tests passed, 10x faster","source_ids":[]}]}' } }] }); return true; } };
-  const invalid = await toDraft(g); assert.equal(invalid.error, 'release_notes_invalid'); assert.equal(g.state.releases.length, 0);
+  const invalid = await toDraft(g, 'v1.2.3', () => ({ groups: [{ heading: 'All tests passed, 10x faster', source_ids: [] }] }));
+  assert.equal(invalid.error, 'release_notes_invalid'); assert.equal(g.state.releases.length, 0);
   const h = await releaseFixture(t); await h.admin('/api/models', 'POST', { repository_id: '101', api_url: h.apiUrl + '/v1', api_key: 'registered-secret-release', model_name: 'fixture' });
   h.state.commits[0].commit.message = 'Leak registered-secret-release'; const sensitive = await toDraft(h); assert.equal(sensitive.error, 'release_sensitive_body'); assert.equal(h.state.releases.length, 0);
   assert.ok(!JSON.stringify(sensitive).includes('registered-secret-release'));
@@ -473,17 +483,25 @@ test('read-only observation can finish without requesting logs and has no write 
   const f = await releaseFixture(t); f.state.runs = [run({ conclusion: 'failure' })]; f.state.jobs = [job({ conclusion: 'failure', steps: [{ name: 'Build', number: 1, conclusion: 'failure' }] })];
   const r = await observe(f), m = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'observation-fixture-secret', model_name: 'fixture' });
   await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: m.value.model.id });
-  let input, request; f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: '{"job_ids":[1],"advice":"Inspect the Build step output"}' } }] }); return true; } };
+  const github = async task => { const client = new GitHub(f.h.store, f.h.store.get('SELECT * FROM repositories WHERE id=?', task.repository_id), new Redactor(), async () => {}, f.apiUrl);
+    await client.connect(false, { contents: 'read', actions: 'read' }, undefined, false); return client; };
   const before = writes(f.state).length, tokens = f.state.tokens.length;
+  // Asking for an observation queues a task of the CI observation workflow and changes nothing else.
   const result = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: r.revision });
-  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'start_agent']); assert.equal(request.tool_choice, 'auto');
-  assert.ok(!JSON.stringify(request).includes('fixture-installation-'));
+  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.ok(result.value.release.observation_task); assert.equal(result.value.release.observation, undefined);
+  let seen; await runEventTasks(f.h.store, 'release.observe', ({ input, target: event }) => { seen = { input, event }; return { job_ids: [1], advice: 'Inspect the Build step output' }; }, { github });
+  const done = (await f.admin(f.endpoint + '/' + r.id)).value.release;
+  assert.equal(done.observation.run_id, 800); assert.equal(done.observation.advice, 'Inspect the Build step output'); assert.equal(done.observation_task, null); assert.equal(seen.input.run_attempt, 1);
+  assert.equal(JSON.parse(seen.event.files['run.json']).jobs[0].id, 1); assert.equal(seen.event.sha, target);
+  const names = workspaceProfile('release.observe', seen.event.context, workflowPermissions(f.h.store, '101', 'release.observe')).tools.map(t => t.function.name);
+  for (const name of ['create_issue', 'create_pull_request', 'rerun_failed_run', 'report_failure']) assert.ok(!names.includes(name), name);
   assert.ok(f.state.tokens.slice(tokens).every(t => Object.values(t.permissions).every(p => p === 'read')));
-  assert.ok(writes(f.state).slice(before).every(r => r.path === '/v1/chat/completions'));
-  assert.equal(f.state.releases.length, 0);
-  f.state.custom = async ({ path, send }) => { if (path === '/v1/chat/completions') { send({ error: 'unavailable' }, 503); return true; } };
-  const failed = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: result.value.release.revision });
-  assert.equal(failed.value.release.stage, 'failed'); assert.ok(failed.value.release.observation_error); assert.equal(failed.value.release.run.conclusion, 'failure');
+  assert.deepEqual(writes(f.state).slice(before), []); assert.equal(f.state.releases.length, 0);
+  // A task that ends without a result says why beside the run; the CI facts stay as GitHub reported them.
+  const again = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: done.revision });
+  await runEventTasks(f.h.store, 'release.observe', () => { throw Object.assign(new Error('down'), { code: 'model_http_503', state: 'failed', detail: '模型请求失败' }); }, { github });
+  const failed = (await f.admin(f.endpoint + '/' + r.id)).value.release;
+  assert.equal(again.status, 201); assert.equal(failed.stage, 'failed'); assert.match(failed.observation_error, /model_http_503/); assert.equal(failed.run.conclusion, 'failure');
 });
 test('every attempt job page is checked, including a failure on the second page', async t => {
   const f = await releaseFixture(t); f.state.runs = [run()];
@@ -529,15 +547,17 @@ test('release notes provider outage stops for explicit retry instead of holding 
   f.state.files['.agents/skills/release-notes/SKILL.md'] = 'Group verified sources.';
   const model = await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'notes-outage-key', model_name: 'notes-outage' });
   await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id });
+  // The task's model does not answer: the task would wait and retry, but the release fails the step for a person to retry.
   let calls = 0;
-  f.state.custom = async ({ path, res }) => {
-    if (path !== '/v1/chat/completions') return false;
-    calls++; res.writeHead(503, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'unavailable' } })); return true;
-  };
-  const result = await toDraft(f);
+  const result = await toDraft(f, 'v1.2.3', () => { calls++; return { wait: 'model_http_503' }; });
   assert.equal(result.stage, 'failed'); assert.equal(result.error, 'release_notes_model_failed');
-  assert.equal(f.state.releases.length, 0); assert.equal(calls, 1);
+  assert.equal(f.state.releases.length, 0); assert.equal(calls, 1); assert.equal(f.h.store.get("SELECT status FROM tasks WHERE kind='release.notes'").status, 'cancelled');
   await f.service.worker.process(result.id); assert.equal(calls, 1);
+  // Resuming the step asks for a new notes task.
+  assert.equal((await f.admin(f.endpoint + '/' + result.id + '/resume', 'POST', { revision: result.revision })).status, 201);
+  for (let i = 0; i < 3; i++) { await f.service.worker.process(result.id); await runEventTasks(f.h.store, 'release.notes', ({ input }) => ({ groups: [{ heading: 'Changes', source_ids: input.sources.map(s => s.id) }] })); }
+  assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='release.notes'").n, 2);
+  assert.equal((await f.admin(f.endpoint + '/' + result.id)).value.release.stage, 'draft');
 });
 
 test('disabling a project during notes generation rejects the result before advancing to a draft', async t => {
@@ -545,14 +565,10 @@ test('disabling a project during notes generation rejects the result before adva
   f.state.files['.agents/skills/release-notes/SKILL.md'] = 'Group verified sources.';
   const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'notes-disable-key', model_name: 'notes-disable' })).value.model;
   await f.admin('/api/repositories/101/policy', 'PATCH', { task_models: {'release.notes': model.id} });
-  f.state.custom = async ({path,body,send}) => {
-    if (path !== '/v1/chat/completions') return false;
+  const result = await toDraft(f, 'v1.2.3', ({ input }) => {
     f.h.store.run("UPDATE policies SET enabled=0 WHERE repository_id='101'");
-    const input = JSON.parse(body.messages[1].content);
-    send({choices:[{message:{content:JSON.stringify({groups:[{heading:'Changes',source_ids:input.sources.map(source=>source.id)}]})}}]});
-    return true;
-  };
-  const result = await toDraft(f);
+    return { groups: [{ heading: 'Changes', source_ids: input.sources.map(source => source.id) }] };
+  });
   assert.equal(result.stage,'waiting_permission'); assert.equal(result.error,'release_disabled');
   assert.equal(result.body,''); assert.equal(f.state.releases.length,0);
 });
