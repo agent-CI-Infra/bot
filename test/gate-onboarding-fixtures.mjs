@@ -67,10 +67,12 @@ export async function fakeGitHub(t) {
     if (rest === '' && method === 'GET') return send(200, { id: target.id, full_name: full, private: target.private, default_branch: target.default_branch });
     if (rest === '/languages') return send(200, target.languages);
     if (rest.startsWith('/git/trees/')) {
-      const entries = new Map();
-      for (const file of Object.keys(target.files)) { const [first, ...more] = file.split('/'); entries.set(first, more.length ? 'tree' : 'blob'); }
-      return send(200, { tree: [...entries].map(([path, type]) => ({ path, type })), truncated: false });
+      const files = Object.keys(target.files), dirs = new Set();
+      for (const file of files) { const parts = file.split('/'); for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/')); }
+      if (url.searchParams.get('recursive') === '1') return send(200, { tree: [...[...dirs].map(path => ({ path, type: 'tree' })), ...files.map(path => ({ path, type: 'blob' }))], truncated: false });
+      return send(200, { tree: [...dirs].filter(path => !path.includes('/')).map(path => ({ path, type: 'tree' })).concat(files.filter(path => !path.includes('/')).map(path => ({ path, type: 'blob' }))), truncated: false });
     }
+    if (rest === '/actions/runs') return send(200, { workflow_runs: target.actionRuns || [] });
     if ((m = /^\/contents\/(.+)$/.exec(rest))) {
       const file = m[1];
       if (method === 'GET') {

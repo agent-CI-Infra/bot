@@ -30,7 +30,7 @@ App 已经创建好了，不需要自己再建。安装地址只用这一个：
 
 发版本的写入只看 GitHub App 安装权限：控制台授权（超级管理员或该项目的管理员）决定谁能操作，不另外核对操作者本人在 GitHub 仓库上的权限。
 
-「接入门禁」先介绍 build、pr-ready、pr-merge、daily、release 五层门禁，再由 agent 只读查看仓库（语言、已有 workflow、构建和测试命令、默认分支、merge queue），和人一起定下各层命令；不要求是 Node 仓库。已有 CI 或门禁的仓库先由 agent 审视现有配置并给出建议。人在预览里看过新增和修改的文件、确认方案后，控制面才创建门禁 PR，其中包含门禁 job、`.github/ci-gates.json`，以及缺少时的 `scripts/gate/gate.mjs` 和由版本标签触发的 `.github/workflows/release.yml`；已有文件只按方案合并修改，不会被整体覆盖。门禁在 PR 上和 merge queue 里运行，可以设为必需检查；启用 merge queue 的仓库合入后不再重复运行。空 lane 的 `not_applicable` 报告不代表实际检查通过；控制面不发布 PyPI、npm 包或镜像，详见[接入说明](docs/onboarding-guide.md)。
+「接入门禁」先介绍 pr-ready（每次 PR 提交都跑的构建和基础检查）、pr-merge（合入门禁：有 merge queue 时在队列里，没有时在合入后，先重跑 pr-ready 再跑费用或资源较多的检查）、daily、release 几个 lane，再由 agent 只读分析仓库（目录结构和子项目、README 和脚本、已有 workflow 及耗时、默认分支、merge queue），和人一起定下各 lane 的命令；不要求是 Node 仓库。已有 CI 或门禁的仓库先由 agent 审视现有配置并给出建议。人在预览里看过新增和修改的文件、确认方案后，控制面才创建门禁 PR，其中包含门禁 job、`.github/ci-gates.json`，以及缺少时的 `scripts/gate/gate.mjs` 和由版本标签触发的 `.github/workflows/release.yml`；已有文件只按方案合并修改，不会被整体覆盖。门禁检出并报告同一个提交（PR 上是 PR head）；有 merge queue 时合入门禁在队列里运行，可以设为必需检查。门禁的 `release.yml` 让「发版本」打标签后运行 release lane 并生成 Release 草稿。空 lane 的 `not_applicable` 报告不代表实际检查通过；控制面不发布 PyPI、npm 包或镜像，详见[接入说明](docs/onboarding-guide.md)。
 
 ## 部署和管理
 

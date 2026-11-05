@@ -24,8 +24,8 @@ test('a Python repository without package.json gets a plan from its own files, a
   assert.equal(session.agent.available, false); // Never started: no model, so the plan comes from certain facts only.
   assert.deepEqual(session.facts.languages.map(item => item.name), ['Python', 'Makefile']);
   assert.deepEqual(session.plan.toolchains, { node: '22', python: '3.12', go: '', java: '' });
-  // Makefile targets are repository commands; pytest and pip install -e . are uncertain and only asked about.
-  assert.deepEqual(session.plan.lanes, { build: ['make build'], 'pr-ready': ['make lint', 'make test'], 'pr-merge': [], daily: [], release: [] });
+  // Makefile targets are repository commands and go into pr-ready, build first; pytest and pip install -e . are only asked about.
+  assert.deepEqual(session.plan.lanes, { 'pr-ready': ['make build', 'make lint', 'make test'], 'pr-merge': [], daily: [], release: [] });
   assert.deepEqual(session.plan.install, []);
   assert.deepEqual([session.plan.observe, session.plan.workflow, session.default_workflow], [['daily'], '', '.github/workflows/ci.yml']);
   assert.ok(session.facts.candidates.some(item => item.command === 'python -m pytest' && !item.certain));
@@ -45,17 +45,19 @@ test('the agent proposes from repository facts, the person corrects it in the co
     if (n === 2) return { content: null, tool_calls: [{ id: 'read', type: 'function', function: { name: 'github_read', arguments: JSON.stringify({ path: '/contents/Makefile' }) } }] };
     if (n === 3) {
       assert.match(body.messages.at(-1).content, /python -m pytest/); // The Makefile it read.
-      return answer('build 用 make build，pr-ready 用 make lint 和 make test。Python 依赖怎么装？', { toolchains: { python: '3.12' }, lanes: { build: ['make build'], 'pr-ready': ['make lint', 'make test'] } });
+      // A model that still thinks in a build lane: it is folded into pr-ready.
+      return answer('pr-ready 跑 make build、make lint 和 make test。Python 依赖怎么装？', { toolchains: { python: '3.12' }, lanes: { build: ['make build'], 'pr-ready': ['make lint', 'make test'] } });
     }
     assert.equal(input.conversation.at(-1).content, '依赖用 pip install -e ".[test]"，daily 跑 make test');
-    return answer('已加入安装命令和 daily。', { toolchains: { python: '3.12' }, install: ['pip install -e ".[test]"'], lanes: { build: ['make build'], 'pr-ready': ['make lint', 'make test'], daily: ['make test'] } });
+    return answer('已加入安装命令和 daily。', { toolchains: { python: '3.12' }, install: ['pip install -e ".[test]"'], lanes: { 'pr-ready': ['make build', 'make lint', 'make test'], daily: ['make test'] } });
   } });
   let session = await open();
   assert.equal(session.agent.available, true);
   assert.equal(session.messages.at(-1).role, 'agent');
   assert.equal(session.revision, 1); // The agent's first plan equals the one built from certain facts, so no new revision.
   assert.deepEqual(seen[0].facts.files.Makefile, makefile);
-  assert.deepEqual(seen[0].current_plan.lanes.build, ['make build']);
+  assert.deepEqual(seen[0].current_plan.lanes['pr-ready'], ['make build', 'make lint', 'make test']);
+  assert.ok(seen[0].facts.tree.includes('src/hello/__init__.py'));
   assert.equal(seen[0].merge_queue, 'disabled');
   session = await say(session, '依赖用 pip install -e ".[test]"，daily 跑 make test');
   assert.deepEqual(session.plan.install, ['pip install -e ".[test]"']);
@@ -73,13 +75,17 @@ test('the agent proposes from repository facts, the person corrects it in the co
   assert.equal(session.pr_url, 'https://github.com/octo/hello/pull/1');
   assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci.yml', '.github/workflows/release.yml', 'scripts/gate/gate.mjs']);
   const config = JSON.parse(files['.github/ci-gates.json']);
-  assert.deepEqual(config.lanes, { build: { commands: ['make build'] }, 'pr-ready': { commands: ['make lint', 'make test'] }, 'pr-merge': { commands: [] },
+  assert.deepEqual(config.lanes, { 'pr-ready': { commands: ['make build', 'make lint', 'make test'] }, 'pr-merge': { commands: [] },
     daily: { commands: ['make test'], enforcement: 'observe', continueOnError: true }, release: { commands: [] } });
+  // Every PR commit runs pr-ready; the merge gate runs pr-ready again and then pr-merge on the merged result.
+  assert.deepEqual(config.events, { pull_request: ['pr-ready'], workflow_dispatch: ['pr-ready'], merge_group: ['pr-ready', 'pr-merge'], push: ['pr-ready', 'pr-merge'], schedule: ['daily'], release: ['release'] });
   const workflow = parse(files['.github/workflows/ci.yml']), steps = workflow.jobs.gate.steps;
   assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'merge_group', 'push', 'schedule', 'workflow_dispatch']);
   assert.deepEqual(workflow.on.push, { branches: ['main'] });
   assert.equal(workflow.jobs.gate.env.CI_GATES_SHA, '${{ github.event.pull_request.head.sha || github.sha }}');
   assert.deepEqual(steps.filter(step => step.uses).map(step => step.uses), ['actions/checkout@v4', 'actions/setup-node@v4', 'actions/setup-python@v5', 'actions/upload-artifact@v4']);
+  // The code checked out is the commit the reports name.
+  assert.equal(steps[0].with.ref, workflow.jobs.gate.env.CI_GATES_SHA);
   assert.deepEqual(steps.filter(step => step.run).map(step => step.run), ['pip install -e ".[test]"', 'node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"']);
   assert.ok(!files['.github/workflows/ci.yml'].includes('npm ci'));
   assert.equal(steps.find(step => step.uses === 'actions/setup-node@v4').with.cache, undefined);
@@ -93,6 +99,48 @@ test('the agent proposes from repository facts, the person corrects it in the co
   assert.ok(writes(state).filter(r => r.path.startsWith('/repos/octo/hello')).every(r => r.auth === source));
   assert.deepEqual(state.tokens.get(source).permissions, gatePermissions.source);
   assert.equal(state.revoked.length, state.tokens.size);
+});
+
+test('a repository whose projects live in subdirectories is analyzed from its tree, README, scripts and existing CI', async t => {
+  const { state, open } = await fixture(t);
+  // The layout of agent-test-zone/bot-demo: no root manifest, a test script the README and CI use, a Node sub-project.
+  state.repos['octo/hello'].languages = { Python: 4000, JavaScript: 2000, Shell: 300 };
+  state.repos['octo/hello'].files = {
+    'README.md': '# demo\n\n## Tests\n\n```sh\nsh scripts/test.sh\n```\n',
+    'scripts/test.sh': '#!/bin/sh\npython3 -m unittest discover -s inventory -t . -v\n(cd textkit && node --test)\n',
+    'inventory/__init__.py': '', 'inventory/stock.py': 'x = 1\n', 'inventory/test_stock.py': 'import unittest\n',
+    'textkit/package.json': JSON.stringify({ name: 'textkit', scripts: { test: 'node --test' } }), 'textkit/src/index.js': '', 'textkit/test/index.test.js': '',
+    '.github/workflows/ci.yml': "name: ci\non:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.11'\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '22'\n      - run: sh scripts/test.sh\n" };
+  state.repos['octo/hello'].actionRuns = [{ path: '.github/workflows/ci.yml', event: 'pull_request', conclusion: 'success', run_started_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:01:30Z' }];
+  const session = await open();
+  assert.ok(session.facts.tree.includes('textkit/test/index.test.js') && session.facts.tree.includes('inventory/'));
+  assert.deepEqual(session.facts.manifests.sort(), ['README.md', 'scripts/test.sh', 'textkit/package.json']);
+  assert.deepEqual(session.facts.actions_runs.map(run => [run.workflow, run.minutes]), [['.github/workflows/ci.yml', 1.5]]);
+  const script = session.facts.candidates.find(item => item.command === 'sh scripts/test.sh');
+  assert.deepEqual([script.kind, script.certain, script.source.split('；').sort()], ['test', true, ['.github/workflows/ci.yml', 'README.md', 'scripts/test.sh']]);
+  assert.ok(session.facts.candidates.some(item => item.command === '(cd textkit && npm test)' && item.certain));
+  // The command the repository already runs in CI wins; the versions come from its setup steps.
+  assert.deepEqual(session.plan.lanes['pr-ready'], ['sh scripts/test.sh']);
+  assert.deepEqual(session.plan.toolchains, { node: '22', python: '3.11', go: '', java: '' });
+  assert.match(session.messages[0].content, /最近成功的 PR 检查耗时：1\.5–1\.5 分钟/);
+});
+
+test('the agent submits its plan through a tool and fixes what validation rejects within the same turn', async t => {
+  const calls = [];
+  const submit = (id, args) => ({ content: null, tool_calls: [{ id, type: 'function', function: { name: 'submit_gate_plan', arguments: JSON.stringify(args) } }] });
+  const plan = { toolchains: { node: '22', python: '3.12', go: '', java: '' }, install: [], lanes: { 'pr-ready': ['make build', 'make test'], 'pr-merge': ['make e2e'], daily: [], release: [] }, observe: ['daily'], workflow: '' };
+  const { open } = await fixture(t, { model: async (input, n, body) => {
+    calls.push(body.messages.at(-1));
+    if (n === 1) { assert.ok(body.tools.some(tool => tool.function.name === 'submit_gate_plan')); return submit('a', { reply: '方案', plan: { ...plan, workflow: '.github/workflows/other.yml' } }); }
+    if (n === 2) { assert.match(body.messages.at(-1).content, /gate_plan_invalid/); return submit('b', { reply: 'pr-ready 跑构建和测试，pr-merge 跑端到端。', plan }); }
+    assert.match(body.messages.at(-1).content, /"accepted":true/);
+    return { content: '已提交。' };
+  } });
+  const session = await open();
+  assert.equal(calls.length, 3);
+  assert.equal(session.messages.at(-1).content, 'pr-ready 跑构建和测试，pr-merge 跑端到端。');
+  assert.deepEqual(session.plan.lanes['pr-merge'], ['make e2e']);
+  assert.equal(session.revision, 2);
 });
 
 test('with a merge queue the gate runs on pull requests and in the queue, not again after merging, so it can be required', async t => {
@@ -112,12 +160,12 @@ test('with a merge queue the gate runs on pull requests and in the queue, not ag
   assert.ok(!('push' in workflow.on));
   assert.equal(workflow.jobs.gate.env.CI_GATES_SHA, '${{ github.event.pull_request.head.sha || github.sha }}');
   // A push never cancels a queue or daily run; only pull request runs of one branch replace each other.
-  assert.deepEqual(workflow.concurrency, { group: 'ci-gates-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}', 'cancel-in-progress': "${{ github.event_name == 'pull_request' }}" });
+  assert.deepEqual(workflow.concurrency, { group: "ci-gates-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}", 'cancel-in-progress': "${{ github.event_name == 'pull_request' }}" });
   const config = JSON.parse(files['.github/ci-gates.json']);
   assert.deepEqual(config.lanes['pr-merge'], { commands: ['make test'] });
   // daily follows CI-workflow: failures are recorded, later commands still run.
   assert.deepEqual(config.lanes.daily, { commands: ['make e2e'], enforcement: 'observe', continueOnError: true });
-  assert.match(pull.body, /队列里（merge_group：build、pr-merge）运行，合入默认分支后不再重复运行/);
+  assert.match(pull.body, /进入队列后，在队列的合并结果上先跑 pr-ready 再跑 pr-merge（merge_group），合入默认分支后不再重复运行/);
   assert.match(pull.body, /可以把 `gate` 设为必需检查/);
   assert.match(pull.body, /\*\*daily\*\*（.*，失败只记录（observe））：`make e2e`/);
   // release.yml runs on version tags, not after merging.
@@ -163,11 +211,30 @@ test('an existing ci.yml and release.yml are never overwritten; by default the g
   session = await confirm(session, { plan });
   assert.equal(session.state, 'done', JSON.stringify(session.messages));
   const { files } = branchOf(state);
-  assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci-gates.yml', 'scripts/gate/gate.mjs']);
-  assert.ok(!writes(state).some(r => /workflows\/(?:ci|release)\.yml$/.test(r.path)));
+  assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci-gates.yml', '.github/workflows/release.yml', 'scripts/gate/gate.mjs']);
+  assert.ok(!writes(state).some(r => /workflows\/ci\.yml$/.test(r.path)));
   const workflow = parse(files['.github/workflows/ci-gates.yml']);
   assert.equal(workflow.name, 'CI gates');
-  assert.ok('release' in workflow.on); // The repository's own release.yml does not run the release lane.
+  assert.ok(!('release' in workflow.on));
+  // The repository's own tag-triggered release.yml keeps its triggers and gets a job that runs the release lane.
+  const release = parse(files['.github/workflows/release.yml']);
+  assert.deepEqual([release.on, Object.keys(release.jobs)], [{ push: { tags: ['v*'] } }, ['release-gate']]);
+  assert.equal(release.jobs['release-gate'].steps.find(step => step.run?.includes('gate.mjs')).run, 'node scripts/gate/gate.mjs run --lane release');
+  assert.deepEqual(release.jobs['release-gate'].permissions, { contents: 'read' });
+});
+
+test('a release.yml the release flow cannot use is left alone and explained; a missing one is created', async t => {
+  const { state, open, confirm } = await fixture(t);
+  state.repos['octo/hello'].files['.github/workflows/release.yml'] = 'name: Release\non:\n  release:\n    types: [published]\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo publish\n';
+  let session = await open();
+  assert.equal(session.facts.release_workflow.usable, false);
+  assert.match(session.messages[0].content, /不能用于发版本/);
+  assert.ok(session.facts.questions.some(question => question.includes('release.yml')));
+  session = await confirm(session, { plan: { ...session.plan, lanes: { ...session.plan.lanes, release: ['make build'] } } });
+  assert.equal(session.state, 'done', JSON.stringify(session.messages));
+  const { pull, files } = branchOf(state);
+  assert.ok(!('.github/workflows/release.yml' in files));
+  assert.match(pull.body, /不能用于发版本（[^）]+），这个 PR 没有修改它/);
 });
 
 test('the gate job can be merged into an existing workflow: other jobs, comments and triggers stay, and the diff is shown first', async t => {
@@ -208,26 +275,30 @@ test('a repository that already has gates is reviewed from its own configuration
   let session = await open();
   assert.equal(session.state, 'ready');
   assert.match(session.messages.at(-1).content, /右侧是仓库当前的门禁配置/);
-  assert.deepEqual(session.plan.lanes, { build: ['make build'], 'pr-ready': ['make lint'], 'pr-merge': [], daily: [], release: [] });
+  // The old build lane is folded into pr-ready.
+  assert.deepEqual(session.plan.lanes, { 'pr-ready': ['make build', 'make lint'], 'pr-merge': [], daily: [], release: [] });
+  assert.ok(session.messages.some(message => message.content.includes('原来的 build lane 已并入 pr-ready')));
   assert.deepEqual([session.plan.workflow, session.plan.install, session.plan.toolchains.python, session.plan.observe], ['.github/workflows/ci.yml', ['pip install -e .'], '3.11', []]);
   assert.equal(session.workflow_options[0].path, '.github/workflows/ci.yml');
-  // The unchanged plan leaves ci-gates.json alone; the gate job and its triggers are what the review would change.
-  assert.deepEqual(session.target.files.map(file => [file.path, file.mode]), [['.github/workflows/ci.yml', 'update']]);
+  // The review shows what the standard gate changes: the gate job and its triggers, the event mapping replacing the build lane,
+  // and the release.yml the release flow needs.
+  assert.deepEqual(session.target.files.map(file => [file.path, file.mode]), [['.github/workflows/ci.yml', 'update'], ['.github/ci-gates.json', 'update'], ['.github/workflows/release.yml', 'create']]);
   const diff = session.target.files[0].diff;
-  for (const line of [/^\+  merge_group:$/m, /^\+ {6}CI_GATES_SHA: /m, /^\+ {8}uses: actions\/upload-artifact@v4$/m, /^ {5}name: CI gate$/m, /^ {5}branches: \[main\]$/m]) assert.match(diff, line);
-  const plan = { ...session.plan, lanes: { ...session.plan.lanes, 'pr-ready': ['make lint', 'make test'] } };
+  for (const line of [/^\+  merge_group:$/m, /^\+ {6}CI_GATES_SHA: /m, /^\+ {10}ref: /m, /^\+ {8}uses: actions\/upload-artifact@v4$/m, /^ {5}name: CI gate$/m, /^ {5}branches: \[main\]$/m]) assert.match(diff, line);
+  assert.deepEqual(Object.keys(JSON.parse(session.target.files[1].content).lanes), ['pr-ready', 'daily']);
+  const plan = { ...session.plan, lanes: { ...session.plan.lanes, 'pr-ready': ['make build', 'make lint', 'make test'] } };
   session = await confirm(session, { plan });
   assert.equal(session.state, 'done', JSON.stringify(session.messages));
   const { pull, files } = branchOf(state), updated = JSON.parse(files['.github/ci-gates.json']), workflow = parse(files['.github/workflows/ci.yml']);
   assert.equal(pull.title, 'chore(ci): update CI gates');
   // Keys and forms the plan did not change are kept.
-  assert.deepEqual([updated.level, updated.caseCatalog, updated.lanes.build, Object.keys(updated.lanes)], ['C2', 'test/cases/case-catalog.yaml', { commands: 'make build', timeoutSec: 600 }, ['build', 'pr-ready', 'daily']]);
-  assert.deepEqual(updated.lanes['pr-ready'], { commands: ['make lint', 'make test'] });
+  assert.deepEqual([updated.level, updated.caseCatalog, Object.keys(updated), Object.keys(updated.lanes)], ['C2', 'test/cases/case-catalog.yaml', ['version', 'level', 'caseCatalog', 'events', 'lanes'], ['pr-ready', 'daily']]);
+  assert.deepEqual(updated.lanes['pr-ready'], { commands: ['make build', 'make lint', 'make test'] });
   assert.deepEqual([Object.keys(workflow.jobs), workflow.jobs.checks.name], [['checks'], 'CI gate']);
   // With a merge queue the old push trigger stays in the file, but the gate job no longer runs after merging.
   assert.ok(!workflow.jobs.checks.if.includes("'push'"));
-  assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci.yml']);
-  assert.ok(!writes(state).some(r => r.path.endsWith('gate.mjs') || r.path.endsWith('release.yml')));
+  assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci.yml', '.github/workflows/release.yml']);
+  assert.ok(!writes(state).some(r => r.path.endsWith('gate.mjs')));
 });
 
 test('gates this flow created and that were merged show no changes the next time, and no empty PR is opened', async t => {
@@ -269,8 +340,7 @@ test('a Node repository with dependencies but no lock file is onboarded; npm ins
   let session = await open();
   assert.equal(session.state, 'ready');
   assert.deepEqual(session.plan.install, []);
-  assert.deepEqual(session.plan.lanes.build, ['npm run build']);
-  assert.deepEqual(session.plan.lanes['pr-ready'], ['npm test']);
+  assert.deepEqual(session.plan.lanes['pr-ready'], ['npm run build', 'npm test']);
   assert.match(session.messages.at(-1).content, /没有锁文件/);
   session = await confirm(session, { plan: { ...session.plan, install: ['npm install'] } });
   assert.equal(session.state, 'done', JSON.stringify(session.messages));
@@ -329,7 +399,8 @@ test('model output that breaks the contract leaves the plan alone and says so', 
   const revision = session.revision;
   session = await say(session, '再想想');
   assert.equal(session.revision, revision);
-  assert.match(session.messages.at(-1).content, /没有按约定返回 JSON/);
+  // Plain text instead of a submitted plan is shown as the reply; the plan stays as it was.
+  assert.match(session.messages.at(-1).content, /^not json\n\n（这一轮 agent 没有提交方案，右侧方案没有变化。）$/);
   session = await say(session, '再来');
   assert.equal(session.revision, revision);
   assert.match(session.messages.at(-1).content, /包含了令牌/);
@@ -357,18 +428,21 @@ test('a restart ends an unfinished turn, a newer conversation supersedes the old
 });
 
 test('rendered files follow the plan: toolchains, go.mod, npm cache and empty lanes', () => {
-  const plan = normalizePlan({ toolchains: { node: '20', go: 'go.mod', java: '21' }, install: ['npm ci', 'go mod download'], lanes: { build: ['go build ./...'], release: [] } });
-  const target = { defaultBranch: 'trunk', mergeQueue: 'disabled', workflowPath: '.github/workflows/ci.yml', workflowSource: null, configSource: null, releaseWorkflow: true, npmLock: true };
+  const plan = normalizePlan({ toolchains: { node: '20', go: 'svc/go.mod', java: '21' }, install: ['npm ci', 'go mod download'], lanes: { build: ['go build ./...'], 'pr-ready': ['go vet ./...'], release: [] } });
+  const target = { defaultBranch: 'trunk', mergeQueue: 'disabled', workflowPath: '.github/workflows/ci.yml', workflowSource: null, configSource: null, releaseSource: null, releaseUsable: false, npmLock: true };
   const [workflow, config, release] = gateFiles(plan, target), parsed = parse(workflow.content);
   assert.deepEqual(parsed.on.push.branches, ['trunk']);
   assert.deepEqual(gateEvents(plan, target), ['pull_request', 'merge_group', 'push', 'workflow_dispatch']);
   assert.deepEqual(gateEvents(plan, { ...target, mergeQueue: 'enabled' }), ['pull_request', 'merge_group', 'workflow_dispatch']);
   const steps = parsed.jobs.gate.steps;
   assert.deepEqual(steps.find(step => step.uses === 'actions/setup-node@v4').with, { 'node-version': '20', cache: 'npm' });
-  assert.deepEqual(steps.find(step => step.uses === 'actions/setup-go@v5').with, { 'go-version-file': 'go.mod' });
+  assert.deepEqual(steps.find(step => step.uses === 'actions/setup-go@v5').with, { 'go-version-file': 'svc/go.mod' });
+  assert.deepEqual(steps[0].with, { ref: '${{ github.event.pull_request.head.sha || github.sha }}' });
   assert.deepEqual(steps.find(step => step.uses === 'actions/setup-java@v4').with, { distribution: 'temurin', 'java-version': '21' });
   assert.deepEqual(steps.filter(step => step.run).map(step => step.name), ['Install dependencies (1)', 'Install dependencies (2)', 'Run gate lanes']);
-  assert.deepEqual(JSON.parse(config.content).lanes['pr-ready'], { commands: [] });
+  // A build lane is folded into pr-ready, build first.
+  assert.deepEqual(JSON.parse(config.content).lanes, { 'pr-ready': { commands: ['go build ./...', 'go vet ./...'] }, 'pr-merge': { commands: [] },
+    daily: { commands: [], enforcement: 'observe', continueOnError: true }, release: { commands: [] } });
   assert.equal(parse(release.content).jobs.gate.steps.at(-2).run, 'node scripts/gate/gate.mjs run --lane release');
   assert.deepEqual(emptyPlan().toolchains, { node: '22', python: '', go: '', java: '' });
   assert.deepEqual([emptyPlan().observe, normalizePlan({}).observe, normalizePlan({ observe: [] }).observe], [['daily'], ['daily'], []]);
@@ -390,7 +464,7 @@ test('review, development and read tokens still never ask for workflows', async 
   assert.ok(!('workflows' in agentReadPermissions));
 });
 
-test('opening 接入门禁 shows the five lanes first and creates nothing until the person starts', async () => {
+test('opening 接入门禁 shows the lanes first and creates nothing until the person starts', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/gate-onboarding.js'], (method, path) =>
     method === 'GET' && path === '/api/projects/101/gate-onboarding' ? [200, { session: null }] : [500, { error: 'unexpected' }]);
   await page.run("openGateOnboarding({ id: '101', full_name: 'octo/hello' }, null)");
@@ -399,7 +473,7 @@ test('opening 接入门禁 shows the five lanes first and creates nothing until 
   assert.equal(page.$('gate-onboarding-intro').hidden, false);
   assert.equal(page.$('gate-onboarding-chat').hidden, true);
   const lanes = page.$('gate-onboarding-lanes').children.filter(item => item.tagName === 'DT').map(item => item.textContent);
-  assert.deepEqual(lanes, ['build', 'pr-ready', 'pr-merge', 'daily', 'release']);
+  assert.deepEqual(lanes, ['pr-ready', 'pr-merge', 'daily', 'release']);
   assert.ok(page.$('gate-onboarding-lanes').children.filter(item => item.tagName === 'DD').every(item => item.textContent.length > 10));
   assert.deepEqual(page.requests, ['GET /api/projects/101/gate-onboarding']);
 });

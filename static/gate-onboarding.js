@@ -3,11 +3,10 @@
 // the repository already has. Nothing is written to the repository until the person confirms a plan revision after seeing
 // the files it changes. Globals are prefixed gateOnboarding: console scripts share one scope.
 const gateOnboardingLanes = [
-  ['build', 'PR 每次更新时和进入 merge queue 后都会跑；没有 merge queue 的仓库合入默认分支后也会跑。确认代码能构建，放编译、打包、类型检查等快速检查。'],
-  ['pr-ready', 'PR 每次更新时跑，检查 PR 的 head 提交（不是 GitHub 生成的合并提交）。放 lint、单元测试等合入前必须通过、结果稳定的检查。'],
-  ['pr-merge', 'PR 进入 merge queue 后，对排队中的合并结果跑，放单次 PR 嫌慢的更全的检查；仓库没有 merge queue 时不会触发。'],
+  ['pr-ready', 'PR 每次提交或更新时跑（也可以手动运行），检查 PR 的 head 提交。放构建和基础检查：编译、lint、类型检查、快速的单元测试，要在几分钟内跑完。'],
+  ['pr-merge', '合入门禁，确保多个 PR 合在一起不会互相影响：有 merge queue 时在队列里对合并结果先跑 pr-ready 再跑这一层；没有 merge queue 时在合入默认分支后对合入结果这样运行。放需要费用、资源或较长时间的检查，比如全量测试、真实服务或模型的集成测试。'],
   ['daily', '每天北京时间 0 点在默认分支定时跑，放耗时较长或依赖外部环境的全量测试、端到端测试，通常只记录失败。'],
-  ['release', '推送版本标签（如 v1.2.3）或发布 Release 时跑，是发布前的最后一道检查，不负责发包。'],
+  ['release', '推送版本标签（如 v1.2.3）时跑，是发版本前的最后一道检查；通过后「发版本」才生成 Release 草稿，不负责发包。'],
 ];
 const gateOnboardingTools = [['node', 'Node 版本', '运行 gate.mjs，默认 22'], ['python', 'Python 版本', '留空表示不安装'], ['go', 'Go 版本', '填 go.mod 表示按 go.mod'], ['java', 'Java 版本', '留空表示不安装']];
 const gateOnboardingStates = { collecting: '正在读取仓库', thinking: 'agent 正在思考', ready: '等待你的回复或确认', creating: '正在创建门禁 PR',
@@ -28,11 +27,11 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <button type="button" class="quiet" id="gate-onboarding-restart" hidden>重新开始</button><button type="button" class="quiet" id="gate-onboarding-close">关闭</button></div></div>
 <p id="gate-onboarding-error" class="view-error" role="alert"></p>
 <section id="gate-onboarding-intro" class="gate-intro" aria-labelledby="gate-onboarding-intro-title">
-<h3 id="gate-onboarding-intro-title">五层门禁</h3>
-<p>门禁按五层（lane）组织。每一层在不同的时机运行这个仓库自己的检查命令，结果写进门禁报告和看板；命令为空的层只表示还没有配置，不表示检查通过。</p>
+<h3 id="gate-onboarding-intro-title">门禁的几个 lane</h3>
+<p>门禁按 lane 组织。每个 lane 在不同的时机运行这个仓库自己的检查命令，结果写进门禁报告和看板；命令为空的 lane 只表示还没有配置，不表示检查通过。门禁检出并报告同一个提交：PR 上检查的就是 PR 的 head 提交。</p>
 <dl id="gate-onboarding-lanes" class="gate-lanes"></dl>
-<p>仓库启用了 merge queue 时，门禁在 PR 上和队列里（merge_group）运行，所以可以设为必需检查；合入默认分支后不再重复运行。没有 merge queue 的仓库，合入默认分支后再跑一次 build。</p>
-<p>点「开始适配」后，agent 只读地查看仓库：语言、已有 workflow、构建和测试命令、默认分支、是否已有 ci.yml 或 ci-gates.json、是否启用 merge queue，再按仓库实际情况提出每层的命令，不确定的会在对话里问你。仓库已经有 CI 或门禁时，agent 会先审视现有配置，说明哪里不合理并给出建议。</p>
+<p>pr-merge 是合入门禁：仓库启用了 merge queue 时，它就是队列的门禁，所以门禁可以设为必需检查，合入后不再重复运行；没有 merge queue 时，它在每次合入默认分支后运行。发版本时，bot 打版本标签，标签触发 release lane，通过后生成 Release 草稿。</p>
+<p>点「开始适配」后，agent 只读地分析仓库：目录结构和子项目、语言和工具链、README 和脚本、构建和测试方式、已有 workflow 和它们的耗时、默认分支、是否启用 merge queue，再按仓库实际情况设计每个 lane 的命令，说明理由，不确定的会在对话里问你。仓库已经有 CI 或门禁时，agent 会先审视现有配置，说明哪里不合理并给出建议。</p>
 <p>你确认之前，不会创建分支或 PR，不会写仓库，也不会运行仓库里的脚本；确认前可以预览 PR 会新增或修改的每个文件。</p>
 <p id="gate-onboarding-last" class="muted"></p>
 <div class="actions"><button type="button" class="quiet" id="gate-onboarding-resume" hidden>继续上次的对话</button><button type="button" id="gate-onboarding-start">开始适配</button></div>
@@ -47,8 +46,8 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <h3 id="gate-onboarding-plan-title">门禁方案</h3>
 <p id="gate-onboarding-queue" class="muted"></p>
 <fieldset id="gate-onboarding-queue-question" hidden><legend>默认分支是否启用了 merge queue？</legend>
-<label class="check"><input type="radio" name="merge_queue" value="enabled"> 已启用：门禁在 PR 上和队列里运行</label>
-<label class="check"><input type="radio" name="merge_queue" value="disabled"> 没有启用：门禁在 PR 上和合入默认分支后运行</label></fieldset>
+<label class="check"><input type="radio" name="merge_queue" value="enabled"> 已启用：合入门禁在队列里运行</label>
+<label class="check"><input type="radio" name="merge_queue" value="disabled"> 没有启用：合入门禁在合入默认分支后运行</label></fieldset>
 <label>门禁 job 放在<select name="workflow"></select></label>
 <div id="gate-onboarding-tools" class="gate-tools"></div>
 <label>安装依赖（每行一条命令）<textarea name="install" rows="2"></textarea></label>
@@ -150,12 +149,11 @@ function gateOnboardingRender() {
   $('gate-onboarding-plan-title').textContent = `门禁方案 · 第 ${session.revision} 版`;
   const queue = session.merge_queue || { state: 'unknown' }, question = $('gate-onboarding-queue-question');
   question.hidden = !queue.asked || session.state === 'done';
-  $('gate-onboarding-queue').textContent = { enabled: `merge queue：已启用（${queue.evidence}）。门禁在 PR 上和队列里运行，合入默认分支后不再重复运行。`,
-    disabled: `merge queue：未启用（${queue.evidence}）。门禁在 PR 上和合入默认分支后运行，pr-merge 不会触发。`, unknown: `merge queue：无法判断（${queue.evidence}），请在下面回答。` }[queue.state];
+  $('gate-onboarding-queue').textContent = { enabled: `merge queue：已启用（${queue.evidence}）。PR 上跑 pr-ready；队列里先跑 pr-ready 再跑 pr-merge，合入后不再重复运行。`,
+    disabled: `merge queue：未启用（${queue.evidence}）。PR 上跑 pr-ready；每次合入默认分支后先跑 pr-ready 再跑 pr-merge。`, unknown: `merge queue：无法判断（${queue.evidence}），请在下面回答。` }[queue.state];
   if (queue.asked && queue.state !== 'unknown') $('gate-onboarding-queue').textContent += ' 可以在下面改。';
   // The saved answer (merge_queue.state) checks its radio; the person changes it there.
   for (const radio of plan.querySelectorAll('input[name=merge_queue]')) { radio.checked = radio.value === queue.state; radio.disabled = !open; }
-  plan.elements['lane_pr-merge'].placeholder = queue.state === 'disabled' ? '仓库没有 merge queue，这一层不会触发' : '留空表示还没有配置，不表示检查通过';
   for (const field of plan.querySelectorAll('input:not([type=radio]):not([type=checkbox]), textarea')) field.readOnly = !open;
   for (const field of plan.querySelectorAll('input[type=checkbox], select')) field.disabled = !open;
   const view = gateOnboardingContext.preview || session;

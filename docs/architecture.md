@@ -120,7 +120,7 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 | 看板采集 | 源仓 | contents、issues、pull_requests、actions、metadata 只读，按安装实际授权裁剪 |
 | 看板开关 | bot 本地 | 控制台超管；不向 GitHub 写配置 |
 
-每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。门禁 PR 只从 CI-workflow 读取 `scripts/gate/gate.mjs`；门禁 job 和 `ci-gates.json` 由控制面按确认的方案生成，或合并进仓库已有的文件（只补触发事件、替换门禁 job、改方案改了的 lane），模型只能给出工具链版本、安装命令、各 lane 命令、observe 和门禁 job 的位置，触发事件、权限和 job 结构由控制面按仓库事实决定。
+每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。门禁 PR 只从 CI-workflow 读取 `scripts/gate/gate.mjs`；门禁 job 和 `ci-gates.json` 由控制面按确认的方案生成，或合并进仓库已有的文件（只补触发事件、替换门禁 job、改方案改了的 lane），模型只能通过 `submit_gate_plan` 工具提交工具链版本、安装命令、各 lane 命令、observe 和门禁 job 的位置；触发事件、权限、job 结构、检出的提交和每个事件跑哪些 lane（`ci-gates.json` 的 `events`）由控制面按仓库事实决定。
 
 ## 代码快照与发布
 
