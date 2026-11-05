@@ -83,7 +83,7 @@ export class GitHub {
   beforeWrite?: () => void;
   // The rate-limit windows this client's credentials count against: the App's JWT, and the installation (or the bot
   // account's user) for the token.
-  private jwt = ''; private appWindow?: Bucket; private tokenWindow?: Bucket;
+  private jwt = ''; private installationId = ''; private appWindow?: Bucket; private tokenWindow?: Bucket;
   constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor,
     readonly guard: () => Promise<void>, readonly apiUrl = 'https://api.github.com') {}
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
@@ -157,6 +157,24 @@ export class GitHub {
     if (!Number.isSafeInteger(jobId) || jobId < 1) return stop('github_log_job_invalid', undefined, 'Actions job ID 无效。');
     return this.request('GET', this.path(`/actions/jobs/${jobId}/logs`), undefined, false, this.token, false, false, true);
   }
+  // A short-lived token of the App installation with permissions the task token was not given, for one control-plane write
+  // (resolving a review thread takes contents: write). It covers this repository only and is revoked after use; GitHub
+  // refuses it (422) when the installation does not grant those permissions. A Token account uses its own token.
+  async withPermissions<T>(permissions:Record<string,string>,use:(token:string)=>Promise<T>):Promise<T>{
+    if(!this.jwt||!this.installationId)return use(this.token);
+    const access=await this.request('POST',`/app/installations/${this.installationId}/access_tokens`,{repository_ids:[Number(this.repository.id)],permissions},false,this.jwt);
+    const token=String(access?.token||'');if(!token)stop('github_token_missing','waiting_permission',`GitHub 未返回安装 ${this.installationId} 的访问令牌。`);this.redactor.add(token);
+    try{return await use(token);}finally{await revokeInstallationToken(this.apiUrl,token).catch(()=>false);}
+  }
+  // A GraphQL request; GitHub answers 200 with errors for a refused or invalid one.
+  async graphql(query:string,variables:Record<string,unknown>,token=this.token):Promise<any>{
+    const value=await this.request('POST','/graphql',{query,variables},false,token);
+    if(Array.isArray(value?.errors)&&value.errors.length){
+      const denied=value.errors.some((e:any)=>['FORBIDDEN','INSUFFICIENT_SCOPES'].includes(String(e?.type)));
+      stop(denied?'github_permission_graphql':'github_graphql_failed',denied?'waiting_permission':'failed',this.redactor.text(`GitHub GraphQL 请求失败：${value.errors.map((e:any)=>String(e?.message||e?.type||'error')).join('; ').slice(0,500)}`));
+    }
+    return value?.data;
+  }
   async snapshotBlob(sha:string):Promise<any>{
     if(!/^[a-f0-9]{40}$/.test(sha))stop('repository_blob_invalid',undefined,`Invalid blob SHA: ${sha}`);
     return this.request('GET',this.path('/git/blobs/'+sha),undefined,false,this.token,false,true);
@@ -197,6 +215,7 @@ export class GitHub {
       const app = identifyActor && !fresh ? await this.request('GET','/app', undefined, false, jwt) : null;
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
       this.installationEvents = Array.isArray(installation.events) ? installation.events.map(String) : null;
+      this.installationId = String(installation.id);
       this.tokenWindow = installationBucket(account!.id, String(installation.id), installation.account?.login ? String(installation.account.login) : null);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission', `GitHub App 安装 ${installation.id} 的所属账号与仓库登记的所有者不一致。`);
       const requested: Record<string,string> = requiredPermissions || requestedPermissions || { contents: development ? 'write':'read', issues:'write',pull_requests:'write' };

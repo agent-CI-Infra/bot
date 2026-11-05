@@ -5,7 +5,7 @@ import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
-import { testEvidence } from '../github/text.js';
+import { testEvidence, reviewLanguage } from '../github/text.js';
 import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
 import { actionsDevelopmentAllowed, actionsSourceIssue } from '../actions/safety.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
@@ -292,7 +292,7 @@ export class TaskEngine {
         const labels=development?[]:await github.pages(github.path('/labels')).then(repositoryLabels,error=>{if(error instanceof TaskError&&error.code.startsWith('github_permission_'))return [];throw error;});
         input={...input,...JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input),object,object_hash:sha(JSON.stringify([object.title,object.body])),base_branch:baseBranch,snapshot_sha:ref.object.sha,snapshot_tree:snapshot.tree_sha,
           source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,
-          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,
+          files,coverage:snapshot.coverage,review_label:effectiveRules.review_label,development_label:effectiveRules.development_label,repository_labels:labels,behavior_changes:files.filter((f:any)=>behaviorPath(f.filename)||f.previous_filename&&behaviorPath(f.previous_filename)).map((f:any)=>f.filename),context:{mode:development?'development':'review',repository:github.fullName,reviewed_sha:ref.object.sha,...(development?{}:{bot_login:github.actorLogin||null}),
             ...(!pr ? {actions_failure:this.store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?',task.repository_id,task.object_number)||null} : {}),
             object:{number:object.number,title:object.title,state:object.state,author:object.user?.login||null,html_url:object.html_url||null,labels:(object.labels||[]).map((l:any)=>typeof l==='string'?l:l.name),
               ...(pr?{draft:object.draft===true}:{}),body_excerpt:String(object.body||'').slice(0,1000)},
@@ -371,7 +371,8 @@ export class TaskEngine {
           return publishDevelopment();
         }:undefined,conversation);await validate();
         if(!development){
-          if(input.behavior_changes?.length){result.summary+='\n\n这些文件改变了 bot 的行为，需要人来决定：'+input.behavior_changes.join('、');result.clarification_required=true;}
+          // Files that change the bot's own behavior are a person's decision; the summary comment lists them with the others.
+          if(input.behavior_changes?.length){result.behavior_changes=input.behavior_changes;result.clarification_required=true;}
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash};
           update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
@@ -387,14 +388,17 @@ export class TaskEngine {
         });
         if(!development){
           log({type:'phase',phase:'publish',target:'review',detail:'正在发布到 GitHub：发送检视评论…'});
-          const outputs=await publisher.review(result,input.files);
+          const setting=this.store.get('SELECT review_language FROM policies WHERE repository_id=?',task.repository_id)?.review_language;
+          // A review a person's comment asked for names that person in the summary comment, which also notifies them of the edit.
+          const asked=input.trigger?.actor?{actor:input.trigger.actor,url:input.trigger.url||null}:input.comment?{actor:input.comment.user?.login||input.sender?.login||null,url:input.comment.html_url||null}:undefined;
+          const outputs=await publisher.review(result,input.files,{language:reviewLanguage(setting,result.summary),trigger:asked});
           // Labels go on only after the summary comment was published: the policy's review label, plus the classification
           // labels the model named that pass classificationLabels against the repository and the object's current labels.
           // publisher.review ends by validating the object, so its labels are current.
           const label=input.review_label,current=(seen||await github.object(task.kind,task.object_number)).labels;
           const names=[...(label?[label]:[]),...classificationLabels(result.labels,input.repository_labels,current,[label,input.development_label])];
           if(names.length)outputs.push({labels:(await publisher.labels(names)).map((l:any)=>l.name)});
-          log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0})});
+          log({type:'published',outputs:outputs.map((o:any)=>o.labels?{labels:o.labels}:{html_url:o.html_url,inline_comments:o.inline_comments?.length||0,...(o.resolved_threads?{resolved_threads:o.resolved_threads.length}:{})})});
           result={...result,outputs};
           // A review that finds a code request starts development only with a person's go-ahead already on the Issue;
           // otherwise the labeled webhook starts it later. A failed check counts as no go-ahead.
