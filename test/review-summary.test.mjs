@@ -9,6 +9,7 @@ import { Publisher } from '../dist/github/publisher.js';
 import { Redactor } from '../dist/agent/common.js';
 import { validateReview } from '../dist/review/findings.js';
 import { reviewLanguage, summaryComment } from '../dist/github/text.js';
+import { appGaps } from '../dist/app/access.js';
 
 // A fake GitHub for one pull request (#7): conversation comments that can be edited, reviews with inline comments, and the
 // GraphQL review threads those comments start. `deny` makes GraphQL refuse the way GitHub does for a missing permission.
@@ -187,4 +188,10 @@ test('the summary comment speaks the review language; findings validate their ne
   assert.doesNotThrow(() => validateReview({ ...valid, resolved_comments: [12], findings: [{ ...decision, human_action: 'Decide' }] }));
   assert.throws(() => validateReview({ ...valid, resolved_comments: ['12'] }), /model_review_invalid/);
   assert.throws(() => validateReview({ ...valid, findings: [{ ...decision, human_action: 3 }] }), /model_finding_invalid/);
+});
+
+test('an installation with contents: read reports that fixed review threads are not closed', () => {
+  const granted = { metadata: 'read', contents: 'read', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', workflows: 'write' };
+  const contents = appGaps(granted, ['issues', 'issue_comment', 'pull_request', 'pull_request_review', 'pull_request_review_comment', 'workflow_run']).find(gap => gap.name === 'contents');
+  assert.deepEqual(contents, { kind: 'permission', name: 'contents', required: 'write', current: 'read', features: ['review_threads', 'development', 'release', 'gate'] });
 });

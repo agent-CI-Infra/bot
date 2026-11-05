@@ -4,11 +4,14 @@ import { appEvents, appPermissions, missingEvents, missingPermissions } from '..
 // onboarding asks for (appPermissions/appEvents). Gate onboarding commits .github/workflows/ (workflows) and Actions
 // failure analysis needs workflow_run; both, like releases, run only through a GitHub App installation. Tokens still
 // request only what each use needs; this table only says which features a missing grant stops.
-export const features = ['review', 'development', 'ci_reads', 'board', 'release', 'gate', 'actions_failures'] as const;
+export const features = ['review', 'review_threads', 'development', 'ci_reads', 'board', 'release', 'gate', 'actions_failures'] as const;
 export type Feature = typeof features[number];
 interface Needs { permissions: Record<string, string>; events?: string[]; app?: boolean }
 export const featureNeeds: Record<Feature, Needs> = {
   review: { permissions: { metadata: 'read', contents: 'read', issues: 'write', pull_requests: 'write' }, events: appEvents },
+  // Re-reviews close the bot's inline threads that later commits fixed; GitHub lets an App resolve a thread only with
+  // contents: write. Without it reviews are still published and the threads stay open.
+  review_threads: { permissions: { metadata: 'read', contents: 'write', pull_requests: 'write' } },
   development: { permissions: { metadata: 'read', contents: 'write', issues: 'write', pull_requests: 'write' }, events: appEvents },
   // Task agents read CI results with their own read-only token; a missing grant only hides those results.
   ci_reads: { permissions: { actions: 'read', checks: 'read', statuses: 'read' } },
@@ -49,7 +52,7 @@ export function accessGaps(accountType: string, grant: string | null, events: st
   const role = value as Record<string, unknown>, gaps: AccessGap[] = [];
   if (!(role.admin === true || role.maintain === true || role.push === true)) {
     const current = role.triage === true ? 'triage' : role.pull === true ? 'read' : null;
-    gaps.push({ kind: 'role', name: 'repository_role', required: 'write', current, features: current ? ['review', 'development'] : features.filter(feature => !featureNeeds[feature].app) });
+    gaps.push({ kind: 'role', name: 'repository_role', required: 'write', current, features: current ? ['review', 'review_threads', 'development'] : features.filter(feature => !featureNeeds[feature].app) });
   }
   gaps.push({ kind: 'account', name: 'github_app', features: appOnly });
   return gaps;

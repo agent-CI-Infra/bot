@@ -278,9 +278,9 @@ test('repository rows report every feature\'s access gaps, whether or not the fe
   const checked = await admin('/api/installations/permissions/check', 'POST', {});
   assert.deepEqual(checked.value.repositories.map(r => [r.id, r.full_name, r.access_gaps.length, r.actions_failures_enabled]),
     [['101', 'fixture/project-101', 0, true], ['202', 'fixture/project-202', 0, false], ['303', 'fixture/project-303', 1, false]]);
-  // A bot account below write also cannot review or develop.
+  // A bot account below write also cannot review, close fixed review threads or develop.
   h.store.run("UPDATE installed_repositories SET permissions=? WHERE repository_id='303'", JSON.stringify({ pull: true }));
-  assert.deepEqual((await gaps())['303'][0], { kind: 'role', name: 'repository_role', required: 'write', current: 'read', features: ['review', 'development'] });
+  assert.deepEqual((await gaps())['303'][0], { kind: 'role', name: 'repository_role', required: 'write', current: 'read', features: ['review', 'review_threads', 'development'] });
   // Events not read yet are unknown rather than missing.
   h.store.run("UPDATE installed_repositories SET events=NULL WHERE repository_id='101'");
   const unread = (await admin('/api/installations')).value.repositories.find(r => r.id === '101');
