@@ -4,7 +4,8 @@ import { appJwt, missingPermissions, revokeInstallationToken } from '../github/c
 import { selectedModel } from '../agent/model.js';
 import { stop, TaskError } from '../agent/common.js';
 import { collectFacts, baselinePlan, type GateFacts } from './gate-facts.js';
-import { gateFiles, gateEvents, normalizePlan, PlanError, gateLanes, laneTimes, effectivePlan, type GatePlan, type GateTarget } from './gate-plan.js';
+import { gateFiles, gateEvents, normalizePlan, PlanError, gateLanes, laneTimes, type GateFile, type GatePlan, type GateTarget } from './gate-plan.js';
+import { unifiedDiff } from './text-diff.js';
 import { gateAgentTurn, type GateMessage } from './gate-agent.js';
 
 /**
@@ -12,6 +13,7 @@ import { gateAgentTurn, type GateMessage } from './gate-agent.js';
  * the project has one) proposes a plan from those facts and answers the person; nothing is written to the repository and
  * no repository script runs until the person confirms a plan revision. Only then does the control plane open the gate PR.
  */
+// `connected` only appears on conversations from before existing gates were reviewed instead of left alone.
 type State = 'collecting' | 'thinking' | 'ready' | 'creating' | 'done' | 'connected' | 'blocked' | 'failed';
 const busyStates = ['collecting', 'thinking', 'creating'];
 type Permissions = Record<string, string>;
@@ -152,27 +154,59 @@ export class GateOnboarding {
   private mergeQueue(row: Row, facts: GateFacts): 'enabled' | 'disabled' | 'unknown' {
     return facts.merge_queue.state !== 'unknown' ? facts.merge_queue.state : row.merge_queue === 'enabled' || row.merge_queue === 'disabled' ? row.merge_queue : 'unknown';
   }
-  /** Where the files go; null when both workflow paths already exist and neither may be overwritten. */
-  private target(facts: GateFacts, mergeQueue: 'enabled' | 'disabled'): GateTarget | null {
-    if (facts.existing.ci_yml && facts.existing.ci_gates_yml) return null;
-    return { defaultBranch: facts.default_branch, mergeQueue, workflowPath: facts.existing.ci_yml ? '.github/workflows/ci-gates.yml' : '.github/workflows/ci.yml',
-      releaseWorkflow: !facts.existing.release_yml, npmLock: facts.lockfiles.includes('package-lock.json') };
+  /**
+   * Where the gate job can go: the workflow that already runs gate.mjs, or ci.yml / ci-gates.yml, new or existing (release
+   * preflight and the gate status look for the gate there). Nothing is overwritten: an existing file gets the gate job merged in.
+   */
+  private targets(facts: GateFacts): { path: string; mode: 'create' | 'update' }[] {
+    const gate = facts.existing.gate_workflow, names = ['.github/workflows/ci.yml', '.github/workflows/ci-gates.yml'];
+    const taken = new Set(facts.workflows.map(item => item.path)), readable = facts.workflows.filter(item => !item.error && item.path in facts.sources).map(item => item.path);
+    return [...(gate ? [{ path: gate, mode: 'update' as const }] : []),
+      ...names.filter(path => !taken.has(path)).map(path => ({ path, mode: 'create' as const })),
+      ...names.filter(path => path !== gate && readable.includes(path)).map(path => ({ path, mode: 'update' as const }))];
+  }
+  /** The default place: the existing gate workflow, else a new ci.yml, else a new ci-gates.yml beside the repository's ci.yml. */
+  private defaultWorkflow(facts: GateFacts): string { return this.targets(facts)[0]?.path ?? '.github/workflows/ci.yml'; }
+  /** What the files are rendered against; null when the plan names a workflow that is not one of the targets. */
+  private target(facts: GateFacts, mergeQueue: 'enabled' | 'disabled', plan: GatePlan): GateTarget | null {
+    const path = plan.workflow || this.defaultWorkflow(facts), option = this.targets(facts).find(item => item.path === path);
+    if (!option) return null;
+    return { defaultBranch: facts.default_branch, mergeQueue, workflowPath: path, workflowSource: option.mode === 'update' ? facts.sources[path]! : null,
+      configSource: facts.sources['.github/ci-gates.json'] ?? null, npmLock: facts.lockfiles.includes('package-lock.json'),
+      // New gates get the tag-triggered release.yml the console's release flow needs; existing gates only when the release lane has commands.
+      releaseWorkflow: !facts.existing.release_yml && (!facts.existing.ci_gates_json || plan.lanes.release.length > 0) };
+  }
+  /** The files of the gate PR for a plan, or why there are none. */
+  private files(facts: GateFacts, mergeQueue: 'enabled' | 'disabled', plan: GatePlan): { target: GateTarget; files: GateFile[] } | { problem: string; code: string } {
+    const target = this.target(facts, mergeQueue, plan);
+    if (!target) return { code: 'gate_workflow_invalid', problem: `方案里的 workflow ${plan.workflow} 不是可选的位置。` };
+    try { return { target, files: gateFiles(plan, target) }; }
+    catch (error) { if (error instanceof PlanError) return { code: error.code, problem: error.detail }; throw error; }
   }
 
   private view(row: Row): Json {
     const facts: GateFacts | null = row.facts ? JSON.parse(String(row.facts)) : null, plan: GatePlan | null = row.plan ? JSON.parse(String(row.plan)) : null;
-    const mergeQueue = facts ? this.mergeQueue(row, facts) : 'unknown', target = facts && mergeQueue !== 'unknown' ? this.target(facts, mergeQueue) : null;
-    const { files: manifests, gate_config: _config, ...summary } = facts || ({} as any);
+    const mergeQueue = facts ? this.mergeQueue(row, facts) : 'unknown';
+    const rendered = facts && plan && mergeQueue !== 'unknown' ? this.files(facts, mergeQueue, plan) : null;
+    const { files: manifests, gate_config: _config, sources: _sources, ...summary } = facts || ({} as any);
     return { id: row.id, repository_id: row.repository_id, state: row.state, busy: this.running.has(String(row.id)),
       latest: this.latestId(String(row.repository_id)) === row.id, messages: JSON.parse(String(row.messages)), plan, revision: Number(row.revision),
       facts: facts ? { ...summary, manifests: Object.keys(manifests || {}) } : null,
       merge_queue: facts ? { state: mergeQueue, evidence: facts.merge_queue.state === 'unknown' ? (row.merge_queue ? '由你在对话中确认' : facts.merge_queue.evidence) : facts.merge_queue.evidence,
         asked: facts.merge_queue.state === 'unknown' } : null,
       agent: this.agent(String(row.repository_id)),
-      target: target ? { workflow_path: target.workflowPath, events: plan ? gateEvents(effectivePlan(plan, target), target) : [], release_workflow: target.releaseWorkflow,
-        gate_script: facts!.existing.gate_script ? 'keep' : 'copy', files: plan ? gateFiles(plan, target) : [] } : null,
-      target_problem: facts && facts.existing.ci_yml && facts.existing.ci_gates_yml ? '仓库已有 ci.yml 和 ci-gates.yml，门禁 workflow 没有可以新增的位置；需要人工把 gate job 并进其中一个文件。' : null,
+      workflow_options: facts ? this.targets(facts) : [], default_workflow: facts ? this.defaultWorkflow(facts) : null,
+      ...targetView(facts, plan, rendered),
       pr_url: row.pr_url || null, error: row.error || null, detail: row.detail || null, created_at: row.created_at, updated_at: row.updated_at };
+  }
+  /** The files a plan would produce, without saving it: the console previews the person's unsent edits with this. */
+  preview(id: string, plan: unknown): Json {
+    const row = this.row(id);
+    if (!row?.facts) return fail(404, 'gate_onboarding_not_found');
+    const facts: GateFacts = JSON.parse(String(row.facts)), mergeQueue = this.mergeQueue(row, facts);
+    let normalized: GatePlan;
+    try { normalized = normalizePlan(plan); } catch (error) { if (error instanceof PlanError) return fail(400, error.code); throw error; }
+    return targetView(facts, normalized, mergeQueue === 'unknown' ? null : this.files(facts, mergeQueue, normalized));
   }
   latest(repositoryId: string): Json | null {
     const id = this.latestId(repositoryId);
@@ -233,7 +267,7 @@ export class GateOnboarding {
     if (answer !== 'enabled' && answer !== 'disabled') return fail(400, 'merge_queue_required');
     if (row.merge_queue !== answer) {
       this.update(id, { merge_queue: answer });
-      this.say(id, 'system', answer === 'enabled' ? '你确认默认分支启用了 merge queue：只提交进入队列之前的门禁。' : '你确认默认分支没有启用 merge queue：保留完整的五层事件。');
+      this.say(id, 'system', answer === 'enabled' ? '你确认默认分支启用了 merge queue：门禁在 PR 上和队列里运行，合入后不再重复运行。' : '你确认默认分支没有启用 merge queue：门禁在 PR 上和合入默认分支后运行。');
     }
     return this.get(id)!;
   }
@@ -248,7 +282,11 @@ export class GateOnboarding {
     if (mergeQueue === 'unknown') return fail(400, 'merge_queue_required');
     // What blocks every plan is checked before the person's edits become a new revision.
     if (facts.open_gate_prs.length) return fail(409, 'gate_pr_open');
-    if (!this.target(facts, mergeQueue)) return fail(409, 'gate_workflow_exists');
+    const candidate = plan === undefined ? JSON.parse(String(row.plan)) : (() => { try { return normalizePlan(plan); } catch (error) { if (error instanceof PlanError) return fail(400, error.code); throw error; } })();
+    const rendered = this.files(facts, mergeQueue, candidate);
+    if ('problem' in rendered) return fail(409, rendered.code);
+    // A plan equal to what the repository already has would open an empty PR.
+    if (!rendered.files.length) return fail(409, 'gate_no_changes');
     row = this.edit(this.row(id)!, revision, plan);
     this.say(id, 'system', `已确认第 ${row.revision} 版方案，正在创建门禁 PR。`);
     this.update(id, { state: 'creating', error: null, detail: null });
@@ -274,15 +312,13 @@ export class GateOnboarding {
       if (code === 'repository_not_found') return this.close(id, 'blocked', code, '没有该仓库的访问权限');
       return this.close(id, 'failed', code, `读取仓库失败：${code}`);
     } finally { await this.revoke(source.app); }
-    if (facts.existing.ci_gates_json) {
-      this.update(id, { facts: JSON.stringify(facts) });
-      return this.close(id, 'connected', null, '仓库已经接入门禁：默认分支上已有 .github/ci-gates.json，不需要再开一份覆盖它的 PR。需要调整时直接修改这个文件。');
-    }
     this.update(id, { facts: JSON.stringify(facts), plan: JSON.stringify(baselinePlan(facts)), revision: 1 });
     this.say(id, 'system', factSummary(facts));
+    // A repository that already has gates is reviewed from its own configuration; nothing changes unless someone changes the plan.
+    if (facts.existing.ci_gates_json) this.say(id, 'system', `仓库已经接入门禁。右侧方案就是当前的 .github/ci-gates.json${facts.existing.gate_workflow ? ` 和 ${facts.existing.gate_workflow} 里的门禁 job` : ''}；按建议修改并确认后，才会开一个更新门禁的 PR，确认前可以在「预览将提交的文件」里看到改动。`);
     const agent = this.agent(repositoryId);
     if (!agent.available) {
-      this.say(id, 'system', `${agent.reason} 右侧是只按仓库文件中确定的命令整理的初步方案，不确定的命令没有填入${facts.questions.length ? '，需要你补充：\n- ' + facts.questions.join('\n- ') : '。'}\n可以直接修改右侧方案，确认后才会创建门禁 PR。`);
+      this.say(id, 'system', `${agent.reason} 右侧是${facts.existing.ci_gates_json ? '仓库当前的门禁配置' : '只按仓库文件中确定的命令整理的初步方案'}，不确定的命令没有填入${facts.questions.length ? '，需要你补充：\n- ' + facts.questions.join('\n- ') : '。'}\n可以直接修改右侧方案，确认后才会创建门禁 PR。`);
       return this.update(id, { state: 'ready' });
     }
     this.update(id, { state: 'thinking' });
@@ -301,7 +337,7 @@ export class GateOnboarding {
       if (!repository) stop('gate_repository_stopped', 'cancelled', '这个仓库还没有启动，没有可用的模型。');
       const model = selectedModel(this.store, repositoryId, 'gate.onboarding'), messages: GateMessage[] = JSON.parse(String(row.messages));
       const result = await gateAgentTurn({ store: this.store, repository: repository!, model, apiUrl: this.apiUrl, guard, id, turn: messages.filter(item => item.role === 'user').length,
-        facts, plan: JSON.parse(String(row.plan)), mergeQueue: this.mergeQueue(row, facts), messages });
+        facts, plan: JSON.parse(String(row.plan)), mergeQueue: this.mergeQueue(row, facts), messages, targets: this.targets(facts) });
       this.say(id, 'agent', result.reply);
       const current = this.row(id)!;
       if (result.plan && JSON.stringify(result.plan) !== String(current.plan)) this.update(id, { plan: JSON.stringify(result.plan), revision: Number(current.revision) + 1 });
@@ -321,8 +357,10 @@ export class GateOnboarding {
   /** Opens the gate PR for the confirmed plan. A failure returns to the conversation, and confirming again reuses the branch. */
   private async create(id: string): Promise<void> {
     const row = this.row(id)!, repositoryId = String(row.repository_id), facts: GateFacts = JSON.parse(String(row.facts)), plan: GatePlan = JSON.parse(String(row.plan));
-    const target = this.target(facts, this.mergeQueue(row, facts) as 'enabled' | 'disabled')!;
     const back = (code: string, detail: string) => { this.say(id, 'system', detail); this.update(id, { state: 'ready', error: code, detail }); };
+    const rendered = this.files(facts, this.mergeQueue(row, facts) as 'enabled' | 'disabled', plan);
+    if ('problem' in rendered) return back(rendered.code, rendered.problem);
+    const { target, files } = rendered;
     let source: ReturnType<GateOnboarding['source']>;
     try { source = this.source(repositoryId); }
     catch (error) { if (error instanceof Blocked) return back(error.code, error.detail); throw error; }
@@ -333,19 +371,18 @@ export class GateOnboarding {
       const gap = this.permissionGap(installation, gatePermissions.source);
       if (gap) return back(gap.code, gap.detail);
       const token = await this.token(app, installation, gatePermissions.source, { repository_ids: [Number(repositoryId)] });
-      // The default branch may have moved since the facts were read: never add a file that now exists there.
-      if (await this.file(full, '.github/ci-gates.json', token) !== null) {
-        this.say(id, 'system', '默认分支上已经有 .github/ci-gates.json，仓库已接入门禁，不再创建覆盖它的 PR。');
-        return this.update(id, { state: 'connected', error: null, detail: null });
+      // Every file is written from what the conversation saw: if the default branch changed it since, nothing is written.
+      for (const item of files) {
+        if (await this.file(full, item.path, token) !== item.previous)
+          return back('gate_file_changed', `默认分支上的 ${item.path} 在对话开始后有变化，不会覆盖它。请重新开始，让方案按最新的仓库内容调整。`);
       }
-      const files = gateFiles(plan, target);
-      for (const item of files) if (await this.file(full, item.path, token) !== null) return back('gate_file_exists', `默认分支上已经有 ${item.path}，不会覆盖它。请重新开始接入，让方案按最新的仓库内容调整。`);
+      const writes: { path: string; content: string }[] = files.map(({ path, content }) => ({ path, content }));
       if (!facts.existing.gate_script && await this.file(full, 'scripts/gate/gate.mjs', token) === null) {
         const templateToken = await this.templateToken(app, token);
         if (templateToken === null) return back('template_app_not_installed', `读取模板仓库 ${this.templateRepo} 被拒绝，需要把同一个 GitHub App 安装到该仓库`);
         const gateScript = await this.file(this.templateRepo, 'scripts/gate/gate.mjs', templateToken);
         if (!gateScript) return back('template_unavailable', '读取 CI-workflow 的 scripts/gate/gate.mjs 失败');
-        files.push({ path: 'scripts/gate/gate.mjs', content: gateScript });
+        writes.push({ path: 'scripts/gate/gate.mjs', content: gateScript });
       }
       const ref = await this.request('GET', `/repos/${full}/git/ref/heads/${encodeURIComponent(target.defaultBranch)}`, token);
       const sha = ref?.object?.sha;
@@ -353,10 +390,11 @@ export class GateOnboarding {
       const branch = `bot/gate-onboarding-${id.slice(0, 8)}`;
       try { await this.request('POST', `/repos/${full}/git/refs`, token, { ref: `refs/heads/${branch}`, sha }); }
       catch (error) { if (!String((error as Error).message).endsWith('422')) throw error; } // An earlier attempt of this session created it.
-      for (const item of files) await this.put(full, item.path, item.content, branch, token);
-      const body = prBody(id, Number(row.revision), facts, plan, target, files.some(item => item.path === 'scripts/gate/gate.mjs') ? this.templateRepo : null);
+      for (const item of writes) await this.put(full, item.path, item.content, branch, token);
+      const body = prBody(id, Number(row.revision), facts, plan, target, files, writes.some(item => item.path === 'scripts/gate/gate.mjs') ? this.templateRepo : null);
+      const title = facts.existing.ci_gates_json ? 'chore(ci): update CI gates' : 'chore(ci): connect CI gates';
       let pr: any;
-      try { pr = await this.request('POST', `/repos/${full}/pulls`, token, { title: 'chore(ci): connect CI gates', head: branch, base: target.defaultBranch, body }); }
+      try { pr = await this.request('POST', `/repos/${full}/pulls`, token, { title, head: branch, base: target.defaultBranch, body }); }
       catch (error) {
         if (!String((error as Error).message).endsWith('422')) throw error;
         const open = await this.request('GET', `/repos/${full}/pulls?state=open&head=${encodeURIComponent(`${full.split('/')[0]}:${branch}`)}`, token);
@@ -372,45 +410,58 @@ export class GateOnboarding {
   }
 }
 
+/** What the console shows of the files a plan produces: new files whole, changed files also as a diff. */
+function targetView(facts: GateFacts | null, plan: GatePlan | null, rendered: { target: GateTarget; files: GateFile[] } | { problem: string; code: string } | null): Json {
+  if (!rendered || !facts || !plan) return { target: null, target_problem: null };
+  if ('problem' in rendered) return { target: null, target_problem: rendered.problem };
+  const { target, files } = rendered;
+  return { target_problem: null, target: { workflow_path: target.workflowPath, mode: target.workflowSource === null ? 'create' : 'update',
+    events: gateEvents(plan, target), release_workflow: target.releaseWorkflow, gate_script: facts.existing.gate_script ? 'keep' : 'copy',
+    files: files.map(file => ({ path: file.path, mode: file.previous === null ? 'create' : 'update', content: file.content,
+      ...(file.previous === null ? {} : { diff: unifiedDiff(file.previous, file.content) }) })) } };
+}
+
 /** The facts in a few lines, as the first message of the conversation. */
 function factSummary(facts: GateFacts): string {
   const languages = facts.languages.slice(0, 5).map(item => item.name).join('、') || '未识别';
-  const workflows = facts.workflows.length ? facts.workflows.map(item => `${item.path.replace('.github/workflows/', '')}（${item.events.join('、') || '无触发'}）`).join('、') : '没有';
+  const workflows = facts.workflows.length ? facts.workflows.map(item => `${item.path.replace('.github/workflows/', '')}（${item.events.join('、') || '无触发'}${item.gate_job ? '，运行门禁' : ''}）`).join('、') : '没有';
   const queue = { enabled: '已启用', disabled: '未启用', unknown: '无法判断' }[facts.merge_queue.state];
   return [`已只读查看 ${facts.repository} 的默认分支 ${facts.default_branch}（${facts.head_sha.slice(0, 7)}）：`,
     `- 语言：${languages}`, `- 已有 workflow：${workflows}`,
     `- 构建与依赖文件：${Object.keys(facts.files).join('、') || '没有找到'}${facts.lockfiles.length ? `；锁文件：${facts.lockfiles.join('、')}` : ''}`,
     `- merge queue：${queue}（${facts.merge_queue.evidence}）`,
-    facts.existing.ci_yml ? '- 已有 .github/workflows/ci.yml：不会覆盖，门禁 workflow 将放在 .github/workflows/ci-gates.yml' : '- 没有 .github/workflows/ci.yml',
+    `- 规则集要求的检查：${facts.required_checks === null ? '读不到' : facts.required_checks.length ? facts.required_checks.join('、') : '没有'}`,
+    facts.existing.ci_gates_json ? `- 已接入门禁：.github/ci-gates.json${facts.existing.gate_workflow ? `，门禁 job 在 ${facts.existing.gate_workflow}` : '，但没有找到运行 gate.mjs 的 workflow'}`
+      : facts.existing.ci_yml ? '- 已有 .github/workflows/ci.yml：不会覆盖；门禁 job 可以放进新的 ci-gates.yml，也可以并入已有 workflow' : '- 没有 .github/workflows/ci.yml',
     ...(facts.open_gate_prs.length ? [`- 已有未合入的门禁 PR：${facts.open_gate_prs.map(item => '#' + item.number).join('、')}，处理它之前不能再开新的门禁 PR`] : [])].join('\n');
 }
 
-/** The gate PR description: what was confirmed, what each lane runs, and what was left out on purpose. */
-function prBody(id: string, revision: number, facts: GateFacts, plan: GatePlan, target: GateTarget, templateRepo: string | null): string {
-  const effective = effectivePlan(plan, target), events = gateEvents(effective, target);
+/** The gate PR description: what was confirmed, what each lane runs, and how the gate runs around a merge queue. */
+function prBody(id: string, revision: number, facts: GateFacts, plan: GatePlan, target: GateTarget, files: GateFile[], templateRepo: string | null): string {
+  const events = gateEvents(plan, target), update = facts.existing.ci_gates_json;
   const lanes = gateLanes.map(lane => {
-    const commands = effective.lanes[lane];
-    const skipped = lane === 'pr-merge' && target.mergeQueue === 'enabled' ? '本次不提交（仓库启用了 merge queue，见下文）' : '未配置';
-    // With a merge queue, build runs only on the PR in this commit.
-    const when = lane === 'build' && target.mergeQueue === 'enabled' ? 'PR 每次更新时跑，确认代码能构建' : laneTimes[lane];
-    return `- **${lane}**（${when}）：${commands.length ? commands.map(code).join('；') : skipped}`;
+    const commands = plan.lanes[lane], observe = plan.observe.includes(lane) && commands.length ? '，失败只记录（observe）' : '';
+    const when = lane === 'build' && target.mergeQueue === 'enabled' ? 'PR 每次更新时和进入 merge queue 后跑，确认代码能构建' : laneTimes[lane];
+    return `- **${lane}**（${when}${observe}）：${commands.length ? commands.map(code).join('；') : '未配置'}`;
   }).join('\n');
-  const { node, python, go, java } = effective.toolchains;
+  const { node, python, go, java } = plan.toolchains;
   const toolchains = [`Node ${node}（运行 gate.mjs）`, python && `Python ${python}`, go && `Go ${go === 'go.mod' ? '（按 go.mod）' : go}`, java && `Java ${java}（Temurin）`].filter(Boolean).join('、');
+  const evidence = facts.merge_queue.state === 'unknown' ? '由仓库管理员在接入对话中确认' : facts.merge_queue.evidence;
   const queue = target.mergeQueue === 'enabled'
-    ? `仓库默认分支启用了 merge queue（${facts.merge_queue.state === 'unknown' ? '由仓库管理员在接入对话中确认' : facts.merge_queue.evidence}）。这个 PR 只提交进入队列之前的门禁：pull_request 上的 build 和 pr-ready，报告 PR head 提交而不是 GitHub 的合并提交。不包含 merge_group，也不包含 push 到默认分支后才运行的门禁，pr-merge lane 留空。如果之后要把 \`gate\` 设为合并队列的必需检查，需要先给门禁 workflow 加上 merge_group 触发，否则队列会一直等这项检查。`
-    : `仓库默认分支没有启用 merge queue（${facts.merge_queue.state === 'unknown' ? '由仓库管理员在接入对话中确认' : facts.merge_queue.evidence}），门禁 workflow 保留 CI-workflow 的完整事件；pull_request 报告 PR head 提交。`;
-  return [`按接入门禁对话中确认的第 ${revision} 版方案接入 CI-workflow 门禁。控制面只根据这份方案生成文件，没有运行其中任何命令；检查是否通过以这个 PR 上的 Actions 结果为准。`,
+    ? `仓库默认分支启用了 merge queue（${evidence}）。门禁在 PR 上（pull_request：build、pr-ready，报告 PR head 提交而不是 GitHub 的合并提交）和队列里（merge_group：build、pr-merge）运行，合入默认分支后不再重复运行。因为队列里也会报告结果，合入后可以把 \`gate\` 设为必需检查。`
+    : `仓库默认分支没有启用 merge queue（${evidence}）。门禁在 PR 上（pull_request：build、pr-ready，报告 PR head 提交）和合入默认分支后（push：build）运行；merge_group 触发保留，启用 merge queue 后 pr-merge 会在队列里运行。合入后可以把 \`gate\` 设为必需检查。`;
+  const fileLines = files.map(file => file.path === target.workflowPath
+    ? `- \`${file.path}\`：${file.previous === null ? '新增门禁 workflow' : '并入或更新门禁 job，补上缺少的触发事件，其他 job 不变；门禁 job 只在这些事件上运行'}：${events.join('、')}`
+    : file.path === '.github/ci-gates.json' ? `- \`.github/ci-gates.json\`：${file.previous === null ? '新增' : '更新'}各 lane 的命令${file.previous === null ? '' : '，其他配置项保持不变'}`
+    : `- \`${file.path}\`：版本标签（如 v1.2.3）触发 release lane`);
+  return [`按接入门禁对话中确认的第 ${revision} 版方案${update ? '更新' : '接入'} CI-workflow 门禁。控制面只根据这份方案生成文件，没有运行其中任何命令；检查是否通过以这个 PR 上的 Actions 结果为准。`,
     '', '### Lane 命令', '', lanes, '',
     '空 lane 只表示还没有配置检查，运行时报告 not_applicable，不表示检查通过。需要时在 `.github/ci-gates.json` 里补充命令。', '',
     '### merge queue', '', queue, '',
-    '### 运行环境', '', `- 工具链：${toolchains}`, `- 安装依赖：${effective.install.length ? effective.install.map(code).join('；') : '无'}`, '',
-    '### 文件', '',
-    `- \`${target.workflowPath}\`：门禁 workflow，触发事件 ${events.join('、')}`,
-    '- `.github/ci-gates.json`：各 lane 的命令',
-    templateRepo ? `- \`scripts/gate/gate.mjs\`：门禁运行器，来自 ${templateRepo}` : '- `scripts/gate/gate.mjs`：沿用仓库已有的门禁运行器',
-    target.releaseWorkflow ? '- `.github/workflows/release.yml`：版本标签（如 v1.2.3）触发 release lane' : '- 仓库已有 `.github/workflows/release.yml`，没有修改；release lane 在发布 Release 时由门禁 workflow 运行',
-    ...(facts.existing.ci_yml ? ['', '### 已有 ci.yml', '', '仓库已有 `.github/workflows/ci.yml`，这个 PR 没有修改它，门禁 job 放在独立的 `.github/workflows/ci-gates.yml`。如果想合成一个 workflow，把 `gate` job 连同 pull_request 触发、`CI_GATES_SHA` 环境变量和 `ci-gates-reports` artifact 一起复制进 ci.yml，再删除 ci-gates.yml。'] : []),
+    '### 运行环境', '', `- 工具链：${toolchains}`, `- 安装依赖：${plan.install.length ? plan.install.map(code).join('；') : '无'}`, '',
+    '### 文件', '', ...fileLines,
+    ...(templateRepo ? [`- \`scripts/gate/gate.mjs\`：门禁运行器，来自 ${templateRepo}`] : []),
+    ...(target.workflowSource !== null && target.workflowPath !== facts.existing.gate_workflow ? ['', `门禁 job 并入了已有的 \`${target.workflowPath}\`，补上的触发事件也会让这个文件里的其他 job 在这些事件上运行；如果不希望这样，可以把门禁 job 移到单独的 workflow 文件。`] : []),
     '', '控制面只提供门禁框架，并在人工确认版本后打标签；是否发布 PyPI、npm 包或镜像，由仓库开发者写进自己的 Release workflow。',
     '', `<!-- dept-bot:gate-onboarding:${id} -->`].join('\n');
 }

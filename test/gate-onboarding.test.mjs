@@ -27,6 +27,7 @@ test('a Python repository without package.json gets a plan from its own files, a
   // Makefile targets are repository commands; pytest and pip install -e . are uncertain and only asked about.
   assert.deepEqual(session.plan.lanes, { build: ['make build'], 'pr-ready': ['make lint', 'make test'], 'pr-merge': [], daily: [], release: [] });
   assert.deepEqual(session.plan.install, []);
+  assert.deepEqual([session.plan.observe, session.plan.workflow, session.default_workflow], [['daily'], '', '.github/workflows/ci.yml']);
   assert.ok(session.facts.candidates.some(item => item.command === 'python -m pytest' && !item.certain));
   assert.match(session.messages.at(-1).content, /Python 依赖在 CI 里怎么安装/);
   assert.equal(session.merge_queue.state, 'disabled');
@@ -72,7 +73,8 @@ test('the agent proposes from repository facts, the person corrects it in the co
   assert.equal(session.pr_url, 'https://github.com/octo/hello/pull/1');
   assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci.yml', '.github/workflows/release.yml', 'scripts/gate/gate.mjs']);
   const config = JSON.parse(files['.github/ci-gates.json']);
-  assert.deepEqual(config.lanes, { build: { commands: ['make build'] }, 'pr-ready': { commands: ['make lint', 'make test'] }, 'pr-merge': { commands: [] }, daily: { commands: ['make test'] }, release: { commands: [] } });
+  assert.deepEqual(config.lanes, { build: { commands: ['make build'] }, 'pr-ready': { commands: ['make lint', 'make test'] }, 'pr-merge': { commands: [] },
+    daily: { commands: ['make test'], enforcement: 'observe', continueOnError: true }, release: { commands: [] } });
   const workflow = parse(files['.github/workflows/ci.yml']), steps = workflow.jobs.gate.steps;
   assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'merge_group', 'push', 'schedule', 'workflow_dispatch']);
   assert.deepEqual(workflow.on.push, { branches: ['main'] });
@@ -93,26 +95,31 @@ test('the agent proposes from repository facts, the person corrects it in the co
   assert.equal(state.revoked.length, state.tokens.size);
 });
 
-test('with a merge queue the PR keeps only the gates that run before the queue, and reports the PR head', async t => {
+test('with a merge queue the gate runs on pull requests and in the queue, not again after merging, so it can be required', async t => {
   const { state, open, confirm } = await fixture(t);
   state.repos['octo/hello'].queue = 'ruleset';
   let session = await open();
   assert.deepEqual(session.merge_queue, { state: 'enabled', evidence: '默认分支 main 的规则集 77 要求 merge queue', asked: false });
-  assert.deepEqual(session.target.events, ['pull_request', 'workflow_dispatch']);
-  // Even a pr-merge command typed by the person is left out: it would only run on merge_group.
-  const plan = { ...session.plan, lanes: { ...session.plan.lanes, 'pr-merge': ['make test'], daily: ['make test'] } };
+  assert.deepEqual(session.facts.required_checks, ['unit']);
+  assert.match(session.messages[0].content, /规则集要求的检查：unit/);
+  assert.deepEqual(session.target.events, ['pull_request', 'merge_group', 'workflow_dispatch']);
+  // pr-merge runs in the queue, so a command for it is kept.
+  const plan = { ...session.plan, lanes: { ...session.plan.lanes, 'pr-merge': ['make test'], daily: ['make e2e'] } };
   session = await confirm(session, { plan });
   assert.equal(session.state, 'done', JSON.stringify(session.messages));
   const { pull, files } = branchOf(state), workflow = parse(files['.github/workflows/ci.yml']);
-  assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'schedule', 'workflow_dispatch']);
-  assert.ok(!('merge_group' in workflow.on) && !('push' in workflow.on));
+  assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'merge_group', 'schedule', 'workflow_dispatch']);
+  assert.ok(!('push' in workflow.on));
   assert.equal(workflow.jobs.gate.env.CI_GATES_SHA, '${{ github.event.pull_request.head.sha || github.sha }}');
+  // A push never cancels a queue or daily run; only pull request runs of one branch replace each other.
+  assert.deepEqual(workflow.concurrency, { group: 'ci-gates-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}', 'cancel-in-progress': "${{ github.event_name == 'pull_request' }}" });
   const config = JSON.parse(files['.github/ci-gates.json']);
-  assert.deepEqual(config.lanes['pr-merge'], { commands: [] });
-  assert.deepEqual(config.lanes.daily, { commands: ['make test'] });
-  assert.match(pull.body, /不包含 merge_group，也不包含 push 到默认分支后才运行的门禁/);
-  assert.match(pull.body, /\*\*build\*\*（PR 每次更新时跑，确认代码能构建）/);
-  assert.match(pull.body, /先给门禁 workflow 加上 merge_group 触发/);
+  assert.deepEqual(config.lanes['pr-merge'], { commands: ['make test'] });
+  // daily follows CI-workflow: failures are recorded, later commands still run.
+  assert.deepEqual(config.lanes.daily, { commands: ['make e2e'], enforcement: 'observe', continueOnError: true });
+  assert.match(pull.body, /队列里（merge_group：build、pr-merge）运行，合入默认分支后不再重复运行/);
+  assert.match(pull.body, /可以把 `gate` 设为必需检查/);
+  assert.match(pull.body, /\*\*daily\*\*（.*，失败只记录（observe））：`make e2e`/);
   // release.yml runs on version tags, not after merging.
   assert.deepEqual(Object.keys(parse(files['.github/workflows/release.yml']).on.push), ['tags']);
 });
@@ -140,37 +147,120 @@ test('classic protection is settled by GraphQL, and an unreadable merge queue is
   assert.match(branchOf(state).pull.body, /由仓库管理员在接入对话中确认/);
 });
 
-test('an existing ci.yml and release.yml are never overwritten; the gate job goes beside them', async t => {
+test('an existing ci.yml and release.yml are never overwritten; by default the gate job goes beside them', async t => {
   const { state, open, confirm } = await fixture(t);
   Object.assign(state.repos['octo/hello'].files, { '.github/workflows/ci.yml': 'name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n',
     '.github/workflows/release.yml': 'name: Release\non:\n  push:\n    tags: ["v*"]\njobs: {}\n' });
   let session = await open();
-  assert.deepEqual(session.facts.workflows.map(item => [item.path, item.events]), [['.github/workflows/ci.yml', ['push']], ['.github/workflows/release.yml', ['push']]]);
+  assert.deepEqual(session.facts.workflows.map(item => [item.path, item.events, item.jobs]), [['.github/workflows/ci.yml', ['push'], ['test']], ['.github/workflows/release.yml', ['push'], []]]);
   assert.ok(session.facts.candidates.some(item => item.command === 'make test' && item.source.includes('Makefile') && item.source.includes('.github/workflows/ci.yml')));
+  assert.deepEqual(session.workflow_options, [{ path: '.github/workflows/ci-gates.yml', mode: 'create' }, { path: '.github/workflows/ci.yml', mode: 'update' }]);
+  const elsewhere = await confirm(session, { plan: { ...session.plan, workflow: '.github/workflows/release.yml' } });
+  assert.deepEqual([elsewhere.status, elsewhere.value.error], [409, 'gate_workflow_invalid']);
   assert.equal(session.target.workflow_path, '.github/workflows/ci-gates.yml');
   assert.match(session.messages[0].content, /不会覆盖/);
   const plan = { ...session.plan, lanes: { ...session.plan.lanes, release: ['make build'] } };
   session = await confirm(session, { plan });
   assert.equal(session.state, 'done', JSON.stringify(session.messages));
-  const { pull, files } = branchOf(state);
+  const { files } = branchOf(state);
   assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci-gates.yml', 'scripts/gate/gate.mjs']);
   assert.ok(!writes(state).some(r => /workflows\/(?:ci|release)\.yml$/.test(r.path)));
   const workflow = parse(files['.github/workflows/ci-gates.yml']);
   assert.equal(workflow.name, 'CI gates');
   assert.ok('release' in workflow.on); // The repository's own release.yml does not run the release lane.
-  assert.match(pull.body, /这个 PR 没有修改它/);
 });
 
-test('a repository that already has ci-gates.json is reported as connected and gets no PR', async t => {
+test('the gate job can be merged into an existing workflow: other jobs, comments and triggers stay, and the diff is shown first', async t => {
   const { state, open, confirm, admin } = await fixture(t);
-  state.repos['octo/hello'].files['.github/ci-gates.json'] = '{"version":1,"lanes":{}}';
-  const session = await open();
-  assert.equal(session.state, 'connected');
-  assert.match(session.messages.at(-1).content, /不需要再开一份覆盖它的 PR/);
-  const refused = await confirm(session);
-  assert.deepEqual([refused.status, refused.value.error], [409, 'gate_onboarding_closed']);
-  assert.equal((await admin(`/api/gate-onboarding/${session.id}/messages`, 'POST', { content: 'hi' })).status, 409);
+  state.repos['octo/hello'].queue = 'ruleset';
+  const ci = '# Our CI\nname: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: make test # unit tests\n';
+  state.repos['octo/hello'].files['.github/workflows/ci.yml'] = ci;
+  let session = await open();
+  const plan = { ...session.plan, workflow: '.github/workflows/ci.yml' };
+  // The preview renders unsent edits without saving them.
+  const preview = (await admin(`/api/gate-onboarding/${session.id}/preview`, 'POST', { plan })).value;
+  assert.equal(preview.target.mode, 'update');
+  const diff = preview.target.files.find(file => file.path === '.github/workflows/ci.yml').diff;
+  assert.match(diff, /^\+  merge_group:$/m);
+  assert.match(diff, /^\+  gate:$/m);
+  assert.match(diff, /^ {3}test:$/m);
+  assert.equal((await admin(`/api/gate-onboarding/${session.id}`)).value.session.revision, session.revision);
   assert.deepEqual(writes(state), []);
+  session = await confirm(session, { plan });
+  assert.equal(session.state, 'done', JSON.stringify(session.messages));
+  const { pull, files } = branchOf(state), merged = files['.github/workflows/ci.yml'], workflow = parse(merged);
+  assert.ok(merged.startsWith('# Our CI\n') && merged.includes('make test # unit tests'));
+  assert.deepEqual(Object.keys(workflow.jobs), ['test', 'gate']);
+  assert.deepEqual(Object.keys(workflow.on), ['push', 'pull_request', 'merge_group', 'workflow_dispatch']);
+  // The existing push trigger stays for the test job, but with a merge queue the gate job does not run after merging.
+  assert.equal(workflow.jobs.gate.if, "github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'");
+  assert.ok(!Object.keys(files).includes('.github/workflows/ci-gates.yml'));
+  assert.match(pull.body, /并入了已有的 `\.github\/workflows\/ci\.yml`/);
+});
+
+test('a repository that already has gates is reviewed from its own configuration; the review shows what the standard gate job changes', async t => {
+  const { state, open, confirm } = await fixture(t);
+  state.repos['octo/hello'].queue = 'ruleset';
+  const config = { version: 1, level: 'C2', caseCatalog: 'test/cases/case-catalog.yaml', lanes: { build: { commands: 'make build', timeoutSec: 600 }, 'pr-ready': { commands: ['make lint'] }, daily: { commands: [] } } };
+  // An older, hand-written gate job: its own display name, no PR head reporting, no report upload and no merge_group.
+  const ci = 'name: CI\non:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  checks:\n    name: CI gate\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: "3.11"\n      - run: pip install -e .\n      - run: node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"\n';
+  Object.assign(state.repos['octo/hello'].files, { '.github/ci-gates.json': JSON.stringify(config), '.github/workflows/ci.yml': ci, 'scripts/gate/gate.mjs': '// theirs\n' });
+  let session = await open();
+  assert.equal(session.state, 'ready');
+  assert.match(session.messages.at(-1).content, /右侧是仓库当前的门禁配置/);
+  assert.deepEqual(session.plan.lanes, { build: ['make build'], 'pr-ready': ['make lint'], 'pr-merge': [], daily: [], release: [] });
+  assert.deepEqual([session.plan.workflow, session.plan.install, session.plan.toolchains.python, session.plan.observe], ['.github/workflows/ci.yml', ['pip install -e .'], '3.11', []]);
+  assert.equal(session.workflow_options[0].path, '.github/workflows/ci.yml');
+  // The unchanged plan leaves ci-gates.json alone; the gate job and its triggers are what the review would change.
+  assert.deepEqual(session.target.files.map(file => [file.path, file.mode]), [['.github/workflows/ci.yml', 'update']]);
+  const diff = session.target.files[0].diff;
+  for (const line of [/^\+  merge_group:$/m, /^\+ {6}CI_GATES_SHA: /m, /^\+ {8}uses: actions\/upload-artifact@v4$/m, /^ {5}name: CI gate$/m, /^ {5}branches: \[main\]$/m]) assert.match(diff, line);
+  const plan = { ...session.plan, lanes: { ...session.plan.lanes, 'pr-ready': ['make lint', 'make test'] } };
+  session = await confirm(session, { plan });
+  assert.equal(session.state, 'done', JSON.stringify(session.messages));
+  const { pull, files } = branchOf(state), updated = JSON.parse(files['.github/ci-gates.json']), workflow = parse(files['.github/workflows/ci.yml']);
+  assert.equal(pull.title, 'chore(ci): update CI gates');
+  // Keys and forms the plan did not change are kept.
+  assert.deepEqual([updated.level, updated.caseCatalog, updated.lanes.build, Object.keys(updated.lanes)], ['C2', 'test/cases/case-catalog.yaml', { commands: 'make build', timeoutSec: 600 }, ['build', 'pr-ready', 'daily']]);
+  assert.deepEqual(updated.lanes['pr-ready'], { commands: ['make lint', 'make test'] });
+  assert.deepEqual([Object.keys(workflow.jobs), workflow.jobs.checks.name], [['checks'], 'CI gate']);
+  // With a merge queue the old push trigger stays in the file, but the gate job no longer runs after merging.
+  assert.ok(!workflow.jobs.checks.if.includes("'push'"));
+  assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci.yml']);
+  assert.ok(!writes(state).some(r => r.path.endsWith('gate.mjs') || r.path.endsWith('release.yml')));
+});
+
+test('gates this flow created and that were merged show no changes the next time, and no empty PR is opened', async t => {
+  const { state, open, confirm } = await fixture(t);
+  let session = await confirm(await open());
+  assert.equal(session.state, 'done', JSON.stringify(session.messages));
+  // Merge the gate PR, then open onboarding again.
+  const repo = state.repos['octo/hello'], { files } = branchOf(state);
+  Object.assign(repo.files, files); repo.pulls = [];
+  session = await open();
+  assert.deepEqual([session.plan.workflow, session.target.mode, session.target.files], ['.github/workflows/ci.yml', 'update', []]);
+  const before = writes(state).length, empty = await confirm(session);
+  assert.deepEqual([empty.status, empty.value.error], [409, 'gate_no_changes']);
+  assert.equal(writes(state).length, before);
+});
+
+test('a merged gate job keeps the existing job name, and a default-branch change since the conversation stops the PR', async t => {
+  const { state, open, confirm } = await fixture(t);
+  state.repos['octo/hello'].queue = 'ruleset';
+  const ci = 'name: CI\non: [pull_request]\njobs:\n  checks:\n    name: CI gate\n    runs-on: ubuntu-latest\n    steps:\n      - run: node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"\n';
+  Object.assign(state.repos['octo/hello'].files, { '.github/ci-gates.json': '{"version":1,"lanes":{}}', '.github/workflows/ci.yml': ci, 'scripts/gate/gate.mjs': '// theirs\n' });
+  let session = await open();
+  state.repos['octo/hello'].files['.github/workflows/ci.yml'] = ci + '# changed\n';
+  session = await confirm(session);
+  assert.deepEqual([session.state, session.error], ['ready', 'gate_file_changed']);
+  assert.deepEqual(writes(state), []);
+  state.repos['octo/hello'].files['.github/workflows/ci.yml'] = ci;
+  session = await confirm(session);
+  assert.equal(session.state, 'done', JSON.stringify(session.messages));
+  const workflow = parse(branchOf(state).files['.github/workflows/ci.yml']);
+  assert.deepEqual(Object.keys(workflow.jobs), ['checks']);
+  assert.equal(workflow.jobs.checks.name, 'CI gate'); // The required-check context stays the same.
+  assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'merge_group', 'workflow_dispatch']);
 });
 
 test('a Node repository with dependencies but no lock file is onboarded; npm install is only asked about', async t => {
@@ -268,10 +358,11 @@ test('a restart ends an unfinished turn, a newer conversation supersedes the old
 
 test('rendered files follow the plan: toolchains, go.mod, npm cache and empty lanes', () => {
   const plan = normalizePlan({ toolchains: { node: '20', go: 'go.mod', java: '21' }, install: ['npm ci', 'go mod download'], lanes: { build: ['go build ./...'], release: [] } });
-  const target = { defaultBranch: 'trunk', mergeQueue: 'disabled', workflowPath: '.github/workflows/ci.yml', releaseWorkflow: true, npmLock: true };
+  const target = { defaultBranch: 'trunk', mergeQueue: 'disabled', workflowPath: '.github/workflows/ci.yml', workflowSource: null, configSource: null, releaseWorkflow: true, npmLock: true };
   const [workflow, config, release] = gateFiles(plan, target), parsed = parse(workflow.content);
   assert.deepEqual(parsed.on.push.branches, ['trunk']);
   assert.deepEqual(gateEvents(plan, target), ['pull_request', 'merge_group', 'push', 'workflow_dispatch']);
+  assert.deepEqual(gateEvents(plan, { ...target, mergeQueue: 'enabled' }), ['pull_request', 'merge_group', 'workflow_dispatch']);
   const steps = parsed.jobs.gate.steps;
   assert.deepEqual(steps.find(step => step.uses === 'actions/setup-node@v4').with, { 'node-version': '20', cache: 'npm' });
   assert.deepEqual(steps.find(step => step.uses === 'actions/setup-go@v5').with, { 'go-version-file': 'go.mod' });
@@ -280,6 +371,9 @@ test('rendered files follow the plan: toolchains, go.mod, npm cache and empty la
   assert.deepEqual(JSON.parse(config.content).lanes['pr-ready'], { commands: [] });
   assert.equal(parse(release.content).jobs.gate.steps.at(-2).run, 'node scripts/gate/gate.mjs run --lane release');
   assert.deepEqual(emptyPlan().toolchains, { node: '22', python: '', go: '', java: '' });
+  assert.deepEqual([emptyPlan().observe, normalizePlan({}).observe, normalizePlan({ observe: [] }).observe], [['daily'], ['daily'], []]);
+  assert.throws(() => normalizePlan({ workflow: '../ci.yml' }), PlanError);
+  assert.throws(() => normalizePlan({ observe: ['nightly'] }), PlanError);
   assert.throws(() => normalizePlan({ lanes: { deploy: ['x'] } }), PlanError);
   // Commands are kept whole; a long or non-ASCII command is not refused.
   const long = 'echo ' + '测'.repeat(5000);
