@@ -11,14 +11,14 @@ async function login(page, f) {
   await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
 }
 
-test('接入门禁先介绍五层，再和 agent 按仓库事实定方案，确认后才开 PR；有 merge queue 时门禁在 PR 上和队列里运行', async ({ page }) => {
+test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，确认后才开 PR；有 merge queue 时合入门禁在队列里运行', async ({ page }) => {
   mkdirSync('.tmp', { recursive: true });
   const cleanup = [], errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const f = await gateFixture({ after: fn => cleanup.push(fn) }, { model: async input => input.conversation.length <= 1
-    ? answer('仓库是 Python 项目，Makefile 里有 build、lint、test。建议 build 跑 make build，pr-ready 跑 make lint 和 make test。默认分支启用了 merge queue，门禁会在队列里再跑 build。Python 依赖在 CI 里怎么安装？',
-      { toolchains: { python: '3.12' }, lanes: { build: ['make build'], 'pr-ready': ['make lint', 'make test'] } })
-    : answer('已按你的说法加入安装命令。', { toolchains: { python: '3.12' }, install: ['pip install -e ".[test]"'], lanes: { build: ['make build'], 'pr-ready': ['make lint', 'make test'] } }) });
+    ? answer('仓库是 Python 项目，Makefile 里有 build、lint、test。建议 pr-ready 跑 make build、make lint 和 make test；默认分支启用了 merge queue，队列里会先重跑 pr-ready 再跑 pr-merge。Python 依赖在 CI 里怎么安装？',
+      { toolchains: { python: '3.12' }, lanes: { 'pr-ready': ['make build', 'make lint', 'make test'] } })
+    : answer('已按你的说法加入安装命令。', { toolchains: { python: '3.12' }, install: ['pip install -e ".[test]"'], lanes: { 'pr-ready': ['make build', 'make lint', 'make test'] } }) });
   try {
     f.state.repos['octo/hello'].queue = 'ruleset';
     await login(page, f);
@@ -27,8 +27,8 @@ test('接入门禁先介绍五层，再和 agent 按仓库事实定方案，确�
     const dialog = page.locator('#quickstart-view');
     await expect(dialog.getByRole('heading', { name: '接入门禁 · octo/hello', exact: true })).toBeVisible();
     // The five lanes come first, fully visible, before any conversation, branch or PR exists.
-    for (const lane of ['build', 'pr-ready', 'pr-merge', 'daily', 'release']) await expect(dialog.locator('#gate-onboarding-lanes dt', { hasText: new RegExp(`^${lane}$`) })).toBeVisible();
-    await expect(dialog.locator('#gate-onboarding-lanes').getByText('PR 进入 merge queue 后，对排队中的合并结果跑，放单次 PR 嫌慢的更全的检查；仓库没有 merge queue 时不会触发。')).toBeVisible();
+    for (const lane of ['pr-ready', 'pr-merge', 'daily', 'release']) await expect(dialog.locator('#gate-onboarding-lanes dt', { hasText: new RegExp(`^${lane}$`) })).toBeVisible();
+    await expect(dialog.locator('#gate-onboarding-lanes').getByText(/^合入门禁，确保多个 PR 合在一起不会互相影响：有 merge queue 时在队列里对合并结果先跑 pr-ready 再跑这一层；没有 merge queue 时在合入默认分支后/)).toBeVisible();
     await expect(dialog.getByText(/你确认之前，不会创建分支或 PR/)).toBeVisible();
     // Nothing in the introduction is cut off: no element is wider than its box and none uses an ellipsis.
     const clipped = await dialog.locator('#gate-onboarding-intro').evaluate(node => [node, ...node.querySelectorAll('*')]
@@ -46,10 +46,10 @@ test('接入门禁先介绍五层，再和 agent 按仓库事实定方案，确�
     await dialog.getByRole('button', { name: '开始适配', exact: true }).click();
     await expect(dialog.locator('.gate-message-agent').first()).toContainText('Makefile 里有 build、lint、test');
     await expect(dialog.locator('.gate-message-system').first()).toContainText('merge queue：已启用');
-    await expect(dialog.locator('#gate-onboarding-queue')).toContainText('门禁在 PR 上和队列里运行');
+    await expect(dialog.locator('#gate-onboarding-queue')).toContainText('队列里先跑 pr-ready 再跑 pr-merge');
     const lane = name => dialog.locator(`textarea[name="lane_${name}"]`);
-    await expect(lane('build')).toHaveValue('make build');
-    await expect(lane('pr-ready')).toHaveValue('make lint\nmake test');
+    await expect(lane('build')).toHaveCount(0);
+    await expect(lane('pr-ready')).toHaveValue('make build\nmake lint\nmake test');
     await expect(lane('pr-merge')).toBeEditable();
     await dialog.getByLabel('发给 agent').fill('依赖用 pip install -e ".[test]"');
     await dialog.getByRole('button', { name: '发送', exact: true }).click();
@@ -71,6 +71,8 @@ test('接入门禁先介绍五层，再和 agent 按仓库事实定方案，确�
     const { files } = branchOf(f.state), workflow = parse(files['.github/workflows/ci.yml']);
     expect(Object.keys(workflow.on)).toEqual(['pull_request', 'merge_group', 'workflow_dispatch']);
     expect(JSON.parse(files['.github/ci-gates.json']).lanes['pr-merge']).toEqual({ commands: [] });
+    expect(JSON.parse(files['.github/ci-gates.json']).events.merge_group).toEqual(['pr-ready', 'pr-merge']);
+    expect(workflow.jobs.gate.steps[0].with.ref).toBe('${{ github.event.pull_request.head.sha || github.sha }}');
     await expect(dialog.getByRole('button', { name: '确认并创建门禁 PR', exact: true })).toBeHidden();
     await page.screenshot({ path: '.tmp/gate-onboarding-done-desktop.png' });
     expect(errors).toEqual([]);
@@ -92,7 +94,7 @@ test('没有模型的仓库也能看到按事实整理的方案，回答 merge q
     const confirm = dialog.getByRole('button', { name: '确认并创建门禁 PR', exact: true });
     await expect(confirm).toBeDisabled();
     await expect(dialog.locator('#gate-onboarding-note')).toContainText('回答 merge queue 问题后才能确认');
-    await dialog.getByLabel('没有启用：门禁在 PR 上和合入默认分支后运行').check();
+    await dialog.getByLabel('没有启用：合入门禁在合入默认分支后运行').check();
     await expect(dialog.locator('.gate-message-system').last()).toContainText('你确认默认分支没有启用 merge queue');
     await expect(dialog.locator('#gate-onboarding-files')).toContainText('在 pull_request、merge_group、push、workflow_dispatch 上运行');
     await expect(confirm).toBeEnabled();
