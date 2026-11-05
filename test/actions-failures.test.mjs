@@ -304,3 +304,41 @@ test('an uncertain report cannot prevent another already-sent rerun from reachin
   assert.equal(f.h.store.get('SELECT tracking FROM actions_failure_runs WHERE run_id=801').tracking, 0);
   assert.equal(f.reruns().length, 1); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'actions_report_write_unknown');
 });
+
+test('an unknown report shows the failed step\'s last output, and says when an excerpt was withheld for safety', async t => {
+  // A one-second job: setup, the step and cleanup share the failed step's whole-second interval, as on github.com.
+  const output = log(['Secret source: Actions', 'Prepare workflow directory', 'Complete job name: package',
+    '##[group]Run echo "bundle checksum does not match manifest"', 'echo "bundle checksum does not match manifest"', 'exit 3', 'shell: /usr/bin/bash -e {0}', '##[endgroup]',
+    'bundle checksum does not match manifest', '##[error]Process completed with exit code 3.', 'Cleaning up orphan processes'].join('\n'));
+  const classified = classifyJob(job(), output);
+  // Display context only: the script, shell and generic exit lines stay out, and deduplication still keys on the empty quote.
+  assert.deepEqual([classified.kind, classified.quote, classified.context], ['unknown', '', 'bundle checksum does not match manifest']);
+  let f = await fixture(t, { log: output }); await f.tick();
+  assert.match(f.state.issues[0].body, /No recognized error line was found\. Last output of the failed step:\n\n {4}bundle checksum does not match manifest/);
+  assert.doesNotMatch(f.state.issues[0].body, /could not be made safe|exit 3|Secret source|orphan/);
+  // A step whose header block has no exit line still stops at the runner's cleanup.
+  assert.equal(classifyJob(job(), log(['##[group]Run ./deploy', './deploy', '##[endgroup]', 'state=broken', '##[error]deploy refused', 'Post job cleanup.', 'Cleaning up orphan processes'].join('\n'))).context,
+    'state=broken\n##[error]deploy refused');
+  // A recognized line that cannot be made public is withheld, not described as missing.
+  f = await fixture(t, { log: log('AssertionError: digest ' + 'Q'.repeat(64)) }); await f.tick();
+  assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/); assert.match(f.state.issues[0].body, /Excerpt omitted: the log lines could not be made safe for public disclosure/);
+  assert.ok(!f.state.issues[0].body.includes('Q'.repeat(64)));
+  f = await fixture(t, { log: null }); await f.tick();
+  assert.match(f.state.issues[0].body, /No log excerpt is available/);
+});
+
+test('a person\'s rerun of an earlier, untracked run is found without its workflow_run delivery', async t => {
+  const f = await fixture(t), listings = () => f.state.requests.filter(r => r.path.endsWith('/actions/runs') && r.query.includes('per_page=100')).length;
+  await f.tick(); assert.equal(f.reruns().length, 1); assert.equal(listings(), 1);
+  Object.assign(f.state.runs[0], { status: 'completed', conclusion: 'failure' }); await f.tick();
+  assert.equal(f.state.issues.length, 1); assert.equal(f.h.store.get('SELECT tracking FROM actions_failure_runs').tracking, 0);
+  // The rerun keeps the run's creation time, so later creation windows miss it; the check waits for its interval.
+  Object.assign(f.state.runs[0], { run_attempt: 3 }); await f.tick();
+  assert.equal(listings(), 1); assert.equal(f.state.comments.length, 0);
+  f.h.store.run('UPDATE actions_failure_scans SET reconciled_at=0'); await f.tick();
+  assert.equal(listings(), 2); assert.equal(f.state.comments.length, 1); assert.match(f.state.comments[0].body, /attempt 3\)[\s\S]*already been used/);
+  assert.equal(f.reruns().length, 1);
+  // Recorded once: another check finds nothing new.
+  f.h.store.run('UPDATE actions_failure_scans SET reconciled_at=0'); await f.tick();
+  assert.equal(listings(), 3); assert.equal(f.state.comments.length, 1); assert.equal(f.state.issues.length, 1);
+});

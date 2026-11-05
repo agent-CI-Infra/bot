@@ -20,12 +20,15 @@ export function actionsStorage(store: Store) {
       run_id INTEGER NOT NULL, attempt INTEGER NOT NULL, signature TEXT NOT NULL, classification TEXT NOT NULL,
       state TEXT NOT NULL DEFAULT 'pending', issue_number INTEGER, body TEXT NOT NULL, title TEXT NOT NULL);
   `);
+  // When the last look for reruns of earlier runs happened (milliseconds); see ActionsFailures.reconcileReruns.
+  if (!store.all('PRAGMA table_info(actions_failure_scans)').some(r => r.name === 'reconciled_at'))
+    store.db.exec('ALTER TABLE actions_failure_scans ADD COLUMN reconciled_at INTEGER NOT NULL DEFAULT 0');
 }
 
 // Activation starts a new discovery epoch; the retry budget and processed attempts outlive toggles.
 export function activateActions(store: Store, id: string, now = new Date().toISOString()) {
   store.run(`INSERT INTO actions_failure_scans(repository_id,enabled_at) VALUES(?,?)
-    ON CONFLICT(repository_id) DO UPDATE SET enabled_at=excluded.enabled_at,cursor=0,windows='[]',page_data=NULL,next_scan=0,error=NULL,configured_at=NULL,lease=NULL,lease_until=0`, id, now);
+    ON CONFLICT(repository_id) DO UPDATE SET enabled_at=excluded.enabled_at,cursor=0,windows='[]',page_data=NULL,next_scan=0,error=NULL,configured_at=NULL,lease=NULL,lease_until=0,reconciled_at=0`, id, now);
 }
 
 export function recordActionsRun(store: Store, id: string, run: any) {

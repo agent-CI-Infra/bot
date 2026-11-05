@@ -1,5 +1,8 @@
 export type FailureKind = 'external' | 'code' | 'unknown';
-export interface Evidence { job: any; kind: FailureKind; reason: string; quote: string }
+// `quote` holds the recognized causal lines and keys deduplication. `context` is display only: the last output of a failed
+// step in which no causal line was recognized, so an unknown report still shows what the step printed before it stopped.
+export interface Evidence { job: any; kind: FailureKind; reason: string; quote: string; context?: string; withheld?: boolean }
+const contextLines = 8;
 
 const external = [
   /\b(?:HTTP(?:Error|StatusError)?(?:\s+(?:status|error))?\s*[:=]?\s*|status(?: code)?\s*[:=]?\s*)(?:429|502|503)\b/i,
@@ -22,7 +25,7 @@ const clean = (line: string) => line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 
 // Only failed step intervals count. Successful steps, echoed commands and generic exit wrappers are not causes.
 export function classifyJob(job: any, log: string | null): Evidence {
-  const unknown = (reason: string, quote = ''): Evidence => ({ job, kind: 'unknown', reason, quote });
+  const unknown = (reason: string, quote = '', context = ''): Evidence => ({ job, kind: 'unknown', reason, quote, ...(context ? { context } : {}) });
   if (!log || /\[(?:log )?truncated\]|characters omitted|output truncated/i.test(log)) return unknown('Missing or incomplete job log.');
   const steps = (job.steps || []).filter((s: any) => s.conclusion === 'failure');
   if (!steps.length) return unknown('No failed step with a causal log interval.');
@@ -45,12 +48,31 @@ export function classifyJob(job: any, log: string | null): Evidence {
       else if (/^(?:##\[error\]|(?:[\w.]+)?(?:Error|Exception):)/.test(text)
         && !/Process completed with exit code|script returned exit code|command failed with exit code/i.test(text)) { kinds.add('unknown'); causes.push(text); }
     }
-    if (!found) return unknown('No recognized causal evidence in a failed step.', causes.join('\n'));
+    if (!found) return unknown('No recognized causal evidence in a failed step.', causes.join('\n'), tail(scoped));
   }
   const quote = causes.join('\n');
   return kinds.size === 1 && !kinds.has('unknown')
     ? { job, kind: [...kinds][0]!, reason: 'Causal evidence from failed steps.', quote }
     : unknown('Mixed or ambiguous causal evidence in failed steps.', quote);
+}
+
+// The failed step's own output. A run step prints `##[group]Run …` (script, shell, env) up to `##[endgroup]`, then its output,
+// then the runner's exit line. Step times are whole seconds, so a short job's interval also holds its setup and cleanup
+// lines: keep only what follows the last Run header before the exit line, and stop at the next group or cleanup line.
+function tail(scoped: string[]) {
+  let stop = scoped.length;
+  for (let i = scoped.length - 1; i >= 0; i--) if (/^##\[error\]Process completed with exit code \d+/.test(scoped[i]!)) { stop = i; break; }
+  let from = 0;
+  for (let i = stop - 1; i >= 0; i--) if (scoped[i]!.startsWith('##[group]Run ')) {
+    const close = scoped.findIndex((text, j) => j > i && j < stop && text.startsWith('##[endgroup]'));
+    from = close < 0 ? stop : close + 1; break;
+  }
+  const output: string[] = [];
+  for (const text of scoped.slice(from, stop)) {
+    if (/^(?:##\[(?:group|endgroup)\]|Post job cleanup\.|Cleaning up orphan processes)/.test(text)) break;
+    if (text.trim()) output.push(text);
+  }
+  return output.slice(-contextLines).join('\n');
 }
 
 export function classifyFailure(evidence: Evidence[]): FailureKind {
