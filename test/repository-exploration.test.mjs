@@ -7,6 +7,7 @@ import { RepositoryExplorer, repositoryTools } from '../dist/agent/exploration.j
 import { ReadTokens } from '../dist/agent/read-token.js';
 import { Redactor } from '../dist/agent/common.js';
 import { agentLoop } from '../dist/agent/loop.js';
+import { Workspace } from '../dist/agent/workspace.js';
 import { workspaceProfile } from '../dist/agent/profiles.js';
 import { agentOperation } from '../runner/agent.mjs';
 
@@ -133,21 +134,42 @@ test('runner repository-tool mailbox binds replies to the current request and pr
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'repository-reply-' + id + '.json'))), JSON.parse(reply));
 });
 
-test('Pi delivery ignores an expired request but still interrupts on genuine mailbox failures', async t => {
+test('real Workspace delivery ignores only abandoned repository replies, including runner-wrapped errors', async t => {
   const f = await explorerFixture(t);
   const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'late-reply-model', model_name: 'fixture' })).value.model;
   await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
-  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('late','101','review.issue','running','Read')");
-  const task = f.h.store.get("SELECT * FROM tasks WHERE id='late'");
-  for (const error of ['agent_request_changed', 'agent_reply_offset', 'runner_operation_failed']) {
-    let delivered = false;
-    const workspace = { log() {}, async call(_key, input) {
-      if (input.type !== 'workspace_agent_poll') return {};
-      return delivered ? { state: 'completed', result: { summary: 'Continued after the read.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } }
-        : { state: 'running', repository_tool: { id: 'a'.repeat(48), name: 'github_read', arguments: { path: '/issues/42/comments' } } };
-    }, async deliver() { delivered = true; return { error }; } };
+  f.state.custom = async ({ path, send }) => {
+    if (!path.endsWith('/issues/42/comments')) return false;
+    send([{ body: 'Related evidence. '.repeat(4000) }]); return true;
+  };
+  const cases = [
+    { error: 'agent_request_changed', continues: true },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_repository_tool: agent_request_changed', continues: true },
+    { error: 'agent_reply_offset' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_repository_tool: agent_reply_offset' },
+    { error: 'runner_operation_failed' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_progress: agent_request_changed' },
+    { error: 'runner_operation_failed', detail: 'workspace_agent_repository_tool: agent_request_changed unexpectedly' }
+  ];
+  for (const [index, { continues, ...failure }] of cases.entries()) await t.test(JSON.stringify(failure), async () => {
+    const id = 'late-' + index;
+    f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101','review.issue','running','Read')", id);
+    const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', id), deliveries = [];
+    const manager = { async call(_method, _path, { request }) {
+      if (request.type === 'workspace_agent_repository_tool') {
+        deliveries.push(request); return { ok: false, ...failure };
+      }
+      if (request.type !== 'workspace_agent_poll') return { ok: true, result: {} };
+      return { ok: true, result: deliveries.length
+        ? { state: 'completed', result: { summary: 'Continued after the read.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } }
+        : { state: 'running', repository_tool: { id: 'a'.repeat(48), name: 'github_read', arguments: { path: '/issues/42/comments' } } } };
+    } };
+    const workspace = new Workspace(f.h.store, manager, task, f.redactor, async () => {}, () => {});
     const running = agentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
-    if (error === 'agent_request_changed') assert.match((await running).summary, /Continued/);
+    if (continues) assert.match((await running).summary, /Continued/);
     else await assert.rejects(running, { code: 'execution_interrupted' });
-  }
+    assert.equal(deliveries.length, 1, 'stop sending chunks after the first rejected delivery');
+    assert.equal(deliveries[0].offset, 0); assert.equal(deliveries[0].final, false);
+    assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token'));
+  });
 });

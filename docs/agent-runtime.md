@@ -25,6 +25,8 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 
 Pi 在仓库工具内部串行使用邮箱，其他工具仍可并行执行。每个已进入邮箱的仓库请求最多等待 120 秒，超时返回 `repository_tool_timeout`；超时或取消后的迟到回复不会中断任务。共享执行器按现有 2 MiB 邮箱容量检查脱敏后 JSON 的 UTF-8 字节数，超出时向观察循环和 Pi 返回完整的 `repository_result_too_large` 工具错误。例如 `/git/trees/<sha>?recursive=1` 的结果无法投递时，模型应缩小 path、去掉 recursive 或继续分页，并用 page/per_page 减小每页结果；不会截断 JSON 后冒充成功结果。
 
+仓库回复投递保留 runner 错误的 `detail`：只有直接返回的 `agent_request_changed`，或 `runner_operation_failed` 且 `detail` 恰为 `workspace_agent_repository_tool: agent_request_changed` 时，控制面才停止投递旧回复并继续轮询。分块偏移错误等其他投递故障仍中断任务；其他邮箱操作的中断条件保持不变。
+
 读取范围扩大不改变写入范围。CI 观察仍以触发 run/attempt 为分析目标，重跑或授权变化时停止，最终 job 结论仍核对触发快照；相关运行的日志只作为带来源的旁证。检视与开发可以检查其他相关对象，但实施目标、检视结果校验、GitHub 发布授权和受控 publisher 都保留原边界。新工具固定使用 GET，不接受自选仓库、任意 URL、路径逃逸或写入方法；搜索也不能改写仓库范围。自动 Actions 失败分类与单次重试仍是既有触发流程，不由这些读取工具执行。
 
 ## 扩展任务

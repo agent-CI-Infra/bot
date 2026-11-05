@@ -136,8 +136,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         const reply = Buffer.from(JSON.stringify(redactor.clean(result)));
         for (let at = 0; at < reply.length; at += 30000) {
           const sent = await workspace.deliver({ type: 'workspace_agent_repository_tool', request_id: id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });
-          // The caller may have timed out or been cancelled while the GitHub read was in flight.
-          if (sent.error === 'agent_request_changed') break;
+          // The caller may have timed out or been cancelled; the runner wraps the original error in detail.
+          if (sent.error === 'agent_request_changed' || (sent.error === 'runner_operation_failed' && sent.detail === 'workspace_agent_repository_tool: agent_request_changed')) break;
           if (sent.error) stop('execution_interrupted', 'waiting_environment', '发送仓库读取结果时中断。');
         }
         answered.add('repository:' + id); continue;
