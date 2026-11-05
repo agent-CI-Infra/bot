@@ -1,7 +1,8 @@
 // Workflows page (#/projects/<id>/workflows/<item>). Every workflow, built-in or added here, has the same parts: a name, a
 // switch, triggers, a prompt (whose ```mermaid flowchart is drawn here), permissions and a model. The page lists them on
-// the left and edits the selected one on the right, in tabs; a chat beside the editor drafts prompt and permissions, and
-// nothing takes effect until the administrator saves. Loaded after project.js.
+// the left and edits the selected one on the right, in tabs; a floating assistant drafts prompt and permissions, and
+// nothing takes effect until the administrator saves. Unsaved edits and assistant conversations are kept in this browser
+// per project and workflow, so leaving the page loses neither. Loaded after project.js.
 
 // The first ```mermaid flowchart block of a prompt: nodes in order of appearance, and every edge with its label.
 // Only what a step diagram needs is read: `id[label]` (also `(label)`, `{label}`), chains of `-->`, `==>`, `-.->`,
@@ -93,6 +94,11 @@ function flowFigure(flow, title = '流程图') {
 
 const publicationNames = { reply: '回复：控制面发布一条评论（PR 上可附 COMMENT 行内检视）', pull_request: 'bot 分支与 PR：控制面在测试通过并复核开发条件后发布',
   release_notes: '发行说明草稿：控制面核验来源完整且不重复', actions: '重跑原运行一次或提报 Issue：控制面按固定分类规则执行', none: '不发布：结果只显示在控制台' };
+// How the agent hands over what the control plane then writes to GitHub, per kind of publication.
+const writeTools = { reply: 'agent 调用 finish_review 交出总结和意见；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出。',
+  pull_request: 'agent 调用 create_pull_request 交出修改；控制面固定快照、跑项目测试，复核开发标签和指派人后推 bot 分支、开或更新 PR。',
+  release_notes: '模型只给已核验的来源分组；控制面写出说明正文，起草和发布仍在「发版本」页由人操作。',
+  actions: '模型只给出分类和依据；控制面按分类最多重跑原运行一次，或提报、评论 Issue。', none: '不写 GitHub。' };
 const workflowPermissionNames = [['read', '读取工作区'], ['shell', '运行命令'], ['notes', '写项目笔记'], ['write', '修改工作区代码']];
 const scopeNames = { contents: '代码', issues: 'Issue', pull_requests: 'PR', actions: 'Actions', checks: '检查', statuses: '提交状态', metadata: '元数据' };
 const workflowTabs = [['overview', '概览'], ['triggers', '触发源'], ['prompt', '提示词与流程'], ['access', '权限与模型']];
@@ -136,7 +142,8 @@ function fillWorkflowPage(page, options = {}) {
 function fillWorkflowDetail(detail, { notice = '', chat = false } = {}) {
   const item = workflowItem(), workflow = workflowById(item), shared = sharedItems.find(([id]) => id === item);
   detail.setAttribute('aria-label', shared ? shared[1] : workflow ? '工作流：' + workflow.name : '新增工作流');
-  detail.replaceChildren(...(shared ? sharedDetail(shared) : workflowEditor(workflow, { chat, notice })));
+  detail.replaceChildren(...(shared ? sharedDetail(shared) : workflowEditor(workflow, { notice })));
+  if (chat && !shared) openWorkflowAssistant(item);
   // The Actions failure status (subscription, pause reasons) keeps refreshing while its editor is open.
   if (item === 'actions.failures' && current.policy.actions_failures_enabled) { clearTimeout(projectTimer); const token = renderToken; projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000); }
 }
@@ -159,10 +166,12 @@ function workflowLists(selected) {
   };
   for (const workflow of current.workflows.workflows) {
     const flow = flowText(parseFlow(workflow.prompt.effective))[0], meta = element('span', '', 'workflow-list-meta');
-    meta.append(workflowState(workflow), ...(workflow.builtin ? [] : [badge('自定义', 'info')]));
+    meta.append(workflowState(workflow), ...(workflow.builtin ? [] : [badge('自定义', 'info')]), ...(storedEditor(current.id, workflow.id) ? [badge('未保存', 'warning')] : []));
     list.append(entry(workflow.id, workflow.name, meta, element('span', flow || '没有流程图', 'flow-path')));
   }
-  if (selected === 'new') list.append(entry('new', '新工作流', element('span', '尚未保存', 'muted')));
+  // A workflow being added stays in the list while it has unsaved contents, so leaving the page does not lose it.
+  const added = storedEditor(current.id, 'new');
+  if (selected === 'new' || added) list.append(entry('new', added?.name?.trim() || '新工作流', element('span', added ? '未保存的草稿' : '尚未保存', 'muted')));
   const rules = element('ul', '', 'workflow-list shared');
   for (const [item, title, path] of sharedItems) rules.append(entry(item, title, ...(path ? [ruleSource(path)] : [])));
   lists.append(list, element('h3', '共用规则'), rules);
@@ -219,9 +228,8 @@ function workflowEditor(workflow, { chat, notice }) {
   const head = element('div', '', 'workflow-detail-head'), title = element('div', '', 'title-group'), actions = element('div', '', 'actions');
   title.append(element('h2', workflow ? workflow.name : '新增工作流'), ...(workflow ? [element('code', workflow.id), badge(workflow.builtin ? '内置' : '自定义', workflow.builtin ? '' : 'info'), workflowState(workflow)] : []));
   const submit = element('button', '保存'); submit.type = 'submit';
-  const chatToggle = button('用聊天编写', () => { const open = shell.classList.toggle('with-chat'); chatToggle.setAttribute('aria-expanded', String(open)); if (open) shell.querySelector('.workflow-chat textarea')?.focus(); });
-  chatToggle.setAttribute('aria-expanded', String(!!chat));
-  actions.append(chatToggle, submit);
+  const item = workflow ? workflow.id : 'new', repo = current.id;
+  actions.append(button('用聊天编写', () => openWorkflowAssistant(item)), submit);
   if (workflow && custom) actions.append(button('删除', async () => {
     if (!await askConfirm({ title: `删除工作流「${workflow.name}」？`, body: ['尚未完成的任务会取消，已完成的任务和日志保留。'], action: '删除', danger: true })) return;
     try { await api(`/api/repositories/${current.id}/workflows/${encodeURIComponent(workflow.id)}`, 'DELETE', {}); await reloadWorkflows(); selectWorkflowItem(current.workflows.workflows[0].id, { notice: '已删除工作流' }); }
@@ -288,8 +296,12 @@ function workflowEditor(workflow, { chat, notice }) {
     for (const scope of scopes) { const box = checkbox('scope:' + scope, permissions.github.includes(scope), scopeNames[scope] || scope); box.querySelector('input').disabled = !ceiling.github.includes(scope); scopeBox.append(box); }
     permissionBox.append(scopeBox);
   }
-  permissionBox.append(note('发布：' + publicationNames[ceiling.publication]), note('运行中的模型和仓库内容都不能改这些权限；子 agent 只能在这里保存的范围内再收窄。'));
-  panel('access').append(element('h3', '权限'), permissionBox);
+  permissionBox.append(note('运行中的模型和仓库内容都不能改这些权限；子 agent 只能在这里保存的范围内再收窄。'));
+  // GitHub writes are not agent permissions: the agent hands its result to a platform tool and the control plane writes it.
+  const writes = element('div', '', 'workflow-writes');
+  writes.append(element('p', publicationNames[ceiling.publication]), note(writeTools[ceiling.publication]),
+    note('写入由控制面用 GitHub App 安装令牌（或登记的机器人账号）完成：先核对对象、head 和权限条件，再经发布队列写入，结果不明时先对账、不重复写。agent 只拿得到只读令牌，不能在命令里推送、评论、加标签或合并。'));
+  panel('access').append(element('h3', '权限'), permissionBox, element('h3', 'GitHub 写入（由控制面执行）'), writes);
   const model = document.createElement('select'); model.name = 'model_id';
   {
     const defaultModel = current.models.find(entry => entry.id === current.policy.model_id);
@@ -319,6 +331,8 @@ function workflowEditor(workflow, { chat, notice }) {
     const elements = form.elements;
     if (draft.name !== undefined) elements.name.value = draft.name;
     if (draft.description !== undefined) elements.description.value = draft.description;
+    if (typeof draft.enabled === 'boolean') elements.enabled.checked = draft.enabled;
+    if (draft.model_id !== undefined) model.value = draft.model_id || '';
     if (typeof draft.prompt === 'string') { editor.value = draft.prompt; drawPreview(); }
     if (Array.isArray(draft.triggers)) for (const option of options) {
       const picked = draft.triggers.find(trigger => trigger.id === option.id); elements['trigger:' + option.id].checked = !!picked;
@@ -329,9 +343,16 @@ function workflowEditor(workflow, { chat, notice }) {
       if (elements['permission:agents'] && !elements['permission:agents'].disabled) elements['permission:agents'].checked = !!draft.permissions.agents;
       for (const scope of scopes) if (elements['scope:' + scope] && !elements['scope:' + scope].disabled) elements['scope:' + scope].checked = (draft.permissions.github || []).includes(scope);
     }
-    show('prompt'); message.className = 'view-progress'; message.textContent = '草稿已填入编辑器，检查后点「保存」才会生效。';
+    form.dataset.dirty = '1'; keep();
+    if (!restoring) { show('prompt'); message.className = 'view-progress'; message.textContent = '草稿已填入编辑器，检查后点「保存」才会生效。'; }
   };
-  form.addEventListener('input', () => { form.dataset.dirty = '1'; });
+  // Every change is kept in this browser until it is saved or discarded; the assistant's window lives outside the page.
+  // Written at once (a few kilobytes), so leaving the page right after a change never loses it.
+  let restoring = false;
+  const keep = () => storeEditor(repo, item, values());
+  form.addEventListener('input', event => { if (event.target.name === 'chat') return; form.dataset.dirty = '1'; keep(); });
+  form.addEventListener('change', () => { form.dataset.dirty = '1'; keep(); });
+  workflowEditorHooks.set(repo + ':' + item, { values, apply, form });
   form.addEventListener('submit', async event => {
     event.preventDefault(); message.className = 'view-error'; message.textContent = ''; submit.disabled = true;
     const value = values(), trigger = list => JSON.stringify(list.map(entry => entry.id + ':' + (entry.label || '').toLowerCase()).sort());
@@ -359,15 +380,24 @@ function workflowEditor(workflow, { chat, notice }) {
       }
       const url = workflow ? `/api/repositories/${current.id}/workflows/${encodeURIComponent(workflow.id)}` : `/api/repositories/${current.id}/workflows`;
       const saved = await api(url, workflow ? 'PUT' : 'POST', body), tab = current.workflowTab;
+      storeEditor(repo, item, null);
       // The project policy changes with some saves (switches, settings); the page reloads it with the workflows.
       await loadProject(current.id, 'workflows'); current.workflowItem = saved.workflow.id;
       history.replaceState(null, '', `#/projects/${current.id}/workflows/${saved.workflow.id}`);
       current.workflowTab = tab; drawWorkflowPage({ notice: '已保存工作流' });
     } catch (err) { message.className = 'view-error'; message.textContent = workflowError(err.message); submit.disabled = false; }
   });
-  shell.append(main, workflowChat(workflow, values, apply, chat));
-  if (chat) shell.classList.add('with-chat');
+  shell.append(main);
   form.append(head, ...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), message, shell);
+  // Unsaved contents from an earlier visit (or a draft the assistant filled in from another page) come back here, once the
+  // fields are in the form.
+  const stored = storedEditor(repo, item);
+  if (stored) {
+    restoring = true; apply(stored); restoring = false;
+    const restored = element('div', '', 'workflow-restored');
+    restored.append(element('span', '这里显示的是未保存的修改：保存后才生效。'), button('丢弃未保存的修改', () => { storeEditor(repo, item, null); drawWorkflowPage(); }, 'quiet'));
+    message.before(restored);
+  }
   show(panels.has(current.workflowTab) ? current.workflowTab : 'overview');
   return [form];
 }
@@ -404,32 +434,141 @@ const workflowErrors = { workflow_version_conflict: '工作流已被别人修改
   invalid_workflow_name: '请填写工作流名称。', invalid_workflow_prompt: '请填写提示词。', invalid_bot_label: '提示词里的标签声明不合法（最长 50 个字符，首尾不能有空白）。', model_not_configured: '项目还没有可用的模型，请先在「模型」页选择项目默认模型。',
   model_not_available: '选择的模型不可用于这个项目。', assistant_reply_invalid: '助手没有返回可用的草稿，请换个说法再试。', duplicate_workflow_trigger: '同一个触发源只能选一次。' };
 const workflowError = code => workflowErrors[code] || code;
-// The chat sends the conversation and the editor's current values; the reply is a draft shown with its flowchart.
-function workflowChat(workflow, values, apply, focus) {
-  const box = element('aside', '', 'workflow-chat'), log = element('ol', '', 'workflow-chat-log'), question = textarea('chat', '', { rows: 3 }), status = element('p', '', 'muted');
-  box.setAttribute('aria-label', '用聊天编写'); question.setAttribute('aria-label', '告诉助手你想要的流程'); log.setAttribute('aria-live', 'polite');
-  question.placeholder = workflow ? '例如：检视之后如果发现安全问题，再启动一个独立 agent 复核' : '例如：PR 改到 docs/ 时，检查文档链接和示例命令，回复发现的问题';
-  const messages = [];
-  const say = (role, text) => { const item = element('li', '', 'chat-' + role); item.append(element('strong', role === 'user' ? '你' : '助手'), element('p', text)); log.append(item); return item; };
-  const send = button('发送', async () => {
-    const text = question.value.trim(); if (!text) return;
-    messages.push({ role: 'user', content: text }); say('user', text); question.value = ''; send.disabled = true; status.textContent = '助手正在起草…';
-    try {
-      const value = values(), reply = await api(`/api/repositories/${current.id}/workflows/assistant`, 'POST', { ...(workflow ? { workflow_id: workflow.id } : {}),
-        draft: { name: value.name, description: value.description, triggers: value.triggers, prompt: value.prompt, permissions: value.permissions }, messages });
-      messages.push({ role: 'assistant', content: reply.reply });
-      const item = say('assistant', reply.reply), draft = element('div', '', 'workflow-draft');
-      draft.append(flowFigure(parseFlow(reply.draft.prompt), '草稿流程图'), ...reply.warnings.map(warning => element('p', warning, 'endpoint-warning')),
-        element('p', '草稿权限：' + [...workflowPermissionNames.filter(([key]) => reply.draft.permissions.workspace[key]).map(([, caption]) => caption), ...(reply.draft.permissions.agents ? ['启动独立 agent'] : []),
-          reply.draft.permissions.github.length ? 'GitHub 只读 ' + reply.draft.permissions.github.map(scope => scopeNames[scope] || scope).join('、') : '不读 GitHub'].join('、'), 'muted'),
-        collapsible('草稿提示词', reply.draft.prompt), button('填入编辑器', () => apply(reply.draft), ''));
-      item.append(draft); status.textContent = '';
-    } catch (err) { messages.pop(); status.textContent = workflowError(err.message); }
-    finally { send.disabled = false; }
-  }, '');
-  box.append(element('h4', '用聊天编写'), note('描述你想要的流程，助手起草提示词（含流程图）和权限。草稿填入编辑器后要点「保存」才会生效；保存的人是控制台管理员。'), log, field('你的要求', question), send, status);
-  if (focus) setTimeout(() => question.focus(), 0);
+// Unsaved editor contents and assistant conversations, per project and workflow, in this browser.
+const workflowEditorHooks = new Map();
+const browserStore = (key, value) => {
+  try { if (value === undefined) return JSON.parse(localStorage.getItem(key) || 'null'); if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(value)); }
+  catch { return null; }
+};
+const storedEditor = (repo, item) => browserStore(`workflow-editor:${repo}:${item}`);
+const storeEditor = (repo, item, value) => browserStore(`workflow-editor:${repo}:${item}`, value);
+const assistantKey = (repo, item) => `workflow-assistant:${repo}:${item}`;
+
+// The workflow assistant: a floating window that can be moved and resized, stays open while you browse other pages, and
+// shows the agent's work as it streams: its text, its reasoning, each tool call with its result, and the drafts it proposes.
+const assistant = { repo: null, item: null, history: null, controller: null };
+function openWorkflowAssistant(item, repo = current.id) {
+  assistant.repo = repo; assistant.item = item;
+  assistant.history = browserStore(assistantKey(repo, item)) || { messages: [], turns: [] };
+  const window = assistantWindow(); window.hidden = false;
+  window.querySelector('.assistant-title span').textContent = ' · ' + (workflowById(item)?.name || storedEditor(repo, 'new')?.name?.trim() || '新工作流');
+  drawAssistantLog(); window.querySelector('textarea').focus();
+}
+function assistantWindow() {
+  let box = $('workflow-assistant'); if (box) return box;
+  box = element('section', '', 'assistant-window'); box.id = 'workflow-assistant'; box.setAttribute('role', 'dialog'); box.setAttribute('aria-label', '工作流助手'); box.hidden = true;
+  const head = element('header', '', 'assistant-head'), title = element('strong', '工作流助手', 'assistant-title'); title.append(element('span', ''));
+  const tools = element('div', '', 'actions');
+  tools.append(button('清空对话', () => { if (assistant.controller) return; assistant.history = { messages: [], turns: [] }; saveAssistant(); drawAssistantLog(); }, 'quiet'),
+    button('收起', () => { box.hidden = true; }, 'quiet'));
+  head.append(title, tools);
+  const log = element('ol', '', 'assistant-log'); log.setAttribute('aria-live', 'polite'); log.setAttribute('aria-label', '对话记录');
+  const form = document.createElement('form'), question = textarea('assistant', '', { rows: 3 }), send = element('button', '发送'), halt = button('停止', () => assistant.controller?.abort(), 'quiet');
+  form.className = 'assistant-input'; question.setAttribute('aria-label', '告诉助手你想要的流程'); question.placeholder = '描述你想要的流程，Ctrl+Enter 发送'; send.type = 'submit'; halt.hidden = true;
+  question.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); form.requestSubmit(); } });
+  form.addEventListener('submit', event => { event.preventDefault(); const text = question.value.trim(); if (!text || assistant.controller) return; question.value = ''; askAssistant(text); });
+  const actions = element('div', '', 'actions'); actions.append(halt, send); form.append(question, actions);
+  box.append(head, log, form); document.body.append(box);
+  // Where and how big the window is survives reloads; the header moves it, the corner resizes it.
+  const geometry = browserStore('workflow-assistant-geometry');
+  if (geometry) Object.assign(box.style, { left: geometry.left, top: geometry.top, right: 'auto', bottom: 'auto', width: geometry.width, height: geometry.height });
+  const remember = () => browserStore('workflow-assistant-geometry', { left: box.style.left || '', top: box.style.top || '', width: box.offsetWidth + 'px', height: box.offsetHeight + 'px' });
+  head.addEventListener('pointerdown', event => {
+    if (event.target.closest('button')) return;
+    const start = box.getBoundingClientRect(), x = event.clientX, y = event.clientY; head.setPointerCapture(event.pointerId);
+    const move = moved => {
+      const left = Math.min(Math.max(0, start.left + moved.clientX - x), innerWidth - 80), top = Math.min(Math.max(0, start.top + moved.clientY - y), innerHeight - 40);
+      Object.assign(box.style, { left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
+    };
+    const up = () => { head.removeEventListener('pointermove', move); head.removeEventListener('pointerup', up); remember(); };
+    head.addEventListener('pointermove', move); head.addEventListener('pointerup', up);
+  });
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => { if (!box.hidden) remember(); }).observe(box);
   return box;
+}
+const saveAssistant = () => { if (assistant.repo) browserStore(assistantKey(assistant.repo, assistant.item), assistant.history); };
+// One turn on screen: the person's message, or the assistant's parts in the order they streamed.
+function assistantTurn(turn) {
+  const item = element('li', '', 'assistant-turn turn-' + turn.role);
+  item.append(element('strong', turn.role === 'user' ? '你' : '助手'));
+  if (turn.role === 'user') { item.append(element('p', turn.text)); return item; }
+  for (const part of turn.parts) {
+    if (part.type === 'text') item.append(element('p', part.text, 'assistant-text'));
+    else if (part.type === 'reasoning') { const box = collapsible('思考过程', part.text); box.classList.add('assistant-reasoning'); item.append(box); }
+    else if (part.type === 'tool') {
+      const call = element('details', '', 'assistant-tool' + (part.result === undefined ? ' running' : '')), summary = element('summary', '');
+      summary.append(element('code', part.name), element('span', part.result === undefined ? '执行中…' : '完成', 'muted'));
+      call.append(summary, element('pre', '参数：' + JSON.stringify(part.arguments ?? {}, null, 2)), ...(part.result !== undefined ? [element('pre', '结果：' + part.result)] : []));
+      item.append(call);
+    } else if (part.type === 'draft') {
+      const draft = part.draft, card = element('div', '', 'workflow-draft');
+      card.append(flowFigure(parseFlow(draft.prompt), '草稿流程图'), ...(part.warnings || []).map(warning => element('p', warning, 'endpoint-warning')),
+        element('p', '草稿权限：' + [...workflowPermissionNames.filter(([key]) => draft.permissions?.workspace?.[key]).map(([, caption]) => caption), ...(draft.permissions?.agents ? ['启动独立 agent'] : []),
+          draft.permissions?.github?.length ? 'GitHub 只读 ' + draft.permissions.github.map(scope => scopeNames[scope] || scope).join('、') : '不读 GitHub'].join('、'), 'muted'),
+        collapsible('草稿提示词', draft.prompt || ''), button('填入编辑器', () => fillFromAssistant(draft), ''));
+      item.append(card);
+    } else if (part.type === 'error') item.append(element('p', part.text, 'view-error'));
+  }
+  if (turn.pending) item.append(element('p', '助手正在工作…', 'muted assistant-pending'));
+  return item;
+}
+function drawAssistantLog() {
+  const log = $('workflow-assistant')?.querySelector('.assistant-log'); if (!log) return;
+  const turns = assistant.history.turns;
+  log.replaceChildren(...(turns.length ? turns.map(assistantTurn) : [element('li', '描述你想要的流程：助手会先看现有工作流和仓库，再起草提示词（含流程图）和权限。草稿填入编辑器后要点「保存」才会生效。', 'muted assistant-empty')]));
+  log.scrollTop = log.scrollHeight;
+  const box = $('workflow-assistant'), running = !!assistant.controller;
+  box.querySelector('.assistant-input button[type=submit]').disabled = running; box.querySelector('.assistant-input .actions button:not([type=submit])').hidden = !running;
+}
+// A draft fills the editor of its workflow; when that editor is not on screen it is kept as the unsaved contents and shown.
+function fillFromAssistant(draft) {
+  const { repo, item } = assistant, hook = workflowEditorHooks.get(repo + ':' + item);
+  if (hook && document.body.contains(hook.form)) { hook.apply(draft); return; }
+  storeEditor(repo, item, { ...(storedEditor(repo, item) || {}), ...draft });
+  location.hash = `#/projects/${repo}/workflows/${item}`;
+}
+async function askAssistant(text) {
+  const { repo, item } = assistant, history = assistant.history, hook = workflowEditorHooks.get(repo + ':' + item);
+  const editor = hook && document.body.contains(hook.form) ? hook.values() : storedEditor(repo, item);
+  // The assistant's own last draft goes back with the conversation, whether or not it was filled into the editor.
+  const proposed = history.turns.flatMap(turn => turn.parts || []).filter(part => part.type === 'draft').at(-1)?.draft;
+  history.messages.push({ role: 'user', content: text }); history.turns.push({ role: 'user', text });
+  const turn = { role: 'assistant', parts: [], pending: true }; history.turns.push(turn);
+  const controller = assistant.controller = new AbortController(); drawAssistantLog();
+  const last = type => { const part = turn.parts.at(-1); if (part?.type === type) return part; const created = { type, text: '' }; turn.parts.push(created); return created; };
+  // This conversation is saved under its own workflow even if the window switches to another one meanwhile.
+  const persist = () => browserStore(assistantKey(repo, item), history);
+  let redraw = null; const later = () => { if (!redraw) redraw = setTimeout(() => { redraw = null; if (assistant.history === history) drawAssistantLog(); persist(); }, 60); };
+  try {
+    const response = await fetch(`/api/repositories/${repo}/workflows/assistant?stream=1`, { method: 'POST', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrf_token }, body: JSON.stringify({ ...(item === 'new' ? {} : { workflow_id: item }), ...(editor ? { draft: editor } : {}), ...(proposed ? { proposed } : {}), messages: history.messages }) });
+    if (!response.ok) { const value = await response.json().catch(() => ({})); throw new Error(value.error || String(response.status)); }
+    const reader = response.body.getReader(), decoder = new TextDecoder(); let pending = '';
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      let end; while ((end = pending.indexOf('\n')) >= 0) {
+        const line = pending.slice(0, end); pending = pending.slice(end + 1); if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.type === 'text') last('text').text += event.delta;
+        else if (event.type === 'reasoning') last('reasoning').text += event.delta;
+        else if (event.type === 'turn') turn.parts.push({ type: 'gap' });
+        else if (event.type === 'tool_call') turn.parts.push({ type: 'tool', id: event.id, name: event.name, arguments: event.arguments });
+        else if (event.type === 'tool_result') { const call = turn.parts.find(part => part.type === 'tool' && part.id === event.id); if (call) call.result = event.result; }
+        else if (event.type === 'draft') turn.parts.push({ type: 'draft', draft: event.draft, warnings: event.warnings });
+        else if (event.type === 'done') history.messages.push({ role: 'assistant', content: event.reply || turn.parts.filter(part => part.type === 'text').map(part => part.text).join('\n') || '（已起草）' });
+        else if (event.type === 'error') throw new Error(event.error);
+        later();
+      }
+    }
+  } catch (err) {
+    turn.parts.push({ type: 'error', text: err.name === 'AbortError' ? '已停止。' : workflowError(err.message) });
+    if (history.messages.at(-1)?.role === 'user') history.messages.pop();
+  } finally {
+    turn.pending = false; turn.parts = turn.parts.filter(part => part.type !== 'gap' && !(part.type === 'text' && !part.text));
+    if (assistant.controller === controller) assistant.controller = null;
+    clearTimeout(redraw); redraw = null; persist(); if (assistant.history === history) drawAssistantLog();
+  }
 }
 // The model page lists custom workflows next to the built-in ones; their model is saved on the workflow.
 function customWorkflowModelEditor(workflow) {

@@ -34,7 +34,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // A custom workflow switched off or deleted while its task waited or ran.
     'workflow_disabled','workflow_not_found',
     // A newer gate onboarding conversation, or a repository stopped while the agent was answering.
-    'gate_session_superseded','gate_repository_stopped'] },
+    'gate_session_superseded','gate_repository_stopped',
+    // The workflow assistant's run was stopped by the person who started it.
+    'assistant_cancelled'] },
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown','pr_release_label_incomplete'] },
   bot: { label:'Bot 自身问题', codes:['task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed',

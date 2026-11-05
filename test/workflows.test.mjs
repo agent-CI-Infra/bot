@@ -376,11 +376,37 @@ test('a custom workflow task runs its own prompt with its saved permissions and 
   assert.equal(f.store.get("SELECT count(*) n FROM review_sessions").n, 0);
 });
 
-test('chat drafts a prompt with a flowchart and permissions within the ceiling; only saving makes it effective', async t => {
+// The assistant's model: it reads the workflows, proposes a draft through update_draft and streams its last message.
+async function assistantModel(t, draft) {
+  const requests = [];
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
+    const last = body.messages.at(-1), tool = name => body.messages.some(message => message.role === 'tool' && body.messages.find(m => m.tool_calls?.some(c => c.id === message.tool_call_id && c.function.name === name)));
+    const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+    if (last.role !== 'tool' || !tool('update_draft') && !tool('list_workflows')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '先看现有工作流。', tool_calls: [call('c1', 'list_workflows', {})] } }], usage: { prompt_tokens: 5, completion_tokens: 2 } }));
+    }
+    if (!tool('update_draft')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [call('c2', 'update_draft', draft)] } }], usage: { prompt_tokens: 5, completion_tokens: 2 } }));
+    }
+    // The last message streams in pieces, as a provider sends it.
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    for (const piece of ['已起草：', '读文档后核对', '并回复。']) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece } }] })}\n\n`);
+    res.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 2 } })}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  return { url: `http://127.0.0.1:${server.address().port}/v1`, requests };
+}
+
+test('the assistant works like an agent: it reads workflows, proposes a checked draft, streams its work, and saves nothing', async t => {
   const { h, admin } = await project(t);
   const draftPrompt = '检查文档。\n\n```mermaid\nflowchart LR\n  read[读文档] --> check[核对] --> reply[回复]\n  check -->|需要复核| read\n```';
-  const model = await modelServer(t, () => ({ content: JSON.stringify({ reply: '已起草：读文档后核对并回复。', draft: { name: '文档检查', description: '检查文档链接',
-    triggers: [{ id: 'pull_request.opened' }, { id: 'push' }], prompt: draftPrompt, permissions: { workspace: { read: true, write: true, shell: true }, github: ['contents'], agents: true } } }) }));
+  const draft = { name: '文档检查', description: '检查文档链接', triggers: [{ id: 'pull_request.opened' }, { id: 'push' }], prompt: draftPrompt,
+    permissions: { workspace: { read: true, write: true, shell: true }, github: ['contents'], agents: true } };
+  const model = await assistantModel(t, draft);
   const created = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'writer', api_url: model.url, api_key: 'assistant-model-key' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: created.id });
   const reply = await admin('/api/repositories/101/workflows/assistant', 'POST', { messages: [{ role: 'user', content: 'PR 打开时检查文档链接' }] });
@@ -389,22 +415,37 @@ test('chat drafts a prompt with a flowchart and permissions within the ceiling; 
   assert.equal(reply.value.draft.prompt, draftPrompt);
   assert.deepEqual(reply.value.draft.triggers, [{ id: 'pull_request.opened' }]);
   assert.deepEqual(reply.value.draft.permissions, { workspace: { read: true, write: false, notes: false, shell: true }, github: ['contents'], agents: true, publication: 'reply' });
-  assert.equal(reply.value.warnings.length, 1);
+  assert.equal(reply.value.warnings.length, 2);
   const page = flowPage();
   assert.deepEqual(JSON.parse(flowOf(page, reply.value.draft.prompt)), ['读文档 → 核对 → 回复', '核对 → 读文档：需要复核']);
-  // The model saw the catalog and the ceiling; nothing was saved by the chat itself.
-  assert.match(model.requests[0].messages[0].content, /start_agent/);
+  // The model was told the ceiling, the catalog and that GitHub writes belong to the control plane; it saw the workflows it asked for.
+  assert.match(model.requests[0].messages[0].content, /start_agent/); assert.match(model.requests[0].messages[0].content, /control plane publishes/);
+  assert.deepEqual(model.requests[0].tools.map(tool => tool.function.name), ['update_draft', 'list_workflows']);
+  assert.ok(JSON.parse(model.requests[1].messages.at(-1).content).some(workflow => workflow.id === 'review.pr'));
   assert.equal((await admin('/api/repositories/101/workflows')).value.workflows.length, builtins.length);
   assert.equal(h.store.get('SELECT count(*) n FROM workflows').n, 0);
+  // The streamed form sends each step as one JSON line: text, tool calls with their results, the draft, then done.
+  const stream = await fetch(h.admin + '/api/repositories/101/workflows/assistant?stream=1', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: admin.cookie(), 'X-CSRF-Token': admin.csrf() },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'PR 打开时检查文档链接' }] }) });
+  assert.equal(stream.headers.get('content-type'), 'application/x-ndjson; charset=utf-8');
+  const events = (await stream.text()).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(events.filter(event => event.type === 'tool_call').map(event => event.name), ['list_workflows', 'update_draft']);
+  assert.equal(events.filter(event => event.type === 'tool_result').length, 2);
+  assert.equal(events.find(event => event.type === 'draft').draft.prompt, draftPrompt);
+  assert.deepEqual(events.filter(event => event.type === 'text').map(event => event.delta), ['先看现有工作流。', '已起草：', '读文档后核对', '并回复。']);
+  assert.deepEqual([events.at(-1).type, events.at(-1).reply], ['done', '已起草：读文档后核对并回复。']);
+  // Saving is the administrator's own step.
   const saved = await admin('/api/repositories/101/workflows', 'POST', { name: reply.value.draft.name, description: reply.value.draft.description, triggers: reply.value.draft.triggers,
     prompt: reply.value.draft.prompt, permissions: reply.value.draft.permissions });
   assert.equal(saved.status, 201);
   assert.equal(saved.value.workflow.prompt.effective, draftPrompt);
   assert.equal(h.store.get("SELECT action FROM audit WHERE action='workflow.created'").action, 'workflow.created');
-  // For a built-in workflow the chat drafts the same fields, keeping only triggers that workflow can have.
+  // For a built-in workflow the assistant drafts the same fields, keeping only triggers that workflow can have.
   const builtin = await admin('/api/repositories/101/workflows/assistant', 'POST', { workflow_id: 'review.pr', messages: [{ role: 'user', content: '只在打开时检视' }] });
   assert.equal(builtin.status, 201); assert.deepEqual(builtin.value.draft.triggers, [{ id: 'pull_request.opened' }]);
   assert.equal((await admin('/api/repositories/101/workflows/assistant', 'POST', { messages: [] })).value.error, 'invalid_assistant_messages');
+  assert.equal((await fetch(h.admin + '/api/repositories/101/workflows/assistant?stream=1', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: admin.cookie(), 'X-CSRF-Token': admin.csrf() },
+    body: JSON.stringify({ messages: [] }) })).status, 400);
 });
 
 test('a project administrator manages only their own project\'s workflows', async t => {

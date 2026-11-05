@@ -3,8 +3,11 @@ import { stop } from './common.js';
 export const modelIdleMs = 90000;
 const responseLimit = 2 * 1024 * 1024;
 
-// Keep provider output in the control plane until usage accounting and response redaction finish.
-export async function readModelResponse(response: Response, onToken: () => Promise<void>): Promise<any> {
+/** What one streamed chunk added: text, reasoning, or part of a tool call. */
+export interface ModelDelta { content?: string; reasoning?: string; tool?: { index: number; name: string; arguments: string } }
+// Keep provider output in the control plane until usage accounting and response redaction finish. onToken receives each
+// chunk's additions, for callers that show the answer while it is written.
+export async function readModelResponse(response: Response, onToken: (delta: ModelDelta) => Promise<void>): Promise<any> {
   const reader = response.body?.getReader();
   if (!reader) return stop('model_response_invalid', undefined, '模型响应没有正文。');
   const streaming = response.headers.get('content-type')?.includes('text/event-stream');
@@ -21,7 +24,7 @@ export async function readModelResponse(response: Response, onToken: () => Promi
     if (!chunk || chunk.error || !Array.isArray(chunk.choices)) return invalid();
     for (const key of ['id', 'created', 'model']) if (chunk[key] !== undefined) value[key] = chunk[key];
     if (chunk.usage != null) value.usage = chunk.usage;
-    let token = false;
+    let token = false; const added: ModelDelta = {};
     for (const part of chunk.choices) {
       if (!part || typeof part !== 'object') return invalid();
       if (part.index !== 0) continue;
@@ -32,7 +35,7 @@ export async function readModelResponse(response: Response, onToken: () => Promi
         if (delta[key] == null) continue;
         if (typeof delta[key] !== 'string') return invalid();
         message[key] = (message[key] || '') + delta[key];
-        if (delta[key].length) token = true;
+        if (delta[key].length) { token = true; if (key === 'content') added.content = (added.content || '') + delta[key]; else added.reasoning = (added.reasoning || '') + delta[key]; }
       }
       if (delta.tool_calls !== undefined) {
         if (!Array.isArray(delta.tool_calls)) return invalid();
@@ -48,12 +51,15 @@ export async function readModelResponse(response: Response, onToken: () => Promi
             call.function.arguments += part.function.arguments;
             if (part.function.arguments.length) token = true;
           }
+          if (typeof part.function?.name === 'string' || part.function?.arguments) {
+            added.tool = { index: part.index, name: call.function.name, arguments: typeof part.function?.arguments === 'string' ? part.function.arguments : '' };
+          }
         }
       }
       if (part.finish_reason != null) { choice.finish_reason = part.finish_reason; finished = true; }
     }
     // Role-only chunks, usage, SSE comments and blank lines never extend the token deadline.
-    if (token) await onToken();
+    if (token) await onToken(added);
   };
   const line = async (text: string) => {
     if (!text) await event();

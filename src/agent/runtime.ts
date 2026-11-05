@@ -4,11 +4,12 @@ import { selectedModel } from './model.js';
 import { randomId } from '../core/security.js';
 import { taskWorkflow } from '../workflows/resolve.js';
 import { requestModel, type AgentModel } from './gateway.js';
+import type { ModelDelta } from './model-stream.js';
 
 export interface AgentServices {
   model: AgentModel;
   guard: () => Promise<void>;
-  request: (body: Record<string, any>, requestId: string, onToken?: () => Promise<void>) => ReturnType<typeof requestModel>;
+  request: (body: Record<string, any>, requestId: string, onToken?: (delta?: ModelDelta) => Promise<void>) => ReturnType<typeof requestModel>;
 }
 export interface AgentSpec<T> {
   store: Store;

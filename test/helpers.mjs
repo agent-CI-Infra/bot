@@ -32,6 +32,8 @@ export async function harness(t, manager, options = {}) {
       if (value.csrf_token) csrf = value.csrf_token;
       return { status: r.status, value, headers: r.headers };
     };
+    // The session of this client, for requests that read a response other than JSON (such as a stream).
+    client.cookie = () => cookie; client.csrf = () => csrf;
     client.harness = h; return client;
   };
   h.hook = async (endpoint, secret, delivery, payload, headers = {}) => {

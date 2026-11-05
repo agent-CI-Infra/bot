@@ -3,7 +3,9 @@ import { type Actor, repository as allowRepository } from '../app/auth.js';
 import { fail, fields, HttpError, randomId, type Json } from '../core/security.js';
 import { type RuleService, resolveRules } from '../rules/service.js';
 import { runAgent } from '../agent/runtime.js';
-import { Redactor, TaskError } from '../agent/common.js';
+import { Redactor, TaskError, stop } from '../agent/common.js';
+import { ReadTokens } from '../agent/read-token.js';
+import { RepositoryExplorer, repositoryTools } from '../agent/exploration.js';
 import { builtinRule } from '../releases/preflight.js';
 import { builtinWorkflows, builtinWorkflow, triggers, customCeiling, defaultPermissions, validatePermissions, clampPermissions, githubScopes,
   hasFlowchart, triggerOptions as catalogOptions, type BuiltinWorkflow, type WorkflowPermissions } from './catalog.js';
@@ -23,7 +25,7 @@ const layerSource = (layers: { source: string }[]) => layers.at(-1)!.source;
 const jsonOf = (text: unknown, fallback: any) => { try { return JSON.parse(String(text)); } catch { return fallback; } };
 
 export class WorkflowService {
-  constructor(readonly store: Store, readonly rules: RuleService) {}
+  constructor(readonly store: Store, readonly rules: RuleService, readonly githubUrl?: string) {}
   // Prompt layers of a built-in workflow: built-in text, console layer, repository file; the last one present is used.
   private builtinPrompt(workflow: BuiltinWorkflow, view: any, row: Row | undefined) {
     if (workflow.prompt.rule) {
@@ -204,57 +206,125 @@ export class WorkflowService {
       this.store.audit(user.id, existing ? 'workflow.updated' : 'workflow.created', id, repositoryId);
     });
   }
-  // Chat drafts a prompt (with its flowchart) and permissions. Nothing is saved: the administrator reviews the draft in
-  // the editor and saves it there, so a draft never becomes the effective configuration by itself.
-  async assistant(repositoryId: string, body: Json) {
-    fields(body, ['workflow_id', 'draft', 'messages']);
+  // Chat drafts a workflow with an agent: it reads the project's workflows and, when the account allows, the repository,
+  // and proposes a draft through update_draft. Nothing is saved: the administrator reviews the draft in the editor and saves
+  // it there, so a draft never becomes the effective configuration by itself. `emit` receives the run as it happens.
+  async assistant(repositoryId: string, body: Json, emit: (event: Json) => void = () => {}, signal?: AbortSignal) {
+    const prepared = await this.assistantInput(repositoryId, body);
+    return this.assistantRun(repositoryId, prepared, emit, signal);
+  }
+  private async assistantInput(repositoryId: string, body: Json) {
+    fields(body, ['workflow_id', 'draft', 'proposed', 'messages']);
     const messages = body.messages;
     if (!Array.isArray(messages) || !messages.length || messages.some((m: any) => !m || !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string' || !m.content.trim()))
       fail(400, 'invalid_assistant_messages');
     const id = body.workflow_id === undefined || body.workflow_id === null ? null : String(body.workflow_id);
     const builtin = id ? builtinWorkflow(id) : undefined;
     if (id && !builtin && !savedWorkflow(this.store, repositoryId, id)) fail(404, 'workflow_not_found');
-    const current = id ? (await this.list(repositoryId)).workflows.find(workflow => workflow.id === id) : null;
-    const ceiling = builtin?.ceiling ?? customCeiling;
+    const list = await this.list(repositoryId), current = id ? list.workflows.find(workflow => workflow.id === id) ?? null : null;
+    const object = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as Json : null;
+    return { id, builtin, current, list, messages: messages as { role: 'user' | 'assistant'; content: string }[], draft: object(body.draft), proposed: object(body.proposed) };
+  }
+  private async assistantRun(repositoryId: string, input: Awaited<ReturnType<WorkflowService['assistantInput']>>, emit: (event: Json) => void, signal?: AbortSignal) {
+    const { id, builtin, current, list, messages } = input, ceiling = builtin?.ceiling ?? customCeiling;
     // The same trigger catalog the editor offers this workflow.
     const catalog = triggerOptions(id ?? 'custom', null).map(({ id, title, label }) => ({ id, title, ...(label ? { needs_label: true } : {}) }));
+    let draft: Json = { name: current?.name ?? '新工作流', description: current?.description ?? '', triggers: current?.triggers ?? [], prompt: current?.prompt.effective ?? '',
+      permissions: current?.permissions ?? defaultPermissions('custom'), ...(input.draft ?? {}) }, warnings: string[] = [], updated = false;
+    // update_draft: the agent's proposal, checked as the editor would check it; outside the ceiling it is narrowed and said so.
+    const updateDraft = (args: any) => {
+      if (!args || typeof args !== 'object') return { error: 'update_draft_invalid' };
+      const next: Json = { ...draft }, notes: string[] = [];
+      for (const key of ['name', 'description', 'prompt']) if (typeof args[key] === 'string') next[key] = args[key];
+      if (Array.isArray(args.triggers)) {
+        next.triggers = args.triggers.filter((trigger: any) => { const option = catalog.find(entry => entry.id === trigger?.id); return option && (!option.needs_label || typeof trigger.label === 'string' && trigger.label.trim()); })
+          .map((trigger: any) => ({ id: trigger.id, ...(catalog.find(entry => entry.id === trigger.id)!.needs_label ? { label: String(trigger.label).trim() } : {}) }));
+        if ((next.triggers as any[]).length !== args.triggers.length) notes.push('有触发源不在这条工作流的目录里，或按标签触发时缺少标签名，已去掉。');
+      }
+      if (args.permissions !== undefined) {
+        const permissions = clampPermissions(args.permissions, ceiling);
+        if (JSON.stringify(permissions) !== JSON.stringify({ ...args.permissions, publication: ceiling.publication })) notes.push('草稿里的权限超出了这条工作流的上限或格式不对，已收窄到允许的范围。');
+        next.permissions = permissions;
+      }
+      if (typeof next.prompt === 'string' && next.prompt && !hasFlowchart(next.prompt)) notes.push('提示词里没有 mermaid 流程图。');
+      draft = next; warnings = notes; updated = true;
+      emit({ type: 'draft', draft, warnings });
+      return { ok: true, draft, warnings };
+    };
+    const repository = this.store.get('SELECT * FROM repositories WHERE id=?', repositoryId)!;
+    const app = this.store.get('SELECT type FROM accounts WHERE id=?', repository.account_id)?.type === 'github_app';
+    const redactor = new Redactor(), guard = async () => { if (signal?.aborted) stop('assistant_cancelled', 'cancelled'); };
+    const tokens = new ReadTokens(this.store, repository, redactor, guard, this.githubUrl, ['contents', 'issues', 'pull_requests', 'actions', 'metadata']), explorer = new RepositoryExplorer(tokens, redactor, guard);
+    const fn = (name: string, description: string, properties: Json = {}) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required: [], additionalProperties: false } } });
+    const tools = [
+      fn('update_draft', 'Propose the workflow draft shown to the administrator. Give the full prompt (with its mermaid flowchart) and any fields you change; omitted fields keep their draft value. Returns the checked draft and warnings to fix.', {
+        name: { type: 'string' }, description: { type: 'string' }, prompt: { type: 'string' },
+        triggers: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, label: { type: 'string' } }, required: ['id'], additionalProperties: false } },
+        permissions: { type: 'object', description: '{"workspace":{"read","write","notes","shell"},"github":[scopes],"agents":boolean}' } }),
+      fn('list_workflows', 'List this project\'s workflows: id, name, switch, triggers, flowchart steps and permissions.'),
+      ...(app ? [fn('github_read_token', 'Establish read-only access to this repository before reading it.'), ...repositoryTools] : [])
+    ];
     const system = [
-      'You help a project administrator write one workflow of a GitHub repository maintenance bot. Reply in Simplified Chinese.',
-      'A workflow has triggers, a prompt for the agent, permissions and a model. The prompt is Markdown. It must contain exactly one flowchart as a fenced ```mermaid block starting with "flowchart LR"; nodes are id[label] with short Chinese labels, edges are -->, and a labeled edge -->|label| may lead back to an earlier step (for example when a review or a test finds a problem). After the flowchart, describe each step for the agent.',
-      'To use several agents, the prompt says in which step to call start_agent: it starts an independent agent with its own session that does not see the main conversation and gets at most the workflow permissions (it can only narrow them) and cannot publish. Only mention start_agent when permissions.agents is true.',
-      'Hard limits you cannot change through the prompt: publication is done by the control plane (' + ceiling.publication + '); the agent never pushes, merges, approves, labels or comments through the shell; drafts, closed objects and the bot\'s own writing never trigger; development needs the project development switch, a development label added by a person and an Issue nobody is assigned to; tests must pass before a pull request; release notes are checked by the control plane.',
-      'Permissions: {"workspace":{"read","write","notes","shell" booleans},"github":[read scopes],"agents":boolean}. They can never exceed this ceiling: ' + JSON.stringify(ceiling) + '. Choose the least the workflow needs.',
-      'Return only JSON: {"reply":"what you changed and why, in a few sentences","draft":{"name":"...","description":"...","triggers":[{"id":"...","label":"... only when needs_label"}],"prompt":"full Markdown prompt","permissions":{...}}}. Keep fields the administrator did not ask to change.'
+      'You are the workflow assistant of a GitHub repository maintenance bot. You help a project administrator write one workflow. Reply in Simplified Chinese, briefly.',
+      'A workflow has triggers, a prompt for its agent, permissions and a model. The prompt is Markdown with exactly one flowchart as a fenced ```mermaid block starting with "flowchart LR": nodes are id[label] with short Chinese labels, edges are -->, and a labeled edge -->|label| may lead back to an earlier step (for example when a review or a test finds a problem). After the flowchart, describe each step for the agent.',
+      'To use several agents, the prompt says in which step to call start_agent: it starts an independent agent with its own session that does not see the main conversation, gets at most the workflow permissions and cannot publish. Mention start_agent only when permissions.agents is true.',
+      'GitHub writes are never permissions of the agent: the control plane publishes what the workflow type allows (' + ceiling.publication + '); the agent never pushes, merges, approves, labels or comments through the shell. Drafts, closed objects and the bot\'s own writing never trigger; development needs the project development switch, a development label added by a person and an unassigned Issue; tests must pass before a pull request; release notes are checked by the control plane.',
+      'Permissions never exceed this ceiling: ' + JSON.stringify(ceiling) + '. Choose the least the workflow needs. Available triggers: ' + JSON.stringify(catalog) + '.',
+      'Work like an agent: read what you need (list_workflows; the repository through github_read and github_search when available), then call update_draft with the draft, fix any warnings it returns, and finish with a short message saying what you drafted and what the administrator should check. The administrator saves the draft; you cannot save or change anything yourself.'
     ].join('\n');
-    const prompt = JSON.stringify({ workflow: current ? { id: current.id, builtin: current.builtin, name: current.name, description: current.description,
-      triggers: current.triggers, prompt: current.prompt.effective, permissions: current.permissions } : null,
-      draft: body.draft ?? null, available_triggers: catalog, github_scopes: ceiling.github, conversation: messages });
-    const redactor = new Redactor();
-    let content: string;
+    const context = { workflow: current ? { id: current.id, builtin: current.builtin, name: current.name, description: current.description, triggers: current.triggers, prompt: current.prompt.effective, permissions: current.permissions } : null,
+      editor_draft: input.draft, your_last_draft: input.proposed, repository: repository.full_name };
+    let reply = '';
     try {
-      content = await runAgent({ store: this.store, task: { id: 'workflow-assistant:' + randomId(), repository_id: repositoryId, kind: 'workflow.assistant' }, redactor,
-        guard: async () => {}, system, prompt, tools: [], maxTurns: 1, maxOutputChars: 2 * 1024 * 1024 });
+      await runAgent({ store: this.store, task: { id: 'workflow-assistant:' + randomId(), repository_id: repositoryId, kind: 'workflow.assistant' }, redactor, guard, system, prompt: '', tools,
+        adapter: async ({ request }) => {
+          const conversation: any[] = [{ role: 'system', content: system }, { role: 'user', content: 'Current workflow and editor contents:\n' + JSON.stringify(context) }, ...messages.map(m => ({ role: m.role, content: m.content }))];
+          for (let turn = 0; turn < 32; turn++) {
+            let streamed = '';
+            const { value } = await request({ messages: conversation, tools, tool_choice: 'auto' }, 'turn:' + turn, async delta => {
+              if (delta?.content) { streamed += delta.content; emit({ type: 'text', delta: redactor.text(delta.content) }); }
+              if (delta?.reasoning) emit({ type: 'reasoning', delta: redactor.text(delta.reasoning) });
+            });
+            const message = value?.choices?.[0]?.message;
+            if (!message) return stop('agent_output_invalid', undefined, '助手没有返回有效结果。');
+            const text = typeof message.content === 'string' ? message.content : '';
+            if (text && !streamed) emit({ type: 'text', delta: redactor.text(text) });
+            const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+            if (!calls.length) { reply = redactor.text(text); return; }
+            conversation.push(redactor.clean({ role: 'assistant', content: text || null, tool_calls: calls }));
+            emit({ type: 'turn' });
+            for (const call of calls.slice(0, 8)) {
+              await guard();
+              let args: any = null; try { args = JSON.parse(call.function?.arguments || '{}'); } catch { args = null; }
+              const name = String(call.function?.name || '');
+              emit({ type: 'tool_call', id: call.id, name, arguments: redactor.clean(args) });
+              const result = name === 'update_draft' ? updateDraft(args)
+                : name === 'list_workflows' ? list.workflows.map(workflow => ({ id: workflow.id, name: workflow.name, builtin: workflow.builtin, enabled: workflow.enabled, triggers: workflow.triggers,
+                  flow: workflow.prompt.effective.match(/```mermaid[\s\S]*?```/)?.[0] ?? null, permissions: workflow.permissions }))
+                : tools.some(tool => tool.function.name === name) ? await explorer.execute(name, args) : { error: 'tool_not_allowed' };
+              const content = JSON.stringify(redactor.clean(result));
+              emit({ type: 'tool_result', id: call.id, name, result: content.length > 4000 ? content.slice(0, 4000) + '…' : content });
+              conversation.push({ role: 'tool', tool_call_id: call.id, content });
+            }
+          }
+          return stop('agent_turn_limit', 'failed', '助手达到 32 轮上限。');
+        } });
     } catch (error) {
-      if (error instanceof TaskError) throw Object.assign(new HttpError(error.state === 'waiting_configuration' ? 409 : 502, error.code), { detail: error.detail });
+      if (error instanceof TaskError) throw Object.assign(new HttpError(error.state === 'waiting_configuration' ? 409 : error.code === 'assistant_cancelled' ? 499 : 502, error.code), { detail: error.detail });
       throw error;
-    }
-    const value = jsonOf(content.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''), null);
-    if (!value || typeof value.reply !== 'string' || !value.draft || typeof value.draft !== 'object') fail(502, 'assistant_reply_invalid');
-    const draft = value.draft, warnings: string[] = [];
-    // A draft outside what the workflow may do is narrowed here and said so; saving validates again.
-    const permissions = clampPermissions(draft.permissions ?? current?.permissions ?? defaultPermissions('custom'), ceiling);
-    if (JSON.stringify(permissions) !== JSON.stringify({ ...draft.permissions, publication: ceiling.publication }) && draft.permissions)
-      warnings.push('草稿里的权限超出了这条工作流的上限或格式不对，已收窄到允许的范围。');
-    const result: Json = { prompt: typeof draft.prompt === 'string' ? draft.prompt : current?.prompt.effective ?? '', permissions };
-    // Built-in and custom drafts have the same fields; triggers are kept only where this workflow can have them.
-    result.name = typeof draft.name === 'string' && draft.name.trim() ? draft.name : current?.name ?? '新工作流';
-    result.description = typeof draft.description === 'string' ? draft.description : current?.description ?? '';
-    result.triggers = Array.isArray(draft.triggers) ? draft.triggers.filter((trigger: any) => {
-      const option = catalog.find(entry => entry.id === trigger?.id);
-      return option && (!option.needs_label || typeof trigger.label === 'string' && trigger.label.trim());
-    }).map((trigger: any) => ({ id: trigger.id, ...(catalog.find(entry => entry.id === trigger.id)!.needs_label ? { label: String(trigger.label).trim() } : {}) })) : current?.triggers ?? [];
-    if (!hasFlowchart(String(result.prompt))) warnings.push('草稿提示词里没有 mermaid 流程图。');
-    return { reply: value.reply, draft: result, warnings };
+    } finally { await tokens.revoke(); }
+    return { reply, draft: updated ? draft : null, warnings };
+  }
+  // The streamed assistant: one JSON line per event (text, reasoning, tool call and result, draft), then done or error.
+  async assistantStream(user: Actor, url: URL, body: Json, res: import('node:http').ServerResponse, closed: AbortSignal) {
+    const match = /^\/api\/repositories\/([^/]+)\/workflows\/assistant$/.exec(url.pathname)!, repositoryId = match[1]!;
+    allowRepository(this.store, user, repositoryId);
+    const input = await this.assistantInput(repositoryId, body);
+    res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+    const emit = (event: Json) => { if (!res.writableEnded) res.write(JSON.stringify(event) + '\n'); };
+    try { emit({ type: 'done', ...await this.assistantRun(repositoryId, input, emit, closed) }); }
+    catch (error) { emit({ type: 'error', error: error instanceof HttpError ? error.code : 'service_unavailable', ...((error as any)?.detail ? { detail: String((error as any).detail) } : {}) }); }
+    finally { res.end(); }
   }
   async api(user: Actor, method: string, url: URL, body: Json): Promise<Json | undefined> {
     const match = /^\/api\/repositories\/([^/]+)\/workflows(?:\/([^/]+))?$/.exec(url.pathname); if (!match) return undefined;

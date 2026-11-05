@@ -214,7 +214,8 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .workflow-sidebar .rule-sync{display:grid;gap:6px;margin-top:auto}.workflow-sidebar .rule-sync button{justify-self:start}
 .workflow-detail{padding:16px 20px;min-width:0;display:grid;align-content:start;gap:12px}.workflow-detail>.side-card{margin:0}
 .workflow-detail-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.workflow-detail-head h2{font-size:18px;margin:0}.workflow-detail-head .title-group{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.workflow-detail-head code{font-size:12px;color:#637c89}.workflow-detail-head button[aria-expanded=true]{background:#e7eff1;border-color:#16636b}
-.workflow-editor{display:grid;gap:12px}.workflow-shell{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-items:start}.workflow-shell.with-chat{grid-template-columns:minmax(0,1fr) minmax(300px,380px)}.workflow-shell:not(.with-chat)>.workflow-chat{display:none}
+.workflow-editor{display:grid;gap:12px}.workflow-shell{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-items:start}
+.workflow-restored{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px 12px;border-radius:6px;background:#fff7e6;color:#7a5200;font-size:13px}
 .workflow-main{display:grid;gap:12px;min-width:0}.workflow-tabs{display:flex;gap:2px;border-bottom:1px solid #d7e3e8;overflow-x:auto}
 .workflow-tab{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:#40525c;padding:8px 14px;font-weight:600;white-space:nowrap}.workflow-tab[aria-selected=true]{color:#16636b;border-bottom-color:#16636b}
 .workflow-panel{display:grid;gap:12px;min-width:0}.workflow-panel>h3{font-size:14px;margin:6px 0 0}.workflow-panel textarea.code{min-height:360px;font-size:12px}
@@ -222,14 +223,29 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .workflow-summary{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:0;font-size:13px}.workflow-summary dt{color:#637c89}.workflow-summary dd{margin:0;overflow-wrap:anywhere}
 .workflow-trigger{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;border-bottom:1px solid #f0f4f6}.workflow-trigger>.muted{font-size:12px}.workflow-trigger input:not([type]){width:auto;min-width:160px}
 .workflow-triggers{display:grid}.workflow-permissions{display:grid;gap:6px}.workflow-scopes{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center}
-.workflow-chat{border:1px solid #d7e3e8;border-radius:8px;padding:12px;display:grid;gap:8px;position:sticky;top:12px;background:#fbfdfe;min-width:0;max-height:calc(100svh - 40px);overflow:auto}.workflow-chat>h4{margin:0}
-.workflow-chat-log{list-style:none;margin:0;padding:0;display:grid;gap:8px}.workflow-chat-log>li{border-radius:8px;padding:8px 10px;font-size:13px}.workflow-chat-log>li>p{margin:4px 0 0;white-space:pre-wrap}.workflow-chat .workflow-flow svg{max-width:100%}
-.workflow-chat-log>.chat-user{background:#eef5f8}.workflow-chat-log>.chat-assistant{background:#fff;border:1px solid #e3eaee}.workflow-draft{display:grid;gap:6px;margin-top:8px}
+/* The workflow assistant: a floating window, moved by its header and resized from its corner. */
+.assistant-window{position:fixed;right:24px;bottom:24px;width:440px;height:600px;min-width:300px;min-height:320px;max-width:96vw;max-height:92vh;resize:both;overflow:hidden;z-index:40;
+  display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:#fff;border:1px solid #c4d6de;border-radius:10px;box-shadow:0 12px 32px #0f2a3a33}
+.assistant-window[hidden]{display:none}
+.assistant-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px 8px 14px;background:#16353f;color:#fff;cursor:move;user-select:none;touch-action:none}
+.assistant-head .assistant-title{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.assistant-head .assistant-title span{font-weight:400;color:#c9dde5}
+.assistant-head button{color:#fff;border-color:#ffffff55;background:transparent;min-height:30px;padding:4px 10px}
+.assistant-log{list-style:none;margin:0;padding:12px;display:grid;align-content:start;gap:12px;overflow:auto;background:#f7fafb}
+.assistant-turn{display:grid;gap:6px;font-size:13px;min-width:0}.assistant-turn>strong{font-size:12px;color:#637c89}.assistant-turn p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.turn-user{justify-self:end;max-width:88%;background:#e2eff4;border-radius:10px;padding:8px 10px}.turn-assistant{background:#fff;border:1px solid #e3eaee;border-radius:10px;padding:8px 10px}
+.assistant-tool{border:1px solid #dde6eb;border-radius:6px;background:#fbfdfe;font-size:12px}.assistant-tool summary{cursor:pointer;display:flex;gap:8px;align-items:center;padding:4px 8px}
+.assistant-tool.running summary::after{content:'';width:10px;height:10px;border-radius:50%;border:2px solid #5f8da0;border-right-color:transparent;animation:assistant-spin .8s linear infinite}
+.assistant-tool pre{margin:0;padding:6px 8px;max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border-top:1px solid #eef3f5}
+.assistant-reasoning{font-size:12px;color:#637c89}.assistant-pending{font-size:12px}.assistant-empty{font-size:13px;line-height:1.6}
+.assistant-input{display:grid;gap:6px;padding:10px;border-top:1px solid #e3eaee}.assistant-input textarea{min-height:64px;resize:vertical}.assistant-input .actions{justify-content:flex-end}
+.workflow-draft{display:grid;gap:6px;margin-top:4px}.workflow-draft .workflow-flow svg{max-width:100%}
+@keyframes assistant-spin{to{transform:rotate(360deg)}}
+@media(max-width:820px){.assistant-window{left:8px!important;right:8px!important;top:auto!important;bottom:8px;width:auto!important;height:70vh!important;resize:none}}
 .workflow-flow{margin:0;display:grid;gap:6px;min-width:0}.workflow-flow-canvas{overflow-x:auto;max-width:100%}.workflow-flow svg{display:block;max-width:none;height:auto}
 .workflow-flow figcaption{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:#40525c}.workflow-flow .flow-loop{color:#8a5a00}
 .flow-node{fill:#f3f8fa;stroke:#5f8da0;stroke-width:1.5}.flow-node-label{font-size:13px;fill:#1f2f38}.flow-edge{stroke:#5f8da0;stroke-width:1.5;fill:none}.flow-back{stroke:#b07a12;stroke-dasharray:5 3}
 .flow-arrowhead{fill:#5f8da0}.flow-edge-label{font-size:11px;fill:#8a5a00}
-@media(max-width:1100px){.workflow-shell.with-chat{grid-template-columns:minmax(0,1fr)}.workflow-chat{position:static;max-height:none}.workflow-prompt-columns{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:1100px){.workflow-prompt-columns{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:820px){.workflow-page{grid-template-columns:minmax(0,1fr);min-height:0}.workflow-sidebar{border-right:0;border-bottom:1px solid #e3eaf0}.workflow-sidebar .rule-sync{margin-top:0}
   .workflow-detail{padding:12px}.workflow-panel textarea.code{min-height:260px}}
 /* Gate onboarding (static/gate-onboarding.js): the five lanes first, then the conversation beside the editable plan. */

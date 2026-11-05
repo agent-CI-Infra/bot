@@ -7,7 +7,7 @@
 - **提示词与流程**：交给 agent 的 Markdown 规则，其中一张 ` ```mermaid ` 流程图说明步骤顺序，页面把这张图画出来。
 - **权限与模型**：agent 能读工作区、运行命令、写项目笔记、改代码、读哪些 GitHub 内容、能否启动独立 agent，使用的模型（留空时继承项目默认），以及检视语言、测试命令等原有设置；发布方式由工作流的类型决定。
 
-编辑器上方的「用聊天编写」在右侧打开聊天面板，「保存」一次保存所有标签页。窄屏时列表在上、编辑器在下。
+编辑器上方的「用聊天编写」打开悬浮的工作流助手，「保存」一次保存所有标签页。还没保存的修改（包括新工作流）保存在这个浏览器里，离开页面或刷新后回到这条工作流仍在，列表里标「未保存」；新工作流的草稿在列表里显示为「未保存的草稿」，可以在编辑器上方丢弃。窄屏时列表在上、编辑器在下。
 
 现有的六项任务和 Actions 失败处理是七条内置工作流，工作流 id 等于原来的任务类型（Actions 失败处理是 `actions.failures`），所以已保存的 `task_models` 映射原样生效。管理员也可以在页面上新增工作流，不需要改代码或发版。内置工作流不能删除，可以关掉。
 
@@ -85,6 +85,19 @@ flowchart LR
 
 每条工作流有一个上限：检视和自定义工作流不能改代码，发行说明不读工作区也不读 GitHub。超出上限的保存请求返回 400 `invalid_workflow_permissions`；早先保存、现在超出上限的值在读取时收窄。发布方式由工作流类型决定，不能配置：检视和自定义工作流由控制面发回复，开发工作流由控制面发 PR，发行说明由控制面写草稿。
 
+## GitHub 写入
+
+GitHub 写入不属于工作流的权限，也不交给 agent：agent 只拿得到只读令牌，不能在命令里推送、评论、加标签或合并。它把结果交给平台提供的工具，由控制面用 GitHub App 安装令牌（或登记的机器人账号）写入：
+
+| 工作流 | agent 交出结果的方式 | 控制面写入 GitHub 的内容 |
+| --- | --- | --- |
+| 检视 Issue、检视 PR、自定义工作流 | `finish_review` | 一条评论；PR 上有真实 diff 位置的意见作为 COMMENT 行内检视；检视工作流另加标签 |
+| 开发 Issue、跟进 bot PR | `create_pull_request` | 固定快照、跑项目测试、复核开发标签和指派人后推 bot 分支，开或更新 PR |
+| 发行说明 | 返回已核验来源的分组 | 写出说明正文；起草和发布仍在「发版本」页由人操作 |
+| Actions 失败处理 | 返回分类和引用的日志行 | 最多重跑原运行一次，或提报、评论 Issue |
+
+每次写入前控制面重新核对对象、head 和条件，经发布队列写出；结果不明时先在 GitHub 上对账，不重复写。写入能力由工作流的类型决定，编辑器的「权限与模型」页会写明这条工作流能写什么、通过哪个工具。
+
 ## 独立 agent
 
 提示词决定什么时候启动独立 agent（例如内置开发提示词在「检视」一步启动一个审查者），运行时提供 `start_agent` 工具。调用时 agent 写明对方的角色说明和任务，可以收窄权限：
@@ -97,7 +110,15 @@ flowchart LR
 
 ## 用聊天编写
 
-编辑器旁边的「用聊天编写」把对话、编辑器里的当前内容、可选触发源和权限上限发给项目模型，模型返回一份草稿：提示词（含流程图）、权限，以及自定义工作流的名称、说明和触发源。超出上限的草稿权限会收窄并提示。草稿只显示在页面上，点「填入编辑器」后检查，再点「保存」才成为生效配置；保存的人是控制台的项目管理员或超级管理员，审计记录为 `workflow.created`／`workflow.updated`。运行中的模型没有修改工作流的工具。
+「用聊天编写」打开工作流助手：一个悬浮窗口，拖动标题栏移动，拖动右下角调整大小，位置和大小保存在浏览器里。它像一般的 agent 一样工作，并把过程流式显示出来：
+
+- 先用 `list_workflows` 看项目里已有的工作流；账号是 GitHub App 时还可以用 `github_read`、`github_search` 等只读工具看仓库。
+- 用 `update_draft` 提出草稿（名称、说明、触发源、含流程图的提示词、权限）。控制面按编辑器的规则检查：触发源不在这条工作流的目录里就去掉，权限超出上限就收窄，没有流程图会提示；检查结果返回给助手，它可以再改。
+- 文字、思考过程、每次工具调用的参数和结果、草稿（带流程图）按发生顺序出现在窗口里；运行中可以停止。
+
+草稿只在窗口里显示，点「填入编辑器」才放进对应工作流的编辑器（编辑器不在当前页面时会跳过去），再点「保存」才生效；保存的人是控制台的项目管理员或超级管理员，审计记录为 `workflow.created`／`workflow.updated`。助手没有保存或修改任何配置的工具，运行中的模型也不能改工作流。
+
+窗口在切换到项目的其他页面时保持打开；每条工作流（包括还没保存的新工作流）的对话按项目保存在这个浏览器里，收起、换页面或刷新后，再打开同一条工作流的助手，对话还在。「清空对话」只清掉这条工作流的对话。
 
 ## 接口
 
@@ -106,6 +127,6 @@ flowchart LR
 | `/api/repositories/:id/workflows` | GET | 全部工作流（七条内置在前），以及触发源目录 `triggers`、GitHub 范围 `github_scopes` 和提及名字 `mention_names` |
 | `/api/repositories/:id/workflows` | POST | 新增自定义工作流：`name,prompt` 必填，`description,enabled,triggers,permissions,model_id` 可选；`triggers` 为 `[{id,label?}]`，按标签触发时 `label` 必填；返回 201 和 `workflow`，id 形如 `custom.<12 位十六进制>` |
 | `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。每条工作流返回 `name,description,enabled,active,triggers`（`[{id,label?}]`）、`trigger_options`（它可选的触发源）、`prompt,permissions,ceiling,model` 和 `settings`。内置工作流的 PUT 和自定义的一样接受 `name,description,enabled,triggers,prompt,permissions,model_id`（名称留空恢复默认；`prompt` 为 `null` 清除控制台层；`triggers` 也接受旧的 `{id:布尔}` 写法），另接受 `settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
-| `/api/repositories/:id/workflows/assistant` | POST | 聊天起草：`messages`（`[{role:user|assistant,content}]`）、可选 `workflow_id` 和编辑器当前内容 `draft`；返回 `reply,draft,warnings`，不保存任何内容。项目没有可用模型时返回 409 `model_not_configured` |
+| `/api/repositories/:id/workflows/assistant` | POST | 工作流助手：`messages`（`[{role:user|assistant,content}]`）、可选 `workflow_id` 和编辑器当前内容 `draft`；返回 `reply,draft,warnings`（助手没有调用 `update_draft` 时 `draft` 为 `null`），不保存任何内容。加 `?stream=1` 时以 `application/x-ndjson` 逐行返回过程：`text`、`reasoning`（文字增量）、`tool_call`、`tool_result`、`draft`、`turn`，最后是 `done`（同上三项）或 `error`。项目没有可用模型时返回 409 `model_not_configured` |
 
 自定义工作流的任务类型是 `workflow.issue` 或 `workflow.pr`，任务记录的 `workflow_id` 指向工作流。它们在同一台项目电脑上排队，按工作流权限准备工作区，结束时调用 `finish_review` 返回 `summary` 和 `findings`；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出。自定义工作流不加标签、不衔接开发、不延续检视会话，也不开分支或 PR。

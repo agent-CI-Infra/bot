@@ -50,7 +50,7 @@ export function createControlPlane(options: Options) {
   const external = options.external || new ExternalService(store);
   const onboarding = options.onboarding || new Onboarding(store);
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
-  const workflows = new WorkflowService(store, rules);
+  const workflows = new WorkflowService(store, rules, options.githubUrl);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
@@ -176,6 +176,11 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
+    // The workflow assistant answers as it works: text, tool calls and drafts are streamed as JSON lines.
+    if (method === 'POST' && url.searchParams.get('stream') === '1' && /^\/api\/repositories\/[^/]+\/workflows\/assistant$/.test(path)) {
+      const closed = new AbortController(); res.on('close', () => { if (!res.writableFinished) closed.abort(); });
+      await workflows.assistantStream(user!, url, input, res, closed.signal); return;
+    }
     const result = await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, path, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
