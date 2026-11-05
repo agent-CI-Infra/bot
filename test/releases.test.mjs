@@ -381,7 +381,7 @@ test('manual draft saving holds the repository only until the edit finishes', as
   assert.equal(f.h.store.get('SELECT active FROM project_releases WHERE id=?', first.id).active, 0);
   assert.equal((await f.create('v1.2.4')).status, 201); assert.equal(f.state.releases[0].draft, true);
 });
-test('repository release-notes Skill is explicitly loaded at the target SHA into a tool-free model call', async t => {
+test('repository release-notes Skill is explicitly loaded at the target SHA into a model call that can only read', async t => {
   const f = await releaseFixture(t), skill = 'Group real commits under Changes. Do not invent results.';
   f.state.files['.agents/skills/release-notes/SKILL.md'] = skill;
   await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'fixture-model-release-key', model_name: 'notes-fixture' });
@@ -391,7 +391,9 @@ test('repository release-notes Skill is explicitly loaded at the target SHA into
   let request;
   f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; const input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: JSON.stringify({ groups: [{ heading: 'Changes', source_ids: input.sources.map(s => s.id) }] }) } }] }); return true; } };
   const r = await toDraft(f); assert.equal(r.stage, 'draft'); assert.equal(r.skill.source, 'repository'); assert.equal(r.skill.sha, target);
-  const modelInput = JSON.parse(request.messages[1].content); assert.equal(modelInput.skill, skill); assert.equal(modelInput.skill_sha, target); assert.deepEqual(request.tools, []); assert.equal(request.tool_choice, 'none');
+  const modelInput = JSON.parse(request.messages[1].content); assert.equal(modelInput.skill, skill); assert.equal(modelInput.skill_sha, target);
+  // Like every workflow it may read GitHub and start agents; nothing it is given writes.
+  assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'start_agent']);
   assert.equal(request.model, 'notes-fixture');
   assert.equal(request.temperature, 0);
   assert.equal(f.h.store.get('SELECT model_id FROM model_requests').model_id, model.id);
@@ -474,7 +476,7 @@ test('read-only observation can finish without requesting logs and has no write 
   let input, request; f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: '{"job_ids":[1],"advice":"Inspect the Build step output"}' } }] }); return true; } };
   const before = writes(f.state).length, tokens = f.state.tokens.length;
   const result = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: r.revision });
-  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log']); assert.equal(request.tool_choice, 'auto');
+  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'start_agent']); assert.equal(request.tool_choice, 'auto');
   assert.ok(!JSON.stringify(request).includes('fixture-installation-'));
   assert.ok(f.state.tokens.slice(tokens).every(t => Object.values(t.permissions).every(p => p === 'read')));
   assert.ok(writes(f.state).slice(before).every(r => r.path === '/v1/chat/completions'));

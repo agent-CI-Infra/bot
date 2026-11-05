@@ -4,13 +4,15 @@ import { harness, setup, account, repository, testPassword } from './helpers.mjs
 import { boardTask, boardFixtures, boardRelease } from './board-fixtures.mjs';
 const query=filters=>'/api/board/cards?filters='+encodeURIComponent(JSON.stringify(filters));
 async function fixture(t){const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');return {h,admin,a};}
-test('board projects one card per work family, keeps published PR separate and omits raw task JSON',async t=>{
+test('board projects one card per workflow, keeps published PR separate and omits raw task JSON',async t=>{
   const {h,admin}=await fixture(t);boardFixtures(h.store);
   const result=await admin('/api/board/cards');assert.equal(result.status,200);
   const own=result.value.cards.filter(c=>c.repository_id==='101');assert.equal(own.length,8);
-  assert.deepEqual(Object.fromEntries(own.map(c=>[c.object_number+'/'+c.card_category,c.bot_stage])),{'1/review':'reviewed','2/review':'reviewing','3/review':'reviewed','3/development':'developing','4/review':'reviewed','4/development':'developed','5/review':'attention','40/review':'unreviewed'});
+  assert.deepEqual(Object.fromEntries(own.map(c=>[c.object_number+'/'+c.card_category,c.bot_stage])),{'1/review.issue':'reviewed','2/review.pr':'reviewing','3/review.issue':'reviewed','3/development.issue':'developing','4/review.issue':'reviewed','4/development.issue':'developed','5/review.issue':'attention','40/review.pr':'unreviewed'});
+  // Each card names its workflow as the repository names it.
+  assert.deepEqual([...new Set(own.map(c=>c.card_category+'='+c.card_category_name))].sort(),['development.issue=开发 Issue','review.issue=检视 Issue','review.pr=检视 PR']);
   assert.equal(result.value.work_count,9);assert.equal(Object.values(result.value.column_counts).reduce((a,b)=>a+b,0),9);
-  const combined=own.find(c=>c.object_number===3&&c.card_category==='development');assert.equal(combined.review_task_id,'source-review');assert.equal(combined.development_task_id,'developing');
+  const combined=own.find(c=>c.object_number===3&&c.card_category==='development.issue');assert.equal(combined.review_task_id,'source-review');assert.equal(combined.development_task_id,'developing');
   assert.equal(own.find(c=>c.object_number===4).development_pr_number,40);assert.equal(combined.development_pr_number,null);
   assert.deepEqual(result.value.counts,{issue:5,pr:2});
   const stages=(await admin('/api/board')).value.stages;assert.deepEqual(stages.map(s=>s.id),['unreviewed','reviewing','reviewed','developing','developed','attention']);
@@ -20,7 +22,7 @@ test('board projects one card per work family, keeps published PR separate and o
   const tasks=(await admin('/api/board/cards/101/issue/3/tasks')).value.tasks;assert.equal(tasks.length,2);
   assert.equal((await admin('/api/tasks?kind=review')).value.tasks.length,6);assert.equal((await admin('/api/tasks?kind=development')).value.tasks.length,2);
 });
-test('each family retains its stage when another family has a newer success or failure',async t=>{
+test('each workflow retains its stage when another workflow has a newer success or failure',async t=>{
   const {h,admin}=await fixture(t);
   const active=['queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready'];
   for(const [i,status]of active.entries()){
@@ -34,18 +36,18 @@ test('each family retains its stage when another family has a newer success or f
   boardTask(h.store,'dev-success',52,'development.issue','succeeded');boardTask(h.store,'review-later',52,'review.issue','running',{time:'2026-10-02T12:00:00.000Z'});
   boardTask(h.store,'retry-fail',53,'review.issue','failed');boardTask(h.store,'retry-success',53,'review.issue','succeeded',{time:'2026-10-02T12:00:00.000Z'});
   const cards=(await admin('/api/board/cards')).value.cards;
-  assert.ok(cards.filter(c=>c.object_number>=10&&c.object_number<20&&c.card_category==='development').every(c=>c.bot_stage==='developing'));
+  assert.ok(cards.filter(c=>c.object_number>=10&&c.object_number<20&&c.card_category==='development.issue').every(c=>c.bot_stage==='developing'));
   assert.ok(cards.filter(c=>c.object_number>=30&&c.object_number<36).every(c=>c.bot_stage==='attention'));
   const card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category);
-  assert.equal(card(50,'review').bot_stage,'reviewed');assert.equal(card(50,'development').bot_stage,'attention');
-  assert.equal(card(51,'review').bot_stage,'attention');assert.equal(card(51,'development').bot_stage,'developed');
-  assert.equal(card(52,'review').execution_status,'running');assert.equal(card(52,'development').execution_status,'completed');
-  assert.equal(card(53,'review').bot_stage,'reviewed');assert.equal(card(53,'review').task_id,'retry-success');
+  assert.equal(card(50,'review.issue').bot_stage,'reviewed');assert.equal(card(50,'development.issue').bot_stage,'attention');
+  assert.equal(card(51,'review.issue').bot_stage,'attention');assert.equal(card(51,'development.issue').bot_stage,'developed');
+  assert.equal(card(52,'review.issue').execution_status,'running');assert.equal(card(52,'development.issue').execution_status,'completed');
+  assert.equal(card(53,'review.issue').bot_stage,'reviewed');assert.equal(card(53,'review.issue').task_id,'retry-success');
   // A newer development result must not hide the still-running review.
   h.store.run("UPDATE tasks SET status='succeeded',updated_at='2026-10-03' WHERE id='d0'");
   const before=(await admin(query([{field:'text',value:'10'}]))).value.cards;
-  assert.equal(before.find(c=>c.card_category==='review').execution_status,'running');
-  assert.equal(before.find(c=>c.card_category==='development').execution_status,'completed');
+  assert.equal(before.find(c=>c.card_category==='review.issue').execution_status,'running');
+  assert.equal(before.find(c=>c.card_category==='development.issue').execution_status,'completed');
   for(const group of ['repository','execution_status','category']){
     const after=(await admin(query([{field:'text',value:'10'}])+'&group_by='+group)).value.cards;
     assert.deepEqual(after,before);
@@ -126,7 +128,7 @@ test('custom single-select columns include empty options; changing values never 
   assert.equal((await admin('/api/board/fields/'+field.id+'/options','POST',{name:'High'})).status,409);
   const before=h.store.all('SELECT * FROM tasks');
   assert.equal((await admin('/api/board/cards/101/issue/3','PATCH',{field_id:field.id,option_id:high.id})).status,200);
-  const grouped=(await admin('/api/board/cards?group_by='+field.id)).value.cards.find(c=>c.object_number===3&&c.card_category==='development');
+  const grouped=(await admin('/api/board/cards?group_by='+field.id)).value.cards.find(c=>c.object_number===3&&c.card_category==='development.issue');
   assert.equal(grouped.field_value,high.id);assert.equal(grouped.bot_stage,'developing');assert.deepEqual(h.store.all('SELECT * FROM tasks'),before);
   assert.equal((await admin('/api/board')).value.fields[0].options.length,2);
   assert.equal((await admin('/api/board/cards/101/issue/3','PATCH',{field_id:'bot_stage',option_id:'developed'})).status,404);
@@ -141,7 +143,7 @@ test('custom single-select columns include empty options; changing values never 
   assert.equal((await other('/api/board/cards?group_by='+field.id)).status,404);
   assert.equal((await other('/api/board/cards/101/issue/3','PATCH',{field_id:field.id,option_id:high.id})).status,404);
 });
-test('repository, execution and category dimensions include releases without leaking payload or grants',async t=>{
+test('repository, execution and workflow dimensions include releases without leaking payload or grants',async t=>{
   const {h,admin}=await fixture(t);boardFixtures(h.store);
   boardTask(h.store,'queued',6,'review.issue','queued');boardTask(h.store,'waiting',7,'development.issue','waiting_permission');
   boardTask(h.store,'cancelled',8,'review.issue','cancelled');
@@ -157,10 +159,18 @@ test('repository, execution and category dimensions include releases without lea
     const objectNumber=h.store.get('SELECT object_number FROM tasks WHERE id=?',id).object_number;
     assert.equal(all.value.cards.find(c=>c.object_number===objectNumber&&c.card_type==='object').execution_status,status,id);
   }
-  for(const [category,key]of [['review','review_task_id'],['development','development_task_id']]){
-    const result=await admin(query([{field:'category',value:category}]));assert.ok(result.value.cards.length>0);
+  // A workflow filter keeps that workflow's cards; a family saved by an older view keeps every workflow of the family.
+  for(const category of ['review.issue','review.pr','development.issue']){
+    const result=await admin(query([{field:'category',value:category}]));assert.ok(result.value.cards.length>0,category);
     assert.ok(result.value.cards.every(c=>c.card_type==='object'&&c.card_category===category));assert.equal(result.value.release_count,0);
   }
+  for(const family of ['review','development']){
+    const result=await admin(query([{field:'category',value:family}]));assert.ok(result.value.cards.length>0);
+    assert.ok(result.value.cards.every(c=>c.card_type==='object'&&c.card_category.startsWith(family+'.')));assert.equal(result.value.release_count,0);
+  }
+  // A built-in object workflow names its object type, so an object type filter left in the view does not empty it.
+  assert.ok((await admin(query([{field:'category',value:'review.pr'},{field:'object_type',value:'issue'}]))).value.cards.length>0);
+  assert.equal((await admin(query([{field:'category',value:'custom.zz'}]))).status,400);
   const releases=await admin(query([{field:'category',value:'release'}]));assert.equal(releases.value.cards.length,3);assert.ok(releases.value.cards.every(c=>c.card_type==='release'));
   assert.deepEqual(releases.value.counts,{issue:0,pr:0});
   assert.equal((await admin(query([{field:'text',value:'v1.2.3'}]))).value.cards[0].release_id,'release-running');
@@ -172,6 +182,8 @@ test('repository, execution and category dimensions include releases without lea
   assert.equal(saved.status,200);assert.equal(saved.value.view.group_by,'repository');assert.deepEqual(saved.value.view.filters,[{field:'category',value:'review'}]);
   const taskQuery=(filters)=> '/api/board/cards/101/issue/3/tasks?filters='+encodeURIComponent(JSON.stringify(filters));
   assert.deepEqual((await admin(taskQuery([{field:'category',value:'review'}]))).value.tasks.map(t=>t.id),['source-review']);
+  assert.deepEqual((await admin(taskQuery([{field:'category',value:'review.issue'}]))).value.tasks.map(t=>t.id),['source-review']);
+  assert.deepEqual((await admin(taskQuery([{field:'category',value:'development.issue'}]))).value.tasks.map(t=>t.id),['developing']);
   assert.deepEqual((await admin(taskQuery([{field:'category',value:'development'}]))).value.tasks.map(t=>t.id),['developing']);
   assert.deepEqual((await admin(taskQuery([{field:'category',value:'development'},{field:'execution_status',value:'running'}]))).value.tasks.map(t=>t.id),['developing']);
   assert.equal((await admin(taskQuery([{field:'category',value:'development'},{field:'execution_status',value:'completed'}]))).value.tasks.length,0);
@@ -201,10 +213,40 @@ test('saved views restore object scope and filters, column totals cover all page
   const all=(await admin('/api/board/views','POST',{name:'All work',filters:[{field:'object_type',value:'all'}],group_by:'category'})).value.view;
   assert.equal((await admin('/api/board/cards?view_id='+all.id)).value.work_count,9);
   const page=(await admin('/api/board/cards?group_by=category&limit=1')).value;
-  assert.equal(page.cards.length,1);assert.equal(page.work_count,9);assert.deepEqual(page.column_counts,{review:7,development:2});
+  assert.equal(page.cards.length,1);assert.equal(page.work_count,9);assert.deepEqual(page.column_counts,{'review.issue':5,'review.pr':2,'development.issue':2});
   const keys=new Set();for(let offset=0;offset<9;offset+=2){
     const next=(await admin('/api/board/cards?limit=2&offset='+offset)).value;
     for(const c of next.cards)keys.add([c.repository_id,c.object_type,c.object_number,c.card_category].join('/'));
   }
   assert.equal(keys.size,9);
+});
+
+test('custom workflows get cards of their own, named as their repository names them, and the board lists every workflow',async t=>{
+  const {h,admin}=await fixture(t);boardFixtures(h.store);
+  const created=(await admin('/api/repositories/101/workflows','POST',{name:'文档检查',prompt:'Check the docs.',triggers:[{id:'issue.opened'}]})).value.workflow;
+  const custom=(id,number,status,time)=>{boardTask(h.store,id,number,'workflow.issue',status,{time});h.store.run('UPDATE tasks SET workflow_id=? WHERE id=?',created.id,id);};
+  custom('docs-old',3,'failed','2026-10-01T10:00:00.000Z');custom('docs-new',3,'running','2026-10-01T11:00:00.000Z');custom('docs-done',5,'succeeded');
+  // A renamed built-in workflow shows its new name; custom ones carry their repository.
+  await admin('/api/repositories/101/workflows/review.issue','PUT',{name:'Issue 初审'});
+  const board=(await admin('/api/board')).value;
+  assert.deepEqual(board.workflows.map(w=>w.id),['review.issue','review.pr','development.issue','development.pr',created.id,'release']);
+  // Repository 202 still uses the built-in name, so both names are listed.
+  assert.equal(board.workflows[0].name,'检视 Issue / Issue 初审');assert.deepEqual(board.workflows[4],{id:created.id,name:'文档检查',repository:'fixture/project-101'});
+  const cards=(await admin('/api/board/cards')).value.cards,card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category&&c.repository_id==='101');
+  // The custom card follows its own latest task; the object's review card is unchanged.
+  assert.deepEqual([card(3,created.id).task_id,card(3,created.id).bot_stage,card(3,created.id).card_category_name],['docs-new','reviewing','文档检查']);
+  assert.deepEqual([card(5,created.id).bot_stage,card(5,'review.issue').bot_stage,card(5,'review.issue').card_category_name],['reviewed','attention','Issue 初审']);
+  assert.equal(cards.find(c=>c.repository_id==='202').card_category_name,'检视 Issue');
+  const only=(await admin(query([{field:'category',value:created.id}]))).value;
+  assert.deepEqual(only.cards.map(c=>c.task_id).sort(),['docs-done','docs-new']);
+  assert.deepEqual((await admin('/api/board/cards?group_by=category&filters='+encodeURIComponent('[]'))).value.column_counts[created.id],2);
+  // Opening a custom card lists that workflow's tasks only.
+  const tasks=(await admin('/api/board/cards/101/issue/3/tasks?filters='+encodeURIComponent(JSON.stringify([{field:'category',value:created.id}])))).value.tasks;
+  assert.deepEqual(tasks.map(t=>t.id),['docs-new','docs-old']);
+  assert.equal((await admin('/api/board/cards/101/issue/3/tasks')).value.tasks.length,4);
+  // A deleted workflow keeps its cards under a name that says so.
+  await admin('/api/repositories/101/workflows/'+created.id,'DELETE',{});
+  const left=(await admin(query([{field:'category',value:created.id}]))).value.cards;
+  assert.ok(left.length>0);assert.ok(left.every(c=>c.card_category_name==='已删除的工作流'));
+  assert.ok(!(await admin('/api/board')).value.workflows.some(w=>w.id===created.id));
 });

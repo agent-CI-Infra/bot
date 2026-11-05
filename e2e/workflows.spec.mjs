@@ -5,7 +5,8 @@ import { once } from 'node:events';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
 // The assistant model: like an agent, it reads the workflows, proposes a draft through update_draft, then streams a short
-// answer in pieces (slowly enough to watch it arrive).
+// answer in pieces (slowly enough to watch it arrive). Its draft still names permissions, which are dropped: there are none
+// to configure.
 async function assistantModel() {
   const requests = [];
   const draft = { name: '文档链接检查', description: 'PR 改到文档时检查链接和示例命令',
@@ -29,7 +30,7 @@ async function assistantModel() {
   return { url: `http://127.0.0.1:${server.address().port}/v1`, requests, close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }) };
 }
 
-test('工作流页左侧列表、右侧分页编辑：内置与自定义同样可改触发源，Actions 失败处理也是工作流，聊天起草保存后才生效', async ({ page }) => {
+test('工作流页左侧列表、右侧分页编辑：触发源在概览里改并画在流程图左侧，读取不限制，Actions 失败处理也是工作流，聊天起草保存后才生效', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(), errors = [], model = await assistantModel();
   page.on('pageerror', error => errors.push(error.message));
@@ -57,37 +58,47 @@ test('工作流页左侧列表、右侧分页编辑：内置与自定义同样�
     await item('development.issue').click();
     await expect(page).toHaveURL(/#\/projects\/101\/workflows\/development\.issue$/);
     const development = detail('开发 Issue'), flow = development.locator('figure').first();
-    await expect(flow.locator('svg rect')).toHaveCount(4);
+    await expect(flow.locator('svg rect.flow-node')).toHaveCount(4);
     await expect(flow.locator('figcaption')).toContainText('Issue 分析 → 开发 → 检视 → 测试');
     await expect(flow.locator('figcaption')).toContainText('检视 → 开发：发现问题');
     await expect(flow.locator('figcaption')).toContainText('测试 → 开发：测试失败');
-    await development.getByRole('tab', { name: '触发源', exact: true }).click();
+    // The triggers are drawn on the left of the steps from the trigger list; the prompt's flowchart does not name them.
+    await expect(flow.locator('svg text.flow-trigger-label')).toHaveText(['检视发布结论', 'Issue 加标签：bot-develop']);
+    const pill = await flow.locator('svg rect.flow-trigger').first().boundingBox(), step = await flow.locator('svg rect.flow-node').first().boundingBox();
+    expect(pill.x + pill.width).toBeLessThan(step.x);
+    // There is no separate trigger tab: the triggers are chosen in the overview, under the chart.
+    await expect(development.getByRole('tab')).toHaveText(['概览', '提示词与流程', '权限与模型']);
     await expect(development.getByLabel('检视工作流发布结论后', { exact: true })).toBeChecked();
     await expect(development.getByLabel('有人给 Issue 加上标签', { exact: true })).toBeChecked();
     await expect(development.locator('.workflow-trigger code')).toHaveText('bot-develop');
     await expect(development).toContainText('无论选哪些触发源，控制面都要求');
-    await development.screenshot({ path: '.tmp/workflows/development-triggers.png' });
+    await development.screenshot({ path: '.tmp/workflows/development-overview.png' });
     await development.getByRole('tab', { name: '提示词与流程', exact: true }).click();
     await expect(development.getByLabel('控制台提示词', { exact: true })).toBeVisible();
-    await expect(development.getByLabel('启动独立 agent', { exact: false })).toBeHidden();
+    await expect(development.locator('figure').filter({ hasText: '生效的流程图' }).locator('svg text.flow-trigger-label')).toHaveCount(2);
+    // Reading is not configured: every workflow may read everything. Only writing differs, by the workflow's type.
     await development.getByRole('tab', { name: '权限与模型', exact: true }).click();
-    await expect(development.getByLabel('启动独立 agent', { exact: false })).toBeChecked();
+    await expect(development).toContainText('读取工作区、运行命令、写项目笔记、启动独立 agent、读取 GitHub：所有工作流都允许，不需要配置。');
+    await expect(development).toContainText('修改工作区代码：只在虚拟电脑里这次任务的检出中修改。');
+    await expect(development.locator('input[name^="permission:"], input[name^="scope:"]')).toHaveCount(0);
     await page.screenshot({ path: '.tmp/workflows/desktop.png', fullPage: true });
     // A built-in review: change its triggers like a custom workflow's.
     await item('review.pr').click();
-    const review = detail('检视 PR');
-    await review.getByRole('tab', { name: '触发源', exact: true }).click();
+    const review = detail('检视 PR'), reviewTriggers = review.locator('figure').first().locator('svg text.flow-trigger-label');
+    await expect(reviewTriggers).toHaveText(['PR 打开', 'PR 推送新提交', 'PR 修改或讨论', '评论提到 bot']);
     await review.getByLabel('PR head 更新（推送新提交）', { exact: true }).uncheck();
     await review.getByLabel('有人给 PR 加上标签', { exact: true }).check();
     await review.getByLabel('有人给 PR 加上标签：标签名', { exact: true }).fill('needs-review');
+    // The chart follows the ticked triggers before they are saved.
+    await expect(reviewTriggers).toHaveText(['PR 打开', 'PR 修改或讨论', 'PR 加标签：needs-review', '评论提到 bot']);
     await review.getByRole('button', { name: '保存', exact: true }).click();
     await expect(detail('检视 PR').locator('.flash')).toHaveText('已保存工作流');
-    await expect(detail('检视 PR').getByRole('tab', { name: '触发源', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(detail('检视 PR').getByRole('tab', { name: '概览', exact: true })).toHaveAttribute('aria-selected', 'true');
     let saved = (await admin('/api/repositories/101/workflows/review.pr')).value.workflow;
     expect(saved.triggers.map(trigger => trigger.id).sort()).toEqual(['comment.mention', 'pull_request.labeled', 'pull_request.opened', 'pull_request.updated']);
     expect(saved.triggers.find(trigger => trigger.id === 'pull_request.labeled').label).toBe('needs-review');
     expect((await admin('/api/repositories/101')).value.policy.review_pr_updates).toBe(0);
-    // Untouched prompt and permissions are not written: they keep following the built-in defaults.
+    // An untouched prompt is not written: it keeps following the built-in default. No permissions are saved at all.
     expect(h.store.get("SELECT permissions,prompt FROM workflows WHERE repository_id='101' AND id='review.pr'")).toEqual({ permissions: null, prompt: null });
     // Actions failure handling is managed here too, with its switch and its trigger.
     await item('actions.failures').click();
@@ -102,6 +113,8 @@ test('工作流页左侧列表、右侧分页编辑：内置与自定义同样�
     await expect(detail('Actions 失败处理').getByLabel('控制台提示词', { exact: true })).toHaveValue(/# Actions failure analysis/);
     await detail('Actions 失败处理').getByRole('tab', { name: '权限与模型', exact: true }).click();
     await expect(detail('Actions 失败处理').locator('select[name=model_id]')).toBeVisible();
+    await expect(detail('Actions 失败处理')).toContainText('启动独立 agent、读取 GitHub：所有工作流都允许');
+    await expect(detail('Actions 失败处理')).toContainText('这条工作流在控制面运行，没有虚拟电脑');
     await expect(item('actions.failures')).toContainText('运行中');
     // The assistant floats over the page: it can be moved and resized and shows the agent's work as it streams.
     await list.getByRole('button', { name: '用聊天新增', exact: true }).click();
@@ -120,7 +133,8 @@ test('工作流页左侧列表、右侧分页编辑：内置与自定义同样�
     const draftFigure = assistant.locator('figure').filter({ hasText: '草稿流程图' });
     await expect(draftFigure.locator('figcaption')).toContainText('读改动 → 核对链接 → 回复');
     await expect(draftFigure.locator('figcaption')).toContainText('核对链接 → 读改动：需要复核');
-    await expect(assistant).toContainText('已收窄到允许的范围');
+    await expect(draftFigure.locator('svg text.flow-trigger-label')).toHaveText(['PR 打开', 'PR 推送新提交']);
+    await expect(assistant).not.toContainText('草稿权限');
     await assistant.locator('.assistant-tool').filter({ hasText: 'list_workflows' }).locator('summary').click();
     await expect(assistant.locator('.assistant-tool').filter({ hasText: 'list_workflows' })).toContainText('review.pr');
     expect((await admin('/api/repositories/101/workflows')).value.workflows).toHaveLength(7);
@@ -146,18 +160,16 @@ test('工作流页左侧列表、右侧分页编辑：内置与自定义同样�
     await expect(create).toContainText('这里显示的是未保存的修改');
     await create.getByRole('tab', { name: '概览', exact: true }).click();
     await expect(create.getByLabel('名称', { exact: true })).toHaveValue('文档链接检查');
-    await create.getByRole('tab', { name: '触发源', exact: true }).click();
     await expect(create.getByLabel('PR 打开或 Ready for review', { exact: true })).toBeChecked();
     await create.getByRole('tab', { name: '权限与模型', exact: true }).click();
-    await expect(create.getByLabel('修改工作区代码', { exact: true })).toBeDisabled();
-    await expect(create.getByLabel('启动独立 agent', { exact: false })).toBeChecked();
-    await expect(create).toContainText('GitHub 写入（由控制面执行）'); await expect(create).toContainText('finish_review');
+    await expect(create).toContainText('不修改工作区代码：检出只读。');
+    await expect(create).toContainText('写入（由工作流类型决定）'); await expect(create).toContainText('finish_review');
     await create.getByRole('button', { name: '保存', exact: true }).click();
     await expect(detail('文档链接检查').locator('.flash')).toHaveText('已保存工作流');
     await expect(item('new')).toHaveCount(0);
     const workflows = (await admin('/api/repositories/101/workflows')).value.workflows, custom = workflows.find(workflow => !workflow.builtin);
     expect(custom.triggers.map(trigger => trigger.id)).toEqual(['pull_request.opened', 'pull_request.synchronize']);
-    expect(custom.permissions).toEqual({ workspace: { read: true, write: false, notes: false, shell: true }, github: ['contents', 'pull_requests'], agents: true, publication: 'reply' });
+    expect(custom.permissions).toEqual({ workspace: { read: true, write: false, notes: true, shell: true }, github: ['contents', 'issues', 'pull_requests', 'actions', 'checks', 'statuses', 'metadata'], agents: true, publication: 'reply' });
     expect(custom.prompt.effective).toContain('check -->|需要复核| read');
     expect(model.requests[0].messages[0].content).toContain('flowchart LR');
     expect(h.store.get("SELECT user_id FROM audit WHERE action='workflow.created'").user_id).toBeTruthy();

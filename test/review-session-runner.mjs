@@ -154,8 +154,7 @@ test('real Pi starts a sub-agent as a new session that sees only its own instruc
     if(!request.messages.some(message=>message.role==='tool'))return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('start_agent',{name:'reader',instructions:'Check README only.',task:'Read README and report problems.',permissions:{run_commands:false,write_notes:false}})]}}]}};
     return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('finish_review',result('Checked with an independent reader.'))]}}]}};
   }});
-  const permissions={workspace:{read:true,write:false,notes:true,shell:true},github:['contents','issues'],agents:true};
-  assert.equal((await d.h.admin('/api/repositories/101/workflows/review.issue','PUT',{permissions})).status,200);
+  // Every workflow may start agents without configuration; the main agent narrows what this one gets.
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   const child=seen.filter(request=>text(request.messages[0]).startsWith(subagentSystem)),main=seen.filter(request=>!text(request.messages[0]).startsWith(subagentSystem));

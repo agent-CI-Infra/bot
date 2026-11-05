@@ -27,7 +27,7 @@ test('observation actively exchanges a repository-read-only token, reads redacte
   const read = f.state.requests.find(r => r.path.endsWith('/actions/jobs/1/logs')), token = read.token.slice(7);
   assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token' && r.token === 'Bearer ' + token));
   const transcript = JSON.stringify(requests); assert.ok(!transcript.includes(token)); assert.ok(!transcript.includes('observation-fixture-secret')); assert.match(transcript, /missing release script/); assert.match(transcript, /REDACTED/);
-  assert.deepEqual(requests[0].tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log']);
+  assert.deepEqual(requests[0].tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log', 'start_agent']);
   assert.equal(result.observation.logs[0].first_line, 2); assert.equal(result.observation.logs[0].last_line, 4);
   assert.ok(!JSON.stringify(f.h.store.all('SELECT data FROM project_releases')).includes(token));
   assert.ok(writes(f.state).filter(r => r.path !== '/v1/chat/completions').every(r => r.path.endsWith('/git/tags') || r.path.endsWith('/git/refs')));

@@ -23,9 +23,9 @@ test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独�
     await expect(toggle).toBeChecked(); await expect(item).toContainText('运行中');
     const status = detail.locator('[data-actions-status]');
     await expect(status).toContainText('配置检查通过后');
-    await detail.getByRole('tab', { name: '触发源', exact: true }).click();
+    // Its trigger is chosen in the overview and drawn on the left of its chart.
     await expect(detail.getByLabel('默认分支的 Actions 运行失败', { exact: true })).toBeChecked();
-    await detail.getByRole('tab', { name: '概览', exact: true }).click();
+    await expect(detail.locator('figure').first().locator('svg text.flow-trigger-label')).toHaveText(['Actions 运行失败']);
     h.store.run("UPDATE actions_failure_scans SET error='actions_workflow_run_subscription_missing'");
     await expect(status).toContainText('此仓库使用的 App 安装未订阅 workflow_run', { timeout: 10000 }); await expect(status).toContainText('本功能已停止写入');
     await page.screenshot({ path: '.tmp/actions-failures/desktop.png' });
