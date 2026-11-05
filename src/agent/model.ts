@@ -66,6 +66,17 @@ export function tools(profile: { workspaceWrite: boolean; completion: 'review' |
 // The finishing tool of a workflow that runs on an event, and the writes only it has. Rerun and report are recorded when
 // called; the control plane checks the cited lines and acts after the agent finishes.
 export function eventTools(kind:string,writes:string[]){
+  if(kind==='gate.onboarding'){
+    const commands={type:'array',items:string};
+    return [fn('submit_gate_plan','Finish this turn with your reply to the person and the complete gate plan. The control plane checks the plan, shows it in the conversation and renders the gate files from it; the gate PR is opened only after the person confirms',{
+      reply:{type:'string',description:'Your message to the person in Simplified Chinese: findings, review of existing CI, each lane with its commands, sources, reasons and what you ran with its timing, the standard changes, questions'},
+      plan:{type:'object',additionalProperties:false,required:['toolchains','install','lanes','observe','workflow'],properties:{
+        toolchains:{type:'object',additionalProperties:false,properties:{node:string,python:string,go:string,java:string},description:'Version strings; empty means not set up. node runs gate.mjs (20 or later). go may name a go.mod'},
+        install:{...commands,description:'Shell commands that install dependencies before the lanes run'},
+        lanes:{type:'object',additionalProperties:false,required:['pr-ready','pr-merge','daily','release'],properties:{'pr-ready':commands,'pr-merge':commands,daily:commands,release:commands}},
+        observe:{type:'array',items:{type:'string',enum:['pr-ready','pr-merge','daily','release']},description:'Lanes whose failures are recorded without failing the gate'},
+        workflow:{type:'string',description:'Where the gate job goes: one path from targets in ../context/gate.json, or empty for the default'}}}},['reply','plan'])];
+  }
   if(kind==='release.observe')return [fn('finish_observation','Finish with your analysis of the release run. The control plane shows it beside the authoritative status, which it reads itself',
     {job_ids:{type:'array',items:{type:'integer'},description:'Ids of the failed jobs of this run that your analysis is about'},advice:{type:'string',description:'Your analysis and suggested next steps'}},['job_ids','advice'])];
   if(kind==='release.notes')return [fn('finish_release_notes','Finish with the release notes: every source id of ../context/sources.json exactly once, grouped under allowed headings. The control plane checks the groups and writes every title and link itself',

@@ -115,12 +115,12 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 | 操作 | 目标 | 权限 |
 | --- | --- | --- |
-| 接入门禁读取事实 | 源仓 | contents、pull_requests、metadata 只读；agent 另用 contents、actions 只读的任务令牌 |
+| 接入门禁的每一轮 | 源仓 | `gate.onboarding` 工作流任务的令牌：读取门禁事实和 agent 的仓库只读工具，没有 workflows 写 |
 | 门禁 PR（人确认后） | 源仓 | contents 写、pull_requests 写、workflows 写、metadata 读 |
 | 看板采集 | 源仓 | contents、issues、pull_requests、actions、metadata 只读，按安装实际授权裁剪 |
 | 看板开关 | bot 本地 | 控制台超管；不向 GitHub 写配置 |
 
-每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。门禁 PR 只从 CI-workflow 读取 `scripts/gate/gate.mjs`；门禁 job 和 `ci-gates.json` 由控制面按确认的方案生成，或合并进仓库已有的文件（只补触发事件、替换门禁 job、改方案改了的 lane），模型只能通过 `submit_gate_plan` 工具提交工具链版本、安装命令、各 lane 命令、observe 和门禁 job 的位置；触发事件、权限、job 结构、检出的提交和每个事件跑哪些 lane（`ci-gates.json` 的 `events`）由控制面按仓库事实决定。
+每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。门禁 PR 只从 CI-workflow 读取 `scripts/gate/gate.mjs`；门禁 job 和 `ci-gates.json` 由控制面按确认的方案生成，或合并进仓库已有的文件（只补触发事件、替换门禁 job、改方案改了的 lane），agent 在项目电脑里分析和试跑，只能通过结束工具 `submit_gate_plan` 交回工具链版本、安装命令、各 lane 命令、observe 和门禁 job 的位置；触发事件、权限、job 结构、检出的提交和每个事件跑哪些 lane（`ci-gates.json` 的 `events`）由控制面按仓库事实决定。
 
 ## 代码快照与发布
 

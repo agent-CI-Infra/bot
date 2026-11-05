@@ -44,11 +44,12 @@ test('工作流页左侧列表、右侧分页编辑：触发源在概览里改�
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const list = page.getByRole('complementary', { name: '工作流列表', exact: true }), item = id => list.locator(`[data-workflow-item="${id}"]`);
-    await expect(list.locator('.workflow-list:not(.shared) a')).toHaveCount(7);
+    await expect(list.locator('.workflow-list:not(.shared) a')).toHaveCount(8);
     await expect(item('review.issue')).toHaveAttribute('aria-current', 'page');
     await expect(item('review.issue').locator('.flow-path')).toHaveText('检视 → 回复');
     await expect(item('development.issue').locator('.flow-path')).toHaveText('Issue 分析 → 开发 → 检视 → 测试');
     await expect(item('actions.failures')).toContainText('Actions 失败处理');
+    await expect(item('gate.onboarding')).toContainText('接入门禁');
     // The editor sits beside the list, not under it, and uses the page width.
     const detail = name => page.getByRole('region', { name: '工作流：' + name, exact: true });
     await expect(detail('检视 Issue').locator('figure').first().locator('figcaption')).toContainText('检视 → 回复');
@@ -119,6 +120,14 @@ test('工作流页左侧列表、右侧分页编辑：触发源在概览里改�
     await expect(detail('Actions 失败处理').locator('.workflow-write').filter({ hasText: '提报 Issue' })).toContainText('report_failure');
     for (const write of ['issue', 'actions_rerun']) await expect(detail('Actions 失败处理').locator(`[name="write:${write}"]`)).toBeChecked();
     await expect(item('actions.failures')).toContainText('运行中');
+    // Gate onboarding is a workflow too: its flowchart, its only trigger and its locked write, the plan it submits.
+    await item('gate.onboarding').click();
+    const gate = detail('接入门禁');
+    await expect(gate.locator('figure').first().locator('figcaption')).toContainText('读取对话与门禁事实 → 分析仓库 → 试跑命令 → 设计各 lane → 提交方案');
+    await expect(gate).toContainText('只在项目的「接入门禁」对话里运行');
+    await gate.getByRole('tab', { name: '权限与模型', exact: true }).click();
+    await expect(detail('接入门禁').locator('.workflow-write').filter({ hasText: '提交门禁方案' })).toContainText('submit_gate_plan');
+    await expect(detail('接入门禁').locator('[name="write:gate_plan"]')).toBeChecked();
     // The assistant floats over the page: it can be moved and resized and shows the agent's work as it streams.
     await list.getByRole('button', { name: '用聊天新增', exact: true }).click();
     const assistant = page.getByRole('dialog', { name: '工作流助手', exact: true });
@@ -140,7 +149,7 @@ test('工作流页左侧列表、右侧分页编辑：触发源在概览里改�
     await expect(assistant).toContainText('草稿写入：回复评论、提报 Issue');
     await assistant.locator('.assistant-tool').filter({ hasText: 'list_workflows' }).locator('summary').click();
     await expect(assistant.locator('.assistant-tool').filter({ hasText: 'list_workflows' })).toContainText('review.pr');
-    expect((await admin('/api/repositories/101/workflows')).value.workflows).toHaveLength(7);
+    expect((await admin('/api/repositories/101/workflows')).value.workflows).toHaveLength(8);
     await page.screenshot({ path: '.tmp/workflows/assistant.png' });
     // Another page keeps the window and its conversation; after a reload the conversation comes back with the window.
     await page.getByRole('link', { name: '模型', exact: true }).click();

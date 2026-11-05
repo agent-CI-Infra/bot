@@ -30,7 +30,8 @@ export const writeCatalog: WriteDefinition[] = [
   { id: 'pull_request', title: '开或更新 bot PR', tool: 'create_pull_request', detail: '控制面固定快照、跑项目测试命令，通过后才推 bot 分支、开或更新 PR；检视和自定义工作流还要求项目的开发开关打开，只能在 Issue 上开新 PR 或更新 bot 自己的 PR。' },
   { id: 'issue', title: '提报 Issue', tool: 'create_issue', detail: '控制面以 bot 身份新建一个 Issue，正文里的 @ 提及会被转义。' },
   { id: 'actions_rerun', title: '重跑失败的 Actions 运行', tool: 'rerun_failed_run', detail: '登记后由控制面执行：每个原始运行最多重跑一次，只重跑支持 workflow_dispatch 的运行。' },
-  { id: 'release_notes', title: '写发行说明', tool: 'finish_release_notes', detail: '交出已核验来源的分组；控制面核验每个来源恰好出现一次，再写出正文。' }
+  { id: 'release_notes', title: '写发行说明', tool: 'finish_release_notes', detail: '交出已核验来源的分组；控制面核验每个来源恰好出现一次，再写出正文。' },
+  { id: 'gate_plan', title: '提交门禁方案', tool: 'submit_gate_plan', detail: '交出回复和门禁方案；控制面核对后显示在接入门禁对话里，人看过将提交的文件并确认后，才由控制面开门禁 PR。' }
 ];
 const writeIds = writeCatalog.map(write => write.id);
 // Which writes a workflow can be given, which it starts with and which it cannot drop (the write that ends its task).
@@ -40,14 +41,15 @@ const writeSets: Record<string, { options: string[]; defaults: string[]; locked:
   custom: { options: ['reply', 'labels', 'code', 'pull_request', 'issue'], defaults: ['reply'], locked: [] },
   'release.observe': { options: ['issue'], defaults: [], locked: [] },
   'release.notes': { options: ['release_notes', 'issue'], defaults: ['release_notes'], locked: [] },
-  actions: { options: ['actions_rerun', 'issue'], defaults: ['actions_rerun', 'issue'], locked: [] }
+  actions: { options: ['actions_rerun', 'issue'], defaults: ['actions_rerun', 'issue'], locked: [] },
+  gate: { options: ['gate_plan'], defaults: ['gate_plan'], locked: ['gate_plan'] }
 };
 /** `short` names the trigger in a workflow's flowchart. */
-export interface TriggerDefinition { id: string; title: string; short: string; object: 'issue' | 'pr' | 'any' | 'release' | 'review' | 'actions'; label?: boolean; note?: string }
+export interface TriggerDefinition { id: string; title: string; short: string; object: 'issue' | 'pr' | 'any' | 'release' | 'review' | 'actions' | 'repository'; label?: boolean; note?: string }
 export interface BuiltinWorkflow {
   id: string; name: string; description: string;
-  base: 'review' | 'development' | 'release.observe' | 'release.notes' | 'actions';
-  object: 'issue' | 'pr' | 'release' | 'actions';
+  base: 'review' | 'development' | 'release.observe' | 'release.notes' | 'actions' | 'gate';
+  object: 'issue' | 'pr' | 'release' | 'actions' | 'repository';
   /** Where the prompt's console layer is saved and which repository file replaces it. */
   prompt: { rule?: string; repository?: string; builtin: string };
   /** The triggers this workflow can be given; its defaults are all of them unless the policy switches say otherwise. */
@@ -69,7 +71,8 @@ export const triggers: TriggerDefinition[] = [
   { id: 'comment.mention', title: '评论提到 bot', short: '评论提到 bot', object: 'any' },
   { id: 'review.published', title: '检视工作流发布结论后', short: '检视发布结论', object: 'review', note: '开发 Issue：结论要求改代码；跟进 bot PR：检视发布了可执行意见（在修订轮数内）' },
   { id: 'release.manual', title: '「发版本」页的操作', short: '发版本页操作', object: 'release' },
-  { id: 'actions.run_failed', title: '默认分支的 Actions 运行失败', short: 'Actions 运行失败', object: 'actions', note: 'workflow_run 事件，另有每分钟扫描兜底' }
+  { id: 'actions.run_failed', title: '默认分支的 Actions 运行失败', short: 'Actions 运行失败', object: 'actions', note: 'workflow_run 事件，另有每分钟扫描兜底' },
+  { id: 'gate.manual', title: '「接入门禁」对话里开始或回复', short: '接入门禁对话', object: 'repository' }
 ];
 // The triggers a custom workflow can use: events on the Issue or pull request it replies on.
 export const customTriggerIds = triggers.filter(trigger => ['issue', 'pr', 'any'].includes(trigger.object)).map(trigger => trigger.id);
@@ -94,7 +97,11 @@ export const builtinWorkflows: BuiltinWorkflow[] = [
   // The model classifies a failed run; the control plane checks the log lines it cites and keeps the single rerun, the
   // reports and their redaction. The Issue review workflow then reviews each report.
   { id: 'actions.failures', name: 'Actions 失败处理', base: 'actions', object: 'actions', description: '默认分支的 Actions 运行失败后，由模型分析失败原因：外部原因最多重跑原运行一次，代码缺陷或不明原因提报 Issue，再由检视 Issue 接手。',
-    prompt: { builtin: prompt('actions-failures.md') }, triggers: ['actions.run_failed'], }
+    prompt: { builtin: prompt('actions-failures.md') }, triggers: ['actions.run_failed'], },
+  // The gate onboarding conversation: each turn is a task on a checkout of the default branch; the plan goes back to the
+  // conversation, and only a person's confirmation makes the control plane open the gate PR.
+  { id: 'gate.onboarding', name: '接入门禁', base: 'gate', object: 'repository', description: '在「接入门禁」对话里分析仓库、设计各 lane 的门禁命令并回答问题；人确认方案后，控制面才开门禁 PR。',
+    prompt: { builtin: prompt('gate-onboarding.md') }, triggers: ['gate.manual'], }
 ];
 export const builtinWorkflow = (id: string) => builtinWorkflows.find(workflow => workflow.id === id);
 export const triggerOptions = (id: string) => builtinWorkflow(id)?.triggers ?? customTriggerIds;

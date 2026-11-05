@@ -1,7 +1,14 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { parse } from 'yaml';
-import { gateFixture, answer, writes, branchOf } from '../test/gate-onboarding-fixtures.mjs';
+import { gateFixture, writes, branchOf } from '../test/gate-onboarding-fixtures.mjs';
+
+const lanes = (values = {}) => ({ 'pr-ready': [], 'pr-merge': [], daily: [], release: [], ...values });
+// Plays the project computer once the console has queued a turn: the turn's task runs and the console picks up its result.
+async function runTurn(f) {
+  await expect.poll(() => f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='gate.onboarding' AND status='queued'").n).toBe(1);
+  await f.turn();
+}
 
 async function login(page, f) {
   await page.goto(f.h.admin);
@@ -15,10 +22,10 @@ test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，�
   mkdirSync('.tmp', { recursive: true });
   const cleanup = [], errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  const f = await gateFixture({ after: fn => cleanup.push(fn) }, { model: async input => input.conversation.length <= 1
-    ? answer('仓库是 Python 项目，Makefile 里有 build、lint、test。建议 pr-ready 跑 make build、make lint 和 make test；默认分支启用了 merge queue，队列里会先重跑 pr-ready 再跑 pr-merge。Python 依赖在 CI 里怎么安装？',
-      { toolchains: { python: '3.12' }, lanes: { 'pr-ready': ['make build', 'make lint', 'make test'] } })
-    : answer('已按你的说法加入安装命令。', { toolchains: { python: '3.12' }, install: ['pip install -e ".[test]"'], lanes: { 'pr-ready': ['make build', 'make lint', 'make test'] } }) });
+  const f = await gateFixture({ after: fn => cleanup.push(fn) }, { agent: ({ conversation, plan }) => conversation.length <= 1
+    ? { reply: '在项目电脑里看了仓库：Python 项目，Makefile 里有 build、lint、test，三条都试跑通过，共 40 秒。建议 pr-ready 跑 make build、make lint 和 make test；默认分支启用了 merge queue，队列里会先重跑 pr-ready 再跑 pr-merge。Python 依赖在 CI 里怎么安装？',
+      plan: { ...plan, toolchains: { ...plan.toolchains, python: '3.12' }, lanes: lanes({ 'pr-ready': ['make build', 'make lint', 'make test'] }) } }
+    : { reply: '已按你的说法加入安装命令。', plan: { ...plan, install: ['pip install -e ".[test]"'] } } });
   try {
     f.state.repos['octo/hello'].queue = 'ruleset';
     await login(page, f);
@@ -44,7 +51,12 @@ test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，�
     await page.setViewportSize({ width: 1440, height: 900 });
 
     await dialog.getByRole('button', { name: '开始适配', exact: true }).click();
+    // Each turn is a task in the project computer: the dialog says where it is and links to its process.
+    await expect(dialog.locator('.gate-message-pending')).toContainText('agent 排队等待项目电脑');
+    await expect(dialog.locator('#gate-onboarding-turn').getByRole('button', { name: '查看执行过程', exact: true })).toBeVisible();
+    await runTurn(f);
     await expect(dialog.locator('.gate-message-agent').first()).toContainText('Makefile 里有 build、lint、test');
+    await expect(dialog.locator('#gate-onboarding-turn')).toBeHidden();
     await expect(dialog.locator('.gate-message-system').first()).toContainText('merge queue：已启用');
     await expect(dialog.locator('#gate-onboarding-queue')).toContainText('队列里先跑 pr-ready 再跑 pr-merge');
     const lane = name => dialog.locator(`textarea[name="lane_${name}"]`);
@@ -53,9 +65,10 @@ test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，�
     await expect(lane('pr-merge')).toBeEditable();
     await dialog.getByLabel('发给 agent').fill('依赖用 pip install -e ".[test]"');
     await dialog.getByRole('button', { name: '发送', exact: true }).click();
+    await runTurn(f);
     await expect(dialog.locator('.gate-message-agent').nth(1)).toContainText('已按你的说法加入安装命令');
     await expect(dialog.locator('textarea[name=install]')).toHaveValue('pip install -e ".[test]"');
-    await expect(dialog.locator('#gate-onboarding-plan-title')).toHaveText('门禁方案 · 第 2 版');
+    await expect(dialog.locator('#gate-onboarding-plan-title')).toHaveText('门禁方案 · 第 3 版');
     // Still nothing in the repository: no branch, no file, no PR.
     expect(writes(f.state)).toEqual([]);
     await dialog.locator('#gate-onboarding-preview summary').click();
@@ -79,18 +92,27 @@ test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，�
   } finally { for (const fn of cleanup.reverse()) await fn(); }
 });
 
-test('没有模型的仓库也能看到按事实整理的方案，回答 merge queue 后直接确认', async ({ page }) => {
+test('没有启动的项目只能看介绍；启动、虚拟电脑就绪后才能开始，回答 merge queue 后确认', async ({ page }) => {
   const cleanup = [], errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  const f = await gateFixture({ after: fn => cleanup.push(fn) });
+  const f = await gateFixture({ after: fn => cleanup.push(fn) }, { ready: false });
   try {
     f.state.repos['octo/hello'].queue = 'hidden';
     await login(page, f);
     await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
-    const dialog = page.locator('#quickstart-view');
+    let dialog = page.locator('#quickstart-view');
+    await expect(dialog.locator('#gate-onboarding-lanes dt', { hasText: /^pr-ready$/ })).toBeVisible();
+    await expect(dialog.locator('#gate-onboarding-ready')).toContainText('项目还没有启动');
+    await expect(dialog.getByRole('button', { name: '开始适配', exact: true })).toBeDisabled();
+    expect(f.h.store.get('SELECT count(*) n FROM gate_onboarding_sessions').n).toBe(0);
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click();
+    await f.startProject();
+    await page.reload();
+    await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
+    dialog = page.locator('#quickstart-view');
     await dialog.getByRole('button', { name: '开始适配', exact: true }).click();
-    await expect(dialog.locator('.gate-message-system').nth(1)).toContainText('还没有启动，没有可用的模型');
-    await expect(dialog.locator('#gate-onboarding-compose')).toBeHidden();
+    await runTurn(f);
+    await expect(dialog.locator('.gate-message-agent')).toContainText('方案见右侧');
     const confirm = dialog.getByRole('button', { name: '确认并创建门禁 PR', exact: true });
     await expect(confirm).toBeDisabled();
     await expect(dialog.locator('#gate-onboarding-note')).toContainText('回答 merge queue 问题后才能确认');
@@ -119,6 +141,7 @@ test('已有 CI 的仓库：把门禁 job 并入已有 ci.yml 前先看到改动
     await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
     const dialog = page.locator('#quickstart-view');
     await dialog.getByRole('button', { name: '开始适配', exact: true }).click();
+    await runTurn(f);
     const place = dialog.getByLabel('门禁 job 放在');
     await expect(place).toHaveValue('.github/workflows/ci-gates.yml');
     await place.selectOption('.github/workflows/ci.yml');

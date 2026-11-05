@@ -12,7 +12,8 @@ export async function gateOnboardingApi(gate: GateOnboarding | undefined, user: 
   if (project) {
     superAdmin(user);
     if (!gate) return fail(404, 'not_found');
-    if (method === 'GET') return { session: gate.latest(project[1]!) };
+    // ready says whether the project can use gate onboarding now (started, computer ready, workflow on, model configured).
+    if (method === 'GET') return { session: gate.latest(project[1]!), ready: gate.readiness(project[1]!) };
     if (method === 'POST') { fields(input, []); return { session: gate.start(project[1]!) }; }
     return fail(404, 'not_found');
   }

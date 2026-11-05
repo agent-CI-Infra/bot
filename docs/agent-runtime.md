@@ -7,7 +7,7 @@
 两种 transport 使用同一入口：
 
 - 工作区任务使用 `loop.ts` 的 Pi mailbox adapter，在隔离项目电脑中读取文件、执行命令和产生修改。`profiles.ts` 把固定的硬限制和工作流提示词组合成系统提示，并按工作流保存的权限生成工具和显式 capabilities。
-- CI 观察（`release.observe`）、发行说明（`release.notes`）和 Actions 失败处理（`actions.failures`）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 只留给控制面的对话助手（工作流助手、门禁接入）。
+- CI 观察（`release.observe`）、发行说明（`release.notes`）、Actions 失败处理（`actions.failures`）和接入门禁（`gate.onboarding`，对话的每一轮是一个任务）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 只留给控制面的工作流助手。
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
 
