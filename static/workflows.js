@@ -1,7 +1,8 @@
 // Workflows page (#/projects/<id>/workflows/<item>). Every workflow, built-in or added here, has the same parts: a name, a
-// switch, triggers, a prompt (whose ```mermaid flowchart is drawn here), permissions and a model. The page lists them on
-// the left and edits the selected one on the right, in tabs; a floating assistant drafts prompt and permissions, and
-// nothing takes effect until the administrator saves. Unsaved edits and assistant conversations are kept in this browser
+// switch, triggers, a prompt (whose ```mermaid flowchart is drawn here, with the triggers on its left) and a model. What
+// its agent may do is not configured: reading is open to every workflow and writing follows its type. The page lists the
+// workflows on the left and edits the selected one on the right, in tabs; a floating assistant drafts triggers and prompt,
+// and nothing takes effect until the administrator saves. Unsaved edits and assistant conversations are kept in this browser
 // per project and workflow, so leaving the page loses neither. Loaded after project.js.
 
 // The first ```mermaid flowchart block of a prompt: nodes in order of appearance, and every edge with its label.
@@ -48,24 +49,42 @@ function flowText(flow) {
 let flowFigures = 0;
 // Steps left to right; an edge to the next step is a straight arrow, an edge back (a review or test sending work back)
 // arcs below the row and a jump forward arcs above it. The words of flowText are the figure's caption.
-function flowFigure(flow, title = '流程图') {
-  const figure = element('figure', '', 'workflow-flow');
-  if (!flow) { figure.append(element('p', '这份提示词里没有流程图。在提示词里加一个 ```mermaid 代码块（以 flowchart LR 开头）即可在这里显示。', 'muted')); return figure; }
+// `triggers` (the names of the workflow's triggers) are drawn as a column on the left feeding the first step: they come
+// from the workflow's trigger list, not from the prompt, so they never appear in its mermaid block. A prompt without a
+// flowchart still shows its triggers, feeding one step.
+function flowFigure(flow, title = '流程图', triggers = null) {
+  const figure = element('figure', '', 'workflow-flow'), missing = '这份提示词里没有流程图。在提示词里加一个 ```mermaid 代码块（以 flowchart LR 开头）即可在这里显示。';
+  if (!flow && !triggers) { figure.append(element('p', missing, 'muted')); return figure; }
+  const steps = flow || { nodes: [{ id: 'prompt', label: '按提示词执行' }], edges: [] };
   const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg'), marker = 'flow-arrow-' + (++flowFigures);
   const make = (tag, attributes, text) => { const node = document.createElementNS(ns, tag); for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value)); if (text !== undefined) node.textContent = text; return node; };
-  const width = label => Math.max(72, [...label].reduce((sum, char) => sum + (/[⺀-￿]/.test(char) ? 14 : 7.6), 0) + 30);
-  const index = new Map(flow.nodes.map((node, at) => [node.id, at])), boxes = [], gap = 48, height = 40;
-  const edges = flow.edges.filter(edge => index.has(edge.from) && index.has(edge.to) && edge.from !== edge.to);
+  const measure = (label, wide, narrow, pad) => [...label].reduce((sum, char) => sum + (/[⺀-￿]/.test(char) ? wide : narrow), 0) + pad;
+  const width = label => Math.max(72, measure(label, 14, 7.6, 30));
+  const index = new Map(steps.nodes.map((node, at) => [node.id, at])), boxes = [], gap = 48, height = 40;
+  const edges = steps.edges.filter(edge => index.has(edge.from) && index.has(edge.to) && edge.from !== edge.to);
   const span = edge => index.get(edge.to) - index.get(edge.from), above = edges.filter(edge => span(edge) > 1), below = edges.filter(edge => span(edge) < 0);
-  const lift = above.length ? 34 + 20 * above.length : 12, top = lift, drop = below.length ? 40 + 24 * below.length : 12;
-  let x = 8;
-  for (const node of flow.nodes) { const w = width(node.label); boxes.push({ x, w }); x += w + gap; }
-  const total = x - gap + 8, rowY = top, centre = rowY + height / 2;
-  svg.setAttribute('viewBox', `0 0 ${total} ${top + height + drop}`); svg.setAttribute('width', String(total)); svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', title + '：' + flowText(flow).join('；'));
+  // The trigger column: pills stacked beside the row, with the caption 触发源 above them.
+  const sources = triggers ? (triggers.length ? triggers : ['没有触发源']) : [], pill = 28, pillGap = 8;
+  const pillWidth = sources.length ? Math.max(64, ...sources.map(label => measure(label, 12.5, 6.8, 24))) : 0, column = sources.length * pill + Math.max(0, sources.length - 1) * pillGap;
+  const lift = above.length ? 34 + 20 * above.length : 12, top = sources.length ? Math.max(lift, 26) : lift, drop = below.length ? 40 + 24 * below.length : 12;
+  const band = Math.max(height, column), rowY = top + (band - height) / 2, centre = rowY + height / 2, pillTop = top + (band - column) / 2;
+  let x = sources.length ? 8 + pillWidth + 56 : 8;
+  for (const node of steps.nodes) { const w = width(node.label); boxes.push({ x, w }); x += w + gap; }
+  const total = x - gap + 8, tall = Math.max(top + band + 12, rowY + height + drop);
+  svg.setAttribute('viewBox', `0 0 ${total} ${tall}`); svg.setAttribute('width', String(total)); svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', title + '：' + (triggers ? '触发源 ' + sources.join('、') + '；' : '') + (flow ? flowText(flow).join('；') : missing));
   const defs = make('defs', {}), head = make('marker', { id: marker, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' });
   head.append(make('path', { d: 'M0,0 L10,5 L0,10 z', class: 'flow-arrowhead' })); defs.append(head); svg.append(defs);
   const label = (text, at, y) => { if (text) svg.append(make('text', { x: at, y, 'text-anchor': 'middle', class: 'flow-edge-label' }, text)); };
+  if (sources.length) {
+    svg.append(make('text', { x: 8 + pillWidth / 2, y: pillTop - 8, 'text-anchor': 'middle', class: 'flow-trigger-caption' }, '触发源'));
+    sources.forEach((source, at) => {
+      const y = pillTop + at * (pill + pillGap), none = !triggers.length;
+      if (!none) svg.append(make('path', { d: `M${8 + pillWidth},${y + pill / 2} C${8 + pillWidth + 28},${y + pill / 2} ${boxes[0].x - 28},${centre} ${boxes[0].x - 2},${centre}`, class: 'flow-edge flow-trigger-edge', 'marker-end': `url(#${marker})` }));
+      svg.append(make('rect', { x: 8, y, width: pillWidth, height: pill, rx: pill / 2, class: 'flow-trigger' + (none ? ' flow-trigger-none' : '') }));
+      svg.append(make('text', { x: 8 + pillWidth / 2, y: y + pill / 2 + 4, 'text-anchor': 'middle', class: 'flow-trigger-label' }, source));
+    });
+  }
   edges.forEach(edge => {
     const from = boxes[index.get(edge.from)], to = boxes[index.get(edge.to)], step = span(edge);
     if (step === 1) {
@@ -80,14 +99,14 @@ function flowFigure(flow, title = '流程图') {
       label(edge.label, (x1 + x2) / 2, back ? apex + 13 : apex - 5);
     }
   });
-  flow.nodes.forEach((node, at) => {
+  steps.nodes.forEach((node, at) => {
     const box = boxes[at];
-    svg.append(make('rect', { x: box.x, y: rowY, width: box.w, height, rx: 8, class: 'flow-node' }));
+    svg.append(make('rect', { x: box.x, y: rowY, width: box.w, height, rx: 8, class: 'flow-node' + (flow ? '' : ' flow-node-missing') }));
     svg.append(make('text', { x: box.x + box.w / 2, y: centre + 5, 'text-anchor': 'middle', class: 'flow-node-label' }, node.label));
   });
   const scroll = element('div', '', 'workflow-flow-canvas'); scroll.append(svg);
   const caption = element('figcaption', ''), lines = flowText(flow);
-  caption.append(element('strong', title + '：'), element('span', lines[0], 'flow-path'));
+  caption.append(element('strong', title + '：'), ...(triggers ? [element('span', '触发源 ' + sources.join('、') + ' →', 'flow-triggers')] : []), element('span', flow ? lines[0] : missing, 'flow-path'));
   for (const line of lines.slice(1)) caption.append(element('span', line, 'flow-loop'));
   figure.append(scroll, caption); return figure;
 }
@@ -99,9 +118,10 @@ const writeTools = { reply: 'agent 调用 finish_review 交出总结和意见；
   pull_request: 'agent 调用 create_pull_request 交出修改；控制面固定快照、跑项目测试，复核开发标签和指派人后推 bot 分支、开或更新 PR。',
   release_notes: '模型只给已核验的来源分组；控制面写出说明正文，起草和发布仍在「发版本」页由人操作。',
   actions: '模型只给出分类和依据；控制面按分类最多重跑原运行一次，或提报、评论 Issue。', none: '不写 GitHub。' };
-const workflowPermissionNames = [['read', '读取工作区'], ['shell', '运行命令'], ['notes', '写项目笔记'], ['write', '修改工作区代码']];
-const scopeNames = { contents: '代码', issues: 'Issue', pull_requests: 'PR', actions: 'Actions', checks: '检查', statuses: '提交状态', metadata: '元数据' };
-const workflowTabs = [['overview', '概览'], ['triggers', '触发源'], ['prompt', '提示词与流程'], ['access', '权限与模型']];
+// What every workflow may read; a workflow outside the virtual computer has no workspace, so it reads GitHub only.
+const workflowReads = workflow => (workflow?.computer === false ? ['启动独立 agent', '读取 GitHub'] : ['读取工作区', '运行命令', '写项目笔记', '启动独立 agent', '读取 GitHub']);
+const githubReadScope = '代码、Issue、PR、Actions、检查和提交状态';
+const workflowTabs = [['overview', '概览'], ['prompt', '提示词与流程'], ['access', '权限与模型']];
 const workflowModelName = workflow => {
   const model = current.models.find(entry => entry.id === (workflow.model.id || workflow.model.default_id));
   const name = model ? model.model_name : (workflow.model.id || workflow.model.default_id) ? `模型不可用（${workflow.model.id || workflow.model.default_id}）` : '未选择';
@@ -114,7 +134,8 @@ const promptLocation = workflow => workflow.prompt.source === 'repository' ? wor
   : workflow.id === 'release.notes' ? 'release-notes-v1' : workflow.prompt.path || 'docs/prompts（内置）';
 const workflowState = workflow => workflow.active ? badge('运行中', 'success') : !workflow.enabled ? badge('已关闭', 'warning')
   : badge(workflow.project_switch && !workflow.project_switch.on ? workflow.project_switch.title + '已关' : '项目已禁用', 'warning');
-const triggerTitle = (workflow, trigger) => { const option = workflow.trigger_options.find(entry => entry.id === trigger.id); return (option?.title || trigger.id) + (trigger.label ? `（${trigger.label}）` : option?.fixed_label ? `（${option.fixed_label}）` : ''); };
+// A trigger as the flowchart names it: its short name, with the label of a label trigger.
+const triggerName = (options, trigger) => { const option = options.find(entry => entry.id === trigger.id); return (option?.short || option?.title || trigger.id) + (trigger.label ? '：' + trigger.label : option?.fixed_label ? '：' + option.fixed_label : ''); };
 // The selected item: a workflow id, 'new' for a workflow being added, or one of the shared rule pages.
 const sharedItems = [['rules.guide', '行为指南', '.bot/guide.md'], ['rules.labels', '检视标签', '.bot/rules/labels.md'], ['rules.files', '其他规则文件', null]];
 function workflowItem() {
@@ -218,10 +239,9 @@ const promptMeta = workflow => [badge('生效：' + layerNames[workflow.prompt.s
 // One editor for every workflow, in tabs; the chat opens beside it. A built-in workflow writes each part where it always
 // lived; a custom one is one record.
 function workflowEditor(workflow, { chat, notice }) {
-  const custom = !workflow?.builtin, catalog = current.workflows.triggers, scopes = current.workflows.github_scopes;
-  const options = workflow?.trigger_options || catalog.filter(entry => ['issue', 'pr', 'any'].includes(entry.object)).map(({ id, title, label, note }) => ({ id, title, label: !!label, ...(note ? { note } : {}) }));
-  const ceiling = workflow?.ceiling || { workspace: { read: true, write: false, notes: true, shell: true }, github: scopes, agents: true, publication: 'reply' };
-  const permissions = workflow?.permissions || { workspace: { read: true, write: false, notes: true, shell: true }, github: scopes.filter(scope => scope !== 'statuses'), agents: false, publication: 'reply' };
+  const custom = !workflow?.builtin, catalog = current.workflows.triggers;
+  const options = workflow?.trigger_options || catalog.filter(entry => ['issue', 'pr', 'any'].includes(entry.object)).map(({ id, title, short, label, note }) => ({ id, title, short, label: !!label, ...(note ? { note } : {}) }));
+  const permissions = workflow?.permissions || { workspace: { read: true, write: false, notes: true, shell: true }, agents: true, publication: 'reply' };
   const form = document.createElement('form'), message = element('p', '', 'view-error'), shell = element('div', '', 'workflow-shell');
   form.className = 'project-form workflow-editor'; form.noValidate = true; form.setAttribute('aria-label', workflow ? `工作流 ${workflow.name}` : '新工作流'); message.setAttribute('role', 'alert');
   // Header: what it is and whether it runs, with the actions that apply to the whole form.
@@ -247,12 +267,16 @@ function workflowEditor(workflow, { chat, notice }) {
     tabs.append(tab); panels.set(key, [tab, panel]);
   }
   const panel = key => panels.get(key)[1];
-  // Overview: name, description, switch and the flowchart of the effective prompt.
+  // Overview: name, description, switch, then the workflow drawn with its triggers, and the triggers to choose from.
   const switchBox = workflow?.id === 'actions.failures' ? checkbox('enabled', workflow.enabled, '启用这条工作流（默认关闭；首次开启不补报之前已完成的运行）') : checkbox('enabled', workflow ? workflow.enabled : true, '启用这条工作流');
   panel('overview').append(field('名称', input('name', workflow?.name || '', { required: true })), field('说明', textarea('description', workflow?.description || '', { rows: 2 })), switchBox);
   if (workflow?.project_switch && !workflow.project_switch.on) panel('overview').append(element('p', `${workflow.project_switch.title}已关闭，这条工作流现在不会运行；在项目列表打开${workflow.project_switch.title.replace('项目的', '')}后生效。`, 'endpoint-warning'));
   if (workflow?.status !== undefined) panel('overview').append(actionsStatusLine(workflow));
-  if (workflow) panel('overview').append(flowFigure(parseFlow(workflow.prompt.effective), '流程图'), workflowSummary(workflow));
+  // Every chart of this workflow shows the triggers ticked below, saved or not, so a change is seen at once.
+  const charts = [], chart = (text, title) => { const box = element('div', '', 'workflow-chart'); charts.push([box, text, title]); return box; };
+  const drawCharts = () => { const names = chosenTriggers().map(trigger => triggerName(options, trigger)); for (const [box, text, title] of charts) box.replaceChildren(flowFigure(parseFlow(text()), title, names)); drawPreview(); };
+  // A saved workflow shows what runs now; a new one shows the prompt being written.
+  panel('overview').append(chart(() => workflow ? workflow.prompt.effective : editor.value, '流程图'));
   // Triggers: the same catalog for every workflow; the conditions the control plane checks stay whatever is chosen.
   const triggerBox = element('div', '', 'workflow-triggers'), chosen = workflow?.triggers || [];
   for (const option of options) {
@@ -263,15 +287,16 @@ function workflowEditor(workflow, { chat, notice }) {
     if (option.note) row.append(element('span', option.note, 'muted'));
     triggerBox.append(row);
   }
-  panel('triggers').append(triggerBox, note(triggerRules(workflow)));
+  panel('overview').append(element('h3', '触发源'), triggerBox, note(triggerRules(workflow)), ...(workflow ? [workflowSummary(workflow)] : []));
+  triggerBox.addEventListener('change', drawCharts); triggerBox.addEventListener('input', drawCharts);
   // Prompt: the effective text and its flowchart, then the console layer being edited with a live flowchart.
   const prompt = workflow?.prompt, consoleLayer = prompt?.layers.find(layer => layer.source === 'console');
   const startText = custom ? prompt?.effective || '' : consoleLayer?.content ?? (workflow.id === 'release.notes' ? '' : prompt.layers[0].content);
   const editor = textarea('prompt', startText, { rows: 18, spellcheck: false, className: 'code' }); editor.setAttribute('aria-label', custom ? '提示词' : '控制台提示词');
   if (workflow?.id === 'release.notes') editor.placeholder = '留空时使用内置 release-notes-v1：只列出已核验的提交和合并 PR。写入后按这里的要求整理分组，来源仍由控制面核验。';
   // The chart of the text being edited, while it differs from the effective prompt.
-  const preview = element('div', '', 'workflow-flow-preview'), drawPreview = () => preview.replaceChildren(...(!editor.value.trim() || workflow && editor.value === prompt.effective ? [] : [flowFigure(parseFlow(editor.value), '编辑中的流程图')]));
-  let timer = null; editor.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(drawPreview, 200); }); drawPreview();
+  const preview = element('div', '', 'workflow-flow-preview'), drawPreview = () => preview.replaceChildren(...(!editor.value.trim() || workflow && editor.value === prompt.effective ? [] : [flowFigure(parseFlow(editor.value), '编辑中的流程图', chosenTriggers().map(trigger => triggerName(options, trigger)))]));
+  let timer = null; editor.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(drawCharts, 200); });
   {
     if (workflow) {
       const meta = element('div', '', 'rule-meta'); meta.dataset.promptMeta = ''; meta.append(...promptMeta(workflow)); panel('prompt').append(meta);
@@ -281,27 +306,20 @@ function workflowEditor(workflow, { chat, notice }) {
     const columns = element('div', '', 'workflow-prompt-columns'), left = element('div'), right = element('div');
     left.append(field(custom ? '提示词' : '控制台提示词', editor));
     if (!custom && consoleLayer) left.append(checkbox('clear_prompt', false, '清除控制台提示词，回到' + (prompt.layers.some(layer => layer.source === 'repository') ? '仓库文件' : '内置默认')));
-    right.append(...(workflow ? [flowFigure(parseFlow(prompt.effective), '生效的流程图')] : []), preview, ...(workflow ? [collapsible(`当前生效内容（${prompt.effective.split('\n').length} 行）`, prompt.effective)] : []));
+    right.append(...(workflow ? [chart(() => prompt.effective, '生效的流程图')] : []), preview, ...(workflow ? [collapsible(`当前生效内容（${prompt.effective.split('\n').length} 行）`, prompt.effective)] : []));
     columns.append(left, right); panel('prompt').append(columns);
   }
-  // Permissions and model: never above the ceiling; publication follows the workflow.
-  const permissionBox = element('div', '', 'workflow-permissions');
-  {
-    for (const [key, caption] of workflowPermissionNames) {
-      const box = checkbox('permission:' + key, permissions.workspace[key], caption); box.querySelector('input').disabled = !ceiling.workspace[key];
-      if (!ceiling.workspace[key]) box.title = '这条工作流不能打开这项权限'; permissionBox.append(box);
-    }
-    const agents = checkbox('permission:agents', permissions.agents, '启动独立 agent（start_agent：独立会话，权限不超过本工作流）'); agents.querySelector('input').disabled = !ceiling.agents; permissionBox.append(agents);
-    const scopeBox = element('div', '', 'workflow-scopes'); scopeBox.append(element('span', 'GitHub 只读范围：', 'muted'));
-    for (const scope of scopes) { const box = checkbox('scope:' + scope, permissions.github.includes(scope), scopeNames[scope] || scope); box.querySelector('input').disabled = !ceiling.github.includes(scope); scopeBox.append(box); }
-    permissionBox.append(scopeBox);
-  }
-  permissionBox.append(note('运行中的模型和仓库内容都不能改这些权限；子 agent 只能在这里保存的范围内再收窄。'));
+  // Permissions are not configured: reading is open to every workflow, writing follows the workflow's type.
+  const reads = element('div', '', 'workflow-permissions'), computer = workflow?.computer !== false;
+  reads.append(element('p', workflowReads(workflow).join('、') + '：所有工作流都允许，不需要配置。'),
+    note(`GitHub 用只读令牌读取仓库的${githubReadScope}，令牌由执行器保管、任务结束即撤销。` + (computer ? '' : '这条工作流在控制面运行，没有虚拟电脑，所以没有工作区、命令和项目笔记。')),
+    note('独立 agent（start_agent）有自己的会话，权限不超过主 agent，启动时还可以再收窄；它不能发布，也不能再启动 agent。'));
   // GitHub writes are not agent permissions: the agent hands its result to a platform tool and the control plane writes it.
   const writes = element('div', '', 'workflow-writes');
-  writes.append(element('p', publicationNames[ceiling.publication]), note(writeTools[ceiling.publication]),
+  writes.append(element('p', permissions.workspace.write ? '修改工作区代码：只在虚拟电脑里这次任务的检出中修改。' : computer ? '不修改工作区代码：检出只读。' : '没有工作区。'),
+    element('p', publicationNames[permissions.publication]), note(writeTools[permissions.publication]),
     note('写入由控制面用 GitHub App 安装令牌（或登记的机器人账号）完成：先核对对象、head 和权限条件，再经发布队列写入，结果不明时先对账、不重复写。agent 只拿得到只读令牌，不能在命令里推送、评论、加标签或合并。'));
-  panel('access').append(element('h3', '权限'), permissionBox, element('h3', 'GitHub 写入（由控制面执行）'), writes);
+  panel('access').append(element('h3', '读取（不限制）'), reads, element('h3', '写入（由工作流类型决定）'), writes);
   const model = document.createElement('select'); model.name = 'model_id';
   {
     const defaultModel = current.models.find(entry => entry.id === current.policy.model_id);
@@ -319,12 +337,14 @@ function workflowEditor(workflow, { chat, notice }) {
     note('两条开发工作流共用这些设置。控制面在发布前运行测试命令，测试失败不推分支、不开 PR。'));
   const main = element('div', '', 'workflow-main');
   main.append(tabs, ...[...panels.values()].map(([, element]) => element));
+  function chosenTriggers() {
+    const elements = triggerBox.querySelectorAll('input');
+    const value = name => [...elements].find(input => input.name === name);
+    return options.filter(option => value('trigger:' + option.id)?.checked).map(option => ({ id: option.id, ...(option.label ? { label: value('trigger-label:' + option.id).value.trim() } : {}) }));
+  }
   const values = () => {
-    const elements = form.elements, permission = key => !!elements['permission:' + key]?.checked;
-    return { name: elements.name.value, description: elements.description.value, enabled: elements.enabled.checked, prompt: editor.value,
-      triggers: options.filter(option => elements['trigger:' + option.id].checked).map(option => ({ id: option.id, ...(option.label ? { label: elements['trigger-label:' + option.id].value.trim() } : {}) })),
-      permissions: { workspace: Object.fromEntries(workflowPermissionNames.map(([key]) => [key, permission(key)])), github: scopes.filter(scope => elements['scope:' + scope]?.checked), agents: permission('agents') },
-      model_id: model.value || null };
+    const elements = form.elements;
+    return { name: elements.name.value, description: elements.description.value, enabled: elements.enabled.checked, prompt: editor.value, triggers: chosenTriggers(), model_id: model.value || null };
   };
   // A chat draft fills the editor; it is saved only with 保存.
   const apply = draft => {
@@ -333,17 +353,12 @@ function workflowEditor(workflow, { chat, notice }) {
     if (draft.description !== undefined) elements.description.value = draft.description;
     if (typeof draft.enabled === 'boolean') elements.enabled.checked = draft.enabled;
     if (draft.model_id !== undefined) model.value = draft.model_id || '';
-    if (typeof draft.prompt === 'string') { editor.value = draft.prompt; drawPreview(); }
-    if (Array.isArray(draft.triggers)) for (const option of options) {
+    if (typeof draft.prompt === 'string') editor.value = draft.prompt;
+    if (Array.isArray(draft.triggers)) { for (const option of options) {
       const picked = draft.triggers.find(trigger => trigger.id === option.id); elements['trigger:' + option.id].checked = !!picked;
       if (option.label) elements['trigger-label:' + option.id].value = picked?.label || '';
-    }
-    if (draft.permissions) {
-      for (const [key] of workflowPermissionNames) if (elements['permission:' + key] && !elements['permission:' + key].disabled) elements['permission:' + key].checked = !!draft.permissions.workspace?.[key];
-      if (elements['permission:agents'] && !elements['permission:agents'].disabled) elements['permission:agents'].checked = !!draft.permissions.agents;
-      for (const scope of scopes) if (elements['scope:' + scope] && !elements['scope:' + scope].disabled) elements['scope:' + scope].checked = (draft.permissions.github || []).includes(scope);
-    }
-    form.dataset.dirty = '1'; keep();
+    } }
+    drawCharts(); form.dataset.dirty = '1'; keep();
     if (!restoring) { show('prompt'); message.className = 'view-progress'; message.textContent = '草稿已填入编辑器，检查后点「保存」才会生效。'; }
   };
   // Every change is kept in this browser until it is saved or discarded; the assistant's window lives outside the page.
@@ -358,7 +373,7 @@ function workflowEditor(workflow, { chat, notice }) {
     const value = values(), trigger = list => JSON.stringify(list.map(entry => entry.id + ':' + (entry.label || '').toLowerCase()).sort());
     try {
       let body;
-      if (custom) body = { name: value.name, description: value.description, enabled: value.enabled, triggers: value.triggers, prompt: value.prompt, permissions: value.permissions, model_id: value.model_id, ...(workflow ? { version: workflow.version } : {}) };
+      if (custom) body = { name: value.name, description: value.description, enabled: value.enabled, triggers: value.triggers, prompt: value.prompt, model_id: value.model_id, ...(workflow ? { version: workflow.version } : {}) };
       else {
         // Only what changed is written, so untouched parts keep following their defaults.
         body = { version: workflow.version };
@@ -368,8 +383,6 @@ function workflowEditor(workflow, { chat, notice }) {
         if (trigger(value.triggers) !== trigger(workflow.triggers)) body.triggers = value.triggers;
         {
           if (form.elements.clear_prompt?.checked) body.prompt = null; else if (value.prompt !== startText) body.prompt = value.prompt;
-          const canonical = permissions => JSON.stringify([workflowPermissionNames.map(([key]) => !!permissions.workspace[key]), [...permissions.github].sort(), !!permissions.agents]);
-          if (canonical(value.permissions) !== canonical(workflow.permissions)) body.permissions = value.permissions;
           if ((value.model_id || null) !== (workflow.model.inherited ? null : workflow.model.id)) body.model_id = value.model_id;
         }
         const settings = {};
@@ -398,7 +411,7 @@ function workflowEditor(workflow, { chat, notice }) {
     restored.append(element('span', '这里显示的是未保存的修改：保存后才生效。'), button('丢弃未保存的修改', () => { storeEditor(repo, item, null); drawWorkflowPage(); }, 'quiet'));
     message.before(restored);
   }
-  show(panels.has(current.workflowTab) ? current.workflowTab : 'overview');
+  drawCharts(); show(panels.has(current.workflowTab) ? current.workflowTab : 'overview');
   return [form];
 }
 // What a trigger list means for this workflow, beyond the filters every trigger keeps.
@@ -412,11 +425,10 @@ function triggerRules(workflow) {
 }
 function workflowSummary(workflow) {
   const list = element('dl', '', 'workflow-summary'), row = (term, value) => list.append(element('dt', term), element('dd', value));
-  row('触发源', workflow.triggers.length ? workflow.triggers.map(trigger => triggerTitle(workflow, trigger)).join('、') : '没有触发源，不会运行');
+  if (!workflow.triggers.length) row('触发源', '没有触发源，不会运行');
   row('提示词', `${layerNames[workflow.prompt.source]} · ${promptLocation(workflow)}`);
-  row('权限', [...workflowPermissionNames.filter(([key]) => workflow.permissions.workspace[key]).map(([, caption]) => caption), ...(workflow.permissions.agents ? ['启动独立 agent'] : []),
-    workflow.permissions.github.length ? 'GitHub 只读 ' + workflow.permissions.github.map(scope => scopeNames[scope] || scope).join('、') : '不读 GitHub'].join('、'));
-  row('发布', publicationNames[workflow.ceiling.publication]);
+  row('读取', workflowReads(workflow).join('、') + '（所有工作流都允许）');
+  row('写入', (workflow.permissions.workspace.write ? '修改工作区代码；' : '') + publicationNames[workflow.permissions.publication]);
   row('模型', workflowModelName(workflow));
   return list;
 }
@@ -430,7 +442,7 @@ function actionsStatusLine(workflow) {
     : workflow.enabled ? status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。' : '未开启。';
   return line;
 }
-const workflowErrors = { workflow_version_conflict: '工作流已被别人修改，请刷新页面后再保存。', invalid_workflow_permissions: '权限超出了这条工作流允许的范围。', invalid_workflow_trigger_label: '按标签触发时需要填写标签名。',
+const workflowErrors = { workflow_version_conflict: '工作流已被别人修改，请刷新页面后再保存。', invalid_workflow_trigger_label: '按标签触发时需要填写标签名。',
   invalid_workflow_name: '请填写工作流名称。', invalid_workflow_prompt: '请填写提示词。', invalid_bot_label: '提示词里的标签声明不合法（最长 50 个字符，首尾不能有空白）。', model_not_configured: '项目还没有可用的模型，请先在「模型」页选择项目默认模型。',
   model_not_available: '选择的模型不可用于这个项目。', assistant_reply_invalid: '助手没有返回可用的草稿，请换个说法再试。', duplicate_workflow_trigger: '同一个触发源只能选一次。' };
 const workflowError = code => workflowErrors[code] || code;
@@ -502,9 +514,8 @@ function assistantTurn(turn) {
       item.append(call);
     } else if (part.type === 'draft') {
       const draft = part.draft, card = element('div', '', 'workflow-draft');
-      card.append(flowFigure(parseFlow(draft.prompt), '草稿流程图'), ...(part.warnings || []).map(warning => element('p', warning, 'endpoint-warning')),
-        element('p', '草稿权限：' + [...workflowPermissionNames.filter(([key]) => draft.permissions?.workspace?.[key]).map(([, caption]) => caption), ...(draft.permissions?.agents ? ['启动独立 agent'] : []),
-          draft.permissions?.github?.length ? 'GitHub 只读 ' + draft.permissions.github.map(scope => scopeNames[scope] || scope).join('、') : '不读 GitHub'].join('、'), 'muted'),
+      const options = workflowById(assistant.item)?.trigger_options || current?.workflows?.triggers || [];
+      card.append(flowFigure(parseFlow(draft.prompt), '草稿流程图', (draft.triggers || []).map(trigger => triggerName(options, trigger))), ...(part.warnings || []).map(warning => element('p', warning, 'endpoint-warning')),
         collapsible('草稿提示词', draft.prompt || ''), button('填入编辑器', () => fillFromAssistant(draft), ''));
       item.append(card);
     } else if (part.type === 'error') item.append(element('p', part.text, 'view-error'));
@@ -515,7 +526,7 @@ function assistantTurn(turn) {
 function drawAssistantLog() {
   const log = $('workflow-assistant')?.querySelector('.assistant-log'); if (!log) return;
   const turns = assistant.history.turns;
-  log.replaceChildren(...(turns.length ? turns.map(assistantTurn) : [element('li', '描述你想要的流程：助手会先看现有工作流和仓库，再起草提示词（含流程图）和权限。草稿填入编辑器后要点「保存」才会生效。', 'muted assistant-empty')]));
+  log.replaceChildren(...(turns.length ? turns.map(assistantTurn) : [element('li', '描述你想要的流程：助手会先看现有工作流和仓库，再起草触发源和提示词（含流程图）。草稿填入编辑器后要点「保存」才会生效。', 'muted assistant-empty')]));
   log.scrollTop = log.scrollHeight;
   const box = $('workflow-assistant'), running = !!assistant.controller;
   box.querySelector('.assistant-input button[type=submit]').disabled = running; box.querySelector('.assistant-input .actions button:not([type=submit])').hidden = !running;

@@ -1,7 +1,7 @@
 import { tools } from './model.js';
 import { repositoryTools, explorationInstructions } from './exploration.js';
 import { startAgentTool, subagentSystem } from './runtime.js';
-import { defaultPermissions, type WorkflowPermissions } from '../workflows/catalog.js';
+import { workflowAccess, type WorkflowPermissions } from '../workflows/catalog.js';
 
 /** Capabilities are trusted task configuration, never inferred from a tool name or model output. */
 export interface AgentCapabilities {
@@ -24,8 +24,8 @@ export interface WorkflowPrompt { id: string; name: string; prompt: string }
 const modes: Record<string, 'review' | 'publication' | 'reply'> = { 'review.issue': 'review', 'review.pr': 'review', 'development.issue': 'publication', 'development.pr': 'publication',
   'workflow.issue': 'reply', 'workflow.pr': 'reply' };
 
-/** Every workflow composes the same runtime: its saved permissions choose the tools, its prompt follows the hard limits. */
-export function workspaceProfile(kind: string, context: any, permissions: WorkflowPermissions = defaultPermissions(kind), workflow?: WorkflowPrompt): WorkspaceAgentProfile {
+/** Every workflow composes the same runtime: the permissions its type gives choose the tools, its prompt follows the hard limits. */
+export function workspaceProfile(kind: string, context: any, permissions: WorkflowPermissions = workflowAccess(kind), workflow?: WorkflowPrompt): WorkspaceAgentProfile {
   if (!Object.hasOwn(modes, kind)) throw new Error('workspace_profile_not_registered: ' + kind);
   const completion = modes[kind]!, development = completion === 'publication', reply = completion === 'reply';
   const { workspace } = permissions, github = permissions.github.length > 0;

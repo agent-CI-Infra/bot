@@ -11,7 +11,7 @@ import { Redactor } from '../dist/agent/common.js';
 import { runAgent, startAgentTool, subagentSystem } from '../dist/agent/runtime.js';
 import { workspaceProfile } from '../dist/agent/profiles.js';
 import { selectedModel } from '../dist/agent/model.js';
-import { narrowPermissions, validatePermissions, builtinWorkflow, defaultPermissions } from '../dist/workflows/catalog.js';
+import { narrowPermissions, workflowAccess, githubScopes } from '../dist/workflows/catalog.js';
 import { workflowPermissions } from '../dist/workflows/resolve.js';
 import { runSubagent, subagentConfig } from '../runner/subagent.mjs';
 import { narrowCapabilities, toolCapabilityError } from '../runner/capabilities.mjs';
@@ -47,7 +47,7 @@ test('the built-in tasks and Actions failure handling are workflows; prompts car
     assert.equal(typeof workflow.enabled, 'boolean');
   }
   const actions = list.workflows.find(workflow => workflow.id === 'actions.failures');
-  assert.deepEqual([actions.enabled, actions.triggers, actions.ceiling.publication, actions.prompt.source], [false, [{ id: 'actions.run_failed' }], 'actions', 'builtin']);
+  assert.deepEqual([actions.enabled, actions.triggers, actions.permissions.publication, actions.computer, actions.prompt.source], [false, [{ id: 'actions.run_failed' }], 'actions', false, 'builtin']);
   const page = flowPage(), byId = Object.fromEntries(list.workflows.map(workflow => [workflow.id, workflow]));
   for (const id of ['review.issue', 'review.pr']) assert.deepEqual(JSON.parse(flowOf(page, byId[id].prompt.effective)), ['检视 → 回复']);
   for (const id of ['development.issue', 'development.pr'])
@@ -57,10 +57,19 @@ test('the built-in tasks and Actions failure handling are workflows; prompts car
   assert.equal(figure.querySelector('figcaption .flow-path').textContent, 'Issue 分析 → 开发 → 检视 → 测试');
   assert.equal(figure.querySelectorAll('rect').length, 4);
   assert.match(page.run('flowFigure(parseFlow("no chart")).querySelector("p").textContent'), /没有流程图/);
+  // Triggers are drawn from the trigger list on the left, feeding the first step; they are not part of the prompt.
+  const triggered = page.run(`flowFigure(parseFlow(${JSON.stringify(byId['development.issue'].prompt.effective)}), '流程图', ['检视发布结论', 'Issue 加标签：bot-develop'])`);
+  const svg = (figure, tag, kind) => [...figure.querySelectorAll(tag)].filter(node => String(node.getAttribute('class')).split(' ').includes(kind));
+  assert.deepEqual(svg(triggered, 'text', 'flow-trigger-label').map(node => node.textContent), ['检视发布结论', 'Issue 加标签：bot-develop']);
+  assert.equal(svg(triggered, 'path', 'flow-trigger-edge').length, 2); assert.equal(svg(triggered, 'rect', 'flow-node').length, 4);
+  assert.equal(triggered.querySelector('figcaption .flow-triggers').textContent, '触发源 检视发布结论、Issue 加标签：bot-develop →');
+  assert.doesNotMatch(byId['development.issue'].prompt.effective, /检视发布结论/);
+  const idle = page.run('flowFigure(parseFlow("no chart"), "流程图", [])');
+  assert.deepEqual([svg(idle, 'text', 'flow-trigger-label')[0].textContent, svg(idle, 'path', 'flow-trigger-edge').length, svg(idle, 'text', 'flow-node-label')[0].textContent], ['没有触发源', 0, '按提示词执行']);
   // The prompt file is the source: the flowchart is in docs/prompts, which the model receives as the rule text.
   assert.ok(readFileSync('docs/prompts/issue-development.md', 'utf8').includes('test -->|测试失败| develop'));
-  // Built-in defaults: development may start a sub-agent for its review step; reviews do not unless allowed.
-  assert.equal(byId['development.issue'].permissions.agents, true); assert.equal(byId['review.pr'].permissions.agents, false);
+  // Every workflow reads everything and may start agents; only development changes its checkout.
+  for (const workflow of list.workflows) assert.deepEqual([workflow.permissions.agents, workflow.permissions.github, workflow.permissions.workspace.write], [true, githubScopes, workflow.id.startsWith('development.')], workflow.id);
   assert.equal(byId['development.issue'].prompt.path, '.bot/rules/issue-development.md');
   assert.deepEqual(byId['development.issue'].prompt.shared_with, ['development.pr']);
 });
@@ -166,11 +175,10 @@ test('Actions failure handling is a workflow: its switch is the policy switch an
   assert.equal(actionsWorkflowOn(h.store, '101'), true);
   assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { triggers: [] })).status, 200);
   assert.equal(actionsWorkflowOn(h.store, '101'), false);
-  // Its analysis prompt and permissions are edited like any workflow's; it never reads a workspace.
-  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { prompt: 'Treat npm registry errors as external.', permissions: { github: ['actions', 'contents'], agents: true } })).status, 200);
-  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { permissions: { workspace: { read: true } } })).value.error, 'invalid_workflow_permissions');
+  // Its analysis prompt is edited like any workflow's; it runs in the control plane and reads all of GitHub.
+  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { prompt: 'Treat npm registry errors as external.' })).status, 200);
   const workflow = (await admin('/api/repositories/101/workflows/actions.failures')).value.workflow;
-  assert.deepEqual([workflow.enabled, workflow.active, workflow.triggers, workflow.prompt.source, workflow.permissions.github], [true, true, [], 'console', ['contents', 'actions']]);
+  assert.deepEqual([workflow.enabled, workflow.active, workflow.triggers, workflow.prompt.source, workflow.permissions.github, workflow.computer], [true, true, [], 'console', githubScopes, false]);
   const builtin = workflow.prompt.layers[0].content;
   assert.equal(flowOf(flowPage(), builtin), JSON.stringify(['读取日志 → 分析原因 → 重跑一次 → 提报 Issue → 检视 Issue', '分析原因 → 提报 Issue：代码或不明原因']));
 });
@@ -220,32 +228,38 @@ test('a workflow prompt replaces the rule file console layer, the repository fil
   assert.equal(h.store.get("SELECT test_command FROM policies WHERE repository_id='101'").test_command, 'npm test');
 });
 
-test('saved permissions never exceed the workflow ceiling and choose the tools the agent gets', async t => {
+test('reading is open to every workflow and writing follows its type; permissions are not configured', async t => {
   const { h, admin } = await project(t);
-  for (const permissions of [{ workspace: { read: true, write: true } }, { github: ['administration'] }, { workspace: { read: false, shell: true } }, { publication: 'pull_request' }])
-    assert.equal((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { permissions })).value.error, 'invalid_workflow_permissions', JSON.stringify(permissions));
-  assert.equal((await admin('/api/repositories/101/workflows/release.notes', 'PUT', { permissions: { agents: true } })).value.error, 'invalid_workflow_permissions');
-  const narrowed = { workspace: { read: true, write: false, notes: false, shell: false }, github: ['pull_requests', 'contents'], agents: true };
-  assert.equal((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { permissions: narrowed })).status, 200);
-  const saved = workflowPermissions(h.store, '101', 'review.pr');
-  assert.deepEqual(saved, { ...narrowed, github: ['contents', 'pull_requests'], publication: 'reply' });
-  const profile = workspaceProfile('review.pr', {}, saved), names = profile.tools.map(tool => tool.function.name);
-  assert.deepEqual(names.filter(name => ['run_command', 'write_file', 'read_file', 'start_agent', 'github_read_token'].includes(name)).sort(), ['github_read_token', 'read_file', 'start_agent']);
-  assert.deepEqual(profile.capabilities.github.permissions, { contents: 'read', pull_requests: 'read' });
-  assert.equal(profile.capabilities.workspace.shell, false); assert.equal(profile.subagentSystem, subagentSystem);
-  // The runner refuses what the capabilities refuse, whatever tool the model names.
-  assert.equal(toolCapabilityError({ capabilities: profile.capabilities }, 'run_command'), 'shell_not_allowed');
+  // The editor has no permissions to save, built-in or custom.
+  assert.equal((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { permissions: { agents: false } })).status, 400);
+  assert.equal((await admin('/api/repositories/101/workflows', 'POST', { name: 'x', prompt: 'y', permissions: { agents: false } })).status, 400);
+  for (const id of ['review.issue', 'review.pr', 'release.observe', 'release.notes', 'actions.failures', 'custom'])
+    assert.deepEqual(workflowAccess(id), { workspace: { read: true, write: false, notes: true, shell: true }, github: githubScopes, agents: true,
+      publication: { 'review.issue': 'reply', 'review.pr': 'reply', 'release.observe': 'none', 'release.notes': 'release_notes', 'actions.failures': 'actions', custom: 'reply' }[id] }, id);
+  assert.equal(workflowAccess('development.issue').workspace.write, true); assert.equal(workflowAccess('development.pr').publication, 'pull_request');
+  // Permissions saved while they were configurable no longer narrow anything, and never widen writing.
+  h.store.run("INSERT INTO workflows(repository_id,id,permissions,created_at,updated_at) VALUES('101','review.pr',?,'','')", JSON.stringify({ workspace: { read: true, write: true, shell: false }, github: ['contents'], agents: false }));
+  const permissions = workflowPermissions(h.store, '101', 'review.pr');
+  assert.deepEqual(permissions, workflowAccess('review.pr'));
+  const profile = workspaceProfile('review.pr', {}, permissions), names = profile.tools.map(tool => tool.function.name);
+  for (const name of ['read_file', 'run_command', 'write_file', 'start_agent', 'github_read_token']) assert.ok(names.includes(name), name);
+  // write_file writes project notes only: the checkout stays read-only.
+  assert.match(profile.tools.find(tool => tool.function.name === 'write_file').function.description, /project note at \.\.\/notes\/<name> only/);
+  assert.equal(profile.capabilities.workspace.write, false);
+  assert.deepEqual(profile.capabilities.github, { permissions: Object.fromEntries(githubScopes.map(scope => [scope, 'read'])), publication: 'none' });
+  assert.equal(profile.subagentSystem, subagentSystem);
+  // The runner still refuses what the capabilities refuse, whatever tool the model names.
+  assert.equal(toolCapabilityError({ capabilities: { ...profile.capabilities, workspace: { ...profile.capabilities.workspace, shell: false } } }, 'run_command'), 'shell_not_allowed');
   assert.equal(toolCapabilityError({ capabilities: { ...profile.capabilities, agents: false } }, 'start_agent'), 'agents_not_allowed');
-  // A stored row that no longer fits fails closed instead of granting more.
-  h.store.run("UPDATE workflows SET permissions=? WHERE repository_id='101' AND id='review.pr'", JSON.stringify({ workspace: { read: true, write: true, shell: true }, github: ['contents', 'administration'], agents: true }));
-  assert.deepEqual(workflowPermissions(h.store, '101', 'review.pr'), { workspace: { read: true, write: false, notes: false, shell: true }, github: ['contents'], agents: true, publication: 'reply' });
+  // A deleted custom workflow runs nothing.
+  assert.throws(() => workflowPermissions(h.store, '101', 'custom.000000000000'), /workflow_not_found/);
 });
 
-test('a sub-agent permission request can only narrow the saved permissions', () => {
-  const parent = validatePermissions({ workspace: { read: true, notes: true }, github: ['contents'], agents: true }, builtinWorkflow('review.pr').ceiling);
+test('a sub-agent permission request can only narrow the main agent\'s permissions', () => {
+  const parent = { ...workflowAccess('review.pr'), workspace: { read: true, write: false, notes: true, shell: false }, github: ['contents'] };
   const child = narrowPermissions(parent, { run_commands: true, write_workspace: true, github_read: true, write_notes: false });
   assert.deepEqual(child, { workspace: { read: true, write: false, notes: false, shell: false }, github: ['contents'], agents: false, publication: 'none' });
-  assert.deepEqual(narrowPermissions(defaultPermissions('development.issue'), { write_workspace: false, github_read: false }).workspace, { read: true, write: false, notes: true, shell: true });
+  assert.deepEqual(narrowPermissions(workflowAccess('development.issue'), { write_workspace: false, github_read: false }).workspace, { read: true, write: false, notes: true, shell: true });
   // The runner applies the same rule to the capabilities it received from the control plane.
   const capabilities = { workspace: { read: true, write: false, notes: true, shell: false }, github: { permissions: { contents: 'read' }, publication: 'pull_request' }, agents: true };
   assert.deepEqual(narrowCapabilities(capabilities, { run_commands: true, write_workspace: true }),
@@ -253,7 +267,7 @@ test('a sub-agent permission request can only narrow the saved permissions', () 
 });
 
 test('a runner sub-agent is a new session built only from its own instructions, with the main agent\'s tools narrowed', async () => {
-  const profile = workspaceProfile('development.issue', {}, defaultPermissions('development.issue'));
+  const profile = workspaceProfile('development.issue', {}, workflowAccess('development.issue'));
   const config = { system: 'MAIN SYSTEM', prompt: 'MAIN PROMPT with the Issue', tools: profile.tools, capabilities: profile.capabilities, workspace_id: 'w', subagent_system: profile.subagentSystem };
   const created = [], events = [];
   const result = await runSubagent({ config, id: 'agent-1', writeEvent: async event => { events.push(event); },
@@ -270,7 +284,7 @@ test('a runner sub-agent is a new session built only from its own instructions, 
   assert.deepEqual(events.map(event => event.type), ['agent_start', 'agent_end']);
   // A main agent without the agents capability cannot start one, and a child of a read-only parent stays read-only.
   assert.deepEqual(await runSubagent({ config: { ...config, capabilities: { ...config.capabilities, agents: false } }, args: { instructions: 'x', task: 'y' }, id: 'a', createSession: async () => assert.fail(), writeEvent: async () => {} }), { error: 'start_agent_not_allowed' });
-  const review = workspaceProfile('review.pr', {}, { ...defaultPermissions('review.pr'), workspace: { read: true, write: false, notes: false, shell: false }, agents: true });
+  const review = workspaceProfile('review.pr', {}, { ...workflowAccess('review.pr'), workspace: { read: true, write: false, notes: false, shell: false } });
   const reader = subagentConfig({ ...config, tools: review.tools, capabilities: review.capabilities }, { instructions: 'x', task: 'y', permissions: { run_commands: true, write_notes: true, write_workspace: true } });
   assert.deepEqual(reader.tools.map(tool => tool.function.name).filter(name => ['run_command', 'write_file'].includes(name)), []);
 });
@@ -313,11 +327,10 @@ test('custom workflows trigger on the catalog events with today\'s filters, and 
   const { h, admin, a } = await project(t);
   const prompt = 'Check the docs.\n\n```mermaid\nflowchart LR\n  read[读文档] --> reply[回复]\n```';
   const created = await admin('/api/repositories/101/workflows', 'POST', { name: '文档检查', description: 'docs', prompt,
-    triggers: [{ id: 'pull_request.opened' }, { id: 'issue.labeled', label: 'Audit' }, { id: 'comment.mention' }],
-    permissions: { workspace: { read: true, notes: false, shell: false }, github: ['contents'], agents: false } });
+    triggers: [{ id: 'pull_request.opened' }, { id: 'issue.labeled', label: 'Audit' }, { id: 'comment.mention' }] });
   assert.equal(created.status, 201); const workflow = created.value.workflow;
   assert.match(workflow.id, /^custom\.[a-f0-9]{12}$/); assert.equal(workflow.builtin, false); assert.equal(workflow.prompt.effective, prompt);
-  assert.deepEqual(workflow.permissions, { workspace: { read: true, write: false, notes: false, shell: false }, github: ['contents'], agents: false, publication: 'reply' });
+  assert.deepEqual(workflow.permissions, workflowAccess('custom')); assert.equal(workflow.computer, true);
   for (const body of [{ name: 'x', prompt: 'y', permissions: { workspace: { read: true, write: true } } }, { name: 'x', prompt: 'y', triggers: [{ id: 'issue.labeled' }] }, { name: 'x', prompt: 'y', triggers: [{ id: 'push' }] }, { name: '', prompt: 'y' }])
     assert.equal((await admin('/api/repositories/101/workflows', 'POST', body)).status, 400, JSON.stringify(body));
   const tasks = () => h.store.all("SELECT kind,workflow_id,object_number,head_sha FROM tasks WHERE kind LIKE 'workflow.%' ORDER BY created_at,rowid");
@@ -349,7 +362,7 @@ test('custom workflows trigger on the catalog events with today\'s filters, and 
   assert.equal((await admin('/api/repositories/101/workflows')).value.workflows.length, builtins.length);
 });
 
-test('a custom workflow task runs its own prompt with its saved permissions and replies once', async t => {
+test('a custom workflow task runs its own prompt, reads everything, writes nothing itself and replies once', async t => {
   const configs = [];
   const f = await emptyRepositoryFixture(t, { execute: async request => {
     if (request.type === 'workspace_agent_config') { configs.push(Buffer.from(request.base64, 'base64')); if (request.final) configs.done = JSON.parse(Buffer.concat(configs)); }
@@ -358,8 +371,7 @@ test('a custom workflow task runs its own prompt with its saved permissions and 
   f.setBranch('ready');
   f.store.run("UPDATE tasks SET status='cancelled' WHERE id=?", f.taskId);
   const prompt = 'Check every link in the docs.\n\n```mermaid\nflowchart LR\n  read[读文档] --> reply[回复]\n```';
-  const workflow = (await f.admin('/api/repositories/101/workflows', 'POST', { name: '文档检查', prompt, triggers: [{ id: 'issue.opened' }],
-    permissions: { workspace: { read: true, notes: false, shell: false }, github: [], agents: false } })).value.workflow;
+  const workflow = (await f.admin('/api/repositories/101/workflows', 'POST', { name: '文档检查', prompt, triggers: [{ id: 'issue.opened' }] })).value.workflow;
   const id = (await import('../dist/workflows/triggers.js')).queueWorkflows(f.store, '101', 'issues', { action: 'opened', issue: { number: 1, state: 'open', title: 'First issue', body: 'Please review this project.' }, sender: { type: 'User', login: 'alice' } }, 'delivery-1');
   assert.equal(id, 1);
   f.engine.tick(); await Promise.all(f.engine.active.values());
@@ -369,8 +381,10 @@ test('a custom workflow task runs its own prompt with its saved permissions and 
   const config = configs.done;
   assert.ok(config.system.includes('## Workflow: 文档检查 (console)\n' + prompt));
   assert.doesNotMatch(config.system, /## \.bot\/rules\/issue-review\.md/);
-  assert.deepEqual(config.tools.map(tool => tool.function.name), ['read_file', 'finish_review']);
-  assert.deepEqual(config.capabilities, { workspace: { read: true, write: false, notes: false, shell: false }, github: { permissions: {}, publication: 'none' }, agents: false });
+  const names = config.tools.map(tool => tool.function.name);
+  for (const name of ['read_file', 'run_command', 'write_file', 'github_read_token', 'start_agent', 'finish_review']) assert.ok(names.includes(name), name);
+  assert.ok(!names.includes('create_pull_request'));
+  assert.deepEqual(config.capabilities, { workspace: { read: true, write: false, notes: true, shell: true }, github: { permissions: Object.fromEntries(githubScopes.map(scope => [scope, 'read'])), publication: 'none' }, agents: true });
   // No label, no development and no review conversation come out of a custom workflow.
   assert.equal(f.store.get("SELECT count(*) n FROM tasks WHERE kind LIKE 'development.%'").n, 0);
   assert.equal(f.store.get("SELECT count(*) n FROM review_sessions").n, 0);
@@ -404,6 +418,7 @@ async function assistantModel(t, draft) {
 test('the assistant works like an agent: it reads workflows, proposes a checked draft, streams its work, and saves nothing', async t => {
   const { h, admin } = await project(t);
   const draftPrompt = '检查文档。\n\n```mermaid\nflowchart LR\n  read[读文档] --> check[核对] --> reply[回复]\n  check -->|需要复核| read\n```';
+  // A model that still proposes permissions has them dropped: there are none to configure.
   const draft = { name: '文档检查', description: '检查文档链接', triggers: [{ id: 'pull_request.opened' }, { id: 'push' }], prompt: draftPrompt,
     permissions: { workspace: { read: true, write: true, shell: true }, github: ['contents'], agents: true } };
   const model = await assistantModel(t, draft);
@@ -414,12 +429,14 @@ test('the assistant works like an agent: it reads workflows, proposes a checked 
   assert.equal(reply.value.reply, '已起草：读文档后核对并回复。');
   assert.equal(reply.value.draft.prompt, draftPrompt);
   assert.deepEqual(reply.value.draft.triggers, [{ id: 'pull_request.opened' }]);
-  assert.deepEqual(reply.value.draft.permissions, { workspace: { read: true, write: false, notes: false, shell: true }, github: ['contents'], agents: true, publication: 'reply' });
-  assert.equal(reply.value.warnings.length, 2);
+  assert.equal(reply.value.draft.permissions, undefined);
+  assert.deepEqual(reply.value.warnings, ['有触发源不在这条工作流的目录里，或按标签触发时缺少标签名，已去掉。']);
   const page = flowPage();
   assert.deepEqual(JSON.parse(flowOf(page, reply.value.draft.prompt)), ['读文档 → 核对 → 回复', '核对 → 读文档：需要复核']);
-  // The model was told the ceiling, the catalog and that GitHub writes belong to the control plane; it saw the workflows it asked for.
-  assert.match(model.requests[0].messages[0].content, /start_agent/); assert.match(model.requests[0].messages[0].content, /control plane publishes/);
+  // The model was told reading is open, writing follows the type and GitHub writes belong to the control plane; it saw the workflows it asked for.
+  const system = model.requests[0].messages[0].content;
+  assert.match(system, /Reading is never restricted/); assert.match(system, /start_agent/); assert.match(system, /control plane publishes what the type allows \(reply\)/);
+  assert.doesNotMatch(JSON.stringify(model.requests[0].tools), /permissions/);
   assert.deepEqual(model.requests[0].tools.map(tool => tool.function.name), ['update_draft', 'list_workflows']);
   assert.ok(JSON.parse(model.requests[1].messages.at(-1).content).some(workflow => workflow.id === 'review.pr'));
   assert.equal((await admin('/api/repositories/101/workflows')).value.workflows.length, builtins.length);
@@ -436,7 +453,7 @@ test('the assistant works like an agent: it reads workflows, proposes a checked 
   assert.deepEqual([events.at(-1).type, events.at(-1).reply], ['done', '已起草：读文档后核对并回复。']);
   // Saving is the administrator's own step.
   const saved = await admin('/api/repositories/101/workflows', 'POST', { name: reply.value.draft.name, description: reply.value.draft.description, triggers: reply.value.draft.triggers,
-    prompt: reply.value.draft.prompt, permissions: reply.value.draft.permissions });
+    prompt: reply.value.draft.prompt });
   assert.equal(saved.status, 201);
   assert.equal(saved.value.workflow.prompt.effective, draftPrompt);
   assert.equal(h.store.get("SELECT action FROM audit WHERE action='workflow.created'").action, 'workflow.created');

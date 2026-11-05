@@ -20,9 +20,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // The repository's .bot/ rule files and .agents/skills/ are the repository's to fix.
     'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
-    'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required',
-    // Saved workflow configuration an administrator has to save again.
-    'workflow_permissions_invalid'] },
+    'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required'] },
   task_changed: { label:'任务条件已变化', codes:['object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
@@ -80,8 +78,7 @@ const codeActions: Record<string,string> = {
   repository_policy_disabled:'仓库已停用这类任务，任务已结束；需要时在项目设置里重新开启。',
   workflow_disabled:'这条工作流已关闭或删除，任务已结束；需要时在「工作流」页重新开启。',
   workflow_not_found:'这条工作流已删除，任务已结束。',
-  workflow_permissions_invalid:'在「工作流」页重新保存这条工作流的权限，修复后任务自动继续。',
-  github_read_token_not_allowed:'这条工作流没有 GitHub 读取权限；需要时在「工作流」页打开读取范围后点「重试」。',
+  github_read_token_not_allowed:'启动这个子 agent 时关掉了 GitHub 读取；主 agent 仍可读取，需要时让它不带 github_read:false 再启动子 agent。',
   pull_request_head_changed:'PR 有了新的提交，这个任务已被取代，无需处理。',
   branch_head_changed:'分支被推送了其他提交，这个任务已被取代，无需处理。',
   branch_disappeared:'待更新的分支已被删除，这个任务已被取代，无需处理。',

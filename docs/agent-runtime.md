@@ -53,11 +53,11 @@ const result = await runAgent({
 
 任务调度、触发与持久化仍由调用方负责。工具 schema、executor、guard 必须来自可信控制面配置，不能从 Issue/PR/模型结果直接生成权限。默认 tool loop 有轮数、输出和工具调用上限；它只执行已公布工具，且每次工具/模型调用前检查 guard。Pi adapter 保留原来的无总轮数限制行为。
 
-项目通过[工作流](workflows.md)配置任务：触发源、提示词（含流程图）、权限和模型都保存在控制面，管理员在网页上新增的工作流不需要代码注册。工具、执行器和 guard 仍由可信代码按保存的权限生成；工作流只能在固定上限内选择，不能从 Issue、PR、仓库文件或模型结果取得权限。`task_models` 管理 API 仍可按任意精确 task kind 选择模型，内置工作流的 id 就是 task kind，见[开发说明](development.md#按任务选择模型)。
+项目通过[工作流](workflows.md)配置任务：触发源、提示词（含流程图）和模型都保存在控制面，管理员在网页上新增的工作流不需要代码注册。权限不配置：读取对所有工作流开放，写入由工作流类型决定。工具、执行器和 guard 仍由可信代码按类型给出的权限生成，不能从 Issue、PR、仓库文件或模型结果取得权限。`task_models` 管理 API 仍可按任意精确 task kind 选择模型，内置工作流的 id 就是 task kind，见[开发说明](development.md#按任务选择模型)。
 
 ## 权限与隔离
 
-显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，取自工作流保存的权限，每次任务从存储读取。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
+显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，每次任务由控制面按工作流类型给出：读取、笔记、shell、全部 GitHub 只读范围和独立 agent 对所有工作流开放，修改工作区只给开发工作流，远端发布只经受控 publisher。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
 
 `start_agent` 启动独立 agent：新会话的系统提示是固定说明加调用方写的角色说明，第一条消息是任务，不带调用方的消息；工具是调用方工具按收窄后的权限过滤出的子集，不含发布、结束任务和再启动 agent。Pi 在同一进程里另建会话，模型请求经同一个邮箱逐个转发；默认 tool loop 用 `AgentSpec.agents` 另起一组消息。检视的 GitHub token 只有读权限。开发也只向 shell 发放短期 GitHub 读 token；写 PR/推送由已有受控 publisher 执行。发布的写操作由既有状态机和授权控制，运行中的 Agent 不持有可任意写 GitHub 的凭据。
 

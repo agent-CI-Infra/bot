@@ -1,19 +1,19 @@
 import type { Store, Row } from '../storage/database.js';
 import { stop } from '../agent/common.js';
-import { builtinWorkflow, clampPermissions, customCeiling, defaultPermissions, triggerOptions, triggers as catalog, type WorkflowPermissions } from './catalog.js';
+import { builtinWorkflow, workflowAccess, triggerOptions, triggers as catalog, type WorkflowPermissions } from './catalog.js';
 
 // The workflow a task belongs to: a custom workflow's id, or the built-in task kind.
 export const taskWorkflow = (task: { kind: string; workflow_id?: string | null }) => String(task.workflow_id || task.kind);
 export const savedWorkflow = (store: Store, repositoryId: string, id: string): Row | undefined =>
   store.get('SELECT * FROM workflows WHERE repository_id=? AND id=?', repositoryId, id);
 
-/** The saved permissions of a workflow, clamped to its ceiling; read from trusted storage on every task. */
+/**
+ * What a task's agent may do, decided on every task from the workflow's type: reading is open, writing follows the type.
+ * Permissions saved before reading was opened up are ignored. A deleted custom workflow runs nothing.
+ */
 export function workflowPermissions(store: Store, repositoryId: string, id: string): WorkflowPermissions {
-  const builtin = builtinWorkflow(id), row = savedWorkflow(store, repositoryId, id);
-  if (!builtin && !row) return stop('workflow_not_found', 'cancelled', `工作流 ${id} 已删除。`);
-  if (!row?.permissions) return defaultPermissions(id);
-  try { return clampPermissions(JSON.parse(row.permissions), builtin?.ceiling ?? customCeiling); }
-  catch { return stop('workflow_permissions_invalid', 'waiting_configuration', `工作流 ${id} 的权限配置无效，请在「工作流」页重新保存。`); }
+  if (!builtinWorkflow(id) && !savedWorkflow(store, repositoryId, id)) return stop('workflow_not_found', 'cancelled', `工作流 ${id} 已删除。`);
+  return workflowAccess(id);
 }
 export interface CustomWorkflow { id: string; name: string; enabled: boolean; prompt: string; triggers: { id: string; label?: string }[]; model_id: string | null }
 export function customWorkflow(row: Row): CustomWorkflow {
