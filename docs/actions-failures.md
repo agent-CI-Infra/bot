@@ -4,7 +4,7 @@
 
 ## 配置前提
 
-App 管理员需要在已有 App 的事件订阅中添加 `workflow_run`。新建 App 的 manifest 不能替代这个操作。此事件不属于全局 `appEvents`，因此未启用本功能的安装继续使用现有接入要求。处理器读取该仓库实际使用的安装的 `events`；没有订阅时，在项目设置和仓库读取 API 的 `actions_failures.error` 中显示 `actions_workflow_run_subscription_missing`，本功能不写 GitHub。修改事件订阅本身不要求新增权限批准；只有实际增加安装权限时才需要安装管理员批准。
+App 管理员需要在已有 App 的事件订阅中添加 `workflow_run`。新建 App 的 manifest 不能替代这个操作。此事件不属于全局 `appEvents`，因此未启用本功能的安装继续使用现有接入要求。处理器读取该仓库实际使用的安装的 `events`；没有订阅时，在项目设置和仓库读取 API 的 `actions_failures.error` 中显示 `actions_workflow_run_subscription_missing`，本功能不写 GitHub。超级管理员的项目列表按安装记录的事件，在开启本功能的仓库行显示带警告图标的「事件未订阅」，「同步安装列表」的结论也列出这些仓库；未开启的仓库不因缺少 `workflow_run` 报缺口。修改事件订阅本身不要求新增权限批准；只有实际增加安装权限时才需要安装管理员批准。
 
 已有 App 权限包含 Actions write；处理器只请求 Contents read、Actions write、Issues write。运行读取、日志读取及写入都经过现有 GitHub 客户端、配额判断和仓库启停检查。身份检查绑定仓库 id 和所有者；按仓库持久租约串行处理，写入前再次检查功能开关和租约。
 

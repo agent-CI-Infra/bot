@@ -329,7 +329,7 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   // The list asks for this when it opens with stale grants and swaps only the permission badges with the answer.
   if (path === '/api/installations/permissions/check' && method === 'POST') {
     fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const errors = await sync.refreshPermissions();
-    return { errors, repositories: (list(store).repositories as Json[]).map(r => ({ id: r.id, permission_missing: r.permission_missing, events_missing: r.events_missing,
+    return { errors, repositories: (list(store).repositories as Json[]).map(r => ({ id: r.id, permission_missing: r.permission_missing, events_missing: r.events_missing, feature_missing: r.feature_missing,
       permissions_checked_at: r.permissions_checked_at, permissions_stale: r.permissions_stale })) };
   }
   // Hiding only removes a row from the console list; it never touches GitHub, projects or policies. Restore is the only way back.
@@ -341,9 +341,18 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   if (!match || method !== 'POST') return fail(404, 'not_found');
   return match[2] === 'activate' ? activate(store, user, match[1]!, input) : disable(store, user, match[1]!, input);
 }
+// Access that only a switched-on project feature needs, so it stays out of the global appEvents. Actions failure analysis
+// stops at the same two checks (actions_app_required, actions_workflow_run_subscription_missing) before reading any run.
+// Null while an App installation's events have not been read.
+function featureGap(seen: Row, reg: Row | undefined): { feature: string; requirement: string }[] | null {
+  if (!reg?.actions_failures_enabled) return [];
+  if (seen.account_type !== 'github_app') return [{ feature: 'actions_failures', requirement: 'github_app' }];
+  if (!seen.events) return null;
+  return missingEvents(JSON.parse(seen.events), ['workflow_run']).map(() => ({ feature: 'actions_failures', requirement: 'workflow_run' }));
+}
 // One row per repository: what GitHub shows as installed, merged with registration, policy and environment.
 function list(store: Store): Json {
-  const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.model_id,
+  const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.actions_failures_enabled,p.model_id,
     e.state AS environment_state,${projectActivityColumns} FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id ${projectActivityJoin}`).map(r => [r.id, r]));
   const scope = new Map<string, Row>();
   for (const row of store.all('SELECT i.*,a.name AS account_name,a.type AS account_type FROM installed_repositories i JOIN accounts a ON a.id=i.account_id WHERE i.hidden=0 ORDER BY i.installed DESC')) {
@@ -356,6 +365,7 @@ function list(store: Store): Json {
     // Only a repository the account still lists can be short of permissions; one that left the installation has its own badge.
     const events = listed && seen!.account_type === 'github_app' ? seen!.events ? missingEvents(JSON.parse(seen!.events)) : null : [];
     const permissions = { permission_missing: listed ? permissionGap(seen!.account_type, seen!.permissions) : null, events_missing: listed ? events : null,
+      feature_missing: listed ? featureGap(seen!, reg) : null,
       permissions_checked_at: listed ? seen!.permissions_at || null : null,
       permissions_stale: listed && (!seen!.permissions_at || events === null || now - Date.parse(seen!.permissions_at) > PERMISSIONS_FRESH_MS) };
     return { id, full_name: reg?.full_name || seen!.full_name, owner_id: reg?.owner_id || seen!.owner_id, owner_login: seen?.owner_login || '', private: !!seen?.private,
