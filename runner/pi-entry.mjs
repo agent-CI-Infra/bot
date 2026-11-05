@@ -6,6 +6,7 @@ import {createAgentSession,createExtensionRuntime,ModelRuntime,SessionManager,Se
 import {workspace} from './workspace.mjs';
 import {waitModelReply} from './model-reply.mjs';
 import {toolCapabilityError} from './capabilities.mjs';
+import {createRepositoryTool} from './repository-tool.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
@@ -27,12 +28,7 @@ async function exchange(){
   }finally{await unlink(dir+'/token-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
 }
 // Repository exploration runs in the control plane, using the same executor as CI observation.
-async function repositoryTool(name,args){
-  const id=randomBytes(24).toString('hex'),reply=dir+'/repository-reply-'+id+'.json';
-  await writeFile(dir+'/repository-request.tmp',JSON.stringify({id,name,arguments:args}),{mode:0o600});await rename(dir+'/repository-request.tmp',dir+'/repository-request.json');
-  try{for(;;){const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;await new Promise(resolve=>setTimeout(resolve,100));}}
-  finally{await unlink(dir+'/repository-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
-}
+const repositoryTool=createRepositoryTool(dir);
 // Publication can include a long-running policy command. Wait for the control plane instead of
 // ending the session or imposing a request deadline.
 async function createPullRequest(args){
@@ -70,14 +66,14 @@ try{
   const runtime=await ModelRuntime.create({authPath:dir+'/auth.json',modelsPath:dir+'/models.json',modelsStorePath:dir+'/catalog.json',allowModelNetwork:false});
   const loader={getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),getSystemPrompt:()=>config.system,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[],getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
   const tools=config.tools.map(tool=>({name:tool.function.name,label:tool.function.name,description:tool.function.description,parameters:tool.function.parameters,
-    async execute(id,args){
+    async execute(id,args,signal){
       const name=tool.function.name;
       // Start metadata deliberately excludes file contents and publication payloads.
       await writeEvent({type:'tool_start',name,call_id:id,...(['read_file','write_file'].includes(name)?{path:args.path}:name==='run_command'?{command:args.command}:{})});
       let result;
       const denied=toolCapabilityError(config,name,args);
       if(denied) result={error:denied};
-      else if(['github_read','github_search','read_job_log'].includes(name))result=await repositoryTool(name,args);
+      else if(['github_read','github_search','read_job_log'].includes(name))result=await repositoryTool(name,args,signal);
       else if(tool.function.name==='finish_review'){finished=args;result={finished:true};}
       else if(tool.function.name==='create_pull_request'){
         result=await createPullRequest(args);

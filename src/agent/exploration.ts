@@ -5,7 +5,7 @@ import type { ReadTokens } from './read-token.js';
 
 const fn = (name: string, description: string, properties: any, required: string[]) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } });
 export const repositoryTools = [
-  fn('github_read', 'GET repository information using a path relative to this repository, such as /contents/package.json?ref=<sha>, /git/trees/<sha>?recursive=1, /issues?state=all, /issues/42/comments, /pulls/12/files or /actions/runs. Read other relevant Issues, PRs, commits, workflows and checks as needed. File content is decoded to UTF-8. Follow API pagination with page/per_page. Call github_read_token first. No URLs, other repositories, writes or log downloads.', { path: { type: 'string' } }, ['path']),
+  fn('github_read', 'GET repository information using a path relative to this repository, such as /contents/package.json?ref=<sha>, /git/trees/<sha>?recursive=1, /issues?state=all, /issues/42/comments, /pulls/12/files or /actions/runs. Read other relevant Issues, PRs, commits, workflows and checks as needed. File content is decoded to UTF-8. Follow API pagination with page/per_page. If the result cannot fit the 2 MiB mailbox, repository_result_too_large asks you to narrow the path, remove recursive=1 or use smaller pages. Call github_read_token first. No URLs, other repositories, writes or log downloads.', { path: { type: 'string' } }, ['path']),
   fn('github_search', 'Search Issues and PRs within this repository. query uses GitHub issue search syntax; the repository is fixed by the executor. Do not supply repo:, org: or user: qualifiers. Follow pagination when needed. Call github_read_token first.', { query: { type: 'string' }, page: { type: 'integer', minimum: 1 } }, ['query']),
   fn('read_job_log', 'Read a plain-text log window from any relevant Actions job in this repository, not only the triggering run. Get job IDs from github_read. Call github_read_token first.', { job_id: { type: 'integer', minimum: 1 }, start_line: { type: 'integer', minimum: 1 }, max_lines: { type: 'integer', minimum: 1, maximum: 500 } }, ['job_id'])
 ];
@@ -48,7 +48,10 @@ export class RepositoryExplorer {
     try {
       const result = await this.read(name, args);
       await this.guard();
-      return this.redactor.clean(result);
+      const cleaned = this.redactor.clean(result);
+      // Match the existing mailbox capacity in both the observation and Pi transports.
+      if (Buffer.byteLength(JSON.stringify(cleaned)) > 2 * 1024 * 1024) return { error: 'repository_result_too_large', detail: 'Narrow the path, remove recursive=1, or continue pagination with smaller page/per_page requests.' };
+      return cleaned;
     } catch (error) {
       await this.guard();
       if (!(error instanceof TaskError) || error.code === 'github_rate_limited') throw error;
