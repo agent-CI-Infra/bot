@@ -72,7 +72,7 @@ function select(root, selector) {
 export function loadConsole(files, respond) {
   const root = new FakeElement('html'), byId = new Map(), requests = [];
   const document = {
-    body: new FakeElement('body'), createElement: tag => new FakeElement(tag), addEventListener() {},
+    body: new FakeElement('body'), createElement: tag => new FakeElement(tag), createElementNS: (ns, tag) => new FakeElement(tag), addEventListener() {},
     // Elements the scripts look up by id hang under one root, so document-wide selectors such as `#rows .row` find them.
     getElementById(id) { if (!byId.has(id)) { const element = Object.assign(new FakeElement('div'), { id }); root.append(element); byId.set(id, element); } return byId.get(id); },
     querySelectorAll: selector => select(root, selector), querySelector: selector => select(root, selector)[0] || null,

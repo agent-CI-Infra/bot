@@ -336,6 +336,10 @@ test('sync conclusions count installations and retain gaps, account failures and
   assert.match(message(missing), /fixture（安装 7）/);
   const unchecked = structuredClone(good); unchecked.results[0].app = { error: 'app_check_failed' };
   assert.match(message(unchecked), /App 定义暂时无法核对/);
+  // An installation that satisfies the global lists can still lack what a repository's switched-on feature needs.
+  const feature = structuredClone(good); feature.repositories[0] = { id: '101', full_name: 'fixture/project-101', installation_id: '7', feature_missing: [{ feature: 'actions_failures', requirement: 'workflow_run' }] };
+  assert.equal(message(feature), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-101：已开启 Actions 失败分析，但安装未订阅 Workflow run 事件，分析不会运行。');
+  assert.equal(conclusion(feature).tone, '');
 });
 
 test('an installed but never started repository is hidden from the list, survives sync, and can be restored', async t => {

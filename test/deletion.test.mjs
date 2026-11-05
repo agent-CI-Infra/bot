@@ -253,6 +253,29 @@ test('the permission check refreshes installation permissions and events and exc
   assert.deepEqual((await admin('/api/installations/permissions/check', 'POST', {})).value.errors, [{ account_id: a.id, error: 'github_http_503' }]);
 });
 
+test('repository rows report what a switched-on feature needs from the installation, apart from the global requirements', async t => {
+  const github = await fakeGitHub(t); let sync;
+  const h = await harness(t, undefined, store => ({ installations: sync = new InstallationSync(store, github.url) })), { admin } = await setup(h);
+  const app = await appAccount(admin), bot = await account(admin);
+  github.installations = [installation(77)]; github.listed = { 77: ['101', '202'] }; github.userRepos = [['303', { admin: false, push: true }]];
+  await sync.sync(app.id); await sync.sync(bot.id);
+  for (const [id, owner] of [['101', app], ['202', app], ['303', bot]]) await repository(admin, owner.id, id);
+  const gaps = async () => Object.fromEntries((await admin('/api/installations')).value.repositories.map(r => [r.id, [r.events_missing, r.feature_missing]]));
+  assert.deepEqual(await gaps(), { 101: [[], []], 202: [[], []], 303: [[], []] });
+  // Actions failure analysis needs workflow_run, which is not a global required event: only the projects using it lack it.
+  for (const id of ['101', '303']) assert.equal((await admin(`/api/repositories/${id}/policy`, 'PATCH', { actions_failures_enabled: true })).status, 200);
+  assert.deepEqual(await gaps(), { 101: [[], [{ feature: 'actions_failures', requirement: 'workflow_run' }]], 202: [[], []],
+    303: [[], [{ feature: 'actions_failures', requirement: 'github_app' }]] });
+  // The in-place permission check carries the same field, and a later subscription clears it.
+  github.installations = [installation(77, full, { events: [...events, 'workflow_run'] })];
+  const checked = await admin('/api/installations/permissions/check', 'POST', {});
+  assert.deepEqual(checked.value.repositories.map(r => [r.id, r.feature_missing]), [['101', []], ['202', []], ['303', [{ feature: 'actions_failures', requirement: 'github_app' }]]]);
+  // Events not read yet are unknown rather than missing.
+  h.store.run("UPDATE installed_repositories SET events=NULL WHERE repository_id='101'");
+  const unread = (await admin('/api/installations')).value.repositories.find(r => r.id === '101');
+  assert.deepEqual([unread.feature_missing, unread.permissions_stale], [null, true]);
+});
+
 test('users are deleted with their sessions and assignments, but never the last active super administrator', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin), password = testPassword();
   await repository(admin, a.id, '101');
@@ -346,7 +369,8 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   const gap = [{ permission: 'actions', required: 'write', current: 'read' }];
   const row = (id, extra) => ({ id, full_name: 'fixture/project-' + id, owner_id: '10', installed: true, registered: true, enabled: true, review_enabled: true,
     development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false, ...extra });
-  let listing = [row('101', { permission_missing: gap, permissions_stale: true }), row('202', { installed: false, permission_missing: null }), row('303', { events_missing: ['issue_comment'] })];
+  let listing = [row('101', { permission_missing: gap, permissions_stale: true }), row('202', { installed: false, permission_missing: null }), row('303', { events_missing: ['issue_comment'] }),
+    row('404', { events_missing: [], feature_missing: [{ feature: 'actions_failures', requirement: 'workflow_run' }] })];
   let check = () => [201, { errors: [], repositories: [{ id: '101', permission_missing: [...gap, { permission: 'contents', required: 'write', current: null }] }, { id: '303', permission_missing: gap, events_missing: ['pull_request_review'] }] }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [{ repository_id: '101', gate_state: 'live', dashboard_state: 'none', stale: false }] }];
@@ -358,8 +382,12 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   const settle = () => new Promise(r => setTimeout(r, 50)), permission = line => line.querySelector('[data-permission]');
   const actions = line => line.querySelectorAll('button').map(b => b.textContent);
   await page.run('render()');
-  const [first, removed, third] = page.$('rows').children;
+  const [first, removed, third, actionsRow] = page.$('rows').children;
   assert.deepEqual([permission(first).textContent, permission(first).hidden], ['权限不足', false]);
+  // Every gap carries a warning icon; a switched-on feature's missing event counts as one too.
+  assert.equal(permission(first).children[0].tagName, 'SVG'); assert.equal(permission(removed).children.length, 0);
+  assert.deepEqual([permission(actionsRow).textContent, permission(actionsRow).hidden, permission(actionsRow).children[0].tagName], ['事件未订阅', false, 'SVG']);
+  assert.match(permission(actionsRow).title, /^已开启 Actions 失败分析，但安装未订阅 Workflow run 事件.*请 App 管理员为已有 App 订阅 workflow_run/);
   assert.match(permission(first).title, /Actions 需要「Read and write」，现在「Read-only」/);
   assert.equal(permission(removed).hidden, true);
   assert.deepEqual([permission(third).textContent, permission(third).hidden], ['事件未订阅', false]);

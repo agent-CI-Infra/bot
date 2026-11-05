@@ -76,6 +76,22 @@ test('App 定义只在机器人账号检查，安装权限和事件缺口在项�
     await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。');
     await expect(message.locator('span')).toHaveClass('view-success');
     await expect(row('101').locator('[data-permission]')).toBeHidden(); await expect(row('202').locator('[data-permission]')).toBeHidden();
+    // Actions failure analysis needs workflow_run, outside the global list: only the project that switched it on is flagged.
+    expect((await admin('/api/repositories/101/policy', 'PATCH', { actions_failures_enabled: true })).status).toBe(200);
+    await sync.click(); await expect(message).toContainText('权限和事件订阅并非全部正常。');
+    await expect(message).toContainText('fixture/project-101：已开启 Actions 失败分析，但安装未订阅 Workflow run 事件，分析不会运行。');
+    const actionsChip = row('101').locator('[data-permission]');
+    await expect(actionsChip).toHaveText('事件未订阅'); await expect(actionsChip.locator('svg.status-icon')).toBeVisible();
+    await expect(actionsChip).toHaveAttribute('title', /Workflow run.*订阅 workflow_run/);
+    await expect(row('202').locator('[data-permission]')).toBeHidden();
+    for (const [width, height] of [[1365, 900], [390, 844]]) {
+      await page.setViewportSize({ width, height }); await row('101').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `.tmp/app-permissions/actions-row-${width}.png`, fullPage: true });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    await page.setViewportSize({ width: 1365, height: 900 });
+    installations[0].events = [...events, 'workflow_run']; await sync.click();
+    await expect(message.locator('span')).toHaveText('安装列表已同步，1 个安装的权限和事件订阅都正常。'); await expect(actionsChip).toBeHidden();
     // A failed account sync cannot turn cached grants into an all-normal conclusion.
     failInstallations = true; await sync.click();
     await expect(message).toContainText('部分账号同步失败：Department App（github_http_503）');

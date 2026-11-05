@@ -507,20 +507,29 @@ function installedBadges(row) {
 // GitHub's own wording for App permissions, shared by the project list and the App permission check.
 const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests: 'Pull requests', statuses: 'Commit statuses', actions: 'Actions', checks: 'Checks', metadata: 'Metadata' };
 // GitHub's names for the webhook events under Permissions & events → Subscribe to events.
-const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment' };
+const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', workflow_run: 'Workflow run' };
 const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
 function permissionGapText(missing) {
   return missing.map(item => item.permission === 'repository_role' ? `仓库角色需要「${roleNames.write}」，现在「${roleNames[item.current] || item.current || '无'}」`
     : `${permissionNames[item.permission] || item.permission} 需要「${accessNames[item.required] || item.required}」，现在「${item.current ? accessNames[item.current] || item.current : 'No access'}」`).join('；');
 }
 function eventGapText(missing) { return '事件未订阅：' + missing.map(event => eventNames[event] || event).join('、'); }
+// Access that only a switched-on project feature needs (feature_missing); the global required lists do not include it.
+function featureGapText(gap) {
+  if (gap.feature !== 'actions_failures') return `${gap.feature} 缺少 ${gap.requirement}`;
+  return gap.requirement === 'workflow_run' ? '已开启 Actions 失败分析，但安装未订阅 Workflow run 事件，分析不会运行'
+    : gap.requirement === 'github_app' ? '已开启 Actions 失败分析，但它只能通过 GitHub App 账号运行，当前是机器人账号' : `Actions 失败分析缺少 ${gap.requirement}`;
+}
 // Use the full sync's installation snapshots: one installation can cover many repositories, including hidden ones.
 function installationSyncNotice(result) {
   const failed = result.results.filter(row => row.error), installations = result.results.flatMap(row => row.installations || []);
   const gaps = installations.filter(row => row.missing.length || row.missing_events.length).map(row => `${row.account || '安装'}（安装 ${row.id}）：` +
     [row.missing.length ? '权限不足：' + permissionGapText(row.missing) : '', row.missing_events.length ? eventGapText(row.missing_events) : ''].filter(Boolean).join('；'));
-  for (const row of result.repositories || []) if (!row.installation_id && row.permission_missing?.length)
-    gaps.push(row.full_name + '：权限不足：' + permissionGapText(row.permission_missing));
+  for (const row of result.repositories || []) {
+    if (!row.installation_id && row.permission_missing?.length) gaps.push(row.full_name + '：权限不足：' + permissionGapText(row.permission_missing));
+    // Installation snapshots only cover the global lists; a feature's extra event is a gap of the repositories using it.
+    for (const gap of row.feature_missing || []) gaps.push(row.full_name + '：' + featureGapText(gap));
+  }
   const parts = [failed.length ? '部分账号同步失败：' + failed.map(row => (accounts.find(account => account.id === row.account_id)?.name || row.account_id) + '（' + row.error + '）').join('、') + '，因此还不能判断全部安装的权限和事件订阅是否正常。'
     : gaps.length ? '安装列表已同步，权限和事件订阅并非全部正常。' : `安装列表已同步，${installations.length} 个安装的权限和事件订阅都正常。`];
   if (gaps.length) parts.push(gaps.join('；') + '。');
@@ -530,13 +539,24 @@ function installationSyncNotice(result) {
   if (appUnknown) parts.push('App 定义暂时无法核对，请到「全局设置 → 机器人账号」检查。');
   return { text: parts.join(''), tone: failed.length || gaps.length || appMissing || appUnknown ? '' : 'view-success' };
 }
-// A repository the account still lists but with less than the bot needs. Always drawn (hidden when nothing is missing) so
-// that a later permission check can swap it in place.
+function warningIcon() {
+  const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16'); svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('class', 'status-icon');
+  svg.innerHTML = '<path d="M8 1.4 15.3 14.2H.7z" fill="currentColor"/><path d="M8 5.7v4M8 11.8v.4" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/>';
+  return svg;
+}
+// A repository the account still lists but with less than the bot needs, including what a switched-on feature needs.
+// Always drawn (hidden when nothing is missing) so that a later permission check can swap it in place.
 function permissionBadge(row) {
-  const missing = row.permission_missing || [], events = row.events_missing || [], labels = [missing.length ? '权限不足' : '', events.length ? '事件未订阅' : ''].filter(Boolean);
+  const missing = row.permission_missing || [], events = row.events_missing || [], features = row.feature_missing || [];
+  const eventGap = events.length || features.some(gap => gap.requirement === 'workflow_run'), appGap = features.some(gap => gap.requirement === 'github_app');
+  const labels = [missing.length ? '权限不足' : '', eventGap ? '事件未订阅' : '', appGap ? 'Actions 需要 App' : ''].filter(Boolean);
   const chip = labels.length ? badge(labels.join(' · '), 'warning') : element('span', '');
-  if (labels.length) chip.title = [missing.length ? `仍能看到这个仓库，但授予的权限低于所需：${permissionGapText(missing)}。这种仓库不能删除。` : '', events.length ? eventGapText(events) + '。请在 GitHub 安装设置接受所需事件。' : ''].filter(Boolean).join('');
-  else chip.hidden = true;
+  if (labels.length) {
+    chip.classList.add('status-alert'); chip.prepend(warningIcon());
+    chip.title = [missing.length ? `仍能看到这个仓库，但授予的权限低于所需：${permissionGapText(missing)}。这种仓库不能删除。` : '', events.length ? eventGapText(events) + '。请在 GitHub 安装设置接受所需事件。' : '',
+      ...features.map(gap => featureGapText(gap) + '。' + (gap.requirement === 'workflow_run' ? '请 App 管理员为已有 App 订阅 workflow_run；没有新增权限时无需重新批准安装。' : ''))].filter(Boolean).join('');
+  } else chip.hidden = true;
   chip.dataset.permission = ''; return chip;
 }
 // Replaces the permission badge of rows already on the list; nothing else in a row is redrawn.
