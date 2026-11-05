@@ -16,9 +16,9 @@ import { ExternalService } from './external/service.js';
 import { type InstallationSync, installationApi } from './app/installations.js';
 import { Onboarding } from './onboarding/service.js';
 import { type IntegrationChecker } from './projects/integrations.js';
-import { type Quickstart } from './projects/quickstart.js';
+import { type GateOnboarding } from './projects/gate-onboarding.js';
 import { integrationsApi } from './app/integrations.js';
-import { quickstartApi } from './app/quickstart.js';
+import { gateOnboardingApi } from './app/gate-onboarding.js';
 import { RuleService } from './rules/service.js';
 import { WorkflowService } from './workflows/service.js';
 import { settingsApi } from './app/settings.js';
@@ -30,7 +30,7 @@ import { PublicBoards } from './public-board/service.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
-  integrations?: IntegrationChecker; quickstart?: Quickstart; githubUrl?: string; releases?: ReleaseService;
+  integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
   imageTag?: string; boards?: PublicBoards; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -108,7 +108,7 @@ export function createControlPlane(options: Options) {
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
-      '/views.js': ['views.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/workflows.js': ['workflows.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
+      '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/workflows.js': ['workflows.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
       const [name, mime] = assets[path]; const bytes = await readFile(join(options.staticDirectory, name));
@@ -176,7 +176,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
-    const result = await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await quickstartApi(store, options.quickstart, user, method, url, input) ?? await management(store, user, method, path, input) ?? await models(store, user, method, url, input)
+    const result = await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, path, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined);
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.

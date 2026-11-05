@@ -30,10 +30,10 @@
 
 | 你的仓库需要 | 说明 |
 | --- | --- |
-| 是 **Node** 仓库 | 根目录有 `package.json` |
-| 检查命令由仓库维护者配置 | 不要求已有 build 或 test 脚本；接入 PR 不按 `package.json` 代选检查命令 |
-| 依赖有锁文件 | 有 `dependencies` 就要有 `package-lock.json` 等 |
-| 没有 `.github/workflows/ci.yml` | 已存在则视为"已接入门禁"，不再覆盖 |
+| 已安装 GitHub App | 门禁接入只使用 App 安装令牌；挂在机器人账号上的仓库不能接入 |
+| 至少有一个提交 | 空仓库没有可读的事实，先推送代码 |
+| 不限语言 | Node、Python、Go、Rust、Java 等都可以；不要求 `package.json` 或 npm 锁文件 |
+| 检查命令来自仓库自己 | agent 只按仓库里已有的脚本、Makefile、构建文件和 workflow 提议命令，不确定的会问你 |
 | 是公开或私有仓库 | 公开仓安装后默认提供看板；私有仓由超管在仓库列表开启看板后公开 |
 
 另外，你需要在 GitHub 上有该仓库的管理权限，并且是控制台的超管（或找超管帮你点）。
@@ -81,11 +81,23 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 - 关闭后立即停止对外展示，包括已经生成的快照；设置在刷新、同步安装和重启后保留。
 - 以前已明确启用的私有仓会保留开启状态。已保存的开或关在仓库可见性变化后也保持不变；未保存选择的仓库按新可见性使用默认值。
 
-**接入门禁** 中的门禁 PR 按钮只负责从 `CI-workflow` 复制原门禁框架并提出源仓 PR，不改变看板开关。
+**接入门禁** 是一段和 agent 的对话，不改变看板开关：
 
-门禁 PR 同时就是发版本的接入示例，不另建示例仓库。`release.yml` 优先来自 `agent-CI-Infra/CI-workflow` 的 `template/.github/workflows/release.yml`，缺少时使用同样只运行 release 门禁 lane 的本地模板；`v1.2.3`、`v1.2.3-beta.1` 等标签会触发 Release Actions。框架不含 PyPI、npm 或镜像发布步骤。
+1. **先看五层介绍**：点「接入门禁」后，对话框先说明 build、pr-ready、pr-merge、daily、release 各在什么时候运行。此时不会读写仓库，也不会创建分支或 PR。
+2. **开始适配**：控制面用只读安装令牌查看默认分支：语言、根目录的构建和依赖文件（`package.json`、`pyproject.toml`、`Makefile`、`go.mod`、`Cargo.toml` 等）、已有 workflow 及其命令、是否已有 `ci.yml` 或 `ci-gates.json`、有没有未合入的门禁 PR，以及默认分支是否启用 merge queue（先看规则集，再看分支保护；判断不了就在对话里问你）。
+3. **和 agent 定方案**：项目已启动并选了模型时，agent 用项目默认模型和同一套仓库只读工具提出工具链、安装命令和各 lane 的命令，并注明来源；不确定的命令留空并在对话里问你。你可以回复它，也可以直接修改右侧方案。仓库还没启动或没有可用模型时，右侧是只按仓库中确定的命令整理的初步方案，由你补充后确认。确认之前，控制面不写仓库、不推分支，也不运行仓库里的脚本。
+4. **确认后开 PR**：点「确认并创建门禁 PR」后，控制面按你确认的那一版方案生成文件并开 PR。
 
-`.github/ci-gates.json` 保留 `build`、`pr-ready`、`pr-merge`、`daily`、`release` 的 lane 名字，但 `commands` 留空。空 lane 能运行并生成 `not_applicable` 报告，只说明还没有配置检查，不表示实际检查通过。仓库开发者应填写各 lane 的检查命令，并决定是否在自己的 Release workflow 中增加 PyPI、npm 或镜像发布步骤。控制面只提供框架、在人确认版本和完整提交 SHA 后打标签；具体检查及发包行为均由该仓库自己的 Release Actions 执行。没有 build/test 脚本的 Node 仓库也能先接入框架。
+门禁 PR 的内容：
+
+- 门禁 workflow：默认是 `.github/workflows/ci.yml`。仓库已有 `ci.yml` 时不会覆盖，门禁 job 放在 `.github/workflows/ci-gates.yml`，PR 正文说明怎样并进 `ci.yml`。触发事件、权限和 job 结构由控制面决定；pull_request 上报告 PR head 提交，不是 GitHub 的合并提交。
+- `.github/ci-gates.json`：各 lane 的命令。空 lane 运行时报告 `not_applicable`，只说明还没有配置检查，不表示检查通过。
+- `scripts/gate/gate.mjs`：从 `agent-CI-Infra/CI-workflow` 复制；仓库已有时沿用。
+- `.github/workflows/release.yml`：版本标签（如 `v1.2.3`、`v1.2.3-beta.1`）触发 release lane；仓库已有时不覆盖。框架不含 PyPI、npm 或镜像发布步骤。
+
+**merge queue**：默认分支启用了 merge queue 时，这次只提交进入队列之前的门禁，也就是 pull_request 上的 build 和 pr-ready；不包含 `merge_group`，也不包含 push 到默认分支后才运行的门禁，pr-merge 留空。daily 和 release 有命令时照常保留。没有 merge queue 的仓库保留 CI-workflow 的完整事件（pull_request、merge_group、push 到默认分支、有命令时的定时任务）。如果之后要把 `gate` 设为合并队列的必需检查，需要先给门禁 workflow 加上 `merge_group`，否则队列会一直等这项检查。
+
+默认分支上已有 `.github/ci-gates.json` 的仓库视为已接入，对话直接说明这一点，不再开覆盖它的 PR；需要调整时直接改这个文件。
 
 使用时，先合并并配置门禁 PR，再到项目页「发版本」检查版本和目标提交。相对上一枚可达的合法版本标签没有新提交时，页面说明跳过，不能确认；没有上一枚标签则按首次发布处理。有新提交时，人确认后创建标签，仓库 Release Actions 成功后生成草稿，再由人点击「正式发布」。定时发版本和自动计算版本号不在当前框架范围内。
 
@@ -103,7 +115,7 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 
 自动化到"PR 开出来"为止，门禁检查内容和开发授权仍留给人把关：
 
-1. **配置并合并门禁 PR**：由本仓库开发者填写 lane 检查命令，并决定 Release workflow 是否需要发布包或镜像；空命令 lane 仅为框架；
+1. **确认方案并合并门禁 PR**：在接入对话里确认各 lane 的命令，PR 上的 Actions 跑过后再合入；是否在 Release workflow 里发布包或镜像由本仓库开发者决定；空命令 lane 只表示还没有配置；
 2. **确认私有仓快照是否可以公开**：需要公开时，由超管在仓库列表开启看板；公开仓不需要这一步；
 3. **给需要开发的 Issue 加 `bot-develop` 标签**：bot 只处理带这个标签的 Issue，这是"允许 bot 改代码"的唯一开关。
 
@@ -140,4 +152,4 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 控制台项目行的 **删除** 只清理本系统记录（仓库、策略、运行记录），**不会**卸载 App，也不会删除 GitHub 上的仓库。GitHub 侧请自行处理。
 
 **接入失败了怎么排查？**
-每个项都会显示失败原因和错误码（如 `app_permissions_missing`、`public_address_not_verified`、`collection_failed`），对着提示处理即可；也可以先跑一次预演看它想做什么。
+接入对话会写明原因和错误码（如 `app_permissions_missing`、`template_app_not_installed`、`repository_empty`），对着提示处理后再次确认即可，会复用同一个分支；确认前可以展开「预览将提交的文件」查看完整内容。看板的问题（如 `public_address_not_verified`、`collection_failed`）显示在仓库列表的看板开关旁。

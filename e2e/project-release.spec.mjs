@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { releaseFixture, run, target, other, writes } from '../test/release-fixtures.mjs';
-import { workflowSet } from '../dist/projects/gate-templates.js';
+import { releaseWorkflowFile, emptyPlan } from '../dist/projects/gate-plan.js';
 import { testPassword } from '../test/helpers.mjs';
 
 async function login(page, address, username, password) {
@@ -12,8 +12,9 @@ test('项目页完整 beta 发版：确认 SHA、Release lane、草稿编辑和�
   const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) }), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    // Exercise the existing onboarding release-lane template against fake GitHub; no live repository writes.
-    f.state.files['.github/workflows/release.yml'] = workflowSet({ build: 'npm run build' })['.github/workflows/release.yml'];
+    // Exercise the onboarding release-lane template against fake GitHub; no live repository writes.
+    f.state.files['.github/workflows/release.yml'] = releaseWorkflowFile({ ...emptyPlan(), install: ['npm ci'] },
+      { defaultBranch: 'main', mergeQueue: 'disabled', workflowPath: '.github/workflows/ci.yml', releaseWorkflow: true, npmLock: true });
     await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
     await login(page, f.h.admin, 'administrator', f.password);
     await page.goto(f.h.admin + '/#/projects/101/release');
