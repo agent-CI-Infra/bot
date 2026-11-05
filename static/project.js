@@ -828,6 +828,7 @@ function ruleSync() {
       const { rules } = await api(`/api/repositories/${id}/rules/refresh`, 'POST', {});
       if (current?.id !== id) return;
       current.rules = rules; updateRuleSources(); describe();
+      if (typeof redrawSharedRule === 'function') redrawSharedRule();
       // Refresh saved content without discarding an editor's unsaved draft.
       $('project-page').querySelectorAll('.common-rule').forEach(details => {
         const body = details.querySelector('.common-rule-body');

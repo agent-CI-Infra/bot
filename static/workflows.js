@@ -191,12 +191,19 @@ async function refreshWorkflowTable() {
   try {
     await reloadWorkflows();
     document.querySelector('.workflow-sidebar .workflow-lists')?.replaceWith(workflowLists(workflowItem()));
-    // An editor nobody has touched shows the new sources; one with unsaved changes keeps them and only updates its source line.
+    // A workflow editor nobody has touched shows the new sources; one with unsaved changes keeps them and only updates its
+    // source line. A shared rule card redraws itself after its own save, so it is left alone here.
     const detail = $('workflow-detail'), form = detail?.querySelector('form.workflow-editor');
+    if (!workflowById(workflowItem())) return;
     if (detail && !form?.dataset.dirty) { fillWorkflowDetail(detail); return; }
     const workflow = workflowById(workflowItem()), meta = detail?.querySelector('[data-prompt-meta]');
     if (workflow && meta) meta.replaceChildren(...promptMeta(workflow));
   } catch { /* The next visit reloads the page. */ }
+}
+// After the default branch is read again, a shared rule card that is only being read shows the new text.
+function redrawSharedRule() {
+  const shared = sharedItems.find(([id]) => id === current?.workflowItem), card = $('workflow-detail')?.querySelector('.rule-card');
+  if (current?.section === 'workflows' && shared?.[2] && card && !card.querySelector('form')) card.replaceWith(ruleCard(shared[2]));
 }
 const promptMeta = workflow => [badge('生效：' + layerNames[workflow.prompt.source], workflow.prompt.source === 'builtin' ? '' : 'info'), element('code', promptLocation(workflow))];
 
