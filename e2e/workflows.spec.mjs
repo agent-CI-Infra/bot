@@ -4,7 +4,8 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
-// The assistant model: answers with a draft workflow (a prompt with its flowchart, triggers and permissions).
+// The assistant model: like an agent, it reads the workflows, proposes a draft through update_draft, then streams a short
+// answer in pieces (slowly enough to watch it arrive).
 async function assistantModel() {
   const requests = [];
   const draft = { name: '文档链接检查', description: 'PR 改到文档时检查链接和示例命令',
@@ -12,9 +13,17 @@ async function assistantModel() {
     prompt: 'Check every link and example command in the changed docs.\n\n```mermaid\nflowchart LR\n  read[读改动] --> check[核对链接] --> reply[回复]\n  check -->|需要复核| read\n```\n\n1. **Read** the changed Markdown files.\n2. **Check** each link and command; start_agent may double-check a doubtful one.\n3. **Reply** with the broken ones.',
     permissions: { workspace: { read: true, write: true, notes: false, shell: true }, github: ['contents', 'pull_requests'], agents: true } };
   const server = createServer(async (req, res) => {
-    let raw = ''; for await (const chunk of req) raw += chunk; requests.push(JSON.parse(raw));
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: JSON.stringify({ reply: '已起草：读改动、核对链接，再回复；可疑的链接交给独立 agent 复核。', draft }) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
+    const called = name => body.messages.some(message => message.tool_calls?.some(call => call.function.name === name));
+    const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+    const message = !called('list_workflows') ? { role: 'assistant', content: '先看看现有的工作流。', tool_calls: [call('c1', 'list_workflows', {})] }
+      : !called('update_draft') ? { role: 'assistant', content: null, tool_calls: [call('c2', 'update_draft', draft)] } : null;
+    if (message) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 10, completion_tokens: 5 } })); }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    for (const piece of ['已起草：读改动、核对链接，', '再回复；', '可疑的链接交给独立 agent 复核。']) {
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: piece } }] })}\n\n`); await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    res.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`);
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   return { url: `http://127.0.0.1:${server.address().port}/v1`, requests, close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }) };
@@ -94,25 +103,47 @@ test('工作流页左侧列表、右侧分页编辑：内置与自定义同样�
     await detail('Actions 失败处理').getByRole('tab', { name: '权限与模型', exact: true }).click();
     await expect(detail('Actions 失败处理').locator('select[name=model_id]')).toBeVisible();
     await expect(item('actions.failures')).toContainText('运行中');
-    // Chat drafts a new workflow beside the editor; the draft takes effect only once saved.
+    // The assistant floats over the page: it can be moved and resized and shows the agent's work as it streams.
     await list.getByRole('button', { name: '用聊天新增', exact: true }).click();
-    const create = page.getByRole('region', { name: '新增工作流', exact: true }), chat = create.getByRole('complementary', { name: '用聊天编写', exact: true });
-    await expect(chat).toBeVisible();
-    await chat.getByLabel('告诉助手你想要的流程', { exact: true }).fill('PR 改到文档时检查链接和示例命令，回复坏掉的');
-    await chat.getByRole('button', { name: '发送', exact: true }).click();
-    await expect(chat.locator('.chat-assistant')).toContainText('已起草');
-    const draftFigure = chat.locator('figure').filter({ hasText: '草稿流程图' });
+    const assistant = page.getByRole('dialog', { name: '工作流助手', exact: true });
+    await expect(assistant).toBeVisible();
+    expect(await assistant.evaluate(node => [getComputedStyle(node).position, getComputedStyle(node).resize])).toEqual(['fixed', 'both']);
+    const before = await assistant.boundingBox(), handle = assistant.locator('.assistant-head');
+    await handle.hover({ position: { x: 60, y: 12 } }); await page.mouse.down(); await page.mouse.move(before.x - 240, before.y - 120, { steps: 5 }); await page.mouse.up();
+    const moved = await assistant.boundingBox(); expect(moved.x).toBeLessThan(before.x - 150); expect(moved.y).toBeLessThan(before.y - 60);
+    await assistant.getByLabel('告诉助手你想要的流程', { exact: true }).fill('PR 改到文档时检查链接和示例命令，回复坏掉的');
+    await assistant.getByRole('button', { name: '发送', exact: true }).click();
+    await expect(assistant.getByRole('button', { name: '停止', exact: true })).toBeVisible();
+    await expect(assistant.locator('.assistant-tool code')).toHaveText(['list_workflows', 'update_draft']);
+    await expect(assistant.locator('.turn-assistant')).toContainText('已起草：读改动、核对链接，再回复；可疑的链接交给独立 agent 复核。');
+    await expect(assistant.getByRole('button', { name: '停止', exact: true })).toBeHidden();
+    const draftFigure = assistant.locator('figure').filter({ hasText: '草稿流程图' });
     await expect(draftFigure.locator('figcaption')).toContainText('读改动 → 核对链接 → 回复');
     await expect(draftFigure.locator('figcaption')).toContainText('核对链接 → 读改动：需要复核');
-    await expect(chat).toContainText('已收窄到允许的范围');
+    await expect(assistant).toContainText('已收窄到允许的范围');
+    await assistant.locator('.assistant-tool').filter({ hasText: 'list_workflows' }).locator('summary').click();
+    await expect(assistant.locator('.assistant-tool').filter({ hasText: 'list_workflows' })).toContainText('review.pr');
     expect((await admin('/api/repositories/101/workflows')).value.workflows).toHaveLength(7);
-    const chatBox = await chat.boundingBox(), tabsBox = await create.getByRole('tablist', { name: '工作流设置', exact: true }).boundingBox();
-    expect(chatBox.x).toBeGreaterThan(tabsBox.x + tabsBox.width - 2);
-    await page.screenshot({ path: '.tmp/workflows/chat-draft.png', fullPage: true });
-    await chat.getByRole('button', { name: '填入编辑器', exact: true }).click();
+    await page.screenshot({ path: '.tmp/workflows/assistant.png' });
+    // Another page keeps the window and its conversation; after a reload the conversation comes back with the window.
+    await page.getByRole('link', { name: '模型', exact: true }).click();
+    await expect(assistant).toBeVisible(); await expect(assistant.locator('.turn-user')).toHaveCount(1);
+    await page.reload(); await expect(assistant).toBeHidden();
+    await page.goto(h.admin + '/#/projects/101/workflows/new');
+    await page.getByRole('region', { name: '新增工作流', exact: true }).getByRole('button', { name: '用聊天编写', exact: true }).click();
+    await expect(assistant.locator('.turn-assistant')).toContainText('已起草');
+    const placed = await assistant.boundingBox(); expect(Math.abs(placed.x - moved.x)).toBeLessThan(4);
+    // A draft fills the editor; unsaved contents survive leaving the page and show up in the list until saved.
+    await assistant.getByRole('button', { name: '填入编辑器', exact: true }).click();
+    const create = page.getByRole('region', { name: '新增工作流', exact: true });
     await expect(create.getByRole('tab', { name: '提示词与流程', exact: true })).toHaveAttribute('aria-selected', 'true');
     await expect(create.getByLabel('提示词', { exact: true })).toHaveValue(/flowchart LR/);
     await expect(create.locator('figure').filter({ hasText: '编辑中的流程图' }).locator('figcaption')).toContainText('读改动 → 核对链接 → 回复');
+    await assistant.getByRole('button', { name: '收起', exact: true }).click(); await expect(assistant).toBeHidden();
+    await page.getByRole('link', { name: '基本设置', exact: true }).click(); await page.getByRole('link', { name: '工作流', exact: true }).click();
+    await expect(item('new')).toContainText('文档链接检查'); await expect(item('new')).toContainText('未保存的草稿');
+    await item('new').click();
+    await expect(create).toContainText('这里显示的是未保存的修改');
     await create.getByRole('tab', { name: '概览', exact: true }).click();
     await expect(create.getByLabel('名称', { exact: true })).toHaveValue('文档链接检查');
     await create.getByRole('tab', { name: '触发源', exact: true }).click();
@@ -120,8 +151,10 @@ test('工作流页左侧列表、右侧分页编辑：内置与自定义同样�
     await create.getByRole('tab', { name: '权限与模型', exact: true }).click();
     await expect(create.getByLabel('修改工作区代码', { exact: true })).toBeDisabled();
     await expect(create.getByLabel('启动独立 agent', { exact: false })).toBeChecked();
+    await expect(create).toContainText('GitHub 写入（由控制面执行）'); await expect(create).toContainText('finish_review');
     await create.getByRole('button', { name: '保存', exact: true }).click();
     await expect(detail('文档链接检查').locator('.flash')).toHaveText('已保存工作流');
+    await expect(item('new')).toHaveCount(0);
     const workflows = (await admin('/api/repositories/101/workflows')).value.workflows, custom = workflows.find(workflow => !workflow.builtin);
     expect(custom.triggers.map(trigger => trigger.id)).toEqual(['pull_request.opened', 'pull_request.synchronize']);
     expect(custom.permissions).toEqual({ workspace: { read: true, write: false, notes: false, shell: true }, github: ['contents', 'pull_requests'], agents: true, publication: 'reply' });

@@ -2,7 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { beginModelRequest, finishModelRequest } from '../metrics/accounting.js';
 import { errorBody, networkReason, type Redactor, stop, TaskError } from './common.js';
 import { modelEndpoints, selectedModel } from './model.js';
-import { modelIdleMs, readModelResponse } from './model-stream.js';
+import { modelIdleMs, readModelResponse, type ModelDelta } from './model-stream.js';
 
 export type AgentModel = ReturnType<typeof selectedModel>;
 export interface ModelRequest {
@@ -13,7 +13,7 @@ export interface ModelRequest {
   body: Record<string, any>;
   requestId: string;
   guard?: () => Promise<void>;
-  onToken?: () => Promise<void>;
+  onToken?: (delta?: ModelDelta) => Promise<void>;
 }
 
 /** The single provider boundary. Credentials stay here, never in task tools or prompts.
@@ -52,14 +52,14 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
       headers: { Authorization: 'Bearer ' + model.key, 'Content-Type': 'application/json' },
       body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, [limit]: 8192, stream: true, stream_options: { include_usage: true } }))
     });
-    value = response.ok ? await readModelResponse(response, async () => {
+    value = response.ok ? await readModelResponse(response, async delta => {
       reset();
       try {
         // Full guards can call the workspace manager. Check the first token and
         // then at most once a second, while retaining per-token idle/progress updates.
         const now = Date.now();
         if (now - lastGuard >= 1000) { lastGuard = now; await input.guard?.(); }
-        await input.onToken?.();
+        await input.onToken?.(delta);
       }
       catch (error) { callbackFailed = true; throw error; }
     }) : await errorBody(response);
