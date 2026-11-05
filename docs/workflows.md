@@ -29,7 +29,7 @@
 | 草稿、已关闭对象、bot 自己写的内容、仓库外人员的评论不触发 | 控制面硬条件 | 所有触发源共用这套过滤，自定义工作流也一样 |
 | 发布 outbox、对账、PR head 校验、bot 分支归属 | 控制面硬条件 | 不变 |
 | `src/automation` 的标签规范、PR 状态、门禁、合并队列 | 确定性模块 | 仍是代码模块，由 `config/repositories/<owner>__<repo>.yml` 和 policy 的 `automation` 配置，不改成提示词 |
-| Actions 失败分类、单次重跑与提报 | 内置工作流 `actions.failures` | 触发源：默认分支的 Actions 运行失败；流程：分类 → 外部原因重跑一次／代码或不明原因提报 Issue → 检视 Issue。分类仍是代码里的固定规则，不调用模型，所以没有提示词和模型可配，「提示词与流程」页显示的是流程说明；开关就是原来的 `actions_failures_enabled` |
+| Actions 失败分类、单次重跑与提报 | 内置工作流 `actions.failures` | 触发源：默认分支的 Actions 运行失败；流程：读取日志 → 模型分析原因 → 外部原因重跑一次／代码或不明原因提报 Issue → 检视 Issue；提示词：`docs/prompts/actions-failures.md`；控制面核验模型引用的日志行，`external`／`code` 没有真实引用就按 unknown 处理，单次重跑预算和提报仍由控制面执行；开关就是原来的 `actions_failures_enabled` |
 | `.bot/computer.yaml` | 机器配置 | 不是工作流，按字段合并进虚拟电脑配置 |
 | 项目列表上的检视、开发开关 | 项目总开关 | 仍然有效：关掉检视，两条检视工作流都不运行；关掉开发，两条开发工作流都不运行。每条工作流另有自己的开关 |
 | 接入门禁 PR、公共看板 | 控制面功能 | 不是模型工作流 |
@@ -105,7 +105,7 @@ flowchart LR
 | --- | --- | --- |
 | `/api/repositories/:id/workflows` | GET | 全部工作流（七条内置在前），以及触发源目录 `triggers`、GitHub 范围 `github_scopes` 和提及名字 `mention_names` |
 | `/api/repositories/:id/workflows` | POST | 新增自定义工作流：`name,prompt` 必填，`description,enabled,triggers,permissions,model_id` 可选；`triggers` 为 `[{id,label?}]`，按标签触发时 `label` 必填；返回 201 和 `workflow`，id 形如 `custom.<12 位十六进制>` |
-| `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。每条工作流返回 `name,description,enabled,active,triggers`（`[{id,label?}]`）、`trigger_options`（它可选的触发源）、`prompt,permissions,ceiling,model`（不调用模型的为 `null`）和 `settings`。内置工作流的 PUT 和自定义的一样接受 `name,description,enabled,triggers,prompt,permissions,model_id`（名称留空恢复默认；`prompt` 为 `null` 清除控制台层；`triggers` 也接受旧的 `{id:布尔}` 写法），另接受 `settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；Actions 失败处理不接受 `prompt`、`model_id`（400 `workflow_agent_not_used`）。带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
+| `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。每条工作流返回 `name,description,enabled,active,triggers`（`[{id,label?}]`）、`trigger_options`（它可选的触发源）、`prompt,permissions,ceiling,model` 和 `settings`。内置工作流的 PUT 和自定义的一样接受 `name,description,enabled,triggers,prompt,permissions,model_id`（名称留空恢复默认；`prompt` 为 `null` 清除控制台层；`triggers` 也接受旧的 `{id:布尔}` 写法），另接受 `settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
 | `/api/repositories/:id/workflows/assistant` | POST | 聊天起草：`messages`（`[{role:user|assistant,content}]`）、可选 `workflow_id` 和编辑器当前内容 `draft`；返回 `reply,draft,warnings`，不保存任何内容。项目没有可用模型时返回 409 `model_not_configured` |
 
 自定义工作流的任务类型是 `workflow.issue` 或 `workflow.pr`，任务记录的 `workflow_id` 指向工作流。它们在同一台项目电脑上排队，按工作流权限准备工作区，结束时调用 `finish_review` 返回 `summary` 和 `findings`；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出。自定义工作流不加标签、不衔接开发、不延续检视会话，也不开分支或 PR。

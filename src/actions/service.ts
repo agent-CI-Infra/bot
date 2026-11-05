@@ -6,7 +6,8 @@ import { sha, stop, TaskError } from '../agent/common.js';
 import { actionPages } from '../releases/actions.js';
 import { queueWebhook } from '../review/queue.js';
 import { activateActions, recordActionsRun, actionsWorkflowOn } from './storage.js';
-import { classifyFailure, classifyJob, normalizeSignature, type Evidence, type FailureKind } from './classifier.js';
+import { classifyFailure, normalizeSignature, type Evidence, type FailureKind } from './classifier.js';
+import { analyzeFailedJobs } from './analysis.js';
 import { actionsRedactor, publicText } from './safety.js';
 
 export const scanInterval = 60_000, scanPageSize = 50;
@@ -162,14 +163,20 @@ export class ActionsFailures {
       else {
         const jobs = await actionPages(github, github.path(`/actions/runs/${runId}/attempts/${run.run_attempt}/jobs`), 'jobs');
         if (jobs.some(j => j.run_id !== runId || j.run_attempt && j.run_attempt !== run.run_attempt)) stop('actions_jobs_identity_changed');
-        const failed = jobs.filter(j => j.conclusion === 'failure'), evidence: Evidence[] = [];
+        const failed = jobs.filter(j => j.conclusion === 'failure'), logs: { job: any; log: string | null }[] = [], evidence: Evidence[] = [];
         for (const job of failed) {
           let log: string | null = null;
           try { log = await github.jobLog(job.id); } catch (error) { if (error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost', 'github_rate_limited'].includes(error.code)) throw error; }
-          const classified = classifyJob(job, log);
+          logs.push({ job, log });
+        }
+        // The workflow's model classifies the failed jobs; the control plane checks what it cites and acts on the result.
+        for (const classified of failed.length ? await analyzeFailedJobs(this.store, github, run, logs) : []) {
+          const job = classified.job;
           // A non-empty excerpt that publicText empties could not be made safe; the report says so instead of "no evidence".
           const quote = publicText(classified.quote, github.redactor).slice(0, 2400), context = classified.context ? publicText(classified.context, github.redactor).slice(-1200) : '';
-          evidence.push({ ...classified, job: { id: job.id, key: sha(String(job.name)), name: publicText(String(job.name), github.redactor).replace(/[\r\n`#<>@]/g, ' ') || 'Failed job' }, quote, context,
+          // The model's reason goes into a public Issue: one plain line that mentions nobody.
+          const reason = publicText(classified.reason, github.redactor).replace(/\s+/g, ' ').replace(/@/g, '&#64;').slice(0, 1200) || 'The reason could not be made safe for public disclosure.';
+          evidence.push({ ...classified, reason, job: { id: job.id, key: sha(String(job.name)), name: publicText(String(job.name), github.redactor).replace(/[\r\n`#<>@]/g, ' ') || 'Failed job' }, quote, context,
             withheld: !!classified.quote && !quote || !!classified.context && !context });
         }
         if (!evidence.length) evidence.push({ job: { name: 'Workflow', id: null }, kind: 'unknown', reason: 'Failed job evidence is unavailable.', quote: '' });
@@ -234,8 +241,8 @@ export class ActionsFailures {
     const block = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/@/g, '&#64;').split('\n').map(line => '    ' + line).join('\n');
     const excerpt = (e: Evidence) => e.quote ? [block(e.quote)]
       : e.withheld ? ['Excerpt omitted: the log lines could not be made safe for public disclosure. Open the failing job link above to read them.']
-      : e.context ? ['No recognized error line was found. Last output of the failed step:', block(e.context)]
-      : ['No log excerpt is available: no recognized error line and no step output were found.'];
+      : e.context ? ['The analysis cited no log line. Last output of the failed step:', block(e.context)]
+      : ['No log excerpt is available: the analysis cited no log line and the failed step printed nothing.'];
     const id = github.repository.id, workflow = publicText(String(run.name || 'Workflow'), github.redactor).replace(/[\r\n`#<>@]/g, ' ') || 'Workflow';
     const signature = sha(JSON.stringify([String(run.name || 'Workflow'), evidence.job.key || evidence.job.name, normalizeSignature(evidence.quote || evidence.reason)]));
     const key = sha(JSON.stringify([id, run.id, run.run_attempt, evidence.job.id, signature])), marker = `<!-- dept-bot-actions:${key} -->`;

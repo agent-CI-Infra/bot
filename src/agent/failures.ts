@@ -12,7 +12,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
   model: { label:'模型服务或模型配置', codes:['model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',
-    'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','agent_tool_not_allowed','agent_output_invalid','agent_tool_calls_invalid','agent_turn_limit'] },
+    'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_tool_calls_invalid','agent_turn_limit'] },
   environment: { label:'项目电脑或运行环境', codes:['environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
     'workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',

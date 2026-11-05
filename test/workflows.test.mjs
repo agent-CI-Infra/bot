@@ -40,14 +40,14 @@ test('the built-in tasks and Actions failure handling are workflows; prompts car
   const { admin } = await project(t);
   const list = (await admin('/api/repositories/101/workflows')).value;
   assert.deepEqual(list.workflows.map(workflow => workflow.id), builtins);
-  // Built-in and custom workflows have the same fields; only Actions failure handling has no agent, so no model.
+  // Built-in and custom workflows have the same fields, Actions failure handling included.
   for (const workflow of list.workflows) {
     assert.equal(workflow.builtin, true);
-    for (const part of ['name', 'description', 'triggers', 'trigger_options', 'prompt', 'permissions']) assert.ok(workflow[part] !== undefined, workflow.id + ' ' + part);
-    assert.equal(typeof workflow.enabled, 'boolean'); assert.equal(!!workflow.model, workflow.id !== 'actions.failures');
+    for (const part of ['name', 'description', 'triggers', 'trigger_options', 'prompt', 'permissions', 'model']) assert.ok(workflow[part] !== undefined && workflow[part] !== null, workflow.id + ' ' + part);
+    assert.equal(typeof workflow.enabled, 'boolean');
   }
   const actions = list.workflows.find(workflow => workflow.id === 'actions.failures');
-  assert.deepEqual([actions.agent, actions.enabled, actions.triggers, actions.ceiling.publication], [false, false, [{ id: 'actions.run_failed' }], 'actions']);
+  assert.deepEqual([actions.enabled, actions.triggers, actions.ceiling.publication, actions.prompt.source], [false, [{ id: 'actions.run_failed' }], 'actions', 'builtin']);
   const page = flowPage(), byId = Object.fromEntries(list.workflows.map(workflow => [workflow.id, workflow]));
   for (const id of ['review.issue', 'review.pr']) assert.deepEqual(JSON.parse(flowOf(page, byId[id].prompt.effective)), ['检视 → 回复']);
   for (const id of ['development.issue', 'development.pr'])
@@ -166,12 +166,13 @@ test('Actions failure handling is a workflow: its switch is the policy switch an
   assert.equal(actionsWorkflowOn(h.store, '101'), true);
   assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { triggers: [] })).status, 200);
   assert.equal(actionsWorkflowOn(h.store, '101'), false);
-  // No agent: no prompt or model to set, and no permission above its fixed ceiling.
-  for (const body of [{ prompt: 'x' }, { model_id: null }]) assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', body)).value.error, 'workflow_agent_not_used');
-  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { permissions: { agents: true } })).value.error, 'invalid_workflow_permissions');
+  // Its analysis prompt and permissions are edited like any workflow's; it never reads a workspace.
+  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { prompt: 'Treat npm registry errors as external.', permissions: { github: ['actions', 'contents'], agents: true } })).status, 200);
+  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { permissions: { workspace: { read: true } } })).value.error, 'invalid_workflow_permissions');
   const workflow = (await admin('/api/repositories/101/workflows/actions.failures')).value.workflow;
-  assert.deepEqual([workflow.enabled, workflow.active, workflow.triggers], [true, true, []]);
-  assert.equal(flowOf(flowPage(), workflow.prompt.effective), JSON.stringify(['分类 → 重跑一次 → 提报 Issue → 检视 Issue', '分类 → 提报 Issue：代码或不明原因']));
+  assert.deepEqual([workflow.enabled, workflow.active, workflow.triggers, workflow.prompt.source, workflow.permissions.github], [true, true, [], 'console', ['contents', 'actions']]);
+  const builtin = workflow.prompt.layers[0].content;
+  assert.equal(flowOf(flowPage(), builtin), JSON.stringify(['读取日志 → 分析原因 → 重跑一次 → 提报 Issue → 检视 Issue', '分析原因 → 提报 Issue：代码或不明原因']));
 });
 
 test('built-in workflows take a name and description like custom ones, and release workflows can be switched off', async t => {
@@ -403,7 +404,6 @@ test('chat drafts a prompt with a flowchart and permissions within the ceiling; 
   // For a built-in workflow the chat drafts the same fields, keeping only triggers that workflow can have.
   const builtin = await admin('/api/repositories/101/workflows/assistant', 'POST', { workflow_id: 'review.pr', messages: [{ role: 'user', content: '只在打开时检视' }] });
   assert.equal(builtin.status, 201); assert.deepEqual(builtin.value.draft.triggers, [{ id: 'pull_request.opened' }]);
-  assert.equal((await admin('/api/repositories/101/workflows/assistant', 'POST', { workflow_id: 'actions.failures', messages: [{ role: 'user', content: 'x' }] })).value.error, 'workflow_agent_not_used');
   assert.equal((await admin('/api/repositories/101/workflows/assistant', 'POST', { messages: [] })).value.error, 'invalid_assistant_messages');
 });
 
