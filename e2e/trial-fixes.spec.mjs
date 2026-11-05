@@ -19,54 +19,54 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await h.hook(a.path,a.secret,'draft',{repository:{id:101},action:'opened',pull_request:{number:10,draft:true,head:{sha:'b'.repeat(40)}}},{'X-GitHub-Event':'pull_request'});
   await h.hook(a.path,a.secret,'label',{repository:{id:101},action:'labeled',issue:{number:9}});await h.hook(a.path,a.secret,'label',{repository:{id:101},action:'labeled',issue:{number:9}});
   await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
-  // The workflows table stays compact; editors and rules open on demand.
-  const close=async()=>page.locator('#project-detail').getByRole('button',{name:'收起',exact:true}).click();
-  const flow=id=>page.getByRole('table',{name:'工作流',exact:true}).locator(`tr[data-workflow="${id}"]`),edit=async(id,title)=>{await flow(id).getByRole('button',{name:'编辑',exact:true}).click();return page.getByRole('region',{name:'编辑工作流：'+title,exact:true});};
+  // The workflows page lists every workflow beside its editor; rules open in the same place.
+  const list=page.getByRole('complementary',{name:'工作流列表',exact:true}),item=id=>list.locator(`[data-workflow-item="${id}"]`),detail=title=>page.getByRole('region',{name:'工作流：'+title,exact:true});
+  const edit=async(id,title,tab)=>{await item(id).click();const editor=detail(title);if(tab)await editor.getByRole('tab',{name:tab,exact:true}).click();return editor;},save=async title=>{await detail(title).getByRole('button',{name:'保存',exact:true}).click();await expect(detail(title).locator('.flash')).toHaveText('已保存工作流');};
   await page.goto(h.admin+'/#/projects/101/workflows');await expect(page.locator('#project-page')).not.toContainText('项目检视指引');
-  let editor=await edit('review.pr','检视 PR');await expect(editor).toContainText('生效：仓库文件');await expect(editor).toContainText('Final repository review only.');
-  await editor.getByLabel('PR head 更新（推送新提交）',{exact:true}).uncheck();await editor.getByRole('button',{name:'保存',exact:true}).click();editor=page.getByRole('region',{name:'编辑工作流：检视 PR',exact:true});
-  await expect(editor.locator(':scope > .flash')).toHaveText('已保存工作流');await expect(editor.locator('[name="trigger:pull_request.synchronize"]')).not.toBeChecked();await close();await expect(page.locator('#project-page')).not.toContainText('[object Object]');
+  let editor=await edit('review.pr','检视 PR','提示词与流程');await expect(editor.locator('[data-prompt-meta]')).toContainText('生效：仓库文件');await expect(editor).toContainText('Final repository review only.');
+  await editor.getByRole('tab',{name:'触发源',exact:true}).click();await editor.getByLabel('PR head 更新（推送新提交）',{exact:true}).uncheck();await save('检视 PR');
+  await expect(detail('检视 PR').locator('[name="trigger:pull_request.synchronize"]')).not.toBeChecked();await expect(page.locator('#project-page')).not.toContainText('[object Object]');
 
 
 
-  await page.locator('.common-rules summary').filter({hasText:'检视标签'}).click();await expect(page.locator('[data-rule-path=".bot/rules/labels.md"]')).toContainText('console-label');await page.locator('.common-rules summary').filter({hasText:'检视标签'}).click();
-  editor=await edit('review.issue','检视 Issue');await expect(editor).toContainText('生效：项目控制台');
-  await editor.getByLabel('控制台提示词',{exact:true}).fill('Edited console directive');await editor.getByRole('button',{name:'保存',exact:true}).click();editor=page.getByRole('region',{name:'编辑工作流：检视 Issue',exact:true});
-  await expect(editor.locator(':scope > .flash')).toHaveText('已保存工作流');await expect(editor.getByLabel('控制台提示词',{exact:true})).toHaveValue('Edited console directive');
-  mkdirSync('.tmp/trial-ui',{recursive:true});await page.screenshot({path:'.tmp/trial-ui/review-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/trial-ui/review-mobile.png',fullPage:true});await page.setViewportSize({width:1365,height:900});await close();
-  editor=await edit('development.issue','开发 Issue');await expect(editor).toContainText('生效：内置默认');
-  await editor.getByLabel('测试命令',{exact:true}).fill('npm test');await editor.getByRole('button',{name:'保存',exact:true}).click();editor=page.getByRole('region',{name:'编辑工作流：开发 Issue',exact:true});await expect(editor.locator(':scope > .flash')).toHaveText('已保存工作流');
-  await page.route('**/api/repositories/101/workflows/development.issue',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'invalid_test_command'})}));await editor.getByLabel('测试命令',{exact:true}).fill('invalid');await editor.getByRole('button',{name:'保存',exact:true}).click();await expect(editor.locator('.workflow-editor [role=alert]')).toContainText('invalid_test_command');await page.unroute('**/api/repositories/101/workflows/development.issue');await close();
+  await item('rules.labels').click();await expect(page.locator('[data-rule-path=".bot/rules/labels.md"]')).toContainText('console-label');
+  editor=await edit('review.issue','检视 Issue','提示词与流程');await expect(editor.locator('[data-prompt-meta]')).toContainText('生效：项目控制台');
+  await editor.getByLabel('控制台提示词',{exact:true}).fill('Edited console directive');await save('检视 Issue');
+  await expect(detail('检视 Issue').getByLabel('控制台提示词',{exact:true})).toHaveValue('Edited console directive');
+  mkdirSync('.tmp/trial-ui',{recursive:true});await page.screenshot({path:'.tmp/trial-ui/review-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/trial-ui/review-mobile.png',fullPage:true});await page.setViewportSize({width:1365,height:900});
+  editor=await edit('development.issue','开发 Issue','提示词与流程');await expect(editor.locator('[data-prompt-meta]')).toContainText('生效：内置默认');await editor.getByRole('tab',{name:'权限与模型',exact:true}).click();
+  await editor.getByLabel('测试命令',{exact:true}).fill('npm test');await save('开发 Issue');editor=detail('开发 Issue');
+  await page.route('**/api/repositories/101/workflows/development.issue',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'invalid_test_command'})}));await editor.getByLabel('测试命令',{exact:true}).fill('invalid');await editor.getByRole('button',{name:'保存',exact:true}).click();await expect(editor.locator('.workflow-editor > [role=alert]')).toContainText('invalid_test_command');await page.unroute('**/api/repositories/101/workflows/development.issue');
   await page.getByRole('link',{name:'基本设置',exact:true}).click();await expect(page.locator('#project-page')).toContainText('Visible model name');await expect(page.locator('#project-page')).toContainText('1.5 CPU · 2048 MB');
   await page.getByRole('link',{name:'机器配置',exact:true}).click();await expect(page.getByText('这里保存的是控制台配置',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('1.5');await expect(page.locator('#project-page')).not.toContainText('单条命令最长时间');
-  // Effective prompt sources are visible in the workflow table without opening another page or modal.
+  // Effective prompt sources are visible in the editor; the list shows each workflow's state and flow.
   await page.getByRole('link',{name:'工作流',exact:true}).click();
-  await expect(flow('review.issue').locator('[data-prompt-source]')).toHaveText('项目控制台');await expect(flow('review.pr').locator('[data-prompt-source]')).toHaveText('仓库文件');
-  await expect(flow('development.issue').locator('[data-prompt-source]')).toHaveText('内置默认');
-  await flow('development.issue').getByRole('button',{name:'编辑',exact:true}).click();await expect(page).toHaveURL(/#\/projects\/101\/workflows$/);await expect(page.getByRole('region',{name:'编辑工作流：开发 Issue',exact:true})).toBeInViewport();await close();await expect(page.getByRole('dialog')).toHaveCount(0);
-  const guideSummary=page.locator('.common-rules summary').filter({hasText:'行为指南'});await guideSummary.click();await expect(page.locator('.common-rules [data-rule-path=".bot/guide.md"]')).toContainText('Long repository guide');await guideSummary.click();
+  for(const [id,title,source] of [['review.issue','检视 Issue','项目控制台'],['review.pr','检视 PR','仓库文件']]){await edit(id,title,'提示词与流程');await expect(detail(title).locator('[data-prompt-meta]')).toContainText('生效：'+source);}
+  await expect(item('development.issue').locator('.flow-path')).toHaveText('Issue 分析 → 开发 → 检视 → 测试');
+  await item('development.issue').click();await expect(page).toHaveURL(/#\/projects\/101\/workflows\/development\.issue$/);await expect(detail('开发 Issue')).toBeInViewport();await expect(page.getByRole('dialog')).toHaveCount(0);
+  await item('rules.guide').click();await expect(page.locator('[data-rule-path=".bot/guide.md"]')).toContainText('Long repository guide');
   const refresh=page.getByRole('button',{name:'刷新默认分支文件',exact:true});await expect(refresh).toBeEnabled();
-  const releaseNotesSource=flow('release.notes').locator('[data-label="提示词来源"]'),releaseSkill='.agents/skills/release-notes/SKILL.md';
-  await expect(releaseNotesSource.locator('[data-prompt-source]')).toHaveText('内置默认');await expect(releaseNotesSource.locator('code')).toHaveText('release-notes-v1');
+  await edit('release.notes','发行说明','提示词与流程');const releaseNotesSource=detail('发行说明').locator('[data-prompt-meta]'),releaseSkill='.agents/skills/release-notes/SKILL.md';
+  await expect(releaseNotesSource.locator('.status')).toHaveText('生效：内置默认');await expect(releaseNotesSource.locator('code')).toHaveText('release-notes-v1');
   await page.evaluate(()=>window.sameRuleDocument=true);
   let release,count=0;const blocked=new Promise(resolve=>release=resolve);
   await page.route('**/api/repositories/101/rules/refresh',async route=>{count++;await blocked;rules.cache('101','b'.repeat(40),{'.bot/guide.md':'Refreshed repository guide\n'.repeat(50),'.bot/computer.yaml':'cpus: 1.5\nmemory_mb: 2048',[releaseSkill]:'Refreshed release notes from verified sources.'});await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify((await admin('/api/repositories/101/rules')).value)});});
-  await refresh.click();await expect(page.getByRole('button',{name:'正在读取默认分支…',exact:true})).toBeDisabled();await page.getByRole('button',{name:'正在读取默认分支…',exact:true}).evaluate(node=>node.click());expect(count).toBe(1);release();await expect(page.locator('#project-page')).toContainText('默认分支提交 '+ 'b'.repeat(12));await expect(refresh).toBeEnabled();await expect(page.locator('#project-detail')).toBeHidden();await guideSummary.click();await expect(page.locator('.common-rules [data-rule-path=".bot/guide.md"]')).toContainText('Refreshed repository guide');await guideSummary.click();
-  await expect(releaseNotesSource.locator('[data-prompt-source]')).toHaveText('仓库文件');await expect(releaseNotesSource.locator('code')).toHaveText(releaseSkill);expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);
-  await flow('release.notes').getByRole('button',{name:'编辑',exact:true}).click();await expect(page.locator('#project-detail')).toContainText('Refreshed release notes from verified sources.');await close();
+  await refresh.click();await expect(page.getByRole('button',{name:'正在读取默认分支…',exact:true})).toBeDisabled();await page.getByRole('button',{name:'正在读取默认分支…',exact:true}).evaluate(node=>node.click());expect(count).toBe(1);release();await expect(page.locator('#project-page')).toContainText('默认分支提交 '+ 'b'.repeat(12));await expect(refresh).toBeEnabled();await item('rules.guide').click();await expect(page.locator('.workflow-detail [data-rule-path=".bot/guide.md"]')).toContainText('Refreshed repository guide');await edit('release.notes','发行说明','提示词与流程');
+  await expect(releaseNotesSource.locator('.status')).toHaveText('生效：仓库文件');await expect(releaseNotesSource.locator('code')).toHaveText(releaseSkill);expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);
+  await expect(detail('发行说明')).toContainText('Refreshed release notes from verified sources.');
   await page.unroute('**/api/repositories/101/rules/refresh');await page.route('**/api/repositories/101/rules/refresh',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"github_unavailable"}'}));await refresh.click();await expect(page.locator('.rule-sync [role=status]')).toContainText('github_unavailable');await page.unroute('**/api/repositories/101/rules/refresh');
-  await expect(releaseNotesSource.locator('[data-prompt-source]')).toHaveText('仓库文件');await expect(releaseNotesSource.locator('code')).toHaveText(releaseSkill);
+  await expect(releaseNotesSource.locator('.status')).toHaveText('生效：仓库文件');await expect(releaseNotesSource.locator('code')).toHaveText(releaseSkill);
   // Removing the skill also updates the source in place; a failed read of the workflows shows an error instead of a guess.
   await page.route('**/api/repositories/101/rules/refresh',async route=>{rules.cache('101','c'.repeat(40),{'.bot/guide.md':'Refreshed repository guide'});await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify((await admin('/api/repositories/101/rules')).value)});});
-  await refresh.click();await expect(releaseNotesSource.locator('[data-prompt-source]')).toHaveText('内置默认');await expect(releaseNotesSource.locator('code')).toHaveText('release-notes-v1');expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);
-  await flow('release.notes').getByRole('button',{name:'编辑',exact:true}).click();await expect(page.locator('#project-detail')).toContainText('release-notes-v1: list only verified commits');await close();
+  await refresh.click();await expect(releaseNotesSource.locator('.status')).toHaveText('生效：内置默认');await expect(releaseNotesSource.locator('code')).toHaveText('release-notes-v1');expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);
+  await expect(detail('发行说明')).toContainText('release-notes-v1: list only verified commits');
   await page.route('**/api/repositories/101/workflows',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"github_unavailable"}'}));await page.reload();
-  await expect(page.locator('#project-page')).toContainText('暂时读不到工作流配置');await expect(page.getByRole('table',{name:'工作流',exact:true})).toHaveCount(0);
-  await page.unroute('**/api/repositories/101/workflows');await page.reload();
+  await expect(page.locator('#project-page')).toContainText('暂时读不到工作流配置');await expect(list).toHaveCount(0);
+  await page.unroute('**/api/repositories/101/workflows');await page.reload();await detail('发行说明').getByRole('tab',{name:'提示词与流程',exact:true}).click();
   await page.evaluate(()=>window.sameRuleDocument=true);await refresh.click();
-  await expect(releaseNotesSource.locator('[data-prompt-source]')).toHaveText('内置默认');await expect(releaseNotesSource.locator('code')).toHaveText('release-notes-v1');expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);await page.unroute('**/api/repositories/101/rules/refresh');
+  await expect(releaseNotesSource.locator('.status')).toHaveText('生效：内置默认');await expect(releaseNotesSource.locator('code')).toHaveText('release-notes-v1');expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);await page.unroute('**/api/repositories/101/rules/refresh');
   mkdirSync('.tmp/trial-ui',{recursive:true});await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'.tmp/trial-ui/tasks-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await page.locator('.common-rules summary').filter({hasText:'行为指南'}).click();expect(await page.locator('.common-rules .rule-card pre').first().evaluate(node=>getComputedStyle(node).maxHeight)).toBe('none');await page.screenshot({path:'.tmp/trial-ui/tasks-mobile.png',fullPage:true});
+  await item('rules.guide').click();expect(await page.locator('.workflow-detail .rule-card pre').first().evaluate(node=>getComputedStyle(node).maxHeight)).toBe('none');await page.screenshot({path:'.tmp/trial-ui/tasks-mobile.png',fullPage:true});
   for(const caption of ['基本设置','机器配置','工作流','模型','发版本','项目笔记','外部执行','成员','运行记录']){const node=page.getByRole('link',{name:caption,exact:true});await expect(node).toBeVisible();const box=await node.boundingBox();expect(box.x+box.width).toBeLessThanOrEqual(391);}
   for(const caption of ['使用的模型','检视','开发','规则总览'])await expect(page.getByRole('link',{name:caption,exact:true})).toHaveCount(0);
   await page.getByRole('link',{name:'模型',exact:true}).click();await expect(page.locator('.model-address').first()).toBeVisible();await page.locator('.model-address').first().scrollIntoViewIfNeeded();expect(await page.locator('.model-address').first().evaluate(node=>node.scrollWidth<=node.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/trial-ui/model-mobile.png',fullPage:true});

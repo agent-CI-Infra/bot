@@ -20,7 +20,7 @@ async function assistantModel() {
   return { url: `http://127.0.0.1:${server.address().port}/v1`, requests, close: () => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }) };
 }
 
-test('工作流页展示内置流程图，聊天起草的新工作流保存后才生效', async ({ page }) => {
+test('工作流页左侧列表、右侧分页编辑：内置与自定义同样可改触发源，Actions 失败处理也是工作流，聊天起草保存后才生效', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(), errors = [], model = await assistantModel();
   page.on('pageerror', error => errors.push(error.message));
@@ -33,40 +33,68 @@ test('工作流页展示内置流程图，聊天起草的新工作流保存后�
     await page.goto(h.admin + '/#/projects/101/workflows');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    const table = page.getByRole('table', { name: '工作流', exact: true }), row = id => table.locator(`tr[data-workflow="${id}"]`);
-    await expect(table.locator('tr[data-workflow]')).toHaveCount(6);
-    await expect(row('review.issue').locator('.flow-path')).toHaveText('检视 → 回复');
-    await expect(row('review.pr').locator('.flow-path')).toHaveText('检视 → 回复');
-    await expect(row('development.issue').locator('.flow-path')).toHaveText('Issue 分析 → 开发 → 检视 → 测试');
-    await expect(page.locator('#project-page')).toContainText('标签规范、PR 门禁和合并队列');
-    // The development editor draws the flowchart of its prompt, back edges included.
-    await row('development.issue').getByRole('button', { name: '编辑', exact: true }).click();
-    const editor = page.getByRole('region', { name: '编辑工作流：开发 Issue', exact: true });
-    const effective = editor.locator('figure').filter({ hasText: '生效的流程图' });
-    await expect(effective.locator('svg rect')).toHaveCount(4);
-    await expect(effective.locator('figcaption')).toContainText('Issue 分析 → 开发 → 检视 → 测试');
-    await expect(effective.locator('figcaption')).toContainText('检视 → 开发：发现问题');
-    await expect(effective.locator('figcaption')).toContainText('测试 → 开发：测试失败');
-    await expect(effective.locator('svg')).toHaveAttribute('aria-label', /Issue 分析 → 开发 → 检视 → 测试/);
-    await expect(editor.getByText('开发标签和「Issue 没有指派人」由控制面检查', { exact: false })).toBeVisible();
-    await expect(editor.getByLabel('启动独立 agent', { exact: false })).toBeChecked();
-    await editor.screenshot({ path: '.tmp/workflows/development-editor.png' });
-    await editor.getByRole('button', { name: '收起', exact: true }).click();
-    await row('review.pr').getByRole('button', { name: '编辑', exact: true }).click();
-    const review = page.getByRole('region', { name: '编辑工作流：检视 PR', exact: true });
-    await expect(review.locator('figure').filter({ hasText: '生效的流程图' }).locator('figcaption')).toContainText('检视 → 回复');
-    // A trigger turned off here is the project's review switch for it.
+    const list = page.getByRole('complementary', { name: '工作流列表', exact: true }), item = id => list.locator(`[data-workflow-item="${id}"]`);
+    await expect(list.locator('.workflow-list:not(.shared) a')).toHaveCount(7);
+    await expect(item('review.issue')).toHaveAttribute('aria-current', 'page');
+    await expect(item('review.issue').locator('.flow-path')).toHaveText('检视 → 回复');
+    await expect(item('development.issue').locator('.flow-path')).toHaveText('Issue 分析 → 开发 → 检视 → 测试');
+    await expect(item('actions.failures')).toContainText('Actions 失败处理');
+    // The editor sits beside the list, not under it, and uses the page width.
+    const detail = name => page.getByRole('region', { name: '工作流：' + name, exact: true });
+    await expect(detail('检视 Issue').locator('figure').first().locator('figcaption')).toContainText('检视 → 回复');
+    const listBox = await list.boundingBox(), detailBox = await detail('检视 Issue').boundingBox();
+    expect(detailBox.x).toBeGreaterThan(listBox.x + listBox.width - 2); expect(Math.abs(detailBox.y - listBox.y)).toBeLessThan(4);
+    expect(detailBox.width).toBeGreaterThan(800);
+    await item('development.issue').click();
+    await expect(page).toHaveURL(/#\/projects\/101\/workflows\/development\.issue$/);
+    const development = detail('开发 Issue'), flow = development.locator('figure').first();
+    await expect(flow.locator('svg rect')).toHaveCount(4);
+    await expect(flow.locator('figcaption')).toContainText('Issue 分析 → 开发 → 检视 → 测试');
+    await expect(flow.locator('figcaption')).toContainText('检视 → 开发：发现问题');
+    await expect(flow.locator('figcaption')).toContainText('测试 → 开发：测试失败');
+    await development.getByRole('tab', { name: '触发源', exact: true }).click();
+    await expect(development.getByLabel('检视工作流发布结论后', { exact: true })).toBeChecked();
+    await expect(development.getByLabel('有人给 Issue 加上标签', { exact: true })).toBeChecked();
+    await expect(development.locator('.workflow-trigger code')).toHaveText('bot-develop');
+    await expect(development).toContainText('无论选哪些触发源，控制面都要求');
+    await development.screenshot({ path: '.tmp/workflows/development-triggers.png' });
+    await development.getByRole('tab', { name: '提示词与流程', exact: true }).click();
+    await expect(development.getByLabel('控制台提示词', { exact: true })).toBeVisible();
+    await expect(development.getByLabel('启动独立 agent', { exact: false })).toBeHidden();
+    await development.getByRole('tab', { name: '权限与模型', exact: true }).click();
+    await expect(development.getByLabel('启动独立 agent', { exact: false })).toBeChecked();
+    await page.screenshot({ path: '.tmp/workflows/desktop.png', fullPage: true });
+    // A built-in review: change its triggers like a custom workflow's.
+    await item('review.pr').click();
+    const review = detail('检视 PR');
+    await review.getByRole('tab', { name: '触发源', exact: true }).click();
     await review.getByLabel('PR head 更新（推送新提交）', { exact: true }).uncheck();
+    await review.getByLabel('有人给 PR 加上标签', { exact: true }).check();
+    await review.getByLabel('有人给 PR 加上标签：标签名', { exact: true }).fill('needs-review');
     await review.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(page.getByRole('region', { name: '编辑工作流：检视 PR', exact: true }).locator('.flash')).toHaveText('已保存工作流');
+    await expect(detail('检视 PR').locator('.flash')).toHaveText('已保存工作流');
+    await expect(detail('检视 PR').getByRole('tab', { name: '触发源', exact: true })).toHaveAttribute('aria-selected', 'true');
+    let saved = (await admin('/api/repositories/101/workflows/review.pr')).value.workflow;
+    expect(saved.triggers.map(trigger => trigger.id).sort()).toEqual(['comment.mention', 'pull_request.labeled', 'pull_request.opened', 'pull_request.updated']);
+    expect(saved.triggers.find(trigger => trigger.id === 'pull_request.labeled').label).toBe('needs-review');
     expect((await admin('/api/repositories/101')).value.policy.review_pr_updates).toBe(0);
-    // Untouched permissions and prompt are not written: the workflow keeps following the built-in defaults.
+    // Untouched prompt and permissions are not written: they keep following the built-in defaults.
     expect(h.store.get("SELECT permissions,prompt FROM workflows WHERE repository_id='101' AND id='review.pr'")).toEqual({ permissions: null, prompt: null });
-    expect(JSON.parse((await admin('/api/repositories/101')).value.policy.rule_overrides)).toEqual({});
-    await page.getByRole('region', { name: '编辑工作流：检视 PR', exact: true }).getByRole('button', { name: '收起', exact: true }).click();
-    // Chat drafts a new workflow; the draft fills the editor and takes effect only once saved.
-    await page.getByRole('button', { name: '用聊天新增', exact: true }).click();
+    // Actions failure handling is managed here too, with its switch and its trigger.
+    await item('actions.failures').click();
+    const actions = detail('Actions 失败处理');
+    await expect(actions.locator('figure').first().locator('figcaption')).toContainText('分类 → 重跑一次 → 提报 Issue → 检视 Issue');
+    await actions.getByLabel('启用这条工作流', { exact: false }).check();
+    await actions.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(detail('Actions 失败处理').locator('.flash')).toHaveText('已保存工作流');
+    expect((await admin('/api/repositories/101')).value.policy.actions_failures_enabled).toBe(1);
+    await detail('Actions 失败处理').getByRole('tab', { name: '提示词与流程', exact: true }).click();
+    await expect(detail('Actions 失败处理')).toContainText('不调用模型');
+    await expect(item('actions.failures')).toContainText('运行中');
+    // Chat drafts a new workflow beside the editor; the draft takes effect only once saved.
+    await list.getByRole('button', { name: '用聊天新增', exact: true }).click();
     const create = page.getByRole('region', { name: '新增工作流', exact: true }), chat = create.getByRole('complementary', { name: '用聊天编写', exact: true });
+    await expect(chat).toBeVisible();
     await chat.getByLabel('告诉助手你想要的流程', { exact: true }).fill('PR 改到文档时检查链接和示例命令，回复坏掉的');
     await chat.getByRole('button', { name: '发送', exact: true }).click();
     await expect(chat.locator('.chat-assistant')).toContainText('已起草');
@@ -74,36 +102,43 @@ test('工作流页展示内置流程图，聊天起草的新工作流保存后�
     await expect(draftFigure.locator('figcaption')).toContainText('读改动 → 核对链接 → 回复');
     await expect(draftFigure.locator('figcaption')).toContainText('核对链接 → 读改动：需要复核');
     await expect(chat).toContainText('已收窄到允许的范围');
-    expect((await admin('/api/repositories/101/workflows')).value.workflows).toHaveLength(6);
-    await create.screenshot({ path: '.tmp/workflows/chat-draft.png' });
+    expect((await admin('/api/repositories/101/workflows')).value.workflows).toHaveLength(7);
+    const chatBox = await chat.boundingBox(), tabsBox = await create.getByRole('tablist', { name: '工作流设置', exact: true }).boundingBox();
+    expect(chatBox.x).toBeGreaterThan(tabsBox.x + tabsBox.width - 2);
+    await page.screenshot({ path: '.tmp/workflows/chat-draft.png', fullPage: true });
     await chat.getByRole('button', { name: '填入编辑器', exact: true }).click();
-    await expect(create.getByLabel('名称', { exact: true })).toHaveValue('文档链接检查');
+    await expect(create.getByRole('tab', { name: '提示词与流程', exact: true })).toHaveAttribute('aria-selected', 'true');
     await expect(create.getByLabel('提示词', { exact: true })).toHaveValue(/flowchart LR/);
     await expect(create.locator('figure').filter({ hasText: '编辑中的流程图' }).locator('figcaption')).toContainText('读改动 → 核对链接 → 回复');
+    await create.getByRole('tab', { name: '概览', exact: true }).click();
+    await expect(create.getByLabel('名称', { exact: true })).toHaveValue('文档链接检查');
+    await create.getByRole('tab', { name: '触发源', exact: true }).click();
     await expect(create.getByLabel('PR 打开或 Ready for review', { exact: true })).toBeChecked();
+    await create.getByRole('tab', { name: '权限与模型', exact: true }).click();
     await expect(create.getByLabel('修改工作区代码', { exact: true })).toBeDisabled();
-    await expect(create.getByLabel('修改工作区代码', { exact: true })).not.toBeChecked();
     await expect(create.getByLabel('启动独立 agent', { exact: false })).toBeChecked();
     await create.getByRole('button', { name: '保存', exact: true }).click();
-    const savedEditor = page.getByRole('region', { name: '编辑工作流：文档链接检查', exact: true });
-    await expect(savedEditor.locator('.flash')).toHaveText('已保存工作流');
-    const workflows = (await admin('/api/repositories/101/workflows')).value.workflows, saved = workflows.find(workflow => !workflow.builtin);
-    expect(saved.name).toBe('文档链接检查');
-    expect(saved.triggers.map(trigger => trigger.id)).toEqual(['pull_request.opened', 'pull_request.synchronize']);
-    expect(saved.permissions).toEqual({ workspace: { read: true, write: false, notes: false, shell: true }, github: ['contents', 'pull_requests'], agents: true, publication: 'reply' });
-    expect(saved.prompt.effective).toContain('check -->|需要复核| read');
-    // The assistant was told the ceiling and the flowchart convention; the administrator is the one who saved.
+    await expect(detail('文档链接检查').locator('.flash')).toHaveText('已保存工作流');
+    const workflows = (await admin('/api/repositories/101/workflows')).value.workflows, custom = workflows.find(workflow => !workflow.builtin);
+    expect(custom.triggers.map(trigger => trigger.id)).toEqual(['pull_request.opened', 'pull_request.synchronize']);
+    expect(custom.permissions).toEqual({ workspace: { read: true, write: false, notes: false, shell: true }, github: ['contents', 'pull_requests'], agents: true, publication: 'reply' });
+    expect(custom.prompt.effective).toContain('check -->|需要复核| read');
     expect(model.requests[0].messages[0].content).toContain('flowchart LR');
     expect(h.store.get("SELECT user_id FROM audit WHERE action='workflow.created'").user_id).toBeTruthy();
-    await expect(row(saved.id).locator('.flow-path')).toHaveText('读改动 → 核对链接 → 回复');
-    await expect(row(saved.id)).toContainText('自定义');
-    await page.screenshot({ path: '.tmp/workflows/desktop.png', fullPage: true });
+    await expect(page).toHaveURL(new RegExp(`#/projects/101/workflows/${custom.id.replace('.', '\\.')}$`));
+    await expect(item(custom.id).locator('.flow-path')).toHaveText('读改动 → 核对链接 → 回复');
+    // Shared rules open in the same place; the address of an item survives a reload.
+    await list.locator('[data-workflow-item="rules.guide"]').click();
+    await expect(page.getByRole('region', { name: '行为指南', exact: true })).toContainText('.bot/guide.md');
+    await page.goto(h.admin + '/#/projects/101/workflows/review.pr'); await page.reload();
+    await expect(detail('检视 PR')).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/workflows/mobile.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     // The custom workflow's model is on the model page next to the built-in ones.
     await page.goto(h.admin + '/#/projects/101/model');
-    await expect(page.getByRole('table', { name: '工作流模型', exact: true }).locator(`tr[data-task-kind="${saved.id}"]`)).toContainText('文档链接检查');
+    await expect(page.getByRole('table', { name: '工作流模型', exact: true }).locator(`tr[data-task-kind="${custom.id}"]`)).toContainText('文档链接检查');
     expect(errors).toEqual([]);
   } finally { await model.close(); await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });

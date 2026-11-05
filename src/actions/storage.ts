@@ -1,3 +1,4 @@
+import { activeTrigger } from '../workflows/resolve.js';
 import type { Store } from '../storage/database.js';
 
 export function actionsStorage(store: Store) {
@@ -39,7 +40,11 @@ export function recordActionsRun(store: Store, id: string, run: any) {
 }
 
 export function actionsWebhook(store: Store, id: string, event: string, payload: any) {
-  if (event !== 'workflow_run' || payload.action !== 'completed'
-    || !store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1 AND actions_failures_enabled=1', id)) return;
+  if (event !== 'workflow_run' || payload.action !== 'completed' || !actionsWorkflowOn(store, id)) return;
   recordActionsRun(store, id, payload.workflow_run);
+}
+// The Actions failure workflow runs while the project and its switch are on and its trigger is in its trigger list.
+export function actionsWorkflowOn(store: Store, id: string) {
+  return !!store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1 AND actions_failures_enabled=1', id)
+    && !!activeTrigger(store, id, 'actions.failures', 'actions.run_failed');
 }

@@ -16,7 +16,7 @@ import { workflowPermissions } from '../dist/workflows/resolve.js';
 import { runSubagent, subagentConfig } from '../runner/subagent.mjs';
 import { narrowCapabilities, toolCapabilityError } from '../runner/capabilities.mjs';
 
-const builtins = ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'release.observe', 'release.notes'];
+const builtins = ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'release.observe', 'release.notes', 'actions.failures'];
 const flowPage = () => loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/workflows.js'], () => [200, {}]);
 const flowOf = (page, text) => page.run(`JSON.stringify(flowText(parseFlow(${JSON.stringify(text)})))`);
 // A fake Chat Completions server: respond(body, index) returns a message.
@@ -36,14 +36,18 @@ async function project(t) {
   return { h, admin, a };
 }
 
-test('the six built-in tasks are workflows whose prompts carry the review and development flowcharts', async t => {
+test('the built-in tasks and Actions failure handling are workflows; prompts carry the review and development flowcharts', async t => {
   const { admin } = await project(t);
   const list = (await admin('/api/repositories/101/workflows')).value;
   assert.deepEqual(list.workflows.map(workflow => workflow.id), builtins);
+  // Built-in and custom workflows have the same fields; only Actions failure handling has no agent, so no model.
   for (const workflow of list.workflows) {
     assert.equal(workflow.builtin, true);
-    for (const part of ['triggers', 'prompt', 'permissions', 'model']) assert.ok(workflow[part], workflow.id + ' ' + part);
+    for (const part of ['name', 'description', 'triggers', 'trigger_options', 'prompt', 'permissions']) assert.ok(workflow[part] !== undefined, workflow.id + ' ' + part);
+    assert.equal(typeof workflow.enabled, 'boolean'); assert.equal(!!workflow.model, workflow.id !== 'actions.failures');
   }
+  const actions = list.workflows.find(workflow => workflow.id === 'actions.failures');
+  assert.deepEqual([actions.agent, actions.enabled, actions.triggers, actions.ceiling.publication], [false, false, [{ id: 'actions.run_failed' }], 'actions']);
   const page = flowPage(), byId = Object.fromEntries(list.workflows.map(workflow => [workflow.id, workflow]));
   for (const id of ['review.issue', 'review.pr']) assert.deepEqual(JSON.parse(flowOf(page, byId[id].prompt.effective)), ['检视 → 回复']);
   for (const id of ['development.issue', 'development.pr'])
@@ -91,25 +95,99 @@ test('existing task model overrides keep applying to the workflows of the same i
   assert.equal(selectedModel(h.store, '101', custom.id).id, base.id);
 });
 
-test('built-in triggers keep today\'s switches: a turned-off trigger and a draft PR start no review', async t => {
+test('built-in triggers start from today\'s switches and are edited like custom ones; drafts are never reviewed', async t => {
   const { h, admin, a } = await project(t);
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
   const pr = (action, sha, draft = false) => ({ repository: { id: 101 }, action, sender: { type: 'User', login: 'alice' }, pull_request: { number: 7, draft, state: 'open', head: { sha } } });
   const hook = (id, body) => h.hook(a.path, a.secret, id, body, { 'X-GitHub-Event': 'pull_request' }).then(r => r.value.tasks_created);
   assert.equal(await hook('draft', pr('opened', 'a'.repeat(40), true)), 0);
   assert.equal(await hook('ready', pr('ready_for_review', 'a'.repeat(40))), 1);
-  const saved = await admin('/api/repositories/101/workflows/review.pr', 'PUT', { triggers: { 'pull_request.synchronize': false } });
-  assert.equal(saved.status, 200);
-  assert.equal(saved.value.workflow.triggers.find(trigger => trigger.id === 'pull_request.synchronize').enabled, false);
+  let workflow = (await admin('/api/repositories/101/workflows/review.pr')).value.workflow;
+  assert.deepEqual(workflow.triggers.map(trigger => trigger.id).sort(), ['comment.mention', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated']);
+  assert.deepEqual(workflow.trigger_options.map(option => option.id), ['pull_request.opened', 'pull_request.synchronize', 'pull_request.updated', 'pull_request.labeled', 'comment.mention']);
+  // The trigger list replaces the switches: head updates off, mentions off, a label trigger on.
+  const saved = await admin('/api/repositories/101/workflows/review.pr', 'PUT', { triggers: [{ id: 'pull_request.opened' }, { id: 'pull_request.updated' }, { id: 'pull_request.labeled', label: 'needs-review' }] });
+  assert.equal(saved.status, 200, JSON.stringify(saved.value));
   assert.equal(h.store.get("SELECT review_pr_updates FROM policies WHERE repository_id='101'").review_pr_updates, 0);
   assert.equal(await hook('push', pr('synchronize', 'b'.repeat(40))), 0);
-  // Fixed conditions cannot be switched through the workflow.
-  for (const triggers of [{ 'comment.mention': false }, { 'issue.labeled': true }])
-    assert.equal((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { triggers })).value.error, 'invalid_workflow_triggers');
-  assert.equal((await admin('/api/repositories/101/workflows/development.issue', 'PUT', { triggers: { 'issue.labeled': false } })).value.error, 'invalid_workflow_triggers');
-  // The shared switch is still the project's review switch.
-  await admin('/api/repositories/101/workflows/review.issue', 'PUT', { enabled: false });
+  const comment = id => ({ repository: { id: 101 }, action: 'created', sender: { type: 'User', login: 'bob' }, issue: { number: 7, state: 'open', pull_request: {} }, comment: { id, body: '@bot look', author_association: 'NONE', user: { id: 9 } } });
+  assert.equal((await h.hook(a.path, a.secret, 'mention', comment(51), { 'X-GitHub-Event': 'issue_comment' })).value.tasks_created, 0);
+  const label = (id, name, type = 'User', draft = false) => hook(id, { ...pr('labeled', 'a'.repeat(40), draft), label: { name }, sender: { type, login: 'carol' } });
+  for (const [id, name, type, draft] of [['l1', 'other'], ['l2', 'NEEDS-REVIEW', 'Bot'], ['l3', 'needs-review', 'User', true]]) assert.equal(await label(id, name, type, draft), 0, id);
+  // The review of this head is still queued, so the label joins it as an update instead of a second review.
+  assert.equal(await label('l4', 'NEEDS-REVIEW'), 0);
+  assert.equal(JSON.parse(h.store.get("SELECT input FROM tasks WHERE kind='review.pr'").input).merged_updates.at(-1).reason, 'labeled');
+  assert.equal(h.store.get('SELECT count(*) n FROM review_updates').n, 1);
+  // A policy PATCH still switches the matching trigger of a workflow with its own list.
+  await admin('/api/repositories/101/policy', 'PATCH', { review_pr_updates: true });
+  workflow = (await admin('/api/repositories/101/workflows/review.pr')).value.workflow;
+  assert.ok(workflow.triggers.some(trigger => trigger.id === 'pull_request.synchronize'));
+  // Triggers a workflow cannot have, and label triggers without a label, are refused.
+  for (const triggers of [[{ id: 'issue.labeled', label: 'x' }], [{ id: 'pull_request.labeled' }], [{ id: 'release.manual' }]])
+    assert.match((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { triggers })).value.error, /invalid_workflow_trigger/);
+  // Each review workflow has its own switch now; the project review switch still covers both.
+  assert.equal((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { enabled: false })).status, 200);
   assert.equal(await hook('reopen', pr('opened', 'c'.repeat(40))), 0);
+  assert.equal((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { enabled: true })).status, 200);
+  assert.equal(await hook('again', pr('opened', 'd'.repeat(40))), 1);
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: false });
+  assert.equal(await hook('off', pr('opened', 'e'.repeat(40))), 0);
+});
+
+test('development triggers can be switched while the control plane keeps the development conditions', async t => {
+  const { h, admin, a } = await project(t);
+  await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
+  const review = { summary: 's', requires_code_change: true, issue_requests_code: true, clarification_required: false, implementation_goal: 'Fix add', request_quote: 'Fix add.', findings: [], object_hash: 'h' }, now = new Date().toISOString();
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,result,object_number,created_at,updated_at) VALUES('rv','101','review.issue','succeeded','r','101:review.issue:5:opened','{}',?,5,?,?)", JSON.stringify(review), now, now);
+  const labeled = async (delivery, assignees = []) => (await h.hook(a.path, a.secret, delivery, { repository: { id: 101 }, action: 'labeled', label: { name: 'bot-develop' }, sender: { id: 5, type: 'User' },
+    issue: { number: 5, title: 'Fix add.', body: 'Please fix.', state: 'open', labels: [{ name: 'bot-develop' }], assignees } })).value.tasks_created;
+  const options = (await admin('/api/repositories/101/workflows/development.issue')).value.workflow.trigger_options;
+  assert.deepEqual(options.map(option => [option.id, option.label, option.fixed_label ?? null]), [['review.published', false, null], ['issue.labeled', false, 'bot-develop']]);
+  // Without the label trigger a person's label starts nothing; with it, the conditions still apply.
+  assert.equal((await admin('/api/repositories/101/workflows/development.issue', 'PUT', { triggers: [{ id: 'review.published' }] })).status, 200);
+  assert.equal(await labeled('d1'), 0);
+  assert.equal((await admin('/api/repositories/101/workflows/development.issue', 'PUT', { triggers: [{ id: 'issue.labeled' }] })).status, 200);
+  assert.equal(await labeled('d2', [{ login: 'someone' }]), 0);
+  assert.equal(await labeled('d3'), 1);
+  // Switching the workflow off stops its queued task at the next check.
+  assert.equal((await admin('/api/repositories/101/workflows/development.issue', 'PUT', { enabled: false })).status, 200);
+  const { workflowActive } = await import('../dist/workflows/resolve.js');
+  assert.equal(workflowActive(h.store, '101', 'development.issue'), false);
+  assert.equal(await labeled('d4'), 0);
+});
+
+test('Actions failure handling is a workflow: its switch is the policy switch and its trigger gates the module', async t => {
+  const { h, admin } = await project(t);
+  const { actionsWorkflowOn } = await import('../dist/actions/storage.js');
+  assert.equal(actionsWorkflowOn(h.store, '101'), false);
+  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { enabled: true })).status, 200);
+  assert.equal(h.store.get("SELECT actions_failures_enabled FROM policies WHERE repository_id='101'").actions_failures_enabled, 1);
+  assert.ok(h.store.get("SELECT enabled_at FROM actions_failure_scans WHERE repository_id='101'").enabled_at);
+  assert.equal(actionsWorkflowOn(h.store, '101'), true);
+  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { triggers: [] })).status, 200);
+  assert.equal(actionsWorkflowOn(h.store, '101'), false);
+  // No agent: no prompt or model to set, and no permission above its fixed ceiling.
+  for (const body of [{ prompt: 'x' }, { model_id: null }]) assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', body)).value.error, 'workflow_agent_not_used');
+  assert.equal((await admin('/api/repositories/101/workflows/actions.failures', 'PUT', { permissions: { agents: true } })).value.error, 'invalid_workflow_permissions');
+  const workflow = (await admin('/api/repositories/101/workflows/actions.failures')).value.workflow;
+  assert.deepEqual([workflow.enabled, workflow.active, workflow.triggers], [true, true, []]);
+  assert.equal(flowOf(flowPage(), workflow.prompt.effective), JSON.stringify(['分类 → 重跑一次 → 提报 Issue → 检视 Issue', '分类 → 提报 Issue：代码或不明原因']));
+});
+
+test('built-in workflows take a name and description like custom ones, and release workflows can be switched off', async t => {
+  const { h, admin } = await project(t);
+  assert.equal((await admin('/api/repositories/101/workflows/review.pr', 'PUT', { name: 'PR 检视（主仓）', description: '只看核心模块' })).status, 200);
+  let workflow = (await admin('/api/repositories/101/workflows/review.pr')).value.workflow;
+  assert.deepEqual([workflow.name, workflow.description, workflow.default_name], ['PR 检视（主仓）', '只看核心模块', '检视 PR']);
+  await admin('/api/repositories/101/workflows/review.pr', 'PUT', { name: '' });
+  assert.equal((await admin('/api/repositories/101/workflows/review.pr')).value.workflow.name, '检视 PR');
+  const { activeTrigger } = await import('../dist/workflows/resolve.js');
+  assert.ok(activeTrigger(h.store, '101', 'release.observe', 'release.manual'));
+  assert.equal((await admin('/api/repositories/101/workflows/release.observe', 'PUT', { enabled: false })).status, 200);
+  assert.equal(activeTrigger(h.store, '101', 'release.observe', 'release.manual'), undefined);
+  workflow = (await admin('/api/repositories/101/workflows/release.notes')).value.workflow;
+  assert.equal((await admin('/api/repositories/101/workflows/release.notes', 'PUT', { triggers: [], version: workflow.version })).status, 200);
+  assert.equal(activeTrigger(h.store, '101', 'release.notes', 'release.manual'), undefined);
 });
 
 test('a workflow prompt replaces the rule file console layer, the repository file still wins, and the development label stays required', async t => {
@@ -267,7 +345,7 @@ test('custom workflows trigger on the catalog events with today\'s filters, and 
   assert.equal((await admin('/api/repositories/101/workflows/review.issue', 'DELETE', {})).value.error, 'builtin_workflow_required');
   assert.equal((await admin('/api/repositories/101/workflows/' + workflow.id, 'DELETE', {})).status, 200);
   assert.deepEqual(h.store.all("SELECT DISTINCT status,error_code FROM tasks WHERE kind LIKE 'workflow.%'").map(row => [row.status, row.error_code]), [['cancelled', 'workflow_deleted']]);
-  assert.equal((await admin('/api/repositories/101/workflows')).value.workflows.length, 6);
+  assert.equal((await admin('/api/repositories/101/workflows')).value.workflows.length, builtins.length);
 });
 
 test('a custom workflow task runs its own prompt with its saved permissions and replies once', async t => {
@@ -315,16 +393,17 @@ test('chat drafts a prompt with a flowchart and permissions within the ceiling; 
   assert.deepEqual(JSON.parse(flowOf(page, reply.value.draft.prompt)), ['读文档 → 核对 → 回复', '核对 → 读文档：需要复核']);
   // The model saw the catalog and the ceiling; nothing was saved by the chat itself.
   assert.match(model.requests[0].messages[0].content, /start_agent/);
-  assert.equal((await admin('/api/repositories/101/workflows')).value.workflows.length, 6);
+  assert.equal((await admin('/api/repositories/101/workflows')).value.workflows.length, builtins.length);
   assert.equal(h.store.get('SELECT count(*) n FROM workflows').n, 0);
   const saved = await admin('/api/repositories/101/workflows', 'POST', { name: reply.value.draft.name, description: reply.value.draft.description, triggers: reply.value.draft.triggers,
     prompt: reply.value.draft.prompt, permissions: reply.value.draft.permissions });
   assert.equal(saved.status, 201);
   assert.equal(saved.value.workflow.prompt.effective, draftPrompt);
   assert.equal(h.store.get("SELECT action FROM audit WHERE action='workflow.created'").action, 'workflow.created');
-  // For a built-in workflow the chat drafts its configurable triggers only.
+  // For a built-in workflow the chat drafts the same fields, keeping only triggers that workflow can have.
   const builtin = await admin('/api/repositories/101/workflows/assistant', 'POST', { workflow_id: 'review.pr', messages: [{ role: 'user', content: '只在打开时检视' }] });
-  assert.equal(builtin.status, 201); assert.deepEqual(builtin.value.draft.triggers, {});
+  assert.equal(builtin.status, 201); assert.deepEqual(builtin.value.draft.triggers, [{ id: 'pull_request.opened' }]);
+  assert.equal((await admin('/api/repositories/101/workflows/assistant', 'POST', { workflow_id: 'actions.failures', messages: [{ role: 'user', content: 'x' }] })).value.error, 'workflow_agent_not_used');
   assert.equal((await admin('/api/repositories/101/workflows/assistant', 'POST', { messages: [] })).value.error, 'invalid_assistant_messages');
 });
 

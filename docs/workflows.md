@@ -1,13 +1,15 @@
 # 工作流
 
-项目的「工作流」页列出这个仓库会运行的全部工作流。每条工作流由四部分组成：
+项目的「工作流」页（`#/projects/<仓库 ID>/workflows/<工作流 id>`）左侧列出这个仓库会运行的全部工作流和共用规则，右侧是选中那一项的编辑器。内置工作流和新增的工作流设置方式完全一样：
 
-- **触发源**：哪些 GitHub 事件启动它。
-- **提示词**：交给 agent 的 Markdown 规则，其中一张 ` ```mermaid ` 流程图说明步骤顺序，页面把这张图画出来。
-- **权限**：agent 能读工作区、运行命令、写项目笔记、改代码、读哪些 GitHub 内容、能否启动独立 agent；发布方式由工作流的类型决定。
-- **模型**：使用的模型，留空时继承项目默认模型。
+- **概览**：名称、说明、启用开关，以及提示词里的流程图和一份配置摘要。
+- **触发源**：从同一份目录里勾选，按标签触发的写上标签名。
+- **提示词与流程**：交给 agent 的 Markdown 规则，其中一张 ` ```mermaid ` 流程图说明步骤顺序，页面把这张图画出来。
+- **权限与模型**：agent 能读工作区、运行命令、写项目笔记、改代码、读哪些 GitHub 内容、能否启动独立 agent，使用的模型（留空时继承项目默认），以及检视语言、测试命令等原有设置；发布方式由工作流的类型决定。
 
-现有的六项任务就是六条内置工作流，工作流 id 等于原来的任务类型，所以已保存的 `task_models` 映射原样生效。管理员也可以在页面上新增工作流，不需要改代码或发版。
+编辑器上方的「用聊天编写」在右侧打开聊天面板，「保存」一次保存所有标签页。窄屏时列表在上、编辑器在下。
+
+现有的六项任务和 Actions 失败处理是七条内置工作流，工作流 id 等于原来的任务类型（Actions 失败处理是 `actions.failures`），所以已保存的 `task_models` 映射原样生效。管理员也可以在页面上新增工作流，不需要改代码或发版。内置工作流不能删除，可以关掉。
 
 ## 现有能力的去向
 
@@ -27,24 +29,32 @@
 | 草稿、已关闭对象、bot 自己写的内容、仓库外人员的评论不触发 | 控制面硬条件 | 所有触发源共用这套过滤，自定义工作流也一样 |
 | 发布 outbox、对账、PR head 校验、bot 分支归属 | 控制面硬条件 | 不变 |
 | `src/automation` 的标签规范、PR 状态、门禁、合并队列 | 确定性模块 | 仍是代码模块，由 `config/repositories/<owner>__<repo>.yml` 和 policy 的 `automation` 配置，不改成提示词 |
-| Actions 失败分类与单次重跑 | 确定性模块 | 开关在工作流页的「Actions 失败处理」；提报的 Issue 仍走检视和开发工作流 |
+| Actions 失败分类、单次重跑与提报 | 内置工作流 `actions.failures` | 触发源：默认分支的 Actions 运行失败；流程：分类 → 外部原因重跑一次／代码或不明原因提报 Issue → 检视 Issue。分类仍是代码里的固定规则，不调用模型，所以没有提示词和模型可配，「提示词与流程」页显示的是流程说明；开关就是原来的 `actions_failures_enabled` |
 | `.bot/computer.yaml` | 机器配置 | 不是工作流，按字段合并进虚拟电脑配置 |
+| 项目列表上的检视、开发开关 | 项目总开关 | 仍然有效：关掉检视，两条检视工作流都不运行；关掉开发，两条开发工作流都不运行。每条工作流另有自己的开关 |
 | 接入门禁 PR、公共看板 | 控制面功能 | 不是模型工作流 |
 
 ## 触发源
 
-| id | 含义 |
-| --- | --- |
-| `issue.opened` | Issue 打开 |
-| `issue.updated` | Issue 标题或正文被修改，或有可信评论（作者或 `OWNER`、`MEMBER`、`COLLABORATOR`） |
-| `issue.labeled` | 有人（不是 App）给 Issue 加上指定标签，比较时不区分大小写 |
-| `pull_request.opened` | PR 打开或从草稿转为 Ready for review |
-| `pull_request.synchronize` | PR head 更新 |
-| `pull_request.updated` | PR 标题或描述被修改、可信评论、提交检视或回复检视意见 |
-| `pull_request.labeled` | 有人（不是 App）给 PR 加上指定标签 |
-| `comment.mention` | 新评论提到 `BOT_MENTION_NAMES` 里的名字 |
+所有工作流从同一份目录里选触发源；每条工作流只列出它能处理的那些：
 
-内置检视工作流的可选触发源对应项目原有的开关（`review_issues`、`review_issue_updates`、`review_pull_requests`、`review_pr_updates`、`review_pr_discussion`），行为和以前一样：Issue 更新和 Issue 上的提及需要同时打开「Issue 打开」，PR 讨论更新和 PR 上的提及需要同时打开「PR 打开或 Ready for review」，关闭 PR head 更新也会停止 bot PR 的自动跟进。两条检视工作流共用项目的检视开关，两条开发工作流共用项目的开发开关。
+| id | 含义 | 可用于 |
+| --- | --- | --- |
+| `issue.opened` | Issue 打开 | 检视 Issue、自定义 |
+| `issue.updated` | Issue 标题或正文被修改，或有可信评论（作者或 `OWNER`、`MEMBER`、`COLLABORATOR`） | 检视 Issue、自定义 |
+| `issue.labeled` | 有人（不是 App）给 Issue 加上指定标签，比较时不区分大小写 | 检视 Issue、开发 Issue（标签固定为开发标签）、自定义 |
+| `pull_request.opened` | PR 打开或从草稿转为 Ready for review | 检视 PR、自定义 |
+| `pull_request.synchronize` | PR head 更新 | 检视 PR、自定义 |
+| `pull_request.updated` | PR 标题或描述被修改、可信评论、提交检视或回复检视意见 | 检视 PR、自定义 |
+| `pull_request.labeled` | 有人（不是 App）给 PR 加上指定标签 | 检视 PR、自定义 |
+| `comment.mention` | 新评论提到 `BOT_MENTION_NAMES` 里的名字 | 检视 Issue、检视 PR、自定义 |
+| `review.published` | 检视工作流发布结论后：Issue 的结论要求改代码，或 bot PR 的检视有可执行意见 | 开发 Issue、跟进 bot PR |
+| `release.manual` | 「发版本」页的操作 | CI 观察、发行说明 |
+| `actions.run_failed` | 默认分支的 Actions 运行失败 | Actions 失败处理 |
+
+内置检视工作流在第一次保存触发源之前，按项目原有的开关（`review_issues`、`review_issue_updates`、`review_pull_requests`、`review_pr_updates`、`review_pr_discussion`）算出触发源，和以前一样：Issue 更新和 Issue 上的提及跟着「Issue 打开」，PR 讨论更新和 PR 上的提及跟着「PR 打开或 Ready for review」。在页面上保存过触发源以后，工作流用自己的列表，每个触发源独立生效（例如可以只关掉提及）；这些策略字段仍随列表同步，`PATCH /api/repositories/:id/policy` 改它们时也会增删列表里对应的触发源。关闭 PR head 更新也会停止 bot PR 的自动跟进。按标签再次检视时，和其他更新一样并入还在排队的检视。
+
+开发工作流的触发源只决定什么时候检查是否开始开发；开发开关、检视结论里的原文依据、人加上的开发标签、Issue 无人指派这些条件始终由控制面检查，发布 PR 前再查一次。发版本的两条工作流关掉（或去掉触发源）以后，发版本页不再调用模型：CI 观察返回 409 `workflow_disabled`，发行说明按内置规则直接列出已核验的来源。
 
 自定义工作流的每个触发源都用上面同一套过滤。同一次投递只为一条自定义工作流建一个任务；同一 PR head 的打开和推送只运行一次。自定义工作流有自己的启用开关，不依赖项目的检视开关；项目禁用时都不运行。
 
@@ -93,9 +103,9 @@ flowchart LR
 
 | 路径 | 方法 | 说明 |
 | --- | --- | --- |
-| `/api/repositories/:id/workflows` | GET | 全部工作流（六条内置在前），以及触发源目录 `triggers`、GitHub 范围 `github_scopes` 和提及名字 `mention_names` |
+| `/api/repositories/:id/workflows` | GET | 全部工作流（七条内置在前），以及触发源目录 `triggers`、GitHub 范围 `github_scopes` 和提及名字 `mention_names` |
 | `/api/repositories/:id/workflows` | POST | 新增自定义工作流：`name,prompt` 必填，`description,enabled,triggers,permissions,model_id` 可选；`triggers` 为 `[{id,label?}]`，按标签触发时 `label` 必填；返回 201 和 `workflow`，id 形如 `custom.<12 位十六进制>` |
-| `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。内置工作流的 PUT 接受 `enabled,triggers`（`{id:布尔}`，只限可配置的触发源）、`prompt`（字符串或 `null` 清除控制台层）、`permissions`、`model_id`、`settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；自定义工作流的 PUT 接受新增时的字段。带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
+| `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。每条工作流返回 `name,description,enabled,active,triggers`（`[{id,label?}]`）、`trigger_options`（它可选的触发源）、`prompt,permissions,ceiling,model`（不调用模型的为 `null`）和 `settings`。内置工作流的 PUT 和自定义的一样接受 `name,description,enabled,triggers,prompt,permissions,model_id`（名称留空恢复默认；`prompt` 为 `null` 清除控制台层；`triggers` 也接受旧的 `{id:布尔}` 写法），另接受 `settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；Actions 失败处理不接受 `prompt`、`model_id`（400 `workflow_agent_not_used`）。带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
 | `/api/repositories/:id/workflows/assistant` | POST | 聊天起草：`messages`（`[{role:user|assistant,content}]`）、可选 `workflow_id` 和编辑器当前内容 `draft`；返回 `reply,draft,warnings`，不保存任何内容。项目没有可用模型时返回 409 `model_not_configured` |
 
 自定义工作流的任务类型是 `workflow.issue` 或 `workflow.pr`，任务记录的 `workflow_id` 指向工作流。它们在同一台项目电脑上排队，按工作流权限准备工作区，结束时调用 `finish_review` 返回 `summary` 和 `findings`；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出。自定义工作流不加标签、不衔接开发、不延续检视会话，也不开分支或 PR。

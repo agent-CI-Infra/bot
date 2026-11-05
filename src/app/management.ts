@@ -7,6 +7,7 @@ import { loadAutomationConfig, parseAutomationConfig } from '../automation/confi
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
 import { activateActions } from '../actions/storage.js';
+import { syncPolicyTriggers } from '../workflows/resolve.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 interface Grants { repositories?: string[]; organizations?: string[] }
@@ -294,6 +295,8 @@ export async function management(store: Store, user: Actor, method: string, path
           keep('review_issues', Number(body.review_issues)), keep('review_pull_requests', Number(body.review_pull_requests)), keep('review_pr_updates', Number(body.review_pr_updates)),
           keep('review_issue_updates', Number(body.review_issue_updates)), keep('review_pr_discussion', Number(body.review_pr_discussion)),
           keep('review_language', body.review_language), id);
+        // A review workflow with its own trigger list follows the switch that was changed.
+        syncPolicyTriggers(store, id, body);
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
