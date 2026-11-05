@@ -1,6 +1,6 @@
 # Actions 失败分类与提报
 
-每个仓库的 `actions_failures_enabled` 默认关闭。在项目「任务总览」的「检视设置」中开启「Actions 失败处理」，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
+每个仓库的 `actions_failures_enabled` 默认关闭。在项目「工作流」页的「Actions 失败处理」中开启，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
 
 ## 配置前提
 

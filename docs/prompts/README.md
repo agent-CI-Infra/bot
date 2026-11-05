@@ -1,6 +1,6 @@
 # 内置场景规则
 
-本目录的四份 Markdown 就是 Bot 的内置规则层。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`，规则接口、引导页的「内置默认」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有覆盖的项目的默认行为。
+本目录的 Markdown 是 Bot 的内置规则层，也是内置工作流的默认提示词。控制面启动时由 `src/rules/service.ts` 按文件读入 `defaults`，规则接口、引导页的「内置默认」和模型系统提示用的都是这里的原文；运行镜像把本目录复制到 `/app/docs/prompts`。修改这些文件就是修改所有没有覆盖的项目的默认行为。
 
 ## 文件对应
 
@@ -10,15 +10,18 @@
 | [`issue-review.md`](issue-review.md) | `.bot/rules/issue-review.md` | 新 Issue 的意图、缺失信息、代码证据与授权判断，以及哪些检视结果会启动开发 |
 | [`pr-review.md`](pr-review.md) | `.bot/rules/pr-review.md` | PR 检视：一轮报全、严重度与处置、复审收敛、相关性判断、COMMENT 输出 |
 | [`issue-development.md`](issue-development.md) | `.bot/rules/issue-development.md` | 开发任务的资格、范围、停止条件、测试与 PR 说明 |
+| [`release-observe.md`](release-observe.md) | 无仓库文件，可由控制台覆盖 | CI 观察工作流的提示词：读取运行、分析日志与代码、给出结论 |
+
+三份检视和开发规则以及 CI 观察提示词各带一张 ` ```mermaid ` 流程图（检视：检视 → 回复；开发：Issue 分析 → 开发 → 检视 → 测试，检视或测试发现问题时回到开发），工作流页把它画出来，见[工作流](../workflows.md)。
 
 `.bot/guide.md` 与 `.bot/computer.yaml` 的内置内容仍在 `src/rules/service.ts` 中。
 
 ## 覆盖方式
 
-优先级是「内置默认 → 项目控制台 → 默认分支仓库文件」，每层整份替换，单份上限 16 KiB（16384 个 UTF-8 字节）。
+优先级是「内置默认 → 项目控制台 → 默认分支仓库文件」，每层整份替换，不限大小。
 
 1. **仓库文件**：把改好的文本放到默认分支的 `.bot/rules/<name>.md`。PR 内的改动不会成为当次任务的规则。
-2. **项目控制台**：在项目页对应规则卡片上「添加控制台覆盖」，编辑框从内置文本开始。仓库已经有同名文件时，控制台内容不会悄悄盖过它。
+2. **项目控制台**：在项目「工作流」页编辑对应工作流的提示词（行为指南和检视标签在「通用准则」里），编辑框从内置文本开始。仓库已经有同名文件时，控制台内容不会悄悄盖过它。
 3. 覆盖 `labels.md` 时保留 `review_label:` 行，它决定检视成功后由控制面加上的标签；去掉这一行就不再打检视标签。
 4. `issue-development.md` 第一行 `development_label:` 是开发标签名，默认 `bot-develop`。覆盖时去掉这一行仍按 `bot-develop` 要求，开发标签这道要求不能通过改规则关闭；不想自动开发就关掉项目的开发开关。
 

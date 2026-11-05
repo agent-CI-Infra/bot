@@ -10,6 +10,9 @@ import { validVersion } from './version.js';
 import { ReleaseWorker } from './worker.js';
 import { runSnapshot } from './actions.js';
 import { explainRun } from './observe.js';
+import { savedWorkflow } from '../workflows/resolve.js';
+// The release.notes workflow's console prompt; a repository skill still replaces it at preflight.
+const releaseNotesPrompt = (store: Store, id: string) => savedWorkflow(store, id, 'release.notes')?.prompt ?? null;
 
 export class ReleaseService {
   readonly worker: ReleaseWorker;
@@ -33,7 +36,7 @@ export class ReleaseService {
     if (method === 'GET' && action === 'preflight') {
       const version = url.searchParams.get('version') || '', redactor = releaseRedactor(this.store, id);
       try {
-        const preview = await withGitHub(this.store, id, this.apiUrl, { pull_requests: 'read' }, redactor, github => inspect(github, version));
+        const preview = await withGitHub(this.store, id, this.apiUrl, { pull_requests: 'read' }, redactor, github => inspect(github, version, releaseNotesPrompt(this.store, id)));
         const token = preflightToken();
         this.store.run('DELETE FROM release_preflights WHERE expires_at<?', Date.now());
         this.store.run('INSERT INTO release_preflights VALUES(?,?,?,?,?,?)', token, id, user.id, fingerprint(preview), JSON.stringify(redactor.clean(preview)), Date.now() + 10 * 60_000);
@@ -59,7 +62,7 @@ export class ReleaseService {
       const saved = this.store.get('SELECT * FROM release_preflights WHERE token=? AND repository_id=? AND actor_id=? AND expires_at>?', String(input.credential || ''), id, user.id, Date.now());
       if (!saved || input.target_sha !== JSON.parse(saved.data).target_sha) return fail(409, 'release_preflight_expired');
       const redactor = releaseRedactor(this.store, id);
-      const preview = await withGitHub(this.store, id, this.apiUrl, { pull_requests: 'read' }, redactor, github => inspect(github, input.version as string));
+      const preview = await withGitHub(this.store, id, this.apiUrl, { pull_requests: 'read' }, redactor, github => inspect(github, input.version as string, releaseNotesPrompt(this.store, id)));
       if (preview.target_sha !== input.target_sha || fingerprint(preview) !== saved.fingerprint) return fail(409, 'release_candidate_changed');
       if (preview.no_changes) return fail(409, 'release_no_changes');
       if (!preview.available) return fail(409, 'release_preflight_failed');

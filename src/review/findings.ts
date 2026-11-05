@@ -13,6 +13,14 @@ export function validateReview(value: any) {
   if(value.resolved_comments!==undefined&&(!Array.isArray(value.resolved_comments)||value.resolved_comments.length>200||value.resolved_comments.some((id:unknown)=>!Number.isSafeInteger(id)||Number(id)<1)))stop('model_review_invalid', undefined, '检视结果的 resolved_comments 必须是行内评论 ID（正整数）列表。');
   return value;
 }
+// A custom workflow's reply: a summary and findings, checked the same way as review findings.
+export function validateReply(value: any) {
+  if (!value || typeof value.summary !== 'string' || value.summary.length > 16000 || !Array.isArray(value.findings) || value.findings.length > 100 || value.event !== undefined)
+    stop('model_review_invalid', undefined, '工作流结果的 summary 或 findings 无效，请检查 finish_review 输出格式。');
+  for (const finding of value.findings) if (!finding || typeof finding.body !== 'string' || finding.body.length > 16000 || !['discussion','inline'].includes(finding.format)
+    || typeof finding.selection_reason !== 'string' || finding.selection_reason.length > 2000 || finding.event !== undefined) stop('model_finding_invalid', undefined, '工作流结果的意见正文、位置类型或选择原因格式无效，或包含不允许的 event 字段。');
+  return { summary: value.summary, findings: value.findings };
+}
 function positions(patch: string): Set<string> {
   const result = new Set<string>(); let left=0,right=0,active=false;
   for (const line of patch.split('\n')) {

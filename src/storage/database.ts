@@ -7,6 +7,7 @@ import { boardStorage } from '../board/storage.js';
 import { metricsStorage } from '../metrics/storage.js';
 import { rateLimitStorage } from '../github/rate-limits.js';
 import { actionsStorage } from '../actions/storage.js';
+import { workflowStorage } from '../workflows/storage.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -152,6 +153,7 @@ export class Store {
     externalStorage(this);
     boardStorage(this);
     metricsStorage(this);
+    workflowStorage(this);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

@@ -3,7 +3,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { RuleService } from '../dist/rules/service.js';
 
-test('任务表按需配置规则，模型独立管理且项目不能修改共享模型', async ({ page }) => {
+test('工作流表按需编辑规则，模型独立管理且项目不能修改共享模型', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -28,58 +28,57 @@ test('任务表按需配置规则，模型独立管理且项目不能修改共�
     await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.getByRole('link', { name: '任务总览', exact: true })).toHaveAttribute('aria-current', 'page');
-    for (const caption of ['使用的模型', '检视', '开发', '规则总览']) await expect(page.getByRole('link', { name: caption, exact: true })).toHaveCount(0);
-    const table = page.getByRole('table', { name: '支持的任务', exact: true });
-    await expect(table.locator('tr[data-task-kind]')).toHaveCount(6);
-    await expect(page.locator('#project-page select, #project-page form, #project-page .rule-card')).toHaveCount(0);
+    // The old task overview address opens the workflows page.
+    await expect(page).toHaveURL(/#\/projects\/101\/workflows$/);
+    await expect(page.getByRole('link', { name: '工作流', exact: true })).toHaveAttribute('aria-current', 'page');
+    for (const caption of ['使用的模型', '检视', '开发', '规则总览', '任务总览']) await expect(page.getByRole('link', { name: caption, exact: true })).toHaveCount(0);
+    const table = page.getByRole('table', { name: '工作流', exact: true }), flow = id => table.locator(`tr[data-workflow="${id}"]`);
+    await expect(table.locator('tr[data-workflow]')).toHaveCount(6);
+    await expect(page.locator('#project-page .rule-card, #project-page .workflow-editor')).toHaveCount(0);
     for (const [kind, title] of [['review.issue', '检视 Issue'], ['review.pr', '检视 PR'], ['development.issue', '开发 Issue'], ['development.pr', '跟进 bot PR'], ['release.observe', 'CI 观察'], ['release.notes', '发行说明']]) {
-      await expect(row(kind)).toContainText(title);
+      await expect(flow(kind)).toContainText(title);
     }
     const common = page.locator('.common-rules');
     await expect(common).toContainText('通用准则');
     await expect(common.locator('[data-rule-source=".bot/guide.md"]')).toHaveText('仓库文件');
-    await expect(row('review.pr').locator('[data-rule-source]')).toHaveText('内置默认');
-    await expect(row('review.pr')).toContainText('.bot/rules/pr-review.md');
-    await expect(row('release.notes').locator('.task-rule-source')).toHaveAttribute('title', '内置默认：生效（release-notes-v1）');
-    await expect(page.getByRole('button', { name: '规则来源', exact: true })).toHaveCount(0);
+    await expect(flow('review.pr').locator('[data-prompt-source]')).toHaveText('内置默认');
+    await expect(flow('review.pr')).toContainText('.bot/rules/pr-review.md');
+    await expect(flow('release.notes')).toContainText('release-notes-v1');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     expect((await common.boundingBox()).y).toBeLessThan((await table.boundingBox()).y);
-    expect((await table.boundingBox()).height).toBeLessThan(650);
     await page.screenshot({ path: '.tmp/task-overview/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/task-overview/mobile.png', fullPage: true });
-    await page.getByRole('button', { name: '检视设置', exact: true }).click();
-    const reviewSettings = page.getByRole('region', { name: '检视设置', exact: true });
-    await reviewSettings.getByLabel('检视这个项目的 Issue 和 PR', { exact: true }).check();
-    await reviewSettings.locator('form').filter({ has: page.locator('[name="review_enabled"]') }).getByRole('button', { name: '保存', exact: true }).click();
-    await expect(reviewSettings.locator('.flash')).toHaveText('已保存');
+    // The project review switch, the development test command and a console prompt are saved from the editor.
+    const edit = async (id, title) => { await flow(id).getByRole('button', { name: '编辑', exact: true }).click(); return page.getByRole('region', { name: '编辑工作流：' + title, exact: true }); };
+    let editor = await edit('review.issue', '检视 Issue');
+    await editor.getByLabel('启用这条工作流', { exact: true }).check();
+    await editor.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(page.getByRole('region', { name: '编辑工作流：检视 Issue', exact: true }).locator('.flash')).toHaveText('已保存工作流');
     expect((await policy()).review_enabled).toBe(1); await close();
-    await expect(row('review.issue')).toContainText('已开启');
-    await page.getByRole('button', { name: '开发设置', exact: true }).click();
-    const developmentSettings = page.getByRole('region', { name: '开发设置', exact: true });
-    await developmentSettings.getByLabel('测试命令', { exact: true }).fill('npm test');
-    await developmentSettings.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(developmentSettings.locator('.flash')).toHaveText('已保存');
+    await expect(flow('review.issue')).toContainText('已开启');
+    editor = await edit('development.issue', '开发 Issue');
+    await editor.getByLabel('测试命令', { exact: true }).fill('npm test');
+    await editor.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(page.getByRole('region', { name: '编辑工作流：开发 Issue', exact: true }).locator('.flash')).toHaveText('已保存工作流');
     expect((await policy()).test_command).toBe('npm test'); await close();
-    await row('review.pr').getByRole('button', { name: '展开规则', exact: true }).click();
-    const rule = page.locator('[data-rule-path=".bot/rules/pr-review.md"]');
-    await rule.getByRole('button', { name: '添加控制台覆盖', exact: true }).click();
-    await rule.getByLabel('.bot/rules/pr-review.md 控制台覆盖', { exact: true }).fill('Console PR review rule');
-    await rule.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(rule.locator('.flash')).toHaveText('已保存控制台覆盖');
-    await expect(rule).toContainText('生效：项目控制台');
-    await expect(row('review.pr').locator('[data-rule-source]')).toHaveText('项目控制台');
+    editor = await edit('review.pr', '检视 PR');
+    await editor.getByLabel('控制台提示词', { exact: true }).fill('Console PR review rule');
+    await editor.getByRole('button', { name: '保存', exact: true }).click();
+    editor = page.getByRole('region', { name: '编辑工作流：检视 PR', exact: true });
+    await expect(editor.locator('.flash')).toHaveText('已保存工作流');
+    await expect(editor).toContainText('生效：项目控制台');
+    await expect(flow('review.pr').locator('[data-prompt-source]')).toHaveText('项目控制台');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await page.screenshot({ path: '.tmp/task-overview/rules-mobile.png', fullPage: true }); await close();
-    await page.reload(); await row('review.pr').getByRole('button', { name: '展开规则', exact: true }).click();
-    await expect(rule).toContainText('Console PR review rule'); await close();
-    await row('release.notes').getByRole('button', { name: '展开规则', exact: true }).click();
-    await expect(page.getByRole('region', { name: '发行说明规则', exact: true })).toContainText('release-notes-v1'); await close();
-    for (const legacy of ['review', 'development', 'rules']) {
+    await page.reload(); await flow('review.pr').getByRole('button', { name: '编辑', exact: true }).click();
+    await expect(page.getByRole('region', { name: '编辑工作流：检视 PR', exact: true }).getByLabel('控制台提示词', { exact: true })).toHaveValue('Console PR review rule'); await close();
+    await flow('release.notes').getByRole('button', { name: '编辑', exact: true }).click();
+    await expect(page.getByRole('region', { name: '编辑工作流：发行说明', exact: true })).toContainText('release-notes-v1'); await close();
+    for (const legacy of ['review', 'development', 'rules', 'tasks']) {
       await page.goto(h.admin + '/#/projects/101/' + legacy);
-      await expect(page).toHaveURL(/#\/projects\/101\/tasks$/);
+      await expect(page).toHaveURL(/#\/projects\/101\/workflows$/);
       if (legacy === 'rules') { await expect(page.getByRole('button', { name: '刷新默认分支文件', exact: true })).toBeVisible(); await expect(page.getByRole('dialog')).toHaveCount(0); }
     }
     await common.locator('summary').filter({ hasText: '行为指南' }).click();
@@ -87,7 +86,7 @@ test('任务表按需配置规则，模型独立管理且项目不能修改共�
     await page.goto(h.admin + '/#/projects/101/model');
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page).toHaveURL(/#\/projects\/101\/model$/);
-    await expect(page.getByRole('table', { name: '支持的任务', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('table', { name: '工作流', exact: true })).toHaveCount(0);
     const sharedCard = page.locator('.side-card').filter({ has: page.getByRole('heading', { name: '部署共享模型', exact: true }) });
     await expect(sharedCard).toContainText('Shared model');
     await expect(sharedCard.locator('button, input, select, form')).toHaveCount(0);

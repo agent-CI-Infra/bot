@@ -32,6 +32,23 @@ export class Publisher {
     return this.effect(key,'comment',payload,()=>this.github.request('POST',path,payload),async()=>
       (await this.github.pages(path)).find(c=>String(c.user?.id)===this.github.actorId&&String(c.body).includes(marker)));
   }
+  // A custom workflow's reply: a comment of its own, plus one COMMENT review for findings with a real position on a pull
+  // request. It never edits the review summary comment, labels anything or resolves threads; those belong to reviews.
+  async reply(result:any,files:any[]){
+    const inline:any[]=[],locations=new Map<string,any>(),pr=String(this.task.kind).endsWith('.pr');
+    for(const finding of result.findings){const location=pr&&finding.format==='inline'?inlineLocation(finding,files):null;if(location)locations.set(finding.id,location);}
+    const text=reviewText(result.summary,result.findings,new Set(locations.keys()));
+    for(const finding of text.findings){const location=locations.get(finding.id);if(location)inline.push({body:finding.body+`\n\n<!-- dept-bot-finding:${finding.id} -->`,...location});}
+    const coverage=`Reviewed commit: ${result.reviewed_sha}\nCoverage: ${result.coverage.join('; ')}`,outputs:any[]=[];
+    if(inline.length){
+      const path=this.github.path(`/pulls/${this.task.object_number}/reviews`),marker=this.marker('inline');
+      const payload={commit_id:result.reviewed_sha,event:'COMMENT',body:coverage+'\n\n'+marker,comments:inline};
+      outputs.push(await this.effect('inline','review',payload,()=>this.github.request('POST',path,payload),async()=>
+        (await this.github.pages(path)).find(r=>String(r.user?.id)===this.github.actorId&&r.commit_id===result.reviewed_sha&&String(r.body).includes(marker))));
+    }
+    outputs.push(await this.discussion('discussion',[text.overview,text.discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
+    await this.validate();return outputs;
+  }
   // language: the words of the summary comment; trigger: the person's comment this review answers, if any.
   async review(result:any,files:any[],options:{language:'zh'|'en',trigger?:{actor?:string|null,url?:string|null}}={language:'en'}){
     const inline:any[]=[], locations = new Map<string, any>(), language=options.language,pr=this.task.kind==='review.pr';
