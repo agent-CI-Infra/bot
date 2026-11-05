@@ -6,6 +6,7 @@ import { HttpError, fail, fields, text, type Json } from '../core/security.js';
 import { appEvents, appJwt, appPermissions, missingEvents, missingPermissions, revokeInstallationToken } from '../github/client.js';
 import { appBucket, installationBucket, observe, observeAll, rateLimitView, refused, userBucket, type Bucket } from '../github/rate-limits.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
+import { accessGaps, appGaps } from './access.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
 // enables it; an administrator starts it in the console, and can disable it again.
@@ -173,8 +174,10 @@ export class InstallationSync {
     const slug = encodeURIComponent(String(app.slug || '')), owner = app.owner as Json | undefined, origin = githubOrigin(app.html_url);
     const settings = owner?.type === 'Organization' ? `${origin}/organizations/${encodeURIComponent(String(owner.login))}/settings/apps/${slug}/permissions` : `${origin}/settings/apps/${slug}/permissions`;
     const appMissing = missingPermissions(app.permissions), appEventsMissing = missingEvents(app.events);
-    return { required: appPermissions, required_events: appEvents, app: { slug: String(app.slug || ''), owner: String(owner?.login || ''), missing: appMissing, missing_events: appEventsMissing, settings_url: settings },
-      ok: !appMissing.length && !appEventsMissing.length };
+    // What only some features need beyond the baseline; reported alongside, without failing the baseline check.
+    const featureGaps = appGaps(app.permissions, app.events).filter(gap => gap.kind === 'permission' ? !appMissing.some(item => item.permission === gap.name) : !appEventsMissing.includes(gap.name));
+    return { required: appPermissions, required_events: appEvents, app: { slug: String(app.slug || ''), owner: String(owner?.login || ''), missing: appMissing, missing_events: appEventsMissing,
+      feature_gaps: featureGaps, settings_url: settings }, ok: !appMissing.length && !appEventsMissing.length };
   }
   // Asked before a project is deleted, because the list's flags may be stale. 'gone' covers a deleted repository, one no
   // longer in the installation (even when it is public and anyone can still read it), a suspended or missing installation,
@@ -261,7 +264,7 @@ export class InstallationSync {
         for (const installation of await this.pages('/app/installations', jwt)) {
           if (installation.suspended_at) continue;
           installations.push({ id: String(installation.id), account: String((installation.account as Json | undefined)?.login || ''),
-            missing: missingPermissions(installation.permissions), missing_events: missingEvents(installation.events) });
+            missing: missingPermissions(installation.permissions), missing_events: missingEvents(installation.events), gaps: appGaps(installation.permissions, installation.events) });
           // A metadata-only token is enough to list the installation's repositories; its window is the installation's.
           const token = this.installationToken(account, installation, await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } }));
           for (const repo of await this.pages('/installation/repositories', token, 'repositories')) {
@@ -329,8 +332,8 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   // The list asks for this when it opens with stale grants and swaps only the permission badges with the answer.
   if (path === '/api/installations/permissions/check' && method === 'POST') {
     fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const errors = await sync.refreshPermissions();
-    return { errors, repositories: (list(store).repositories as Json[]).map(r => ({ id: r.id, permission_missing: r.permission_missing, events_missing: r.events_missing, feature_missing: r.feature_missing,
-      permissions_checked_at: r.permissions_checked_at, permissions_stale: r.permissions_stale })) };
+    // Whole rows: a swapped badge also needs the name, owner and feature switches it explains.
+    return { errors, repositories: list(store).repositories };
   }
   // Hiding only removes a row from the console list; it never touches GitHub, projects or policies. Restore is the only way back.
   const hide = /^\/api\/installations\/([1-9]\d*)$/.exec(path);
@@ -340,15 +343,6 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   const match = /^\/api\/installations\/([1-9]\d*)\/(activate|disable)$/.exec(path);
   if (!match || method !== 'POST') return fail(404, 'not_found');
   return match[2] === 'activate' ? activate(store, user, match[1]!, input) : disable(store, user, match[1]!, input);
-}
-// Access that only a switched-on project feature needs, so it stays out of the global appEvents. Actions failure analysis
-// stops at the same two checks (actions_app_required, actions_workflow_run_subscription_missing) before reading any run.
-// Null while an App installation's events have not been read.
-function featureGap(seen: Row, reg: Row | undefined): { feature: string; requirement: string }[] | null {
-  if (!reg?.actions_failures_enabled) return [];
-  if (seen.account_type !== 'github_app') return [{ feature: 'actions_failures', requirement: 'github_app' }];
-  if (!seen.events) return null;
-  return missingEvents(JSON.parse(seen.events), ['workflow_run']).map(() => ({ feature: 'actions_failures', requirement: 'workflow_run' }));
 }
 // One row per repository: what GitHub shows as installed, merged with registration, policy and environment.
 function list(store: Store): Json {
@@ -365,13 +359,13 @@ function list(store: Store): Json {
     // Only a repository the account still lists can be short of permissions; one that left the installation has its own badge.
     const events = listed && seen!.account_type === 'github_app' ? seen!.events ? missingEvents(JSON.parse(seen!.events)) : null : [];
     const permissions = { permission_missing: listed ? permissionGap(seen!.account_type, seen!.permissions) : null, events_missing: listed ? events : null,
-      feature_missing: listed ? featureGap(seen!, reg) : null,
+      access_gaps: listed ? accessGaps(seen!.account_type, seen!.permissions, seen!.events) : null,
       permissions_checked_at: listed ? seen!.permissions_at || null : null,
       permissions_stale: listed && (!seen!.permissions_at || events === null || now - Date.parse(seen!.permissions_at) > PERMISSIONS_FRESH_MS) };
     return { id, full_name: reg?.full_name || seen!.full_name, owner_id: reg?.owner_id || seen!.owner_id, owner_login: seen?.owner_login || '', private: !!seen?.private,
       account_id: reg?.account_id || seen!.account_id, account_name: seen?.account_name || null, installation_id: seen?.installation_id || null,
       installed: seen ? !!seen.installed : null, synced_at: seen?.synced_at || null, registered: !!reg, enabled: !!reg?.enabled,
-      review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
+      review_enabled: !!reg?.review_enabled, development_enabled: !!reg?.development_enabled, actions_failures_enabled: !!reg?.actions_failures_enabled, model_id: reg?.model_id || null, environment_state: reg?.environment_state || null,
       running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions,
       board_enabled: publication.enabled, board_state: publication.state, board_url: publication.url };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));

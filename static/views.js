@@ -505,35 +505,66 @@ function installedBadges(row) {
   return badges;
 }
 // GitHub's own wording for App permissions, shared by the project list and the App permission check.
-const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests: 'Pull requests', statuses: 'Commit statuses', actions: 'Actions', checks: 'Checks', metadata: 'Metadata' };
+const permissionNames = { contents: 'Contents', issues: 'Issues', pull_requests: 'Pull requests', statuses: 'Commit statuses', actions: 'Actions', checks: 'Checks', metadata: 'Metadata', workflows: 'Workflows' };
 // GitHub's names for the webhook events under Permissions & events → Subscribe to events.
 const eventNames = { issues: 'Issues', pull_request: 'Pull request', issue_comment: 'Issue comment', pull_request_review: 'Pull request review', pull_request_review_comment: 'Pull request review comment', workflow_run: 'Workflow run' };
 const accessNames = { read: 'Read-only', write: 'Read and write', admin: 'Admin' }, roleNames = { read: 'Read', triage: 'Triage', write: 'Write' };
-function permissionGapText(missing) {
-  return missing.map(item => item.permission === 'repository_role' ? `仓库角色需要「${roleNames.write}」，现在「${roleNames[item.current] || item.current || '无'}」`
-    : `${permissionNames[item.permission] || item.permission} 需要「${accessNames[item.required] || item.required}」，现在「${item.current ? accessNames[item.current] || item.current : 'No access'}」`).join('；');
+// Access gaps (access_gaps) name the features they stop; src/app/access.ts holds what each feature needs.
+const featureNames = { review: '检视', development: '开发', ci_reads: '任务读取 CI 结果', board: '看板', release: '发版本', gate: '接入门禁', actions_failures: 'Actions 失败分析' };
+const featureImpact = {
+  review: '读不到代码或发不出检视意见', development: '推不了分支、开不了或更新不了 PR', ci_reads: '任务看不到 Actions、检查和提交状态',
+  board: '采集不到看板数据', release: '打不了标签、写不了 Release、重跑不了发布运行', gate: '提交不了 .github/workflows 门禁配置 PR',
+  actions_failures: '读不到运行、重跑不了外部失败、提报不了 Issue',
+};
+// What a missing event stops, in the words of the triggers it carries (src/review/queue.ts, src/actions).
+const eventImpact = {
+  issues: '新 Issue 不检视，编辑后不重新检视，加开发标签不会开始开发，关闭后相关任务不会自动取消',
+  issue_comment: 'Issue 和 PR 下的评论不会触发检视跟进', pull_request: 'PR 打开、转为可检视、推送新提交或编辑后不检视，关闭后相关任务不会自动取消',
+  pull_request_review: '提交 PR 检视意见后不会触发跟进', pull_request_review_comment: 'PR 行内评论和回复不会触发跟进',
+  workflow_run: 'Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue',
+};
+const gapLabels = { permission: '权限不足', role: '权限不足', event: '事件未订阅', account: '需要 GitHub App' };
+// Whether a stopped feature is in use on this row: on, off, or run by hand (releases and gate PRs have no switch).
+function featureState(row, feature) {
+  const active = !!row.enabled, on = { review: row.review_enabled, development: row.development_enabled, ci_reads: row.review_enabled || row.development_enabled,
+    board: row.board_enabled, actions_failures: row.actions_failures_enabled }[feature];
+  if (feature === 'release' || feature === 'gate') return row.registered === false ? 'off' : 'manual';
+  return feature === 'board' ? on ? 'on' : 'off' : active && on ? 'on' : 'off';
 }
-function eventGapText(missing) { return '事件未订阅：' + missing.map(event => eventNames[event] || event).join('、'); }
-// Access that only a switched-on project feature needs (feature_missing); the global required lists do not include it.
-function featureGapText(gap) {
-  if (gap.feature !== 'actions_failures') return `${gap.feature} 缺少 ${gap.requirement}`;
-  return gap.requirement === 'workflow_run' ? '已开启 Actions 失败分析，但安装未订阅 Workflow run 事件，分析不会运行'
-    : gap.requirement === 'github_app' ? '已开启 Actions 失败分析，但它只能通过 GitHub App 账号运行，当前是机器人账号' : `Actions 失败分析缺少 ${gap.requirement}`;
+const stateNames = { on: '已开启', off: '未开启', manual: '手动使用时' };
+function gapWhat(gap) {
+  if (gap.kind === 'permission') return `${permissionNames[gap.name] || gap.name} 需要「${accessNames[gap.required] || gap.required}」，现在「${gap.current ? accessNames[gap.current] || gap.current : 'No access'}」`;
+  if (gap.kind === 'event') return `未订阅事件 ${eventNames[gap.name] || gap.name}`;
+  if (gap.kind === 'role') return `机器人账号的仓库角色需要「${roleNames.write}」，现在「${roleNames[gap.current] || gap.current || '无'}」`;
+  return '项目挂在机器人账号上，不是 GitHub App 安装';
+}
+function gapHow(gap, row) {
+  const owner = row.owner_login ? `（${row.owner_login}）` : '';
+  if (gap.kind === 'permission') return `GitHub App 管理员在 App 设置的 Permissions & events 中把 ${permissionNames[gap.name] || gap.name} 设为「${accessNames[gap.required] || gap.required}」并保存；新增权限要由安装所有者${owner}在 GitHub 的安装设置里接受。App 已经有这项权限时，只需接受安装上的待批准变更。`;
+  if (gap.kind === 'event') return `GitHub App 管理员在 App 设置的 Permissions & events → Subscribe to events 勾选 ${eventNames[gap.name] || gap.name} 并保存；所需权限已经授予时，安装无需重新批准。App 已经勾选时，到安装设置接受待批准的变更。`;
+  if (gap.kind === 'role') return '在仓库 Settings → Collaborators and teams 把机器人账号的角色改为 Write 或更高。';
+  return '这些功能只用 GitHub App 安装令牌。在「接入向导」创建 GitHub App 并安装到这个仓库，项目改用该 App 账号后才能使用。';
+}
+function gapImpact(gap, row) {
+  const used = gap.features.map(feature => `${featureNames[feature] || feature}（${stateNames[featureState(row, feature)]}）`).join('、');
+  if (!gap.features.length) return '接入基线要求这一级别；各功能目前用到的级别已经满足，暂不影响使用。';
+  if (gap.kind === 'event') return `${eventImpact[gap.name] || '相关触发不会到达'}。涉及：${used}。`;
+  return gap.features.map(feature => `${featureNames[feature] || feature}（${stateNames[featureState(row, feature)]}）：${featureImpact[feature] || '无法使用'}`).join('；') + '。';
+}
+function gapSummary(gap) {
+  const names = gap.features.map(feature => featureNames[feature] || feature).join('、');
+  return gapWhat(gap) + (names ? `（影响${/^[A-Za-z]/.test(names) ? ' ' : ''}${names}）` : '');
 }
 // Use the full sync's installation snapshots: one installation can cover many repositories, including hidden ones.
 function installationSyncNotice(result) {
   const failed = result.results.filter(row => row.error), installations = result.results.flatMap(row => row.installations || []);
-  const gaps = installations.filter(row => row.missing.length || row.missing_events.length).map(row => `${row.account || '安装'}（安装 ${row.id}）：` +
-    [row.missing.length ? '权限不足：' + permissionGapText(row.missing) : '', row.missing_events.length ? eventGapText(row.missing_events) : ''].filter(Boolean).join('；'));
-  for (const row of result.repositories || []) {
-    if (!row.installation_id && row.permission_missing?.length) gaps.push(row.full_name + '：权限不足：' + permissionGapText(row.permission_missing));
-    // Installation snapshots only cover the global lists; a feature's extra event is a gap of the repositories using it.
-    for (const gap of row.feature_missing || []) gaps.push(row.full_name + '：' + featureGapText(gap));
-  }
+  const gaps = installations.filter(row => row.gaps?.length).map(row => `${row.account || '安装'}（安装 ${row.id}）：${row.gaps.map(gapSummary).join('；')}`);
+  // Bot accounts have no installation snapshot; their repositories carry the gaps.
+  for (const row of result.repositories || []) if (!row.installation_id && row.access_gaps?.length) gaps.push(`${row.full_name}：${row.access_gaps.map(gapSummary).join('；')}`);
   const parts = [failed.length ? '部分账号同步失败：' + failed.map(row => (accounts.find(account => account.id === row.account_id)?.name || row.account_id) + '（' + row.error + '）').join('、') + '，因此还不能判断全部安装的权限和事件订阅是否正常。'
     : gaps.length ? '安装列表已同步，权限和事件订阅并非全部正常。' : `安装列表已同步，${installations.length} 个安装的权限和事件订阅都正常。`];
-  if (gaps.length) parts.push(gaps.join('；') + '。');
-  const appMissing = result.results.some(row => row.app && (row.app.missing?.length || row.app.missing_events?.length)), appUnknown = result.results.some(row => row.app?.error);
+  if (gaps.length) parts.push(gaps.join('；') + '。点仓库行上的提示查看处理方法。');
+  const appMissing = result.results.some(row => row.app && (row.app.missing?.length || row.app.missing_events?.length || row.app.feature_gaps?.length)), appUnknown = result.results.some(row => row.app?.error);
   if (appMissing)
     parts.push('App 定义仍有缺口，请到「全局设置 → 机器人账号」查看。');
   if (appUnknown) parts.push('App 定义暂时无法核对，请到「全局设置 → 机器人账号」检查。');
@@ -545,19 +576,34 @@ function warningIcon() {
   svg.innerHTML = '<path d="M8 1.4 15.3 14.2H.7z" fill="currentColor"/><path d="M8 5.7v4M8 11.8v.4" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/>';
   return svg;
 }
-// A repository the account still lists but with less than the bot needs, including what a switched-on feature needs.
-// Always drawn (hidden when nothing is missing) so that a later permission check can swap it in place.
+// One dialog lists every gap of a repository: what is missing, how to fix it, and which features it stops.
+const accessView = document.createElement('dialog'); accessView.className = 'access-dialog'; accessView.setAttribute('aria-labelledby', 'access-title');
+document.body.append(accessView);
+function openAccessGaps(row) {
+  const title = element('h2', '权限与事件缺口 · ' + row.full_name); title.id = 'access-title';
+  const list = element('ol', '', 'access-gaps');
+  for (const gap of row.access_gaps) {
+    const item = element('li', ''), facts = element('dl', '');
+    for (const [term, text] of [['缺少', gapWhat(gap)], ['怎么操作', gapHow(gap, row)], ['会影响什么', gapImpact(gap, row)]]) facts.append(element('dt', term), element('dd', text));
+    item.append(facts); list.append(item);
+  }
+  const close = button('关闭', () => accessView.close(), 'quiet'), actions = element('div', '', 'actions');
+  actions.append(close);
+  accessView.replaceChildren(title, element('p', '对照所有功能检查，未开启的功能也列出。改完后点「同步安装列表」重新读取。', 'muted'), list, actions);
+  accessView.showModal(); close.focus();
+}
+// Every access gap of a repository the account still lists, against every feature whether or not it is on. Warning tone
+// when a stopped feature is on; a gap only for unused features is informational. Always drawn (hidden when nothing is
+// missing) so that a later permission check can swap it in place.
 function permissionBadge(row) {
-  const missing = row.permission_missing || [], events = row.events_missing || [], features = row.feature_missing || [];
-  const eventGap = events.length || features.some(gap => gap.requirement === 'workflow_run'), appGap = features.some(gap => gap.requirement === 'github_app');
-  const labels = [missing.length ? '权限不足' : '', eventGap ? '事件未订阅' : '', appGap ? 'Actions 需要 App' : ''].filter(Boolean);
-  const chip = labels.length ? badge(labels.join(' · '), 'warning') : element('span', '');
-  if (labels.length) {
-    chip.classList.add('status-alert'); chip.prepend(warningIcon());
-    chip.title = [missing.length ? `仍能看到这个仓库，但授予的权限低于所需：${permissionGapText(missing)}。这种仓库不能删除。` : '', events.length ? eventGapText(events) + '。请在 GitHub 安装设置接受所需事件。' : '',
-      ...features.map(gap => featureGapText(gap) + '。' + (gap.requirement === 'workflow_run' ? '请 App 管理员为已有 App 订阅 workflow_run；没有新增权限时无需重新批准安装。' : ''))].filter(Boolean).join('');
-  } else chip.hidden = true;
-  chip.dataset.permission = ''; return chip;
+  const gaps = row.access_gaps || [], labels = [...new Set(gaps.map(gap => gapLabels[gap.kind]))];
+  if (!labels.length) { const chip = element('span', ''); chip.hidden = true; chip.dataset.permission = ''; return chip; }
+  const urgent = gaps.some(gap => gap.features.some(feature => featureState(row, feature) === 'on'));
+  const chip = button(labels.join(' · '), () => openAccessGaps(row), `status status-${urgent ? 'warning' : 'info'} status-alert`);
+  chip.prepend(warningIcon()); chip.dataset.permission = '';
+  chip.title = gaps.map(gapSummary).join('；') + '。点击查看处理方法。';
+  chip.setAttribute('aria-label', `${labels.join('、')}：${chip.title}`);
+  return chip;
 }
 // Replaces the permission badge of rows already on the list; nothing else in a row is redrawn.
 function updatePermissionBadges(rows) {
