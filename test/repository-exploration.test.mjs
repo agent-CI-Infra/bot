@@ -84,6 +84,12 @@ test('serialized UTF-8 results use the existing 2 MiB capacity without truncatin
     const result = await f.explorer.execute('github_read', { path: '/git/trees/' + 'a'.repeat(40) + '?recursive=1' });
     if (size <= limit) assert.deepEqual(result, data);
     else { assert.equal(result.error, 'repository_result_too_large'); assert.match(result.detail, /path.*recursive.*page/); }
+    if (size === limit) {
+      const root = join(f.h.directory, 'exact-mailbox'), dir = join(root, 'agent'), id = 'a'.repeat(48), reply = Buffer.from(JSON.stringify(result));
+      mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'repository-request.json'), JSON.stringify({ id }));
+      for (let offset = 0; offset < reply.length; offset += 30000) await agentOperation({ type: 'workspace_agent_repository_tool', request_id: id, base64: reply.subarray(offset, offset + 30000).toString('base64'), offset, final: offset + 30000 >= reply.length }, root);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'repository-reply-' + id + '.json'))), data);
+    }
   }
   data = { items: [{ repository_url: f.apiUrl + '/repos/fixture/project-101', body: 'x'.repeat(limit) }] };
   assert.equal((await f.explorer.execute('github_search', { query: 'dependency' })).error, 'repository_result_too_large');

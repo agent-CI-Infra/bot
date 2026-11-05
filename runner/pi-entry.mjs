@@ -7,26 +7,20 @@ import {workspace} from './workspace.mjs';
 import {waitModelReply} from './model-reply.mjs';
 import {toolCapabilityError} from './capabilities.mjs';
 import {createRepositoryTool} from './repository-tool.mjs';
+import {createTokenExchange} from './token-exchange.mjs';
+import {createRepositoryResultGuard} from './repository-context.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
-let steps=0,session,finished,grant=null,requestFailure;
+let steps=0,session,finished,grant=null,requestFailure,checkResult;
+const modelRequestTooLarge=raw=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+8192>128000;
 // Serialize model and tool events in execution order; mask every issued token before it reaches disk.
 const secrets=new Set();let events=Promise.resolve();
 const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
 const writeEvent=value=>{const line=JSON.stringify(clean(value))+'\n';events=events.then(()=>appendFile(dir+'/events.jsonl',line,{mode:0o600}));return events;};
 // Asks the control plane for a read-only GitHub token through the task mailbox, as model requests do.
-async function exchange(){
-  const id=randomBytes(24).toString('hex'),reply=dir+'/token-reply-'+id+'.json';
-  await writeFile(dir+'/token-request.tmp',JSON.stringify({id}),{mode:0o600});await rename(dir+'/token-request.tmp',dir+'/token-request.json');
-  try{
-    for(const end=Date.now()+120000;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,100))){
-      const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;
-    }
-    return {error:'github_read_token_timeout'};
-  }finally{await unlink(dir+'/token-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
-}
+const exchange=createTokenExchange(dir);
 // Repository exploration runs in the control plane, using the same executor as CI observation.
 const repositoryTool=createRepositoryTool(dir);
 // Publication can include a long-running policy command. Wait for the control plane instead of
@@ -53,7 +47,7 @@ const server=createServer(async(req,res)=>{
     // Any number of model requests per task; only the chat completion endpoint is proxied.
     if(req.url!=='/v1/chat/completions'||req.method!=='POST')throw new Error('model_request_not_allowed');
     const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes>2*1024*1024){requestFailure='agent_context_too_large';throw new Error(requestFailure);};chunks.push(chunk);}const raw=Buffer.concat(chunks).toString('utf8');
-    if(estimateTokens({role:'user',content:raw,timestamp:Date.now()})+8192>128000){requestFailure='agent_context_too_large';throw new Error(requestFailure);}
+    if(modelRequestTooLarge(raw)){requestFailure='agent_context_too_large';throw new Error(requestFailure);}
     const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:JSON.parse(raw)}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
     const response=await waitModelReply(dir,id);await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
     res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
@@ -92,16 +86,28 @@ try{
         try{result=await workspace({type:'workspace_command',workspace_id:config.workspace_id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true,output_file:dir+'/command.out',secret_env});}finally{await unlink(dir+'/live.json').catch(()=>{});}
       }else if(tool.function.name==='github_read_token'){
         // The token stays in this process and reaches later commands only as environment variables; the model sees what it can do, not the value.
-        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange();if(reply.error)result={error:reply.error};else {grant=reply;secrets.add(grant.token);}}
+        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange(signal);if(reply.error)result={error:reply.error};else {grant=reply;secrets.add(grant.token);}}
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else throw new Error('tool_not_allowed');
+      result=await checkResult(id,name,result);
       await writeEvent({type:'tool',name:tool.function.name,call_id:id,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(name==='finish_review'?{terminate:true}:{})};
     }}));
   const history=await readFile(dir+'/restore.json','utf8').then(JSON.parse).catch(()=>[]),sessionManager=SessionManager.inMemory(cwd);
   for(const message of history)sessionManager.appendMessage(message);
   ({session}=await createAgentSession({cwd,agentDir:dir,modelRuntime:runtime,model:runtime.getModel('department-proxy','selected'),thinkingLevel:'off',resourceLoader:loader,
     tools:tools.map(tool=>tool.name),customTools:tools,sessionManager,settingsManager:SettingsManager.inMemory({compaction:{enabled:true,reserveTokens:24000,keepRecentTokens:16000},retry:{enabled:false}})}));
+  checkResult=createRepositoryResultGuard({getMessages:()=>session.messages,tooLarge:modelRequestTooLarge,renderRequest:async messages=>{
+    // Let the same SDK serialize the projected request, then stop before any HTTP request or accounting.
+    let raw;
+    const stream=runtime.streamSimple(session.agent.state.model,{messages:await session.agent.convertToLlm(messages),tools:session.agent.state.tools},{
+      onPayload(payload){raw=JSON.stringify(payload);throw new Error('repository_request_preview_complete');}
+    });
+    await stream.result();
+    if(raw===undefined)throw new Error('repository_request_preview_failed');
+    return raw;
+  }});
   session.subscribe(event=>{if(event.type==='message_end'&&event.message.role==='assistant'){
+    checkResult.reset();
     const m=event.message;void writeEvent({type:'model',step:++steps,reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
   }});
   if(config.review_session){
