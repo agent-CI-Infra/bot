@@ -485,8 +485,9 @@ function factSummary(facts: GateFacts): string {
 function prBody(id: string, revision: number, facts: GateFacts, plan: GatePlan, target: GateTarget, files: GateFile[], templateRepo: string | null): string {
   const events = gateEvents(plan, target), update = facts.existing.ci_gates_json;
   const lanes = gateLanes.map(lane => {
-    const commands = plan.lanes[lane], observe = plan.observe.includes(lane) && commands.length ? '，失败只记录（observe）' : '';
-    return `- **${lane}**（${laneTimes[lane]}${observe}）：${commands.length ? commands.map(code).join('；') : '未配置'}`;
+    // laneTimes says what the lane is for in general; the observe note says how this repository configured it.
+    const commands = plan.lanes[lane], observe = plan.observe.includes(lane) && commands.length ? '（observe：失败只记录，不让门禁失败）' : '';
+    return `- **${lane}**（${laneTimes[lane]}）：${commands.length ? commands.map(code).join('；') + observe : '未配置'}`;
   }).join('\n');
   const { node, python, go, java } = plan.toolchains;
   const toolchains = [`Node ${node}（运行 gate.mjs）`, python && `Python ${python}`, go && `Go ${go.endsWith('go.mod') ? `（按 ${go}）` : go}`, java && `Java ${java}（Temurin）`].filter(Boolean).join('、');
