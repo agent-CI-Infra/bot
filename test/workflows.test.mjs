@@ -16,7 +16,7 @@ import { workflowPermissions } from '../dist/workflows/resolve.js';
 import { runSubagent, subagentConfig } from '../runner/subagent.mjs';
 import { narrowCapabilities, toolCapabilityError } from '../runner/capabilities.mjs';
 
-const builtins = ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'release.observe', 'release.notes', 'actions.failures'];
+const builtins = ['review.issue', 'review.pr', 'development.issue', 'development.pr', 'release.observe', 'release.notes', 'actions.failures', 'gate.onboarding'];
 const flowPage = () => loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/workflows.js'], () => [200, {}]);
 const flowOf = (page, text) => page.run(`JSON.stringify(flowText(parseFlow(${JSON.stringify(text)})))`);
 // A fake Chat Completions server: respond(body, index) returns a message.
@@ -52,6 +52,9 @@ test('the built-in tasks and Actions failure handling are workflows; prompts car
   for (const id of ['review.issue', 'review.pr']) assert.deepEqual(JSON.parse(flowOf(page, byId[id].prompt.effective)), ['检视 → 回复']);
   for (const id of ['development.issue', 'development.pr'])
     assert.deepEqual(JSON.parse(flowOf(page, byId[id].prompt.effective)), ['Issue 分析 → 开发 → 检视 → 测试', '检视 → 开发：发现问题', '测试 → 开发：测试失败']);
+  // Gate onboarding is a workflow too: its prompt draws the analysis, the commands it tries and the plan it submits.
+  assert.deepEqual(JSON.parse(flowOf(page, byId['gate.onboarding'].prompt.effective)), ['读取对话与门禁事实 → 分析仓库 → 试跑命令 → 设计各 lane → 提交方案', '试跑命令 → 设计各 lane：命令失败或太慢']);
+  assert.deepEqual([byId['gate.onboarding'].triggers, byId['gate.onboarding'].permissions.writes], [[{ id: 'gate.manual' }], ['gate_plan']]);
   // The drawn figure names the same steps; a prompt without a flowchart says so instead of inventing one.
   const figure = page.run(`flowFigure(parseFlow(${JSON.stringify(byId['development.issue'].prompt.effective)}))`);
   assert.equal(figure.querySelector('figcaption .flow-path').textContent, 'Issue 分析 → 开发 → 检视 → 测试');

@@ -15,12 +15,18 @@ const gateOnboardingErrors = {
   gate_plan_changed: '方案已经更新，请查看最新方案后再确认。', merge_queue_required: '请先回答默认分支是否启用了 merge queue。',
   gate_pr_open: '仓库已有未合入的门禁 PR，请先合入或关闭它。', gate_workflow_invalid: '选的 workflow 不能放门禁 job，请换一个位置。',
   gate_no_changes: '方案和仓库现有的门禁一致，没有需要提交的改动。', gate_file_changed: '默认分支上的门禁文件在对话开始后有变化，请重新开始。',
-  gate_agent_unavailable: '这个仓库没有可用的模型，agent 不能回复；可以直接修改方案后确认。', gate_onboarding_busy: '上一步还在进行，请稍候。',
+  gate_project_not_started: '项目还没有启动：先在仓库列表点「启动」，等虚拟电脑就绪后再接入门禁。', gate_project_disabled: '项目已禁用，启用后再接入门禁。',
+  gate_environment_not_ready: '项目的虚拟电脑还没有就绪，就绪后再接入门禁。', workflow_disabled: '工作流「接入门禁」已关闭，请在项目的工作流页打开它。',
+  model_not_configured: '项目没有可用的模型，请先在项目设置里选择模型。', github_app_required: '门禁接入只使用 GitHub App；这个仓库挂在机器人账号上。',
+  gate_onboarding_busy: '上一步还在进行，请稍候。',
   gate_onboarding_superseded: '已经开始了新的接入对话，请关闭后重新打开。', gate_onboarding_closed: '这个对话已经结束，可以重新开始。',
   merge_queue_known: '这个仓库的 merge queue 状态已经读到，不需要回答。',
   gate_plan_invalid: '方案格式无效：安装命令不能包含 ${{ }} 表达式或控制字符。', gate_plan_secret: '方案里像是包含了令牌或密钥，不能写进仓库。', message_required: '请输入要发给 agent 的内容。',
 };
 const gateOnboardingBusy = ['collecting', 'thinking', 'creating'];
+// Where a turn's task is: it waits in the project's queue like every other workflow task.
+const gateOnboardingTaskStates = { queued: '排队等待项目电脑', preparing: '在项目电脑里准备检出', running: '在项目电脑里分析', retry_wait: '等待重试',
+  waiting_environment: '等待项目电脑就绪', waiting_configuration: '等待模型或配置', waiting_permission: '等待 GitHub 权限' };
 const gateOnboardingView = document.createElement('dialog'); gateOnboardingView.id = 'quickstart-view'; gateOnboardingView.className = 'gate-dialog';
 gateOnboardingView.setAttribute('aria-labelledby', 'gate-onboarding-title');
 gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-title">接入门禁</h2><div class="actions">
@@ -31,8 +37,9 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <p>门禁按 lane 组织。每个 lane 在不同的时机运行这个仓库自己的检查命令，结果写进门禁报告和看板；命令为空的 lane 只表示还没有配置，不表示检查通过。门禁检出并报告同一个提交：PR 上检查的就是 PR 的 head 提交。</p>
 <dl id="gate-onboarding-lanes" class="gate-lanes"></dl>
 <p>pr-merge 是合入门禁：仓库启用了 merge queue 时，它就是队列的门禁，所以门禁可以设为必需检查，合入后不再重复运行；没有 merge queue 时，它在每次合入默认分支后运行。发版本时，bot 打版本标签，标签触发 release lane，通过后生成 Release 草稿。</p>
-<p>点「开始适配」后，agent 只读地分析仓库：目录结构和子项目、语言和工具链、README 和脚本、构建和测试方式、已有 workflow 和它们的耗时、默认分支、是否启用 merge queue，再按仓库实际情况设计每个 lane 的命令，说明理由，不确定的会在对话里问你。仓库已经有 CI 或门禁时，agent 会先审视现有配置，说明哪里不合理并给出建议。</p>
-<p>你确认之前，不会创建分支或 PR，不会写仓库，也不会运行仓库里的脚本；确认前可以预览 PR 会新增或修改的每个文件。</p>
+<p>点「开始适配」后，接入门禁和其他工作流一样在项目的虚拟电脑里工作：每次开始或回复是一轮任务，agent 检出默认分支，分析目录结构和子项目、语言和工具链、README 和脚本、构建和测试方式、已有 workflow 和它们的耗时，必要时安装依赖、试跑命令并计时，再按仓库实际情况设计每个 lane 的命令，说明理由，不确定的会在对话里问你。仓库已经有 CI 或门禁时，agent 会先审视现有配置，说明哪里不合理并给出建议。所以项目要先启动、虚拟电脑就绪、选好模型，才能接入门禁。</p>
+<p>你确认之前，不会创建分支或 PR，也不会写仓库；确认前可以预览 PR 会新增或修改的每个文件。</p>
+<p id="gate-onboarding-ready" class="view-error" role="status"></p>
 <p id="gate-onboarding-last" class="muted"></p>
 <div class="actions"><button type="button" class="quiet" id="gate-onboarding-resume" hidden>继续上次的对话</button><button type="button" id="gate-onboarding-start">开始适配</button></div>
 </section>
@@ -41,6 +48,7 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <ol id="gate-onboarding-messages" class="gate-messages" aria-live="polite"></ol>
 <form id="gate-onboarding-compose" class="gate-compose"><label>发给 agent<textarea name="content" rows="3" placeholder="例如：测试命令用 python -m pytest -q；daily 跑 make e2e"></textarea></label>
 <div class="actions"><span id="gate-onboarding-agent" class="muted"></span><button type="submit">发送</button></div></form>
+<p id="gate-onboarding-turn" class="gate-turn muted" hidden></p>
 </section>
 <form id="gate-onboarding-plan" class="gate-plan" aria-labelledby="gate-onboarding-plan-title">
 <h3 id="gate-onboarding-plan-title">门禁方案</h3>
@@ -73,7 +81,7 @@ for (const [lane, when] of gateOnboardingLanes) {
 }
 // row: the repository list row; session: the latest conversation; rendered: the plan revision the form shows, so polling
 // never overwrites what the person is typing; preview: files for the form's unsent edits; timer: polling while a step runs.
-let gateOnboardingContext = { row: null, after: null, session: null, rendered: -1, preview: null, timer: null, wasBusy: false };
+let gateOnboardingContext = { row: null, after: null, session: null, ready: null, rendered: -1, preview: null, timer: null, wasBusy: false };
 
 function gateOnboardingError(err) {
   const code = String(err.message || '').split(' · ')[1];
@@ -103,7 +111,10 @@ function gateOnboardingShowChat(show) {
   gateOnboardingView.classList.toggle('wide', show);
 }
 function gateOnboardingIntro() {
-  const session = gateOnboardingContext.session, last = $('gate-onboarding-last'); last.replaceChildren();
+  const session = gateOnboardingContext.session, last = $('gate-onboarding-last'), ready = gateOnboardingContext.ready; last.replaceChildren();
+  // Like every workflow, gate onboarding runs in the project computer: a project that is not ready cannot start it.
+  $('gate-onboarding-ready').textContent = ready && !ready.ok ? ready.reason : '';
+  $('gate-onboarding-start').disabled = !ready?.ok;
   $('gate-onboarding-resume').hidden = !session;
   if (!session) return;
   last.append(`上次对话：${gateOnboardingStates[session.state] || session.state}（${timestamp(session.updated_at)}）`);
@@ -135,13 +146,17 @@ function gateOnboardingRender() {
     item.append(element('span', { agent: 'agent', user: '你', system: '控制面' }[message.role] || message.role, 'gate-message-role'), element('p', message.content));
     list.append(item);
   }
-  if (busy) list.append(element('li', gateOnboardingStates[session.state] + '…', 'gate-message gate-message-pending'));
+  const task = session.task, waiting = task && gateOnboardingTaskStates[task.status];
+  if (busy) list.append(element('li', (session.state === 'thinking' && waiting ? `agent ${waiting}` : gateOnboardingStates[session.state]) + '…', 'gate-message gate-message-pending'));
+  // A turn is a task in the project computer; its process (commands, files read, model output) opens like any task's.
+  const turn = $('gate-onboarding-turn'); turn.replaceChildren(); turn.hidden = !task;
+  if (task) turn.append(`本轮任务：${waiting || task.status}${task.error ? `（${task.error}）` : ''} `, button('查看执行过程', () => openTask(task.id), 'quiet'));
   if (session.pr_url) { const item = element('li', '', 'gate-message gate-message-system'), link = element('a', '打开门禁 PR', 'result-link');
     link.href = session.pr_url; link.target = '_blank'; link.rel = 'noopener noreferrer'; item.append(link); list.append(item); }
   list.lastElementChild?.scrollIntoView({ block: 'end' });
-  const agent = session.agent || {};
-  $('gate-onboarding-compose').hidden = !agent.available || !open;
-  $('gate-onboarding-agent').textContent = agent.available ? `agent 使用项目模型 ${agent.model}` : '';
+  const ready = session.ready || {};
+  $('gate-onboarding-compose').hidden = !ready.ok || !open;
+  $('gate-onboarding-agent').textContent = ready.ok ? `agent 在项目电脑里工作，使用模型 ${ready.model}` : ready.reason || '';
   const plan = $('gate-onboarding-plan'); plan.hidden = !session.plan || session.state === 'connected';
   if (!session.plan) return;
   // Only a new revision from the server replaces the form; the person's unsent edits otherwise stay.
@@ -203,14 +218,14 @@ async function gateOnboardingStart() {
 
 async function openGateOnboarding(row, after) {
   clearTimeout(gateOnboardingContext.timer);
-  gateOnboardingContext = { row, after, session: null, rendered: -1, preview: null, timer: null, wasBusy: false };
+  gateOnboardingContext = { row, after, session: null, ready: null, rendered: -1, preview: null, timer: null, wasBusy: false };
   $('gate-onboarding-title').textContent = '接入门禁 · ' + row.full_name; $('gate-onboarding-error').textContent = '';
   // A previous repository's answer or unsent message must not carry over.
   for (const radio of $('gate-onboarding-plan').querySelectorAll('input[name=merge_queue]')) radio.checked = false;
   for (const field of $('gate-onboarding-compose').querySelectorAll('textarea')) field.value = '';
   gateOnboardingShowChat(false); gateOnboardingIntro();
   gateOnboardingView.showModal();
-  try { const value = await api(`/api/projects/${row.id}/gate-onboarding`); if (gateOnboardingContext.row === row) { gateOnboardingContext.session = value.session; gateOnboardingIntro(); } }
+  try { const value = await api(`/api/projects/${row.id}/gate-onboarding`); if (gateOnboardingContext.row === row) { Object.assign(gateOnboardingContext, { session: value.session, ready: value.ready }); gateOnboardingIntro(); } }
   catch (err) { gateOnboardingError(err); }
 }
 $('gate-onboarding-start').addEventListener('click', () => gateOnboardingStart());

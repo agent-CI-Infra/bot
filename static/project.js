@@ -402,6 +402,8 @@ async function refreshProjectStatus(token) {
   projectTimer = setTimeout(() => refreshProjectStatus(token), 5000);
 }
 
+// Event workflow tasks (CI observation, Actions failures, gate onboarding turns) have no Issue or PR number.
+function projectTaskLabel(task) { return `${kindLabels[task.kind] || task.kind}${task.object_number == null ? '' : ' #' + task.object_number}`; }
 const builtInTasks = [
   { kind: 'review.issue', group: '检视', title: '检视 Issue', description: '检视新 Issue，判断意图、核对代码证据，并按规则决定是否衔接开发。', rule: '.bot/rules/issue-review.md' },
   { kind: 'review.pr', group: '检视', title: '检视 PR', description: '检视 PR 的变更、测试与证据，发布 COMMENT 检视结论。', rule: '.bot/rules/pr-review.md' },
@@ -750,18 +752,18 @@ function activityCards() {
   const environment = current.environment; if (!environment) return [note('暂时读不到运行状态。')];
   const { running_tasks: running = [], queued_tasks: queued = [], task_concurrency: limit, tasks } = environment, work = card(`正在执行 ${running.length}／${limit ?? 1}`);
   const list = element('ul', '', 'history');
-  for (const task of running) { const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status)); list.append(row); }
+  for (const task of running) { const row = element('li', ''); row.append(button(projectTaskLabel(task), () => openTask(task.id), 'quiet linkish'), state(task.status)); list.append(row); }
   work.append(running.length ? list : note('暂无正在执行的任务。'), note(`这台虚拟电脑最多同时执行 ${limit ?? 1} 个任务，其余任务排队。`));
   const queue = card(`排队任务 ${queued.length}`), queueList = element('ul', '', 'history');
   for (const task of queued) {
-    const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status));
+    const row = element('li', ''); row.append(button(projectTaskLabel(task), () => openTask(task.id), 'quiet linkish'), state(task.status));
     row.append(element('span', `入队 ${timestamp(task.created_at)}`, 'muted wide-cell')); queueList.append(row);
   }
   queue.append(queued.length ? queueList : note('暂无排队任务。'));
   const recent = card('最近任务'), taskList = element('ul', '', 'history');
   recent.classList.add('activity-history');
   for (const task of tasks) {
-    const row = element('li', ''); row.append(button(`${kindLabels[task.kind] || task.kind} #${task.object_number}`, () => openTask(task.id), 'quiet linkish'), state(task.status));
+    const row = element('li', ''); row.append(button(projectTaskLabel(task), () => openTask(task.id), 'quiet linkish'), state(task.status));
     row.append(element('span', `${task.generation ? 'g' + task.generation + ' · ' : ''}${timestamp(task.updated_at)}`, 'muted wide-cell'),taskMetricsLine(task)); taskList.append(row);
   }
   recent.append(tasks.length ? taskList : note('还没有任务。'));

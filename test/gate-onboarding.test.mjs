@@ -9,66 +9,92 @@ import { GitHub, agentReadPermissions } from '../dist/github/client.js';
 import { ReadTokens } from '../dist/agent/read-token.js';
 import { Redactor } from '../dist/agent/common.js';
 import { releaseWorkflow } from '../dist/releases/workflow.js';
+import { workspaceProfile } from '../dist/agent/profiles.js';
+import { workflowAccess, builtinWorkflow, writeOptions } from '../dist/workflows/catalog.js';
 import { loadConsole } from './console-page.mjs';
-import { gateFixture as fixture, makefile, answer, writes, branchOf } from './gate-onboarding-fixtures.mjs';
+import { gateFixture as fixture, writes, branchOf } from './gate-onboarding-fixtures.mjs';
+
+const lanes = (values = {}) => ({ 'pr-ready': [], 'pr-merge': [], daily: [], release: [], ...values });
 
 test('the board location helper still names the verified webhook origin and a lowercase path', () => {
   assert.deepEqual(boardLocation('https://bot.example/', 'My-Org/Hello'), { key: 'my-org/hello', url: 'https://bot.example/boards/my-org/hello/' });
 });
 
-test('a Python repository without package.json gets a plan from its own files, and nothing is written before confirmation', async t => {
-  const { state, open } = await fixture(t);
-  const session = await open();
-  assert.equal(session.state, 'ready', JSON.stringify(session));
-  assert.notEqual(session.error, 'unsupported_stack');
-  assert.equal(session.agent.available, false); // Never started: no model, so the plan comes from certain facts only.
-  assert.deepEqual(session.facts.languages.map(item => item.name), ['Python', 'Makefile']);
-  assert.deepEqual(session.plan.toolchains, { node: '22', python: '3.12', go: '', java: '' });
-  // Makefile targets are repository commands and go into pr-ready, build first; pytest and pip install -e . are only asked about.
-  assert.deepEqual(session.plan.lanes, { 'pr-ready': ['make build', 'make lint', 'make test'], 'pr-merge': [], daily: [], release: [] });
-  assert.deepEqual(session.plan.install, []);
-  assert.deepEqual([session.plan.observe, session.plan.workflow, session.default_workflow], [['daily'], '', '.github/workflows/ci.yml']);
-  assert.ok(session.facts.candidates.some(item => item.command === 'python -m pytest' && !item.certain));
-  assert.match(session.messages.at(-1).content, /Python 依赖在 CI 里怎么安装/);
-  assert.equal(session.merge_queue.state, 'disabled');
-  assert.deepEqual(writes(state), []);
-  // The facts token only reads.
-  assert.deepEqual([...state.tokens.values()], [{ installation: 1, repository_ids: [101], permissions: gatePermissions.read }]);
-  assert.ok(!JSON.stringify(session).includes('ghs_'));
+test('gate onboarding needs a started project with a ready computer, the workflow on and a model, like every workflow', async t => {
+  const { h, admin, startProject, open } = await fixture(t, { ready: false });
+  const ready = async () => (await admin('/api/projects/101/gate-onboarding')).value.ready;
+  assert.deepEqual([(await ready()).ok, (await ready()).code], [false, 'gate_project_not_started']);
+  assert.deepEqual([(await open()).status, (await open()).value.error], [409, 'gate_project_not_started']);
+  await startProject();
+  h.store.run("UPDATE project_environments SET state='provisioning' WHERE repository_id='101'");
+  assert.equal((await ready()).code, 'gate_environment_not_ready');
+  assert.match((await ready()).reason, /虚拟电脑还没有就绪（当前：provisioning）/);
+  h.store.run("UPDATE project_environments SET state='ready' WHERE repository_id='101'");
+  assert.equal((await admin('/api/repositories/101/workflows/gate.onboarding', 'PUT', { enabled: false })).status, 200);
+  assert.equal((await ready()).code, 'workflow_disabled');
+  assert.equal((await admin('/api/repositories/101/workflows/gate.onboarding', 'PUT', { enabled: true })).status, 200);
+  h.store.run("UPDATE policies SET model_id=NULL WHERE repository_id='101'");
+  assert.equal((await ready()).code, 'model_not_configured');
+  h.store.run("UPDATE policies SET model_id=(SELECT id FROM models LIMIT 1) WHERE repository_id='101'");
+  assert.deepEqual([(await ready()).ok, (await ready()).model], [true, 'gate-model']);
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 0);
 });
 
-test('the agent proposes from repository facts, the person corrects it in the conversation, and only confirmation opens the PR', async t => {
-  const seen = [];
-  const { state, open, say, confirm, llm } = await fixture(t, { model: async (input, n, body) => {
-    seen.push(input);
-    if (n === 1) return { content: null, tool_calls: [{ id: 'token', type: 'function', function: { name: 'github_read_token', arguments: '{}' } }] };
-    if (n === 2) return { content: null, tool_calls: [{ id: 'read', type: 'function', function: { name: 'github_read', arguments: JSON.stringify({ path: '/contents/Makefile' }) } }] };
-    if (n === 3) {
-      assert.match(body.messages.at(-1).content, /python -m pytest/); // The Makefile it read.
-      // A model that still thinks in a build lane: it is folded into pr-ready.
-      return answer('pr-ready 跑 make build、make lint 和 make test。Python 依赖怎么装？', { toolchains: { python: '3.12' }, lanes: { build: ['make build'], 'pr-ready': ['make lint', 'make test'] } });
-    }
-    assert.equal(input.conversation.at(-1).content, '依赖用 pip install -e ".[test]"，daily 跑 make test');
-    return answer('已加入安装命令和 daily。', { toolchains: { python: '3.12' }, install: ['pip install -e ".[test]"'], lanes: { 'pr-ready': ['make build', 'make lint', 'make test'], daily: ['make test'] } });
-  } });
-  let session = await open();
-  assert.equal(session.agent.available, true);
-  assert.equal(session.messages.at(-1).role, 'agent');
-  assert.equal(session.revision, 1); // The agent's first plan equals the one built from certain facts, so no new revision.
-  assert.deepEqual(seen[0].facts.files.Makefile, makefile);
-  assert.deepEqual(seen[0].current_plan.lanes['pr-ready'], ['make build', 'make lint', 'make test']);
-  assert.ok(seen[0].facts.tree.includes('src/hello/__init__.py'));
-  assert.equal(seen[0].merge_queue, 'disabled');
-  session = await say(session, '依赖用 pip install -e ".[test]"，daily 跑 make test');
-  assert.deepEqual(session.plan.install, ['pip install -e ".[test]"']);
-  assert.deepEqual(session.plan.lanes.daily, ['make test']);
-  assert.equal(llm.requests.length, 4);
-  // The agent's own read token is read-only and revoked; still nothing written to the repository.
-  const agentToken = [...state.tokens.values()].find(grant => grant.permissions.contents === 'read' && !grant.permissions.pull_requests);
-  assert.deepEqual(Object.values(agentToken.permissions).filter(level => level !== 'read'), []);
-  assert.deepEqual(writes(state), []);
-  assert.equal(state.repos['octo/hello'].pulls.length, 0);
+test('gate onboarding is a built-in workflow whose agent works in the project computer and only submits a plan', () => {
+  const workflow = builtinWorkflow('gate.onboarding');
+  assert.deepEqual([workflow.name, workflow.base, workflow.triggers], ['接入门禁', 'gate', ['gate.manual']]);
+  assert.match(workflow.prompt.builtin, /flowchart LR/);
+  assert.deepEqual(writeOptions('gate.onboarding').map(write => [write.id, write.tool, write.locked]), [['gate_plan', 'submit_gate_plan', true]]);
+  const profile = workspaceProfile('gate.onboarding', { workflow_prompt: workflow.prompt.builtin }, workflowAccess('gate.onboarding'));
+  const names = profile.tools.map(tool => tool.function.name);
+  for (const name of ['read_file', 'run_command', 'github_read_token', 'github_read', 'start_agent', 'submit_gate_plan']) assert.ok(names.includes(name), name);
+  for (const name of ['create_pull_request', 'create_issue', 'finish_review']) assert.ok(!names.includes(name), name);
+  assert.deepEqual([profile.finishTools, profile.capabilities.workspace.write, profile.capabilities.github.publication, profile.capabilities.writes], [['submit_gate_plan'], false, 'none', ['gate_plan']]);
+  // The plan's four lanes are all required, so a submission never leaves one out by accident.
+  const submit = profile.tools.find(tool => tool.function.name === 'submit_gate_plan').function.parameters;
+  assert.deepEqual(submit.properties.plan.properties.lanes.required, ['pr-ready', 'pr-merge', 'daily', 'release']);
+  assert.match(profile.system, /gate onboarding mode/);
+  assert.match(profile.system, /standard_changes/);
+});
 
+test('each turn is a task on a checkout of the default branch; the control plane reads only gate facts and writes nothing', async t => {
+  const seen = [];
+  const { h, state, open, play } = await fixture(t);
+  play.agent = context => { seen.push(context); return { reply: '分析完成。', plan: { ...context.plan, lanes: lanes({ 'pr-ready': ['make build', 'make test'] }) } }; };
+  const session = await open();
+  assert.equal(session.state, 'ready', JSON.stringify(session));
+  const task = h.store.get("SELECT * FROM tasks WHERE kind='gate.onboarding'");
+  assert.deepEqual([task.status, JSON.parse(task.input).session_id, session.task], ['succeeded', session.id, null]);
+  const { target, gate, conversation, plan } = seen[0];
+  assert.equal(target.sha, 'a'.repeat(40));
+  assert.deepEqual(target.contextFiles.map(file => file.path), ['../context/conversation.json', '../context/plan.json', '../context/gate.json']);
+  assert.match(target.context.workflow_prompt, /# Gate onboarding/);
+  assert.deepEqual(plan, emptyPlan());
+  assert.equal(conversation.length, 1); // The facts summary.
+  assert.deepEqual(gate.targets, [{ path: '.github/workflows/ci.yml', mode: 'create' }, { path: '.github/workflows/ci-gates.yml', mode: 'create' }]);
+  assert.deepEqual(gate.events.merge_group, ['pr-ready', 'pr-merge']);
+  assert.ok(gate.standard_changes.some(change => change.includes('PR head')) && gate.standard_changes.some(change => change.includes('release.yml is created')));
+  assert.deepEqual([session.messages.map(message => message.role), session.plan.lanes['pr-ready'], session.revision], [['system', 'agent'], ['make build', 'make test'], 2]);
+  assert.match(session.messages[0].content, /agent 在项目电脑里检出这个提交继续分析/);
+  // The task's token only reads; nothing is written to the repository before a confirmation.
+  assert.deepEqual(writes(state), []);
+  for (const grant of state.tokens.values()) assert.ok(!('workflows' in grant.permissions) && grant.permissions.contents === 'read');
+});
+
+test('the person replies; lanes the agent leaves out keep their commands, and the confirmed plan becomes the gate PR', async t => {
+  const contexts = [];
+  const { state, open, say, confirm, play } = await fixture(t);
+  play.agent = context => { contexts.push(context); return contexts.length === 1
+    ? { reply: 'pr-ready 跑 make build、make lint 和 make test，依赖怎么装？', plan: { toolchains: { python: '3.12' }, lanes: lanes({ 'pr-ready': ['make build', 'make lint', 'make test'], release: ['make dist'] }), install: [], observe: ['daily'], workflow: '' } }
+    // Only the lanes it changes: the others keep what they had.
+    : { reply: '已加入安装命令和 daily。', plan: { install: ['pip install -e ".[test]"'], lanes: { daily: ['make test'] } } }; };
+  let session = await open();
+  session = await say(session, '依赖用 pip install -e ".[test]"，daily 跑 make test');
+  assert.equal(contexts[1].conversation.at(-1).content, '依赖用 pip install -e ".[test]"，daily 跑 make test');
+  assert.deepEqual(contexts[1].plan.lanes['pr-ready'], ['make build', 'make lint', 'make test']);
+  assert.deepEqual(session.plan.lanes, lanes({ 'pr-ready': ['make build', 'make lint', 'make test'], daily: ['make test'], release: ['make dist'] }));
+  assert.deepEqual([session.plan.install, session.plan.toolchains.python], [['pip install -e ".[test]"'], '3.12']);
+  assert.deepEqual(writes(state), []);
   session = await confirm(session);
   assert.equal(session.state, 'done', JSON.stringify(session.messages));
   const { pull, files } = branchOf(state);
@@ -76,71 +102,78 @@ test('the agent proposes from repository facts, the person corrects it in the co
   assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci.yml', '.github/workflows/release.yml', 'scripts/gate/gate.mjs']);
   const config = JSON.parse(files['.github/ci-gates.json']);
   assert.deepEqual(config.lanes, { 'pr-ready': { commands: ['make build', 'make lint', 'make test'] }, 'pr-merge': { commands: [] },
-    daily: { commands: ['make test'], enforcement: 'observe', continueOnError: true }, release: { commands: [] } });
-  // Every PR commit runs pr-ready; the merge gate runs pr-ready again and then pr-merge on the merged result.
+    daily: { commands: ['make test'], enforcement: 'observe', continueOnError: true }, release: { commands: ['make dist'] } });
   assert.deepEqual(config.events, { pull_request: ['pr-ready'], workflow_dispatch: ['pr-ready'], merge_group: ['pr-ready', 'pr-merge'], push: ['pr-ready', 'pr-merge'], schedule: ['daily'], release: ['release'] });
   const workflow = parse(files['.github/workflows/ci.yml']), steps = workflow.jobs.gate.steps;
   assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'merge_group', 'push', 'schedule', 'workflow_dispatch']);
-  assert.deepEqual(workflow.on.push, { branches: ['main'] });
-  assert.equal(workflow.jobs.gate.env.CI_GATES_SHA, '${{ github.event.pull_request.head.sha || github.sha }}');
-  assert.deepEqual(steps.filter(step => step.uses).map(step => step.uses), ['actions/checkout@v4', 'actions/setup-node@v4', 'actions/setup-python@v5', 'actions/upload-artifact@v4']);
-  // The code checked out is the commit the reports name.
   assert.equal(steps[0].with.ref, workflow.jobs.gate.env.CI_GATES_SHA);
   assert.deepEqual(steps.filter(step => step.run).map(step => step.run), ['pip install -e ".[test]"', 'node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"']);
-  assert.ok(!files['.github/workflows/ci.yml'].includes('npm ci'));
-  assert.equal(steps.find(step => step.uses === 'actions/setup-node@v4').with.cache, undefined);
   assert.ok(releaseWorkflow(files['.github/workflows/release.yml'], 'v1.2.3').matched);
   assert.match(pull.body, /空 lane 只表示还没有配置检查/);
-  assert.match(pull.body, /没有运行其中任何命令/);
-  assert.match(pull.body, /`make lint`；`make test`/);
-  assert.equal(pull.base, 'main');
-  // Every write used the source token, which is the only token that may write workflows.
+  assert.match(pull.body, /在项目的受控环境里分析仓库/);
   const source = [...state.tokens.entries()].find(([, grant]) => grant.permissions.workflows === 'write')[0];
   assert.ok(writes(state).filter(r => r.path.startsWith('/repos/octo/hello')).every(r => r.auth === source));
   assert.deepEqual(state.tokens.get(source).permissions, gatePermissions.source);
-  assert.equal(state.revoked.length, state.tokens.size);
+  assert.ok(state.revoked.includes(source));
 });
 
-test('a repository whose projects live in subdirectories is analyzed from its tree, README, scripts and existing CI', async t => {
-  const { state, open } = await fixture(t);
-  // The layout of agent-test-zone/bot-demo: no root manifest, a test script the README and CI use, a Node sub-project.
-  state.repos['octo/hello'].languages = { Python: 4000, JavaScript: 2000, Shell: 300 };
-  state.repos['octo/hello'].files = {
-    'README.md': '# demo\n\n## Tests\n\n```sh\nsh scripts/test.sh\n```\n',
-    'scripts/test.sh': '#!/bin/sh\npython3 -m unittest discover -s inventory -t . -v\n(cd textkit && node --test)\n',
-    'inventory/__init__.py': '', 'inventory/stock.py': 'x = 1\n', 'inventory/test_stock.py': 'import unittest\n',
-    'textkit/package.json': JSON.stringify({ name: 'textkit', scripts: { test: 'node --test' } }), 'textkit/src/index.js': '', 'textkit/test/index.test.js': '',
-    '.github/workflows/ci.yml': "name: ci\non:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.11'\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '22'\n      - run: sh scripts/test.sh\n" };
-  state.repos['octo/hello'].actionRuns = [{ path: '.github/workflows/ci.yml', event: 'pull_request', conclusion: 'success', run_started_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:01:30Z' }];
+test('a plan that fails the checks keeps the reply and the current plan; tokens in a reply are hidden', async t => {
+  const { open, play } = await fixture(t);
+  play.agent = ({ plan }) => ({ reply: '放进 other.yml。ghp_' + 'a'.repeat(36), plan: { ...plan, lanes: lanes({ 'pr-ready': ['make test'] }), workflow: '.github/workflows/other.yml' } });
   const session = await open();
-  assert.ok(session.facts.tree.includes('textkit/test/index.test.js') && session.facts.tree.includes('inventory/'));
-  assert.deepEqual(session.facts.manifests.sort(), ['README.md', 'scripts/test.sh', 'textkit/package.json']);
-  assert.deepEqual(session.facts.actions_runs.map(run => [run.workflow, run.minutes]), [['.github/workflows/ci.yml', 1.5]]);
-  const script = session.facts.candidates.find(item => item.command === 'sh scripts/test.sh');
-  assert.deepEqual([script.kind, script.certain, script.source.split('；').sort()], ['test', true, ['.github/workflows/ci.yml', 'README.md', 'scripts/test.sh']]);
-  assert.ok(session.facts.candidates.some(item => item.command === '(cd textkit && npm test)' && item.certain));
-  // The command the repository already runs in CI wins; the versions come from its setup steps.
-  assert.deepEqual(session.plan.lanes['pr-ready'], ['sh scripts/test.sh']);
-  assert.deepEqual(session.plan.toolchains, { node: '22', python: '3.11', go: '', java: '' });
-  assert.match(session.messages[0].content, /最近成功的 PR 检查耗时：1\.5–1\.5 分钟/);
+  assert.deepEqual([session.state, session.revision, session.plan.lanes['pr-ready']], ['ready', 1, []]);
+  assert.equal(session.messages.at(-2).content, '放进 other.yml。[REDACTED]');
+  assert.match(session.messages.at(-1).content, /没有通过检查（workflow \.github\/workflows\/other\.yml 不在可选的位置里），右侧方案没有变化/);
 });
 
-test('the agent submits its plan through a tool and fixes what validation rejects within the same turn', async t => {
-  const calls = [];
-  const submit = (id, args) => ({ content: null, tool_calls: [{ id, type: 'function', function: { name: 'submit_gate_plan', arguments: JSON.stringify(args) } }] });
-  const plan = { toolchains: { node: '22', python: '3.12', go: '', java: '' }, install: [], lanes: { 'pr-ready': ['make build', 'make test'], 'pr-merge': ['make e2e'], daily: [], release: [] }, observe: ['daily'], workflow: '' };
-  const { open } = await fixture(t, { model: async (input, n, body) => {
-    calls.push(body.messages.at(-1));
-    if (n === 1) { assert.ok(body.tools.some(tool => tool.function.name === 'submit_gate_plan')); return submit('a', { reply: '方案', plan: { ...plan, workflow: '.github/workflows/other.yml' } }); }
-    if (n === 2) { assert.match(body.messages.at(-1).content, /gate_plan_invalid/); return submit('b', { reply: 'pr-ready 跑构建和测试，pr-merge 跑端到端。', plan }); }
-    assert.match(body.messages.at(-1).content, /"accepted":true/);
-    return { content: '已提交。' };
-  } });
-  const session = await open();
-  assert.equal(calls.length, 3);
-  assert.equal(session.messages.at(-1).content, 'pr-ready 跑构建和测试，pr-merge 跑端到端。');
-  assert.deepEqual(session.plan.lanes['pr-merge'], ['make e2e']);
-  assert.equal(session.revision, 2);
+test('a turn that ends without a result says so; the conversation goes on, and a newer conversation stops an older turn', async t => {
+  const { h, admin, open, say, turn, play } = await fixture(t);
+  play.agent = () => { throw Object.assign(new Error('model_unavailable'), { code: 'model_unavailable', state: 'failed', detail: '模型 30 秒内没有响应' }); };
+  let session = await open();
+  assert.deepEqual([session.state, session.error, session.task], ['ready', 'model_unavailable', null]);
+  assert.match(session.messages.at(-1).content, /agent 这一轮没有完成：模型 30 秒内没有响应/);
+  play.agent = ({ plan }) => ({ reply: '好了。', plan });
+  session = await say(session, '再试一次');
+  assert.equal(session.messages.at(-1).content, '好了。');
+  // A conversation started while a turn waits supersedes it: the old turn's task stops when it is picked up.
+  const first = (await admin('/api/projects/101/gate-onboarding', 'POST', {})).value.session;
+  assert.equal(first.state, 'thinking');
+  const second = (await admin('/api/projects/101/gate-onboarding', 'POST', {})).value.session;
+  await turn();
+  const tasks = h.store.all("SELECT input,status,error_code FROM tasks WHERE kind='gate.onboarding' ORDER BY created_at,rowid").slice(-2);
+  assert.deepEqual(tasks.map(task => [JSON.parse(task.input).session_id, task.status, task.error_code]), [[first.id, 'cancelled', 'gate_session_superseded'], [second.id, 'succeeded', null]]);
+  const stale = await admin(`/api/gate-onboarding/${first.id}/messages`, 'POST', { content: 'hi' });
+  assert.deepEqual([stale.status, stale.value.error], [409, 'gate_onboarding_superseded']);
+});
+
+test('a bot account repository cannot start, and an empty repository ends its first turn', async t => {
+  const bot = await fixture(t, { type: 'bot_account' });
+  const blocked = await bot.open();
+  assert.deepEqual([blocked.status, blocked.value.error], [409, 'github_app_required']);
+  assert.deepEqual(bot.state.requests.filter(r => r.path !== '/repositories/101'), []);
+  const app = await fixture(t);
+  app.state.repos['octo/hello'].files = {};
+  const empty = await app.open();
+  assert.deepEqual([empty.state, empty.error], ['failed', 'repository_has_no_commit']);
+  assert.match(empty.messages.at(-1).content, /仓库还没有任何提交/);
+});
+
+test('a restart ends a PR creation in progress, and deleting the project removes its conversations', async t => {
+  const { h, admin, open } = await fixture(t);
+  const first = await open();
+  h.store.run("UPDATE gate_onboarding_sessions SET state='creating' WHERE id=?", first.id);
+  await h.stop(); await h.start();
+  const restarted = (await admin(`/api/gate-onboarding/${first.id}`)).value.session;
+  assert.deepEqual([restarted.state, restarted.error], ['ready', 'interrupted']);
+  assert.match(restarted.messages.at(-1).content, /控制面重启，创建 PR 没有完成/);
+  h.store.run("UPDATE environment_operations SET state='completed'");
+  assert.equal((await admin('/api/projects/101', 'DELETE', {})).status, 200);
+  assert.equal(h.store.get('SELECT count(*) n FROM gate_onboarding_sessions').n, 0);
+  // Only super administrators use onboarding.
+  const password = testPassword(), member = h.client();
+  await admin('/api/users', 'POST', { username: 'member', password, repository_ids: [] });
+  await member('/api/auth/login', 'POST', { username: 'member', password });
+  assert.equal((await member('/api/projects/101/gate-onboarding', 'POST', {})).status, 403);
 });
 
 test('with a merge queue the gate runs on pull requests and in the queue, not again after merging, so it can be required', async t => {
@@ -181,7 +214,7 @@ test('classic protection is settled by GraphQL, and an unreadable merge queue is
   session = await open();
   assert.deepEqual([session.merge_queue.state, session.merge_queue.asked], ['unknown', true]);
   assert.equal(session.target, null);
-  assert.match(session.messages.at(-1).content, /是否启用了 merge queue/);
+  assert.match(session.messages[0].content, /merge queue：无法判断/);
   const refused = await confirm(session);
   assert.deepEqual([refused.status, refused.value.error], [400, 'merge_queue_required']);
   assert.deepEqual(writes(state), []);
@@ -201,7 +234,6 @@ test('an existing ci.yml and release.yml are never overwritten; by default the g
     '.github/workflows/release.yml': 'name: Release\non:\n  push:\n    tags: ["v*"]\njobs: {}\n' });
   let session = await open();
   assert.deepEqual(session.facts.workflows.map(item => [item.path, item.events, item.jobs]), [['.github/workflows/ci.yml', ['push'], ['test']], ['.github/workflows/release.yml', ['push'], []]]);
-  assert.ok(session.facts.candidates.some(item => item.command === 'make test' && item.source.includes('Makefile') && item.source.includes('.github/workflows/ci.yml')));
   assert.deepEqual(session.workflow_options, [{ path: '.github/workflows/ci-gates.yml', mode: 'create' }, { path: '.github/workflows/ci.yml', mode: 'update' }]);
   const elsewhere = await confirm(session, { plan: { ...session.plan, workflow: '.github/workflows/release.yml' } });
   assert.deepEqual([elsewhere.status, elsewhere.value.error], [409, 'gate_workflow_invalid']);
@@ -229,7 +261,6 @@ test('a release.yml the release flow cannot use is left alone and explained; a m
   let session = await open();
   assert.equal(session.facts.release_workflow.usable, false);
   assert.match(session.messages[0].content, /不能用于发版本/);
-  assert.ok(session.facts.questions.some(question => question.includes('release.yml')));
   session = await confirm(session, { plan: { ...session.plan, lanes: { ...session.plan.lanes, release: ['make build'] } } });
   assert.equal(session.state, 'done', JSON.stringify(session.messages));
   const { pull, files } = branchOf(state);
@@ -274,7 +305,7 @@ test('a repository that already has gates is reviewed from its own configuration
   Object.assign(state.repos['octo/hello'].files, { '.github/ci-gates.json': JSON.stringify(config), '.github/workflows/ci.yml': ci, 'scripts/gate/gate.mjs': '// theirs\n' });
   let session = await open();
   assert.equal(session.state, 'ready');
-  assert.match(session.messages.at(-1).content, /右侧是仓库当前的门禁配置/);
+  assert.ok(session.messages.some(message => /右侧方案从当前的 \.github\/ci-gates\.json/.test(message.content)));
   // The old build lane is folded into pr-ready.
   assert.deepEqual(session.plan.lanes, { 'pr-ready': ['make build', 'make lint'], 'pr-merge': [], daily: [], release: [] });
   assert.ok(session.messages.some(message => message.content.includes('原来的 build lane 已并入 pr-ready')));
@@ -334,22 +365,6 @@ test('a merged gate job keeps the existing job name, and a default-branch change
   assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'merge_group', 'workflow_dispatch']);
 });
 
-test('a Node repository with dependencies but no lock file is onboarded; npm install is only asked about', async t => {
-  const { state, open, confirm } = await fixture(t);
-  state.repos['octo/hello'].files = { 'package.json': JSON.stringify({ name: 'hello', scripts: { build: 'tsc', test: 'node --test' }, dependencies: { leftpad: '1' } }) };
-  let session = await open();
-  assert.equal(session.state, 'ready');
-  assert.deepEqual(session.plan.install, []);
-  assert.deepEqual(session.plan.lanes['pr-ready'], ['npm run build', 'npm test']);
-  assert.match(session.messages.at(-1).content, /没有锁文件/);
-  session = await confirm(session, { plan: { ...session.plan, install: ['npm install'] } });
-  assert.equal(session.state, 'done', JSON.stringify(session.messages));
-  const { files } = branchOf(state), steps = parse(files['.github/workflows/ci.yml']).jobs.gate.steps;
-  assert.ok(!Object.keys(files).includes('package-lock.json'));
-  assert.equal(steps.find(step => step.uses === 'actions/setup-node@v4').with.cache, undefined);
-  assert.deepEqual(steps.filter(step => step.run).map(step => step.run)[0], 'npm install');
-});
-
 test('a stale revision, an open gate PR, a secret or an Actions expression stops confirmation without writing', async t => {
   const { state, open, confirm, admin } = await fixture(t);
   let session = await open();
@@ -359,7 +374,6 @@ test('a stale revision, an open gate PR, a secret or an Actions expression stops
   assert.deepEqual([refused.status, refused.value.error], [400, 'gate_plan_invalid']);
   refused = await confirm(session, { plan: { ...session.plan, lanes: { ...session.plan.lanes, build: ['curl -H "Authorization: ghp_' + 'a'.repeat(36) + '"'] } } });
   assert.deepEqual([refused.status, refused.value.error], [400, 'gate_plan_secret']);
-  assert.equal((await admin(`/api/gate-onboarding/${session.id}/messages`, 'POST', { content: 'hello' })).value.error, 'gate_agent_unavailable');
   state.repos['octo/hello'].pulls.push({ number: 7, head: { ref: 'bot/gate-onboarding-12345678' } });
   session = await open();
   assert.deepEqual(session.facts.open_gate_prs.map(item => item.number), [7]);
@@ -381,52 +395,6 @@ test('an App without the workflows permission returns to the conversation and ca
   assert.equal(session.state, 'done');
 });
 
-test('a bot account repository and an empty repository stop before anything is proposed', async t => {
-  const bot = await fixture(t, { type: 'bot_account' });
-  const blocked = await bot.open();
-  assert.deepEqual([blocked.state, blocked.error], ['blocked', 'github_app_required']);
-  assert.deepEqual(bot.state.requests, []);
-  const app = await fixture(t);
-  app.state.repos['octo/hello'].files = {};
-  const empty = await app.open();
-  assert.deepEqual([empty.state, empty.error], ['blocked', 'repository_empty']);
-});
-
-test('model output that breaks the contract leaves the plan alone and says so', async t => {
-  const { open, say } = await fixture(t, { model: async (_input, n) => n === 1 ? answer('先看看', { lanes: { build: ['make build'] } })
-    : n === 2 ? { content: 'not json' } : answer('带令牌的方案', { lanes: { build: ['echo gate-model-key-123456'] } }) });
-  let session = await open();
-  const revision = session.revision;
-  session = await say(session, '再想想');
-  assert.equal(session.revision, revision);
-  // Plain text instead of a submitted plan is shown as the reply; the plan stays as it was.
-  assert.match(session.messages.at(-1).content, /^not json\n\n（这一轮 agent 没有提交方案，右侧方案没有变化。）$/);
-  session = await say(session, '再来');
-  assert.equal(session.revision, revision);
-  assert.match(session.messages.at(-1).content, /包含了令牌/);
-});
-
-test('a restart ends an unfinished turn, a newer conversation supersedes the old one, and deleting the project removes both', async t => {
-  const { h, admin, open } = await fixture(t, { start: true });
-  const first = await open();
-  h.store.run("UPDATE gate_onboarding_sessions SET state='thinking' WHERE id=?", first.id);
-  await h.stop(); await h.start();
-  const restarted = (await admin(`/api/gate-onboarding/${first.id}`)).value.session;
-  assert.deepEqual([restarted.state, restarted.error], ['ready', 'interrupted']);
-  assert.match(restarted.messages.at(-1).content, /控制面重启/);
-  const second = await open();
-  assert.equal((await admin('/api/projects/101/gate-onboarding')).value.session.id, second.id);
-  const stale = await admin(`/api/gate-onboarding/${first.id}/confirm`, 'POST', { revision: restarted.revision });
-  assert.deepEqual([stale.status, stale.value.error], [409, 'gate_onboarding_superseded']);
-  assert.equal((await admin('/api/projects/101', 'DELETE', {})).status, 200);
-  assert.equal(h.store.get('SELECT count(*) n FROM gate_onboarding_sessions').n, 0);
-  // Only super administrators use onboarding.
-  const password = testPassword(), member = h.client();
-  await admin('/api/users', 'POST', { username: 'member', password, repository_ids: [] });
-  await member('/api/auth/login', 'POST', { username: 'member', password });
-  assert.equal((await member('/api/projects/101/gate-onboarding', 'POST', {})).status, 403);
-});
-
 test('rendered files follow the plan: toolchains, go.mod, npm cache and empty lanes', () => {
   const plan = normalizePlan({ toolchains: { node: '20', go: 'svc/go.mod', java: '21' }, install: ['npm ci', 'go mod download'], lanes: { build: ['go build ./...'], 'pr-ready': ['go vet ./...'], release: [] } });
   const target = { defaultBranch: 'trunk', mergeQueue: 'disabled', workflowPath: '.github/workflows/ci.yml', workflowSource: null, configSource: null, releaseSource: null, releaseUsable: false, npmLock: true };
@@ -444,6 +412,11 @@ test('rendered files follow the plan: toolchains, go.mod, npm cache and empty la
   assert.deepEqual(JSON.parse(config.content).lanes, { 'pr-ready': { commands: ['go build ./...', 'go vet ./...'] }, 'pr-merge': { commands: [] },
     daily: { commands: [], enforcement: 'observe', continueOnError: true }, release: { commands: [] } });
   assert.equal(parse(release.content).jobs.gate.steps.at(-2).run, 'node scripts/gate/gate.mjs run --lane release');
+  // A repository's own release.yml with branch triggers runs the merged release lane on version tags only.
+  const own = 'name: Release\non:\n  push:\n    branches: [main]\n    tags: ["v*"]\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo publish\n';
+  const merged = gateFiles({ ...plan, lanes: { ...plan.lanes, release: ['make dist'] } }, { ...target, releaseSource: own, releaseUsable: true }).find(file => file.path === '.github/workflows/release.yml');
+  assert.equal(parse(merged.content).jobs['release-gate'].if, "startsWith(github.ref, 'refs/tags/')");
+  assert.deepEqual(Object.keys(parse(merged.content).jobs), ['publish', 'release-gate']);
   assert.deepEqual(emptyPlan().toolchains, { node: '22', python: '', go: '', java: '' });
   assert.deepEqual([emptyPlan().observe, normalizePlan({}).observe, normalizePlan({ observe: [] }).observe], [['daily'], ['daily'], []]);
   assert.throws(() => normalizePlan({ workflow: '../ci.yml' }), PlanError);
@@ -466,7 +439,7 @@ test('review, development and read tokens still never ask for workflows', async 
 
 test('opening 接入门禁 shows the lanes first and creates nothing until the person starts', async () => {
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/gate-onboarding.js'], (method, path) =>
-    method === 'GET' && path === '/api/projects/101/gate-onboarding' ? [200, { session: null }] : [500, { error: 'unexpected' }]);
+    method === 'GET' && path === '/api/projects/101/gate-onboarding' ? [200, { session: null, ready: { ok: false, code: 'gate_project_not_started', reason: '项目还没有启动' } }] : [500, { error: 'unexpected' }]);
   await page.run("openGateOnboarding({ id: '101', full_name: 'octo/hello' }, null)");
   assert.equal(page.run('gateOnboardingView.open && gateOnboardingView.id'), 'quickstart-view');
   assert.equal(page.$('gate-onboarding-title').textContent, '接入门禁 · octo/hello');
@@ -476,4 +449,7 @@ test('opening 接入门禁 shows the lanes first and creates nothing until the p
   assert.deepEqual(lanes, ['pr-ready', 'pr-merge', 'daily', 'release']);
   assert.ok(page.$('gate-onboarding-lanes').children.filter(item => item.tagName === 'DD').every(item => item.textContent.length > 10));
   assert.deepEqual(page.requests, ['GET /api/projects/101/gate-onboarding']);
+  // A project that is not ready cannot start: the reason is shown and the button stays off.
+  assert.equal(page.$('gate-onboarding-ready').textContent, '项目还没有启动');
+  assert.equal(page.$('gate-onboarding-start').disabled, true);
 });

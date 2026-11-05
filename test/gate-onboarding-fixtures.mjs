@@ -4,8 +4,12 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { harness, setup, account } from './helpers.mjs';
 import { GateOnboarding } from '../dist/projects/gate-onboarding.js';
+import { GitHub } from '../dist/github/client.js';
+import { Redactor } from '../dist/agent/common.js';
+import { runEventTasks } from './event-tasks.mjs';
 
-// Gate onboarding against an in-memory GitHub and a scripted project model, shared by the unit tests and the browser journey.
+// Gate onboarding against an in-memory GitHub and a scripted agent in the project computer, shared by the unit tests and
+// the browser journeys.
 // `t` only needs `after(fn)`, so a Playwright test passes its own cleanup list.
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 }), privateKey = keys.privateKey.export({ type: 'pkcs8', format: 'pem' });
 const b64 = text => Buffer.from(text).toString('base64');
@@ -108,23 +112,10 @@ export async function fakeGitHub(t) {
   return { state, url: `http://127.0.0.1:${server.address().port}` };
 }
 
-// The project model: answers each turn with `respond(input, requestNumber)`, by default with the facts' certain candidates.
-export async function fakeModel(t, respond) {
-  const requests = [];
-  const server = createServer(async (req, res) => {
-    let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
-    const input = JSON.parse(body.messages.find(message => message.role === 'user').content);
-    const reply = await respond(input, requests.length, body);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, ...reply } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
-  });
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  return { url: `http://127.0.0.1:${server.address().port}/v1`, requests };
-}
-export const answer = (reply, plan = null) => ({ content: JSON.stringify({ reply, plan }) });
-
-export async function gateFixture(t, { type = 'github_app', model, start = false } = {}) {
+// The project computer, played by the test: each queued turn of the gate.onboarding workflow is prepared by the module
+// (with a GitHub client connected the way the engine connects event tasks), `agent({ task, input, target, files, plan })`
+// returns the arguments of submit_gate_plan (or throws { code, state } to end the turn), and the module takes the result.
+export async function gateFixture(t, { type = 'github_app', agent, ready = true } = {}) {
   const github = await fakeGitHub(t);
   let gate;
   const h = await harness(t, undefined, store => ({ maxBodyBytes: 64 * 1024, gateOnboarding: gate = new GateOnboarding(store, github.url) }));
@@ -132,31 +123,45 @@ export async function gateFixture(t, { type = 'github_app', model, start = false
   const owner = type === 'github_app' ? await account(admin, { type, app_id: '123', private_key: privateKey, token: undefined }) : await account(admin);
   h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
     VALUES(?,?,?,?,?,?,0,1,?)`, owner.id, '101', '1', 'octo/hello', '10', 'octo', new Date().toISOString());
-  let llm = null;
-  if (start || model) {
+  // A started project with a model and a ready computer: what gate onboarding needs, like every workflow.
+  const startProject = async () => {
     assert.equal((await admin('/api/installations/101/activate', 'POST', { account_id: owner.id })).status, 201);
-    if (model) {
-      llm = await fakeModel(t, model);
-      const created = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'gate-model', api_url: llm.url, api_key: 'gate-model-key-123456' })).value.model;
-      assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: created.id, review_enabled: false })).status, 200);
-    }
-  }
-  // Steps run in the background; wait until the session settles and every token it minted is revoked.
+    const created = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'gate-model', api_url: 'http://127.0.0.1:9/v1', api_key: 'gate-model-key-123456' })).value.model;
+    assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: created.id, review_enabled: false })).status, 200);
+    h.store.run("INSERT INTO project_environments(repository_id,state) VALUES('101','ready') ON CONFLICT(repository_id) DO UPDATE SET state='ready'");
+  };
+  if (ready) await startProject();
+  const play = { agent: agent ?? (({ plan }) => ({ reply: '方案见右侧。', plan })) };
+  const client = async task => {
+    const value = new GitHub(h.store, h.store.get('SELECT * FROM repositories WHERE id=?', task.repository_id), new Redactor(), async () => {}, github.url);
+    await value.connect(false, undefined, { contents: 'read', actions: 'read', checks: 'read', statuses: 'read', issues: 'write', pull_requests: 'read' }); return value;
+  };
+  const turn = () => runEventTasks(h.store, 'gate.onboarding', ({ task, input, target }) =>
+    play.agent({ task, input, target, files: target.files, plan: JSON.parse(target.files['plan.json']), gate: JSON.parse(target.files['gate.json']), conversation: JSON.parse(target.files['conversation.json']) }), { github: client });
+  const session = async id => (await admin(`/api/gate-onboarding/${id}`)).value.session;
+  // The confirmed PR is created in the background; wait until it settles and every token it minted is revoked.
   const settle = async id => {
     for (let attempt = 0; attempt < 500; attempt++) {
-      const value = (await admin(`/api/gate-onboarding/${id}`)).value.session;
-      if (!value.busy && !['collecting', 'thinking', 'creating'].includes(value.state) && github.state.revoked.length === github.state.tokens.size) return value;
+      const value = await session(id), pending = [...github.state.tokens.entries()].filter(([token, grant]) => grant.permissions.workflows === 'write' && !github.state.revoked.includes(token));
+      if (!value.busy && value.state !== 'creating' && !pending.length) return value;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     throw new Error('gate onboarding did not settle');
   };
-  const open = async () => settle((await admin('/api/projects/101/gate-onboarding', 'POST', {})).value.session.id);
-  const say = async (session, content, extra = {}) => { const r = await admin(`/api/gate-onboarding/${session.id}/messages`, 'POST', { content, ...extra }); assert.equal(r.status, 201, JSON.stringify(r.value)); return settle(session.id); };
-  const confirm = async (session, extra = {}) => {
-    const r = await admin(`/api/gate-onboarding/${session.id}/confirm`, 'POST', { revision: session.revision, ...extra });
-    return r.status === 201 ? settle(session.id) : r;
+  const open = async () => {
+    const started = await admin('/api/projects/101/gate-onboarding', 'POST', {});
+    if (started.status !== 201) return started;
+    await turn(); return session(started.value.session.id);
   };
-  return { h, admin, password, owner, github, state: github.state, gate, llm, open, say, confirm, settle };
+  const say = async (current, content, extra = {}) => {
+    const r = await admin(`/api/gate-onboarding/${current.id}/messages`, 'POST', { content, ...extra }); assert.equal(r.status, 201, JSON.stringify(r.value));
+    await turn(); return session(current.id);
+  };
+  const confirm = async (current, extra = {}) => {
+    const r = await admin(`/api/gate-onboarding/${current.id}/confirm`, 'POST', { revision: current.revision, ...extra });
+    return r.status === 201 ? settle(current.id) : r;
+  };
+  return { h, admin, password, owner, github, state: github.state, gate, play, turn, open, say, confirm, settle, session, startProject };
 }
 // Writes to GitHub, leaving out minting and revoking installation tokens.
 export const writes = state => state.requests.filter(r => r.method !== 'GET' && r.path !== '/graphql' && !r.path.endsWith('/access_tokens') && r.path !== '/installation/token');

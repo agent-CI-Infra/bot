@@ -1,6 +1,6 @@
 // Task process and project computer views. Loaded after app.js and reuses its helpers ($, api, element, state, states, timestamp).
 const terminalStates = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
-const kindLabels = { 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR', 'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败分析',
+const kindLabels = { 'gate.onboarding': '接入门禁', 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR', 'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败分析',
   'workflow.issue': '自定义工作流 Issue', 'workflow.pr': '自定义工作流 PR' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', publish: '发布', done: '完成' };

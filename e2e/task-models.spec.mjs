@@ -32,7 +32,7 @@ test('工作流表按需编辑规则，模型独立管理且项目不能修改�
     await expect(page.getByRole('link', { name: '工作流', exact: true })).toHaveAttribute('aria-current', 'page');
     for (const caption of ['使用的模型', '检视', '开发', '规则总览', '任务总览']) await expect(page.getByRole('link', { name: caption, exact: true })).toHaveCount(0);
     const list = page.getByRole('complementary', { name: '工作流列表', exact: true }), item = id => list.locator(`[data-workflow-item="${id}"]`);
-    await expect(list.locator('.workflow-list:not(.shared) a')).toHaveCount(7);
+    await expect(list.locator('.workflow-list:not(.shared) a')).toHaveCount(8);
     for (const [kind, title] of [['review.issue', '检视 Issue'], ['review.pr', '检视 PR'], ['development.issue', '开发 Issue'], ['development.pr', '跟进 bot PR'], ['release.observe', 'CI 观察'], ['release.notes', '发行说明'], ['actions.failures', 'Actions 失败处理']]) {
       await expect(item(kind)).toContainText(title);
     }

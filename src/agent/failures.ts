@@ -8,7 +8,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_token_missing',
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
-    'actions_app_required','actions_workflow_run_subscription_missing'] },
+    'actions_app_required','actions_workflow_run_subscription_missing','gate_repository_unreadable'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
   model: { label:'模型服务或模型配置', codes:['model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',

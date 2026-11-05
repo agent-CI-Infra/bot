@@ -31,7 +31,7 @@ const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_envi
 const retryCycleMs=8*60*60*1000;
 // Reviews and custom workflows reply on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
-const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures'))";
+const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding'))";
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 // A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run

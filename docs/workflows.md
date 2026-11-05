@@ -8,7 +8,7 @@
 
 编辑器上方的「用聊天编写」打开悬浮的工作流助手，「保存」一次保存所有标签页。还没保存的修改（包括新工作流）保存在这个浏览器里，离开页面或刷新后回到这条工作流仍在，列表里标「未保存」；新工作流的草稿在列表里显示为「未保存的草稿」，可以在编辑器上方丢弃。窄屏时列表在上、编辑器在下。
 
-现有的六项任务和 Actions 失败处理是七条内置工作流，工作流 id 等于原来的任务类型（Actions 失败处理是 `actions.failures`），所以已保存的 `task_models` 映射原样生效。管理员也可以在页面上新增工作流，不需要改代码或发版。内置工作流不能删除，可以关掉。
+现有的六项任务、Actions 失败处理和接入门禁是八条内置工作流，工作流 id 等于原来的任务类型（Actions 失败处理是 `actions.failures`），所以已保存的 `task_models` 映射原样生效。管理员也可以在页面上新增工作流，不需要改代码或发版。内置工作流不能删除，可以关掉。
 
 ## 现有能力的去向
 
@@ -31,7 +31,8 @@
 | Actions 失败分类、单次重跑与提报 | 内置工作流 `actions.failures` | 触发源：默认分支的 Actions 运行失败；流程：读取日志 → 模型分析原因 → 外部原因重跑一次／代码或不明原因提报 Issue → 检视 Issue；提示词：`docs/prompts/actions-failures.md`；控制面核验模型引用的日志行，`external`／`code` 没有真实引用就按 unknown 处理，单次重跑预算和提报仍由控制面执行；开关就是原来的 `actions_failures_enabled` |
 | `.bot/computer.yaml` | 机器配置 | 不是工作流，按字段合并进虚拟电脑配置 |
 | 项目列表上的检视、开发开关 | 项目总开关 | 仍然有效：关掉检视，两条检视工作流都不运行；关掉开发，两条开发工作流都不运行。每条工作流另有自己的开关 |
-| 接入门禁对话、公共看板 | 控制面功能 | 不是可配置工作流。接入门禁的 agent 使用项目默认模型，只读仓库并提出方案；门禁 PR 只在人确认后由控制面创建 |
+| 接入门禁（`gate.onboarding`） | 内置工作流 `gate.onboarding` | 触发源：「接入门禁」对话里开始或回复，每一轮是一个任务；流程：读取对话与门禁事实 → 分析仓库 → 试跑命令 → 设计各 lane → 提交方案；提示词：`docs/prompts/gate-onboarding.md`；写入：提交门禁方案（`submit_gate_plan`），方案只回到对话里；门禁 PR 由人看过将提交的文件并确认后，由控制面创建 |
+| 公共看板 | 控制面功能 | 不是模型工作流 |
 
 ## 触发源
 
@@ -50,6 +51,7 @@
 | `review.published` | 检视工作流发布结论后：Issue 的结论要求改代码，或 bot PR 的检视有可执行意见 | 开发 Issue、跟进 bot PR |
 | `release.manual` | 「发版本」页的操作 | CI 观察、发行说明 |
 | `actions.run_failed` | 默认分支的 Actions 运行失败 | Actions 失败处理 |
+| `gate.manual` | 「接入门禁」对话里开始或回复 | 接入门禁 |
 
 内置检视工作流在第一次保存触发源之前，按项目原有的开关（`review_issues`、`review_issue_updates`、`review_pull_requests`、`review_pr_updates`、`review_pr_discussion`）算出触发源，和以前一样：Issue 更新和 Issue 上的提及跟着「Issue 打开」，PR 讨论更新和 PR 上的提及跟着「PR 打开或 Ready for review」。在页面上保存过触发源以后，工作流用自己的列表，每个触发源独立生效（例如可以只关掉提及）；这些策略字段仍随列表同步，`PATCH /api/repositories/:id/policy` 改它们时也会增删列表里对应的触发源。关闭 PR head 更新也会停止 bot PR 的自动跟进。按标签再次检视时，和其他更新一样并入还在排队的检视。
 
@@ -83,6 +85,7 @@ flowchart LR
 - CI 观察：在「发版本」页点「让智能体看这次运行」，排一个任务。页面显示「运行分析在项目电脑里排队或执行中」，完成后显示分析结果；运行或 attempt 变了，任务就停止。
 - 发行说明：只有默认分支的 Skill 或控制台提示词需要模型整理时，发版本才在「准备发行说明」这一步排一个任务并等它完成；没有任务时按内置规则直接列出来源。模型不可用时这一步失败、任务取消，由人点「继续／查证此步骤」重试，重试会排一个新任务。
 - Actions 失败处理：每个失败运行的 attempt 排一个分析任务，扫描等它完成后再执行重跑或提报。模型不可用时运行保持待处理，什么也不写。
+- 接入门禁：对话的每一轮排一个任务，检出默认分支；`../context/` 里有 `conversation.json`（到目前的对话）、`plan.json`（当前方案）和 `gate.json`（控制面读到的门禁事实、门禁 job 可以放的位置和门禁 PR 一定会做的标准改动）。项目没启动、虚拟电脑没就绪、工作流关着或没有模型时不能开始。
 
 ## 权限
 
@@ -100,6 +103,7 @@ flowchart LR
 | 提报 Issue（`issue`） | `create_issue`；Actions 失败处理是 `report_failure` | 以 bot 身份新建 Issue，`@` 提及会被转义；Actions 失败处理核验引用的日志行后新建或评论 Issue，同一失败只报一次 | 全部（Actions 失败处理默认） |
 | 重跑失败的 Actions 运行（`actions_rerun`） | `rerun_failed_run` | 每个原始运行最多重跑一次，只重跑支持 `workflow_dispatch` 的运行 | Actions 失败处理（默认） |
 | 写发行说明（`release_notes`） | `finish_release_notes` | 核验每个来源恰好出现一次，再写出正文 | 发行说明（默认） |
+| 提交门禁方案（`gate_plan`） | `submit_gate_plan` | 核对方案（没写到的 lane 保持原样，不合格的方案不替换当前方案），把回复和方案放回接入门禁对话；人确认后才开门禁 PR | 接入门禁（固定） |
 
 开 PR 必须同时允许修改代码。开发 Issue 和跟进 bot PR 仍以 PR 结束，开发标签、指派人、测试和发布前复核这些条件不变。检视和自定义工作流也可以开 PR：项目的开发开关关着时工具返回 `development_disabled`；在 Issue 上开一个新的 bot PR，在 PR 上只能更新 bot 自己的 PR（别人的 PR 返回 `pull_request_not_owned`）；每个任务最多开一个 PR，开完 agent 继续，最后照常回复。这里不要求开发标签，管理员用触发源（例如按标签触发）决定什么时候运行。
 
@@ -137,7 +141,7 @@ agent 只拿得到只读令牌，不能在命令里推送、评论、加标签�
 
 | 路径 | 方法 | 说明 |
 | --- | --- | --- |
-| `/api/repositories/:id/workflows` | GET | 全部工作流（七条内置在前），以及触发源目录 `triggers`（每项有 `title` 和画图用的短名 `short`）、新工作流的写入选项 `custom_write_options` 和默认值 `custom_writes`、提及名字 `mention_names` |
+| `/api/repositories/:id/workflows` | GET | 全部工作流（八条内置在前），以及触发源目录 `triggers`（每项有 `title` 和画图用的短名 `short`）、新工作流的写入选项 `custom_write_options` 和默认值 `custom_writes`、提及名字 `mention_names` |
 | `/api/repositories/:id/workflows` | POST | 新增自定义工作流：`name,prompt` 必填，`description,enabled,triggers,writes,model_id` 可选（`writes` 缺省为 `["reply"]`）；`triggers` 为 `[{id,label?}]`，按标签触发时 `label` 必填；返回 201 和 `workflow`，id 形如 `custom.<12 位十六进制>` |
 | `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。每条工作流返回 `name,description,enabled,active,triggers`（`[{id,label?}]`）、`trigger_options`（它可选的触发源）、`prompt,model` 和 `settings`，`permissions`（读取能力和保存的 `writes`）、`write_options`（可选的写入，带工具名、说明和是否固定）。内置工作流的 PUT 和自定义的一样接受 `name,description,enabled,triggers,prompt,writes,model_id`（名称留空恢复默认；`prompt` 为 `null` 清除控制台层；`triggers` 也接受旧的 `{id:布尔}` 写法），另接受 `settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
 | `/api/repositories/:id/workflows/assistant` | POST | 工作流助手：`messages`（`[{role:user|assistant,content}]`）、可选 `workflow_id` 和编辑器当前内容 `draft`；返回 `reply,draft,warnings`（助手没有调用 `update_draft` 时 `draft` 为 `null`），不保存任何内容。加 `?stream=1` 时以 `application/x-ndjson` 逐行返回过程：`text`、`reasoning`（文字增量）、`tool_call`、`tool_result`、`draft`、`turn`，最后是 `done`（同上三项）或 `error`。项目没有可用模型时返回 409 `model_not_configured` |

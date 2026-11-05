@@ -10,8 +10,9 @@ import { GitHub } from '../dist/github/client.js';
 import '../dist/releases/observe.js';
 import '../dist/releases/notes.js';
 import '../dist/actions/analysis.js';
+import '../dist/projects/gate-onboarding.js';
 
-// Plays the project computer for event workflow tasks (CI observation, release notes, Actions failure analysis), the
+// Plays the project computer for event workflow tasks (CI observation, release notes, Actions failure analysis, gate onboarding), the
 // way the engine runs them: the model must be configured, the module prepares the task and checks it still applies,
 // the agent calls the module's tools and finishes, and the module takes the result. `agent({ task, input, target,
 // tools })` returns the finishing tool's arguments, or { wait: code } for a model that does not answer (the task waits),

@@ -68,7 +68,7 @@ export const emptyPlan = (): GatePlan => ({ toolchains: { node: '22', python: ''
 export class PlanError extends Error { constructor(readonly code: string, readonly detail: string) { super(code); } }
 
 // A token in a plan would be committed to the repository; these are GitHub's own token formats.
-const tokenPattern = /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b/;
+export const tokenPattern = /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b/;
 const control = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 export const workflowPathPattern = /^\.github\/workflows\/[A-Za-z0-9._-]+\.ya?ml$/;
 
@@ -326,11 +326,13 @@ ${releaseJob(plan, target)}`;
 
 /**
  * A repository's own tag-triggered release.yml gets a job that runs the release lane, so a failing lane fails the run the
- * release flow waits for; its triggers and other jobs are not touched.
+ * release flow waits for; its triggers and other jobs are not touched, and the job runs on version tags only.
  */
 export function mergeReleaseJob(source: string, plan: GatePlan, target: GateTarget): string {
   const doc = parseWorkflow(source, releasePath);
   const job = parseDocument(`jobs:\n${releaseJob(plan, target, 'release-gate')}`).getIn(['jobs', 'release-gate'], true) as YAMLMap;
+  // The release flow waits for the tag's run; branch pushes or published releases in the same file do not run the lane.
+  job.items.splice(1, 0, doc.createPair('if', "startsWith(github.ref, 'refs/tags/')"));
   placeJob(doc, job, gateJobKey(doc, true), 'release-gate');
   return render(doc);
 }
