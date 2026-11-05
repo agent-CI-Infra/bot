@@ -225,6 +225,7 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 .workflow-summary{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:0;font-size:13px}.workflow-summary dt{color:#637c89}.workflow-summary dd{margin:0;overflow-wrap:anywhere}
 .workflow-trigger{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;border-bottom:1px solid #f0f4f6}.workflow-trigger>.muted{font-size:12px}.workflow-trigger input:not([type]){width:auto;min-width:160px}
 .workflow-triggers{display:grid}.workflow-permissions,.workflow-writes{display:grid;gap:6px}.workflow-permissions>p,.workflow-writes>p{margin:0}
+.workflow-write{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:6px 0;border-bottom:1px solid #f0f4f6}.workflow-write>.muted{font-size:12px;flex-basis:100%}.workflow-write code{font-size:12px}
 /* The workflow assistant: a floating window, moved by its header and resized from its corner. */
 .assistant-window{position:fixed;right:24px;bottom:24px;width:440px;height:600px;min-width:300px;min-height:320px;max-width:96vw;max-height:92vh;resize:both;overflow:hidden;z-index:40;
   display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:#fff;border:1px solid #c4d6de;border-radius:10px;box-shadow:0 12px 32px #0f2a3a33}

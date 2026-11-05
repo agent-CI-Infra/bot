@@ -7,7 +7,9 @@ import { actionPages } from '../releases/actions.js';
 import { queueWebhook } from '../review/queue.js';
 import { activateActions, recordActionsRun, actionsWorkflowOn } from './storage.js';
 import { classifyFailure, normalizeSignature, type Evidence, type FailureKind } from './classifier.js';
-import { analyzeFailedJobs } from './analysis.js';
+import { analysisTask, classifiedEvidence, failedStepOutput, requestAnalysis, taskVerdicts } from './analysis.js';
+import { eventTaskActive } from '../workflows/events.js';
+import { workflowPermissions } from '../workflows/resolve.js';
 import { actionsRedactor, publicText } from './safety.js';
 
 export const scanInterval = 60_000, scanPageSize = 50;
@@ -151,6 +153,9 @@ export class ActionsFailures {
     let budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
     if (budget.head_sha && (budget.head_sha !== live.head_sha || budget.head_branch !== live.head_branch)) stop('actions_rerun_identity_changed');
     const activated = this.store.get('SELECT enabled_at FROM actions_failure_scans WHERE repository_id=?', id)!.enabled_at;
+    // The workflow's writes: without actions_rerun nothing is rerun, without issue nothing is reported.
+    const writes = workflowPermissions(this.store, id, 'actions.failures').writes;
+    let analyzing = false;
     for (const attempt of this.store.all("SELECT * FROM actions_failure_attempts WHERE repository_id=? AND run_id=? AND state='pending' ORDER BY attempt", id, runId)) {
       const run = attempt.attempt === live.run_attempt ? live : await github.request('GET', github.path(`/actions/runs/${runId}/attempts/${attempt.attempt}`));
       if (run.id !== runId || run.run_attempt !== attempt.attempt || run.head_sha !== live.head_sha || run.head_branch !== live.head_branch) stop('actions_attempt_identity_changed');
@@ -161,6 +166,14 @@ export class ActionsFailures {
       let data: { kind: FailureKind; evidence: Evidence[] };
       if (attempt.data) data = JSON.parse(attempt.data);
       else {
+        // The analysis runs as a task in the project computer; until it ends, the attempt waits and nothing is written.
+        const task = analysisTask(this.store, id, runId, run.run_attempt);
+        if (task && eventTaskActive(task)) {
+          analyzing = true;
+          // A model that cannot be reached keeps the run waiting, as the failure status of the whole workflow.
+          if (/^model_|^task_models_invalid$/.test(String(task.error_code || ''))) stop(task.error_code, 'retry_wait', '等待模型恢复后继续分析。');
+          continue;
+        }
         const jobs = await actionPages(github, github.path(`/actions/runs/${runId}/attempts/${run.run_attempt}/jobs`), 'jobs');
         if (jobs.some(j => j.run_id !== runId || j.run_attempt && j.run_attempt !== run.run_attempt)) stop('actions_jobs_identity_changed');
         const failed = jobs.filter(j => j.conclusion === 'failure'), logs: { job: any; log: string | null }[] = [], evidence: Evidence[] = [];
@@ -169,8 +182,15 @@ export class ActionsFailures {
           try { log = await github.jobLog(job.id); } catch (error) { if (error instanceof TaskError && ['actions_failures_disabled', 'actions_lease_lost', 'github_rate_limited'].includes(error.code)) throw error; }
           logs.push({ job, log });
         }
-        // The workflow's model classifies the failed jobs; the control plane checks what it cites and acts on the result.
-        for (const classified of failed.length ? await analyzeFailedJobs(this.store, github, run, logs) : []) {
+        // The workflow's agent classifies the failed jobs; the control plane checks what it cites and acts on the result.
+        const outputs = logs.map(({ job, log }) => ({ job, output: failedStepOutput(job, log) }));
+        // Without any output to read there is nothing for a model to decide.
+        let verdicts: Map<unknown, any> | null = new Map(outputs.map(({ job }) => [job.id, { kind: 'unknown', reason: '', evidence: [] }]));
+        if (outputs.length && !outputs.every(({ output }) => output.problem)) {
+          if (!task) { requestAnalysis(this.store, github, run, outputs); analyzing = true; continue; }
+          verdicts = taskVerdicts(task);
+        }
+        for (const classified of failed.length ? classifiedEvidence(outputs, verdicts) : []) {
           const job = classified.job;
           // A non-empty excerpt that publicText empties could not be made safe; the report says so instead of "no evidence".
           const quote = publicText(classified.quote, github.redactor).slice(0, 2400), context = classified.context ? publicText(classified.context, github.redactor).slice(-1200) : '';
@@ -185,7 +205,8 @@ export class ActionsFailures {
       }
       budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
       let reason = '';
-      if (data.kind === 'external') {
+      if (data.kind === 'external' && !writes.includes('actions_rerun')) reason = 'This workflow does not rerun runs automatically.';
+      else if (data.kind === 'external') {
         if (budget.retry_state === 'none') {
           // A human may have rerun while we read logs. Never rerun a newer/incomplete attempt on this evidence.
           const current = await github.request('GET', github.path('/actions/runs/' + runId));
@@ -214,7 +235,7 @@ export class ActionsFailures {
           : budget.retry_state === 'denied' ? 'The single automatic retry could not be sent with the installation token. No further automatic retry will be attempted.'
           : 'The single automatic retry budget for this original run has already been used. No further automatic retry will be attempted.';
       }
-      for (const evidence of data.evidence) await this.report(github, run, data.kind, evidence, reason);
+      if (writes.includes('issue')) for (const evidence of data.evidence) await this.report(github, run, data.kind, evidence, reason);
       finish();
     }
     budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
@@ -224,7 +245,7 @@ export class ActionsFailures {
       if (attempt?.data) for (const evidence of JSON.parse(attempt.data).evidence)
         await this.report(github, { ...live, run_attempt: budget.before_attempt }, 'external', evidence, 'The single automatic retry request could not be confirmed after querying the original run. It will not be resent; completion is still being monitored.');
     }
-    this.store.run('UPDATE actions_failure_runs SET tracking=? WHERE repository_id=? AND run_id=?', Number(awaiting || live.status !== 'completed'), id, runId);
+    this.store.run('UPDATE actions_failure_runs SET tracking=? WHERE repository_id=? AND run_id=?', Number(awaiting || analyzing || live.status !== 'completed'), id, runId);
   }
   private async dispatchSupported(github: GitHub, run: any): Promise<boolean> {
     const workflow = await github.request('GET', github.path('/actions/workflows/' + run.workflow_id));

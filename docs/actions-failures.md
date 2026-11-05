@@ -24,9 +24,9 @@ GitHub 的 run 列表支持 `created` 范围，不支持完成时间范围。扫
 
 失败原因由这条工作流的模型分析（`src/actions/analysis.ts`），模型按工作流的模型设置选择，没有单独设置时用项目默认模型；提示词是 [`docs/prompts/actions-failures.md`](prompts/actions-failures.md)，可以在工作流页由控制台覆盖。
 
-控制面先读取每个失败 job 的完整日志（不超过现有 GitHub 客户端 8 MiB 下载边界；超限不返回截断内容），取出失败 step 时间区间内的输出（`src/actions/classifier.ts`），连同 run、job 和失败 step 的名字交给模型。每个 job 只放最后 400 行、4 万字符，模型需要更多时用 `read_job_log` 读完整日志；按工作流的 GitHub 只读范围，它还可以读工作流文件、代码、其他运行、Issue 和 PR，权限允许时可以启动独立 agent。日志、job 名和 step 名都是不可信数据。
+控制面先读取每个失败 job 的完整日志（不超过现有 GitHub 客户端 8 MiB 下载边界；超限不返回截断内容），取出失败 step 时间区间内的输出（`src/actions/classifier.ts`），然后为这个 attempt 排一个分析任务。任务和其他工作流一样在项目电脑里运行，检出失败运行的提交；run、job 和失败 step 的名字写在 `../context/run.json`，每个失败 job 的失败 step 输出写在 `../context/failed-steps/<job id>.log`（只放最后 400 行、4 万字符）。agent 需要更多时用 `read_job_log` 读完整日志，也可以在检出里运行命令、读工作流文件和代码、其他运行、Issue 和 PR，按提示词启动独立 agent。日志、job 名和 step 名都是不可信数据。
 
-模型为每个失败 job 返回一个类别和理由，并引用判断所依据的日志行：
+agent 为每个失败 job 选一个类别、写理由，并引用判断所依据的日志行，通过这条工作流的写入工具登记：外部原因交给 `rerun_failed_run`（需要 `actions_rerun` 写入），其他交给 `report_failure`（需要 `issue` 写入），最后调用 `finish_analysis` 结束。登记时工具就告诉 agent 引用行有没有在失败 step 输出里找到；真正的重跑和提报在任务结束后由控制面执行：
 
 - `external`：仓库以外的原因，例如依赖服务的 429/502/503、网络超时或中断、DNS、磁盘耗尽、runner 断联或 Actions 队列故障，重跑同一提交很可能通过。
 - `code`：这个提交上仓库自己的问题，例如测试或断言失败、编译、类型或 lint 错误、仓库里的脚本或配置有误，重跑仍会失败。
@@ -34,11 +34,12 @@ GitHub 的 run 列表支持 `created` 范围，不支持完成时间范围。扫
 
 控制面核验这份结果，不让模型的波动直接花掉重跑预算：
 
-- 必须逐一覆盖所有失败 job，类别只能是这三种；返回的不是可用 JSON 时，全部按 unknown 提报，不反复重试模型。
+- 没有登记的失败 job 按 unknown 提报；任务没有正常结束（例如没有用 `finish_analysis` 结束）时全部按 unknown 提报，不反复重试。
 - 引用的日志行必须是失败 step 实际打印过的行（忽略首尾空白和时间戳）；`external` 或 `code` 没有一行核验通过就改为 unknown，提报里写明原因。
-- 日志缺失或截断、没有失败 step 或时间戳时直接是 unknown，不调用模型。
+- 日志缺失或截断、没有失败 step 或时间戳时直接是 unknown，不排分析任务。
 - 多个失败 job 不能由单一类别解释时，整个 run 归为 unknown。
-- 模型服务不可用、限流或没有配置模型时不写任何东西：这次运行保持待处理，扫描状态显示原因（例如 `model_not_configured`），模型恢复后再分析。
+- 模型服务不可用、限流或没有配置模型时不写任何东西：分析任务等待，这次运行保持待处理，扫描状态显示原因（例如 `model_not_configured`），模型恢复后任务继续。
+- 没有 `actions_rerun` 写入时外部原因也提报（写明不自动重跑）；没有 `issue` 写入时只记录分类，不提报。
 
 核验通过的引用行作为提报摘录，也用于去重签名；没有引用行时保留失败 step 自身输出的最后 8 行，只用于提报展示（只取 `##[group]Run` 脚本块之后、通用退出码行之前的输出），不参与去重。模型的理由去掉换行和 `@` 后写进提报。分类不等于确认产品缺陷，后续仍需现有检视。
 
@@ -68,6 +69,6 @@ code 来源还必须保留 Current behavior、Expected behavior、Requested code
 
 ## 验证
 
-`test/actions-failures.test.mjs` 通过签名 webhook、独立控制面 SQLite、HTTP GitHub 夹具和假模型覆盖模型分析的核验与降级、扫描、分页断点、重启、一次重跑、未知响应对账、提报去重、凭据过滤和现有开发门槛。`test/release-label.test.mjs` 验证类别读回及失败状态。`e2e/actions-failures.spec.mjs` 覆盖真实管理页面的默认关闭、开关保存、配置错误和窄屏展示。现有开发测试继续验证批准和发布前检查。
+`test/actions-failures.test.mjs` 通过签名 webhook、独立控制面 SQLite、HTTP GitHub 夹具和扮演分析任务的假 agent（`test/event-tasks.mjs`）覆盖分析结果的核验与降级、扫描、分页断点、重启、一次重跑、未知响应对账、提报去重、凭据过滤和现有开发门槛。`test/release-label.test.mjs` 验证类别读回及失败状态。`e2e/actions-failures.spec.mjs` 覆盖真实管理页面的默认关闭、开关保存、配置错误和窄屏展示。现有开发测试继续验证批准和发布前检查。
 
 真实验收只使用 `agent-test-zone` 组织。若该组织中的安装未订阅 `workflow_run`，应记录现场阻断，不能修改生产配置来绕过它；不得在生产仓库试重跑、试打标签或创建自动化失败 Issue。生产仓库开启开关是验证完成后的独立配置步骤。

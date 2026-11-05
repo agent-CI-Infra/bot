@@ -9,6 +9,7 @@ export function releaseStorage(store: Store): void {
     CREATE UNIQUE INDEX IF NOT EXISTS release_repository_active ON project_releases(repository_id) WHERE active=1;
     CREATE TABLE IF NOT EXISTS release_effects(id TEXT PRIMARY KEY,release_id TEXT NOT NULL REFERENCES project_releases(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,request_hash TEXT NOT NULL,state TEXT NOT NULL,response TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    -- Observer leases of the earlier in-process CI observation; observations are tasks now and the table stays for old databases.
     CREATE TABLE IF NOT EXISTS release_observers(release_id TEXT PRIMARY KEY REFERENCES project_releases(id) ON DELETE CASCADE,
     token TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS release_attempts(release_id TEXT NOT NULL REFERENCES project_releases(id) ON DELETE CASCADE,

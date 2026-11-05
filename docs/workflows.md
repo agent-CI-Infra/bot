@@ -4,7 +4,7 @@
 
 - **概览**：名称、说明、启用开关、流程图和一份配置摘要，以及触发源：从同一份目录里勾选，按标签触发的写上标签名。流程图左侧画出勾选的触发源，改动勾选时图跟着变。
 - **提示词与流程**：交给 agent 的 Markdown 规则，其中一张 ` ```mermaid ` 流程图说明步骤顺序，页面把这张图画出来。
-- **权限与模型**：说明这条工作流读什么（不限制）、写什么（由工作流类型决定），使用的模型（留空时继承项目默认），以及检视语言、测试命令等原有设置。权限没有可配置项。
+- **权限与模型**：读取不限制，不用配置；写入按需勾选（回复评论、加标签、修改代码、开 PR、提报 Issue、重跑 Actions、写发行说明中这条工作流能用的几项），使用的模型（留空时继承项目默认），以及检视语言、测试命令等原有设置。
 
 编辑器上方的「用聊天编写」打开悬浮的工作流助手，「保存」一次保存所有标签页。还没保存的修改（包括新工作流）保存在这个浏览器里，离开页面或刷新后回到这条工作流仍在，列表里标「未保存」；新工作流的草稿在列表里显示为「未保存的草稿」，可以在编辑器上方丢弃。窄屏时列表在上、编辑器在下。
 
@@ -76,28 +76,40 @@ flowchart LR
 
 提示词、名称和说明不设文件数量、单份大小、总大小、字符集或长度的限制；含 NUL 字节的文本仍然拒绝，开发提示词里的 `development_label` 行仍按原规则校验。
 
+## 运行方式
+
+所有工作流用同一套机制运行：任务进入项目的队列，在项目电脑的 Pi 进程里执行，工作区是相关提交的检出——Issue 检出默认分支，PR 检出它的 head，CI 观察和发行说明检出发版本的提交，Actions 失败处理检出失败运行的提交。事件本身放在检出旁边的 `../context/` 里：CI 观察有 `run.json`；发行说明有 `sources.json` 和 `release-notes-skill.md`；Actions 失败处理有 `run.json`，以及 `failed-steps/<job id>.log`（每个失败 job 的失败 step 打印的内容）。每条工作流都按同样的方式选模型、记账，任务过程同样能在任务详情里查看。项目电脑没有就绪时，发版本和 Actions 失败处理的任务也和其他任务一样等待。
+
+- CI 观察：在「发版本」页点「让智能体看这次运行」，排一个任务。页面显示「运行分析在项目电脑里排队或执行中」，完成后显示分析结果；运行或 attempt 变了，任务就停止。
+- 发行说明：只有默认分支的 Skill 或控制台提示词需要模型整理时，发版本才在「准备发行说明」这一步排一个任务并等它完成；没有任务时按内置规则直接列出来源。模型不可用时这一步失败、任务取消，由人点「继续／查证此步骤」重试，重试会排一个新任务。
+- Actions 失败处理：每个失败运行的 attempt 排一个分析任务，扫描等它完成后再执行重跑或提报。模型不可用时运行保持待处理，什么也不写。
+
 ## 权限
 
-读取不限制，写入由工作流类型决定，都不需要配置，也没有可保存的权限字段：
+读取不限制，写入按工作流配置：
 
-- 所有工作流都可以读取工作区、运行命令、写项目笔记、启动独立 agent，并用只读令牌读取仓库的代码、Issue、PR、Actions、检查和提交状态。令牌由执行器保管，GitHub 返回任何写权限时拒绝交付，任务结束即撤销。
-- CI 观察、发行说明和 Actions 失败处理在控制面运行，没有虚拟电脑，所以没有工作区、命令和项目笔记；它们同样能读 GitHub、启动独立 agent。
-- 只有开发 Issue 和跟进 bot PR 能修改工作区代码（只在这次任务的检出里）。GitHub 写入见下一节。
+- 所有工作流都可以读取工作区、运行命令、写项目笔记、启动独立 agent，并用只读令牌读取仓库的代码、Issue、PR、Actions、检查和提交状态。令牌由执行器保管，GitHub 返回任何写权限时拒绝交付，任务结束即撤销。读取不需要配置。
+- 写入是平台提供的工具，在「权限与模型」页按工作流勾选；agent 需要时自己调用，由控制面执行。每条工作流只列出它能用的写入，以它结束任务的那一项不能去掉：
 
-这些规则每次任务由控制面按工作流类型给出，不来自 Issue、PR、仓库文件或模型输出。早先版本保存的权限不再生效；已删除的自定义工作流不再运行任务。
+| 写入 | 工具 | 控制面做什么 | 可用于 |
+| --- | --- | --- | --- |
+| 回复评论（`reply`） | `finish_review` | agent 结束时交出回复；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视 | 检视（固定）、自定义（默认） |
+| 加分类标签（`labels`） | `finish_review` 的 `labels` | 只加仓库里已有、对象上还没有的标签，从不加检视标签和开发标签；检视工作流的检视标签也属于这一项 | 检视（默认）、自定义 |
+| 修改工作区代码（`code`） | `write_file` | 只改这次任务的检出 | 开发（固定）、检视、自定义 |
+| 开或更新 bot PR（`pull_request`） | `create_pull_request` | 固定快照、跑项目测试命令，通过后推 bot 分支、开或更新 PR | 开发（固定）、检视、自定义 |
+| 提报 Issue（`issue`） | `create_issue`；Actions 失败处理是 `report_failure` | 以 bot 身份新建 Issue，`@` 提及会被转义；Actions 失败处理核验引用的日志行后新建或评论 Issue，同一失败只报一次 | 全部（Actions 失败处理默认） |
+| 重跑失败的 Actions 运行（`actions_rerun`） | `rerun_failed_run` | 每个原始运行最多重跑一次，只重跑支持 `workflow_dispatch` 的运行 | Actions 失败处理（默认） |
+| 写发行说明（`release_notes`） | `finish_release_notes` | 核验每个来源恰好出现一次，再写出正文 | 发行说明（默认） |
+
+开 PR 必须同时允许修改代码。开发 Issue 和跟进 bot PR 仍以 PR 结束，开发标签、指派人、测试和发布前复核这些条件不变。检视和自定义工作流也可以开 PR：项目的开发开关关着时工具返回 `development_disabled`；在 Issue 上开一个新的 bot PR，在 PR 上只能更新 bot 自己的 PR（别人的 PR 返回 `pull_request_not_owned`）；每个任务最多开一个 PR，开完 agent 继续，最后照常回复。这里不要求开发标签，管理员用触发源（例如按标签触发）决定什么时候运行。
+
+Actions 失败处理的 `rerun_failed_run` 和 `report_failure` 在调用时只登记并告诉 agent 引用的日志行有没有找到；agent 结束后，控制面用完整日志核验引用、按单次重跑预算重跑或提报，没有覆盖到的失败 job 按 unknown 提报。没有 `actions_rerun` 时外部原因也提报；没有 `issue` 时只记录分类，不提报。
+
+写入保存在 `PUT`/`POST` 的 `writes`（写入 id 的列表）里；不在这条工作流可选范围里、去掉了固定的写入、或开 PR 却没有修改代码，返回 400 `invalid_workflow_writes`。还没保存过写入的工作流用默认值；早先版本保存的读取范围不再生效。这些设置每次任务从存储里读，不来自 Issue、PR、仓库文件或模型输出；已删除的自定义工作流不再运行任务。
 
 ## GitHub 写入
 
-GitHub 写入不属于工作流的权限，也不交给 agent：agent 只拿得到只读令牌，不能在命令里推送、评论、加标签或合并。它把结果交给平台提供的工具，由控制面用 GitHub App 安装令牌（或登记的机器人账号）写入：
-
-| 工作流 | agent 交出结果的方式 | 控制面写入 GitHub 的内容 |
-| --- | --- | --- |
-| 检视 Issue、检视 PR、自定义工作流 | `finish_review` | 一条评论；PR 上有真实 diff 位置的意见作为 COMMENT 行内检视；检视工作流另加标签 |
-| 开发 Issue、跟进 bot PR | `create_pull_request` | 固定快照、跑项目测试、复核开发标签和指派人后推 bot 分支，开或更新 PR |
-| 发行说明 | 返回已核验来源的分组 | 写出说明正文；起草和发布仍在「发版本」页由人操作 |
-| Actions 失败处理 | 返回分类和引用的日志行 | 最多重跑原运行一次，或提报、评论 Issue |
-
-每次写入前控制面重新核对对象、head 和条件，经发布队列写出；结果不明时先在 GitHub 上对账，不重复写。写入能力由工作流的类型决定，编辑器的「权限与模型」页会写明这条工作流能写什么、通过哪个工具。
+agent 只拿得到只读令牌，不能在命令里推送、评论、加标签或合并。所有写入都通过上面的工具交给控制面，由控制面用 GitHub App 安装令牌（或登记的机器人账号）完成。每次写入前控制面重新核对对象、head 和条件，经发布队列写出；结果不明时先在 GitHub 上对账，不重复写。
 
 ## 独立 agent
 
@@ -107,14 +119,14 @@ GitHub 写入不属于工作流的权限，也不交给 agent：agent 只拿得�
 - 它的工具是调用方工具的子集，按收窄后的权限过滤；`true` 不会补上调用方没有的权限。它不能发布、不能结束任务，也不能再启动 agent。
 - 它的结果作为工具结果交还调用方，模型请求和费用记在同一个任务上，任务日志里带 `agent` 标记。
 
-工作区任务在项目电脑的 Pi 进程里另建一个会话；控制面上的 CI 观察、发行说明和 Actions 失败处理用同一个运行时循环另起一组消息。项目电脑里的子集检查由 runner 执行，控制面对所有邮箱请求仍按工作流类型给出的权限检查，所以即使 runner 被篡改，也不能多拿写入能力。
+独立 agent 在项目电脑的 Pi 进程里另建一个会话，不能使用任何写入工具。子集检查由 runner 执行，控制面对所有邮箱请求仍按工作流保存的写入检查，所以即使 runner 被篡改，也不能多拿写入能力。
 
 ## 用聊天编写
 
 「用聊天编写」打开工作流助手：一个悬浮窗口，拖动标题栏移动，拖动右下角调整大小，位置和大小保存在浏览器里。它像一般的 agent 一样工作，并把过程流式显示出来：
 
 - 先用 `list_workflows` 看项目里已有的工作流；账号是 GitHub App 时还可以用 `github_read`、`github_search` 等只读工具看仓库。
-- 用 `update_draft` 提出草稿（名称、说明、触发源、含流程图的提示词）。控制面按编辑器的规则检查：触发源不在这条工作流的目录里就去掉，没有流程图会提示；检查结果返回给助手，它可以再改。草稿里没有权限，助手被告知读取不限制、写入由类型决定。
+- 用 `update_draft` 提出草稿（名称、说明、触发源、含流程图的提示词、写入）。控制面按编辑器的规则检查：触发源或写入不在这条工作流可选的范围里就去掉（固定的写入保留，开 PR 时补上修改代码），没有流程图会提示；检查结果返回给助手，它可以再改。
 - 文字、思考过程、每次工具调用的参数和结果、草稿（带流程图）按发生顺序出现在窗口里；运行中可以停止。
 
 草稿只在窗口里显示，点「填入编辑器」才放进对应工作流的编辑器（编辑器不在当前页面时会跳过去），再点「保存」才生效；保存的人是控制台的项目管理员或超级管理员，审计记录为 `workflow.created`／`workflow.updated`。助手没有保存或修改任何配置的工具，运行中的模型也不能改工作流。
@@ -125,12 +137,12 @@ GitHub 写入不属于工作流的权限，也不交给 agent：agent 只拿得�
 
 | 路径 | 方法 | 说明 |
 | --- | --- | --- |
-| `/api/repositories/:id/workflows` | GET | 全部工作流（七条内置在前），以及触发源目录 `triggers`（每项有 `title` 和画图用的短名 `short`）和提及名字 `mention_names` |
-| `/api/repositories/:id/workflows` | POST | 新增自定义工作流：`name,prompt` 必填，`description,enabled,triggers,model_id` 可选；`triggers` 为 `[{id,label?}]`，按标签触发时 `label` 必填；返回 201 和 `workflow`，id 形如 `custom.<12 位十六进制>` |
-| `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。每条工作流返回 `name,description,enabled,active,triggers`（`[{id,label?}]`）、`trigger_options`（它可选的触发源）、`prompt,model` 和 `settings`，以及只读的 `permissions`（按类型给出的读写能力和发布方式）与 `computer`（是否在虚拟电脑里运行）。内置工作流的 PUT 和自定义的一样接受 `name,description,enabled,triggers,prompt,model_id`（名称留空恢复默认；`prompt` 为 `null` 清除控制台层；`triggers` 也接受旧的 `{id:布尔}` 写法），另接受 `settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
+| `/api/repositories/:id/workflows` | GET | 全部工作流（七条内置在前），以及触发源目录 `triggers`（每项有 `title` 和画图用的短名 `short`）、新工作流的写入选项 `custom_write_options` 和默认值 `custom_writes`、提及名字 `mention_names` |
+| `/api/repositories/:id/workflows` | POST | 新增自定义工作流：`name,prompt` 必填，`description,enabled,triggers,writes,model_id` 可选（`writes` 缺省为 `["reply"]`）；`triggers` 为 `[{id,label?}]`，按标签触发时 `label` 必填；返回 201 和 `workflow`，id 形如 `custom.<12 位十六进制>` |
+| `/api/repositories/:id/workflows/:workflow` | GET / PUT / DELETE | 读取、保存、删除。每条工作流返回 `name,description,enabled,active,triggers`（`[{id,label?}]`）、`trigger_options`（它可选的触发源）、`prompt,model` 和 `settings`，`permissions`（读取能力和保存的 `writes`）、`write_options`（可选的写入，带工具名、说明和是否固定）。内置工作流的 PUT 和自定义的一样接受 `name,description,enabled,triggers,prompt,writes,model_id`（名称留空恢复默认；`prompt` 为 `null` 清除控制台层；`triggers` 也接受旧的 `{id:布尔}` 写法），另接受 `settings`（检视为 `review_language`，开发为 `test_command,max_revisions`）；带 `version` 时与当前版本不一致返回 409 `workflow_version_conflict`。内置工作流不能删除（409 `builtin_workflow_required`）；删除自定义工作流会取消它未完成的任务 |
 | `/api/repositories/:id/workflows/assistant` | POST | 工作流助手：`messages`（`[{role:user|assistant,content}]`）、可选 `workflow_id` 和编辑器当前内容 `draft`；返回 `reply,draft,warnings`（助手没有调用 `update_draft` 时 `draft` 为 `null`），不保存任何内容。加 `?stream=1` 时以 `application/x-ndjson` 逐行返回过程：`text`、`reasoning`（文字增量）、`tool_call`、`tool_result`、`draft`、`turn`，最后是 `done`（同上三项）或 `error`。项目没有可用模型时返回 409 `model_not_configured` |
 
-自定义工作流的任务类型是 `workflow.issue` 或 `workflow.pr`，任务记录的 `workflow_id` 指向工作流。它们在同一台项目电脑上排队，和检视一样准备只读检出，结束时调用 `finish_review` 返回 `summary` 和 `findings`；控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出。自定义工作流不加标签、不衔接开发、不延续检视会话，也不开分支或 PR。
+自定义工作流的任务类型是 `workflow.issue` 或 `workflow.pr`，任务记录的 `workflow_id` 指向工作流。它们在同一台项目电脑上排队，和检视一样准备检出，结束时调用 `finish_review` 返回 `summary`、`findings`（有 `labels` 写入时还有 `labels`）；有 `reply` 写入时控制面发一条评论，PR 上有真实 diff 位置的意见作为 COMMENT 行内检视发出，没有时结果只留在控制台。中途开的 PR 记在任务结果的 `pull_request` 里。自定义工作流不衔接开发、不延续检视会话。CI 观察、发行说明和 Actions 失败处理的任务类型就是它们的工作流 id，没有 Issue／PR 编号。
 
 ## 看板
 

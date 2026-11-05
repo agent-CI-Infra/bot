@@ -1,6 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import { stop } from '../agent/common.js';
-import { builtinWorkflow, workflowAccess, triggerOptions, triggers as catalog, type WorkflowPermissions } from './catalog.js';
+import { builtinWorkflow, workflowAccess, savedWrites, triggerOptions, triggers as catalog, type WorkflowPermissions } from './catalog.js';
 
 // The workflow a task belongs to: a custom workflow's id, or the built-in task kind.
 export const taskWorkflow = (task: { kind: string; workflow_id?: string | null }) => String(task.workflow_id || task.kind);
@@ -8,12 +8,14 @@ export const savedWorkflow = (store: Store, repositoryId: string, id: string): R
   store.get('SELECT * FROM workflows WHERE repository_id=? AND id=?', repositoryId, id);
 
 /**
- * What a task's agent may do, decided on every task from the workflow's type: reading is open, writing follows the type.
- * Permissions saved before reading was opened up are ignored. A deleted custom workflow runs nothing.
+ * What a task's agent may do, read from trusted storage on every task: reading is open, writing is the saved writes (the
+ * workflow's defaults until an administrator saves some). Read scopes saved before reading was opened up are ignored.
+ * A deleted custom workflow runs nothing.
  */
 export function workflowPermissions(store: Store, repositoryId: string, id: string): WorkflowPermissions {
-  if (!builtinWorkflow(id) && !savedWorkflow(store, repositoryId, id)) return stop('workflow_not_found', 'cancelled', `工作流 ${id} 已删除。`);
-  return workflowAccess(id);
+  const row = savedWorkflow(store, repositoryId, id);
+  if (!builtinWorkflow(id) && !row) return stop('workflow_not_found', 'cancelled', `工作流 ${id} 已删除。`);
+  return workflowAccess(id, savedWrites(row?.permissions ?? null, id));
 }
 export interface CustomWorkflow { id: string; name: string; enabled: boolean; prompt: string; triggers: { id: string; label?: string }[]; model_id: string | null }
 export function customWorkflow(row: Row): CustomWorkflow {
