@@ -89,6 +89,10 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 别人的 PR 只检视，不产生向作者分支提交的任务；分支名或机器人名称不能代替归属记录。由本系统创建的 PR 保存不可变 PR ID、作者、head 仓库、分支和发布 SHA，只有这些身份仍匹配、策略允许且确有修改项时才在原分支跟进。跟进默认最多 3 轮，可在 policy 的 max_revisions 中设置 0–10；Issue 的再次检视要继续推进这个 Issue 已有的 bot PR 时也计入同一预算，用完后不再自动开发。不另开 PR，不强推，不自动合并。
 
+## 仓库只读探索
+
+检视、开发与 CI 观察共享 `RepositoryExplorer`，通过 `github_read`、`github_search` 和 `read_job_log` 读取当前接入仓库的代码、其他 Issue/PR、讨论和相关 Actions。触发对象是分析起点，不是全部可读上下文。CI 通过控制面执行这些工具；Pi 使用任务邮箱传递工具请求与分块结果。读取路径、HTTP GET 方法和搜索仓库由控制面校验，内容及日志在返回模型前脱敏。具体工具和触发目标边界见[共享 Agent 后端](agent-runtime.md#触发上下文与仓库探索)。
+
 ## 任务只读令牌
 
 模型调用 `github_read_token` 时，runner 在任务邮箱写入请求，控制面轮询到后为本仓库签发一个 GitHub App 安装令牌：`repository_ids` 只含当前仓库，权限只取 `metadata`、`contents`、`issues`、`pull_requests`、`actions`、`checks`、`statuses` 中安装已授予的项，并一律降为 read；签发结果里只要有任何一项不是 read 就拒绝。机器人账号只有一个能写的长期 Token，不能派生更窄的令牌，所以不提供只读令牌，模型会收到 `github_app_required`。

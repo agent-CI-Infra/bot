@@ -12,6 +12,8 @@ export class ReadTokens {
     const github = await this.connect();
     return { token: github.token, expires_at: github.expiresAt, permissions: github.permissions, repository: github.fullName };
   }
+  // Common repository exploration keeps credentials in the control plane, including for Pi tools.
+  async issueRepository() { return this.connect(undefined, false); }
   // Release observation uses the same issuer/lifecycle as review, with only Actions and metadata reads.
   // Its tool executor keeps this client; neither token values nor arbitrary request paths reach the model.
   async issueActions() {

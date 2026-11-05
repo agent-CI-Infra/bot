@@ -26,6 +26,13 @@ async function exchange(){
     return {error:'github_read_token_timeout'};
   }finally{await unlink(dir+'/token-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
 }
+// Repository exploration runs in the control plane, using the same executor as CI observation.
+async function repositoryTool(name,args){
+  const id=randomBytes(24).toString('hex'),reply=dir+'/repository-reply-'+id+'.json';
+  await writeFile(dir+'/repository-request.tmp',JSON.stringify({id,name,arguments:args}),{mode:0o600});await rename(dir+'/repository-request.tmp',dir+'/repository-request.json');
+  try{for(;;){const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;await new Promise(resolve=>setTimeout(resolve,100));}}
+  finally{await unlink(dir+'/repository-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
+}
 // Publication can include a long-running policy command. Wait for the control plane instead of
 // ending the session or imposing a request deadline.
 async function createPullRequest(args){
@@ -70,6 +77,7 @@ try{
       let result;
       const denied=toolCapabilityError(config,name,args);
       if(denied) result={error:denied};
+      else if(['github_read','github_search','read_job_log'].includes(name))result=await repositoryTool(name,args);
       else if(tool.function.name==='finish_review'){finished=args;result={finished:true};}
       else if(tool.function.name==='create_pull_request'){
         result=await createPullRequest(args);

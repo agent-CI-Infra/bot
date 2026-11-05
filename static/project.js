@@ -200,7 +200,9 @@ function releaseRecord(r, endpoint, refresh, message) {
     section.append(note(`运行分析 · run ${r.observation.run_id} / attempt ${r.observation.attempt} · 仅供排查的建议`), note(r.observation.advice));
     for (const job of r.observation.jobs) section.append(link(job.url, `${job.name} · ${job.conclusion}`));
     for (const log of r.observation.logs || []) {
-      const details = element('details'); details.append(element('summary', `${log.name} 日志 · 第 ${log.first_line}–${log.last_line || log.first_line} 行${log.truncated ? '（已截取）' : ''}`), link(log.url, '查看 job 完整日志'), element('pre', log.content)); section.append(details);
+      const related = log.run_id !== r.observation.run_id || log.attempt != null && log.attempt !== r.observation.attempt;
+      const origin = related ? ` · run ${log.run_id} / attempt ${log.attempt ?? '未知'}` : '';
+      const details = element('details'); details.append(element('summary', `${log.name} 日志${origin} · 第 ${log.first_line}–${log.last_line || log.first_line} 行${log.truncated ? '（已截取）' : ''}`), link(log.url, '查看 job 完整日志'), element('pre', log.content)); section.append(details);
     }
   }
   if (r.release_url) actions.append(link(r.release_url, '查看 GitHub Release'));

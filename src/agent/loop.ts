@@ -7,6 +7,7 @@ import { validateReview } from '../review/findings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
 import type { AgentModel } from './gateway.js';
+import { RepositoryExplorer, repositoryTools } from './exploration.js';
 
 export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
 
@@ -17,6 +18,7 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
 }
 async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation) {
   const profile = workspaceProfile(String(task.kind), context);
+  const explorer = tokens ? new RepositoryExplorer(tokens, redactor, guard) : null;
   const system = profile.system;
   const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation };
   return runAgent({ store, task, redactor, guard, system, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: async ({ request, model }) => {
@@ -112,13 +114,31 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       if (state.token_request && !answered.has('token:' + state.token_request.id)) {
         const id = String(state.token_request.id);
         let reply: any;
-        try { if (!tokens) stop('github_read_token_unavailable', undefined, '当前任务未配置 GitHub 只读令牌服务。'); reply = await tokens!.issue(); }
+        try {
+          if (!tokens || !explorer) stop('github_read_token_unavailable', undefined, '当前任务未配置 GitHub 只读令牌服务。');
+          const client = await explorer!.connect();
+          reply = { token: client.token, repository: client.fullName, permissions: client.permissions, expires_at: client.expiresAt };
+        }
         // The agent gets the reason and carries on without the token; a stopped or revoked task still stops here.
         catch (error) { await guard(); reply = { error: error instanceof TaskError ? error.code : 'github_read_token_unavailable' }; }
         // If the agent stopped waiting, the answer has nowhere to go; it can ask again, and the token is revoked at the end anyway.
         const sent = await workspace.deliver({ type: 'workspace_agent_token', request_id: id, base64: Buffer.from(JSON.stringify(reply)).toString('base64') });
         workspace.log({ type: 'github_read_token', ...(reply.error ? { error: reply.error } : { expires_at: reply.expires_at, permissions: reply.permissions }), ...(sent.error ? { delivered: false } : {}) });
         answered.add('token:' + id); continue;
+      }
+      if (state.repository_tool && !answered.has('repository:' + state.repository_tool.id)) {
+        const { id, name, arguments: args } = state.repository_tool;
+        if (typeof id !== 'string' || !/^[a-f0-9]{48}$/.test(id)) stop('model_request_invalid');
+        const allowed = repositoryTools.some(tool => tool.function.name === name) && profile.tools.some(tool => tool.function.name === name);
+        // A living Pi may retain its read token across a control-plane restart; establish this executor's client too.
+        const access = allowed && explorer ? await explorer.execute('github_read_token', {}) : null;
+        const result = !allowed ? { error: 'tool_not_allowed' } : !explorer ? { error: 'github_read_token_unavailable' } : access?.error ? access : await explorer.execute(name, args);
+        const reply = Buffer.from(JSON.stringify(redactor.clean(result)));
+        for (let at = 0; at < reply.length; at += 30000) {
+          const sent = await workspace.deliver({ type: 'workspace_agent_repository_tool', request_id: id, base64: reply.subarray(at, at + 30000).toString('base64'), offset: at, final: at + 30000 >= reply.length });
+          if (sent.error) stop('execution_interrupted', 'waiting_environment', '发送仓库读取结果时中断。');
+        }
+        answered.add('repository:' + id); continue;
       }
       if (state.request && !answered.has(state.request.id)) {
         const body = state.request.body;

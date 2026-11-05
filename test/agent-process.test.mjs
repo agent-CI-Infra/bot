@@ -235,7 +235,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
     return {ok:true,result:{written:true,started:true}};
   }}};};
   const redactor=new Redactor(),logs=[];let revoked=0;
-  const tokens={issue:async()=>{redactor.add(token);return {token,expires_at:'2099-01-01T00:00:00Z',permissions:{contents:'read',actions:'read'},repository:'fixture/project-101'};},revoke:async()=>{revoked++;}};
+  const tokens={issueRepository:async()=>{redactor.add(token);return {token,expiresAt:'2099-01-01T00:00:00Z',permissions:{contents:'read',actions:'read'},fullName:'fixture/project-101'};},revoke:async()=>{revoked++;}};
   let task=h.store.get("SELECT * FROM tasks WHERE id='tok'"),fake=runner();
   const result=await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},value=>logs.push(value)),redactor,async()=>{},{mode:'review'},tokens);
   assert.equal(result.summary,'Read the checks.');assert.equal(fake.delivered[0].token,token);assert.equal(revoked,1);
