@@ -97,7 +97,6 @@ const workflowPermissionNames = [['read', '读取工作区'], ['shell', '运行�
 const scopeNames = { contents: '代码', issues: 'Issue', pull_requests: 'PR', actions: 'Actions', checks: '检查', statuses: '提交状态', metadata: '元数据' };
 const workflowTabs = [['overview', '概览'], ['triggers', '触发源'], ['prompt', '提示词与流程'], ['access', '权限与模型']];
 const workflowModelName = workflow => {
-  if (!workflow.model) return '不调用模型';
   const model = current.models.find(entry => entry.id === (workflow.model.id || workflow.model.default_id));
   const name = model ? model.model_name : (workflow.model.id || workflow.model.default_id) ? `模型不可用（${workflow.model.id || workflow.model.default_id}）` : '未选择';
   return workflow.model.inherited ? `${name} · 继承项目默认` : name;
@@ -172,7 +171,7 @@ function workflowLists(selected) {
 // The shared rule files: the behavior guide for every workflow, the labels of both reviews, and the other files.
 function sharedDetail([item, title, path]) {
   const head = element('div', '', 'workflow-detail-head'); head.append(element('h2', title));
-  if (path) return [head, note(path === '.bot/guide.md' ? '每条有 agent 的工作流都先读这份行为指南。' : '两条检视工作流选分类标签、加检视标签时使用。'), ruleCard(path)];
+  if (path) return [head, note(path === '.bot/guide.md' ? '每条工作流的 agent 都先读这份行为指南。' : '两条检视工作流选分类标签、加检视标签时使用。'), ruleCard(path)];
   const others = current.rules?.files.filter(file => file.path === '.bot/computer.yaml' || !ruleFiles.some(([rule]) => rule === file.path) && file.path !== releaseNotesSkill) || [];
   const { table, body } = projectTable(['文件', '作用', '规则来源', '操作'], '其他规则文件');
   for (const file of others) {
@@ -210,7 +209,7 @@ const promptMeta = workflow => [badge('生效：' + layerNames[workflow.prompt.s
 // One editor for every workflow, in tabs; the chat opens beside it. A built-in workflow writes each part where it always
 // lived; a custom one is one record.
 function workflowEditor(workflow, { chat, notice }) {
-  const custom = !workflow?.builtin, catalog = current.workflows.triggers, scopes = current.workflows.github_scopes, agent = workflow ? workflow.agent : true;
+  const custom = !workflow?.builtin, catalog = current.workflows.triggers, scopes = current.workflows.github_scopes;
   const options = workflow?.trigger_options || catalog.filter(entry => ['issue', 'pr', 'any'].includes(entry.object)).map(({ id, title, label, note }) => ({ id, title, label: !!label, ...(note ? { note } : {}) }));
   const ceiling = workflow?.ceiling || { workspace: { read: true, write: false, notes: true, shell: true }, github: scopes, agents: true, publication: 'reply' };
   const permissions = workflow?.permissions || { workspace: { read: true, write: false, notes: true, shell: true }, github: scopes.filter(scope => scope !== 'statuses'), agents: false, publication: 'reply' };
@@ -222,7 +221,7 @@ function workflowEditor(workflow, { chat, notice }) {
   const submit = element('button', '保存'); submit.type = 'submit';
   const chatToggle = button('用聊天编写', () => { const open = shell.classList.toggle('with-chat'); chatToggle.setAttribute('aria-expanded', String(open)); if (open) shell.querySelector('.workflow-chat textarea')?.focus(); });
   chatToggle.setAttribute('aria-expanded', String(!!chat));
-  actions.append(...(agent ? [chatToggle] : []), submit);
+  actions.append(chatToggle, submit);
   if (workflow && custom) actions.append(button('删除', async () => {
     if (!await askConfirm({ title: `删除工作流「${workflow.name}」？`, body: ['尚未完成的任务会取消，已完成的任务和日志保留。'], action: '删除', danger: true })) return;
     try { await api(`/api/repositories/${current.id}/workflows/${encodeURIComponent(workflow.id)}`, 'DELETE', {}); await reloadWorkflows(); selectWorkflowItem(current.workflows.workflows[0].id, { notice: '已删除工作流' }); }
@@ -265,9 +264,7 @@ function workflowEditor(workflow, { chat, notice }) {
   // The chart of the text being edited, while it differs from the effective prompt.
   const preview = element('div', '', 'workflow-flow-preview'), drawPreview = () => preview.replaceChildren(...(!editor.value.trim() || workflow && editor.value === prompt.effective ? [] : [flowFigure(parseFlow(editor.value), '编辑中的流程图')]));
   let timer = null; editor.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(drawPreview, 200); }); drawPreview();
-  if (!agent) panel('prompt').append(element('p', '这条工作流按控制面的固定规则运行，不调用模型；下面的说明不发给模型，流程图来自这份说明。分类规则见 docs/actions-failures.md。', 'endpoint-warning'),
-    flowFigure(parseFlow(prompt.effective), '流程图'), collapsible('流程说明', prompt.effective, true));
-  else {
+  {
     if (workflow) {
       const meta = element('div', '', 'rule-meta'); meta.dataset.promptMeta = ''; meta.append(...promptMeta(workflow)); panel('prompt').append(meta);
       if (prompt.source === 'repository') panel('prompt').append(element('p', `默认分支的仓库文件 ${prompt.path} 整份替换这里的提示词；下面保存的控制台内容要等仓库删除这个文件后才生效。`, 'endpoint-warning'));
@@ -281,7 +278,7 @@ function workflowEditor(workflow, { chat, notice }) {
   }
   // Permissions and model: never above the ceiling; publication follows the workflow.
   const permissionBox = element('div', '', 'workflow-permissions');
-  if (agent) {
+  {
     for (const [key, caption] of workflowPermissionNames) {
       const box = checkbox('permission:' + key, permissions.workspace[key], caption); box.querySelector('input').disabled = !ceiling.workspace[key];
       if (!ceiling.workspace[key]) box.title = '这条工作流不能打开这项权限'; permissionBox.append(box);
@@ -290,11 +287,11 @@ function workflowEditor(workflow, { chat, notice }) {
     const scopeBox = element('div', '', 'workflow-scopes'); scopeBox.append(element('span', 'GitHub 只读范围：', 'muted'));
     for (const scope of scopes) { const box = checkbox('scope:' + scope, permissions.github.includes(scope), scopeNames[scope] || scope); box.querySelector('input').disabled = !ceiling.github.includes(scope); scopeBox.append(box); }
     permissionBox.append(scopeBox);
-  } else permissionBox.append(note('控制面用安装令牌读取运行和日志、对外部原因的失败重跑原运行一次、提报或评论 Issue；没有 agent，也不签发任务令牌。'));
+  }
   permissionBox.append(note('发布：' + publicationNames[ceiling.publication]), note('运行中的模型和仓库内容都不能改这些权限；子 agent 只能在这里保存的范围内再收窄。'));
   panel('access').append(element('h3', '权限'), permissionBox);
   const model = document.createElement('select'); model.name = 'model_id';
-  if (agent) {
+  {
     const defaultModel = current.models.find(entry => entry.id === current.policy.model_id);
     modelOptions(model, current.models, workflow?.model && !workflow.model.inherited ? workflow.model.id : '', `继承项目默认${defaultModel ? `（${defaultModel.model_name}）` : '（未选择）'}`);
     panel('access').append(element('h3', '模型'), field('模型', model), note('失效的模型不会自动换成其他模型，任务会等待配置。'));
@@ -348,7 +345,7 @@ function workflowEditor(workflow, { chat, notice }) {
         if (value.description !== workflow.description) body.description = value.description;
         if (value.enabled !== workflow.enabled) body.enabled = value.enabled;
         if (trigger(value.triggers) !== trigger(workflow.triggers)) body.triggers = value.triggers;
-        if (agent) {
+        {
           if (form.elements.clear_prompt?.checked) body.prompt = null; else if (value.prompt !== startText) body.prompt = value.prompt;
           const canonical = permissions => JSON.stringify([workflowPermissionNames.map(([key]) => !!permissions.workspace[key]), [...permissions.github].sort(), !!permissions.agents]);
           if (canonical(value.permissions) !== canonical(workflow.permissions)) body.permissions = value.permissions;
@@ -368,8 +365,8 @@ function workflowEditor(workflow, { chat, notice }) {
       current.workflowTab = tab; drawWorkflowPage({ notice: '已保存工作流' });
     } catch (err) { message.className = 'view-error'; message.textContent = workflowError(err.message); submit.disabled = false; }
   });
-  shell.append(main, ...(agent ? [workflowChat(workflow, values, apply, chat)] : []));
-  if (chat && agent) shell.classList.add('with-chat');
+  shell.append(main, workflowChat(workflow, values, apply, chat));
+  if (chat) shell.classList.add('with-chat');
   form.append(head, ...(notice ? [Object.assign(element('p', notice, 'view-success flash'), { role: 'status' })] : []), message, shell);
   show(panels.has(current.workflowTab) ? current.workflowTab : 'overview');
   return [form];
@@ -386,9 +383,9 @@ function triggerRules(workflow) {
 function workflowSummary(workflow) {
   const list = element('dl', '', 'workflow-summary'), row = (term, value) => list.append(element('dt', term), element('dd', value));
   row('触发源', workflow.triggers.length ? workflow.triggers.map(trigger => triggerTitle(workflow, trigger)).join('、') : '没有触发源，不会运行');
-  row('提示词', workflow.agent ? `${layerNames[workflow.prompt.source]} · ${promptLocation(workflow)}` : '不调用模型（固定规则）');
-  row('权限', workflow.agent ? [...workflowPermissionNames.filter(([key]) => workflow.permissions.workspace[key]).map(([, caption]) => caption), ...(workflow.permissions.agents ? ['启动独立 agent'] : []),
-    workflow.permissions.github.length ? 'GitHub 只读 ' + workflow.permissions.github.map(scope => scopeNames[scope] || scope).join('、') : '不读 GitHub'].join('、') : '控制面固定权限');
+  row('提示词', `${layerNames[workflow.prompt.source]} · ${promptLocation(workflow)}`);
+  row('权限', [...workflowPermissionNames.filter(([key]) => workflow.permissions.workspace[key]).map(([, caption]) => caption), ...(workflow.permissions.agents ? ['启动独立 agent'] : []),
+    workflow.permissions.github.length ? 'GitHub 只读 ' + workflow.permissions.github.map(scope => scopeNames[scope] || scope).join('、') : '不读 GitHub'].join('、'));
   row('发布', publicationNames[workflow.ceiling.publication]);
   row('模型', workflowModelName(workflow));
   return list;
@@ -398,6 +395,7 @@ function actionsStatusLine(workflow) {
   const status = workflow.enabled ? workflow.status : null, line = element('p', '', status?.error ? 'endpoint-warning' : 'muted'); line.dataset.actionsStatus = ''; line.setAttribute('role', 'status');
   line.textContent = status?.error ? status.error === 'actions_workflow_run_subscription_missing'
     ? '配置错误：此仓库使用的 App 安装未订阅 workflow_run。本功能已停止写入，请 App 管理员添加事件订阅。'
+    : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「权限与模型」里选择可用的模型，或检查项目默认模型。`
     : `Actions 失败处理已暂停：${status.error}。请检查账号授权或日志读取状态。`
     : workflow.enabled ? status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。' : '未开启。';
   return line;

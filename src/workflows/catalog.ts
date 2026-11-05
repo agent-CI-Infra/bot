@@ -29,8 +29,6 @@ export interface BuiltinWorkflow {
   ceiling: WorkflowPermissions;
   /** The triggers this workflow can be given; its defaults are all of them unless the policy switches say otherwise. */
   triggers: string[];
-  /** A workflow run by fixed control-plane rules has no prompt or model for an agent. */
-  agent: boolean;
 }
 
 export const githubScopes = ['contents', 'issues', 'pull_requests', 'actions', 'checks', 'statuses', 'metadata'];
@@ -59,30 +57,30 @@ const scopes = githubScopes;
 const workspaceReview = { read: true, write: false, notes: true, shell: true };
 export const builtinWorkflows: BuiltinWorkflow[] = [
   { id: 'review.issue', name: '检视 Issue', base: 'review', object: 'issue', description: '检视新 Issue，判断意图、核对代码证据，并按规则决定是否衔接开发。',
-    prompt: { rule: '.bot/rules/issue-review.md', builtin: prompt('issue-review.md') }, agent: true,
+    prompt: { rule: '.bot/rules/issue-review.md', builtin: prompt('issue-review.md') },
     triggers: ['issue.opened', 'issue.updated', 'issue.labeled', 'comment.mention'],
     ceiling: { workspace: workspaceReview, github: scopes, agents: true, publication: 'reply' } },
   { id: 'review.pr', name: '检视 PR', base: 'review', object: 'pr', description: '检视 PR 的变更、测试与证据，发布 COMMENT 检视结论。',
-    prompt: { rule: '.bot/rules/pr-review.md', builtin: prompt('pr-review.md') }, agent: true,
+    prompt: { rule: '.bot/rules/pr-review.md', builtin: prompt('pr-review.md') },
     triggers: ['pull_request.opened', 'pull_request.synchronize', 'pull_request.updated', 'pull_request.labeled', 'comment.mention'],
     ceiling: { workspace: workspaceReview, github: scopes, agents: true, publication: 'reply' } },
   { id: 'development.issue', name: '开发 Issue', base: 'development', object: 'issue', description: 'Issue 明确要求改代码时，在虚拟电脑里实现、测试并创建 bot PR。',
-    prompt: { rule: '.bot/rules/issue-development.md', builtin: prompt('issue-development.md') }, agent: true, triggers: ['review.published', 'issue.labeled'],
+    prompt: { rule: '.bot/rules/issue-development.md', builtin: prompt('issue-development.md') }, triggers: ['review.published', 'issue.labeled'],
     ceiling: { workspace: { read: true, write: true, notes: true, shell: true }, github: scopes, agents: true, publication: 'pull_request' } },
   { id: 'development.pr', name: '跟进 bot PR', base: 'development', object: 'pr', description: '跟进 bot 自己创建的 PR：检视发现可执行问题后，按开发 Issue 的同一份提示词自动修订。',
-    prompt: { rule: '.bot/rules/issue-development.md', builtin: prompt('issue-development.md') }, agent: true, triggers: ['review.published'],
+    prompt: { rule: '.bot/rules/issue-development.md', builtin: prompt('issue-development.md') }, triggers: ['review.published'],
     ceiling: { workspace: { read: true, write: true, notes: true, shell: true }, github: scopes, agents: true, publication: 'pull_request' } },
   { id: 'release.observe', name: 'CI 观察', base: 'release.observe', object: 'release', description: '只读分析一次 Release 工作流运行并汇总失败线索；观察操作仍留在「发版本」。',
-    prompt: { builtin: prompt('release-observe.md') }, agent: true, triggers: ['release.manual'],
+    prompt: { builtin: prompt('release-observe.md') }, triggers: ['release.manual'],
     ceiling: { workspace: { read: false, write: false, notes: false, shell: false }, github: scopes, agents: true, publication: 'none' } },
   { id: 'release.notes', name: '发行说明', base: 'release.notes', object: 'release', description: '把已核验的提交和合并 PR 整理成发行说明；起草与正式发布仍留在「发版本」。',
-    prompt: { repository: '.agents/skills/release-notes/SKILL.md', builtin: '' }, agent: true, triggers: ['release.manual'],
+    prompt: { repository: '.agents/skills/release-notes/SKILL.md', builtin: '' }, triggers: ['release.manual'],
     ceiling: { workspace: { read: false, write: false, notes: false, shell: false }, github: [], agents: false, publication: 'release_notes' } },
-  // Classification stays fixed rules: a model's variance must not decide the one rerun or a development go-ahead. The
-  // reports it files are then reviewed by the Issue review workflow.
-  { id: 'actions.failures', name: 'Actions 失败处理', base: 'actions', object: 'actions', description: '分析默认分支 Actions 失败：外部原因最多重跑原运行一次，代码缺陷或不明原因提报 Issue，再由检视 Issue 接手。',
-    prompt: { builtin: prompt('actions-failures.md') }, agent: false, triggers: ['actions.run_failed'],
-    ceiling: { workspace: { read: false, write: false, notes: false, shell: false }, github: [], agents: false, publication: 'actions' } }
+  // The model classifies a failed run; the control plane checks the log lines it cites and keeps the single rerun, the
+  // reports and their redaction. The Issue review workflow then reviews each report.
+  { id: 'actions.failures', name: 'Actions 失败处理', base: 'actions', object: 'actions', description: '默认分支的 Actions 运行失败后，由模型分析失败原因：外部原因最多重跑原运行一次，代码缺陷或不明原因提报 Issue，再由检视 Issue 接手。',
+    prompt: { builtin: prompt('actions-failures.md') }, triggers: ['actions.run_failed'],
+    ceiling: { workspace: { read: false, write: false, notes: false, shell: false }, github: scopes, agents: true, publication: 'actions' } }
 ];
 export const builtinWorkflow = (id: string) => builtinWorkflows.find(workflow => workflow.id === id);
 export const triggerOptions = (id: string) => builtinWorkflow(id)?.triggers ?? customTriggerIds;

@@ -1,6 +1,6 @@
 # Actions 失败分类与提报
 
-Actions 失败处理是内置工作流 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`，默认关闭：在项目「工作流」页选中「Actions 失败处理」打开并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。它的触发源是「默认分支的 Actions 运行失败」，去掉后和关闭一样不再扫描和处理。分类用固定规则，不调用模型，所以这条工作流没有提示词和模型；页面画出的流程图来自 `docs/prompts/actions-failures.md` 的说明。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
+Actions 失败处理是内置工作流 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`，默认关闭：在项目「工作流」页选中「Actions 失败处理」打开并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。它的触发源是「默认分支的 Actions 运行失败」，去掉后和关闭一样不再扫描和处理。失败原因由这条工作流的模型分析，提示词、权限和模型和其他工作流一样在页面上设置，见下文「分析与分类」。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
 
 ## 配置前提
 
@@ -20,13 +20,27 @@ GitHub 的 run 列表支持 `created` 范围，不支持完成时间范围。扫
 
 窗口、页号、当前页内容及页内位置保存在 SQLite。每项成功处理或安全忽略后推进页内位置，当前页全部处理后才推进页号；失败页在重启后继续。未完成运行写入独立跟踪表就算已接收，它的最终结果仍需处理。已跟踪 run 逐条隔离处理错误，一条提报状态未知不会阻断其他重跑运行的完成轮询，但仍保留当前未处理扫描页。扫描不依赖收到 webhook，两个入口共用 `repository + run id + attempt` 记录。
 
-## 分类器
+## 分析与分类
 
-`src/actions/classifier.ts` 是测试和线上唯一入口，使用确定性规则，避免模型波动使重跑预算或开发判断改变。
+失败原因由这条工作流的模型分析（`src/actions/analysis.ts`），模型按工作流的模型设置选择，没有单独设置时用项目默认模型；提示词是 [`docs/prompts/actions-failures.md`](prompts/actions-failures.md)，可以在工作流页由控制台覆盖。
 
-只分析 `failure` job 中失败 step 的时间区间，读取完整且不超过现有 GitHub 客户端 8 MiB 下载边界的 job 日志；超限不返回截断内容，归为 unknown。没有失败 step、时间戳、完整日志或可辨认因果记录时也归为 unknown。失败 step 里没有可辨认的错误行时，另外保留该 step 自身输出的最后 8 行，只用于提报展示，不参与分类和去重签名。只取该 step 的 `##[group]Run` 脚本块之后、通用退出码行之前的输出；step 时间只精确到秒，短任务同一秒内的准备和清理行不计入。成功 step、命令回显、文档中偶然出现的错误关键词和通用 exit-code 包装不算因果证据。
+控制面先读取每个失败 job 的完整日志（不超过现有 GitHub 客户端 8 MiB 下载边界；超限不返回截断内容），取出失败 step 时间区间内的输出（`src/actions/classifier.ts`），连同 run、job 和失败 step 的名字交给模型。每个 job 只放最后 400 行、4 万字符，模型需要更多时用 `read_job_log` 读完整日志；按工作流的 GitHub 只读范围，它还可以读工作流文件、代码、其他运行、Issue 和 PR，权限允许时可以启动独立 agent。日志、job 名和 step 名都是不可信数据。
 
-外部规则识别错误记录中的 HTTP 429/502/503、arXiv 406/429、连接超时或连接中断、DNS 错误、磁盘耗尽、runner 断联或 Actions 队列故障。代码规则识别断言、明确语言异常、TypeScript 编译错误、lint 和编译器诊断。任何失败 step 证据缺失、未识别错误和已知错误并存，或 external/code 混合，都归为 unknown；多个失败 job 不能由单一类别解释时，整个 run 归为 unknown。保守分类不等于确认产品缺陷，后续仍需现有检视。
+模型为每个失败 job 返回一个类别和理由，并引用判断所依据的日志行：
+
+- `external`：仓库以外的原因，例如依赖服务的 429/502/503、网络超时或中断、DNS、磁盘耗尽、runner 断联或 Actions 队列故障，重跑同一提交很可能通过。
+- `code`：这个提交上仓库自己的问题，例如测试或断言失败、编译、类型或 lint 错误、仓库里的脚本或配置有误，重跑仍会失败。
+- `unknown`：日志缺失或截断、失败 step 没有有用输出、两类原因并存，或无法判断。
+
+控制面核验这份结果，不让模型的波动直接花掉重跑预算：
+
+- 必须逐一覆盖所有失败 job，类别只能是这三种；返回的不是可用 JSON 时，全部按 unknown 提报，不反复重试模型。
+- 引用的日志行必须是失败 step 实际打印过的行（忽略首尾空白和时间戳）；`external` 或 `code` 没有一行核验通过就改为 unknown，提报里写明原因。
+- 日志缺失或截断、没有失败 step 或时间戳时直接是 unknown，不调用模型。
+- 多个失败 job 不能由单一类别解释时，整个 run 归为 unknown。
+- 模型服务不可用、限流或没有配置模型时不写任何东西：这次运行保持待处理，扫描状态显示原因（例如 `model_not_configured`），模型恢复后再分析。
+
+核验通过的引用行作为提报摘录，也用于去重签名；没有引用行时保留失败 step 自身输出的最后 8 行，只用于提报展示（只取 `##[group]Run` 脚本块之后、通用退出码行之前的输出），不参与去重。模型的理由去掉换行和 `@` 后写进提报。分类不等于确认产品缺陷，后续仍需现有检视。
 
 ## 一次自动重跑
 
@@ -54,6 +68,6 @@ code 来源还必须保留 Current behavior、Expected behavior、Requested code
 
 ## 验证
 
-`test/actions-failures.test.mjs` 通过签名 webhook、独立控制面 SQLite 和 HTTP GitHub 夹具覆盖分类、扫描、分页断点、重启、一次重跑、未知响应对账、提报去重、凭据过滤和现有开发门槛。`test/release-label.test.mjs` 验证类别读回及失败状态。`e2e/actions-failures.spec.mjs` 覆盖真实管理页面的默认关闭、开关保存、配置错误和窄屏展示。现有开发测试继续验证批准和发布前检查。
+`test/actions-failures.test.mjs` 通过签名 webhook、独立控制面 SQLite、HTTP GitHub 夹具和假模型覆盖模型分析的核验与降级、扫描、分页断点、重启、一次重跑、未知响应对账、提报去重、凭据过滤和现有开发门槛。`test/release-label.test.mjs` 验证类别读回及失败状态。`e2e/actions-failures.spec.mjs` 覆盖真实管理页面的默认关闭、开关保存、配置错误和窄屏展示。现有开发测试继续验证批准和发布前检查。
 
 真实验收只使用 `agent-test-zone` 组织。若该组织中的安装未订阅 `workflow_run`，应记录现场阻断，不能修改生产配置来绕过它；不得在生产仓库试重跑、试打标签或创建自动化失败 Issue。生产仓库开启开关是验证完成后的独立配置步骤。

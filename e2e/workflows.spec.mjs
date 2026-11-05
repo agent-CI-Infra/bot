@@ -83,13 +83,16 @@ test('工作流页左侧列表、右侧分页编辑：内置与自定义同样�
     // Actions failure handling is managed here too, with its switch and its trigger.
     await item('actions.failures').click();
     const actions = detail('Actions 失败处理');
-    await expect(actions.locator('figure').first().locator('figcaption')).toContainText('分类 → 重跑一次 → 提报 Issue → 检视 Issue');
+    await expect(actions.locator('figure').first().locator('figcaption')).toContainText('读取日志 → 分析原因 → 重跑一次 → 提报 Issue → 检视 Issue');
     await actions.getByLabel('启用这条工作流', { exact: false }).check();
     await actions.getByRole('button', { name: '保存', exact: true }).click();
     await expect(detail('Actions 失败处理').locator('.flash')).toHaveText('已保存工作流');
     expect((await admin('/api/repositories/101')).value.policy.actions_failures_enabled).toBe(1);
+    // The model analyzes the failure: its prompt and model are edited here like any workflow's.
     await detail('Actions 失败处理').getByRole('tab', { name: '提示词与流程', exact: true }).click();
-    await expect(detail('Actions 失败处理')).toContainText('不调用模型');
+    await expect(detail('Actions 失败处理').getByLabel('控制台提示词', { exact: true })).toHaveValue(/# Actions failure analysis/);
+    await detail('Actions 失败处理').getByRole('tab', { name: '权限与模型', exact: true }).click();
+    await expect(detail('Actions 失败处理').locator('select[name=model_id]')).toBeVisible();
     await expect(item('actions.failures')).toContainText('运行中');
     // Chat drafts a new workflow beside the editor; the draft takes effect only once saved.
     await list.getByRole('button', { name: '用聊天新增', exact: true }).click();

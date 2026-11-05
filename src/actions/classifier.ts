@@ -1,59 +1,37 @@
 export type FailureKind = 'external' | 'code' | 'unknown';
-// `quote` holds the recognized causal lines and keys deduplication. `context` is display only: the last output of a failed
-// step in which no causal line was recognized, so an unknown report still shows what the step printed before it stopped.
+// `quote` holds the log lines the classification rests on and keys deduplication. `context` is display only: the last output
+// of a failed step when no line was cited, so an unknown report still shows what the step printed before it stopped.
 export interface Evidence { job: any; kind: FailureKind; reason: string; quote: string; context?: string; withheld?: boolean }
 const contextLines = 8;
-
-const external = [
-  /\b(?:HTTP(?:Error|StatusError)?(?:\s+(?:status|error))?\s*[:=]?\s*|status(?: code)?\s*[:=]?\s*)(?:429|502|503)\b/i,
-  /\b(?:429 Too Many Requests|502 Bad Gateway|503 Service Unavailable)\b/i,
-  /\b(?:arxiv|arXiv)\b.*\b(?:HTTP\s*|status\s*[:=]?\s*)?(?:406|429)\b/i,
-  /\b406\b.*\barxiv\b/i,
-  /\b(?:ConnectTimeout|ReadTimeout|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND)\b/,
-  /^curl:\s*\(28\)/i,
-  /\b(?:connection|network|request|socket|gateway)\b.*\b(?:timed out|timeout|unreachable|reset by peer)\b/i,
-  /\b(?:No space left on device|ENOSPC|runner lost communication|runner has lost communication|failed to acquire (?:a )?runner|GitHub Actions.*queue.*fail)\b/i,
-];
-const code = [
-  /^(?:E\s+|error:\s*|##\[error\]\s*)?(?:[\w.]+\.)?(?:AssertionError|TypeError|ReferenceError|SyntaxError|NameError|ImportError|ModuleNotFoundError)\b/,
-  /^(?:##\[error\]\s*)?(?:[^\s]+\(\d+,\d+\):\s*|[^\s]+:\d+:\d+\s*[-:]?\s*)?error TS\d+: /i,
-  /^(?:##\[error\]\s*)?(?:error\[E\d+\]|FAIL\s+\S+|[✕×]\s+|Expected:|Assertion failed:)/,
-  /^(?:##\[error\]\s*)?[^\s]+:\d+(?::\d+)?:\s*(?:error|fatal error):/i,
-  /^\s*\d+:\d+\s+error\s+.+\S+$/,
-];
 const clean = (line: string) => line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 
-// Only failed step intervals count. Successful steps, echoed commands and generic exit wrappers are not causes.
-export function classifyJob(job: any, log: string | null): Evidence {
-  const unknown = (reason: string, quote = '', context = ''): Evidence => ({ job, kind: 'unknown', reason, quote, ...(context ? { context } : {}) });
-  if (!log || /\[(?:log )?truncated\]|characters omitted|output truncated/i.test(log)) return unknown('Missing or incomplete job log.');
+// What the failed steps of a job printed: the log lines inside each failed step's time interval. The model classifies from
+// this output (and may read the whole log); the lines it cites must be lines of it. `problem` says why there is none.
+export function failedStepOutput(job: any, log: string | null): { lines: string[]; tail: string; problem?: string } {
+  const none = (problem: string) => ({ lines: [], tail: '', problem });
+  if (!log || /\[(?:log )?truncated\]|characters omitted|output truncated/i.test(log)) return none('Missing or incomplete job log.');
   const steps = (job.steps || []).filter((s: any) => s.conclusion === 'failure');
-  if (!steps.length) return unknown('No failed step with a causal log interval.');
+  if (!steps.length) return none('No failed step with a log interval.');
   const lines = log.split('\n').map(clean).map(line => {
     const match = /^(\d{4}-\d\d-\d\dT\S+)\s+(.*)$/.exec(line);
     return match ? { at: Date.parse(match[1]!), text: match[2]! } : null;
   });
-  const causes: string[] = [], kinds = new Set<FailureKind>();
+  const output: string[] = [];let tails = '';
   for (const step of steps) {
     const start = Date.parse(step.started_at), end = Date.parse(step.completed_at);
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return unknown('Failed step timestamps are missing.');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return none('Failed step timestamps are missing.');
     const scoped = lines.filter(l => l && l.at >= start && l.at < end + 1000).map(l => l!.text);
-    if (!scoped.length) return unknown('Failed step output is missing.');
-    let found = false;
-    for (const text of scoped) {
-      if (/^\s*(?:##\[group\]|Run |echo |\+ |\$ |shell:|env:)/.test(text)) continue;
-      const causal = /^(?:##\[error\]\s*|E\s+)?(?:[\w.]+(?:Error|Exception|Timeout)\b|error\b|HTTP\b|arxiv\b|curl:|No space left on device|ENOSPC|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND|runner\b|failed to acquire\b|GitHub Actions\b)/i.test(text);
-      const e = causal && external.some(pattern => pattern.test(text)), c = code.some(pattern => pattern.test(text));
-      if (e || c) { if (e) kinds.add('external'); if (c) kinds.add('code'); causes.push(text); found = true; }
-      else if (/^(?:##\[error\]|(?:[\w.]+)?(?:Error|Exception):)/.test(text)
-        && !/Process completed with exit code|script returned exit code|command failed with exit code/i.test(text)) { kinds.add('unknown'); causes.push(text); }
-    }
-    if (!found) return unknown('No recognized causal evidence in a failed step.', causes.join('\n'), tail(scoped));
+    if (!scoped.length) return none('Failed step output is missing.');
+    output.push(...scoped); tails = tail(scoped);
   }
-  const quote = causes.join('\n');
-  return kinds.size === 1 && !kinds.has('unknown')
-    ? { job, kind: [...kinds][0]!, reason: 'Causal evidence from failed steps.', quote }
-    : unknown('Mixed or ambiguous causal evidence in failed steps.', quote);
+  return { lines: output, tail: tails };
+}
+// Lines the model cites must be lines the failed steps printed (compared without surrounding space), so it can neither
+// invent log text nor quote a step that did not fail.
+export function verifiedEvidence(cited: unknown, output: string[]): string[] {
+  if (!Array.isArray(cited)) return [];
+  const printed = new Set(output.map(line => line.trim()).filter(Boolean));
+  return [...new Set(cited.filter((line): line is string => typeof line === 'string').map(line => clean(line).replace(/^\d{4}-\d\d-\d\dT\S+\s+/, '').trim()).filter(line => printed.has(line)))];
 }
 
 // The failed step's own output. A run step prints `##[group]Run …` (script, shell, env) up to `##[endgroup]`, then its output,

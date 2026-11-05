@@ -697,6 +697,7 @@ function showActionsFailureStatus(message, status) {
   message.className = status?.error ? 'endpoint-warning' : 'muted';
   message.textContent = status?.error ? status.error === 'actions_workflow_run_subscription_missing'
     ? '配置错误：此仓库使用的 App 安装未订阅 workflow_run。本功能已停止写入，请 App 管理员添加事件订阅。'
+    : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「权限与模型」里选择可用的模型，或检查项目默认模型。`
     : `Actions 失败处理已暂停：${status.error}。请检查账号授权或日志读取状态。`
     : status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。';
 }

@@ -5,7 +5,8 @@ import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { ActionsFailures, scanPageSize } from '../dist/actions/service.js';
-import { classifyJob, classifyFailure, normalizeSignature } from '../dist/actions/classifier.js';
+import { failedStepOutput, verifiedEvidence, classifyFailure, normalizeSignature } from '../dist/actions/classifier.js';
+import { actionsModel } from './actions-model.mjs';
 import { actionsDevelopmentAllowed, publicText } from '../dist/actions/safety.js';
 import { recordActionsRun } from '../dist/actions/storage.js';
 import { TaskEngine } from '../dist/agent/engine.js';
@@ -74,27 +75,56 @@ async function fixture(t, options = {}) {
   const apiUrl = `http://127.0.0.1:${server.address().port}`, h = await harness(t, undefined, { githubUrl: apiUrl }), { admin } = await setup(h);
   const a = await account(admin, { type: 'github_app', app_id: '1', private_key: pem, token: undefined }); await repository(admin, a.id, '101');
   const policy = changes => admin('/api/repositories/101/policy', 'PATCH', changes);
-  const enabled = await policy({ actions_failures_enabled: true, review_enabled: true, development_enabled: true }); assert.equal(enabled.status, 200);
+  // The workflow's model analyzes each failed run; by default it answers with the rules in actions-model.mjs.
+  const analysis = await actionsModel(t, options.respond);
+  const model = (await admin('/api/models', 'POST', { repository_id: '101', model_name: 'analysis', api_url: analysis.url, api_key: 'actions-analysis-model-key' })).value.model;
+  const enabled = await policy({ actions_failures_enabled: true, review_enabled: true, development_enabled: true, model_id: model.id }); assert.equal(enabled.status, 200);
   let service = new ActionsFailures(h.store, apiUrl);
   const tick = async () => { h.store.run('UPDATE actions_failure_scans SET next_scan=0'); await service.tick(); };
   const hook = (r = state.runs[0], delivery = 'actions-' + Math.random()) => h.hook(a.path, a.secret, delivery, { action: 'completed', repository: { id: 101 }, workflow_run: r }, { 'X-GitHub-Event': 'workflow_run' });
   const restart = async () => { await service.close(); await h.stop(); await h.start(); service = new ActionsFailures(h.store, apiUrl); };
   const reruns = () => state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/rerun'));
-  return { state, h, a, admin, policy, hook, tick, restart, reruns, apiUrl };
+  return { state, h, a, admin, policy, hook, tick, restart, reruns, apiUrl, analysis };
 }
 
-test('same production classifier scopes causal evidence to failed steps and fails closed', () => {
-  for (const text of ['HTTPError: HTTP 429', 'HTTPError: HTTP 502', 'HTTPError: HTTP 503', 'arxiv HTTP 406', 'HTTPError: 406 Client Error from https://export.arxiv.org', 'ReadTimeout: request timed out', 'Error: No space left on device'])
-    assert.equal(classifyJob(job(), log(text)).kind, 'external', text);
-  for (const text of ['AssertionError: expected 2 to equal 3', 'error TS2322: string cannot be assigned to number', 'src/a.ts(10,2): error TS2345: invalid argument', 'src/main.c:20: error: undeclared symbol'])
-    assert.equal(classifyJob(job(), log(text)).kind, 'code', text);
-  for (const text of [null, '', log('Process completed with exit code 1'), log('AssertionError: failed\nHTTPError: HTTP 429'), '[truncated] ' + log('AssertionError: failed')])
-    assert.equal(classifyJob(job(), text).kind, 'unknown', text);
+test('the analysis reads only the failed steps, and cited lines must be lines they printed', () => {
   const prior = '2026-11-04T00:59:00Z HTTPError: HTTP 429\n';
-  assert.equal(classifyJob(job(), prior + log('AssertionError: failed')).kind, 'code');
-  assert.equal(classifyJob(job(), log('Documentation explains HTTP 429\nProcess completed with exit code 1')).kind, 'unknown');
-  assert.equal(classifyJob(job({ steps: [] }), log('AssertionError: failed')).kind, 'unknown');
-  assert.equal(classifyFailure([classifyJob(job(), log('HTTPError: HTTP 429')), classifyJob(job(), log('AssertionError: failed'))]), 'unknown');
+  assert.deepEqual(failedStepOutput(job(), prior + log('AssertionError: failed')).lines, ['AssertionError: failed']);
+  for (const text of [null, '', '[truncated] ' + log('AssertionError: failed')]) assert.equal(failedStepOutput(job(), text).problem, 'Missing or incomplete job log.');
+  assert.equal(failedStepOutput(job({ steps: [] }), log('AssertionError: failed')).problem, 'No failed step with a log interval.');
+  const output = failedStepOutput(job(), log('HTTPError: HTTP 503\nProcess completed with exit code 1')).lines;
+  assert.deepEqual(verifiedEvidence(['  HTTPError: HTTP 503 ', '2026-11-04T01:00:05.000Z HTTPError: HTTP 503', 'HTTPError: HTTP 429', 42], output), ['HTTPError: HTTP 503']);
+  assert.equal(classifyFailure([{ kind: 'external' }, { kind: 'code' }]), 'unknown');
+});
+
+test('the workflow model decides external and code; unsupported, unusable or failed analyses do not act', async t => {
+  // A model that cites a line the step never printed does not spend the rerun.
+  let f = await fixture(t, { respond: input => ({ content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'external', reason: 'Rate limited.', evidence: ['HTTP 429 from upstream'] })) }) }) });
+  await f.tick();
+  assert.equal(f.reruns().length, 0); assert.match(f.state.issues[0].body, /classification: \*\*unknown\*\*/);
+  assert.match(f.state.issues[0].body, /The analysis cited no line that the failed steps printed\./);
+  // The prompt carries the failed step's output, the workflow prompt and the tools of its saved permissions.
+  const request = f.analysis.requests[0], prompt = JSON.parse(request.messages[1].content);
+  assert.deepEqual(prompt.failed_jobs.map(job => [job.job_id, job.failed_step_output]), [[91, 'HTTPError: HTTP 429 Too Many Requests']]);
+  assert.match(request.messages[0].content, /# Actions failure analysis/); assert.ok(request.tools.some(tool => tool.function.name === 'read_job_log'));
+  // A model that names a cause outside the old rules is followed when its line is real.
+  f = await fixture(t, { log: log('pip install failed: mirror returned an empty index'), respond: input => ({ content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'external',
+    reason: 'The package mirror returned an empty index.', evidence: ['pip install failed: mirror returned an empty index'] })) }) }) });
+  await f.tick(); assert.equal(f.reruns().length, 1); assert.equal(f.state.issues.length, 0);
+  // Output that is not a usable classification files an unknown report instead of retrying the model forever.
+  f = await fixture(t, { respond: () => ({ content: 'I think it is flaky.' }) }); await f.tick();
+  assert.equal(f.reruns().length, 0); assert.match(f.state.issues[0].body, /classification: \*\*unknown\*\*/); assert.match(f.state.issues[0].body, /did not return a usable classification/);
+  // A model outage writes nothing: the run stays pending and is analyzed again once the model answers.
+  let down = true;
+  f = await fixture(t, { respond: input => down ? { status: 503 } : { content: JSON.stringify({ jobs: input.failed_jobs.map(job => ({ job_id: job.job_id, kind: 'code', reason: 'Broken test, ping @owner\nnow.', evidence: ['HTTPError: HTTP 429 Too Many Requests'] })) }) } });
+  await f.tick(); assert.equal(f.reruns().length, 0); assert.equal(f.state.issues.length, 0);
+  assert.match(f.h.store.get('SELECT error FROM actions_failure_scans').error, /^model_/);
+  down = false; await f.tick(); assert.equal(f.state.issues.length, 1); assert.match(f.state.issues[0].body, /classification: \*\*code\*\*/);
+  // The model's reason is published as one line that mentions nobody.
+  assert.ok(f.state.issues[0].body.includes('Broken test, ping &#64;owner now.'));
+  // Without a model the workflow waits for configuration instead of guessing.
+  f = await fixture(t); await f.policy({ model_id: null }); await f.tick();
+  assert.equal(f.state.issues.length, 0); assert.equal(f.h.store.get('SELECT error FROM actions_failure_scans').error, 'model_not_configured');
 });
 
 test('external failure reruns original run once; completion and restart keep one durable budget', async t => {
@@ -310,14 +340,13 @@ test('an unknown report shows the failed step\'s last output, and says when an e
   const output = log(['Secret source: Actions', 'Prepare workflow directory', 'Complete job name: package',
     '##[group]Run echo "bundle checksum does not match manifest"', 'echo "bundle checksum does not match manifest"', 'exit 3', 'shell: /usr/bin/bash -e {0}', '##[endgroup]',
     'bundle checksum does not match manifest', '##[error]Process completed with exit code 3.', 'Cleaning up orphan processes'].join('\n'));
-  const classified = classifyJob(job(), output);
   // Display context only: the script, shell and generic exit lines stay out, and deduplication still keys on the empty quote.
-  assert.deepEqual([classified.kind, classified.quote, classified.context], ['unknown', '', 'bundle checksum does not match manifest']);
+  assert.equal(failedStepOutput(job(), output).tail, 'bundle checksum does not match manifest');
   let f = await fixture(t, { log: output }); await f.tick();
-  assert.match(f.state.issues[0].body, /No recognized error line was found\. Last output of the failed step:\n\n {4}bundle checksum does not match manifest/);
+  assert.match(f.state.issues[0].body, /The analysis cited no log line\. Last output of the failed step:\n\n {4}bundle checksum does not match manifest/);
   assert.doesNotMatch(f.state.issues[0].body, /could not be made safe|exit 3|Secret source|orphan/);
   // A step whose header block has no exit line still stops at the runner's cleanup.
-  assert.equal(classifyJob(job(), log(['##[group]Run ./deploy', './deploy', '##[endgroup]', 'state=broken', '##[error]deploy refused', 'Post job cleanup.', 'Cleaning up orphan processes'].join('\n'))).context,
+  assert.equal(failedStepOutput(job(), log(['##[group]Run ./deploy', './deploy', '##[endgroup]', 'state=broken', '##[error]deploy refused', 'Post job cleanup.', 'Cleaning up orphan processes'].join('\n'))).tail,
     'state=broken\n##[error]deploy refused');
   // A recognized line that cannot be made public is withheld, not described as missing.
   f = await fixture(t, { log: log('AssertionError: digest ' + 'Q'.repeat(64)) }); await f.tick();

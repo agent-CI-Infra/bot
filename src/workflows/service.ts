@@ -51,18 +51,18 @@ export class WorkflowService {
       permissions: workflowPermissions(this.store, repositoryId, id), version: Number(rows.get(id)?.version ?? 0) });
     const builtins = builtinWorkflows.map(workflow => {
       const row = rows.get(workflow.id), review = workflow.base === 'review', development = workflow.base === 'development';
-      return { id: workflow.id, builtin: true, base: workflow.base, object: workflow.object, agent: workflow.agent,
+      return { id: workflow.id, builtin: true, base: workflow.base, object: workflow.object,
         name: row?.name || workflow.name, description: row?.description || workflow.description, default_name: workflow.name, default_description: workflow.description,
         ...shared(workflow.id),
         // The project-wide switches on the project list still apply to every review or development workflow.
         project_switch: review ? { key: 'review_enabled', title: '项目的检视开关', on: !!policy.review_enabled } : development ? { key: 'development_enabled', title: '项目的开发开关', on: !!policy.development_enabled } : null,
-        prompt: this.builtinPrompt(workflow, view, row), ceiling: workflow.ceiling, model: workflow.agent ? this.model(policy, workflow.id) : null,
+        prompt: this.builtinPrompt(workflow, view, row), ceiling: workflow.ceiling, model: this.model(policy, workflow.id),
         settings: review ? { review_language: policy.review_language || 'auto' } : development ? { test_command: policy.test_command || '', max_revisions: policy.max_revisions } : {},
         ...(workflow.id === 'actions.failures' ? { status: this.store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', repositoryId) || null } : {}) };
     });
     const customs = [...rows.values()].filter(row => String(row.id).startsWith('custom.')).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).map(row => {
       const custom = customWorkflow(row);
-      return { id: custom.id, builtin: false, base: 'reply', object: 'any', agent: true, name: custom.name, description: String(row.description || ''),
+      return { id: custom.id, builtin: false, base: 'reply', object: 'any', name: custom.name, description: String(row.description || ''),
         ...shared(custom.id), project_switch: null,
         prompt: { path: null, layers: [{ source: 'console', content: custom.prompt }], source: 'console', effective: custom.prompt, shared_with: [] },
         ceiling: customCeiling, model: this.model(policy, custom.id, row), settings: {}, updated_at: row.updated_at };
@@ -128,7 +128,6 @@ export class WorkflowService {
     const list = body.triggers === undefined ? undefined : this.triggerList(repositoryId, workflow.id, body.triggers);
     // The policy switches of the review triggers follow the list, so the policy API keeps reporting what runs.
     if (list && policyColumns[workflow.id]) for (const [trigger, column] of Object.entries(policyColumns[workflow.id]!)) updates[column] = Number(list.some(entry => entry.id === trigger));
-    if (!workflow.agent && (body.prompt !== undefined || body.model_id !== undefined)) fail(400, 'workflow_agent_not_used');
     const settings = (body.settings ?? {}) as Json;
     if (typeof settings !== 'object' || Array.isArray(settings)) fail(400, 'invalid_workflow_settings');
     fields(settings, review ? ['review_language'] : development ? ['test_command', 'max_revisions'] : []);
@@ -216,7 +215,6 @@ export class WorkflowService {
     const builtin = id ? builtinWorkflow(id) : undefined;
     if (id && !builtin && !savedWorkflow(this.store, repositoryId, id)) fail(404, 'workflow_not_found');
     const current = id ? (await this.list(repositoryId)).workflows.find(workflow => workflow.id === id) : null;
-    if (builtin && !builtin.agent) fail(409, 'workflow_agent_not_used');
     const ceiling = builtin?.ceiling ?? customCeiling;
     // The same trigger catalog the editor offers this workflow.
     const catalog = triggerOptions(id ?? 'custom', null).map(({ id, title, label }) => ({ id, title, ...(label ? { needs_label: true } : {}) }));
