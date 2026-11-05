@@ -232,3 +232,26 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 @media(max-width:1100px){.workflow-shell.with-chat{grid-template-columns:minmax(0,1fr)}.workflow-chat{position:static;max-height:none}.workflow-prompt-columns{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:820px){.workflow-page{grid-template-columns:minmax(0,1fr);min-height:0}.workflow-sidebar{border-right:0;border-bottom:1px solid #e3eaf0}.workflow-sidebar .rule-sync{margin-top:0}
   .workflow-detail{padding:12px}.workflow-panel textarea.code{min-height:260px}}
+/* Gate onboarding (static/gate-onboarding.js): the five lanes first, then the conversation beside the editable plan. */
+dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.gate-dialog .view-head h2{overflow-wrap:anywhere;min-width:0}
+.gate-intro{padding:16px 20px 20px;display:grid;gap:12px;font-size:14px;line-height:1.65}.gate-intro p{margin:0;overflow-wrap:anywhere}.gate-intro h3{margin:0}
+.gate-lanes{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 16px;margin:0;padding:12px 14px;border:1px solid #dce6eb;border-radius:8px;background:#f7fafb}
+.gate-lanes dt{font:600 13px/1.65 ui-monospace,monospace;color:#16636b}.gate-lanes dd{margin:0;overflow-wrap:anywhere}
+.gate-intro .actions,.gate-plan>.actions{justify-content:flex-end}
+.gate-chat{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,440px)}
+.gate-conversation{min-height:0;display:flex;flex-direction:column;border-right:1px solid #e3eaf0}
+.gate-messages{flex:1;min-height:0;overflow:auto;list-style:none;margin:0;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.gate-message{max-width:min(720px,92%);border-radius:8px;padding:8px 11px;font-size:13px;line-height:1.6}.gate-message>p{margin:3px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.gate-message-role{font-size:12px;font-weight:600;color:#52707d}.gate-message-agent{align-self:flex-start;background:#fff;border:1px solid #dce6eb}
+.gate-message-user{align-self:flex-end;background:#e6f1f3}.gate-message-system{align-self:stretch;max-width:none;background:#f4f7f9;color:#365564}
+.gate-message-pending{align-self:flex-start;color:#637c89;font-style:italic}.gate-message .result-link{color:#16636b;text-underline-offset:3px;font-weight:600}
+.gate-compose{display:grid;gap:8px;padding:12px 16px;border-top:1px solid #e3eaf0}.gate-compose textarea{min-height:64px}.gate-compose .actions{justify-content:space-between}
+.gate-plan{min-height:0;overflow:auto;padding:14px 16px 18px;display:grid;gap:12px;align-content:start;background:#fbfdfe}.gate-plan h3{margin:0}.gate-plan>p{margin:0;overflow-wrap:anywhere}
+.gate-plan fieldset{border:1px solid #e9c27a;border-radius:7px;padding:10px 12px;background:#fffaf0}.gate-plan legend{font-size:13px;font-weight:600;color:#875a0a;padding:0 4px}
+.gate-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.gate-plan-lanes{display:grid;gap:10px}
+.gate-plan-lanes label>strong{font:600 13px/1.4 ui-monospace,monospace;color:#16636b}.gate-plan-lanes label>.muted{line-height:1.5}
+.gate-plan textarea{min-height:52px;font:12px/1.6 ui-monospace,monospace}.gate-plan textarea:disabled,.gate-plan textarea:read-only,.gate-plan input:read-only{background:#f4f7f9;color:#4d6875}
+.gate-plan details{font-size:13px}.gate-plan summary{cursor:pointer;width:fit-content;color:#16636b;font-weight:600}.gate-plan details h4{margin:10px 0 4px;font:600 12px ui-monospace,monospace}
+.gate-plan details pre{margin:0;padding:8px 10px;border:1px solid #e3eaee;border-radius:6px;background:#fff;max-height:none;white-space:pre;overflow:auto}
+@media(max-width:860px){.gate-chat{display:block;overflow:auto}.gate-conversation{border-right:0;border-bottom:1px solid #e3eaf0}.gate-messages{overflow:visible}.gate-plan{overflow:visible}}
+@media(max-width:560px){.gate-lanes{grid-template-columns:minmax(0,1fr)}.gate-lanes dd{margin-bottom:6px}.gate-tools{grid-template-columns:minmax(0,1fr)}.gate-intro{padding:14px}}

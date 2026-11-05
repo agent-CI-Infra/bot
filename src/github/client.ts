@@ -51,7 +51,7 @@ export function appJwt(appId: string, privateKey: string): string {
 }
 // The permissions a GitHub App needs for review and development: the onboarding manifest asks for exactly these, and the
 // permission check compares existing Apps and installations with them. Tokens still request only what each use needs.
-// One-click onboarding asks for more (workflows, actions) in its own tokens; see projects/quickstart.ts.
+// Gate onboarding asks for more (workflows) in its own tokens, only after a person confirms; see projects/gate-onboarding.ts.
 export const appPermissions: Record<string,string> = { contents:'write', issues:'write', pull_requests:'write', statuses:'write', actions:'write', checks:'write', metadata:'read' };
 // The webhook events those Apps subscribe to: opened and updated Issues and PRs, their comments, reviews and review comments.
 // installation and installation_repositories reach every App without a subscription. The permission check compares with these too.

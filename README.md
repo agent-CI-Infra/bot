@@ -28,7 +28,7 @@ App 已经创建好了，不需要自己再建。安装地址只用这一个：
 
 相对上一枚可达的合法版本标签，没有新增提交时，页面说明跳过，服务端拒绝确认，不创建发布记录、标签或 Release；还没有这样的版本标签时，现有历史可作为首次发布。已有发布记录仍可查看和按原规则恢复，同名标签始终不会移动或删除。
 
-「接入门禁」的门禁 PR 就是接入框架，包含由版本标签触发的 `.github/workflows/release.yml`，优先使用 `CI-workflow` 上游模板，缺少时使用本地门禁模板。控制面只提供框架并在人工确认后打标签，不根据 `package.json` 选择检查命令，也不发布 PyPI、npm 包或镜像。`.github/ci-gates.json` 保留 lane 名字、命令留空；仓库开发者填写实际检查项，并决定是否在自己的 Release workflow 中增加发包或镜像发布步骤，由标签触发 Release Actions。空 lane 的 `not_applicable` 报告不代表实际检查通过；详见[接入说明](docs/onboarding-guide.md)。
+「接入门禁」先介绍 build、pr-ready、pr-merge、daily、release 五层门禁，再由 agent 只读查看仓库（语言、已有 workflow、构建和测试命令、默认分支、merge queue），和人一起定下各层命令；不要求是 Node 仓库。人确认方案后，控制面才创建门禁 PR，其中包含门禁 workflow、`.github/ci-gates.json`、`scripts/gate/gate.mjs` 和由版本标签触发的 `.github/workflows/release.yml`；已有的 ci.yml、release.yml 不会被覆盖。仓库启用 merge queue 时只提交进入队列之前的门禁。空 lane 的 `not_applicable` 报告不代表实际检查通过；控制面不发布 PyPI、npm 包或镜像，详见[接入说明](docs/onboarding-guide.md)。
 
 ## 部署和管理
 

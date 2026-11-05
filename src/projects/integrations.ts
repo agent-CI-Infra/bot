@@ -82,12 +82,15 @@ export class IntegrationChecker {
   private async gate(full: string, token: string): Promise<{ state: GateState; detail: string }> {
     try {
       const config = await this.file(full, '.github/ci-gates.json', token);
-      const workflow = await this.file(full, '.github/workflows/ci.yml', token) ?? await this.file(full, '.github/workflows/ci-gates.yml', token);
+      // Gate onboarding puts the gate job in ci-gates.yml beside a repository's own ci.yml, so that file wins when both exist.
+      const separate = await this.file(full, '.github/workflows/ci-gates.yml', token);
+      const workflow = separate ?? await this.file(full, '.github/workflows/ci.yml', token);
       if (!config && !workflow) return { state: 'none', detail: '未见 ci-gates 配置和 CI workflow' };
       if (!config) return { state: 'none', detail: '有 CI workflow，但未接入门禁' };
       if (!workflow) return { state: 'configured', detail: '有门禁配置，但没有 CI workflow 运行它' };
       const flows: any = await this.get(`/repos/${full}/actions/workflows`, token).catch(() => null);
-      const flow = flows?.workflows?.find((w: any) => w.name === 'CI' || /ci\.ya?ml$/.test(String(w.path)));
+      const flow = separate ? flows?.workflows?.find((w: any) => String(w.path) === '.github/workflows/ci-gates.yml')
+        : flows?.workflows?.find((w: any) => w.name === 'CI' || /(?:^|\/)ci\.ya?ml$/.test(String(w.path)));
       if (!flow) return { state: 'configured', detail: '已配置，尚未看到 CI workflow' };
       const runs: any = await this.get(`/repos/${full}/actions/workflows/${flow.id}/runs?per_page=1`, token).catch(() => null);
       const run = runs?.workflow_runs?.[0];

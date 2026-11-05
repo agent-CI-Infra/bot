@@ -695,8 +695,8 @@ function installedActions(row, after) {
     try { await api(`/api/installations/${row.id}/${path}`, 'POST', body); $('message').textContent = ''; } catch (err) { error(err); }
     await after();
   };
-  // Gate onboarding keeps its existing PR flow; boards are managed by the list switch.
-  actions.append(button('接入门禁', () => openQuickstart(row, after), ''));
+  // Gate onboarding is a conversation in static/gate-onboarding.js; boards are managed by the list switch.
+  actions.append(button('接入门禁', () => openGateOnboarding(row, after), ''));
   if (!row.registered && row.installed) actions.append(button('启动', () => openActivation(row, after), ''));
   // Review has its own switch; this action resumes a disabled project.
   if (row.registered && !row.enabled) actions.append(button('启用', () => call('activate', {}, `正在启用 ${row.full_name}…`)));
@@ -739,65 +739,3 @@ $('activation-form').addEventListener('submit', async event => {
   } catch (err) { $('activation-error').textContent = err.message; } finally { submit.disabled = false; }
 });
 
-// Source gate onboarding; board execution items have moved to the repository list switch.
-const quickstartView = document.createElement('dialog'); quickstartView.id = 'quickstart-view'; quickstartView.setAttribute('aria-labelledby', 'quickstart-title');
-quickstartView.innerHTML = `<h2 id="quickstart-title">接入门禁</h2>
-<p class="muted" id="quickstart-hint"></p>
-<p id="quickstart-preflight" class="muted"></p>
-<ol id="quickstart-steps" class="quickstart-steps"></ol>
-<p id="quickstart-error" class="view-error" role="alert"></p>
-<div class="actions"><button type="button" class="quiet" id="quickstart-close">关闭</button></div>`;
-document.body.append(quickstartView);
-let quickstartRow = null, quickstartAfter = null, quickstartTimer = null, quickstartState = { run: null, items: {} }, quickstartWasBusy = false, quickstartStarting = false;
-const quickstartStepStatus = { pending: '等待', running: '进行中', done: '完成', skipped: '跳过', blocked: '需人工', failed: '失败' };
-const quickstartErrors = { repository_not_found: 'GitHub App 读不到这个仓库。',
-  github_app_required: '门禁接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上。', github_credentials_missing: 'GitHub App 账号没有保存私钥。',
-  public_address_not_verified: '请先在安装向导验证 webhook 公网地址。' };
-const quickstartBusy = run => !!run && ['running', 'queued'].includes(run.state);
-function quickstartItemList() {
-  return [['gate_pr', '门禁 PR', '给源码仓开一个 PR，加入 CI-workflow 门禁和工作流，合入后门禁生效。']];
-}
-function renderQuickstart() {
-  if (!quickstartRow) return;
-  const { run, items } = quickstartState, busy = quickstartBusy(run), preflight = run?.steps?.find(item => item.id === 'preflight');
-  $('quickstart-preflight').textContent = preflight && preflight.status !== 'pending' ? `预检 · ${quickstartStepStatus[preflight.status] || preflight.status}：${preflight.detail}` : '';
-  const list = $('quickstart-steps'); list.replaceChildren();
-  for (const [id, title, description] of quickstartItemList(quickstartRow)) {
-    // While a run is active, its own steps show live progress; otherwise each item shows its latest result.
-    const item = (busy && run.steps.find(entry => entry.id === id && entry.selected !== false)) || items[id];
-    const li = element('li', '', 'quickstart-step');
-    li.append(element('strong', `${title} · ${item ? (quickstartStepStatus[item.status] || item.status) : '未执行'}`), element('p', description, 'muted'));
-    if (item) li.append(element('p', item.detail));
-    if (item?.url) { const link = element('a', '查看详情', 'result-link'); link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; li.append(link); }
-    const execute = button('执行', () => startQuickstart([id])); execute.disabled = busy || quickstartStarting; execute.setAttribute('aria-label', '执行' + title); li.append(execute);
-    list.append(li);
-  }
-  // Item problems are explained on the item; only a run the preflight stopped needs a message here.
-  const stopped = run && preflight && ['blocked', 'failed'].includes(preflight.status);
-  $('quickstart-error').textContent = stopped ? quickstartErrors[run.error] || run.error || '' : '';
-}
-async function refreshQuickstart() {
-  if (!quickstartRow) return;
-  const value = await api(`/api/projects/${quickstartRow.id}/quickstart`);
-  quickstartState = { run: value.run, items: value.items || {} }; renderQuickstart();
-  clearTimeout(quickstartTimer);
-  if (quickstartBusy(value.run)) { quickstartWasBusy = true; quickstartTimer = setTimeout(() => refreshQuickstart().catch(() => {}), 1500); }
-  else if (quickstartWasBusy) { quickstartWasBusy = false; if (quickstartAfter) quickstartAfter(); }
-}
-async function startQuickstart(steps) {
-  if (!quickstartRow || quickstartStarting || quickstartBusy(quickstartState.run)) return;
-  quickstartStarting = true; $('quickstart-error').textContent = '';
-  $('quickstart-steps').querySelectorAll('button').forEach(button => { button.disabled = true; });
-  try { await api(`/api/projects/${quickstartRow.id}/quickstart`, 'POST', steps ? { steps } : {}); quickstartWasBusy = true; await refreshQuickstart(); }
-  catch (err) { $('quickstart-error').textContent = err.message; }
-  finally { quickstartStarting = false; $('quickstart-steps').querySelectorAll('button').forEach(button => { button.disabled = quickstartBusy(quickstartState.run); }); }
-}
-async function openQuickstart(row, after) {
-  quickstartRow = row; quickstartAfter = after; quickstartState = { run: null, items: {} }; quickstartWasBusy = false;
-  $('quickstart-title').textContent = '接入门禁 · ' + row.full_name;
-  $('quickstart-hint').textContent = '向源仓提出门禁配置 PR。看板由仓库列表的开关管理，不会随门禁 PR 自动开启。';
-  $('quickstart-error').textContent = ''; renderQuickstart();
-  quickstartView.showModal();
-  try { await refreshQuickstart(); } catch {}
-}
-$('quickstart-close').addEventListener('click', () => { clearTimeout(quickstartTimer); quickstartRow = null; quickstartView.close(); });

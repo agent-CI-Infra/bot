@@ -115,11 +115,12 @@ Issue 检视结果明确要求代码变更、存在原文证据且无需补充�
 
 | 操作 | 目标 | 权限 |
 | --- | --- | --- |
-| 门禁 PR | 源仓 | contents 写、pull_requests 写、workflows 写、metadata 读 |
+| 接入门禁读取事实 | 源仓 | contents、pull_requests、metadata 只读；agent 另用 contents、actions 只读的任务令牌 |
+| 门禁 PR（人确认后） | 源仓 | contents 写、pull_requests 写、workflows 写、metadata 读 |
 | 看板采集 | 源仓 | contents、issues、pull_requests、actions、metadata 只读，按安装实际授权裁剪 |
 | 看板开关 | bot 本地 | 控制台超管；不向 GitHub 写配置 |
 
-每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。CI-workflow 模板读取规则和门禁 PR 的权限边界保持原样。
+每次采集使用源仓自己的只读安装令牌并在结束时撤销，不再需要外部 dashboard 的 App 安装或 `PRIVATE_SOURCE_TOKEN`。门禁 PR 只从 CI-workflow 读取 `scripts/gate/gate.mjs`；workflow 和 `ci-gates.json` 由控制面按确认的方案生成，模型只能给出工具链版本、安装命令和各 lane 命令，触发事件、权限和 job 结构由控制面按仓库事实决定。
 
 ## 代码快照与发布
 

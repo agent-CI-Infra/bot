@@ -9,7 +9,7 @@ import { InstallationSync } from './app/installations.js';
 import { ExternalService } from './external/service.js';
 import { Onboarding } from './onboarding/service.js';
 import { IntegrationChecker } from './projects/integrations.js';
-import { Quickstart } from './projects/quickstart.js';
+import { GateOnboarding } from './projects/gate-onboarding.js';
 import { GitCache } from './agent/git-cache.js';
 import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
@@ -41,11 +41,11 @@ setTimeout(() => void installations.syncAll(), 5000).unref();
 const syncTimer = setInterval(() => void installations.syncAll(), 10 * 60_000);
 const boards = new PublicBoards(store, resolve(dirname(databasePath), 'public-boards'), process.env.BOT_GITHUB_API_URL); boards.start();
 const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_URL || undefined);
-const quickstart = new Quickstart(store, process.env.BOT_GITHUB_API_URL || undefined);
+const gateOnboarding = new GateOnboarding(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
-  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, quickstart, releases, boards,
+  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL });
 for (const [name, port] of [['webhook', 8791], ['admin', 8792]] as const) {
   const server = servers[name];

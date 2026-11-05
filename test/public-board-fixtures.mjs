@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { harness, setup, account } from './helpers.mjs';
 import { PublicBoards } from '../dist/public-board/service.js';
-import { Quickstart } from '../dist/projects/quickstart.js';
+import { GateOnboarding } from '../dist/projects/gate-onboarding.js';
 
 const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
 export async function publicBoardFixture(t, collector) {
@@ -38,9 +38,9 @@ export async function publicBoardFixture(t, collector) {
   t.after(() => new Promise(resolve => { github.close(resolve); github.closeAllConnections(); }));
   const api = `http://127.0.0.1:${github.address().port}`;
   mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/public-boards-'));
-  let boards, quickstart;
+  let boards, gateOnboarding;
   const h = await harness(t, undefined, store => ({ githubUrl: api,
-    boards: boards = new PublicBoards(store, directory, api, collector), quickstart: quickstart = new Quickstart(store, api) }));
+    boards: boards = new PublicBoards(store, directory, api, collector), gateOnboarding: gateOnboarding = new GateOnboarding(store, api) }));
   const stop = h.stop; h.stop = async () => { await boards.close(); await stop(); };
   // A service restart preserves snapshots; remove them only when the entire test finishes.
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -50,5 +50,5 @@ export async function publicBoardFixture(t, collector) {
   h.store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: h.webhook }));
   const hook = (id, headers) => h.hook(owner.path, owner.secret, id, { repository: { id: 101, full_name: 'octo/hello', private: state.private } }, { 'X-GitHub-Event': 'push', ...headers });
   const get = async path => { const response = await fetch(h.webhook + path); return { status: response.status, data: await response.json() }; };
-  return { h, boards, quickstart, owner, admin, password, state, hook, get };
+  return { h, boards, gateOnboarding, owner, admin, password, state, hook, get };
 }
