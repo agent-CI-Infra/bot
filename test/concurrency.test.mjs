@@ -72,9 +72,15 @@ test('with nothing configured a repository runs one task at a time and the next 
   const f = await fixture(t);
   f.engine.tick(); await f.reached(1); f.engine.tick(); await settle();
   assert.deepEqual(f.statuses(), ['running', 'queued', 'queued']); assert.equal(f.engine.active.size, 1);
+  let activity = (await f.admin('/api/environments/101')).value;
+  assert.deepEqual(activity.running_tasks.map(task => task.id), [f.task(1).id]);
+  assert.deepEqual(activity.queued_tasks.map(task => task.id), [f.task(2).id, f.task(3).id]);
   assert.deepEqual(f.calls.filter(c => c.path.endsWith('/parallel')).map(c => c.body), [{ tasks: 1 }]);
   await f.finish(1); f.engine.tick(); await f.reached(2);
   assert.deepEqual(f.statuses(), ['succeeded', 'running', 'queued']);
+  activity = (await f.admin('/api/environments/101')).value;
+  assert.deepEqual(activity.running_tasks.map(task => task.id), [f.task(2).id]);
+  assert.deepEqual(activity.queued_tasks.map(task => task.id), [f.task(3).id]);
   // A task alone on its computer clears it when it ends.
   const reaps = f.calls.filter(c => c.body?.request?.type === 'reap');
   assert.deepEqual(reaps.map(c => [c.body.request.workspace_id, c.body.request.idle]), [[f.task(1).workspace_id, true]]);
