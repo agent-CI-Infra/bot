@@ -310,9 +310,14 @@ test('the global permission check measures only the App definition and keeps its
   app.permissions = full; report = await check(); assert.equal(report.ok, false);
   // Even when installation listing is unavailable, a complete App definition passes; workflow_run is not required.
   app.events = events; report = await check(); assert.equal(report.ok, true); assert.deepEqual(report.app.missing, []);
+  // What only gate onboarding and Actions failure analysis need is reported beside the baseline without failing it.
+  assert.deepEqual(report.app.feature_gaps, [{ kind: 'permission', name: 'workflows', required: 'write', current: null, features: ['gate'] },
+    { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }]);
+  app.permissions = { ...full, workflows: 'write' }; app.events = [...events, 'workflow_run']; report = await check();
+  assert.deepEqual([report.ok, report.app.feature_gaps], [true, []]);
   app.owner = { login: 'someone', type: 'User' }; report = await check();
   assert.equal(report.app.settings_url, 'https://github.com/settings/apps/fixture-app/permissions');
-  assert.deepEqual(requests, ['/app', '/app', '/app', '/app']);
+  assert.deepEqual(requests, ['/app', '/app', '/app', '/app', '/app']);
   assert.equal((await admin(`/api/accounts/${bot.id}/permissions`)).status, 409);
 });
 
@@ -321,14 +326,16 @@ test('sync conclusions count installations and retain gaps, account failures and
   page.run("accounts = [{ id: 'broken', name: 'Broken App' }]");
   const conclusion = result => page.run('installationSyncNotice(' + JSON.stringify(result) + ')');
   const message = result => conclusion(result).text;
-  const installation = { id: '7', account: 'fixture', missing: [], missing_events: [] };
+  const installation = { id: '7', account: 'fixture', missing: [], missing_events: [], gaps: [] };
   const good = { results: [{ account_id: 'app', installations: [installation], app: { missing: [], missing_events: [] } }], repositories: [{ id: '101' }, { id: '202' }] };
   assert.equal(message(good), '安装列表已同步，1 个安装的权限和事件订阅都正常。');
   assert.equal(conclusion(good).tone, 'view-success');
-  const missing = structuredClone(good); missing.results[0].installations[0].missing_events = ['pull_request_review'];
-  missing.results[0].installations[0].missing = [{ permission: 'actions', required: 'write', current: 'read' }];
+  // Installation gaps cover every feature, so an installation missing only workflow_run is not all normal.
+  const missing = structuredClone(good); missing.results[0].installations[0].gaps = [
+    { kind: 'permission', name: 'actions', required: 'write', current: 'read', features: ['release', 'actions_failures'] },
+    { kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
   missing.results[0].app.missing_events = ['issue_comment'];
-  assert.match(message(missing), /并非全部正常。fixture（安装 7）：权限不足：Actions.*事件未订阅：Pull request review/);
+  assert.match(message(missing), /并非全部正常。fixture（安装 7）：Actions 需要「Read and write」，现在「Read-only」（影响发版本、Actions 失败分析）；未订阅事件 Workflow run（影响 Actions 失败分析）。点仓库行上的提示查看处理方法。/);
   assert.equal(conclusion(missing).tone, '');
   assert.match(message(missing), /App 定义仍有缺口，请到「全局设置 → 机器人账号」查看/);
   missing.results.push({ account_id: 'broken', error: 'github_http_503' });
@@ -336,10 +343,13 @@ test('sync conclusions count installations and retain gaps, account failures and
   assert.match(message(missing), /fixture（安装 7）/);
   const unchecked = structuredClone(good); unchecked.results[0].app = { error: 'app_check_failed' };
   assert.match(message(unchecked), /App 定义暂时无法核对/);
-  // An installation that satisfies the global lists can still lack what a repository's switched-on feature needs.
-  const feature = structuredClone(good); feature.repositories[0] = { id: '101', full_name: 'fixture/project-101', installation_id: '7', feature_missing: [{ feature: 'actions_failures', requirement: 'workflow_run' }] };
-  assert.equal(message(feature), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-101：已开启 Actions 失败分析，但安装未订阅 Workflow run 事件，分析不会运行。');
-  assert.equal(conclusion(feature).tone, '');
+  // Bot accounts have no installation snapshot; their repositories carry the gaps, and an App-only feature gap counts.
+  const bot = structuredClone(good); bot.repositories[0] = { id: '303', full_name: 'fixture/project-303', installation_id: null,
+    access_gaps: [{ kind: 'account', name: 'github_app', features: ['release', 'gate', 'actions_failures'] }] };
+  assert.equal(message(bot), '安装列表已同步，权限和事件订阅并非全部正常。fixture/project-303：项目挂在机器人账号上，不是 GitHub App 安装（影响发版本、接入门禁、Actions 失败分析）。点仓库行上的提示查看处理方法。');
+  assert.equal(conclusion(bot).tone, '');
+  const appFeatures = structuredClone(good); appFeatures.results[0].app.feature_gaps = [{ kind: 'event', name: 'workflow_run', features: ['actions_failures'] }];
+  assert.match(message(appFeatures), /App 定义仍有缺口/);
 });
 
 test('an installed but never started repository is hidden from the list, survives sync, and can be restored', async t => {
