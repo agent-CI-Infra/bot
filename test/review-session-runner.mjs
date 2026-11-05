@@ -12,6 +12,7 @@ import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
 import {queueWebhook} from '../dist/review/queue.js';
 import {workspace} from '../runner/workspace.mjs';
 import {pruneTasks} from '../runner/store.mjs';
+import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 
 const text=message=>typeof message.content==='string'?message.content:message.content.map(block=>block.text||'').join('');
 const actor={type:'User',login:'alice',id:5};
@@ -91,7 +92,7 @@ test('real Pi completes concurrent repository tools, keeps local reads parallel 
     const history=JSON.stringify(request.messages);assert.ok(!history.includes('exploration-token-'));
     if(n===3){assert.match(history,/compiler/);assert.match(history,/Related dependency discussion/);assert.match(history,/- compiler/);}
     if(n===4)assert.match(history,/repository_result_too_large/);
-    const calls=n===1?[call('github_read_token',{})]:n===2?[
+    const calls=n===1?[call('github_read_token',{}),call('github_read_token',{})]:n===2?[
       call('github_read',{path:'/contents/package.json'}),call('github_read',{path:'/issues/42/comments'}),call('github_read',{path:'/pulls/9/files'}),call('read_file',{path:'../context/object.json'})
     ]:n===3?[call('github_read',{path:'/git/trees/'+'c'.repeat(40)+'?recursive=1'})]:[call('finish_review',result('Checked the related source, Issue #42 and PR #9.'))];
     return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:calls}}]}};
@@ -102,8 +103,42 @@ test('real Pi completes concurrent repository tools, keeps local reads parallel 
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(d.requests.length,4);assert.ok(checkedParallel);assert.ok(d.operations.some(o=>o.type==='workspace_agent_repository_tool'));
+  assert.equal(d.operations.filter(o=>o.type==='workspace_agent_token').length,2,'both uncached token calls finish through the single mailbox');
   assert.ok(grants.some(g=>g.permissions.contents==='read'&&g.permissions.issues==='read'&&Object.values(g.permissions).every(v=>v==='read')));
   assert.ok(d.h.comments.some(c=>c.body.includes('Issue #42')));
+});
+
+for(const siblings of [false,true])test(`real Pi checks repository results against the actual next model request, siblings=${siblings}`,async t=>{
+  let content;
+  const fits=request=>estimateTokens({role:'user',content:JSON.stringify(request),timestamp:Date.now()})+8192<=128000;
+  const d=await live(t,{github:async(path,send)=>{
+    if(path.endsWith('/app')){send({slug:'fixture-app'});return true;}
+    if(path.endsWith('/users/fixture-app%5Bbot%5D')){send({id:999,login:'fixture-app[bot]'});return true;}
+    if(path.endsWith('/installation')){send({id:55,account:{id:10},permissions:{contents:'read',issues:'write',pull_requests:'write',actions:'read',metadata:'read'}});return true;}
+    if(path.endsWith('/access_tokens')){send({token:'context-read-token',expires_at:'2099-01-01T00:00:00Z',permissions:{contents:'read',issues:'read',pull_requests:'read',actions:'read',metadata:'read'}});return true;}
+    if(path==='/installation/token'){send({});return true;}
+    if(/\/git\/trees\/(?:0{40}|1{40})$/.test(path)){send({content});return true;}
+  },model:async(request,n)=>{
+    assert.ok(fits(request),'every actual provider request stays inside the existing context limit');
+    if(n===2){
+      const available=4*(128000-8192)-JSON.stringify(request).length;
+      content='x'.repeat(siblings?Math.floor(available*0.6):4*128000);
+      assert.ok(Buffer.byteLength(JSON.stringify({content}))<2*1024*1024,'the mailbox accepts the result');
+    }
+    if(n===3){
+      const replies=request.messages.filter(message=>message.role==='tool').slice(1).map(message=>JSON.parse(message.content));
+      if(siblings)assert.deepEqual(replies[0],{content},'a result that fits is returned unchanged');
+      const rejected=replies.at(-1);assert.equal(rejected.error,'repository_result_too_large');assert.match(rejected.detail,/path.*recursive.*page/);
+      const expanded=structuredClone(request);expanded.messages.findLast(message=>message.role==='tool').content=JSON.stringify({content});
+      assert.equal(fits(expanded),false,'restoring the rejected result really exceeds estimateTokens + 8192 > 128000');
+    }
+    const calls=n===1?[call('github_read_token',{})]:n===2?Array.from({length:siblings?2:1},(_,i)=>call('github_read',{path:'/git/trees/'+String(i).repeat(40)+'?recursive=1'})):[call('finish_review',result('Continued after the context tool error.'))];
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:calls}}]}};
+  }});
+  const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}),repo=d.h.store.get("SELECT * FROM repositories WHERE id='101'");
+  d.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?",d.h.store.secrets.seal({private_key:pem},'account:'+repo.account_id),repo.account_id);
+  const [task]=await d.run();assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  assert.equal(d.requests.length,3);assert.ok(!d.requests.some(request=>JSON.stringify(request).includes('context-read-token')));
 });
 
 test('real Pi keeps 26 waiting updates, injects after a model request and tool results, then restores only successful history',async t=>{
