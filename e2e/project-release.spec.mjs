@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { releaseFixture, run, target, other, writes } from '../test/release-fixtures.mjs';
+import { releaseFixture, run, target, previous, other, writes } from '../test/release-fixtures.mjs';
 import { releaseWorkflowFile, emptyPlan } from '../dist/projects/gate-plan.js';
 import { testPassword } from '../test/helpers.mjs';
 
@@ -75,6 +75,25 @@ test('候选提交已被上一版本包含时说明跳过并禁用确认，已�
     await expect(page.getByRole('button', { name: '确认打标签', exact: true })).toBeDisabled();
     await expect(page.locator('#project-page')).toContainText(existing.value.release.version);
     expect(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n).toBe(1); expect(writes(f.state)).toHaveLength(0);
+  } finally { for (const close of cleanup.reverse()) await close(); }
+});
+test('填写的版本不高于上一枚版本标签时提示更高版本并禁用确认', async ({ page }) => {
+  const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) });
+  try {
+    f.state.tags['v1.2.2'] = { type: 'commit', sha: previous };
+    await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
+    await login(page, f.h.admin, 'administrator', f.password); await page.goto(f.h.admin + '/#/projects/101/release');
+    const panel = page.locator('#project-page'), version = page.getByLabel('版本号', { exact: true }), confirm = page.getByRole('button', { name: '确认打标签', exact: true });
+    const hint = panel.getByText('版本号需要高于上一枚版本标签 v1.2.2，例如 v1.2.3 或 v1.3.0', { exact: true });
+    await expect(hint).toBeVisible(); await expect(hint).not.toHaveClass(/release-check-failed/);
+    await version.fill('v1.2.1'); await page.getByRole('button', { name: '检查候选提交' }).click();
+    const refused = panel.getByText('版本 v1.2.1 不高于上一枚版本标签 v1.2.2，不能发布。请填写更高的版本，例如 v1.2.3 或 v1.3.0。', { exact: true });
+    await expect(refused).toHaveClass(/release-check-failed/); await expect(confirm).toBeDisabled();
+    mkdirSync('.tmp/project-release-version-order', { recursive: true });
+    await page.screenshot({ path: '.tmp/project-release-version-order/not-higher.png', fullPage: true });
+    await version.fill('v1.2.3'); await page.getByRole('button', { name: '检查候选提交' }).click();
+    await expect(panel).toContainText('版本 v1.2.3 高于上一枚版本标签 v1.2.2'); await expect(confirm).toBeEnabled();
+    expect(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n).toBe(0); expect(writes(f.state)).toHaveLength(0);
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
 test('已有草稿后跳过同提交的新版本，有新提交时确认并展示第二份草稿', async ({ page }) => {

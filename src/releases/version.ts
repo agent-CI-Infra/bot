@@ -16,3 +16,9 @@ export function compareVersions(a: string, b: string): number {
   }
   return 0;
 }
+// Suggestions shown when a version is not above the previous tag: a prerelease's own stable version, otherwise the
+// next patch and the next minor. The major version is never raised for the maintainer.
+export function nextVersions(version: string): string[] {
+  const at = version.indexOf('-'), [major, minor, patch] = version.slice(1, at < 0 ? undefined : at).split('.').map(BigInt) as [bigint, bigint, bigint];
+  return at >= 0 ? [`v${major}.${minor}.${patch}`] : [`v${major}.${minor}.${patch + 1n}`, `v${major}.${minor + 1n}.0`];
+}
