@@ -11,7 +11,7 @@ test('GitHub 写入返回 500 后，过程写明原因和处理办法，点「�
     h.setBranch('ready');await h.run();h.due();await h.run();
     await page.goto(h.adminBase);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(h.password);await page.getByRole('button',{name:'登录',exact:true}).click();
     await page.goto(h.adminBase+'/#/reviews');
-    const card=page.locator('[data-card-key="101/issue/1"]');await expect(card).toContainText('检视 发布待确认');
+    const card=page.locator('[data-card-key="101/issue/1"]');await expect(card).toContainText('检视 Issue 发布待确认');
     await card.locator('.board-card-title').click();
     const timeline=page.locator('#timeline');
     await expect(timeline).toContainText('暂停或失败 · 外部服务或网络波动');
