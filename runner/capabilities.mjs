@@ -10,6 +10,6 @@ export function toolCapabilityError(config, name, args = {}) {
     if (note ? workspace.notes !== true : workspace.write !== true) return note ? 'notes_write_not_allowed' : 'review_repository_write_forbidden';
   }
   if (name === 'create_pull_request' && github.publication !== 'pull_request') return 'publication_not_allowed';
-  if (name === 'github_read_token' && (!github.permissions || !Object.keys(github.permissions).length || Object.values(github.permissions).some(value => value !== 'read'))) return 'github_read_token_not_allowed';
+  if (['github_read_token','github_read','github_search','read_job_log'].includes(name) && (!github.permissions || !Object.keys(github.permissions).length || Object.values(github.permissions).some(value => value !== 'read'))) return 'github_read_token_not_allowed';
   return null;
 }

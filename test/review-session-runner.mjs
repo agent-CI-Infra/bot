@@ -7,6 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
+import {generateKeyPairSync} from 'node:crypto';
 import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
 import {queueWebhook} from '../dist/review/queue.js';
 import {workspace} from '../runner/workspace.mjs';
@@ -67,6 +68,33 @@ async function live(t,options={}){
   const run=async()=>{h.engine.tick();await Promise.all(h.engine.active.values());return h.store.all('SELECT * FROM tasks ORDER BY rowid');};
   return {h,base,requests,operations,update,pushHead,run,until,root:id=>join(base,id),object:()=>object};
 }
+
+test('real Pi explores repository code and other Issues/PRs through the shared read-only executor',async t=>{
+  let d;const grants=[];
+  d=await live(t,{github:async(path,send,_res,body)=>{
+    if(path==='/app'){send({slug:'fixture-app'});return true;}
+    if(path==='/users/fixture-app%5Bbot%5D'){send({id:999,login:'fixture-app[bot]'});return true;}
+    if(path.endsWith('/installation')){send({id:55,account:{id:10},permissions:{contents:'read',issues:'write',pull_requests:'write',actions:'read',metadata:'read'}});return true;}
+    if(path.endsWith('/access_tokens')){grants.push(body);send({token:'exploration-token-'+grants.length,expires_at:'2099-01-01T00:00:00Z',permissions:body.permissions});return true;}
+    if(path==='/installation/token'){send({});return true;}
+    if(path.endsWith('/contents/package.json')){send({encoding:'base64',content:Buffer.from('{"scripts":{"build":"compiler"}}').toString('base64')});return true;}
+    if(path.endsWith('/issues/42/comments')){send([{body:'Related dependency discussion'}]);return true;}
+    if(path.endsWith('/pulls/9/files')){send([{filename:'package.json',patch:'- compiler'}]);return true;}
+  },model:async(request,n)=>{
+    const calls=[['github_read_token',{}],['github_read',{path:'/contents/package.json'}],['github_read',{path:'/issues/42/comments'}],['github_read',{path:'/pulls/9/files'}]];
+    if(n>1){const history=JSON.stringify(request.messages);assert.ok(!history.includes('exploration-token-'));if(n===3)assert.match(history,/compiler/);if(n===4)assert.match(history,/Related dependency discussion/);}
+    const [name,args]=calls[n-1]||['finish_review',result('Checked the related source, Issue #42 and PR #9.')];
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call(name,args)]}}]}};
+  }});
+  const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'});
+  const repo=d.h.store.get("SELECT * FROM repositories WHERE id='101'");
+  d.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?",d.h.store.secrets.seal({private_key:pem},'account:'+repo.account_id),repo.account_id);
+  const [task]=await d.run();
+  assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  assert.equal(d.requests.length,5);assert.ok(d.operations.some(o=>o.type==='workspace_agent_repository_tool'));
+  assert.ok(grants.some(g=>g.permissions.contents==='read'&&g.permissions.issues==='read'&&Object.values(g.permissions).every(v=>v==='read')));
+  assert.ok(d.h.comments.some(c=>c.body.includes('Issue #42')));
+});
 
 test('real Pi keeps 26 waiting updates, injects after a model request and tool results, then restores only successful history',async t=>{
   let releaseRequest,requestStarted,releaseTool;

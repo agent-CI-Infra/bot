@@ -113,7 +113,7 @@ test('已有草稿后跳过同提交的新版本，有新提交时确认并展�
     await page.screenshot({ path: '.tmp/project-release-active-draft/two-drafts.png', fullPage: true });
   } finally { for (const close of cleanup.reverse()) await close(); }
 });
-test('运行分析按需申请只读令牌并在页面展示脱敏日志证据', async ({ page }) => {
+test('运行分析从失败探索代码、其他Issue与PR，并展示脱敏日志证据', async ({ page }) => {
   const cleanup = [], f = await releaseFixture({ after: fn => cleanup.push(fn) }); let release;
   try {
     f.state.runs = [run({ conclusion: 'failure' })];
@@ -124,10 +124,17 @@ test('运行分析按需申请只读令牌并在页面展示脱敏日志证据',
     await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id });
     const held = new Promise(resolve => { release = resolve; }); let turn = 0;
     const tool = (id, name, args = {}) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
-    f.state.custom = async ({ path, send }) => {
+    f.state.custom = async ({ path, body, send, res }) => {
+      if(path.endsWith('/actions/jobs/2')){send({id:2,run_id:801,run_attempt:2,name:'related build',html_url:'https://github.com/fixture/project-101/actions/runs/801/job/2'});return true;}
+      if(path.endsWith('/actions/jobs/2/logs')){res.writeHead(200,{'Content-Type':'text/plain'});res.end('Earlier dependency failure');return true;}
+      if (path.endsWith('/contents/package.json')) { send({ encoding: 'base64', content: Buffer.from('{"dependencies":{}}').toString('base64') }); return true; }
+      if (path.endsWith('/issues/42/comments')) { send([{body:'Dependency removed in PR #9.'}]); return true; }
+      if (path.endsWith('/pulls/9/files')) { send([{filename:'package.json',patch:'- missing-package'}]); return true; }
       if (path !== '/v1/chat/completions') return false;
       const index = turn++; if (!index) await held;
-      send({ choices: [{ message: [tool('token', 'github_read_token'), tool('log', 'read_job_log', { job_id: 1 }), { content: '{"job_ids":[1],"advice":"日志第 1 行显示 package missing，请检查构建依赖。"}' }][index] }] }); return true;
+      const replies = [tool('token', 'github_read_token'), tool('code', 'github_read', {path:'/contents/package.json'}), tool('issue', 'github_read', {path:'/issues/42/comments'}), tool('pr', 'github_read', {path:'/pulls/9/files'}), tool('log', 'read_job_log', {job_id:1}), tool('related', 'read_job_log', {job_id:2}), {content:JSON.stringify({job_ids:[1],advice:'日志第 1 行显示 package missing；package.json、Issue #42 和 PR #9 表明依赖被移除。'})}];
+      if(index===6){const evidence=JSON.stringify(body.messages);expect(evidence).toContain('dependencies');expect(evidence).toContain('Dependency removed');expect(evidence).toContain('missing-package');}
+      send({ choices: [{ message: replies[index] }] }); return true;
     };
     await page.route('**/api/repositories/*/rules', route => route.fulfill({ json: { rules: { files: [], computer: {} } } }));
     await login(page, f.h.admin, 'administrator', f.password); await page.goto(f.h.admin + '/#/projects/101/release');
@@ -135,9 +142,12 @@ test('运行分析按需申请只读令牌并在页面展示脱敏日志证据',
     await page.waitForTimeout(5200); await expect(analyze).toBeDisabled(); release();
     await expect(page.locator('#project-page')).toContainText('日志第 1 行显示 package missing');
     await page.getByText('release 日志 · 第 1–2 行', { exact: true }).click();
-    await expect(page.locator('#project-page pre')).toContainText('Error: package missing'); await expect(page.locator('#project-page pre')).toContainText('[REDACTED]');
+    const primaryLog=page.locator('#project-page details').filter({has:page.getByText('release 日志 · 第 1–2 行',{exact:true})}).locator('pre');
+    await expect(primaryLog).toContainText('Error: package missing'); await expect(primaryLog).toContainText('[REDACTED]');
     await expect(page.locator('#project-page')).not.toContainText('observation-ui-secret'); expect(f.state.releases).toHaveLength(0);
-    const grant = f.state.tokens.find(t => t.permissions.metadata === 'read' && !t.permissions.contents); expect(grant.permissions).toEqual({ actions: 'read', metadata: 'read' });
+    const grant = f.state.tokens.at(-1); expect(grant.repository_ids).toEqual([101]); expect(grant.permissions.contents).toBe('read'); expect(grant.permissions.issues).toBe('read'); expect(grant.permissions.pull_requests).toBe('read'); expect(Object.values(grant.permissions).every(value=>value==='read')).toBe(true);
+    await expect(page.locator('#project-page')).toContainText('Issue #42 和 PR #9');
+    await expect(page.locator('#project-page')).toContainText('related build 日志 · run 801 / attempt 2');
     mkdirSync('.tmp/release-observation', { recursive: true }); await page.screenshot({ path: '.tmp/release-observation/log-evidence.png', fullPage: true });
   } finally { release?.(); for (const close of cleanup.reverse()) await close(); }
 });

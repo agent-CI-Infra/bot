@@ -425,7 +425,7 @@ test('read-only observation can finish without requesting logs and has no write 
   let input, request; f.state.custom = async ({ path, body, send }) => { if (path === '/v1/chat/completions') { request = body; input = JSON.parse(body.messages[1].content); send({ choices: [{ message: { content: '{"job_ids":[1],"advice":"Inspect the Build step output"}' } }] }); return true; } };
   const before = writes(f.state).length, tokens = f.state.tokens.length;
   const result = await f.admin(f.endpoint + '/' + r.id + '/observe', 'POST', { revision: r.revision });
-  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'read_job_log']); assert.equal(request.tool_choice, 'auto');
+  assert.equal(result.status, 201); assert.equal(result.value.release.stage, 'failed'); assert.equal(result.value.release.observation.run_id, 800); assert.equal(input.attempt, 1); assert.deepEqual(request.tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log']); assert.equal(request.tool_choice, 'auto');
   assert.ok(!JSON.stringify(request).includes('fixture-installation-'));
   assert.ok(f.state.tokens.slice(tokens).every(t => Object.values(t.permissions).every(p => p === 'read')));
   assert.ok(writes(f.state).slice(before).every(r => r.path === '/v1/chat/completions'));

@@ -21,7 +21,7 @@ export async function releaseFixture(t) {
     const repo = { id: 101, full_name: 'fixture/project-101', owner: { id: 10 }, default_branch: 'main' };
     if (state.custom && await state.custom({ method, path, body, url, send, req, res })) return;
     if (state.deny === path) return send({ message: 'fixture permission denied' }, 403);
-    if (path === '/repos/fixture/project-101/installation') return send({ id: 55, account: { id: 10 }, permissions: { contents: 'write', actions: 'write', pull_requests: 'read', metadata: 'read' } });
+    if (path === '/repos/fixture/project-101/installation') return send({ id: 55, account: { id: 10 }, permissions: { contents: 'write', actions: 'write', pull_requests: 'read', issues: 'read', checks: 'read', statuses: 'read', metadata: 'read' } });
     if (path === '/app/installations/55/access_tokens') { state.tokens.push(body); return send({ token: 'fixture-installation-' + state.tokens.length, expires_at: new Date(Date.now() + 3600000).toISOString(), permissions: body.permissions }, 201); }
     if (path === '/installation/token') return send({});
     if (path === '/repositories/101') return send(repo);
@@ -41,6 +41,7 @@ export async function releaseFixture(t) {
     if (suffix === '/git/refs' && method === 'POST') { const version = body.ref.slice('refs/tags/'.length); if (state.tags[version]) return send({}, 422); state.tags[version] = { sha: body.sha, type: 'tag', commit: state.tagObjects[body.sha] || target }; return done({ ref: body.ref, object: { sha: body.sha, type: 'tag' } }, 201); }
     if (suffix === '/actions/workflows/77/runs') return send({ total_count: state.runs.length, workflow_runs: Number(url.searchParams.get('page')) > 1 ? [] : state.runs });
     let match;
+    if ((match = /^\/actions\/jobs\/(\d+)$/.exec(suffix))) { const job = state.jobs.find(j => j.id === Number(match[1])); return job ? send(job) : send({}, 404); }
     if ((match = /^\/actions\/jobs\/(\d+)\/logs$/.exec(suffix))) { const content = state.logs[match[1]]; if (content === undefined) return send({ message: 'Logs not available' }, 404); res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end(content); return; }
     if ((match = /^\/actions\/runs\/(\d+)(?:\/attempts\/(\d+)\/jobs)?$/.exec(suffix))) {
       if (match[2]) { const jobs = state.jobs.filter(j => !j.run_attempt || j.run_attempt === Number(match[2])); return send({ total_count: jobs.length, jobs: Number(url.searchParams.get('page')) > 1 ? [] : jobs }); }

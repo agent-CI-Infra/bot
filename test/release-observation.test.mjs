@@ -14,7 +14,7 @@ async function fixture(t) {
   const record = () => f.h.store.get('SELECT * FROM project_releases WHERE id=?', created.value.release.id);
   return Object.assign(f, { record, analyze: async () => (await f.admin(f.endpoint + '/' + created.value.release.id + '/observe', 'POST', { revision: record().revision })).value.release });
 }
-test('observation actively exchanges an Actions-only token, reads redacted log windows and revokes it', async t => {
+test('observation actively exchanges a repository-read-only token, reads redacted log windows and revokes it', async t => {
   const f = await fixture(t), requests = []; let turn = 0;
   f.state.custom = async ({ path, body, send, req, res }) => {
     if (path.endsWith('/actions/jobs/1/logs')) { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('Build started\nError: missing release script\nobservation-fixture-secret\n' + req.headers.authorization.slice(7)); return true; }
@@ -23,16 +23,16 @@ test('observation actively exchanges an Actions-only token, reads redacted log w
     send({ choices: [{ message: reply }] }); return true;
   };
   const before = f.state.tokens.length, result = await f.analyze(); assert.equal(result.stage, 'failed'); assert.equal(result.observation.logs.length, 1);
-  const grant = f.state.tokens.slice(before).find(t => !t.permissions.contents); assert.deepEqual(grant, { repository_ids: [101], permissions: { actions: 'read', metadata: 'read' } });
+  const grant = f.state.tokens.slice(before).at(-1); assert.deepEqual(grant.repository_ids, [101]); assert.ok(['contents','issues','pull_requests','actions','metadata'].every(name => grant.permissions[name] === 'read')); assert.ok(Object.values(grant.permissions).every(value => value === 'read'));
   const read = f.state.requests.find(r => r.path.endsWith('/actions/jobs/1/logs')), token = read.token.slice(7);
   assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token' && r.token === 'Bearer ' + token));
   const transcript = JSON.stringify(requests); assert.ok(!transcript.includes(token)); assert.ok(!transcript.includes('observation-fixture-secret')); assert.match(transcript, /missing release script/); assert.match(transcript, /REDACTED/);
-  assert.deepEqual(requests[0].tools.map(t => t.function.name), ['github_read_token', 'read_job_log']);
+  assert.deepEqual(requests[0].tools.map(t => t.function.name), ['github_read_token', 'github_read', 'github_search', 'read_job_log']);
   assert.equal(result.observation.logs[0].first_line, 2); assert.equal(result.observation.logs[0].last_line, 4);
   assert.ok(!JSON.stringify(f.h.store.all('SELECT data FROM project_releases')).includes(token));
   assert.ok(writes(f.state).filter(r => r.path !== '/v1/chat/completions').every(r => r.path.endsWith('/git/tags') || r.path.endsWith('/git/refs')));
 });
-test('observation rejects jobs outside the bound attempt, arbitrary paths and write tools', async t => {
+test('observation rejects unavailable foreign jobs, arbitrary log paths and write tools', async t => {
   const f = await fixture(t); let turn = 0, last;
   f.state.custom = async ({ path, body, send }) => {
     if (path !== '/v1/chat/completions') return false; last = body;
@@ -42,7 +42,7 @@ test('observation rejects jobs outside the bound attempt, arbitrary paths and wr
   const result = await f.analyze(); assert.equal(result.stage, 'failed'); assert.deepEqual(result.observation.logs, []);
   assert.ok(!f.state.requests.some(r => /\/jobs\/.*\/logs/.test(r.path)));
   const replies = last.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
-  assert.ok(replies.some(r => r.error === 'job_outside_bound_attempt')); assert.ok(replies.some(r => r.error === 'invalid_arguments')); assert.ok(replies.some(r => r.error === 'tool_not_allowed'));
+  assert.ok(replies.some(r => r.error === 'github_permission_404')); assert.ok(replies.some(r => r.error === 'invalid_arguments')); assert.ok(replies.some(r => r.error === 'tool_not_allowed'));
 });
 test('a rerun during observation stops log reads from the old attempt and still revokes the token', async t => {
   const f = await fixture(t); let turn = 0;
@@ -83,7 +83,7 @@ test('unavailable logs and a later model failure preserve CI facts and revoke is
 test('an unexpectedly writable observation token is refused and revoked before any log read', async t => {
   const f = await fixture(t); let turn = 0, last;
   f.state.custom = async ({ path, body, send }) => {
-    if (path.endsWith('/access_tokens') && body.permissions.metadata === 'read' && !body.permissions.contents) {
+    if (path.endsWith('/access_tokens') && body.permissions.metadata === 'read' && body.permissions.contents === 'read') {
       send({ token: 'unexpected-write-token', permissions: { actions: 'write', metadata: 'read' } }, 201); return true;
     }
     if (path !== '/v1/chat/completions') return false; last = body;
@@ -142,4 +142,41 @@ test('observation selects the release.observe model override rather than the def
   };
   const result = await f.analyze();
   assert.equal(requested, 'observe-specific'); assert.ok(result.observation);
+});
+
+test('an Actions failure starts exploration of code, other Issues/PRs and related runs while its result stays bound', async t => {
+  const f = await fixture(t); let turn = 0, finalRequest;
+  f.state.jobs.push({ id: 2, run_id: 801, run_attempt: 2, name: 'Related build', html_url: 'https://github.com/fixture/project-101/actions/runs/801/job/2' });
+  f.state.logs[2] = 'Earlier build also failed: compiler dependency missing.';
+  f.state.custom = async ({ path, body, send }) => {
+    if (path.endsWith('/contents/package.json')) { send({ encoding: 'base64', content: Buffer.from('{"scripts":{"build":"compiler"}}').toString('base64') }); return true; }
+    if (path.endsWith('/issues/42/comments')) { send([{ body: 'The compiler dependency was renamed.' }]); return true; }
+    if (path.endsWith('/pulls/9/files')) { send([{ filename: 'package.json', patch: '- compiler dependency' }]); return true; }
+    if (path === '/search/issues') { send({ items: [{ number: 42, repository_url: f.apiUrl + '/repos/fixture/project-101' }] }); return true; }
+    if (path !== '/v1/chat/completions') return false;
+    finalRequest = body;
+    const messages = [invoke(call('token', 'github_read_token')), invoke(
+      call('code', 'github_read', { path: '/contents/package.json?ref=' + 'a'.repeat(40) }),
+      call('issue', 'github_read', { path: '/issues/42/comments' }),
+      call('pr', 'github_read', { path: '/pulls/9/files' }),
+      call('search', 'github_search', { query: 'compiler' }),
+      call('related-log', 'read_job_log', { job_id: 2 })
+    ), final('package.json uses compiler; Issue #42, PR #9 and the related build corroborate a dependency rename.')];
+    send({ choices: [{ message: messages[turn++] }] }); return true;
+  };
+  // The trigger's snapshot remains restricted to its own run even though exploration can read another run.
+  const originalJobs = f.state.jobs;
+  const handler = f.state.custom;
+  f.state.custom = async request => {
+    if (request.path.endsWith('/actions/runs/800/attempts/1/jobs')) { request.send({ total_count: 1, jobs: originalJobs.filter(j => j.run_id === 800) }); return true; }
+    return handler(request);
+  };
+  const result = await f.analyze();
+  assert.equal(result.observation.run_id, 800); assert.deepEqual(result.observation.jobs.map(j => j.id), [1]);
+  assert.equal(result.observation.logs[0].run_id, 801); assert.equal(result.observation.logs[0].attempt, 2);
+  const evidence = finalRequest.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
+  assert.ok(evidence.some(value => value.content?.includes('"scripts"')));
+  assert.ok(evidence.some(value => Array.isArray(value) && value[0]?.body?.includes('renamed')));
+  assert.ok(evidence.some(value => Array.isArray(value) && value[0]?.filename === 'package.json'));
+  assert.ok(!writes(f.state).some(r => r.path.includes('/issues') || r.path.includes('/pulls') || r.path.endsWith('/rerun')));
 });
