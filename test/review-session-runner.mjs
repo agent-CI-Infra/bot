@@ -69,9 +69,15 @@ async function live(t,options={}){
   return {h,base,requests,operations,update,pushHead,run,until,root:id=>join(base,id),object:()=>object};
 }
 
-test('real Pi explores repository code and other Issues/PRs through the shared read-only executor',async t=>{
-  let d;const grants=[];
-  d=await live(t,{github:async(path,send,_res,body)=>{
+test('real Pi completes concurrent repository tools, keeps local reads parallel and recovers from oversized results',async t=>{
+  let d,checkedParallel=false;const grants=[];
+  d=await live(t,{execute:async(request,{base})=>{
+    if(request.type==='workspace_agent_repository_tool'&&!checkedParallel){
+      // The first repository reply waits for read_file: making all Pi tools sequential would deadlock here.
+      await until(async()=>{const events=await readFile(join(base,request.workspace_id,'agent/events.jsonl'),'utf8');return events.split('\n').filter(Boolean).map(JSON.parse).some(event=>event.type==='tool'&&event.name==='read_file');});
+      checkedParallel=true;
+    }
+  },github:async(path,send,_res,body)=>{
     if(path==='/app'){send({slug:'fixture-app'});return true;}
     if(path==='/users/fixture-app%5Bbot%5D'){send({id:999,login:'fixture-app[bot]'});return true;}
     if(path.endsWith('/installation')){send({id:55,account:{id:10},permissions:{contents:'read',issues:'write',pull_requests:'write',actions:'read',metadata:'read'}});return true;}
@@ -80,18 +86,22 @@ test('real Pi explores repository code and other Issues/PRs through the shared r
     if(path.endsWith('/contents/package.json')){send({encoding:'base64',content:Buffer.from('{"scripts":{"build":"compiler"}}').toString('base64')});return true;}
     if(path.endsWith('/issues/42/comments')){send([{body:'Related dependency discussion'}]);return true;}
     if(path.endsWith('/pulls/9/files')){send([{filename:'package.json',patch:'- compiler'}]);return true;}
+    if(path.endsWith('/git/trees/'+'c'.repeat(40))){send({tree:[{path:'x'.repeat(2*1024*1024)}]});return true;}
   },model:async(request,n)=>{
-    const calls=[['github_read_token',{}],['github_read',{path:'/contents/package.json'}],['github_read',{path:'/issues/42/comments'}],['github_read',{path:'/pulls/9/files'}]];
-    if(n>1){const history=JSON.stringify(request.messages);assert.ok(!history.includes('exploration-token-'));if(n===3)assert.match(history,/compiler/);if(n===4)assert.match(history,/Related dependency discussion/);}
-    const [name,args]=calls[n-1]||['finish_review',result('Checked the related source, Issue #42 and PR #9.')];
-    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call(name,args)]}}]}};
+    const history=JSON.stringify(request.messages);assert.ok(!history.includes('exploration-token-'));
+    if(n===3){assert.match(history,/compiler/);assert.match(history,/Related dependency discussion/);assert.match(history,/- compiler/);}
+    if(n===4)assert.match(history,/repository_result_too_large/);
+    const calls=n===1?[call('github_read_token',{})]:n===2?[
+      call('github_read',{path:'/contents/package.json'}),call('github_read',{path:'/issues/42/comments'}),call('github_read',{path:'/pulls/9/files'}),call('read_file',{path:'../context/object.json'})
+    ]:n===3?[call('github_read',{path:'/git/trees/'+'c'.repeat(40)+'?recursive=1'})]:[call('finish_review',result('Checked the related source, Issue #42 and PR #9.'))];
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:calls}}]}};
   }});
   const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'});
   const repo=d.h.store.get("SELECT * FROM repositories WHERE id='101'");
   d.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?",d.h.store.secrets.seal({private_key:pem},'account:'+repo.account_id),repo.account_id);
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
-  assert.equal(d.requests.length,5);assert.ok(d.operations.some(o=>o.type==='workspace_agent_repository_tool'));
+  assert.equal(d.requests.length,4);assert.ok(checkedParallel);assert.ok(d.operations.some(o=>o.type==='workspace_agent_repository_tool'));
   assert.ok(grants.some(g=>g.permissions.contents==='read'&&g.permissions.issues==='read'&&Object.values(g.permissions).every(v=>v==='read')));
   assert.ok(d.h.comments.some(c=>c.body.includes('Issue #42')));
 });

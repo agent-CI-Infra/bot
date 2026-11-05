@@ -1,6 +1,10 @@
-import {mkdir,readFile,writeFile,rename,open} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,rename,open,unlink} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {environment,workspaceTag} from './command.mjs';
+
+async function currentRepositoryRequest(dir){
+  return readFile(dir+'/repository-request.json','utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+}
 
 // Policy commands run while Pi waits for publication. Reap command leftovers without killing
 // that exact agent; an explicit task release still reaps everything.
@@ -81,11 +85,20 @@ export async function agentOperation(input,root){
   if(input.type==='workspace_agent_reply'||input.type==='workspace_agent_pull_request'||input.type==='workspace_agent_repository_tool'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
     const pr=input.type==='workspace_agent_pull_request',repository=input.type==='workspace_agent_repository_tool';
-    const current=JSON.parse(await readFile(dir+(pr?'/pr-request.json':repository?'/repository-request.json':'/request.json'),'utf8'));if(current.id!==input.request_id)throw new Error('agent_request_changed');
+    const current=repository?await currentRepositoryRequest(dir):JSON.parse(await readFile(dir+(pr?'/pr-request.json':'/request.json'),'utf8'));if(current?.id!==input.request_id)throw new Error('agent_request_changed');
     const prefix=dir+(pr?'/pr-reply-':repository?'/repository-reply-':'/reply-')+input.request_id;
-    const path=prefix+'.tmp',file=await open(path,input.offset===0?'w':'r+',0o600);
-    try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');await file.write(Buffer.from(input.base64,'base64'),0,Buffer.from(input.base64,'base64').length,input.offset);}finally{await file.close();}
-    if(input.final)await rename(path,prefix+'.json');return {written:true};
+    const path=prefix+'.tmp';
+    try{
+      const file=await open(path,input.offset===0?'w':'r+',0o600);
+      try{if((await file.stat()).size!==input.offset)throw new Error('agent_reply_offset');await file.write(Buffer.from(input.base64,'base64'),0,Buffer.from(input.base64,'base64').length,input.offset);}finally{await file.close();}
+      if(input.final)await rename(path,prefix+'.json');
+      if(!repository||(await currentRepositoryRequest(dir))?.id===input.request_id)return {written:true};
+    }catch(error){
+      // Cancellation can remove a partial reply after validation but before open/rename.
+      if(!repository||(await currentRepositoryRequest(dir))?.id===input.request_id)throw error;
+    }
+    await unlink(path).catch(()=>{});await unlink(prefix+'.json').catch(()=>{});
+    throw new Error('agent_request_changed');
   }
   throw new Error('unknown_agent_operation');
 }

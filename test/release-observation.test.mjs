@@ -44,6 +44,24 @@ test('observation rejects unavailable foreign jobs, arbitrary log paths and writ
   const replies = last.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
   assert.ok(replies.some(r => r.error === 'github_permission_404')); assert.ok(replies.some(r => r.error === 'invalid_arguments')); assert.ok(replies.some(r => r.error === 'tool_not_allowed'));
 });
+test('observation receives a tool error for an oversized repository result and continues with a narrower read', async t => {
+  const f = await fixture(t); let turn = 0, last;
+  f.state.custom = async ({ path, body, send }) => {
+    if (path.endsWith('/git/trees/' + 'c'.repeat(40))) { send({ tree: [{ path: 'x'.repeat(2 * 1024 * 1024) }] }); return true; }
+    if (path.endsWith('/contents/package.json')) { send({ encoding: 'base64', content: Buffer.from('{"scripts":{}}').toString('base64') }); return true; }
+    if (path !== '/v1/chat/completions') return false;
+    last = body;
+    const reply = [invoke(call('token', 'github_read_token')), invoke(call('large', 'github_read', { path: '/git/trees/' + 'c'.repeat(40) + '?recursive=1' })),
+      invoke(call('small', 'github_read', { path: '/contents/package.json' })), final('缩小读取范围后确认缺少 release script。')][turn++];
+    send({ choices: [{ message: reply }] }); return true;
+  };
+  const result = await f.analyze();
+  assert.equal(result.observation_error, null); assert.match(result.observation.advice, /缩小读取范围/);
+  const replies = last.messages.filter(message => message.role === 'tool').map(message => JSON.parse(message.content));
+  assert.equal(replies[1].error, 'repository_result_too_large'); assert.match(replies[1].detail, /path.*recursive.*page/);
+  assert.match(replies[2].content, /scripts/);
+  assert.ok(f.state.requests.some(request => request.method === 'DELETE' && request.path === '/installation/token'));
+});
 test('a rerun during observation stops log reads from the old attempt and still revokes the token', async t => {
   const f = await fixture(t); let turn = 0;
   f.state.custom = async ({ path, send }) => {

@@ -68,6 +68,26 @@ test('decoded repository text is redacted, permission errors are explicit and a 
   await assert.rejects(denied.execute('github_read_token', {}), /disabled/);
 });
 
+test('serialized UTF-8 results use the existing 2 MiB capacity without truncating JSON or imposing a smaller quota', async t => {
+  const f = await explorerFixture(t), limit = 2 * 1024 * 1024;
+  await f.explorer.execute('github_read_token', {});
+  let data;
+  f.state.custom = async ({ path, send }) => {
+    if (!path.includes('/git/trees/') && path !== '/search/issues') return false;
+    send(data); return true;
+  };
+  for (const size of [600000, limit, limit + 1]) {
+    const length = size - Buffer.byteLength(JSON.stringify({ content: '' }));
+    data = { content: '仓'.repeat(Math.floor(length / 3)) + 'x'.repeat(length % 3) };
+    assert.equal(Buffer.byteLength(JSON.stringify(data)), size);
+    const result = await f.explorer.execute('github_read', { path: '/git/trees/' + 'a'.repeat(40) + '?recursive=1' });
+    if (size <= limit) assert.deepEqual(result, data);
+    else { assert.equal(result.error, 'repository_result_too_large'); assert.match(result.detail, /path.*recursive.*page/); }
+  }
+  data = { items: [{ repository_url: f.apiUrl + '/repos/fixture/project-101', body: 'x'.repeat(limit) }] };
+  assert.equal((await f.explorer.execute('github_search', { query: 'dependency' })).error, 'repository_result_too_large');
+});
+
 test('review and development Pi adapters execute the same repository tools through the control plane', async t => {
   const f = await explorerFixture(t);
   const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'exploration-model-key', model_name: 'fixture' })).value.model;
@@ -111,4 +131,23 @@ test('runner repository-tool mailbox binds replies to the current request and pr
   const reply = Buffer.from(JSON.stringify({ content: '仓库内容'.repeat(100) }));
   for (let offset = 0; offset < reply.length; offset += 25) await agentOperation({ type: 'workspace_agent_repository_tool', request_id: id, base64: reply.subarray(offset, offset + 25).toString('base64'), offset, final: offset + 25 >= reply.length }, root);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'repository-reply-' + id + '.json'))), JSON.parse(reply));
+});
+
+test('Pi delivery ignores an expired request but still interrupts on genuine mailbox failures', async t => {
+  const f = await explorerFixture(t);
+  const model = (await f.admin('/api/models', 'POST', { repository_id: '101', api_url: f.apiUrl + '/v1', api_key: 'late-reply-model', model_name: 'fixture' })).value.model;
+  await f.admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id });
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('late','101','review.issue','running','Read')");
+  const task = f.h.store.get("SELECT * FROM tasks WHERE id='late'");
+  for (const error of ['agent_request_changed', 'agent_reply_offset', 'runner_operation_failed']) {
+    let delivered = false;
+    const workspace = { log() {}, async call(_key, input) {
+      if (input.type !== 'workspace_agent_poll') return {};
+      return delivered ? { state: 'completed', result: { summary: 'Continued after the read.', findings: [], requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '' } }
+        : { state: 'running', repository_tool: { id: 'a'.repeat(48), name: 'github_read', arguments: { path: '/issues/42/comments' } } };
+    }, async deliver() { delivered = true; return { error }; } };
+    const running = agentLoop(f.h.store, task, workspace, f.redactor, async () => {}, {}, f.tokens);
+    if (error === 'agent_request_changed') assert.match((await running).summary, /Continued/);
+    else await assert.rejects(running, { code: 'execution_interrupted' });
+  }
 });
