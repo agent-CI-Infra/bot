@@ -65,6 +65,7 @@ export class ReleaseService {
       const preview = await withGitHub(this.store, id, this.apiUrl, { pull_requests: 'read' }, redactor, github => inspect(github, input.version as string, releaseNotesPrompt(this.store, id)));
       if (preview.target_sha !== input.target_sha || fingerprint(preview) !== saved.fingerprint) return fail(409, 'release_candidate_changed');
       if (preview.no_changes) return fail(409, 'release_no_changes');
+      if (preview.version_behind) return fail(409, 'release_version_not_higher');
       if (!preview.available) return fail(409, 'release_preflight_failed');
       const row = this.store.transaction(() => {
         releaseIdleDrafts(this.store);

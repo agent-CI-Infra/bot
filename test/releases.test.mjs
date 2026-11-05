@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validVersion, compareVersions } from '../dist/releases/version.js';
+import { validVersion, compareVersions, nextVersions } from '../dist/releases/version.js';
 import { releaseWorkflow, filter } from '../dist/releases/workflow.js';
 import { noCI, noRelease } from '../dist/releases/preflight.js';
 import { releaseFixture, workflow, writes, target, previous, other, tagObject, run } from './release-fixtures.mjs';
@@ -183,6 +183,55 @@ test('an empty source range blocks preflight and confirmation without creating a
     assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 0);
     assert.deepEqual(f.state.tags, tags); assert.deepEqual(f.state.releases, []); assert.deepEqual(writes(f.state), []);
   }
+});
+test('version hints keep the major version and lead a prerelease to its stable version', () => {
+  assert.deepEqual(nextVersions('v1.2.3'), ['v1.2.4', 'v1.3.0']);
+  assert.deepEqual(nextVersions('v0.1.0'), ['v0.1.1', 'v0.2.0']);
+  assert.deepEqual(nextVersions('v1.3.0-beta.2'), ['v1.3.0']);
+  assert.deepEqual(nextVersions('v999999999999999999.0.9'), ['v999999999999999999.0.10', 'v999999999999999999.1.0']);
+});
+test('a version not above the previous reachable tag is refused with a hint before any write', async t => {
+  const f = await releaseFixture(t);
+  // v1.2.2 is reachable from the candidate; v99.0.0 sits on a commit outside its history and is not compared.
+  f.state.tags = { 'v1.2.2': { type: 'commit', sha: previous }, 'v99.0.0': { type: 'commit', sha: other } };
+  for (const version of ['v1.2.1', 'v1.2.2-rc.1', 'v0.9.0']) {
+    const p = await f.preview(version);
+    assert.equal(p.available, false, version); assert.equal(p.version_behind, true, version); assert.equal(p.no_changes, false, version);
+    assert.equal(p.previous_tag.name, 'v1.2.2'); assert.deepEqual(p.suggested_versions, ['v1.2.3', 'v1.3.0']);
+    const failed = p.checks.filter(c => !c.ok); assert.equal(failed.length, 1, version);
+    assert.equal(failed[0].message, `版本 ${version} 不高于上一枚版本标签 v1.2.2，不能发布。请填写更高的版本，例如 v1.2.3 或 v1.3.0。`);
+    const result = await f.admin(f.endpoint, 'POST', { version, target_sha: target, credential: p.credential });
+    assert.equal(result.status, 409, version); assert.equal(result.value.error, 'release_version_not_higher'); assert.equal(result.value.release, undefined);
+  }
+  await f.service.tick();
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 0); assert.deepEqual(writes(f.state), []);
+  const blank = await f.preview('');
+  assert.equal(blank.checks.at(-1).ok, false); assert.equal(blank.checks.at(-1).message, '版本号需要高于上一枚版本标签 v1.2.2，例如 v1.2.3 或 v1.3.0');
+  for (const version of ['v1.2.3', 'v1.2.3-beta.1', 'v2.0.0']) {
+    const p = await f.preview(version);
+    assert.equal(p.available, true, version); assert.equal(p.version_behind, false, version);
+    assert.equal(p.checks.at(-1).message, `版本 ${version} 高于上一枚版本标签 v1.2.2`);
+  }
+  assert.equal((await f.create('v1.2.3')).status, 201);
+});
+test('a prerelease previous tag accepts later prereleases and its stable version only', async t => {
+  const f = await releaseFixture(t); f.state.tags = { 'v1.3.0-beta.2': { type: 'commit', sha: previous } };
+  const lower = await f.preview('v1.3.0-beta.1');
+  assert.equal(lower.available, false); assert.match(lower.checks.at(-1).message, /不高于上一枚版本标签 v1\.3\.0-beta\.2.*例如 v1\.3\.0。$/);
+  for (const version of ['v1.3.0-beta.10', 'v1.3.0-rc.1', 'v1.3.0']) assert.equal((await f.preview(version)).available, true, version);
+  assert.equal((await f.preview('v1.2.9')).version_behind, true);
+});
+test('without a previous version tag the version order is not compared', async t => {
+  const f = await releaseFixture(t), p = await f.preview('v0.0.1');
+  assert.equal(p.available, true); assert.equal(p.version_behind, false); assert.deepEqual(p.suggested_versions, []);
+  assert.deepEqual(p.checks.at(-1), { ok: true, message: '还没有上一枚版本标签，不比较版本号' });
+});
+test('an existing record of a version now below a newer tag is still returned for viewing and recovery', async t => {
+  const f = await releaseFixture(t), first = await f.create('v1.2.3'); assert.equal(first.status, 201);
+  f.state.tags['v1.3.0'] = { type: 'commit', sha: previous };
+  assert.equal((await f.preview('v1.2.3')).version_behind, true);
+  const again = await f.create('v1.2.3'); assert.equal(again.status, 201); assert.equal(again.value.release.id, first.value.release.id);
+  assert.equal(f.h.store.get('SELECT COUNT(*) n FROM project_releases').n, 1);
 });
 function advanceHead(f) {
   f.state.histories[f.state.head] = structuredClone(f.state.commits);

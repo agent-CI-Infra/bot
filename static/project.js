@@ -148,7 +148,10 @@ function releaseSection() {
       if (current.id !== id || value !== version.value) return;
       current.releasePreview = p;
       version.pattern = p.version_pattern || '';
-      preview.replaceChildren(...(p.checks || []).map(c => note(c.message + (c.reason ? ' ' + c.reason : ''))));
+      // Failed checks stand out once a well-formed version is entered; before that they only describe what is needed.
+      preview.replaceChildren(...(p.checks || []).map(c => {
+        const item = note(c.message + (c.reason ? ' ' + c.reason : '')); if (!c.ok && p.version_valid) item.classList.add('release-check-failed'); return item;
+      }));
       if (p.detail) preview.append(note(p.detail));
       if (p.target_sha) preview.append(facts([['默认分支', p.default_branch], ['目标提交', link(p.target_url, p.target_sha)], ['提交标题', p.target_title], ['版本', !p.version_valid ? '请填写合法版本号' : p.prerelease ? '预发布' : '稳定版'],
         ['上一枚版本', p.previous_tag ? `${p.previous_tag.name} · ${p.previous_tag.sha}` : '从仓库历史起算'], ['发行说明规则', `${p.skill.source} · ${p.skill.path || p.skill.version}`],
