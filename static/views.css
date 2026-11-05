@@ -264,12 +264,14 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .gate-message-user{align-self:flex-end;background:#e6f1f3}.gate-message-system{align-self:stretch;max-width:none;background:#f4f7f9;color:#365564}
 .gate-message-pending{align-self:flex-start;color:#637c89;font-style:italic}.gate-message .result-link{color:#16636b;text-underline-offset:3px;font-weight:600}
 .gate-compose{display:grid;gap:8px;padding:12px 16px;border-top:1px solid #e3eaf0}.gate-compose textarea{min-height:64px}.gate-compose .actions{justify-content:space-between}
-.gate-plan{min-height:0;overflow:auto;padding:14px 16px 18px;display:grid;gap:12px;align-content:start;background:#fbfdfe}.gate-plan h3{margin:0}.gate-plan>p{margin:0;overflow-wrap:anywhere}
+.gate-plan{min-height:0;min-width:0;overflow:auto;padding:14px 16px 18px;display:grid;grid-template-columns:minmax(0,1fr);gap:12px;align-content:start;background:#fbfdfe}.gate-plan h3{margin:0}.gate-plan>p{margin:0;overflow-wrap:anywhere}
 .gate-plan fieldset{border:1px solid #e9c27a;border-radius:7px;padding:10px 12px;background:#fffaf0}.gate-plan legend{font-size:13px;font-weight:600;color:#875a0a;padding:0 4px}
 .gate-tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.gate-plan-lanes{display:grid;gap:10px}
 .gate-plan-lanes label>strong{font:600 13px/1.4 ui-monospace,monospace;color:#16636b}.gate-plan-lanes label>.muted{line-height:1.5}
+.gate-lane{display:grid;gap:4px}.gate-lane>label.check{font-size:12px;color:#52707d}
 .gate-plan textarea{min-height:52px;font:12px/1.6 ui-monospace,monospace}.gate-plan textarea:disabled,.gate-plan textarea:read-only,.gate-plan input:read-only{background:#f4f7f9;color:#4d6875}
-.gate-plan details{font-size:13px}.gate-plan summary{cursor:pointer;width:fit-content;color:#16636b;font-weight:600}.gate-plan details h4{margin:10px 0 4px;font:600 12px ui-monospace,monospace}
+.gate-plan details{font-size:13px;min-width:0}.gate-plan summary{cursor:pointer;width:fit-content;color:#16636b;font-weight:600}.gate-plan details h4{margin:10px 0 4px;font:600 12px ui-monospace,monospace}
 .gate-plan details pre{margin:0;padding:8px 10px;border:1px solid #e3eaee;border-radius:6px;background:#fff;max-height:none;white-space:pre;overflow:auto}
+.gate-diff .diff-line{display:block;min-height:1.6em}.gate-diff .diff-add{background:#e6f4ea;color:#1d5c34}.gate-diff .diff-del{background:#fbeaea;color:#8a2328}.gate-diff .diff-hunk{color:#637c89}
 @media(max-width:860px){.gate-chat{display:block;overflow:auto}.gate-conversation{border-right:0;border-bottom:1px solid #e3eaf0}.gate-messages{overflow:visible}.gate-plan{overflow:visible}}
 @media(max-width:560px){.gate-lanes{grid-template-columns:minmax(0,1fr)}.gate-lanes dd{margin-bottom:6px}.gate-tools{grid-template-columns:minmax(0,1fr)}.gate-intro{padding:14px}}

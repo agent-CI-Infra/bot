@@ -84,20 +84,31 @@ https://github.com/apps/agent-ci-infra-bot/installations/new
 **接入门禁** 是一段和 agent 的对话，不改变看板开关：
 
 1. **先看五层介绍**：点「接入门禁」后，对话框先说明 build、pr-ready、pr-merge、daily、release 各在什么时候运行。此时不会读写仓库，也不会创建分支或 PR。
-2. **开始适配**：控制面用只读安装令牌查看默认分支：语言、根目录的构建和依赖文件（`package.json`、`pyproject.toml`、`Makefile`、`go.mod`、`Cargo.toml` 等）、已有 workflow 及其命令、是否已有 `ci.yml` 或 `ci-gates.json`、有没有未合入的门禁 PR，以及默认分支是否启用 merge queue（先看规则集，再看分支保护；判断不了就在对话里问你）。
+2. **开始适配**：控制面用只读安装令牌查看默认分支：语言、根目录的构建和依赖文件（`package.json`、`pyproject.toml`、`Makefile`、`go.mod`、`Cargo.toml` 等）、已有 workflow 的触发事件、job 和命令、是否已有 `ci.yml` 或 `ci-gates.json`、规则集要求的检查、有没有未合入的门禁 PR，以及默认分支是否启用 merge queue（先看规则集，再看分支保护；判断不了就在对话里问你）。
 3. **和 agent 定方案**：项目已启动并选了模型时，agent 用项目默认模型和同一套仓库只读工具提出工具链、安装命令和各 lane 的命令，并注明来源；不确定的命令留空并在对话里问你。你可以回复它，也可以直接修改右侧方案。仓库还没启动或没有可用模型时，右侧是只按仓库中确定的命令整理的初步方案，由你补充后确认。确认之前，控制面不写仓库、不推分支，也不运行仓库里的脚本。
-4. **确认后开 PR**：点「确认并创建门禁 PR」后，控制面按你确认的那一版方案生成文件并开 PR。
+4. **审视已有 CI**：仓库已经有 CI 或门禁时，agent 先审视现有配置：哪些已有命令该放进哪一层、哪些 lane 空着或放错了、merge queue 下没有监听 `merge_group` 的必需检查、报告合并提交而不是 PR head 的检查、`pull_request_target` 里运行不受信任代码、过宽的权限、会互相取消的 concurrency，并给出带文件和行号的建议。门禁 PR 只改门禁 job、它在所在 workflow 里需要的触发事件、`ci-gates.json`，以及缺少时的 `release.yml` 和 `gate.mjs`；对其他 job 或 workflow 的建议由你自己决定是否修改。已经接入门禁的仓库，右侧方案就是当前配置，不改就没有改动，也不会开空 PR。
+5. **确认后开 PR**：确认前展开「预览将提交的文件」，新增的文件显示全文，修改的文件显示改动；预览按表单当前内容生成，包括还没发送的修改。点「确认并创建门禁 PR」后，控制面按你确认的那一版方案生成文件并开 PR；默认分支上的这些文件在对话开始后变过的话，不会写入，需要重新开始。
+
+### 各层放什么
+
+| lane | 推荐放 | 不建议放 |
+| --- | --- | --- |
+| build | 编译、打包、类型检查等快速检查；它在 PR、队列里，以及没有 merge queue 时合入后都会跑 | 测试、联网检查 |
+| pr-ready | 合入前必须通过、结果稳定的检查：lint、格式、单元测试、用假服务的快速集成测试 | 不稳定的测试、需要真实外部服务或密钥的检查（fork 来的 PR 拿不到 secrets） |
+| pr-merge | 有 merge queue 时，对排队的合并结果跑单次 PR 嫌慢的更全的检查 | 没有 merge queue 时留空，它不会触发 |
+| daily | 耗时长或依赖外部环境的全量测试、端到端测试、真实服务集成、性能基准、依赖审计；默认只记录失败（observe） | 本该在合入前拦住的问题 |
+| release | 发布前核对：构建发布物、检查版本号和 changelog | 真正的发包，写在仓库自己的 Release workflow 里 |
+
+每个 lane 可以勾选「失败只记录（observe）」：失败记为 `observe_fail`，不让 `gate` job 失败，后面的命令照常运行。新接入的仓库默认只有 daily 这样设置，和 CI-workflow 的建议一致。
 
 门禁 PR 的内容：
 
-- 门禁 workflow：默认是 `.github/workflows/ci.yml`。仓库已有 `ci.yml` 时不会覆盖，门禁 job 放在 `.github/workflows/ci-gates.yml`，PR 正文说明怎样并进 `ci.yml`。触发事件、权限和 job 结构由控制面决定；pull_request 上报告 PR head 提交，不是 GitHub 的合并提交。
-- `.github/ci-gates.json`：各 lane 的命令。空 lane 运行时报告 `not_applicable`，只说明还没有配置检查，不表示检查通过。
+- 门禁 job：放在哪里由方案决定，默认依次是已有的门禁 workflow、新建的 `.github/workflows/ci.yml`、新建的 `.github/workflows/ci-gates.yml`；也可以并入已有的 `ci.yml` 或 `ci-gates.yml`（发版本的预检和门禁状态在这两个文件里找门禁）。并入已有文件时不会覆盖它：原来运行 `gate.mjs` 的 job 被替换（保留它的显示名称，也就是必需检查的名字），没有就新增 `gate` job；只补缺少的触发事件，不删除任何触发；文件里还有别的触发事件时，门禁 job 带 `if:` 只在门禁事件上运行。补上的触发事件也会让同一文件里的其他 job 在这些事件上运行，对话和 PR 正文会提醒。pull_request 上报告 PR head 提交，不是 GitHub 的合并提交。
+- `.github/ci-gates.json`：各 lane 的命令和 observe 设置。已有文件只改方案改了的部分，其他配置项（level、caseCatalog、events、超时等）原样保留。空 lane 运行时报告 `not_applicable`，只说明还没有配置检查，不表示检查通过。
 - `scripts/gate/gate.mjs`：从 `agent-CI-Infra/CI-workflow` 复制；仓库已有时沿用。
-- `.github/workflows/release.yml`：版本标签（如 `v1.2.3`、`v1.2.3-beta.1`）触发 release lane；仓库已有时不覆盖。框架不含 PyPI、npm 或镜像发布步骤。
+- `.github/workflows/release.yml`：版本标签（如 `v1.2.3`、`v1.2.3-beta.1`）触发 release lane。新接入的仓库没有时新增；已接入门禁的仓库只在 release lane 有命令时新增；已有时不覆盖。框架不含 PyPI、npm 或镜像发布步骤。
 
-**merge queue**：默认分支启用了 merge queue 时，这次只提交进入队列之前的门禁，也就是 pull_request 上的 build 和 pr-ready；不包含 `merge_group`，也不包含 push 到默认分支后才运行的门禁，pr-merge 留空。daily 和 release 有命令时照常保留。没有 merge queue 的仓库保留 CI-workflow 的完整事件（pull_request、merge_group、push 到默认分支、有命令时的定时任务）。如果之后要把 `gate` 设为合并队列的必需检查，需要先给门禁 workflow 加上 `merge_group`，否则队列会一直等这项检查。
-
-默认分支上已有 `.github/ci-gates.json` 的仓库视为已接入，对话直接说明这一点，不再开覆盖它的 PR；需要调整时直接改这个文件。
+**merge queue**：门禁总是监听 `merge_group`，在队列里运行 build 和 pr-merge，所以合入后可以把 `gate` 设为必需检查，队列不会一直等它。默认分支启用了 merge queue 时，合入默认分支后不再重复运行门禁（不监听 push 到默认分支）；没有 merge queue 的仓库在合入默认分支后再跑一次 build。daily 有命令时加每天的定时任务；concurrency 只让同一分支的 PR 运行互相替换，合入不会取消正在运行的队列或 daily。
 
 使用时，先合并并配置门禁 PR，再到项目页「发版本」检查版本和目标提交。相对上一枚可达的合法版本标签没有新提交时，页面说明跳过，不能确认；没有上一枚标签则按首次发布处理。填写的版本必须按 SemVer 高于上一枚可达版本标签，否则页面给出可填写的更高版本，不能确认。有新提交时，人确认后创建标签，仓库 Release Actions 成功后生成草稿，再由人点击「正式发布」。定时发版本和自动计算版本号不在当前框架范围内。
 

@@ -92,7 +92,7 @@ export async function fakeGitHub(t) {
       if (branch === 'main' && !Object.keys(target.files).length) return send(409, { message: 'Git Repository is empty.' });
       return branch === 'main' || target.branches[branch] ? send(200, { object: { sha: 'a'.repeat(40) } }) : send(404, {});
     }
-    if (rest.startsWith('/rules/branches/')) return target.queue === 'hidden' ? send(403, {}) : send(200, target.queue === 'ruleset' ? [{ type: 'pull_request' }, { type: 'merge_queue', ruleset_id: 77 }] : []);
+    if (rest.startsWith('/rules/branches/')) return target.queue === 'hidden' ? send(403, {}) : send(200, target.queue === 'ruleset' ? [{ type: 'pull_request' }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'unit' }] } }, { type: 'merge_queue', ruleset_id: 77 }] : []);
     if (rest.startsWith('/branches/')) return send(200, { name: 'main', protected: target.protected || target.queue === 'graphql' || target.queue === 'hidden' });
     if (rest === '/git/refs' && method === 'POST') { if (!can('contents')) return send(403, {}); target.branches[body.ref.replace('refs/heads/', '')] = {}; return send(201, { ref: body.ref }); }
     if (rest === '/pulls' && method === 'POST') {

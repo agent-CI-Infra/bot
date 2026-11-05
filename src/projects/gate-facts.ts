@@ -1,5 +1,5 @@
 import { parseDocument } from 'yaml';
-import { emptyPlan, type GatePlan, type Lane, type MergeQueue } from './gate-plan.js';
+import { emptyPlan, gateLanes, type GatePlan, type Lane, type MergeQueue, type Toolchains } from './gate-plan.js';
 
 /**
  * Repository facts for gate onboarding, read with a read-only installation token before anything is proposed.
@@ -11,13 +11,19 @@ export interface GateFacts {
   languages: { name: string; bytes: number }[];
   /** Root entries; directories end with `/`. */
   root: string[];
-  workflows: { path: string; name: string; events: string[]; runs: string[]; error?: string }[];
+  /** Existing workflows; `gate_job` is the job that already runs gate.mjs, with the toolchains and installs before it. */
+  workflows: { path: string; name: string; events: string[]; jobs: string[]; runs: string[]; error?: string;
+    gate_job?: { key: string; toolchains: Partial<Toolchains>; install: string[] } }[];
   /** Manifest and version files read from the root, keyed by path; long files are clipped (tools read the rest). */
   files: Record<string, string>;
   lockfiles: string[];
-  existing: { ci_yml: boolean; ci_gates_yml: boolean; ci_gates_json: boolean; release_yml: boolean; gate_script: boolean };
+  existing: { ci_yml: boolean; ci_gates_yml: boolean; ci_gates_json: boolean; release_yml: boolean; gate_script: boolean; gate_workflow: string | null };
   gate_config: unknown;
+  /** Current text of every workflow and of ci-gates.json: the base of an update PR and the check that it is still current. */
+  sources: Record<string, string>;
   merge_queue: { state: MergeQueue; evidence: string };
+  /** Status checks the default branch's rulesets require; null when the rulesets could not be read. */
+  required_checks: string[] | null;
   open_gate_prs: { number: number; url: string; branch: string }[];
   candidates: Candidate[];
   /** What the person must answer before a command can be proposed with confidence. */
@@ -65,39 +71,64 @@ export async function collectFacts(reader: FactReader, full: string): Promise<Ga
     const text = await content(name);
     if (text !== null) files[name] = text.length > clipBytes ? text.slice(0, clipBytes) + `\n[… ${text.length - clipBytes} characters omitted; read the file for the rest …]` : text;
   }
-  const workflows: GateFacts['workflows'] = [];
+  const workflows: GateFacts['workflows'] = [], sources: Record<string, string> = {};
   const listing = root.includes('.github/') ? await reader.get(`${repo}/contents/.github/workflows?ref=${sha}`) : null;
   const workflowNames = Array.isArray(listing) ? listing.filter(item => item.type === 'file' && /\.ya?ml$/.test(String(item.name))).map(item => String(item.name)) : [];
   for (const name of workflowNames.sort()) {
     const path = `.github/workflows/${name}`, text = await content(path);
-    workflows.push(text === null ? { path, name, events: [], runs: [], error: 'unreadable' } : describeWorkflow(path, text));
+    if (text !== null) sources[path] = text;
+    workflows.push(text === null ? { path, name, events: [], jobs: [], runs: [], error: 'unreadable' } : describeWorkflow(path, text));
   }
   const gateText = await content('.github/ci-gates.json');
+  if (gateText !== null) sources['.github/ci-gates.json'] = gateText;
+  // The gate workflow CI-workflow names ci.yml wins over other workflows that also call gate.mjs.
+  const gateWorkflows = workflows.filter(item => item.gate_job).map(item => item.path);
+  const gateWorkflow = ['.github/workflows/ci.yml', '.github/workflows/ci-gates.yml'].find(path => gateWorkflows.includes(path)) ?? gateWorkflows[0] ?? null;
   let gateConfig: unknown = null;
   if (gateText !== null) { try { gateConfig = JSON.parse(gateText); } catch { gateConfig = gateText; } }
   const existing = { ci_yml: workflowNames.includes('ci.yml'), ci_gates_yml: workflowNames.includes('ci-gates.yml'), ci_gates_json: gateText !== null,
-    release_yml: workflowNames.includes('release.yml'), gate_script: await content('scripts/gate/gate.mjs') !== null };
+    release_yml: workflowNames.includes('release.yml'), gate_script: await content('scripts/gate/gate.mjs') !== null, gate_workflow: gateWorkflow };
   const pulls = await reader.get(`${repo}/pulls?state=open&per_page=100`).catch(() => null);
   const openGatePrs = (Array.isArray(pulls) ? pulls : []).filter(pull => String(pull?.head?.ref || '').startsWith('bot/gate-onboarding-'))
     .map(pull => ({ number: Number(pull.number), url: String(pull.html_url), branch: String(pull.head.ref) }));
+  const { rules, ...queue } = await mergeQueue(reader, full, defaultBranch);
+  const requiredChecks = rules ? rules.filter(rule => rule?.type === 'required_status_checks')
+    .flatMap(rule => (rule.parameters?.required_status_checks || []).map((check: any) => String(check?.context || ''))).filter(Boolean) : null;
   const facts: GateFacts = { repository: full, default_branch: defaultBranch, head_sha: sha, private: !!meta.private, languages, root, workflows, files,
-    lockfiles: lockNames.filter(has), existing, gate_config: gateConfig, merge_queue: await mergeQueue(reader, full, defaultBranch), open_gate_prs: openGatePrs,
+    lockfiles: lockNames.filter(has), existing, gate_config: gateConfig, sources, merge_queue: queue, required_checks: requiredChecks, open_gate_prs: openGatePrs,
     candidates: [], questions: [] };
   detect(facts, has);
   return facts;
 }
 
-/** Name, events and run commands of an existing workflow; a file that does not parse is reported, not guessed at. */
+/** Name, events, jobs and run commands of an existing workflow; a file that does not parse is reported, not guessed at. */
 function describeWorkflow(path: string, text: string): GateFacts['workflows'][number] {
   const doc = parseDocument(text, { uniqueKeys: false });
-  if (doc.errors.length) return { path, name: path, events: [], runs: [], error: 'yaml_invalid' };
+  if (doc.errors.length) return { path, name: path, events: [], jobs: [], runs: [], error: 'yaml_invalid' };
   let data: any;
-  try { data = doc.toJS({ maxAliasCount: 50 }); } catch { return { path, name: path, events: [], runs: [], error: 'yaml_invalid' }; }
+  try { data = doc.toJS({ maxAliasCount: 50 }); } catch { return { path, name: path, events: [], jobs: [], runs: [], error: 'yaml_invalid' }; }
   const on = data?.on ?? data?.true; // YAML 1.1 readers turn `on` into true; keep both.
   const events = typeof on === 'string' ? [on] : Array.isArray(on) ? on.map(String) : on && typeof on === 'object' ? Object.keys(on) : [];
-  const runs: string[] = [];
-  for (const job of Object.values(data?.jobs || {}) as any[]) for (const step of Array.isArray(job?.steps) ? job.steps : []) if (typeof step?.run === 'string') runs.push(step.run.trim());
-  return { path, name: typeof data?.name === 'string' ? data.name : path, events, runs };
+  const runs: string[] = [], jobs = data?.jobs && typeof data.jobs === 'object' ? data.jobs : {};
+  let gateJob: NonNullable<GateFacts['workflows'][number]['gate_job']> | undefined;
+  for (const [key, job] of Object.entries(jobs) as [string, any][]) {
+    const steps: any[] = Array.isArray(job?.steps) ? job.steps : [];
+    for (const step of steps) if (typeof step?.run === 'string') runs.push(step.run.trim());
+    const gateAt = steps.findIndex(step => typeof step?.run === 'string' && step.run.includes('scripts/gate/gate.mjs'));
+    if (gateAt < 0 || gateJob) continue;
+    // What the gate job sets up before running gate.mjs is the starting point for toolchains and installs.
+    const toolchains: Partial<Toolchains> = {}, install: string[] = [], before = steps.slice(0, gateAt);
+    for (const step of before) {
+      const uses = String(step?.uses || ''), withs = step?.with || {};
+      if (/^actions\/setup-node@/.test(uses) && withs['node-version'] != null) toolchains.node = String(withs['node-version']);
+      if (/^actions\/setup-python@/.test(uses) && withs['python-version'] != null) toolchains.python = String(withs['python-version']);
+      if (/^actions\/setup-go@/.test(uses)) toolchains.go = withs['go-version-file'] === 'go.mod' ? 'go.mod' : withs['go-version'] != null ? String(withs['go-version']) : 'go.mod';
+      if (/^actions\/setup-java@/.test(uses) && withs['java-version'] != null) toolchains.java = String(withs['java-version']);
+      if (typeof step?.run === 'string' && step.run.trim()) install.push(step.run.trim());
+    }
+    gateJob = { key, toolchains, install };
+  }
+  return { path, name: typeof data?.name === 'string' ? data.name : path, events, jobs: Object.keys(jobs), runs, ...(gateJob ? { gate_job: gateJob } : {}) };
 }
 
 /**
@@ -105,23 +136,23 @@ function describeWorkflow(path: string, text: string): GateFacts['workflows'][nu
  * without one has none. Classic branch protection does not show it over REST, so GraphQL's mergeQueue settles that case.
  * Anything the token cannot read stays unknown and the person is asked.
  */
-export async function mergeQueue(reader: FactReader, full: string, branch: string): Promise<GateFacts['merge_queue']> {
+export async function mergeQueue(reader: FactReader, full: string, branch: string): Promise<GateFacts['merge_queue'] & { rules: any[] | null }> {
   const repo = `/repos/${encode(full)}`;
   let rules: any[] | null = null;
   try { const value = await reader.get(`${repo}/rules/branches/${encode(branch)}`); rules = Array.isArray(value) ? value : null; } catch { rules = null; }
   const queued = rules?.find(rule => rule?.type === 'merge_queue');
-  if (queued) return { state: 'enabled', evidence: `默认分支 ${branch} 的规则集${queued.ruleset_id ? ` ${queued.ruleset_id} ` : ''}要求 merge queue` };
+  if (queued) return { state: 'enabled', evidence: `默认分支 ${branch} 的规则集${queued.ruleset_id ? ` ${queued.ruleset_id} ` : ''}要求 merge queue`, rules };
   let protectedBranch: boolean | null = null;
   try { const value = await reader.get(`${repo}/branches/${encode(branch)}`); protectedBranch = typeof value?.protected === 'boolean' ? value.protected : null; } catch { protectedBranch = null; }
-  if (rules && protectedBranch === false) return { state: 'disabled', evidence: `默认分支 ${branch} 的规则集没有 merge queue，也没有经典分支保护` };
+  if (rules && protectedBranch === false) return { state: 'disabled', evidence: `默认分支 ${branch} 的规则集没有 merge queue，也没有经典分支保护`, rules };
   try {
     const [owner, name] = full.split('/');
     const value = await reader.graphql('query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){mergeQueue(branch:$branch){id}}}', { owner, name, branch });
     if (!value?.errors && value?.data?.repository) return value.data.repository.mergeQueue
-      ? { state: 'enabled', evidence: `GitHub 报告默认分支 ${branch} 已启用 merge queue` }
-      : { state: 'disabled', evidence: `GitHub 报告默认分支 ${branch} 没有启用 merge queue` };
+      ? { state: 'enabled', evidence: `GitHub 报告默认分支 ${branch} 已启用 merge queue`, rules }
+      : { state: 'disabled', evidence: `GitHub 报告默认分支 ${branch} 没有启用 merge queue`, rules };
   } catch { /* Falls through to unknown. */ }
-  return { state: 'unknown', evidence: rules ? `默认分支 ${branch} 有分支保护，但安装令牌读不到它是否要求 merge queue` : '安装令牌读不到默认分支的规则集' };
+  return { state: 'unknown', evidence: rules ? `默认分支 ${branch} 有分支保护，但安装令牌读不到它是否要求 merge queue` : '安装令牌读不到默认分支的规则集', rules };
 }
 
 const tomlSection = (text: string, name: string) => new RegExp(`^\\[${name.replace(/\./g, '\\.')}\\]`, 'm').test(text);
@@ -190,8 +221,24 @@ function detect(facts: GateFacts, has: (name: string) => boolean): void {
   if (facts.merge_queue.state === 'unknown') facts.questions.push('这个仓库的默认分支是否启用了 merge queue？');
 }
 
-/** A plan made only from the certain candidates; uncertain lanes stay empty until someone answers. */
+/**
+ * The plan a conversation starts from. A repository that already has gates starts from its own configuration, so leaving
+ * it unchanged changes nothing; otherwise only certain candidates are used and uncertain lanes stay empty until answered.
+ */
 export function baselinePlan(facts: GateFacts): GatePlan {
+  const config = facts.gate_config && typeof facts.gate_config === 'object' ? facts.gate_config as any : null;
+  if (config) {
+    const plan = emptyPlan(), lanes = config.lanes && typeof config.lanes === 'object' ? config.lanes : {};
+    for (const lane of gateLanes) {
+      const raw = lanes[lane]?.commands;
+      plan.lanes[lane] = (typeof raw === 'string' ? [raw] : Array.isArray(raw) ? raw : []).filter((item: unknown): item is string => typeof item === 'string' && !!item.trim());
+    }
+    plan.observe = gateLanes.filter(lane => lanes[lane]?.enforcement === 'observe');
+    const gate = facts.workflows.find(item => item.path === facts.existing.gate_workflow)?.gate_job;
+    if (gate) { plan.toolchains = { ...plan.toolchains, ...gate.toolchains }; plan.install = gate.install; }
+    plan.workflow = facts.existing.gate_workflow ?? '';
+    return plan;
+  }
   const plan = emptyPlan(), certain = (kind: Candidate['kind']) => facts.candidates.filter(item => item.kind === kind && item.certain).map(item => item.command);
   const nvm = /^v?(\d+)/.exec((facts.files['.nvmrc'] ?? facts.files['.node-version'] ?? '').trim());
   if (nvm && Number(nvm[1]) >= 20) plan.toolchains.node = nvm[1]!;
