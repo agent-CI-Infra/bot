@@ -2,6 +2,7 @@ import type { Store } from '../storage/database.js';
 import { runAgent } from '../agent/runtime.js';
 import { sha, stop, TaskError, type Redactor } from '../agent/common.js';
 import type { Source } from './range.js';
+import { activeTrigger } from '../workflows/resolve.js';
 
 const headings = ['Changes', 'Commits', 'Pull requests', 'Features', 'Fixes', 'Documentation', 'Tests', 'Other', '变更', '提交', '合并的 PR', '功能', '修复', '文档', '测试', '其他'];
 const escape = (value: string) => value.replace(/[\\`*_{}\[\]<>#!|]/g, '\\$&').replace(/[\r\n]/g, ' ');
@@ -10,7 +11,8 @@ export async function notes(store: Store, row: any, input: Source[], redactor: R
   const data = JSON.parse(row.data), byId = new Map(input.map(s => [s.id, s]));
   let groups: NoteGroup[] = [{ heading: 'Commits', source_ids: input.filter(s => s.kind === 'commit').map(s => s.id) }, { heading: 'Pull requests', source_ids: input.filter(s => s.kind === 'pr').map(s => s.id) }];
   // A repository skill, or else the release.notes workflow's console prompt, organizes the sources; the built-in rule lists them.
-  if (['repository', 'console'].includes(data.skill.source) && input.length) {
+  // With the release.notes workflow switched off (or without its trigger) the built-in rule lists the sources as they are.
+  if (['repository', 'console'].includes(data.skill.source) && input.length && activeTrigger(store, row.repository_id, 'release.notes', 'release.manual')) {
     // The model receives no GitHub credentials, workspace or executable tools. It can organize verified sources;
     // source text is rendered here so unsupported feature, test and performance claims cannot enter the draft.
     const messages = [

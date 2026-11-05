@@ -4,6 +4,7 @@ import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
 import { actionsDevelopmentAllowed } from '../actions/safety.js';
 import { queueWorkflows, workflowNeedsPullRequest } from '../workflows/triggers.js';
+import { activeTrigger } from '../workflows/resolve.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
 // A person's go-ahead for development: the development label is on the Issue and nobody has claimed it.
@@ -31,10 +32,8 @@ export function mentionsBot(event: string, payload: Json): boolean {
 export function commentReviewKind(store: Store, repositoryId: string, event: string, payload: Json): 'review.issue' | 'review.pr' | null {
   const issue = payload.issue as any;
   if (!mentionsBot(event, payload)) return null;
-  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
-  if (!policy?.enabled || !policy.review_enabled) return null;
-  if (issue.pull_request) return policy.review_pull_requests ? 'review.pr' : null;
-  return policy.review_issues ? 'review.issue' : null;
+  const kind = issue.pull_request ? 'review.pr' : 'review.issue';
+  return activeTrigger(store, repositoryId, kind, 'comment.mention') ? kind : null;
 }
 // What the bot writes itself carries its marker; a bot account posts as an ordinary GitHub user, so the sender type is not enough.
 const botMarker = /<!-- dept-bot[:-]/;
@@ -74,21 +73,22 @@ export function updateTrigger(event: string, payload: Json): { kind: 'review.iss
       body: clip(p.review.body), url: String(p.review.html_url || '') } };
   return null;
 }
-// Reviews of updates follow the repository's switches: Issue updates need Issue review, PR discussion needs PR review.
-function updateEnabled(policy: any, kind: string) { return kind === 'review.issue' ? !!(policy.review_issues && policy.review_issue_updates) : !!(policy.review_pull_requests && policy.review_pr_discussion); }
+// Reviews of updates follow the review workflow's triggers.
+const updateEnabled = (store: Store, repositoryId: string, kind: string) => !!activeTrigger(store, repositoryId, kind, kind === 'review.issue' ? 'issue.updated' : 'pull_request.updated');
+type Update = { kind: 'review.issue' | 'review.pr', number: number, pullRequest?: Json, trigger: Json };
 // An issue_comment on a PR names only the PR number; the webhook reads the current head before archiving when a review may follow.
 export function pullRequestNeeded(store: Store, repositoryId: string, event: string, payload: Json) {
   if (event !== 'issue_comment' || !(payload.issue as any)?.pull_request) return false;
   if (commentReviewKind(store, repositoryId, event, payload) === 'review.pr') return true;
   if (workflowNeedsPullRequest(store, repositoryId, event, payload)) return true;
-  const policy = store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId);
-  return !!policy?.enabled && !!policy.review_enabled && updateTrigger(event, payload)?.kind === 'review.pr' && updateEnabled(policy, 'review.pr');
+  return updateTrigger(event, payload)?.kind === 'review.pr' && updateEnabled(store, repositoryId, 'review.pr');
 }
 // A durable inbox keeps updates independent of prepare's asynchronous input snapshot.
 const activeStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'running', 'preparing', 'publishing', 'result_ready'];
-function queueUpdate(store: Store, repositoryId: string, policy: any, event: string, payload: Json, delivery: string, currentPullRequest?: Json, mention?: 'review.issue' | 'review.pr') {
-  const update = mention ? { kind: mention, number: Number((payload.issue as any).number), trigger: { reason: 'mention', actor: String((payload.sender as any)?.login || ''), url: String((payload.comment as any)?.html_url || '') } } : updateTrigger(event, payload);
-  if (!update || !mention && !updateEnabled(policy, update.kind)) return 0;
+// `labeled` is a label a person added that one of the review workflow's label triggers names; it is reviewed as an update.
+function queueUpdate(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest?: Json, mention?: 'review.issue' | 'review.pr', labeled?: Update) {
+  const update: Update | null = labeled ?? (mention ? { kind: mention, number: Number((payload.issue as any).number), trigger: { reason: 'mention', actor: String((payload.sender as any)?.login || ''), url: String((payload.comment as any)?.html_url || '') } } : updateTrigger(event, payload));
+  if (!update || !mention && !labeled && !updateEnabled(store, repositoryId, update.kind)) return 0;
   const commentKey=mention?`${repositoryId}:${update.kind}:${update.number}:comment:${(payload.comment as any).id}`:null;
   if(commentKey&&(store.get('SELECT 1 FROM tasks WHERE unique_key=?',commentKey)||store.get('SELECT 1 FROM review_updates WHERE event_key=?',commentKey)))return 0;
   const pr = ((update as any).pullRequest || currentPullRequest) as any;
@@ -118,9 +118,9 @@ function queueUpdate(store: Store, repositoryId: string, policy: any, event: str
 }
 // A person adding the development label after the review starts the development that review found requested.
 // Labels added before the review finishes are checked when the review is published instead.
-function queueLabeledDevelopment(store: Store, repositoryId: string, policy: any, payload: any, number: number, delivery: string) {
+function queueLabeledDevelopment(store: Store, repositoryId: string, payload: any, number: number, delivery: string) {
   const issue = payload.issue;
-  if (!policy.development_enabled || issue?.state !== 'open' || payload.sender?.type !== 'User') return false;
+  if (!activeTrigger(store, repositoryId, 'development.issue', 'issue.labeled') || issue?.state !== 'open' || payload.sender?.type !== 'User') return false;
   let label: string; try { label = developmentLabel(store, repositoryId); } catch { return false; }
   if (!sameLabel(payload.label?.name, label) || !developmentReady(issue, label)) return false;
   const review = store.get("SELECT id,result FROM tasks WHERE repository_id=? AND kind='review.issue' AND object_number=? AND status='succeeded' ORDER BY created_at DESC LIMIT 1", repositoryId, number);
@@ -161,22 +161,30 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number)) return 0;
   // Custom workflows run beside the built-in ones on the same events, with the same filters.
   const custom = queueWorkflows(store, repositoryId, event, payload, delivery, currentPullRequest);
-  return custom + (policy.review_enabled ? queueBuiltin(store, repositoryId, policy, event, payload, delivery, currentPullRequest, object, number, action) : 0);
+  return custom + (policy.review_enabled ? queueBuiltin(store, repositoryId, event, payload, delivery, currentPullRequest, object, number, action) : 0);
 }
-function queueBuiltin(store: Store, repositoryId: string, policy: any, event: string, payload: Json, delivery: string, currentPullRequest: Json | undefined, object: Json | undefined, number: number, action: unknown): number {
+function queueBuiltin(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest: Json | undefined, object: Json | undefined, number: number, action: unknown): number {
+  const p = payload as any, has = (kind: string, trigger: string, label?: string) => !!activeTrigger(store, repositoryId, kind, trigger, label);
   if (event === 'issue_comment') {
     const kind = commentReviewKind(store, repositoryId, event, payload);
     // A comment without a mention may still be an update to review.
-    if (!kind) return queueUpdate(store, repositoryId, policy, event, payload, delivery, currentPullRequest);
-    return queueUpdate(store, repositoryId, policy, event, payload, delivery, currentPullRequest, kind);
+    if (!kind) return queueUpdate(store, repositoryId, event, payload, delivery, currentPullRequest);
+    return queueUpdate(store, repositoryId, event, payload, delivery, currentPullRequest, kind);
   }
-  // Each trigger can be turned off per repository; drafts and closed pull requests are never reviewed.
-  if (event === 'issues' && action === 'opened' && object && !object.pull_request) return policy.review_issues && enqueue(store, repositoryId, 'review.issue', number, null, payload, delivery) ? 1 : 0;
-  if (event === 'issues' && action === 'labeled' && object && !object.pull_request) return queueLabeledDevelopment(store, repositoryId, policy, payload, number, delivery) ? 1 : 0;
-  const prTrigger = action === 'synchronize' ? policy.review_pr_updates : ['opened','ready_for_review'].includes(String(action)) && policy.review_pull_requests;
+  // A label a person adds: the development go-ahead, and a review again when a review workflow triggers on that label.
+  const labeled = (kind: 'review.issue' | 'review.pr', target: any) => action === 'labeled' && p.sender?.type === 'User' && typeof p.label?.name === 'string'
+    && target?.state === 'open' && target.draft !== true && has(kind, kind === 'review.issue' ? 'issue.labeled' : 'pull_request.labeled', p.label.name)
+    ? queueUpdate(store, repositoryId, event, payload, delivery, currentPullRequest, undefined, { kind, number, ...(kind === 'review.pr' ? { pullRequest: target } : {}),
+      trigger: { reason: 'labeled', actor: String(p.sender?.login || ''), label: p.label.name } }) : 0;
+  // Each trigger can be turned off per workflow; drafts and closed pull requests are never reviewed.
+  if (event === 'issues' && action === 'opened' && object && !object.pull_request) return has('review.issue', 'issue.opened') && enqueue(store, repositoryId, 'review.issue', number, null, payload, delivery) ? 1 : 0;
+  if (event === 'issues' && action === 'labeled' && object && !object.pull_request)
+    return (queueLabeledDevelopment(store, repositoryId, payload, number, delivery) ? 1 : 0) + labeled('review.issue', object);
+  const prTrigger = action === 'synchronize' ? has('review.pr', 'pull_request.synchronize') : ['opened','ready_for_review'].includes(String(action)) && has('review.pr', 'pull_request.opened');
   if (event === 'pull_request' && prTrigger && object && object.draft !== true && object.state !== 'closed') {
     const head = object.head as Json | undefined;
     return enqueue(store, repositoryId, 'review.pr', number, String(head?.sha || ''), payload, delivery) ? 1 : 0;
   }
-  return queueUpdate(store, repositoryId, policy, event, payload, delivery, currentPullRequest);
+  if (event === 'pull_request' && action === 'labeled') return labeled('review.pr', object);
+  return queueUpdate(store, repositoryId, event, payload, delivery, currentPullRequest);
 }

@@ -6,29 +6,18 @@ import { runAgent } from '../agent/runtime.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { builtinRule } from '../releases/preflight.js';
 import { builtinWorkflows, builtinWorkflow, triggers, customCeiling, defaultPermissions, validatePermissions, clampPermissions, githubScopes,
-  hasFlowchart, type BuiltinWorkflow, type WorkflowPermissions } from './catalog.js';
-import { savedWorkflow, workflowPermissions, customWorkflow } from './resolve.js';
+  hasFlowchart, triggerOptions as catalogOptions, type BuiltinWorkflow, type WorkflowPermissions } from './catalog.js';
+import { savedWorkflow, workflowPermissions, customWorkflow, workflowTriggers, workflowEnabled, workflowActive, policyColumns, type Trigger } from './resolve.js';
+import { activateActions } from '../actions/storage.js';
 
-// A trigger as the console shows it: configurable switches, and fixed conditions with the reason they are fixed.
-interface TriggerState { id: string; title: string; enabled: boolean; configurable: boolean; label?: string | null; note?: string }
-const policyTriggers: Record<string, { id: string; column?: string; note?: string }[]> = {
-  'review.issue': [{ id: 'issue.opened', column: 'review_issues' }, { id: 'issue.updated', column: 'review_issue_updates', note: '同时需要打开「Issue 打开」' },
-    { id: 'comment.mention', note: '名字来自部署设置 BOT_MENTION_NAMES；同时需要打开「Issue 打开」' }],
-  'review.pr': [{ id: 'pull_request.opened', column: 'review_pull_requests', note: '草稿 PR 不检视' },
-    { id: 'pull_request.synchronize', column: 'review_pr_updates', note: 'bot PR 的自动跟进也依赖它' },
-    { id: 'pull_request.updated', column: 'review_pr_discussion', note: '同时需要打开「PR 打开或 Ready for review」' },
-    { id: 'comment.mention', note: '名字来自部署设置 BOT_MENTION_NAMES；同时需要打开「PR 打开或 Ready for review」' }]
-};
-const title = (id: string) => triggers.find(trigger => trigger.id === id)?.title ?? id;
-function builtinTriggers(workflow: BuiltinWorkflow, policy: Row, developmentLabel: string | null): TriggerState[] {
-  if (policyTriggers[workflow.id]) return policyTriggers[workflow.id]!.map(({ id, column, note }) =>
-    ({ id, title: title(id), enabled: column ? !!policy[column] : true, configurable: !!column, ...(note ? { note } : {}) }));
-  if (workflow.id === 'development.issue') return [
-    { id: 'review.issue.published', title: 'Issue 检视发布，结论要求改代码', enabled: true, configurable: false, note: '控制面核对检视结论里的原文依据' },
-    { id: 'issue.labeled', title: '有人（不是 App）给 Issue 加上开发标签', enabled: true, configurable: false, label: developmentLabel,
-      note: '开发标签和「Issue 没有指派人」由控制面检查，发布 PR 前再查一次；提示词关不掉' }];
-  if (workflow.id === 'development.pr') return [{ id: 'review.pr.published', title: 'bot PR 的检视发布了可执行意见', enabled: true, configurable: false, note: '在修订轮数内；依赖「检视 PR」的 PR head 更新触发' }];
-  return [{ id: 'release.manual', title: workflow.id === 'release.notes' ? '「发版本」页起草发行说明' : '「发版本」页查看 Release 工作流运行', enabled: true, configurable: false }];
+// A trigger as the console offers it to one workflow: the same catalog entries for built-in and custom workflows. The
+// development label trigger names the label from issue-development.md, so it takes no label of its own.
+function triggerOptions(id: string, developmentLabel: string | null) {
+  return catalogOptions(id).map(trigger => {
+    const entry = triggers.find(item => item.id === trigger)!, fixed = id.startsWith('development.') && trigger === 'issue.labeled';
+    return { id: trigger, title: entry.title, label: !!entry.label && !fixed, ...(fixed ? { fixed_label: developmentLabel } : {}),
+      ...(trigger === 'comment.mention' ? { note: '名字来自部署设置 BOT_MENTION_NAMES' } : entry.note ? { note: entry.note } : {}) };
+  });
 }
 const layerSource = (layers: { source: string }[]) => layers.at(-1)!.source;
 const jsonOf = (text: unknown, fallback: any) => { try { return JSON.parse(String(text)); } catch { return fallback; } };
@@ -57,28 +46,52 @@ export class WorkflowService {
   async list(repositoryId: string) {
     const policy = this.store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId)!, view = await this.rules.view(repositoryId);
     const rows = new Map(this.store.all('SELECT * FROM workflows WHERE repository_id=?', repositoryId).map(row => [String(row.id), row]));
+    const shared = (id: string) => ({ enabled: workflowEnabled(this.store, repositoryId, id), active: workflowActive(this.store, repositoryId, id),
+      triggers: workflowTriggers(this.store, repositoryId, id), trigger_options: triggerOptions(id, view.development_label),
+      permissions: workflowPermissions(this.store, repositoryId, id), version: Number(rows.get(id)?.version ?? 0) });
     const builtins = builtinWorkflows.map(workflow => {
       const row = rows.get(workflow.id), review = workflow.base === 'review', development = workflow.base === 'development';
-      return { id: workflow.id, builtin: true, base: workflow.base, object: workflow.object, name: workflow.name, description: workflow.description,
-        enabled: review ? !!policy.review_enabled : development ? !!policy.development_enabled : true,
-        enabled_note: review ? '两条检视工作流共用这个开关' : development ? '两条开发工作流共用项目的开发开关' : '在「发版本」页按需执行',
-        enabled_editable: review || development, active: !!policy.enabled && (review ? !!policy.review_enabled : development ? !!policy.development_enabled : true),
-        triggers: builtinTriggers(workflow, policy, development ? view.development_label : null), prompt: this.builtinPrompt(workflow, view, row),
-        permissions: workflowPermissions(this.store, repositoryId, workflow.id), ceiling: workflow.ceiling, model: this.model(policy, workflow.id),
+      return { id: workflow.id, builtin: true, base: workflow.base, object: workflow.object, agent: workflow.agent,
+        name: row?.name || workflow.name, description: row?.description || workflow.description, default_name: workflow.name, default_description: workflow.description,
+        ...shared(workflow.id),
+        // The project-wide switches on the project list still apply to every review or development workflow.
+        project_switch: review ? { key: 'review_enabled', title: '项目的检视开关', on: !!policy.review_enabled } : development ? { key: 'development_enabled', title: '项目的开发开关', on: !!policy.development_enabled } : null,
+        prompt: this.builtinPrompt(workflow, view, row), ceiling: workflow.ceiling, model: workflow.agent ? this.model(policy, workflow.id) : null,
         settings: review ? { review_language: policy.review_language || 'auto' } : development ? { test_command: policy.test_command || '', max_revisions: policy.max_revisions } : {},
-        version: Number(row?.version ?? 0) };
+        ...(workflow.id === 'actions.failures' ? { status: this.store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', repositoryId) || null } : {}) };
     });
     const customs = [...rows.values()].filter(row => String(row.id).startsWith('custom.')).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).map(row => {
       const custom = customWorkflow(row);
-      return { id: custom.id, builtin: false, base: 'reply', object: 'any', name: custom.name, description: String(row.description || ''), enabled: custom.enabled,
-        enabled_editable: true, active: !!policy.enabled && custom.enabled,
-        triggers: custom.triggers.map(trigger => ({ id: trigger.id, title: title(trigger.id), enabled: true, configurable: true, ...(trigger.label ? { label: trigger.label } : {}) })),
+      return { id: custom.id, builtin: false, base: 'reply', object: 'any', agent: true, name: custom.name, description: String(row.description || ''),
+        ...shared(custom.id), project_switch: null,
         prompt: { path: null, layers: [{ source: 'console', content: custom.prompt }], source: 'console', effective: custom.prompt, shared_with: [] },
-        permissions: workflowPermissions(this.store, repositoryId, custom.id), ceiling: customCeiling, model: this.model(policy, custom.id, row), settings: {},
-        version: Number(row.version), updated_at: row.updated_at };
+        ceiling: customCeiling, model: this.model(policy, custom.id, row), settings: {}, updated_at: row.updated_at };
     });
     return { workflows: [...builtins, ...customs], triggers, github_scopes: githubScopes, rules: { sha: view.sha, updated_at: view.updated_at, needs_refresh: view.needs_refresh },
       mention_names: (process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot').trim().toLowerCase() === 'off' ? [] : (process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot').split(',').map(name => name.trim()).filter(Boolean) };
+  }
+  // A trigger list from the editor: catalog entries this workflow may have, each once, label triggers with their label.
+  // The older form {id: on} switches entries of the current list.
+  private triggerList(repositoryId: string, id: string, value: unknown): Trigger[] {
+    const options = new Map(triggerOptions(id, null).map(option => [option.id, option]));
+    let list: any[] = value as any[];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      list = workflowTriggers(this.store, repositoryId, id).filter(trigger => (value as Json)[trigger.id] !== false);
+      for (const [trigger, on] of Object.entries(value)) {
+        if (typeof on !== 'boolean' || !options.has(trigger)) fail(400, 'invalid_workflow_triggers');
+        if (on && !list.some(entry => entry.id === trigger)) list.push({ id: trigger });
+      }
+    }
+    if (!Array.isArray(list)) return fail(400, 'invalid_workflow_triggers');
+    const result = list.map(trigger => {
+      const option = options.get(trigger?.id);
+      if (!option || typeof trigger !== 'object' || Object.keys(trigger).some(key => !['id', 'label'].includes(key))) return fail(400, 'invalid_workflow_triggers');
+      if (option.label && (typeof trigger.label !== 'string' || !trigger.label.trim() || trigger.label.includes('\0'))) return fail(400, 'invalid_workflow_trigger_label');
+      if (!option.label && trigger.label !== undefined) return fail(400, 'invalid_workflow_triggers');
+      return { id: option.id, ...(option.label ? { label: String(trigger.label).trim() } : {}) };
+    });
+    if (new Set(result.map(trigger => trigger.id + ':' + (trigger.label ?? '').toLowerCase())).size !== result.length) fail(400, 'duplicate_workflow_trigger');
+    return result;
   }
   // A model a project may use: its own, or a deployment-shared one granted to it (a super administrator grants it here).
   private modelChoice(user: Actor, repositoryId: string, value: unknown): { id: string | null; grant: boolean } {
@@ -92,32 +105,30 @@ export class WorkflowService {
   private checkVersion(row: Row | undefined, version: unknown) {
     if (version !== undefined && Number(version) !== Number(row?.version ?? 0)) fail(409, 'workflow_version_conflict');
   }
-  private savePermissions(repositoryId: string, id: string, permissions: WorkflowPermissions | undefined, prompt: string | null | undefined, now: string) {
-    const row = savedWorkflow(this.store, repositoryId, id);
-    if (!row) this.store.run('INSERT INTO workflows(repository_id,id,created_at,updated_at,version) VALUES(?,?,?,?,0)', repositoryId, id, now, now);
-    if (permissions) this.store.run('UPDATE workflows SET permissions=? WHERE repository_id=? AND id=?', JSON.stringify(permissions), repositoryId, id);
-    if (prompt !== undefined) this.store.run('UPDATE workflows SET prompt=? WHERE repository_id=? AND id=?', prompt, repositoryId, id);
+  // The workflows row of a built-in workflow is created on its first save; only the parts given are written.
+  private saveRow(repositoryId: string, id: string, values: Record<string, unknown>, now: string) {
+    if (!savedWorkflow(this.store, repositoryId, id)) this.store.run('INSERT INTO workflows(repository_id,id,created_at,updated_at,version) VALUES(?,?,?,?,0)', repositoryId, id, now, now);
+    for (const [column, value] of Object.entries(values)) if (value !== undefined) this.store.run(`UPDATE workflows SET ${column}=? WHERE repository_id=? AND id=?`, value as any, repositoryId, id);
     this.store.run('UPDATE workflows SET version=version+1,updated_at=? WHERE repository_id=? AND id=?', now, repositoryId, id);
   }
-  // A built-in workflow writes each part where it has always lived; the whole save is one transaction.
+  private text(value: unknown, code: string) {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || value.includes('\0')) return fail(400, code);
+    return value;
+  }
+  // A built-in workflow takes the same fields as a custom one. Prompts, models and settings keep living where they always
+  // did; its name, description, switch and trigger list are on its own row. Fixed-rule workflows have no prompt or model.
   private updateBuiltin(user: Actor, repositoryId: string, workflow: BuiltinWorkflow, body: Json) {
-    fields(body, ['enabled', 'triggers', 'prompt', 'permissions', 'model_id', 'settings', 'version']);
+    fields(body, ['name', 'description', 'enabled', 'triggers', 'prompt', 'permissions', 'model_id', 'settings', 'version']);
     const policy = this.store.get('SELECT * FROM policies WHERE repository_id=?', repositoryId)!, row = savedWorkflow(this.store, repositoryId, workflow.id);
     this.checkVersion(row, body.version);
     const review = workflow.base === 'review', development = workflow.base === 'development', updates: Record<string, unknown> = {};
-    if (body.enabled !== undefined) {
-      if (typeof body.enabled !== 'boolean' || !review && !development) fail(400, 'invalid_workflow_enabled');
-      updates[review ? 'review_enabled' : 'development_enabled'] = Number(body.enabled);
-    }
-    if (body.triggers !== undefined) {
-      const switches = policyTriggers[workflow.id] ?? [], value = body.triggers as Json;
-      if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400, 'invalid_workflow_triggers');
-      for (const [id, on] of Object.entries(value)) {
-        const column = switches.find(trigger => trigger.id === id)?.column;
-        if (!column || typeof on !== 'boolean') fail(400, 'invalid_workflow_triggers');
-        updates[column!] = Number(on);
-      }
-    }
+    const name = this.text(body.name, 'invalid_workflow_name'), description = this.text(body.description, 'invalid_workflow_description');
+    if (body.enabled !== undefined && typeof body.enabled !== 'boolean') fail(400, 'invalid_workflow_enabled');
+    const list = body.triggers === undefined ? undefined : this.triggerList(repositoryId, workflow.id, body.triggers);
+    // The policy switches of the review triggers follow the list, so the policy API keeps reporting what runs.
+    if (list && policyColumns[workflow.id]) for (const [trigger, column] of Object.entries(policyColumns[workflow.id]!)) updates[column] = Number(list.some(entry => entry.id === trigger));
+    if (!workflow.agent && (body.prompt !== undefined || body.model_id !== undefined)) fail(400, 'workflow_agent_not_used');
     const settings = (body.settings ?? {}) as Json;
     if (typeof settings !== 'object' || Array.isArray(settings)) fail(400, 'invalid_workflow_settings');
     fields(settings, review ? ['review_language'] : development ? ['test_command', 'max_revisions'] : []);
@@ -137,7 +148,7 @@ export class WorkflowService {
     }
     const permissions = body.permissions === undefined ? undefined : validatePermissions(body.permissions, workflow.ceiling);
     const model = body.model_id === undefined ? undefined : this.modelChoice(user, repositoryId, body.model_id);
-    const now = new Date().toISOString();
+    const now = new Date().toISOString(), actions = workflow.id === 'actions.failures';
     this.store.transaction(() => {
       for (const [column, value] of Object.entries(updates)) this.store.run(`UPDATE policies SET ${column}=? WHERE repository_id=?`, value as any, repositoryId);
       if (overrides) this.store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?', JSON.stringify(overrides), repositoryId);
@@ -147,12 +158,19 @@ export class WorkflowService {
         if (model.grant) this.store.run('INSERT INTO model_projects VALUES(?,?) ON CONFLICT DO NOTHING', model.id, repositoryId);
         this.store.run('UPDATE policies SET task_models=? WHERE repository_id=?', JSON.stringify(taskModels), repositoryId);
       }
-      this.savePermissions(repositoryId, workflow.id, permissions, consolePrompt, now);
+      // Actions failure handling keeps its policy switch (and its scan start time) as the workflow's switch.
+      if (actions && body.enabled !== undefined) {
+        this.store.run('UPDATE policies SET actions_failures_enabled=? WHERE repository_id=?', Number(body.enabled), repositoryId);
+        if (body.enabled && !policy.actions_failures_enabled) activateActions(this.store, repositoryId);
+      }
+      this.saveRow(repositoryId, workflow.id, { name: name === undefined ? undefined : name.trim(), description: description === undefined ? undefined : description.trim(),
+        enabled: body.enabled === undefined || actions ? undefined : Number(body.enabled), trigger_list: list && JSON.stringify(list),
+        permissions: permissions && JSON.stringify(permissions), prompt: consolePrompt }, now);
       this.store.audit(user.id, 'workflow.updated', workflow.id, repositoryId);
     });
   }
   // A custom workflow: free name, description and prompt; triggers from the catalog; permissions within the reply ceiling.
-  private customValues(body: Json, existing?: Row) {
+  private customValues(repositoryId: string, id: string, body: Json, existing?: Row) {
     fields(body, ['name', 'description', 'enabled', 'triggers', 'prompt', 'permissions', 'model_id', 'version']);
     const string = (value: unknown, code: string, required: boolean) => {
       if (value === undefined && !required) return undefined;
@@ -164,24 +182,13 @@ export class WorkflowService {
     if (existing && prompt !== undefined && !prompt.trim()) fail(400, 'invalid_workflow_prompt');
     const description = string(body.description, 'invalid_workflow_description', false);
     if (body.enabled !== undefined && typeof body.enabled !== 'boolean') fail(400, 'invalid_workflow_enabled');
-    let saved: { id: string; label?: string }[] | undefined;
-    if (body.triggers !== undefined) {
-      if (!Array.isArray(body.triggers)) fail(400, 'invalid_workflow_triggers');
-      saved = (body.triggers as any[]).map(trigger => {
-        const definition = triggers.find(entry => entry.id === trigger?.id);
-        if (!definition || typeof trigger !== 'object' || Object.keys(trigger).some(key => !['id', 'label'].includes(key))) return fail(400, 'invalid_workflow_triggers');
-        if (definition.label && (typeof trigger.label !== 'string' || !trigger.label.trim() || trigger.label.includes('\0'))) return fail(400, 'invalid_workflow_trigger_label');
-        if (!definition.label && trigger.label !== undefined) return fail(400, 'invalid_workflow_triggers');
-        return { id: definition.id, ...(definition.label ? { label: String(trigger.label).trim() } : {}) };
-      });
-      if (new Set(saved!.map(trigger => trigger.id + ':' + (trigger.label ?? '').toLowerCase())).size !== saved!.length) fail(400, 'duplicate_workflow_trigger');
-    }
+    const saved = body.triggers === undefined ? undefined : this.triggerList(repositoryId, id, body.triggers);
     const permissions = body.permissions === undefined ? (existing ? undefined : defaultPermissions('custom')) : validatePermissions(body.permissions, customCeiling);
     return { name, description, prompt, triggers: saved, permissions, enabled: body.enabled as boolean | undefined };
   }
   private saveCustom(user: Actor, repositoryId: string, id: string, body: Json, existing?: Row) {
     if (existing) this.checkVersion(existing, body.version);
-    const values = this.customValues(body, existing), model = body.model_id === undefined ? undefined : this.modelChoice(user, repositoryId, body.model_id);
+    const values = this.customValues(repositoryId, id, body, existing), model = body.model_id === undefined ? undefined : this.modelChoice(user, repositoryId, body.model_id);
     const now = new Date().toISOString();
     this.store.transaction(() => {
       if (!existing) this.store.run(`INSERT INTO workflows(repository_id,id,name,description,enabled,triggers,prompt,permissions,model_id,version,created_at,updated_at)
@@ -209,16 +216,17 @@ export class WorkflowService {
     const builtin = id ? builtinWorkflow(id) : undefined;
     if (id && !builtin && !savedWorkflow(this.store, repositoryId, id)) fail(404, 'workflow_not_found');
     const current = id ? (await this.list(repositoryId)).workflows.find(workflow => workflow.id === id) : null;
+    if (builtin && !builtin.agent) fail(409, 'workflow_agent_not_used');
     const ceiling = builtin?.ceiling ?? customCeiling;
-    const catalog = builtin ? (current?.triggers || []).filter(trigger => trigger.configurable).map(({ id, title }) => ({ id, title }))
-      : triggers.map(({ id, title, label }) => ({ id, title, ...(label ? { needs_label: true } : {}) }));
+    // The same trigger catalog the editor offers this workflow.
+    const catalog = triggerOptions(id ?? 'custom', null).map(({ id, title, label }) => ({ id, title, ...(label ? { needs_label: true } : {}) }));
     const system = [
       'You help a project administrator write one workflow of a GitHub repository maintenance bot. Reply in Simplified Chinese.',
       'A workflow has triggers, a prompt for the agent, permissions and a model. The prompt is Markdown. It must contain exactly one flowchart as a fenced ```mermaid block starting with "flowchart LR"; nodes are id[label] with short Chinese labels, edges are -->, and a labeled edge -->|label| may lead back to an earlier step (for example when a review or a test finds a problem). After the flowchart, describe each step for the agent.',
       'To use several agents, the prompt says in which step to call start_agent: it starts an independent agent with its own session that does not see the main conversation and gets at most the workflow permissions (it can only narrow them) and cannot publish. Only mention start_agent when permissions.agents is true.',
       'Hard limits you cannot change through the prompt: publication is done by the control plane (' + ceiling.publication + '); the agent never pushes, merges, approves, labels or comments through the shell; drafts, closed objects and the bot\'s own writing never trigger; development needs the project development switch, a development label added by a person and an Issue nobody is assigned to; tests must pass before a pull request; release notes are checked by the control plane.',
       'Permissions: {"workspace":{"read","write","notes","shell" booleans},"github":[read scopes],"agents":boolean}. They can never exceed this ceiling: ' + JSON.stringify(ceiling) + '. Choose the least the workflow needs.',
-      'Return only JSON: {"reply":"what you changed and why, in a few sentences","draft":{' + (builtin ? '"triggers":{"<id>":true|false},' : '"name":"...","description":"...","triggers":[{"id":"...","label":"... only when needs_label"}],') + '"prompt":"full Markdown prompt","permissions":{...}}}. Keep fields the administrator did not ask to change.'
+      'Return only JSON: {"reply":"what you changed and why, in a few sentences","draft":{"name":"...","description":"...","triggers":[{"id":"...","label":"... only when needs_label"}],"prompt":"full Markdown prompt","permissions":{...}}}. Keep fields the administrator did not ask to change.'
     ].join('\n');
     const prompt = JSON.stringify({ workflow: current ? { id: current.id, builtin: current.builtin, name: current.name, description: current.description,
       triggers: current.triggers, prompt: current.prompt.effective, permissions: current.permissions } : null,
@@ -240,18 +248,13 @@ export class WorkflowService {
     if (JSON.stringify(permissions) !== JSON.stringify({ ...draft.permissions, publication: ceiling.publication }) && draft.permissions)
       warnings.push('草稿里的权限超出了这条工作流的上限或格式不对，已收窄到允许的范围。');
     const result: Json = { prompt: typeof draft.prompt === 'string' ? draft.prompt : current?.prompt.effective ?? '', permissions };
-    if (builtin) {
-      const allowed = new Set(catalog.map(trigger => trigger.id));
-      result.triggers = Object.fromEntries(Object.entries(draft.triggers && typeof draft.triggers === 'object' && !Array.isArray(draft.triggers) ? draft.triggers : {})
-        .filter(([trigger, on]) => allowed.has(trigger) && typeof on === 'boolean'));
-    } else {
-      result.name = typeof draft.name === 'string' && draft.name.trim() ? draft.name : current?.name ?? '新工作流';
-      result.description = typeof draft.description === 'string' ? draft.description : current?.description ?? '';
-      result.triggers = (Array.isArray(draft.triggers) ? draft.triggers : []).filter((trigger: any) => {
-        const definition = triggers.find(entry => entry.id === trigger?.id);
-        return definition && (!definition.label || typeof trigger.label === 'string' && trigger.label.trim());
-      }).map((trigger: any) => ({ id: trigger.id, ...(triggers.find(entry => entry.id === trigger.id)!.label ? { label: String(trigger.label).trim() } : {}) }));
-    }
+    // Built-in and custom drafts have the same fields; triggers are kept only where this workflow can have them.
+    result.name = typeof draft.name === 'string' && draft.name.trim() ? draft.name : current?.name ?? '新工作流';
+    result.description = typeof draft.description === 'string' ? draft.description : current?.description ?? '';
+    result.triggers = Array.isArray(draft.triggers) ? draft.triggers.filter((trigger: any) => {
+      const option = catalog.find(entry => entry.id === trigger?.id);
+      return option && (!option.needs_label || typeof trigger.label === 'string' && trigger.label.trim());
+    }).map((trigger: any) => ({ id: trigger.id, ...(catalog.find(entry => entry.id === trigger.id)!.needs_label ? { label: String(trigger.label).trim() } : {}) })) : current?.triggers ?? [];
     if (!hasFlowchart(String(result.prompt))) warnings.push('草稿提示词里没有 mermaid 流程图。');
     return { reply: value.reply, draft: result, warnings };
   }

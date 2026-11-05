@@ -10,7 +10,7 @@ import { validVersion } from './version.js';
 import { ReleaseWorker } from './worker.js';
 import { runSnapshot } from './actions.js';
 import { explainRun } from './observe.js';
-import { savedWorkflow } from '../workflows/resolve.js';
+import { savedWorkflow, activeTrigger } from '../workflows/resolve.js';
 // The release.notes workflow's console prompt; a repository skill still replaces it at preflight.
 const releaseNotesPrompt = (store: Store, id: string) => savedWorkflow(store, id, 'release.notes')?.prompt ?? null;
 
@@ -132,6 +132,8 @@ export class ReleaseService {
     if (observation && method === 'POST') {
       fields(input, ['revision']); this.find(id, observation[1]!); enabled(this.store, id);
       if (!Number.isSafeInteger(input.revision)) return fail(400, 'release_revision_required');
+      // The CI observation workflow can be switched off, or lose its trigger, on the Workflows page.
+      if (!activeTrigger(this.store, id, 'release.observe', 'release.manual')) return fail(409, 'workflow_disabled');
       // Analysis owns only its observer lease. CI polling and publication keep their own write lease.
       const row = this.find(id, observation[1]!), redactor = releaseRedactor(this.store, id), observer = randomId();
       if (row.revision !== input.revision) return fail(409, 'release_revision_conflict');

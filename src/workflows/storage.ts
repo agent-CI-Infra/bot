@@ -8,6 +8,8 @@ export function workflowStorage(store: Store) {
     name TEXT NOT NULL DEFAULT '',description TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,triggers TEXT NOT NULL DEFAULT '[]',
     prompt TEXT,permissions TEXT,model_id TEXT,version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
     PRIMARY KEY(repository_id,id))`);
+  // A built-in workflow's own trigger list once an administrator saved one; until then it follows the policy switches.
+  if (!store.all('PRAGMA table_info(workflows)').some(row => row.name === 'trigger_list')) store.db.exec('ALTER TABLE workflows ADD COLUMN trigger_list TEXT');
   // Tasks of a custom workflow name it; built-in tasks keep their kind as their workflow.
   if (!store.all('PRAGMA table_info(tasks)').some(row => row.name === 'workflow_id')) store.db.exec('ALTER TABLE tasks ADD COLUMN workflow_id TEXT');
 }

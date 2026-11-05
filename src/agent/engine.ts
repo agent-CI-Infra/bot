@@ -19,7 +19,7 @@ import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, 
 import { repositoryConcurrency } from '../app/settings.js';
 import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState } from '../review/sessions.js';
 import { type GitCache } from './git-cache.js';
-import { taskWorkflow, workflowPermissions, savedWorkflow } from '../workflows/resolve.js';
+import { taskWorkflow, workflowPermissions, workflowEnabled, activeTrigger } from '../workflows/resolve.js';
 
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
@@ -126,8 +126,8 @@ export class TaskEngine {
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
-      // A custom workflow that was switched off or deleted stops its tasks the same way.
-      if(task.kind.startsWith('workflow.')&&!savedWorkflow(this.store,task.repository_id,taskWorkflow(task as any))?.enabled)stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
+      // A workflow that was switched off (or a custom one deleted) stops its tasks the same way.
+      if(!workflowEnabled(this.store,task.repository_id,taskWorkflow(task as any)))stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
     const update=(values:Record<string,unknown>)=>{
@@ -518,6 +518,8 @@ export class TaskEngine {
     // A PR conversation mention or update requests another review, including on a bot-owned PR, never a revision.
     if(task.kind==='review.pr'&&(input.comment||input.trigger))return;
     if(task.kind==='review.issue'){
+      // The development workflow starts from a published review only while that trigger is on; its conditions stay.
+      if(!activeTrigger(this.store,task.repository_id,'development.issue','review.published'))return;
       if(!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,input.object,result))return;
       if(!approved||!reviewRequestsCode(input.object,result))return;
       // Development that continues the bot's PR for this Issue revises that PR, so it counts against the same budget.
@@ -526,6 +528,7 @@ export class TaskEngine {
       if(owned&&owned.revisions>=policy.max_revisions)return;
       enqueue(this.store,task.repository_id,'development.issue',task.object_number,null,{review:result,object_hash:input.object_hash},task.source_delivery_id,task.id);
     }else{
+      if(!activeTrigger(this.store,task.repository_id,'development.pr','review.published'))return;
       let owned:Row;try{owned=this.owned(github,task,input.object);}catch{return;}
       const source=this.store.get('SELECT * FROM tasks WHERE id=?',owned.source_task_id);
       if(source&&source.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,source.object_number))return;

@@ -24,7 +24,8 @@ function parseEnv(text) {
   });
   return env;
 }
-function projectRoute() { const m = /^#\/projects\/([1-9]\d*)(?:\/([a-z]+))?$/.exec(location.hash); return m ? { id: m[1], section: m[2] || 'basic' } : null; }
+// A section may name one item inside it, e.g. #/projects/<id>/workflows/review.pr.
+function projectRoute() { const m = /^#\/projects\/([1-9]\d*)(?:\/([a-z]+)(?:\/([\w.-]+))?)?$/.exec(location.hash); return m ? { id: m[1], section: m[2] || 'basic', item: m[3] || null } : null; }
 function openProject(id, section = 'basic') { location.hash = `#/projects/${id}/${section}`; }
 function field(label, control) { const wrap = element('label', label); wrap.append(control); return wrap; }
 function input(name, value, attributes = {}) { const el = document.createElement('input'); el.name = name; el.value = value ?? ''; Object.assign(el, attributes); return el; }
@@ -67,14 +68,18 @@ async function renderProject(route) {
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
   if (current?.id !== route.id) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
+  if (route.section === 'workflows') current.workflowItem = route.item || (legacyFocus && legacyFocus !== 'rule-sources' ? legacyFocus : legacyFocus === 'rule-sources' ? 'rules.files' : current.workflowItem);
   try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) page.replaceChildren(element('p', err.message, 'view-error')); return; }
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   current.section = section; page.replaceChildren(projectHeader(), projectBody(section));
+  // The workflows page uses the whole width: a list beside a tabbed editor.
+  page.classList.toggle('wide-project', section === 'workflows');
   if(section==='workflows')page.querySelector('.project-nav [aria-current=page]')?.scrollIntoView({block:'nearest',inline:'nearest'});
   if (current.focusAnchor) { page.querySelector(`[data-overview-anchor="${CSS.escape(current.focusAnchor)}"]`)?.scrollIntoView({ block: 'start' }); current.focusAnchor = null; }
   // Opening a rule file from the overview, or saving one, brings its card into view.
-  if (current.focusRule) { if (section === 'workflows') openProjectRule(current.focusRule); else page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
+  // On the workflows page a shared rule is an item of its own list, already selected by the address.
+  if (current.focusRule) { if (section === 'workflows') { /* shown in place */ } else page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
   if (section === 'workflows' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
 }
@@ -688,19 +693,6 @@ function modelFields(repositoryId) {
   return [field('接口 URL', url), note(modelUrlRule), preview, field('API Key', key), field('模型名', name), pick, actions, result];
 }
 
-function actionsFailureSettings({ after = null } = {}) {
-  const enabled = !!current.policy.actions_failures_enabled, status = current.actionsFailures;
-  const nodes = [checkbox('actions_failures_enabled', enabled, '分析默认分支 Actions 失败：外部原因最多重跑原运行一次，代码缺陷或不明原因提报 Issue'),
-    note('默认关闭；首次开启不补报之前已完成的运行。需要 App 管理员为已有 App 订阅 workflow_run；没有新增权限时无需重新批准安装。'),
-    note('代码缺陷提报仍需通过现有检视，并由人添加配置的开发标签。关闭开发设置仍会分类、按策略重跑和提报。')];
-  const message = element('p'); message.dataset.actionsStatus = ''; message.setAttribute('role', 'status'); message.hidden = !enabled;
-  showActionsFailureStatus(message, status); nodes.push(message);
-  const section = settingsForm('Actions 失败处理', nodes, async form => {
-    await patchPolicy(changed({ actions_failures_enabled: form.elements.actions_failures_enabled.checked }, { actions_failures_enabled: enabled }));
-    current.focusAnchor = 'actions-failures';
-  }, { after });
-  section.dataset.overviewAnchor = 'actions-failures'; return section;
-}
 function showActionsFailureStatus(message, status) {
   message.className = status?.error ? 'endpoint-warning' : 'muted';
   message.textContent = status?.error ? status.error === 'actions_workflow_run_subscription_missing'

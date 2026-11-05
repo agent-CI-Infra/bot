@@ -5,7 +5,7 @@ import { GitHub, revokeInstallationToken } from '../github/client.js';
 import { sha, stop, TaskError } from '../agent/common.js';
 import { actionPages } from '../releases/actions.js';
 import { queueWebhook } from '../review/queue.js';
-import { activateActions, recordActionsRun } from './storage.js';
+import { activateActions, recordActionsRun, actionsWorkflowOn } from './storage.js';
 import { classifyFailure, classifyJob, normalizeSignature, type Evidence, type FailureKind } from './classifier.js';
 import { actionsRedactor, publicText } from './safety.js';
 
@@ -29,7 +29,7 @@ export class ActionsFailures {
     return this.active;
   }
   private async work() {
-    for (const repo of this.store.all('SELECT r.* FROM repositories r JOIN policies p ON p.repository_id=r.id WHERE p.enabled=1 AND p.actions_failures_enabled=1')) {
+    for (const repo of this.store.all('SELECT r.* FROM repositories r JOIN policies p ON p.repository_id=r.id WHERE p.enabled=1 AND p.actions_failures_enabled=1').filter(repo => actionsWorkflowOn(this.store, repo.id))) {
       if (this.closing) break;
       if (!this.store.get('SELECT 1 FROM actions_failure_scans WHERE repository_id=?', repo.id)) activateActions(this.store, repo.id);
       const row = this.store.get('SELECT * FROM actions_failure_scans WHERE repository_id=?', repo.id)!;
@@ -46,7 +46,7 @@ export class ActionsFailures {
   }
   private async repository(repo: Row, lease: string) {
     const guard = async () => {
-      if (this.closing || !this.store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1 AND actions_failures_enabled=1', repo.id)) stop('actions_failures_disabled');
+      if (this.closing || !actionsWorkflowOn(this.store, repo.id)) stop('actions_failures_disabled');
       if (!this.store.run('UPDATE actions_failure_scans SET lease_until=? WHERE repository_id=? AND lease=? AND lease_until>?', Date.now() + 120_000, repo.id, lease, Date.now()).changes) stop('actions_lease_lost');
     };
     const redactor = actionsRedactor(this.store), github = new GitHub(this.store, repo, redactor, guard, this.apiUrl);

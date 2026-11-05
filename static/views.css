@@ -77,7 +77,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .project-table th{text-align:left;color:#637c89;font-size:12px;padding:10px 8px;border-bottom:1px solid #d7e3e8}
 .project-table td{padding:12px 8px;border-bottom:1px solid #edf1f4;vertical-align:middle;overflow-wrap:anywhere}
 .project-table tr:last-child td{border-bottom:0}.project-table td>code{display:block;margin-top:4px;font-size:11px;color:#637c89}
-.project-table[aria-label="工作流"] th:first-child{width:22%}.project-table[aria-label="工作流"] th:nth-child(2){width:34%}
+
 .project-table[aria-label="任务模型"] th:first-child{width:24%}.project-table button{white-space:nowrap}
 .task-model-editor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:end;min-width:0}
 .task-model-editor>.muted{grid-column:1/-1;margin:0;font-size:12px}.task-model-editor>label{min-width:0}.task-model-editor select{width:100%;min-width:0}
@@ -86,9 +86,9 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .common-rule{border-top:1px solid #edf1f4;padding:9px 0}.common-rule:last-child{padding-bottom:0}.common-rule summary{cursor:pointer;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}.common-rule summary::before{content:'▸';color:#637c89}.common-rule[open] summary::before{content:'▾'}.common-rule summary>.muted{margin-left:auto;font-size:12px}.common-rule-body:empty{display:none}.common-rule-body>.side-card{margin-top:10px}
 .rule-sync{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap}.rule-sync>.muted{flex:1;min-width:0;margin:0;font-size:12px}.rule-sync>[role=status]{flex-basis:100%;margin:0}.rule-sync>[role=status]:empty{display:none}
 .project-inline-detail{border-top:1px solid #d7e3e8;padding-top:16px;margin-top:16px;min-width:0}.project-inline-detail>.heading{margin-bottom:12px}.project-inline-detail>.heading h3{margin:0}.project-inline-detail>.side-card{margin:0}.project-inline-detail>.flash{margin-bottom:12px}
-.project-table[aria-label="工作流"] th:first-child{width:17%}.project-table[aria-label="工作流"] th:nth-child(2){width:23%}.project-table[aria-label="工作流"] th:nth-child(3){width:12%}.project-table[aria-label="工作流"] th:nth-child(4){width:33%}.other-rule-rows{border-top:2px solid #d7e3e8}
+.other-rule-rows{border-top:2px solid #d7e3e8}
 @media(max-width:650px){.project-table th,.project-table td{padding:10px 4px}.project-table button{padding:6px;min-height:36px;font-size:12px}.task-model-editor{grid-template-columns:minmax(0,1fr)}.task-model-editor>.actions{grid-column:1;justify-content:flex-start}.task-model-editor select{font-size:13px}.project-table[aria-label="工作流模型"] th:first-child{width:28%}
-.project-table[aria-label="工作流"] thead{display:none}.project-table[aria-label="工作流"],.project-table[aria-label="工作流"] tbody{display:block}.project-table[aria-label="工作流"] tr{display:grid;grid-template-columns:minmax(0,1fr) auto;border-bottom:1px solid #dde6eb;padding:10px 0;gap:6px 12px}.project-table[aria-label="工作流"] td{display:block;border:0;padding:0}.project-table[aria-label="工作流"] td:nth-child(1){grid-column:1;grid-row:1}.project-table[aria-label="工作流"] td:nth-child(4){grid-column:2;grid-row:1}.project-table[aria-label="工作流"] td:nth-child(7){grid-column:2;grid-row:2}.project-table[aria-label="工作流"] td:nth-child(2),.project-table[aria-label="工作流"] td:nth-child(3),.project-table[aria-label="工作流"] td:nth-child(5),.project-table[aria-label="工作流"] td:nth-child(6){grid-column:1}.project-table[aria-label="工作流"] td:nth-child(2){color:#637c89}.project-table[aria-label="工作流"] .flow-path{white-space:normal}.common-rule summary>.muted{margin-left:0}.rule-sync{align-items:flex-start}.rule-sync>.muted{flex-basis:100%}}
+.common-rule summary>.muted{margin-left:0}.rule-sync{align-items:flex-start}.rule-sync>.muted{flex-basis:100%}}
 .add-model{margin-top:8px}.add-model>summary{font-weight:600;color:#16636b}.add-model .side-card{border:0;padding:8px 0 0}
 .member-add{margin-top:8px}.member-add select{width:auto;min-width:220px}
 @media(max-width:760px){
@@ -203,18 +203,32 @@ button.danger{background:#a02b31;border-color:#a02b31;color:#fff}
 /* Provider connection settings are edited once, separately from model-specific operations. */
 .provider-create{margin-top:12px}#provider-edit{width:min(800px,calc(100vw - 24px))}#provider-edit form{gap:16px}.provider-fields{border:0;padding:0;margin:0;min-width:0;display:flex;flex-direction:column;gap:10px}.provider-fields h3{margin:8px 0 0;font-size:14px}.provider-fields p{margin:0}.provider-fields .model-chips:empty,.provider-fields .probe-result:empty{display:none}.provider-fields>button{align-self:flex-start}.provider-manual{align-items:flex-end}.provider-manual label{flex:1 1 220px}.provider-selected .model-chip{border-color:#16636b;color:#16636b}.provider-editor-actions{justify-content:flex-end}.provider-editor-actions .destructive{margin-right:auto}.provider-fields .model-chips{max-height:220px;overflow:auto;padding:2px}.provider-fields input[type=search]{max-width:320px}
 @media(max-width:760px){#provider-edit{padding:16px}.provider-head>button{margin-left:0}.provider-manual label{flex-basis:100%}.provider-editor-actions{gap:8px}}
-/* Workflows: the editor beside the chat that drafts it, and the flowchart drawn from the prompt. */
-.project-table[aria-label="工作流"] td>code{display:block;font-size:11px;color:#637c89;margin-top:2px}.project-table[aria-label="工作流"] td>.status{margin-top:4px}.project-table[aria-label="工作流"] th:nth-child(1){width:16%}.project-table[aria-label="工作流"] th:nth-child(2){width:23%}.project-table[aria-label="工作流"] th:nth-child(3){width:18%}.project-table[aria-label="工作流"] th:nth-child(4){width:9%}.project-table[aria-label="工作流"] th:nth-child(5){width:15%}.project-table[aria-label="工作流"] th:nth-child(6){width:12%}.project-table[aria-label="工作流"] th:nth-child(7){width:7%}
-.workflow-editor{display:block}.workflow-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,340px);gap:18px;align-items:start}
-.workflow-main{display:grid;gap:12px;min-width:0}.project-form fieldset.workflow-group{border:1px solid #dde6eb;border-radius:8px;padding:10px 12px 12px;margin:0;min-width:0;display:grid;gap:8px}
-.workflow-group>legend{font-weight:600;font-size:13px;padding:0 4px}.workflow-group textarea.code{min-height:220px;font-size:12px}
-.workflow-trigger{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.workflow-trigger>.muted{font-size:12px}.workflow-trigger input[type=text],.workflow-trigger input:not([type]){width:auto;min-width:140px}
-.workflow-permissions{display:grid;gap:6px}.workflow-scopes{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center}
-.workflow-chat{border:1px solid #d7e3e8;border-radius:8px;padding:12px;display:grid;gap:8px;position:sticky;top:12px;background:#fbfdfe;min-width:0}.workflow-chat>h4{margin:0}
-.workflow-chat-log{list-style:none;margin:0;padding:0;display:grid;gap:8px;max-height:65vh;overflow:auto}.workflow-chat .workflow-flow svg{max-width:100%}.workflow-chat-log>li{border-radius:8px;padding:8px 10px;font-size:13px}.workflow-chat-log>li>p{margin:4px 0 0;white-space:pre-wrap}
+/* Workflows: a list beside a tabbed editor over the whole width, the chat as a side panel, and the flowchart drawn from the prompt. */
+.wide-project .project-content{max-width:none}
+.workflow-page{display:grid;grid-template-columns:minmax(240px,300px) minmax(0,1fr);gap:0;border:1px solid #dde6eb;border-radius:8px;min-height:calc(100svh - 230px);background:#fff}
+.workflow-sidebar{border-right:1px solid #e3eaf0;background:#f7fafb;padding:12px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.workflow-sidebar-head{display:grid;gap:8px}.workflow-sidebar-head h2{font-size:16px;margin:0}.workflow-sidebar-head .actions{flex-wrap:wrap;gap:6px}.workflow-sidebar h3{font-size:12px;color:#637c89;margin:8px 0 0;letter-spacing:.04em}.workflow-lists{display:grid;gap:10px;align-content:start}
+.workflow-list{list-style:none;margin:0;padding:0;display:grid;gap:2px}.workflow-list a{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:3px 8px;padding:7px 10px;border-radius:6px;color:inherit;text-decoration:none;border:1px solid transparent}.workflow-list a>.flow-path,.workflow-list a>.muted{grid-column:1/-1}
+.workflow-list a:hover{background:#eef4f6}.workflow-list a[aria-current=page]{background:#fff;border-color:#bcd3dc;box-shadow:0 1px 2px #0000000d}.workflow-list strong{font-size:13px}
+.workflow-list-meta{display:flex;gap:4px;flex-wrap:wrap}.workflow-list .flow-path{font-size:12px;color:#40525c}
+.workflow-sidebar .rule-sync{display:grid;gap:6px;margin-top:auto}.workflow-sidebar .rule-sync button{justify-self:start}
+.workflow-detail{padding:16px 20px;min-width:0;display:grid;align-content:start;gap:12px}.workflow-detail>.side-card{margin:0}
+.workflow-detail-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.workflow-detail-head h2{font-size:18px;margin:0}.workflow-detail-head .title-group{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.workflow-detail-head code{font-size:12px;color:#637c89}.workflow-detail-head button[aria-expanded=true]{background:#e7eff1;border-color:#16636b}
+.workflow-editor{display:grid;gap:12px}.workflow-shell{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-items:start}.workflow-shell.with-chat{grid-template-columns:minmax(0,1fr) minmax(300px,380px)}.workflow-shell:not(.with-chat)>.workflow-chat{display:none}
+.workflow-main{display:grid;gap:12px;min-width:0}.workflow-tabs{display:flex;gap:2px;border-bottom:1px solid #d7e3e8;overflow-x:auto}
+.workflow-tab{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:#40525c;padding:8px 14px;font-weight:600;white-space:nowrap}.workflow-tab[aria-selected=true]{color:#16636b;border-bottom-color:#16636b}
+.workflow-panel{display:grid;gap:12px;min-width:0}.workflow-panel>h3{font-size:14px;margin:6px 0 0}.workflow-panel textarea.code{min-height:360px;font-size:12px}
+.workflow-prompt-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}.workflow-prompt-columns>div{display:grid;gap:10px;min-width:0}
+.workflow-summary{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:0;font-size:13px}.workflow-summary dt{color:#637c89}.workflow-summary dd{margin:0;overflow-wrap:anywhere}
+.workflow-trigger{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;border-bottom:1px solid #f0f4f6}.workflow-trigger>.muted{font-size:12px}.workflow-trigger input:not([type]){width:auto;min-width:160px}
+.workflow-triggers{display:grid}.workflow-permissions{display:grid;gap:6px}.workflow-scopes{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center}
+.workflow-chat{border:1px solid #d7e3e8;border-radius:8px;padding:12px;display:grid;gap:8px;position:sticky;top:12px;background:#fbfdfe;min-width:0;max-height:calc(100svh - 40px);overflow:auto}.workflow-chat>h4{margin:0}
+.workflow-chat-log{list-style:none;margin:0;padding:0;display:grid;gap:8px}.workflow-chat-log>li{border-radius:8px;padding:8px 10px;font-size:13px}.workflow-chat-log>li>p{margin:4px 0 0;white-space:pre-wrap}.workflow-chat .workflow-flow svg{max-width:100%}
 .workflow-chat-log>.chat-user{background:#eef5f8}.workflow-chat-log>.chat-assistant{background:#fff;border:1px solid #e3eaee}.workflow-draft{display:grid;gap:6px;margin-top:8px}
 .workflow-flow{margin:0;display:grid;gap:6px;min-width:0}.workflow-flow-canvas{overflow-x:auto;max-width:100%}.workflow-flow svg{display:block;max-width:none;height:auto}
 .workflow-flow figcaption{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:#40525c}.workflow-flow .flow-loop{color:#8a5a00}
 .flow-node{fill:#f3f8fa;stroke:#5f8da0;stroke-width:1.5}.flow-node-label{font-size:13px;fill:#1f2f38}.flow-edge{stroke:#5f8da0;stroke-width:1.5;fill:none}.flow-back{stroke:#b07a12;stroke-dasharray:5 3}
 .flow-arrowhead{fill:#5f8da0}.flow-edge-label{font-size:11px;fill:#8a5a00}
-@media(max-width:900px){.workflow-layout{grid-template-columns:minmax(0,1fr)}.workflow-chat{position:static}}
+@media(max-width:1100px){.workflow-shell.with-chat{grid-template-columns:minmax(0,1fr)}.workflow-chat{position:static;max-height:none}.workflow-prompt-columns{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:820px){.workflow-page{grid-template-columns:minmax(0,1fr);min-height:0}.workflow-sidebar{border-right:0;border-bottom:1px solid #e3eaf0}.workflow-sidebar .rule-sync{margin-top:0}
+  .workflow-detail{padding:12px}.workflow-panel textarea.code{min-height:260px}}
