@@ -128,3 +128,26 @@ test('large evidence stays addressable by digest and cannot read another task’
  store.run('UPDATE task_history SET data=? WHERE id=?',JSON.stringify({tampered:true}),row.id);
  assert.equal(readEvidence(store,'a',c,{source:e.source}).error,'evidence_digest_changed');
 });
+
+test('related draft artifacts are readable without peer approval and never confer completion or cross-family access',async t=>{
+ const {relatedDeliveries,readRelatedArtifact}=await import('../dist/tasks/related.js');
+ const {Workspace}=await import('../dist/agent/workspace.js');const {Redactor}=await import('../dist/agent/common.js');
+ const {store,records,create}=fixture(t);create('root');const parent=submit(records,'root');
+ const residual=key=>({key,description:'Separate report correction',evidence:'Original report is complete',impact:'Citation precision',nonblocking_reason:'Independent of the main goal',goal:'Correct '+key,criteria:['Preserve the observed source']});
+ const delivered=records.decide('root',parent.id,parent.revision,{...pass,outcome:'pass_with_issues',residuals:[residual('first'),residual('second')]});
+ const [first,second]=delivered.followups;
+ store.run("UPDATE tasks SET workspace_id=?,generation=1,status='retry_wait',phase='acceptance' WHERE id=?",'1'.repeat(48),first);
+ records.submit(first,[{kind:'files',reference:'draft-report',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40),files:[{path:'report.md',sha:'d'.repeat(40)}]}}],[],{summary:'Submitted, not yet accepted'});
+ store.run("UPDATE tasks SET workspace_id=?,generation=2,status='running' WHERE id=?",'2'.repeat(48),second);
+ const task=store.get('SELECT * FROM tasks WHERE id=?',second),source=relatedDeliveries(store,task).find(d=>d.row.id===first);
+ assert.equal(source.description.relationship,'submitted_sibling');assert.equal(source.description.accepted,false);assert.equal(source.description.acceptance_outcome,null);
+ const calls=[],manager={call:async(_m,_p,body)=>{calls.push(body);return {ok:true,result:{content:'Observed draft',version:'c'.repeat(40)}};}};
+ const workspace=new Workspace(store,manager,task,new Redactor(),async()=>{},()=>{});
+ const result=await readRelatedArtifact(store,task,workspace,{task_id:first,path:'report.md'});
+ assert.equal(result.content,'Observed draft');assert.equal(result.candidate_id,source.candidate.id);assert.equal(result.blob_sha,'d'.repeat(40));
+ assert.equal(calls[0].generation,2);assert.equal(calls[0].request.workspace_id,'1'.repeat(48));assert.equal(calls[0].request.sha,'c'.repeat(40));
+ assert.equal(store.get('SELECT task_id FROM task_tools').task_id,second);
+ assert.equal((await readRelatedArtifact(store,task,workspace,{task_id:'unrelated',path:'report.md'})).error,'related_delivery_not_available');
+ assert.equal(store.get('SELECT status FROM tasks WHERE id=?',first).status,'retry_wait');assert.equal(records.get(second).acceptance,null);
+ assert.equal(store.get('SELECT count(*) n FROM tasks').n,3);
+});

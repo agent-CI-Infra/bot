@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
@@ -21,7 +21,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  github.listen(0,'127.0.0.1');await once(github,'listening');t.after(()=>new Promise(r=>{github.close(r);github.closeAllConnections();}));
  const gh='http://127.0.0.1:'+github.address().port;
  await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:'fixture-github-token'})});
- let executionCalls=0,acceptanceCalls=0,firstOutage=true,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false;
+ let executionCalls=0,acceptanceCalls=0,firstOutage=true,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false;
  const remediations=new Map();
  const model=createServer(async(req,res)=>{
   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
@@ -34,19 +34,30 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    if(!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'accept-read'));
    assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact')));
    const pack=JSON.parse(messages[1].content),mode=pack.contract.goal.split(' ').at(-1);
+   if(pack.contract.source?.residual==='follow-report-2')assert.ok(pack.related_deliveries.some(d=>d.relationship==='accepted_sibling'));
    if(['return','insufficient_evidence'].includes(mode)){
     const round=(remediations.get(mode)||0)+1;remediations.set(mode,round);
     if(round===1)return send({role:'assistant',content:JSON.stringify({...pass,outcome:mode,core_complete:mode!=='return',required_evidence_complete:false,gaps:['Add the omitted observation and its source to the report']})});
     assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('Recovered observation with source calc.mjs')));
    }
    acceptedDeliveries++;
-   const verdict=acceptedDeliveries===2?{...pass,outcome:'pass_with_issues',residuals:[{key:'follow-report',description:'Independent report extension',evidence:'The requested report is complete',impact:'Extra documentation',nonblocking_reason:'The extension is independent of the completed report',goal:'Write follow-up from the inherited report',criteria:['Read the original report and deliver the extension']}]}:pass;
+   const verdict=acceptedDeliveries===2?{...pass,outcome:'pass_with_issues',residuals:[{key:'follow-report',description:'Independent report extension',evidence:'The requested report is complete',impact:'Extra documentation',nonblocking_reason:'The extension is independent of the completed report',goal:'Write follow-up from the inherited report',criteria:['Read the original report and deliver the extension']},{key:'follow-report-2',description:'Independent second extension',evidence:'Original report is complete',impact:'Documentation',nonblocking_reason:'A separate addition',goal:'Extend the accepted sibling report',criteria:['Read the accepted sibling artifact and preserve its extension']}]}:pass;
    return send({role:'assistant',content:JSON.stringify(verdict)});
   }
   executionCalls++;
   const context=JSON.parse(messages[1].content),multi=context.request.includes('multiple'),wanted=multi?['research','persistence']:['research'];
   if(context.task.contract.source?.parent_task&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'inherited-read'));
   if(context.task.contract.source?.parent_task)inheritedRead||=messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact'));
+  if(context.task.contract.source?.residual==='follow-report-2'){
+   const relatedCalls=calls.filter(c=>c.function.name==='read_related_artifact');
+   if(!relatedCalls.length)return send(call('read_related_artifact',{},'related-discover'));
+   const offered=messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return null;}}).find(v=>v?.deliveries);
+   const sibling=offered.deliveries.find(d=>d.relationship==='accepted_sibling');assert.ok(sibling);
+   if(relatedCalls.length===1)return send(call('read_related_artifact',{task_id:'not-in-family',path:'report.md'},'foreign-reject'));
+   if(relatedCalls.length===2){assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('related_delivery_not_available')));return send(call('read_related_artifact',{task_id:sibling.task_id,path:'../report.md'},'path-reject'));}
+   if(relatedCalls.length===3){assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path')));return send(call('read_related_artifact',{task_id:sibling.task_id,path:'report.md'},'sibling-read'));}
+   siblingRead||=messages.some(m=>m.role==='tool'&&m.content.includes('SIBLING_ACCEPTED_EXTENSION'));
+  }
   const read=calls.filter(c=>c.function.name==='read_playbook').map(c=>JSON.parse(c.function.arguments).id);
   const next=wanted.find(id=>!read.includes(id));if(next)return send(call('read_playbook',{id:next},'read-'+next));
   if(!names.includes('select_playbooks')){
@@ -55,7 +66,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   }
   const writes=calls.filter(c=>c.function.name==='write_file');
   if(!writes.length)return send(call('write_file',{path:'/tmp/forbidden-report.md',content:'bad target'},'invalid-path'));
-  if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
+  if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.contract.source?.residual==='follow-report'?' SIBLING_ACCEPTED_EXTENSION':'')+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
   if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Read guides and wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
   return send(call('submit_delivery',{summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]},'submit-delivery'));
  });
@@ -86,9 +97,13 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   assert.equal(new Set(result.candidate.evidence.map(e=>e.result.execution)).size,1);
   assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='artifact_checkpoint'",id));
  }
- const child=store.get("SELECT * FROM tasks WHERE source_task_id IS NOT NULL AND kind='task.request'");assert.ok(child);
+ const children=store.all("SELECT t.* FROM tasks t JOIN task_followups f ON f.task_id=t.id WHERE t.source_task_id IS NOT NULL AND t.kind='task.request' ORDER BY f.issue_key");assert.equal(children.length,2);
+ for(const child of children){
  store.run("UPDATE tasks SET status='running',claim_token='child-claim' WHERE id=?",child.id);store.run("INSERT INTO task_claims VALUES(?,'101','child-claim','now')",child.id);
  await engine.run(child.id,'child-claim');assert.equal(records.get(child.id).progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',child.id)));
  assert.ok(inheritedRead);assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='inherited_artifact'",child.id));
+ if(JSON.parse(child.input).contract.source.residual==='follow-report')writeFileSync(join(root,'tasks',store.get('SELECT workspace_id FROM tasks WHERE id=?',child.id).workspace_id,'repo','report.md'),'MUTATED_AFTER_ACCEPTANCE');
+ }
+ assert.ok(siblingRead);
  assert.ok(invalidPathObserved);assert.ok(acceptanceCalls>=5);
 });

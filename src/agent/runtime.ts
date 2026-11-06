@@ -29,6 +29,8 @@ export interface AgentSpec<T> {
   maxOutputTokens?: number;
   execute?: (name: string, args: any) => Promise<any>;
   validate?: (content: string) => T | Promise<T>;
+  /** Trusted, opt-in format feedback; at most two corrections within the same finite run. */
+  repairInvalid?: (error: unknown) => string | undefined;
   /** An explicitly offered submission tool ends this execution, never the framework's acceptance. */
   finish?: { name: string; validate: (args: any) => T | Promise<T> };
   /** A transport adapter (for example Pi in a workspace), not a task-kind switch. */
@@ -96,6 +98,7 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
     return stop('agent_limits_invalid', 'waiting_configuration', 'Agent 运行限制配置无效。');
   const tools = spec.tools ?? [], names = new Set(tools.map(tool => tool.function?.name));
   const messages: any[] = [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
+  let repairs=0;
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
     const reserve=Math.min(8,Math.max(2,Math.ceil(maxTurns/4)));
@@ -125,7 +128,12 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
     if (typeof message.content !== 'string' || message.content.length > maxOutput)
       return stop('agent_output_invalid', undefined, 'Agent 返回内容无效或超过输出上限。');
     // Validators see raw content to reject (rather than silently save) sensitive output.
-    return spec.validate ? await spec.validate(message.content) : spec.redactor.text(message.content) as T;
+    try{return spec.validate ? await spec.validate(message.content) : spec.redactor.text(message.content) as T;}
+    catch(error){
+      const feedback=spec.repairInvalid?.(error);
+      if(!feedback||repairs++>=2)throw error;
+      messages.push({role:'assistant',content:spec.redactor.text(message.content)},{role:'user',content:spec.redactor.text(feedback)});
+    }
   }
   return stop('agent_turn_limit', 'failed', `Agent 达到 ${maxTurns} 轮上限，请检查已取得的证据后继续。`);
 }
@@ -136,7 +144,7 @@ async function subagent<T>(spec: AgentSpec<T>, services: AgentServices, args: an
   const parent = new Set((spec.tools ?? []).map(tool => tool.function?.name));
   const tools = spec.agents!.tools(args.permissions).filter(tool => tool.function?.name !== 'start_agent' && tool.function?.name !== spec.finish?.name && parent.has(tool.function?.name));
   const id = 'agent-' + randomId().slice(0, 12);
-  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined };
+  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined, repairInvalid: undefined };
   try {
     const result = await runTools(child, { ...services, request: (body, requestId, onToken) => services.request(body, `${id}:${requestId}`, onToken) });
     return { agent_id: id, tools: tools.map(tool => tool.function.name), result };
