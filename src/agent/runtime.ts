@@ -33,6 +33,8 @@ export interface AgentSpec<T> {
   repairInvalid?: (error: unknown) => string | undefined;
   /** An explicitly offered submission tool ends this execution, never the framework's acceptance. */
   finish?: { name: string; validate: (args: any) => T | Promise<T> };
+  /** Trusted resource budget: reserve the last turns for saving/submitting, never approval. */
+  finalizationTools?: string[];
   /** A transport adapter (for example Pi in a workspace), not a task-kind switch. */
   adapter?: (services: AgentServices) => Promise<T>;
   /** Sub-agents for the default tool loop: start_agent runs a new session whose tools are a subset of these tools. */
@@ -96,14 +98,18 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
   const maxTurns = spec.maxTurns ?? 16, maxOutput = spec.maxOutputChars ?? 32768;
   if (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 256 || !Number.isSafeInteger(maxOutput) || maxOutput < 1 || maxOutput > 2 * 1024 * 1024)
     return stop('agent_limits_invalid', 'waiting_configuration', 'Agent 运行限制配置无效。');
-  const tools = spec.tools ?? [], names = new Set(tools.map(tool => tool.function?.name));
+  const offered = spec.tools ?? [], offeredNames=new Set(offered.map(tool=>tool.function?.name));
+  if(spec.finalizationTools&&(!spec.finish||!spec.finalizationTools.includes(spec.finish.name)||spec.finalizationTools.some(name=>!offeredNames.has(name))))return stop('agent_tools_invalid','waiting_configuration','收尾工具必须来自本次授权工具并包含提交入口。');
+  const finishingNames=spec.finalizationTools?new Set(spec.finalizationTools):null;
   const messages: any[] = [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
   let repairs=0;
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
     const reserve=Math.min(8,Math.max(2,Math.ceil(maxTurns/4)));
-    if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.`});
-    const { value } = await services.request({ tools, tool_choice: tools.length ? 'auto' : 'none', messages,
+    const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
+    const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));
+    if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
+    const { value } = await services.request({ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
       ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) }, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
     if (!message || JSON.stringify(message).length > 2 * 1024 * 1024) return stop('agent_output_invalid', undefined, 'Agent 没有返回有效结果。');
@@ -144,7 +150,7 @@ async function subagent<T>(spec: AgentSpec<T>, services: AgentServices, args: an
   const parent = new Set((spec.tools ?? []).map(tool => tool.function?.name));
   const tools = spec.agents!.tools(args.permissions).filter(tool => tool.function?.name !== 'start_agent' && tool.function?.name !== spec.finish?.name && parent.has(tool.function?.name));
   const id = 'agent-' + randomId().slice(0, 12);
-  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined, repairInvalid: undefined };
+  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined, repairInvalid: undefined, finalizationTools: undefined };
   try {
     const result = await runTools(child, { ...services, request: (body, requestId, onToken) => services.request(body, `${id}:${requestId}`, onToken) });
     return { agent_id: id, tools: tools.map(tool => tool.function.name), result };

@@ -43,7 +43,7 @@ export class TaskRecords {
   get(id: string) {
     const r=this.store.get('SELECT * FROM task_records WHERE task_id=?',id),t=this.store.get('SELECT * FROM tasks WHERE id=?',id);
     if (!r||!t) throw new Error('task_not_found');
-    return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:t.error_code},
+    return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|needs_replan$|failed$)/.test(t.status)?t.error_code:null},
       selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
       project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
@@ -79,7 +79,10 @@ export class TaskRecords {
       const offset=args?.offset??0,limit=args?.limit??10;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page'};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      return {observations:this.store.all("SELECT id,type,data,created_at FROM task_history WHERE task_id=? AND type IN ('checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact') ORDER BY id LIMIT ? OFFSET ?",id,limit,offset).map(row=>({...row,data:clip(JSON.parse(row.data))}))};
+      const filter="task_id=? AND type IN ('checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact')";
+      const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
+      const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
+      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(JSON.parse(row.data))}))};
     }
     if(name==='read_playbook'){
       if(!args?.id)return playbooks.map(({content,...p})=>p);

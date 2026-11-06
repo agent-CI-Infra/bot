@@ -24,8 +24,10 @@ test('all task kinds acquire structured records and real transition history, wit
  const {store,records,create}=fixture(t);
  for(const [i,kind] of ['review.issue','review.pr','development.issue','workflow.issue','release.observe','release.notes','actions.failures','gate.onboarding','task.request','custom.analysis'].entries()){
   const id=String(i);create(id,kind);const initial=records.get(id);assert.equal(initial.contract.completeness,'unspecified');assert.equal(initial.acceptance,null);
-  store.run("UPDATE tasks SET status='running',phase='model',attempt=2 WHERE id=?",id);
+  store.run("UPDATE tasks SET status='running',phase='model',attempt=2,error_code='prior_fault' WHERE id=?",id);
   assert.equal(records.get(id).progress.attempt,2);assert.equal(store.get("SELECT count(*) n FROM task_history WHERE task_id=?",id).n,2);
+  assert.equal(records.get(id).progress.waiting_reason,null);
+  store.run("UPDATE tasks SET status='retry_wait' WHERE id=?",id);assert.equal(records.get(id).progress.waiting_reason,'prior_fault');
  }
 });
 test('contract revision invalidates previous candidate; no old verdict can complete a new revision or artifact',t=>{
@@ -134,10 +136,12 @@ test('related draft artifacts are readable without peer approval and never confe
  const {Workspace}=await import('../dist/agent/workspace.js');const {Redactor}=await import('../dist/agent/common.js');
  const {store,records,create}=fixture(t);create('root');const parent=submit(records,'root');
  const residual=key=>({key,description:'Separate report correction',evidence:'Original report is complete',impact:'Citation precision',nonblocking_reason:'Independent of the main goal',goal:'Correct '+key,criteria:['Preserve the observed source']});
- const delivered=records.decide('root',parent.id,parent.revision,{...pass,outcome:'pass_with_issues',residuals:[residual('first'),residual('second')]});
- const [first,second]=delivered.followups;
+ const delivered=records.decide('root',parent.id,parent.revision,{...pass,outcome:'pass_with_issues',residuals:[residual('first'),residual('peer'),residual('reader')]});
+ const [first,peer,second]=delivered.followups;
  store.run("UPDATE tasks SET workspace_id=?,generation=1,status='retry_wait',phase='acceptance' WHERE id=?",'1'.repeat(48),first);
  records.submit(first,[{kind:'files',reference:'draft-report',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40),files:[{path:'report.md',sha:'d'.repeat(40)}]}}],[],{summary:'Submitted, not yet accepted'});
+ store.run("UPDATE tasks SET workspace_id=?,generation=1,status='retry_wait',phase='acceptance' WHERE id=?",'3'.repeat(48),peer);
+ const same=records.get(first).candidate;const peerCandidate=records.submit(peer,same.artifacts,[],same.claims);assert.equal(peerCandidate.id,same.id);
  store.run("UPDATE tasks SET workspace_id=?,generation=2,status='running' WHERE id=?",'2'.repeat(48),second);
  const task=store.get('SELECT * FROM tasks WHERE id=?',second),source=relatedDeliveries(store,task).find(d=>d.row.id===first);
  assert.equal(source.description.relationship,'submitted_sibling');assert.equal(source.description.accepted,false);assert.equal(source.description.acceptance_outcome,null);
@@ -147,7 +151,19 @@ test('related draft artifacts are readable without peer approval and never confe
  assert.equal(result.content,'Observed draft');assert.equal(result.candidate_id,source.candidate.id);assert.equal(result.blob_sha,'d'.repeat(40));
  assert.equal(calls[0].generation,2);assert.equal(calls[0].request.workspace_id,'1'.repeat(48));assert.equal(calls[0].request.sha,'c'.repeat(40));
  assert.equal(store.get('SELECT task_id FROM task_tools').task_id,second);
+ const again=await readRelatedArtifact(store,task,workspace,{task_id:peer,path:'report.md'});assert.equal(again.candidate_id,result.candidate_id);assert.equal(calls.length,2);assert.equal(store.get('SELECT count(*) n FROM task_tools').n,2);
  assert.equal((await readRelatedArtifact(store,task,workspace,{task_id:'unrelated',path:'report.md'})).error,'related_delivery_not_available');
  assert.equal(store.get('SELECT status FROM tasks WHERE id=?',first).status,'retry_wait');assert.equal(records.get(second).acceptance,null);
- assert.equal(store.get('SELECT count(*) n FROM tasks').n,3);
+ assert.equal(store.get('SELECT count(*) n FROM tasks').n,4);
+});
+
+test('history reconstruction starts with recent facts, pages older observations and excludes private/foreign data',t=>{
+ const {records,store,create}=fixture(t);create('a');create('b');
+ store.run("UPDATE tasks SET messages=? WHERE id='a'",JSON.stringify([{content:'PRIVATE_MODEL_MESSAGES'}]));
+ for(let i=0;i<25;i++)records.history('a','execution_evidence',{result:{output:'fact-'+i}});
+ records.history('a','private_internal',{content:'PRIVATE_INTERNAL'});records.history('b','execution_evidence',{result:'FOREIGN_TASK'});
+ const latest=records.tool('a','read_task_history',{});assert.equal(latest.total,25);assert.equal(latest.next_offset,10);
+ assert.deepEqual(latest.observations.map(r=>r.data.result.output),Array.from({length:10},(_,i)=>'fact-'+(15+i)));
+ const older=records.tool('a','read_task_history',{offset:20,limit:10});assert.equal(older.next_offset,null);assert.equal(older.observations.length,5);
+ assert.ok(!JSON.stringify(latest).includes('PRIVATE'));assert.ok(!JSON.stringify(latest).includes('FOREIGN_TASK'));
 });

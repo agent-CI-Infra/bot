@@ -34,6 +34,6 @@ export async function readRelatedArtifact(store: Store, task: Row, workspace: Wo
   if(!file||!source.snapshot?.local_sha||!source.row.workspace_id)return {error:'related_artifact_unavailable'};
   // Attribute the read to the current task while resolving a framework-authorized source workspace.
   const reader=new Workspace(store,workspace.manager,{...task,workspace_id:source.row.workspace_id},workspace.redactor,workspace.guard,workspace.log);
-  const result=await reader.call('related:'+source.candidate.id+':'+args.path,{type:'workspace_read',path:args.path,sha:source.snapshot.local_sha});
+  const result=await reader.call('related:'+source.row.id+':'+source.candidate.id+':'+args.path,{type:'workspace_read',path:args.path,sha:source.snapshot.local_sha});
   return {...result,source_task_id:source.row.id,candidate_id:source.candidate.id,tree_version:source.artifact!.version,blob_sha:file.sha};
 }
