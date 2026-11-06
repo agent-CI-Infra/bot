@@ -22,6 +22,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  const gh='http://127.0.0.1:'+github.address().port;
  await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:'fixture-github-token'})});
  let executionCalls=0,acceptanceCalls=0,firstOutage=true,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false;
+ const remediations=new Map();
  const model=createServer(async(req,res)=>{
   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
   const accepting=messages[0].content.includes('independent delivery acceptance evaluator');
@@ -32,6 +33,12 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    if(firstOutage){firstOutage=false;res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'temporary outage'}}));return;}
    if(!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'accept-read'));
    assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact')));
+   const pack=JSON.parse(messages[1].content),mode=pack.contract.goal.split(' ').at(-1);
+   if(['return','insufficient_evidence'].includes(mode)){
+    const round=(remediations.get(mode)||0)+1;remediations.set(mode,round);
+    if(round===1)return send({role:'assistant',content:JSON.stringify({...pass,outcome:mode,core_complete:mode!=='return',required_evidence_complete:false,gaps:['Add the omitted observation and its source to the report']})});
+    assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('Recovered observation with source calc.mjs')));
+   }
    acceptedDeliveries++;
    const verdict=acceptedDeliveries===2?{...pass,outcome:'pass_with_issues',residuals:[{key:'follow-report',description:'Independent report extension',evidence:'The requested report is complete',impact:'Extra documentation',nonblocking_reason:'The extension is independent of the completed report',goal:'Write follow-up from the inherited report',criteria:['Read the original report and deliver the extension']}]}:pass;
    return send({role:'assistant',content:JSON.stringify(verdict)});
@@ -48,7 +55,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   }
   const writes=calls.filter(c=>c.function.name==='write_file');
   if(!writes.length)return send(call('write_file',{path:'/tmp/forbidden-report.md',content:'bad target'},'invalid-path'));
-  if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'},'write-report'));}
+  if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
   if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Read guides and wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
   return send(call('submit_delivery',{summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]},'submit-delivery'));
  });
@@ -58,8 +65,8 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'fixture-model-token'},'model:m'),'now');
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
  const engine=new TaskEngine(store,manager,gh+'/github');
- for(const mode of ['single','multiple']){
-  const id=randomBytes(24).toString('hex'),contract={goal:'Write an observed report',scope:['report'],criteria:['Report a concrete repository observation'],endpoint:'report',source:'request'};
+ for(const mode of ['single','multiple','return','insufficient_evidence']){
+  const id=randomBytes(24).toString('hex'),contract={goal:'Write an observed report '+mode,scope:['report'],criteria:['Report a concrete repository observation'],endpoint:'report',source:'request'};
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES(?,'101','task.request','running',?,?,'claim')",id,mode,JSON.stringify({request:mode+' guide report',contract}));
   store.run("INSERT INTO task_claims VALUES(?,'101','claim','now')",id);
   records.history(id,'execution_evidence',{execution:'old-execution',name:'run_command',version:'old-tree',result:{exit_code:0,output:'STALE_EVIDENCE_SENTINEL'}});
@@ -69,7 +76,12 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    const callsBefore=executionCalls;await engine.run(id,'claim');assert.equal(executionCalls,callsBefore,'restart must not repeat successful execution');
   }
   const result=records.get(id);assert.equal(result.progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',id)));
-  assert.equal(result.selections.length,mode==='single'?1:2);assert.equal(result.acceptance.outcome,mode==='multiple'?'pass_with_issues':'pass');
+  assert.equal(result.selections.length,mode==='multiple'?2:1);assert.equal(result.acceptance.outcome,mode==='multiple'?'pass_with_issues':'pass');
+  if(['return','insufficient_evidence'].includes(mode)){
+   assert.equal(remediations.get(mode),2);
+   const decisions=store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",id).map(r=>JSON.parse(r.data).outcome);
+   assert.deepEqual(decisions,[mode,'pass']);
+  }
   assert.ok(!JSON.stringify(result.candidate.evidence).includes('STALE_EVIDENCE_SENTINEL'));
   assert.equal(new Set(result.candidate.evidence.map(e=>e.result.execution)).size,1);
   assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='artifact_checkpoint'",id));
