@@ -10,12 +10,14 @@ export function observation(source:string,version:string,raw:string):Evidence {
 }
 export function readEvidence(store:Store,taskId:string,candidate:Candidate,args:any){
   const evidence=candidate.evidence.find(e=>e.source===args?.source);
-  if(!evidence)return {error:'evidence_not_offered'};
-  const [kind,id]=evidence.source.split(':');
-  const row=kind==='task_history'?store.get('SELECT data AS raw FROM task_history WHERE task_id=? AND id=?',taskId,id!):kind==='task_log'?store.get('SELECT content AS raw FROM task_logs WHERE task_id=? AND id=?',taskId,id!):null;
+  const source=String(args?.source||''),[kind,id]=source.split(':');
+  if(!id||id.length>128)return {error:'invalid_evidence_source'};
+  if(!evidence&&kind!=='task_history')return {error:'evidence_not_offered'};
+  const row=kind==='task_history'?store.get('SELECT data AS raw,type FROM task_history WHERE task_id=? AND id=?',taskId,id!):kind==='task_log'?store.get('SELECT content AS raw FROM task_logs WHERE task_id=? AND id=?',taskId,id!):null;
   if(!row)return {error:'raw_evidence_unavailable'};
-  if((evidence.result as any)?.digest!==sha(row.raw))return {error:'evidence_digest_changed'};
+  if(!evidence&&row.type!=='execution_evidence')return {error:'evidence_not_offered'};
+  if(evidence&&(evidence.result as any)?.digest!==sha(row.raw))return {error:'evidence_digest_changed'};
   const offset=args?.offset??0,length=args?.length??12000;
   if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<1||length>32000)return {error:'invalid_evidence_range'};
-  return {source:evidence.source,version:evidence.version,digest:sha(row.raw),offset,total:row.raw.length,chunk:row.raw.slice(offset,offset+length)};
+  return {source,version:evidence?.version||JSON.parse(row.raw).version||'unknown',historical:!evidence,digest:sha(row.raw),offset,total:row.raw.length,chunk:row.raw.slice(offset,offset+length)};
 }

@@ -13,7 +13,7 @@ const tool=(name:string,description:string,properties:any,required:string[])=>({
 export async function evaluateDelivery(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard:()=>Promise<void>, shell=true): Promise<Verdict> {
   const records=new TaskRecords(store),record=records.get(task.id),candidate=record.candidate;
   if(!candidate)throw new Error('acceptance_candidate_required');
-  const tools=[tool('read_evidence','Read a paginated original observation by its offered source reference and verify its digest',{source:{type:'string'},offset:{type:'integer'},length:{type:'integer'}},['source']),tool('read_file','Read raw artifact or repository text',{path:{type:'string'}},['path'])];
+  const tools=[tool('read_evidence','Read a paginated original observation by offered source or task_history:<id> belonging to this task; old observations retain their original version',{source:{type:'string'},offset:{type:'integer'},length:{type:'integer'}},['source']),tool('read_task_history','Read this task’s factual observations and checkpoints; never executor conversation',{offset:{type:'integer'},limit:{type:'integer'}},[]),tool('read_file','Read raw artifact or repository text',{path:{type:'string'}},['path'])];
   // Caller supplies a trusted profile, not permissions from task/model text. Standard engine workflows retain shell.
   if(shell)tools.push(tool('run_command','Run necessary verification in the candidate workspace; do not modify source',{command:{type:'string'}},['command']));
   const evaluationId=randomId(),start=Date.now();
@@ -48,12 +48,12 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
     }
     const model=selectedModel(store,task.repository_id,taskWorkflow(task as any));
     const verdict=await runAgent({store,task,redactor,guard,model,maxOutputTokens:/^deepseek/i.test(model.model)?16384:8192,system:acceptanceSystem,
-      prompt:JSON.stringify({contract:record.contract,revision:record.revision,project:record.project,candidate,additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
+      prompt:JSON.stringify({contract:record.contract,revision:record.revision,project:record.project,candidate,context_files:Object.keys(sourceInput.context_files||{}).map(p=>'../context/'+p),additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
         delivery_boundary:files?.kind==='code'?{stage:'pre_publication',remaining:'Framework creates or updates the PR after acceptance; judge candidate readiness, do not require an unpublished URL or claim it exists.'}:undefined,
         policy:{test_command:candidate.artifacts.some(a=>a.kind==='code')?store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||null:null},workspace:'Candidate files are available at their original paths.'}),
       tools,requestPrefix:`acceptance:${evaluationId}:`,maxTurns:32,maxOutputChars:40000,
       execute:async(name,args)=>{
-        const result=name==='read_evidence'?readEvidence(store,task.id,candidate,args):name==='read_file'?await verification.call(`accept:${evaluationId}:read:${randomId()}`,{type:'workspace_read',path:args?.path,...(snapshot?.local_sha&&!String(args?.path).startsWith('../')?{sha:snapshot.local_sha}:{})})
+        const result=name==='read_evidence'?readEvidence(store,task.id,candidate,args):name==='read_task_history'?records.tool(task.id,name,args):name==='read_file'?await verification.call(`accept:${evaluationId}:read:${randomId()}`,{type:'workspace_read',path:args?.path,...(snapshot?.local_sha&&!String(args?.path).startsWith('../')?{sha:snapshot.local_sha}:{})})
           :await verification.call(`accept:${evaluationId}:verify:${randomId()}`,{type:'workspace_command',command:args?.command,timeout_ms:120000});
         records.history(task.id,'acceptance_evidence',{evaluation_id:evaluationId,name,arguments:redactor.clean(args),result:redactor.clean(result)});return result;
       },validate:content=>{

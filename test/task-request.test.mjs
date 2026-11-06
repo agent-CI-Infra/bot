@@ -50,7 +50,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   if(!writes.length)return send(call('write_file',{path:'/tmp/forbidden-report.md',content:'bad target'},'invalid-path'));
   if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'},'write-report'));}
   if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Read guides and wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
-  return send({role:'assistant',content:JSON.stringify({summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]})});
+  return send(call('submit_delivery',{summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]},'submit-delivery'));
  });
  model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
  store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)','a','fixture','bot_account',null,store.secrets.seal({token:'fixture-github-token'},'account:a'),'now');

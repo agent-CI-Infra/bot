@@ -29,6 +29,8 @@ export interface AgentSpec<T> {
   maxOutputTokens?: number;
   execute?: (name: string, args: any) => Promise<any>;
   validate?: (content: string) => T | Promise<T>;
+  /** An explicitly offered submission tool ends this execution, never the framework's acceptance. */
+  finish?: { name: string; validate: (args: any) => T | Promise<T> };
   /** A transport adapter (for example Pi in a workspace), not a task-kind switch. */
   adapter?: (services: AgentServices) => Promise<T>;
   /** Sub-agents for the default tool loop: start_agent runs a new session whose tools are a subset of these tools. */
@@ -57,6 +59,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
     new Set(tools.map(tool => tool.function.name)).size !== tools.length)
     return stop('agent_tools_invalid', 'waiting_configuration', 'Agent 工具配置无效或重复。');
   const allowed = new Map(tools.map(tool => [tool.function.name, tool]));
+  if(spec.finish&&!allowed.has(spec.finish.name))return stop('agent_tools_invalid','waiting_configuration','提交工具未在本次执行中提供。');
   const model = spec.model ?? selectedModel(spec.store, spec.task.repository_id, taskWorkflow(spec.task as any));
   spec.redactor.add(model.key);
   const services: AgentServices = {
@@ -107,6 +110,8 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
       for (const call of message.tool_calls) {
         await services.guard();
         let args: any; try { args = JSON.parse(call.function.arguments); } catch { args = null; }
+        const finishing=spec.finish;
+        if(finishing&&finishing.name===call.function.name&&names.has(call.function.name))return await finishing.validate(args);
         // The model cannot call an unadvertised tool, even if an executor happens to support it.
         const result = !names.has(call.function.name) ? { error: 'tool_not_allowed' }
           : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
@@ -127,9 +132,9 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
 async function subagent<T>(spec: AgentSpec<T>, services: AgentServices, args: any) {
   if (!args || typeof args.instructions !== 'string' || typeof args.task !== 'string' || !args.task.trim()) return { error: 'start_agent_invalid' };
   const parent = new Set((spec.tools ?? []).map(tool => tool.function?.name));
-  const tools = spec.agents!.tools(args.permissions).filter(tool => tool.function?.name !== 'start_agent' && parent.has(tool.function?.name));
+  const tools = spec.agents!.tools(args.permissions).filter(tool => tool.function?.name !== 'start_agent' && tool.function?.name !== spec.finish?.name && parent.has(tool.function?.name));
   const id = 'agent-' + randomId().slice(0, 12);
-  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined };
+  const child: AgentSpec<string> = { ...spec, system: spec.agents!.system + '\n\n' + args.instructions, prompt: args.task, tools, validate: undefined, adapter: undefined, agents: undefined, finish: undefined };
   try {
     const result = await runTools(child, { ...services, request: (body, requestId, onToken) => services.request(body, `${id}:${requestId}`, onToken) });
     return { agent_id: id, tools: tools.map(tool => tool.function.name), result };

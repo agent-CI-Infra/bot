@@ -45,12 +45,14 @@ export function validateSpec(input) {
 const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
 export const parallelBounds = [1, 32];
-const runnerTypes = ['command','read','write','workspace_init','workspace_checkout','workspace_context','git_have','git_pack','git_import','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','workspace_reuse','workspace_cache','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_repository_tool','workspace_agent_pull_request','workspace_agent_live','reap'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits'];
+const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_checkout','workspace_context','git_have','git_pack','git_import','workspace_write','workspace_snapshot','workspace_read','workspace_command','workspace_finalize','workspace_blob','workspace_reuse','workspace_cache','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_repository_tool','workspace_agent_pull_request','workspace_agent_live','reap'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits'];
 // A runner request is checked before it can touch the computer, so a malformed one never interrupts other tasks.
 function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
   if (call.workspace_id !== undefined && !/^[a-f0-9]{48}$/.test(call.workspace_id) || call.idle !== undefined && call.idle !== true) throw new ManagerError('invalid_runner_request', 400);
+  if (call.source_workspace_id !== undefined && (!['workspace_acceptance','workspace_restore'].includes(call.type) || !/^[a-f0-9]{48}$/.test(call.source_workspace_id))) throw new ManagerError('invalid_runner_request', 400);
+  if (['workspace_acceptance','workspace_restore'].includes(call.type) && !/^[a-f0-9]{48}$/.test(call.source_workspace_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
 }
 export class Projects {
@@ -438,7 +440,7 @@ export class Projects {
             // Commands run until they end unless the caller sets its own timeout_ms; stop, reset or delete interrupts them.
             const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
             const request = command ? { ...call, timeout_ms: limit } : call,
-              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','git_import'].includes(call.type) ? 0 : 90000;
+              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','git_import'].includes(call.type) ? 0 : 90000;
             result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout);
             if (commandTypes.includes(call.type)) {
               if (call.type === 'workspace_command' && call.keep_background === true && result.ok) kept.add(call.workspace_id);

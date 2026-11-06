@@ -349,3 +349,17 @@ test('a computer is ready without reading its journal, and old journal records a
   t.mock.timers.tick(6 * 3600 * 1000 + 1); await f.projects.check(); await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual([lines, f.projects.get('101').state], [['[manager] project 101 journal prune failed: prune_failed'], 'ready']);
 });
+
+test('Docker manager forwards versioned acceptance/recovery operations and rejects malformed cross-workspace requests before execution',async t=>{
+ const f=fixture(t);await f.projects.register('101');const workspace='a'.repeat(48),source='b'.repeat(48),sha='c'.repeat(40),tree='d'.repeat(40);
+ for(const type of ['workspace_acceptance','workspace_restore','workspace_source']){
+  const request={type,workspace_id:workspace,...(type==='workspace_source'?{}:{source_workspace_id:source,sha,tree_sha:tree})};
+  await f.projects.operate('101','execute',{operation_id:id(),generation:1,request});
+  const call=f.docker.runs.at(-1);assert.equal(call.type,type);assert.equal(call.source_workspace_id,request.source_workspace_id);
+  if(type!=='workspace_source')assert.equal(call.wait,0,'local Git copy/restore follows checkout’s unbounded execution timeout');
+ }
+ const count=f.docker.runs.length;
+ for(const request of [{type:'workspace_restore',workspace_id:workspace,source_workspace_id:'../other'}, {type:'workspace_acceptance',workspace_id:workspace}, {type:'workspace_command',workspace_id:workspace,source_workspace_id:source,command:'true'}])
+  await assert.rejects(f.projects.operate('101','execute',{operation_id:id(),generation:1,request}),/invalid_runner_request/);
+ assert.equal(f.docker.runs.length,count);assert.equal(f.projects.get('101').state,'ready');
+});

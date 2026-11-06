@@ -30,7 +30,8 @@ test('all task kinds acquire structured records and real transition history, wit
 });
 test('contract revision invalidates previous candidate; no old verdict can complete a new revision or artifact',t=>{
  const {records,create}=fixture(t);create('a');records.contract('a',contract);let c=submit(records,'a');
- records.contract('a',{...contract,criteria:['new requirement']},2);
+ records.progress('a',['Old goal-specific claim'],'Old next action');
+ records.contract('a',{...contract,criteria:['new requirement']},2);assert.deepEqual(records.get('a').progress.completed,[]);assert.equal(records.get('a').progress.next_action,null);
  assert.throws(()=>records.decide('a',c.id,2,pass),/stale_acceptance/);
  c=submit(records,'a');const replacement=submit(records,'a','v2');
  assert.throws(()=>records.decide('a',c.id,c.revision,pass),/stale_acceptance/);
@@ -121,6 +122,7 @@ test('large evidence stays addressable by digest and cannot read another task’
  records.history('a','execution_evidence',JSON.parse(raw));const row=store.get("SELECT id,data FROM task_history WHERE task_id='a' AND type='execution_evidence'");
  const e=observation('task_history:'+row.id,'tree-one',row.data);assert.ok(JSON.stringify(e).length<6000);
  const c={id:'c',revision:1,artifacts:[],evidence:[e],claims:{},created_at:'now'};
+ const historical=readEvidence(store,'a',{...c,evidence:[]},{source:e.source});assert.equal(historical.historical,true);assert.equal(historical.version,'tree-one');
  const page=readEvidence(store,'a',c,{source:e.source,offset:0,length:8000});assert.equal(page.chunk,row.data.slice(0,8000));assert.equal(page.total,row.data.length);
  assert.equal(readEvidence(store,'b',c,{source:e.source}).error,'raw_evidence_unavailable');
  store.run('UPDATE task_history SET data=? WHERE id=?',JSON.stringify({tampered:true}),row.id);
