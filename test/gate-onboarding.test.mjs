@@ -315,7 +315,7 @@ test('a repository that already has gates is reviewed from its own configuration
   // and the release.yml the release flow needs.
   assert.deepEqual(session.target.files.map(file => [file.path, file.mode]), [['.github/workflows/ci.yml', 'update'], ['.github/ci-gates.json', 'update'], ['.github/workflows/release.yml', 'create']]);
   const diff = session.target.files[0].diff;
-  for (const line of [/^\+  merge_group:$/m, /^\+ {6}CI_GATES_SHA: /m, /^\+ {10}ref: /m, /^\+ {8}uses: actions\/upload-artifact@v4$/m, /^ {5}name: CI gate$/m, /^ {5}branches: \[main\]$/m]) assert.match(diff, line);
+  for (const line of [/^\+  merge_group:$/m, /^\+ {6}CI_GATES_SHA: /m, /^\+ {10}ref: /m, /^\+ {8}uses: actions\/upload-artifact@v4$/m, /^ {5}name: CI gate$/m, /^- {4}branches: \[main\]$/m]) assert.match(diff, line);
   assert.deepEqual(Object.keys(JSON.parse(session.target.files[1].content).lanes), ['pr-ready', 'daily']);
   const plan = { ...session.plan, lanes: { ...session.plan.lanes, 'pr-ready': ['make build', 'make lint', 'make test'] } };
   session = await confirm(session, { plan });
@@ -326,8 +326,8 @@ test('a repository that already has gates is reviewed from its own configuration
   assert.deepEqual([updated.level, updated.caseCatalog, Object.keys(updated), Object.keys(updated.lanes)], ['C2', 'test/cases/case-catalog.yaml', ['version', 'level', 'caseCatalog', 'events', 'lanes'], ['pr-ready', 'daily']]);
   assert.deepEqual(updated.lanes['pr-ready'], { commands: ['make build', 'make lint', 'make test'] });
   assert.deepEqual([Object.keys(workflow.jobs), workflow.jobs.checks.name], [['checks'], 'CI gate']);
-  // With a merge queue the old push trigger stays in the file, but the gate job no longer runs after merging.
-  assert.ok(!workflow.jobs.checks.if.includes("'push'"));
+  // The file holds only the gate job, so with a merge queue its push trigger goes: nothing runs again after merging.
+  assert.deepEqual([Object.keys(workflow.on), workflow.jobs.checks.if], [['pull_request', 'merge_group', 'workflow_dispatch'], undefined]);
   assert.deepEqual(Object.keys(files).sort(), ['.github/ci-gates.json', '.github/workflows/ci.yml', '.github/workflows/release.yml']);
   assert.ok(!writes(state).some(r => r.path.endsWith('gate.mjs')));
 });
@@ -425,6 +425,29 @@ test('rendered files follow the plan: toolchains, go.mod, npm cache and empty la
   // Commands are kept whole; a long or non-ASCII command is not refused.
   const long = 'echo ' + '测'.repeat(5000);
   assert.deepEqual(normalizePlan({ lanes: { daily: [long] } }).lanes.daily, [long]);
+});
+
+test('turning on a merge queue rewrites the gate\'s own workflow, while a shared workflow keeps its triggers', () => {
+  const plan = normalizePlan({ lanes: { 'pr-ready': ['make test'] } });
+  const target = { defaultBranch: 'main', mergeQueue: 'disabled', workflowPath: '.github/workflows/ci-gates.yml', workflowSource: null, configSource: null, releaseSource: null, releaseUsable: false, npmLock: false };
+  const [first] = gateFiles(plan, target), before = parse(first.content);
+  assert.ok('push' in before.on);
+  assert.match(first.content, /^# Without a merge queue/m);
+  // The lane commands run the pull request's code: no token is handed to them.
+  assert.ok(!first.content.includes('GITHUB_TOKEN'));
+  assert.ok(before.jobs.gate.steps.every(step => !step.env));
+  // The same gate-only file after the repository enables a merge queue: no push trigger, no job-level if, a current header.
+  const [updated] = gateFiles(plan, { ...target, mergeQueue: 'enabled', workflowSource: first.content }), after = parse(updated.content);
+  assert.deepEqual(Object.keys(after.on), ['pull_request', 'merge_group', 'workflow_dispatch']);
+  assert.equal(after.jobs.gate.if, undefined);
+  assert.match(updated.content, /^# This repository uses a merge queue/m);
+  assert.doesNotMatch(updated.content, /Without a merge queue/);
+  assert.match(updated.content, /^# CI gates \(CI-workflow\), generated/);
+  // A workflow with other jobs keeps push for them; the gate job is limited to the gate events instead.
+  const shared = 'name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make lint\n';
+  const [merged] = gateFiles(plan, { ...target, mergeQueue: 'enabled', workflowPath: '.github/workflows/ci.yml', workflowSource: shared }), mixed = parse(merged.content);
+  assert.ok('push' in mixed.on);
+  assert.equal(mixed.jobs.gate.if, "github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'");
 });
 
 test('review, development and read tokens still never ask for workflows', async t => {

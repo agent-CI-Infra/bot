@@ -107,7 +107,7 @@ CI-workflow 原来的 build 和 pr-ready 都是每次 PR 提交、更新就跑�
 
 门禁 PR 的内容：
 
-- 门禁 job：放在哪里由方案决定，默认依次是已有的门禁 workflow、新建的 `.github/workflows/ci.yml`、新建的 `.github/workflows/ci-gates.yml`；也可以并入已有的 `ci.yml` 或 `ci-gates.yml`（发版本的预检和门禁状态在这两个文件里找门禁）。并入已有文件时不会覆盖它：原来运行 `gate.mjs` 的 job 被替换（保留它的显示名称，也就是必需检查的名字），没有就新增 `gate` job；只补缺少的触发事件，不删除任何触发；文件里还有别的触发事件时，门禁 job 带 `if:` 只在门禁事件上运行。补上的触发事件也会让同一文件里的其他 job 在这些事件上运行，对话和 PR 正文会提醒。
+- 门禁 job：放在哪里由方案决定，默认依次是已有的门禁 workflow、新建的 `.github/workflows/ci.yml`、新建的 `.github/workflows/ci-gates.yml`；也可以并入已有的 `ci.yml` 或 `ci-gates.yml`（发版本的预检和门禁状态在这两个文件里找门禁）。并入已有文件时不会覆盖它：原来运行 `gate.mjs` 的 job 被替换（保留它的显示名称，也就是必需检查的名字），没有就新增 `gate` job，并补上缺少的触发事件。文件里还有别的 job 时，不删除任何触发；如果还有门禁事件以外的触发，门禁 job 带 `if:`，只在门禁事件上运行。补上的触发事件也会让同一文件里的其他 job 在这些事件上运行，对话和 PR 正文会提醒。文件里只有门禁 job 时，它就是门禁自己的 workflow：触发事件改成恰好是门禁事件（例如启用 merge queue 后去掉 `push`，合入后不再出现被跳过的运行），生成的文件头说明也随之更新。lane 命令运行的是 PR 的代码，门禁 job 不给它们任何 GitHub 令牌。
 - `.github/ci-gates.json`：各 lane 的命令、observe 设置和 `events`。已有文件只改方案改了的部分，其他配置项（level、caseCatalog、超时等）原样保留，原来的 build lane 去掉（命令并入 pr-ready）。空 lane 运行时报告 `not_applicable`，只说明还没有配置检查，不表示检查通过。
 - `scripts/gate/gate.mjs`：从 `agent-CI-Infra/CI-workflow` 复制；仓库已有时沿用。
 - `.github/workflows/release.yml`：版本标签（如 `v1.2.3`、`v1.2.3-beta.1`）触发 release lane。没有时新建。仓库自己的 `release.yml` 已由版本标签触发时保留，release lane 有命令时加一个运行它的 job，原有触发和 job 不变；不能用于发版本时不修改，对话和 PR 正文说明它缺什么。框架不含 PyPI、npm 或镜像发布步骤。

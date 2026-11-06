@@ -94,6 +94,8 @@ function standardChanges(facts: GateFacts): string[] {
     'The gate job checks out the PR head on pull requests and reports that commit (CI_GATES_SHA), not GitHub\'s merge preview.',
     'ci-gates.json maps each event to its lanes (events): pull_request and workflow_dispatch run pr-ready; merge_group and push to the default branch run pr-ready then pr-merge; schedule runs daily; release runs release.',
     'Triggers follow the merge queue: pull_request and merge_group always; push to the default branch only without a merge queue; schedule when daily has commands; workflow_dispatch.',
+    'A workflow that holds only the gate job gets exactly those triggers (others, such as push under a merge queue, are removed) and its generated header is updated. A workflow shared with other jobs keeps all its triggers; the gate job gets an if: limiting it to the gate events.',
+    'The lane commands run without a GitHub token.',
     'Only pull request runs of one branch cancel each other.',
     ...(config?.lanes?.build ? ['The existing build lane is removed; its commands are folded into pr-ready.'] : []),
     ...(!facts.existing.release_yml ? ['release.yml is created: a version tag runs the release lane, and the release flow waits for that run before the Release draft.'] : []),
