@@ -42,7 +42,7 @@ test('Issue edits and comments queue another review, merged while one waits; the
   const comment = { id: 12, body: 'I attached a sample file.', html_url: 'https://github.invalid/issue/1#issuecomment-12' };
   assert.equal((await send('comment', { action: 'created', issue, comment }, 'issue_comment')).value.tasks_created, 1);
   const reply = JSON.parse(updates(h).at(-1).input);
-  assert.deepEqual(reply.comment, comment); assert.deepEqual(reply.trigger, { event: 'issue_comment', action: 'created', reason: 'comment', actor: 'alice', url: comment.html_url }); finish(h);
+  assert.deepEqual(reply.comment, comment); assert.deepEqual(reply.trigger, { event: 'issue_comment', action: 'created', reason: 'comment', actor: 'alice', url: comment.html_url, source: { type: 'comment', id: 12 } }); finish(h);
 
   // Nothing the bot writes, no edit that leaves the title and body alone, and nothing on a closed Issue triggers.
   for (const [delivery, payload, event] of [
@@ -76,7 +76,7 @@ test('PR comments, reviews, replies to review comments and description edits rev
   assert.equal(queue('pull_request_review_comment', { action: 'created', pull_request: pr, comment: replyComment }), 1);
   let task = updates(h).at(-1), input = JSON.parse(task.input);
   assert.equal(task.kind, 'review.pr'); assert.equal(task.head_sha, head); assert.deepEqual(input.comment, replyComment);
-  assert.deepEqual(input.trigger, { event: 'pull_request_review_comment', action: 'created', reason: 'review_reply', actor: 'alice', url: replyComment.html_url, path: 'src/parse.js', line: 12 });
+  assert.deepEqual(input.trigger, { event: 'pull_request_review_comment', action: 'created', reason: 'review_reply', actor: 'alice', url: replyComment.html_url, path: 'src/parse.js', line: 12, source: { type: 'review_comment', id: 21 } });
   // The review GitHub wraps around that reply has no body and joins the same review; so does anything else while it waits.
   assert.equal(queue('pull_request_review', { action: 'submitted', pull_request: pr, review: { state: 'commented', body: null } }), 0);
   assert.equal(queue('pull_request_review', { action: 'submitted', pull_request: pr, review: { state: 'commented', body: 'Please look again.' } }), 0);
@@ -84,7 +84,7 @@ test('PR comments, reviews, replies to review comments and description edits rev
 
   // A submitted review with a body, or one asking for changes, reviews again.
   assert.equal(queue('pull_request_review', { action: 'submitted', pull_request: pr, review: { id: 30, state: 'commented', body: 'Please look again.', html_url: 'https://github.invalid/pull/7#pullrequestreview-30' } }), 1);
-  assert.deepEqual(JSON.parse(updates(h).at(-1).input).trigger, { event: 'pull_request_review', action: 'submitted', reason: 'review_submitted', actor: 'alice', state: 'commented', body: 'Please look again.', url: 'https://github.invalid/pull/7#pullrequestreview-30' }); finish(h);
+  assert.deepEqual(JSON.parse(updates(h).at(-1).input).trigger, { event: 'pull_request_review', action: 'submitted', reason: 'review_submitted', actor: 'alice', state: 'commented', body: 'Please look again.', url: 'https://github.invalid/pull/7#pullrequestreview-30', source: { type: 'review', id: 30 } }); finish(h);
   assert.equal(queue('pull_request_review', { action: 'submitted', pull_request: pr, review: { state: 'changes_requested', body: '' } }), 1); finish(h);
   assert.equal(queue('pull_request_review', { action: 'submitted', pull_request: pr, review: { state: 'approved', body: '' } }), 0);
 
@@ -147,10 +147,10 @@ async function botPullRequest(t, maxRevisions = 1) {
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('review','101','review.pr','succeeded','review',7)");
   const finding = (requested_in, body = 'F1') => ({ body, format: 'discussion', selection_reason: 'x', actionable: true, within_goal: true, requires_human_decision: false, ...(requested_in ? { requested_in } : {}) });
   // A review that took on these findings; the comment that triggered it is beside the point, only the findings' sources count.
-  const review = async findings => {
+  const review = async (findings, input = { object: {}, trigger: { reason: 'comment', actor: 'alice' } }) => {
     const result = { requires_code_change: true, clarification_required: false, findings };
-    const requests = await engine.revisionRequests(github, task, result);
-    engine.queueDevelopment(github, task, { object: {}, trigger: { reason: 'comment', actor: 'alice' } }, result, false, requests);
+    const requests = await engine.revisionRequests(github, task, result, input);
+    engine.queueDevelopment(github, task, input, result, false, requests);
     return requests;
   };
   const revisions = () => h.store.all("SELECT * FROM tasks WHERE kind='development.pr' ORDER BY created_at,rowid");
@@ -178,6 +178,24 @@ test('a member\'s request on the bot\'s own PR revises it without a budget; ques
   // A later request of a member revises again, still without a budget.
   await review([finding({ type: 'comment', id: 15 })]); assert.equal(revisions().length, 2); finish();
   assert.deepEqual(h.store.all('SELECT source_id FROM bot_pr_requests ORDER BY source_id').map(r => r.source_id), ['11', '15']);
+});
+
+test('a member\'s comment that started the review stands for the changes it found when the review named no request', async t => {
+  const { review, finding, revisions, finish } = await botPullRequest(t);
+  const asked = (source, extra = {}) => ({ object: {}, trigger: { reason: 'comment', actor: 'alice', source, ...extra } });
+  // Another bot's comment never stands in, merged updates make the trigger ambiguous, and a review with nothing to change
+  // (it answered a question) revises nothing.
+  await review([finding(null)], asked({ type: 'review_comment', id: 21 }, { actor_type: 'Bot', actor: 'copilot[bot]' })); assert.equal(revisions().length, 0);
+  await review([finding(null)], { ...asked({ type: 'comment', id: 11 }), merged_updates: [{ reason: 'comment' }] }); assert.equal(revisions().length, 0);
+  await review([{ ...finding(null), actionable: false }], asked({ type: 'comment', id: 11 })); assert.equal(revisions().length, 0);
+  // The member's comment that started it: its changes revise the PR, once, each finding once.
+  await review([finding(null, 'F1'), finding(null, 'F2')], asked({ type: 'comment', id: 11 }));
+  const input = JSON.parse(revisions()[0].input);
+  assert.deepEqual([revisions().length, input.revision.requests.map(r => r.id), input.review.findings.map(f => f.body)], [1, ['11'], ['F1', 'F2']]);
+  finish();
+  await review([finding(null)], asked({ type: 'comment', id: 11 })); assert.equal(revisions().length, 1);
+  // A stranger's comment does not stand in either: its author is checked like a named request's.
+  await review([finding(null)], asked({ type: 'comment', id: 12 })); assert.equal(revisions().length, 1);
 });
 
 test('another review bot revises the bot\'s PR at most once, and a request waits while a revision runs', async t => {
@@ -227,7 +245,7 @@ test('another review bot\'s comments on the bot\'s own PR are reviewed; on other
   let delivery = 0; const queue = (event, payload, current) => queueWebhook(h.store, '101', event, { repository: { id: 101 }, ...payload }, 'bot-delivery-' + (++delivery), current);
   const comment = { id: 90, body: 'This branch is untested.', author_association: 'NONE', html_url: 'https://github.invalid/pull/7#discussion_r90', path: 'a.js', line: 3 };
   assert.equal(queue('pull_request_review_comment', { action: 'created', sender: other, pull_request: pr, comment }), 1);
-  assert.deepEqual(JSON.parse(updates(h).at(-1).input).trigger, { event: 'pull_request_review_comment', action: 'created', reason: 'review_comment', actor: 'copilot[bot]', actor_type: 'Bot', url: comment.html_url, path: 'a.js', line: 3 });
+  assert.deepEqual(JSON.parse(updates(h).at(-1).input).trigger, { event: 'pull_request_review_comment', action: 'created', reason: 'review_comment', actor: 'copilot[bot]', actor_type: 'Bot', url: comment.html_url, path: 'a.js', line: 3, source: { type: 'review_comment', id: 90 } });
   finish(h);
   assert.equal(queue('pull_request_review', { action: 'submitted', sender: other, pull_request: pr, review: { id: 91, state: 'commented', body: 'Two findings.', author_association: 'NONE' } }), 1); finish(h);
   const conversation = { action: 'created', sender: other, issue: { number: 7, state: 'open', user: { id: 999 }, pull_request: {} }, comment: { id: 92, body: 'Summary of changes.', author_association: 'NONE' } };
