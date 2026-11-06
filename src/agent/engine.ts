@@ -370,7 +370,7 @@ export class TaskEngine {
             // On a pull request this bot opened: the comments, reviews and inline comments this review answers. Each change the
             // review takes on from one of them names it in requested_in.
             ...(review&&pr&&this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number)
-              ?{discussion_requests:[input.trigger,...(input.merged_updates||[])].filter((t:any)=>t?.source).map((t:any)=>({...t.source,author:t.actor,author_type:t.actor_type||'User',url:t.url||null}))}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
+              ?{discussion_requests:discussionRequests(this.store,task,input)}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(labeling?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
@@ -620,30 +620,28 @@ export class TaskEngine {
     const events=await github.pages(github.path(`/issues/${task.object_number}/events`));
     return events.filter((e:any)=>e.event==='labeled'&&sameLabel(e.label?.name,label)).at(-1)?.actor?.type==='User';
   }
-  // The requests of people and other review bots that this review of the bot's own pull request took on: each finding that
-  // names the comment, review or inline comment that asked for it is read back from GitHub, so it is on this pull request and
-  // written by a member of the repository or by another bot, never by this bot. Who may ask is checked here; whether a comment
-  // asks for a change at all, or whether another bot's review is right, is the review agent's judgement.
+  // The requests of people and other review bots that this review of the bot's own pull request took on. A request has to be
+  // one of the comments the review answered (discussion_requests): the signed webhook brought those, already limited to the
+  // repository's owners, members and collaborators, or to other bots. GitHub's API answers author_association from the
+  // installation's view, which may not see private organization membership, so it is not asked again; it only gives the text.
+  // Whether a comment asks for a change at all, or whether another bot's review is right, is the review agent's judgement.
   async revisionRequests(github:GitHub,task:Row,result:any,input:any={}):Promise<RevisionRequest[]>{
     if(task.kind!=='review.pr')return [];
-    const requests=new Map<string,RevisionRequest>();
+    const offered=new Map<string,any>((input.context?.discussion_requests||[]).map((r:any)=>[`${r.type}:${r.id}`,r]));
     // A review a person's comment started that found changes to make but named no request: those changes answer that comment.
     // Another bot's comment always needs the review's own judgement, so it never stands in this way.
     const named=result.findings.some((f:any)=>f.requested_in),trigger=input.trigger;
     const answered=named||!trigger?.source||trigger.actor_type==='Bot'||input.merged_updates?.length?[]
       :result.findings.filter(actionableFinding).map((f:any)=>[f,trigger.source]);
+    const requests=new Map<string,RevisionRequest>();
     for(const [finding,asked] of [...result.findings.filter((f:any)=>actionableFinding(f)&&f.requested_in).map((f:any)=>[f,f.requested_in]),...answered]){
-      const {type,id}=asked,key=`${type}:${id}`;
+      const key=`${asked.type}:${asked.id}`,offer=offered.get(key);
       if(requests.has(key)){requests.get(key)!.findings.push(finding);continue;}
-      const path=type==='comment'?`/issues/comments/${id}`:type==='review_comment'?`/pulls/comments/${id}`:`/pulls/${task.object_number}/reviews/${id}`;
-      const source=await github.request('GET',github.path(path)).catch(()=>null);
-      const here=type==='comment'?String(source?.issue_url||'').endsWith(`/issues/${task.object_number}`)
-        :type==='review_comment'?String(source?.pull_request_url||'').endsWith(`/pulls/${task.object_number}`):!!source;
-      const user=source?.user,bot=user?.type==='Bot',own=String(user?.id??'')===github.actorId;
-      const member=!bot&&['OWNER','MEMBER','COLLABORATOR'].includes(String(source?.author_association));
-      if(!here||own||!(bot||member))continue;
-      requests.set(key,{type,id:String(id),author:String(user.login||''),author_id:String(user.id),author_type:bot?'Bot':'User',
-        url:String(source.html_url||''),body:String(source.body||'').slice(0,4000),findings:[finding]});
+      if(!offer||!offer.author_id||String(offer.author_id)===github.actorId)continue;
+      const path=offer.type==='comment'?`/issues/comments/${offer.id}`:offer.type==='review_comment'?`/pulls/comments/${offer.id}`:`/pulls/${task.object_number}/reviews/${offer.id}`;
+      const text=await github.request('GET',github.path(path)).then((c:any)=>String(c?.body||''),()=>'');
+      requests.set(key,{type:offer.type,id:String(offer.id),author:String(offer.author||''),author_id:String(offer.author_id),author_type:offer.author_type==='Bot'?'Bot':'User',
+        url:String(offer.url||''),body:text.slice(0,4000),findings:[finding]});
     }
     return [...requests.values()];
   }
@@ -684,8 +682,8 @@ export class TaskEngine {
       if(!goal)return;
       // A person's request is acted on whenever it comes, with no budget; each comment only once. Another bot's review is
       // acted on once per bot and pull request, so two bots cannot keep each other busy.
-      const done=(r:RevisionRequest)=>!!this.store.get('SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND source_type=? AND source_id=?',task.repository_id,task.object_number,r.type,r.id);
-      const botDone=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND author_id=? AND author_type='Bot'",task.repository_id,task.object_number,r.author_id);
+      const done=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND source_type=? AND source_id=? AND state='done'",task.repository_id,task.object_number,r.type,r.id);
+      const botDone=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND author_id=? AND author_type='Bot' AND state='done'",task.repository_id,task.object_number,r.author_id);
       const accepted=requests.filter(r=>!done(r)&&(r.author_type!=='Bot'||!botDone(r)));
       // The bot's own findings revise the pull request after a review of a new head, within the revision budget; a review that
       // revises for a request anyway takes them along. A mention or a discussion alone never starts a revision of them.
@@ -696,10 +694,13 @@ export class TaskEngine {
       if(!findings.length)return;
       const revision=accepted.length?{source:'request',requests:accepted.map(({findings,...request})=>request)}:{source:'review'};
       const created=enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:{...result,implementation_goal:goal,findings},revision},task.source_delivery_id,task.id);
-      if(!created){if(accepted.length)this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),task.id,
-        JSON.stringify({type:'revision_deferred',detail:`PR #${task.object_number} 已有排队或执行中的修订；这次的修改请求留给它推送后的下一次检视。`}),new Date().toISOString());return;}
+      // Requests the queued revision carries are done; with another revision already queued or running they wait, and later
+      // reviews of this pull request list them again (discussion_requests).
       const now=new Date().toISOString();
-      for(const r of accepted)this.store.run('INSERT OR IGNORE INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?)',task.repository_id,task.object_number,r.type,r.id,r.author_id,r.author_type,created,now);
+      for(const r of accepted)this.store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
+        DO UPDATE SET state=excluded.state,task_id=excluded.task_id`,task.repository_id,task.object_number,r.type,r.id,r.author,r.author_id,r.author_type,r.url,created?'done':'pending',created||null,now);
+      if(!created&&accepted.length)this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),task.id,
+        JSON.stringify({type:'revision_deferred',detail:`PR #${task.object_number} 已有排队或执行中的修订；这次的修改请求先记下，之后对这个 PR 的检视会再列出它们。`}),now);
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
@@ -727,5 +728,18 @@ export class TaskEngine {
 }
 
 export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;
+/**
+ * What a review of a bot pull request answers: the comments, reviews and inline comments that triggered it or joined it while it
+ * waited (each with its author, already limited to members and other bots when it was queued), and requests an earlier review
+ * took on while another revision was running.
+ */
+export function discussionRequests(store:Store,task:Row,input:any){
+  const list=new Map<string,any>();
+  for(const t of [input.trigger,...(input.merged_updates||[])])if(t?.source)list.set(`${t.source.type}:${t.source.id}`,
+    {type:t.source.type,id:t.source.id,author:t.actor||'',author_id:t.actor_id||'',author_type:t.actor_type==='Bot'?'Bot':'User',url:t.url||null});
+  for(const r of store.all("SELECT * FROM bot_pr_requests WHERE repository_id=? AND number=? AND state='pending'",task.repository_id,task.object_number))
+    if(!list.has(`${r.source_type}:${r.source_id}`))list.set(`${r.source_type}:${r.source_id}`,{type:r.source_type,id:Number(r.source_id),author:r.author,author_id:r.author_id,author_type:r.author_type,url:r.url||null,pending:true});
+  return [...list.values()];
+}
 /** A comment, review or inline comment on a bot pull request that a review took on as a change to make. */
 export interface RevisionRequest { type:'comment'|'review'|'review_comment', id:string, author:string, author_id:string, author_type:'User'|'Bot', url:string, body:string, findings:any[] }

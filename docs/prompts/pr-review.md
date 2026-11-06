@@ -99,7 +99,9 @@ read-only token. Use all of them to help the review converge:
 
 When the pull request's author is `bot_login`, people and other review bots may ask the bot to
 change it. `discussion_requests` lists the conversation comments, reviews and inline comments this
-review answers (type, id, author); the discussion files hold their text. For each of them:
+review answers (type, id, author); the discussion files hold their text. Entries marked `pending`
+are earlier requests that waited while another revision ran: take them on if the reviewed head
+does not carry them out yet. For each of them:
 
 - **A person** (anyone but `bot_login` and other bots): decide whether the comment asks for a
   change or only asks a question or remarks. A change you will make becomes a finding with
@@ -107,9 +109,9 @@ review answers (type, id, author); the discussion files hold their text. For eac
   `requested_in` naming the comment: `type` is `comment` (comments.json), `review` (reviews.json)
   or `review_comment` (review_comments.json), `id` its GitHub id, as `discussion_requests` gives
   them. Set it also when the finding keeps an earlier inline comment through `comment_id`: that
-  only says where it was reported, `requested_in` says who asked for it. The control plane checks that a
-  member of the repository wrote it and revises the pull request; a person's requests have no
-  revision limit. Answer a question in the summary or a discussion finding, without
+  only says where it was reported, `requested_in` says who asked for it. Only entries of
+  `discussion_requests` count; the control plane then revises the pull request, and a person's
+  requests have no revision limit. Answer a question in the summary or a discussion finding, without
   `requested_in`. A request that is unclear, contradicts the linked Issue or needs a product
   decision gets `requires_human_decision` and `human_action` instead.
 - **Another review bot** (`user.type` is `Bot`, not `bot_login`): judge each comment on its merits
