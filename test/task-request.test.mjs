@@ -21,7 +21,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  github.listen(0,'127.0.0.1');await once(github,'listening');t.after(()=>new Promise(r=>{github.close(r);github.closeAllConnections();}));
  const gh='http://127.0.0.1:'+github.address().port;
  await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:'fixture-github-token'})});
- let executionCalls=0,acceptanceCalls=0,firstOutage=true,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false;
+ let executionCalls=0,acceptanceCalls=0,firstOutage=true,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false,writeOutage=false,restoredLateWrite=false;
  const remediations=new Map();
  const model=createServer(async(req,res)=>{
   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
@@ -58,6 +58,8 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    if(relatedCalls.length===3){assert.ok(messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path')));return send(call('read_related_artifact',{task_id:sibling.task_id,path:'report.md'},'sibling-read'));}
    siblingRead||=messages.some(m=>m.role==='tool'&&m.content.includes('SIBLING_ACCEPTED_EXTENSION'));
   }
+  if(context.request.includes('write-outage')&&writeOutage&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'read-restored-late-write'));
+  if(context.request.includes('write-outage')&&writeOutage)restoredLateWrite||=messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact'));
   const read=calls.filter(c=>c.function.name==='read_playbook').map(c=>JSON.parse(c.function.arguments).id);
   const next=wanted.find(id=>!read.includes(id));if(next)return send(call('read_playbook',{id:next},'read-'+next));
   if(!names.includes('select_playbooks')){
@@ -67,6 +69,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   const writes=calls.filter(c=>c.function.name==='write_file');
   if(!writes.length)return send(call('write_file',{path:'/tmp/forbidden-report.md',content:'bad target'},'invalid-path'));
   if(writes.length===1){invalidPathObserved||=messages.some(m=>m.role==='tool'&&m.content.includes('invalid_artifact_path'));return send(call('write_file',{path:'report.md',content:'Observed repository fact: calc.mjs contains the arithmetic implementation.'+(context.task.contract.source?.residual==='follow-report'?' SIBLING_ACCEPTED_EXTENSION':'')+(context.task.acceptance?.gaps?.length?' Recovered observation with source calc.mjs.':'')},'write-report'));}
+  if(context.request.includes('write-outage')&&!writeOutage){writeOutage=true;res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Outage after saving artifact, before progress'}}));return;}
   if(!names.includes('record_progress'))return send(call('record_progress',{completed:['Read guides and wrote observed report'],next_action:'Submit for independent acceptance'},'checkpoint'));
   return send(call('submit_delivery',{summary:'Reported observed code',artifacts:[{path:'report.md',description:'Observed repository fact'}],evidence:[],unknowns:[]},'submit-delivery'));
  });
@@ -76,7 +79,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'fixture-model-token'},'model:m'),'now');
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
  const engine=new TaskEngine(store,manager,gh+'/github');
- for(const mode of ['single','multiple','return','insufficient_evidence']){
+ for(const mode of ['single','multiple','return','insufficient_evidence','write-outage']){
   const id=randomBytes(24).toString('hex'),contract={goal:'Write an observed report '+mode,scope:['report'],criteria:['Report a concrete repository observation'],endpoint:'report',source:'request'};
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES(?,'101','task.request','running',?,?,'claim')",id,mode,JSON.stringify({request:mode+' guide report',contract}));
   store.run("INSERT INTO task_claims VALUES(?,'101','claim','now')",id);
@@ -85,6 +88,11 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   if(mode==='single'){
    let row=store.get('SELECT * FROM tasks WHERE id=?',id);assert.equal(row.status,'retry_wait',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',id)));assert.equal(row.phase,'acceptance');
    const callsBefore=executionCalls;await engine.run(id,'claim');assert.equal(executionCalls,callsBefore,'restart must not repeat successful execution');
+  }
+  if(mode==='write-outage'){
+   const row=store.get('SELECT * FROM tasks WHERE id=?',id);assert.equal(row.status,'retry_wait');assert.equal(row.phase,'model');assert.ok(JSON.parse(row.input).recovery);
+   store.run("UPDATE tasks SET status='running',workspace_id=NULL,generation=NULL,attempt=attempt+1 WHERE id=?",id);await engine.run(id,'claim');
+   assert.ok(restoredLateWrite);assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='checkpoint_restored'",id));
   }
   const result=records.get(id);assert.equal(result.progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',id)));
   assert.equal(result.selections.length,mode==='multiple'?2:1);assert.equal(result.acceptance.outcome,mode==='multiple'?'pass_with_issues':'pass');

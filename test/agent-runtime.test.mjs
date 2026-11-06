@@ -265,3 +265,13 @@ test('bounded delivery execution reserves turns to save and submit without claim
  assert.equal(f.requests[0].messages.length,2);assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
  assert.ok(f.requests.at(-1).messages.some(m=>m.role==='user'&&m.content.includes('independent acceptance')));
 });
+
+test('delivery finalization closes exploration and requests an honest structured handoff within the existing budget',async t=>{
+ const f=await fixture(t);let invoked=0;
+ const submit={type:'function',function:{name:'submit_delivery',description:'Submit remaining gaps',parameters:{type:'object',properties:{},additionalProperties:false}}};
+ f.respond(body=>({choices:[{message:{tool_calls:[call(body.tool_choice?.function?.name||'inspect')]}}]}));
+ const value=await runAgent({...f.spec,tools:[tool,submit],maxTurns:4,finish:{name:'submit_delivery',validate:()=>({submitted:true,gaps:['Execution budget reached; independent acceptance must assess completeness']})},finalizationTools:['submit_delivery'],execute:async()=>{invoked++;return {observed:true};}});
+ assert.equal(invoked,2);assert.equal(f.requests.length,4);assert.deepEqual(f.requests[2].tools.map(t=>t.function.name),['submit_delivery']);
+ assert.ok(f.requests[3].messages.some(m=>m.role==='tool'&&m.content.includes('tool_not_allowed')));
+ assert.equal(f.requests[3].tool_choice.function.name,'submit_delivery');assert.equal(value.submitted,true);assert.equal(value.gaps.length,1);assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
+});
