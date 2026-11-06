@@ -177,3 +177,13 @@ test('a truncated or malformed stream never forwards a partial tool call, and th
     });
   }
 });
+
+test('SSE envelope overhead does not consume the assembled response budget, while actual text stays capped',async()=>{
+ const event=JSON.stringify({id:'long-envelope-id'.repeat(20),model:'fixture',choices:[{index:0,delta:{content:'x'}}]});
+ const raw=('data: '+event+'\n\n').repeat(7000)+'data: [DONE]\n\n';
+ assert.ok(Buffer.byteLength(raw)>2*1024*1024);
+ const value=await readModelResponse(new Response(raw,{headers:{'Content-Type':'text/event-stream'}}),async()=>{});
+ assert.equal(value.choices[0].message.content.length,7000);
+ const oversized='data: '+JSON.stringify({choices:[{index:0,delta:{content:'x'.repeat(2*1024*1024+1)}}]})+'\n\ndata: [DONE]\n\n';
+ await assert.rejects(readModelResponse(new Response(oversized,{headers:{'Content-Type':'text/event-stream'}}),async()=>{}),{code:'model_response_too_large'});
+});

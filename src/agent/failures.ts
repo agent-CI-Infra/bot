@@ -10,10 +10,10 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
     'actions_app_required','actions_workflow_run_subscription_missing','gate_repository_unreadable'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
-  model: { label:'模型服务或模型配置', codes:['model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
+  model: { label:'模型服务或模型配置', codes:['acceptance_unavailable','acceptance_output_invalid','model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',
     'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid'] },
-  environment: { label:'项目电脑或运行环境', codes:['environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
+  environment: { label:'项目电脑或运行环境', codes:['checkpoint_unavailable','acceptance_snapshot_unavailable','environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
     'workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
     'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
@@ -21,7 +21,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
     'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required'] },
-  task_changed: { label:'任务条件已变化', codes:['object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
+  task_changed: { label:'任务条件已变化', codes:['acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
     'bot_pr_author_changed','bot_pr_head_repository_changed','bot_pr_branch_changed','bot_pr_ownership_unconfirmed',
@@ -36,7 +36,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // The workflow assistant's run was stopped by the person who started it.
     'assistant_cancelled'] },
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown','pr_release_label_incomplete'] },
-  bot: { label:'Bot 自身问题', codes:['task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
+  bot: { label:'Bot 自身问题', codes:['acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed',
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
     'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','actions_report_identity_missing'] },
@@ -56,7 +56,7 @@ export function failureCause(code: string, state?: string): FailureCause {
 }
 
 // These states are polled by the engine and continue on their own; every other paused or failed state waits for 重试.
-const automatic = new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
+const automatic = new Set(['queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
 const environmentFailures = new Set(['execution_interrupted','workspace_init_failed','workspace_write_failed',
   'workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable']);
 // waiting_environment covers both unmet conditions and failed attempts. Only the latter consume the retry burst;
@@ -67,6 +67,12 @@ export function isAttemptFailure(code: string|null|undefined, state: string) {
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
+  acceptance_return:'执行 Agent 将根据结构化验收缺口修订候选，再次提交验收。',
+  acceptance_insufficient_evidence:'执行 Agent 将补齐所缺证据，并重新验收。',
+  acceptance_publication_changed:'已有 GitHub 成果被保留。请查看验收缺口，针对已有 PR 安排修订；其他任务继续。',
+  acceptance_unavailable:'验收器连续未产生有效结论，候选与故障证据已保留。检查模型或验收配置后重试。',
+  acceptance_needs_human:'查看结构化验收记录中的具体问题，补充决定或授权后继续；其他任务不受影响。',
+  acceptance_no_progress:'自动修订已达到有限退出条件。查看候选和每轮缺口，调整任务或补充信息后重试。',
   task_models_invalid:'在项目模型设置中重新保存任务模型映射，修复后任务自动继续。',
   model_not_available:'任务所选模型已不可用。请重新授权该项目使用模型或选择其他任务模型，修复后自动继续。',
   model_configuration_changed:'模型配置在运行期间变化，本次请求已停止；任务会按最新配置重新开始。',

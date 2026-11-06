@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, symlinkSync, chmodSync, utimesSync } from 'node:fs';
@@ -151,7 +152,7 @@ test('review tasks on one commit share the mirror and the computer store: the se
     return send({}, 404);
   });
   github.listen(0, '127.0.0.1'); await once(github, 'listening'); t.after(() => new Promise(resolve => github.close(resolve)));
-  const h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, 'http://127.0.0.1:' + github.address().port, u.cache) }));
+  const h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, 'http://127.0.0.1:' + github.address().port, u.cache, acceptanceFixture) }));
   t.after(() => engine.close());
   // The bot account's token is the one the Git server accepts.
   const { admin } = await setup(h), a = await account(admin, { token }); await repository(admin, a.id, '101');

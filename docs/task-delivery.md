@@ -1,0 +1,36 @@
+# Structured task delivery
+
+Every business task keeps its existing `tasks.id`, queue, claim, project computer and publication rules. `task_records` adds a versioned contract, execution checkpoints, advisory guide selections, delivery candidate and acceptance. `task_history` retains contract/candidate/checkpoint/acceptance changes; database triggers capture task creation and state changes for every kind, including future task kinds. Old records explicitly say `legacy_unknown`; no historical acceptance is fabricated.
+
+Task contract (what to deliver) and playbooks (optional advice on how) are separate. `read_playbook` discovers/reads versioned guides, `select_playbooks` records actual use of any number of already read guides, and `record_progress` persists completed facts and a next action during execution. `read_task_history` retrieves the same task’s factual observations and checkpoints for context reconstruction without exposing a model conversation. They confer no permissions. Trusted workflows still control the tools and GitHub writes.
+
+A delivery candidate binds the contract revision, versioned artifact references, raw tool evidence and separately labeled executor claims. Large observations use bounded previews and hash-bound references; the evaluator can page through originals with read_evidence. Evidence is not silently reattributed from an earlier attempt to the current tree. Code candidates retain Git trees/commits; non-code tasks may deliver reports without a PR or SHA. The framework invokes an independent evaluator with a new message list and no executor conversation. It can inspect files and run verification only when the existing workflow permits shell use. Code/file candidates are checked out into a separate verification workspace from the submitted Git object; executor edits after submission and the executor's agent/session directory are not copied. Reports carry original source files and evidence references rather than the executor's model mailboxes. Acceptance requests use a separate accounting prefix.
+
+| Acceptance | Task action |
+| --- | --- |
+| pass | Complete after the specified delivery endpoint succeeds |
+| pass_with_issues | Complete and create linked residual tasks in one SQLite transaction |
+| return | Give concrete gaps back to execution and evaluate a new candidate |
+| insufficient_evidence | Give missing evidence back to execution and re-evaluate |
+| needs_human | Record the precise decision/authority needed; other tasks continue |
+
+Core incompleteness, missing mandatory evidence, unacceptable risk, or unresolved blocking gaps cannot pass. Residuals require a description, evidence, impact, nonblocking rationale, follow-up goal and criteria. Ordinary suggestions need not create tasks. Residuals run as ordinary request tasks with project context and no new external publication rights. They receive the accepted parent’s report/artifact context and start from its published SHA or exact retained local artifact, rather than accidentally developing against an older default branch. A GitHub Issue is not required to persist a follow-up.
+
+Before publication an accepted verdict is staged. The original task is still running. Only when the publication endpoint succeeds does an atomic local transaction finalize acceptance, insert all follow-up tasks and lineage, and complete the original task. Failed/uncertain external writes retain the existing publisher reconciliation behavior. SQLite does not pretend to make GitHub writes atomic. Repeated finalization does not duplicate residual tasks. Candidate or contract changes invalidate staged/old decisions. Cancellation fences late acceptance.
+
+Remediation is bounded to three decisions. Re-submitting an identical rejected candidate exits as no progress. An outage during evaluation is an infrastructure fault, not a rejection; the existing backoff/recovery mechanism remains. Progress checkpoints also retain an unpublished Git tree at the current contract/base revision. A new attempt restores it only when both still match, retaining the original workspace for provenance. Structured history and candidate records survive restart; an ordinary request stopped after candidate submission resumes acceptance rather than redoing execution.
+
+## Interfaces
+
+- Existing `GET /api/tasks/:id` now includes `task.structured` and chronological structured `history`. The console shows goal, contract revision, endpoint, next action, guide selections, acceptance and linked residual tasks.
+- `POST /api/tasks` creates an ordinary request using `{repository_id, request, contract:{goal,scope,criteria,endpoint}}`. Existing repository access control and project enablement apply. No untrusted request supplies credentials or tools. This executor delivers local artifacts/reports; it has no merge/push/release tools.
+- `PATCH /api/tasks/:id/contract` revises a paused/unpublished task with `{expected_revision,contract}` and resumes it. It preserves revision history and invalidates previous candidates; running, completed or externally published tasks cannot be silently rewritten.
+- `GET /api/repositories/:id/context` reads durable project facts. `PATCH` accepts `{expected_revision,facts:[{source,fact}]}` with repository access checks and revision conflict detection. Facts retain provenance and are task data, not permission changes.
+
+The production backend remains Docker. Local execution is explicit opt-in for development and is not an OS sandbox: commands run as the host user. Do not expose it as isolation for untrusted code.
+
+## Validation
+
+`test/task-lifecycle.test.mjs` covers universal records, revisions, all outcomes, guide version use, transaction fault injection, idempotency, finite remediation, cancellation and actual SQLite close/reopen. `test/task-acceptance.test.mjs` drives the real evaluator through a local model endpoint, checks message isolation/tool narrowing, evidence retrieval, accounting, outage recovery and request authorization. `test/agent-process.test.mjs` exercises remediation through the existing publication mailbox and deferred residual creation. `test/local-manager.test.mjs` verifies candidate checkout isolation with real Git/runner operations. Existing publication and scheduling fixtures inject an explicit fake evaluator; these tests do not claim semantic model validation.
+
+SSE transport framing has its own bounded wire allowance; assembled model content remains capped at 2 MiB. The existing 8192-token output default remains; only trusted control-plane callers can supply a bounded larger budget (up to 32768), and the new DeepSeek request/evaluation callers use 16384 so reasoning cannot consume the entire final-verdict allowance. A model-supplied max_tokens field does not change the trusted limit.

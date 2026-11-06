@@ -1,7 +1,13 @@
+import { observation } from '../tasks/evidence.js';
+import { playbooks } from '../tasks/playbooks.js';
+import { restoreCheckpoint } from '../tasks/checkpoint.js';
+import { runRequest } from '../tasks/request.js';
+import { TaskRecords } from '../tasks/service.js';
+import { evaluateDelivery } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
-import { type Actor, scope } from '../app/auth.js';
+import { type Actor, scope, repository } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
@@ -31,7 +37,7 @@ const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_envi
 const retryCycleMs=8*60*60*1000;
 // Reviews and custom workflows reply on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
-const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding'))";
+const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request'))";
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 // A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run
@@ -48,7 +54,7 @@ export class TaskEngine {
   private readonly granted=new Map<string,number>();
   private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
   readonly rules:RuleService;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache){this.rules=new RuleService(store,manager,githubUrl);}
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);}
   // The running tasks of one repository, for callers that must wait until they have stopped.
   working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
@@ -107,9 +113,11 @@ export class TaskEngine {
   }
   async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled(this.active.values());}
   async run(id:string,token:string){
-    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const redactor=new Redactor(),event=eventWorkflow(task.kind);
+    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor(),event=eventWorkflow(task.kind);
+    const policyHashFor=(artifacts:any[])=>sha(artifacts.some(a=>a.kind==='code')?String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||''):'');
     const log=(value:any)=>{
       const clean=redactor.clean(value);
+      if(value.type==='tool')clean.attempt=task.attempt;
       // A waiting retry can re-enter a phase. Keep one start per attempt (or policy operation).
       if(value.type==='phase'){
         clean.phase_key=operationId(`${task.attempt}:${value.phase}:${value.operation_id||''}`);
@@ -132,16 +140,27 @@ export class TaskEngine {
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
       // A workflow that was switched off (or a custom one deleted) stops its tasks the same way.
-      if(!workflowEnabled(this.store,task.repository_id,taskWorkflow(task as any)))stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
+      if(task.kind!=='task.request'&&!workflowEnabled(this.store,task.repository_id,taskWorkflow(task as any)))stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
       // An event that moved on (another run attempt, a release no longer waiting) ends its task at once.
       if(event)event.validate(this.store,current!,JSON.parse(current!.input||'{}'));
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
     };
-    const update=(values:Record<string,unknown>)=>{
+    const update=(values:Record<string,unknown>)=>records.atomic(()=>{
+      // A revoked claim may record only its own cancellation; the SQL claim_token fence still protects a new owner.
+      if(!(values.status==='cancelled'&&values.error_code==='task_claim_revoked'))records.assertClaim(id,token);
+      if(['succeeded','pr_opened','completed'].includes(String(values.status))) {
+        const record=records.get(id);
+        const accepted=record.pending||record.acceptance;
+        if(record.pending?.policy_hash!==policyHashFor(record.candidate?.artifacts||[]))stop('acceptance_context_changed','retry_wait','交付前必需验证策略已变化，将重新验收。');
+        if(!record.candidate||accepted?.candidate_id!==record.candidate.id||accepted?.revision!==record.revision||!['pass','pass_with_issues'].includes(accepted?.outcome))
+          stop('acceptance_required','retry_wait','交付必须先通过独立验收。');
+        if(record.pending)records.decide(id,record.candidate!.id,record.revision,record.pending,String(values.status),true,token);
+        records.history(id,'delivery',{status:values.status,result:values.result?JSON.parse(String(values.result)):null,candidate_id:record.candidate!.id});
+      }
       if(values.status&&(terminal.includes(String(values.status))||values.status==='needs_replan'))Object.assign(values,{retry_cycle_started_at:null,retry_error_code:null,retry_count:0});
       Object.assign(task,values);const keys=Object.keys(values);
       this.store.run(`UPDATE tasks SET ${keys.map(k=>k+'=?').join(',')},updated_at=? WHERE id=? AND claim_token=?`,...keys.map(k=>values[k] as any),new Date().toISOString(),id,token);
-    };
+    });
     let workspace:Workspace|undefined;
     try{
       await guard();const config=selectedModel(this.store,task.repository_id,taskWorkflow(task as any));redactor.add(config.key);await this.share(task.repository_id);
@@ -154,6 +173,7 @@ export class TaskEngine {
         if(!environment){environment=await this.manager.call('PUT','/v1/projects/'+task.repository_id);this.granted.delete(task.repository_id);await this.share(task.repository_id);}
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
       }
+      if(task.kind==='task.request'){await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache);return;}
       // The writes this workflow may ask for decide the platform tools; a workflow that may open a PR needs contents write.
       const writes=workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any)).writes,eventState:Record<string,any>={};
       // An event workflow reads Actions runs and logs; it writes only through its own tools.
@@ -213,11 +233,52 @@ export class TaskEngine {
       // Reuse a check only at the immediately following phase boundary in this run. A resumed run or a
       // ReviewUpdated loop starts without this credit and must read the current object before continuing.
       let validatedPhase:'model'|'publish'|undefined;
+      const accept=async(artifact:any, evidence:any[]=[])=>{
+        const inputNow=JSON.parse(task.input||'{}');
+        const before=records.get(id);
+        const goal=development?inputNow.context?.implementation_goal||inputNow.object?.body||task.summary
+          :event?`${task.kind}: ${task.summary}`:`${task.kind}: ${inputNow.object?.title||task.summary}. Deliver a factual report with actual repository evidence, address the requested discussion, distinguish defects and suggestions. Source request: ${inputNow.object?.body||''}`;
+        const contract=inputNow.contract||{goal,scope:[development?String(goal):task.kind],criteria:[development?'Implement the recorded goal and approved findings; mandatory project verification must pass.':'Deliver the requested result, supported by verifiable evidence; do not invent observations.'],endpoint:development?'reviewable_pull_request':'report',source:{kind:task.kind,object_number:task.object_number,delivery_id:task.source_delivery_id},completeness:'derived_from_source'};
+        if(before.contract.completeness==='unspecified'||before.contract.completeness==='legacy_unknown')records.contract(id,contract);
+        const version=artifact.tree_sha||sha(JSON.stringify(artifact));
+        const compact=(value:any)=>({...value,...(value.files?{files:value.files.map(({base64,...file}:any)=>file)}:{})});
+        const artifacts=[{kind:artifact.tree_sha?'code':'report',reference:`task:${id}:candidate`,version,content:redactor.clean(compact(artifact))}];
+        // A workflow's final report delivers its intermediate PR too. Do not drop the code or its residual findings.
+        if(!artifact.tree_sha){
+          const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),code=saved?JSON.parse(saved.data):null;
+          if(code?.published){artifacts.push({kind:'code',reference:code.published.html_url,version:code.published_tree_sha||code.tree_sha,content:redactor.clean(compact(code))});
+            evidence=[...evidence,{source:'policy_validation',version:code.tree_sha,verified:code.validation?.source==='policy',result:code.validation}];}
+        }
+        const candidate=records.submit(id,artifacts,evidence,redactor.clean({summary:artifact.summary,test_command:artifact.test_command}),token);
+        const policyHash=policyHashFor(artifacts);
+        const savedDecision=records.get(id);const existing=savedDecision.pending||savedDecision.acceptance;
+        if(existing?.policy_hash===policyHash&&existing?.candidate_id===candidate.id&&['pass','pass_with_issues'].includes(existing.outcome))return {ok:true};
+        const access=workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any));
+        const verdict=await this.evaluate(this.store,task,workspace!,redactor,guard,access.workspace.shell);
+        await validate();
+        if(policyHash!==policyHashFor(artifacts))stop('acceptance_context_changed','retry_wait','验收期间必需验证策略变化，将重新验收。');
+        if(['pass','pass_with_issues'].includes(verdict.outcome)){records.stage(id,candidate.id,candidate.revision,verdict,token,{policy_hash:policyHash});return {ok:true};}
+        const result=records.decide(id,candidate.id,candidate.revision,verdict,'running',false,token);
+        if(verdict.outcome==='needs_human'||result.exhausted)stop(result.exhausted?'acceptance_no_progress':'acceptance_needs_human','needs_replan',verdict.reason+' '+verdict.gaps.join('; '));
+        // Continue this same execution when called as a tool; a finished report retries with explicit feedback.
+        this.store.run("UPDATE tasks SET status='running',phase=? WHERE id=?",task.phase,id);
+        return {error:`acceptance_${verdict.outcome}`,reason:verdict.reason,gaps:verdict.gaps};
+      };
+      const acceptReport=async(value:any)=>{
+        const checked=await accept(value,this.store.all("SELECT id,content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='tool' AND json_extract(content,'$.name') IN ('run_command','read_file') AND json_extract(content,'$.attempt')=? ORDER BY rowid",id,task.attempt).map(row=>observation('task_log:'+row.id,sha(row.content),row.content)));
+        if(checked.error){
+          update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
+          stop(checked.error,'queued',checked.reason+' '+checked.gaps?.join('; '));
+        }
+      };
+
       // Another workflow's pull request: published like development's, recorded on its candidate, and the task carries on.
       const publishPullRequest=async()=>{
         log({type:'phase',phase:'pull_request',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
         const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+        const checked=await accept(candidate,[{source:'policy_validation',version:candidate.tree_sha,verified:candidate.validation?.source==='policy',result:candidate.validation}]);
+        if(checked.error)return checked;
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
         const published={number:pr.number,html_url:pr.html_url,sha:commit};
@@ -228,6 +289,8 @@ export class TaskEngine {
         update({status:'publishing'});log({type:'phase',phase:'publish',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
         const candidate=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+        const checked=await accept(candidate,[{source:'policy_validation',version:candidate.tree_sha,verified:candidate.validation?.source==='policy',result:candidate.validation}]);
+        if(checked.error)return checked;
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
         await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
@@ -281,6 +344,7 @@ export class TaskEngine {
             }
           }
         }
+        if(input.contract?.completeness==='explicit')implementationGoal=input.contract.goal;
         const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
         if(task.kind==='development.issue'){
           const owned=this.store.get(`SELECT p.* FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
@@ -398,10 +462,17 @@ export class TaskEngine {
         update({input:JSON.stringify(redactor.clean(input))});
         if(updates.length)this.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',updates.at(-1)!.id,id);
         if(stage!=='start')for(const row of updates){const data=JSON.parse(row.data);log({type:'review_update',actor:data.actor,reason:data.reason,detail:JSON.stringify(data)});}
-        return stage==='start'?{prompt:JSON.stringify({...input.context,effective_rules:undefined,review_rules:undefined})}
+        return stage==='start'?{prompt:JSON.stringify({...input.context,structured_task:records.get(id),playbook_catalog:playbooks.map(({content,...p})=>p),effective_rules:undefined,review_rules:undefined})}
           :{messages:updates.map(row=>JSON.stringify({instruction:'A person updated this review. Respond to this update and revise the final result before publication. Discussion files have been refreshed.',
             update:JSON.parse(row.data),current_object:object,reviewed_sha:task.head_sha}))};
       }};
+      if(development&&task.phase==='model')await restoreCheckpoint(this.store,task,workspace,input.snapshot_sha);
+      const initial=records.get(id);
+      if(['unspecified','legacy_unknown'].includes(initial.contract.completeness||'')) {
+        const goal=development?input.context?.implementation_goal||input.object?.body||task.summary
+          :event?input.context?.workflow_prompt||`${task.kind}: ${task.summary}`:`${task.kind}: ${input.object?.title||task.summary}. Requested result: ${input.object?.body||task.summary}`;
+        records.contract(id,input.contract||{goal,scope:[development?goal:task.kind],criteria:[development?'Implement the recorded goal and approved actionable findings; mandatory project verification must pass.':'Deliver a factual requested report, inspect relevant artifacts, distinguish findings from suggestions, and support conclusions with evidence.'],endpoint:development?'reviewable_pull_request':'report',source:{kind:task.kind,object_number:task.object_number,delivery_id:task.source_delivery_id},completeness:'derived_from_source'});
+      }
       for(;;){
       try{
       if(task.phase==='model'){
@@ -410,6 +481,7 @@ export class TaskEngine {
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
         // create_issue: a new Issue the workflow files, once per tool call, with mentions escaped and secrets removed.
         // An event workflow's own write tools (Actions rerun and report) come from its module; it reports through them.
+        input.context={...input.context,acceptance_feedback:records.get(id).acceptance};
         const platform:PlatformTools={...(event?.tools?.(this.store,task,input,writes,eventState)??{})};
         if(writes.includes('issue')&&task.kind!=='actions.failures')platform.create_issue=async(callId,args)=>{
           if(typeof args?.title!=='string'||!args.title.trim()||args.title.length>256||typeof args.body!=='string'||args.body.length>60000)return {error:'create_issue_invalid',message:'title (up to 256 characters) and body are required.'};
@@ -437,6 +509,7 @@ export class TaskEngine {
           // Fix the only candidate snapshot before any policy command can create or modify files.
           const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
           if(snapshot.tree_sha===input.snapshot_tree){
+            const checked=await accept({...args,status:'no_changes',tree_sha:snapshot.tree_sha});if(checked.error)return checked;
             if(development)update({result:JSON.stringify({...args,status:'no_changes'}),phase:'done',status:'completed',error_code:null});
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
           }
@@ -460,9 +533,10 @@ export class TaskEngine {
           if(!development)return publishPullRequest();
           update({result:JSON.stringify(args),phase:'publish'});
           return publishDevelopment();
-        }:undefined,conversation,platform);await validate();
+        }:undefined,conversation,platform);
         if(event){
           // The module checks the finished result and takes it; the task keeps what it returns.
+          await acceptReport(result);
           const kept=await event.finish(this.store,task,input,result,eventState);
           update({result:JSON.stringify(redactor.clean(kept)),phase:'done',status:'succeeded',error_code:null});
         }else if(!development){
@@ -471,12 +545,14 @@ export class TaskEngine {
           // A pull request this workflow published on the way is part of its result.
           const candidate=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=candidate?JSON.parse(candidate.data).published:null;
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash,...(published?{pull_request:published}:{})};
+          await acceptReport(result);
           update({result:JSON.stringify(result),phase:'publish'});validatedPhase='publish';
         }else if(task.phase!=='done')stop('create_pull_request_required',undefined,`开发执行结束时仍处于 ${task.phase} 阶段，未完成 create_pull_request。`);
       }
       if(task.phase==='publish'){
         if(validatedPhase!=='publish')await validate();
         validatedPhase=undefined;
+        if(!development)await acceptReport(result);
         update({status:'publishing'});const publisher=new Publisher(this.store,github,task,validate,undefined,log,development?undefined:()=>{
           // No await between checking the inbox and fencing the first GitHub write.
           if(this.store.get('SELECT publication_started FROM tasks WHERE id=?',id)?.publication_started)return;
@@ -534,7 +610,20 @@ export class TaskEngine {
             this.queueDevelopment(github,task,input,result,approved,requests);
           });
         }
-        else await publishDevelopment();
+        else {
+          const published=await publishDevelopment();
+          if('error' in published&&published.error){
+            if(this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",id))stop('acceptance_publication_changed','needs_replan','已部分发布的候选需要修订；保留现有 GitHub 成果，请根据验收缺口安排已有 PR 的修订。');
+            const saved=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+            const recovery={source_workspace_id:task.workspace_id,base_sha:saved.base_sha,revision:records.get(id).revision,sha:saved.local_sha,tree_sha:saved.tree_sha,created_at:new Date().toISOString()};
+            records.atomic(()=>{
+              const current=JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input);
+              this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({...current,recovery}),id);records.history(id,'artifact_checkpoint',recovery);
+              update({phase:'prepare',status:'queued',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
+            });
+            stop(String(published.error),'queued',String((published as any).reason||'独立验收要求修订或补证。'));
+          }
+        }
       }
       break;
       }catch(error){
@@ -577,7 +666,7 @@ export class TaskEngine {
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        (task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
+        task.kind!=='task.request'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});
@@ -704,6 +793,50 @@ export class TaskEngine {
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
+    const contractMatch=/^\/api\/tasks\/([^/]+)\/contract$/.exec(url.pathname);
+    if(contractMatch&&method==='PATCH'){
+      fields(input,['contract','expected_revision']);const filter=scope(user,'repository_id');
+      const task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,contractMatch[1]!,...filter.args);
+      if(!task)fail(404,'task_not_found');
+      if(this.active.has(task!.id)||task!.status==='running')fail(409,'task_already_running');
+      if(terminal.includes(task!.status)||this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task!.id))fail(409,'task_contract_after_publication');
+      if(!Number.isSafeInteger(input.expected_revision))fail(400,'invalid_task_revision');
+      const records=new TaskRecords(this.store),contract={...(input.contract as any),source:{type:'human_revision',actor:user.id},completeness:'explicit'};
+      records.atomic(()=>{
+        try{records.contract(task!.id,contract,Number(input.expected_revision));}catch(error){fail((error as Error).message==='task_revision_changed'?409:400,(error as Error).message);}
+        const saved=JSON.parse(task!.input);
+        this.store.run("UPDATE tasks SET input=?,status='queued',phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,error_code=NULL,next_run_at=0,attempt=attempt+1 WHERE id=?",JSON.stringify({...saved,contract,request:task!.kind==='task.request'?contract.goal:saved.request}),task!.id);
+        this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task!.id);
+        this.store.run('DELETE FROM development_candidates WHERE task_id=?',task!.id);
+        this.store.audit(user.id,'task.contract',task!.id,task!.repository_id);
+      });this.tick();return {task:new TaskRecords(this.store).get(task!.id)};
+    }
+    const contextMatch=/^\/api\/repositories\/([^/]+)\/context$/.exec(url.pathname);
+    if(contextMatch&&(method==='GET'||method==='PATCH')){
+      repository(this.store,user,contextMatch[1]!);const records=new TaskRecords(this.store);
+      if(method==='GET')return {context:records.project(contextMatch[1]!)};
+      fields(input,['facts','expected_revision']);
+      if(!Number.isSafeInteger(input.expected_revision)||Number(input.expected_revision)<0)fail(400,'invalid_project_revision');
+      try{records.setProject(contextMatch[1]!,input.facts as any,Number(input.expected_revision));}
+      catch(error){fail((error as Error).message==='project_revision_changed'?409:400,(error as Error).message);}
+      this.store.audit(user.id,'project.context',contextMatch[1]!,contextMatch[1]!);return {context:records.project(contextMatch[1]!)};
+    }
+    if(url.pathname==='/api/tasks'&&method==='POST') {
+      fields(input,['repository_id','request','contract']);
+      if(typeof input.repository_id!=='string'||typeof input.request!=='string'||!input.request.trim()||input.request.length>60000)fail(400,'invalid_task_request');
+      repository(this.store,user,input.repository_id as string);
+      const id=randomId(),now=new Date().toISOString();
+      const contract=input.contract as any;
+      if(!contract||!Array.isArray(contract.criteria)||!contract.criteria.length||typeof contract.endpoint!=='string'||!contract.endpoint.trim())fail(400,'invalid_task_contract');
+      // Validate before insertion; rollback also removes trigger-created records on failure.
+      this.store.transaction(()=>{
+        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,created_at,updated_at) VALUES(?,?,'task.request','queued',?,?,?,?)",id,input.repository_id as string,(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),now,now);
+        try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
+        // Persist the authoritative validated contract for executor recovery.
+        this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract}),id);
+        this.store.audit(user.id,'task.create',id,input.repository_id as string);
+      });this.tick();return {id};
+    }
     const live=/^\/api\/tasks\/([^/]+)\/live$/.exec(url.pathname);
     if(live&&method==='GET')return this.live(user,live[1]!,url);
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
@@ -714,7 +847,7 @@ export class TaskEngine {
     this.store.transaction(()=>{
       // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
       const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);
-      if(replies(task.kind)&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status)){
+      if(task.kind!=='task.request'&&(replies(task.kind)&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status))){
         this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,review_update_cursor=0,publication_started=0,attempt=attempt+1 WHERE id=?",task.id);
         if(replies(task.kind))this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task.id);

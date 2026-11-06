@@ -23,7 +23,7 @@ export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=fal
   const mask=text=>Object.values(extra).reduce((masked,secret)=>masked.replaceAll(secret,'[REDACTED]'),text);
   return new Promise((resolve,reject)=>{
     const child=spawn('/bin/sh',['-c',value],{cwd,detached:true,env:{...environment,...workspaceTag(workspaceId),...extra},stdio:['ignore','pipe','pipe']});
-    let output='',timedOut=false,truncated=false,done=false;
+    let output='',timedOut=false,truncated=false,done=false,startup;
     const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
     const timer=timeoutMs===null?null:setTimeout(()=>{timedOut=true;kill();},Math.max(100,Number(timeoutMs)||10000));
     const collect=data=>{
@@ -31,15 +31,17 @@ export function command(value,cwd,timeoutMs=10000,{outputFile,keepBackground=fal
       output+=data.toString();if(outputFile)try{appendFileSync(outputFile,mask(data.toString()),{mode:0o600});}catch{/* Live output is best effort. */}
     };
     const finish=(code,signal)=>{
-      if(done)return;done=true;clearTimeout(timer);
+      if(done)return;done=true;clearTimeout(timer);clearTimeout(startup);
       // Kept background processes may still hold the pipes; release them instead of waiting.
       if(keepBackground&&!timedOut&&!truncated){child.stdout.destroy();child.stderr.destroy();child.unref();}else kill();
-      resolve({exit_code:code,signal,output:mask(output),timed_out:timedOut,truncated});
+      resolve({exit_code:code,signal,output:mask(output),timed_out:timedOut,truncated,...(keepBackground&&code===null?{running:true,pid:child.pid}:{})});
     };
     child.stdout.on('data',collect);child.stderr.on('data',collect);
     child.on('error',error=>{clearTimeout(timer);kill();reject(error);});
     // By default the process group ends with the shell; keep_background leaves it running for later commands of the same task.
     child.on('exit',(code,signal)=>{if(keepBackground)setTimeout(()=>finish(code,signal),500);else kill();});
     child.on('close',finish);
+    // A foreground server explicitly requested as background must release the agent after startup too.
+    if(keepBackground)startup=setTimeout(()=>finish(child.exitCode,child.signalCode),500);
   });
 }

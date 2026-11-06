@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -50,7 +51,7 @@ async function fixture(t, { computer = 'ready' } = {}) {
     return { ok: true, result: {} };
   } };
   let engine, sync;
-  const h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, url), installations: sync = new InstallationSync(store, url) }));
+  const h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, url, undefined, acceptanceFixture), installations: sync = new InstallationSync(store, url) }));
   t.after(() => engine.close());
   const { admin } = await setup(h), privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: privateKey, token: undefined }); await repository(admin, a.id, '101');

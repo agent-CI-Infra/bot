@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness, setup, account, repository } from './helpers.mjs';
@@ -130,7 +131,7 @@ async function botPullRequest(t, maxRevisions = 1) {
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number) VALUES('source','101','development.issue','pr_opened','source',?,1)", JSON.stringify({ review: { implementation_goal: 'Reject shipments larger than the stock.' } }));
   // The PR has used up its revision budget: requests do not need it.
   h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1-source',?,'source',5)", 'c'.repeat(40));
-  const engine = new TaskEngine(h.store, {}); engine.owned = () => h.store.get('SELECT * FROM bot_pull_requests WHERE number=7');
+  const engine = new TaskEngine(h.store, {}, undefined, undefined, acceptanceFixture); engine.owned = () => h.store.get('SELECT * FROM bot_pull_requests WHERE number=7');
   const text = { '/issues/comments/11': 'Please name the SKU in the error.', '/issues/comments/15': 'Also log it.', '/pulls/comments/21': 'This branch is untested.',
     '/pulls/comments/22': 'Rename the variable.', '/pulls/7/reviews/31': 'Line too long.', '/issues/comments/13': 'Summary' };
   const github = { actorId: '999', path: path => path, request: async (_method, path) => { if (!(path in text)) throw new Error('404 ' + path); return { body: text[path] }; } };
@@ -260,7 +261,7 @@ test('another review bot\'s comments on the bot\'s own PR are reviewed; on other
 test('an Issue review continues the bot PR for that Issue only within the revision budget', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true, max_revisions: 2 });
-  const engine = new TaskEngine(h.store, {}), result = { requires_code_change: true, clarification_required: false, findings: [] };
+  const engine = new TaskEngine(h.store, {}, undefined, undefined, acceptanceFixture), result = { requires_code_change: true, clarification_required: false, findings: [] };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,summary) VALUES('dev-1','101','development.issue',1,'pr_opened','')");
   h.store.run("INSERT INTO bot_pull_requests VALUES('101',9,'9009','999','101','bot/issue-1-dev-1','a',?,2)", 'dev-1');
   const task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1, source_delivery_id: null };
@@ -282,7 +283,7 @@ test('a stale PR update review is superseded without queueing a head-triggered r
 test('an Issue the review found ready says why development has not started: no label, someone assigned, or an app\'s label', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
-  const engine = new TaskEngine(h.store, {}), task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1 };
+  const engine = new TaskEngine(h.store, {}, undefined, undefined, acceptanceFixture), task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1 };
   const object = { title: 'Fix it', body: 'Please fix the parser.' };
   const result = { requires_code_change: true, clarification_required: false, issue_requests_code: true, implementation_goal: 'Fix the parser.', request_quote: 'Please fix the parser.', findings: [] };
   let issue = {}, events = [];

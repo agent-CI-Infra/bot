@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness,setup,account,repository } from './helpers.mjs';
@@ -158,7 +159,7 @@ test('active Issue development blocks another task, and a PR comment review revi
     assert.equal(enqueue(h.store,'101','development.issue',9,null,{}),null,status);
     h.store.run('DELETE FROM tasks WHERE id=?',status);
   }
-  const engine=new TaskEngine(h.store,{}),result={requires_code_change:true,clarification_required:false,findings:[{actionable:true,within_goal:true,requires_human_decision:false}]};
+  const engine=new TaskEngine(h.store,{}, undefined, undefined, acceptanceFixture),result={requires_code_change:true,clarification_required:false,findings:[{actionable:true,within_goal:true,requires_human_decision:false}]};
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('source','101','development.issue','succeeded','source',?)",JSON.stringify({review:{implementation_goal:'Fix the bug'}}));
   engine.owned=()=>({source_task_id:'source',revisions:0});
   const task={id:'review',repository_id:'101',kind:'review.pr',object_number:7,head_sha:'c'.repeat(40),source_delivery_id:null};
@@ -207,7 +208,7 @@ test('inline positions use real hunk lines and models cannot choose approval eve
 test('recovery preserves terminal tasks and never treats a running container as a finished task',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   for(const [id,status,phase]of [['done','pr_opened','done'],['cancelled','cancelled','model'],['running','running','model']])h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,phase,next_run_at) VALUES(?,?,?,?,?,?,?)',id,'101','development.issue',status,id,phase,Date.now()+100000);
-  const engine=new TaskEngine(h.store,{call:async()=>({state:'ready',generation:1})});engine.start();await engine.close();
+  const engine=new TaskEngine(h.store,{call:async()=>({state:'ready',generation:1})}, undefined, undefined, acceptanceFixture);engine.start();await engine.close();
   assert.equal(h.store.get("SELECT status FROM tasks WHERE id='done'").status,'pr_opened');assert.equal(h.store.get("SELECT status FROM tasks WHERE id='cancelled'").status,'cancelled');assert.equal(h.store.get("SELECT status FROM tasks WHERE id='running'").status,'queued');
 });
 test('credential redaction covers structured model output including multiline secrets',()=>{
@@ -300,7 +301,7 @@ test('development needs the development label from a person and no assignee, whe
   assert.equal(h.store.get("SELECT count(*) n FROM task_logs l JOIN tasks t ON t.id=l.task_id WHERE t.kind='development.issue' AND json_extract(l.content,'$.type')='queued'").n,1);
   const input=JSON.parse(h.store.get("SELECT input FROM tasks WHERE kind='development.issue'").input);assert.deepEqual([input.review.request_quote,input.object_hash],['Fix add.','h']);
   // A label already on the Issue when the review is published is accepted only if a user account added it last.
-  const engine=new TaskEngine(h.store,{}),task=h.store.get("SELECT * FROM tasks WHERE id='rv'"),user={event:'labeled',label:{name:'bot-develop'},actor:{type:'User'}};
+  const engine=new TaskEngine(h.store,{}, undefined, undefined, acceptanceFixture),task=h.store.get("SELECT * FROM tasks WHERE id='rv'"),user={event:'labeled',label:{name:'bot-develop'},actor:{type:'User'}};
   const github=(object,events)=>({object:async()=>object,pages:async()=>events,path:p=>p});
   assert.equal(await engine.developmentApproved(github(issue(['bot-develop']),[{event:'labeled',label:{name:'bug'},actor:{type:'User'}},user]),task),true);
   assert.equal(await engine.developmentApproved(github(issue(['bot-develop']),[user,{...user,actor:{type:'Bot'}}]),task),false);

@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -48,7 +49,7 @@ async function reviewFixture(t) {
     return { ok: true, result: {} };
   } };
   let engine, state = 'ready';
-  const h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, 'http://127.0.0.1:' + server.address().port) }));
+  const h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, 'http://127.0.0.1:' + server.address().port, undefined, acceptanceFixture) }));
   t.after(() => engine.close());
   const { admin } = await setup(h), privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: privateKey, token: undefined }); await repository(admin, a.id, '101');

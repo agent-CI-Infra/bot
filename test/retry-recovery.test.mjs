@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -66,7 +67,7 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
     assert.equal(new Set(receipts.map(row=>JSON.parse(row.request).request.workspace_id)).size,5);
     assert.equal(requests,fault==='transport'?5:0);
     // Recreate the engine: the slow schedule belongs to the task, not a timer in this process.
-    await h.engine.close();const engine=new TaskEngine(h.store,h.engine.manager,h.githubUrl);t.after(()=>engine.close());
+    await h.engine.close();const engine=new TaskEngine(h.store,h.engine.manager,h.githubUrl, undefined, acceptanceFixture);t.after(()=>engine.close());
     let now=saved.next_run_at-1;t.mock.method(Date,'now',()=>now);
     engine.tick();assert.equal(engine.active.size,0);assert.equal(starts.length,5);
     now=saved.next_run_at;engine.tick();await Promise.all(engine.active.values());
