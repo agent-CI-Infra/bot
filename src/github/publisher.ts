@@ -1,10 +1,18 @@
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
 import { blobSha, operationId, stop, TaskError, treeSha } from '../agent/common.js';
-import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place } from './text.js';
+import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted, type DevelopmentWait } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 import { applyReleaseCategory, releaseCategory } from './release-label.js';
 
+/**
+ * A bot pull request now at `sha`. Only a confirmed head and its refreshed description count, once across retries. The revision
+ * budget limits what the bot starts from its own reviews, so a revision people or other review bots asked for does not use it.
+ */
+export function recordRevision(store:Store,task:Row,number:number,sha:string){
+  const requested=JSON.parse(task.input||'{}').revision?.source==='request';
+  store.run('UPDATE bot_pull_requests SET revisions=revisions+CASE WHEN sha<>? AND ? THEN 1 ELSE 0 END,sha=? WHERE repository_id=? AND number=?',sha,requested?0:1,sha,task.repository_id,number);
+}
 export class Publisher {
   constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly log:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){}
   // replayable effects (such as adding a label) are idempotent on GitHub, so an unknown response may be sent again.
@@ -49,8 +57,9 @@ export class Publisher {
     outputs.push(await this.discussion('discussion',[text.overview,text.discussion.join('\n\n---\n\n'),coverage].filter(Boolean).join('\n\n')));
     await this.validate();return outputs;
   }
-  // language: the words of the summary comment; trigger: the person's comment this review answers, if any.
-  async review(result:any,files:any[],options:{language:'zh'|'en',trigger?:{actor?:string|null,url?:string|null}}={language:'en'}){
+  // language: the words of the summary comment; trigger: the person's comment this review answers, if any; development: why
+  // an Issue ready for development is not being developed.
+  async review(result:any,files:any[],options:{language:'zh'|'en',trigger?:{actor?:string|null,url?:string|null,what?:Prompted},development?:DevelopmentWait|null}={language:'en'}){
     const inline:any[]=[], locations = new Map<string, any>(), language=options.language,pr=this.task.kind==='review.pr';
     // The bot's earlier top-level inline comments, when the review refers to them: a finding that is one of them still
     // applying (comment_id) is not posted again, and the ones it says are fixed (resolved_comments) get their threads resolved.
@@ -83,8 +92,8 @@ export class Publisher {
     const resolved=await this.resolveFixed((result.resolved_comments||[]).map(Number).filter((id:number)=>!still.has(id)).map((id:number)=>earlier.get(id)).filter(Boolean),result.reviewed_sha);
     // Every review publishes one summary discussion comment, even when all findings are inline; later reviews of the same
     // Issue or PR edit it.
-    const count=this.earlierReviews(),body=summaryComment({language,overview:text.overview,discussion:text.discussion,coverage,human,resolved,open:[...kept.values()].map(place),
-      review:{count:count+1,at:new Date().toISOString().replace('T',' ').slice(0,16)+' UTC',sha:result.reviewed_sha,actor:options.trigger?.actor,url:options.trigger?.url}});
+    const count=this.earlierReviews(),body=summaryComment({language,overview:text.overview,discussion:text.discussion,coverage,human,resolved,open:[...kept.values()].map(place),development:options.development,
+      review:{count:count+1,at:new Date().toISOString().replace('T',' ').slice(0,16)+' UTC',sha:result.reviewed_sha,actor:options.trigger?.actor,url:options.trigger?.url,what:options.trigger?.what}});
     outputs.push({...await this.summary(body),...(resolved.length?{resolved_threads:resolved.map(r=>r.id)}:{})});
     await this.validate();return outputs;
   }
@@ -242,8 +251,7 @@ export class Publisher {
         const current=await this.github.object('review.pr',pr.number);assertOwnedPR(owned,current,this.github.actorId,this.task.repository_id);
         return current.head.sha===sha&&current.title===payload.title&&current.body===payload.body?current:null;
       },true);
-      // Only count a confirmed head and its refreshed description, once across retries.
-      this.store.run('UPDATE bot_pull_requests SET revisions=revisions+CASE WHEN sha<>? THEN 1 ELSE 0 END,sha=? WHERE repository_id=? AND number=?',sha,sha,this.task.repository_id,candidate.pr_number);
+      recordRevision(this.store,this.task,candidate.pr_number,sha);
       await applyReleaseCategory(this.github, pr.number, releaseLabel);
       return {...pr,...payload};
     }

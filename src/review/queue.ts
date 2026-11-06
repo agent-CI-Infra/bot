@@ -22,7 +22,7 @@ export function reviewRequestsCode(issue: any, result: any) {
 // A new comment on an open Issue or PR that mentions one of the configured names; any workflow may trigger on it.
 export function mentionsBot(event: string, payload: Json): boolean {
   const issue = payload.issue as any, comment = payload.comment as any, configured = process.env.BOT_MENTION_NAMES ?? 'bot,agent-ci-infra-bot';
-  if (event !== 'issue_comment' || payload.action !== 'created' || byBot(payload, comment?.body) || issue?.state !== 'open'
+  if (event !== 'issue_comment' || payload.action !== 'created' || botWrote(payload, comment?.body) || issue?.state !== 'open'
     || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof comment?.body !== 'string'
     || !/^[1-9]\d*$/.test(String(comment.id ?? '')) || typeof comment.id === 'number' && !Number.isSafeInteger(comment.id)
     || configured.trim().toLowerCase() === 'off') return false;
@@ -37,25 +37,28 @@ export function commentReviewKind(store: Store, repositoryId: string, event: str
 }
 // What the bot writes itself carries its marker; a bot account posts as an ordinary GitHub user, so the sender type is not enough.
 const botMarker = /<!-- dept-bot[:-]/;
-const byBot = (payload: any, body: unknown) => payload?.sender?.type === 'Bot' || botMarker.test(String(body ?? ''));
+const botWrote = (payload: any, body: unknown) => payload?.sender?.type === 'Bot' || botMarker.test(String(body ?? ''));
 const clip = (value: unknown, limit = 4000) => { const text = String(value ?? ''); return text.length > limit ? text.slice(0, limit) + '…' : text; };
 // A person updated an open Issue or PR after it was opened: edited its title or body, commented, submitted a review or replied
 // to review comments. Returns the review to queue and what triggered it, or null. Opening, new commits and mentions have their
-// own triggers; drafts, closed objects and the bot's own writing never trigger.
-export function updateTrigger(event: string, payload: Json): { kind: 'review.issue' | 'review.pr', number: number, pullRequest?: Json, trigger: Json } | null {
+// own triggers; drafts, closed objects and the bot's own writing never trigger. `otherBot` is set for another review bot's
+// comment or review on a pull request this bot opened (see otherBotOnBotPullRequest): it counts like a member's.
+export function updateTrigger(event: string, payload: Json, otherBot = false): { kind: 'review.issue' | 'review.pr', number: number, pullRequest?: Json, trigger: Json } | null {
   const p = payload as any, action = p.action, actor = String(p.sender?.login || ''), edited = (changes: any) => ['title', 'body'].filter(key => changes && key in changes);
   // Anyone can comment on a public repository: a comment or review counts only from the object's author or from someone
   // with a role in the repository, so strangers cannot spend the model budget. Editing a title or body on GitHub already
   // takes one of those.
-  const trusted = (association: unknown, author: any) => ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(String(association))
+  const trusted = (association: unknown, author: any) => otherBot || ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(String(association))
     || author?.id != null && String(author.id) === String(p.sender?.id ?? '');
+  const byBot = (payload: any, body: unknown) => otherBot ? botMarker.test(String(body ?? '')) : botWrote(payload, body);
+  const by = otherBot ? { actor_type: 'Bot' } : {};
   const open = (object: any) => object?.state === 'open' && object.draft !== true && Number.isSafeInteger(object.number) && object.number > 0;
   if (event === 'issues' && action === 'edited' && open(p.issue) && !p.issue.pull_request && edited(p.changes).length && !byBot(p, null))
     return { kind: 'review.issue', number: p.issue.number, trigger: { reason: 'issue_edited', actor, changed: edited(p.changes),
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
   if (event === 'issue_comment' && action === 'created' && p.issue?.state === 'open' && Number.isSafeInteger(p.issue.number) && p.issue.number > 0
     && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body) && trusted(p.comment.author_association, p.issue.user))
-    return { kind: p.issue.pull_request ? 'review.pr' : 'review.issue', number: p.issue.number, trigger: { reason: 'comment', actor, url: String(p.comment.html_url || '') } };
+    return { kind: p.issue.pull_request ? 'review.pr' : 'review.issue', number: p.issue.number, trigger: { reason: 'comment', actor, ...by, url: String(p.comment.html_url || '') } };
   const pr = p.pull_request;
   // A bot account editing its own PR description is the bot, even though GitHub reports a user.
   if (event === 'pull_request' && action === 'edited' && open(pr) && edited(p.changes).length && !byBot(p, null)
@@ -64,14 +67,23 @@ export function updateTrigger(event: string, payload: Json): { kind: 'review.iss
       previous: Object.fromEntries(edited(p.changes).map(key => [key, clip(p.changes[key]?.from)])) } };
   if (event === 'pull_request_review_comment' && action === 'created' && open(pr) && typeof p.comment?.body === 'string' && !byBot(p, p.comment.body)
     && trusted(p.comment.author_association, pr.user))
-    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: p.comment.in_reply_to_id ? 'review_reply' : 'review_comment', actor,
+    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: p.comment.in_reply_to_id ? 'review_reply' : 'review_comment', actor, ...by,
       url: String(p.comment.html_url || ''), path: String(p.comment.path || ''), line: p.comment.line ?? null } };
   // Every reply to a review thread also arrives as a review without a body; that one is the comment event above.
   if (event === 'pull_request_review' && action === 'submitted' && open(pr) && !byBot(p, p.review?.body) && trusted(p.review?.author_association, pr.user)
     && (String(p.review?.body || '').trim() || p.review?.state === 'changes_requested'))
-    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'review_submitted', actor, state: String(p.review.state || ''),
+    return { kind: 'review.pr', number: pr.number, pullRequest: pr, trigger: { reason: 'review_submitted', actor, ...by, state: String(p.review.state || ''),
       body: clip(p.review.body), url: String(p.review.html_url || '') } };
   return null;
+}
+// Another review bot's conversation comment, review or inline comment on a pull request this bot opened. The pull request's
+// author is this bot's account, so a different bot account is someone else; the bot's own writing never counts. Such review
+// is judged on its merits and may revise the pull request once per bot (see the engine's revisionRequests).
+export function otherBotOnBotPullRequest(store: Store, repositoryId: string, event: string, payload: Json): boolean {
+  const p = payload as any, object = event === 'issue_comment' ? (p.issue?.pull_request ? p.issue : null) : p.pull_request;
+  if (!['issue_comment', 'pull_request_review_comment', 'pull_request_review'].includes(event) || !object || p.sender?.type !== 'Bot') return false;
+  const owned = store.get('SELECT author_id FROM bot_pull_requests WHERE repository_id=? AND number=?', repositoryId, Number(object.number));
+  return !!owned && String(object.user?.id ?? '') === String(owned.author_id) && String(p.sender?.id ?? '') !== String(owned.author_id);
 }
 // Reviews of updates follow the review workflow's triggers.
 const updateEnabled = (store: Store, repositoryId: string, kind: string) => !!activeTrigger(store, repositoryId, kind, kind === 'review.issue' ? 'issue.updated' : 'pull_request.updated');
@@ -81,13 +93,13 @@ export function pullRequestNeeded(store: Store, repositoryId: string, event: str
   if (event !== 'issue_comment' || !(payload.issue as any)?.pull_request) return false;
   if (commentReviewKind(store, repositoryId, event, payload) === 'review.pr') return true;
   if (workflowNeedsPullRequest(store, repositoryId, event, payload)) return true;
-  return updateTrigger(event, payload)?.kind === 'review.pr' && updateEnabled(store, repositoryId, 'review.pr');
+  return updateTrigger(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload))?.kind === 'review.pr' && updateEnabled(store, repositoryId, 'review.pr');
 }
 // A durable inbox keeps updates independent of prepare's asynchronous input snapshot.
 const activeStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'running', 'preparing', 'publishing', 'result_ready'];
 // `labeled` is a label a person added that one of the review workflow's label triggers names; it is reviewed as an update.
 function queueUpdate(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest?: Json, mention?: 'review.issue' | 'review.pr', labeled?: Update) {
-  const update: Update | null = labeled ?? (mention ? { kind: mention, number: Number((payload.issue as any).number), trigger: { reason: 'mention', actor: String((payload.sender as any)?.login || ''), url: String((payload.comment as any)?.html_url || '') } } : updateTrigger(event, payload));
+  const update: Update | null = labeled ?? (mention ? { kind: mention, number: Number((payload.issue as any).number), trigger: { reason: 'mention', actor: String((payload.sender as any)?.login || ''), url: String((payload.comment as any)?.html_url || '') } } : updateTrigger(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload)));
   if (!update || !mention && !labeled && !updateEnabled(store, repositoryId, update.kind)) return 0;
   const commentKey=mention?`${repositoryId}:${update.kind}:${update.number}:comment:${(payload.comment as any).id}`:null;
   if(commentKey&&(store.get('SELECT 1 FROM tasks WHERE unique_key=?',commentKey)||store.get('SELECT 1 FROM review_updates WHERE event_key=?',commentKey)))return 0;
@@ -139,7 +151,15 @@ export function enqueue(store: Store, repositoryId: string, kind: string, number
   if (kind === 'development.issue' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=?
     AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
       'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, number)) return null;
-  const key = `${repositoryId}:${kind}:${number}:${commentId !== null ? `comment:${commentId}` : updateId !== null ? `update:${updateId}` : kind.endsWith('.pr') ? head : 'opened'}`;
+  // One revision of a bot pull request at a time: both would push to the same branch. The requests of a review that finds one
+  // running are raised again by the review of the head it pushes.
+  if (kind === 'development.pr' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.pr' AND object_number=?
+    AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
+      'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, number)) return null;
+  // A revision that people or other bots asked for is keyed by those requests, so a revision of the same head that the bot's
+  // own review started earlier does not stand in for it.
+  const requests = kind === 'development.pr' && Array.isArray((input as any).revision?.requests) ? (input as any).revision.requests.map((r: any) => `${r.type}:${r.id}`).join(',') : '';
+  const key = `${repositoryId}:${kind}:${number}:${commentId !== null ? `comment:${commentId}` : updateId !== null ? `update:${updateId}` : kind.endsWith('.pr') ? head + (requests ? `:requests:${requests}` : '') : 'opened'}`;
   const existing = store.get('SELECT id FROM tasks WHERE unique_key=?', key); if (existing) return null;
   const id = randomId(), now = new Date().toISOString();
   store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,head_sha,source_task_id,source_delivery_id,created_at,updated_at)

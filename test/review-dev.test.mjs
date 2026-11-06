@@ -150,7 +150,7 @@ test('comment Issue reviews publish with trigger context before starting authori
   assert.equal(development.source_task_id,task.id);assert.equal(development.status,'queued');assert.equal(development.unique_key,'101:development.issue:1:opened');
 });
 
-test('active Issue development blocks another task and PR comment reviews never start revisions',async t=>{
+test('active Issue development blocks another task, and a PR comment review revises only for requests it took on',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true});
   for(const status of ['queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication','running','preparing','implementing','validating','publishing','result_ready']){
@@ -160,12 +160,13 @@ test('active Issue development blocks another task and PR comment reviews never 
   }
   const engine=new TaskEngine(h.store,{}),result={requires_code_change:true,clarification_required:false,findings:[{actionable:true,within_goal:true,requires_human_decision:false}]};
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('source','101','development.issue','succeeded','source',?)",JSON.stringify({review:{implementation_goal:'Fix the bug'}}));
-  let ownershipChecks=0;engine.owned=()=>{ownershipChecks++;return {source_task_id:'source',revisions:0};};
+  engine.owned=()=>({source_task_id:'source',revisions:0});
   const task={id:'review',repository_id:'101',kind:'review.pr',object_number:7,head_sha:'c'.repeat(40),source_delivery_id:null};
+  // A mention reviews again; the bot's own findings from that review never start a revision by themselves.
   engine.queueDevelopment({},task,{object:{},comment:{id:501,body:'@bot'}},result,true);
-  assert.equal(ownershipChecks,0);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,0);
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,0);
   engine.queueDevelopment({},task,{object:{}},result,true);
-  assert.equal(ownershipChecks,1);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,1);
+  assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,1);
 });
 
 test('a stale PR comment review cannot become a head-triggered task that starts development',async t=>{

@@ -17,7 +17,7 @@
 | Issue 检视（`review.issue`） | 内置工作流 `review.issue` | 触发源：Issue 打开、Issue 修改或可信评论、评论提到 bot；提示词：`.bot/rules/issue-review.md`；流程：检视 → 回复；发布：控制面发一条评论并加标签 |
 | PR 检视（`review.pr`） | 内置工作流 `review.pr` | 触发源：PR 打开或 Ready for review、head 更新、PR 讨论更新、评论提到 bot；草稿不检视；提示词：`.bot/rules/pr-review.md`；流程：检视 → 回复；发布：COMMENT 行内检视加一条总结评论 |
 | 开发 Issue（`development.issue`） | 内置工作流 `development.issue` | 触发源固定：Issue 检视发布且结论要求改代码，或之后有人加上开发标签；提示词：`.bot/rules/issue-development.md`；流程：Issue 分析 → 开发 → 检视 → 测试，检视或测试发现问题时回到开发；发布：控制面推 bot 分支、开 PR |
-| 跟进 bot PR（`development.pr`） | 内置工作流 `development.pr` | 触发源固定：bot PR 的检视发布了可执行意见（在修订轮数内）；和开发 Issue 共用同一份提示词 |
+| 跟进 bot PR（`development.pr`） | 内置工作流 `development.pr` | 触发源固定：bot PR 的检视发布后，有仓库成员要求的修改（检视判断是要求修改而不是提问，不限次数，每条评论一次）、其他检视机器人的合理意见（每个机器人每个 PR 一次），或 bot 自己检视新提交发现的可执行意见（在修订轮数内）；和开发 Issue 共用同一份提示词 |
 | CI 观察（`release.observe`） | 内置工作流 `release.observe` | 触发源固定：「发版本」页查看 Release 工作流运行；提示词：内置 `docs/prompts/release-observe.md`，可由控制台覆盖；只读，不发布 |
 | 发行说明（`release.notes`） | 内置工作流 `release.notes` | 触发源固定：「发版本」页起草；提示词：默认分支的 `.agents/skills/release-notes/SKILL.md`，没有时用控制台提示词，都没有时用内置 release-notes-v1（不调用模型，直接列出来源） |
 | `.bot/rules/` 下三份检视和开发规则 | 对应内置工作流的提示词 | 仓库文件整份替换提示词，并且优先于控制台里对同一份提示词的设置；`development_label` 行见下文 |
@@ -25,7 +25,7 @@
 | 开发开关、人（不是 App）加上的开发标签、Issue 无人指派、发布前复核 | 控制面硬条件 | 写在任务引擎里，提示词关不掉；`development_label` 改名后仍然要求，去掉这一行仍按 `bot-develop` 要求 |
 | 测试失败不推分支、不开 PR | 控制面硬条件 | 项目测试命令是开发工作流的设置，`create_pull_request` 先固定快照再运行它，失败返回 `validation_failed` |
 | 发行说明来源完整且不重复 | 控制面硬条件 | 无论提示词来自哪一层，模型只能给来源分组，控制面核验每个来源恰好出现一次，标题和链接由控制面原样写出 |
-| 草稿、已关闭对象、bot 自己写的内容、仓库外人员的评论不触发 | 控制面硬条件 | 所有触发源共用这套过滤，自定义工作流也一样 |
+| 草稿、已关闭对象、bot 自己写的内容、仓库外人员的评论不触发 | 控制面硬条件 | 所有触发源共用这套过滤，自定义工作流也一样。例外：bot 自己开的 PR 上，其他检视机器人的评论和检视会触发检视 PR，由检视判断是否采纳 |
 | 发布 outbox、对账、PR head 校验、bot 分支归属 | 控制面硬条件 | 不变 |
 | `src/automation` 的标签规范、PR 状态、门禁、合并队列 | 确定性模块 | 仍是代码模块，由 `config/repositories/<owner>__<repo>.yml` 和 policy 的 `automation` 配置，不改成提示词 |
 | Actions 失败分类、单次重跑与提报 | 内置工作流 `actions.failures` | 触发源：默认分支的 Actions 运行失败；流程：读取日志 → 模型分析原因 → 外部原因重跑一次／代码或不明原因提报 Issue → 检视 Issue；提示词：`docs/prompts/actions-failures.md`；控制面核验模型引用的日志行，`external`／`code` 没有真实引用就按 unknown 处理，单次重跑预算和提报仍由控制面执行；开关就是原来的 `actions_failures_enabled` |
@@ -47,7 +47,7 @@
 | `pull_request.updated` | PR 标题或描述被修改、可信评论、提交检视或回复检视意见 | 检视 PR、自定义 |
 | `pull_request.labeled` | 有人（不是 App）给 PR 加上指定标签 | 检视 PR、自定义 |
 | `comment.mention` | 新评论提到 `BOT_MENTION_NAMES` 里的名字 | 检视 Issue、检视 PR、自定义 |
-| `review.published` | 检视工作流发布结论后：Issue 的结论要求改代码，或 bot PR 的检视有可执行意见 | 开发 Issue、跟进 bot PR |
+| `review.published` | 检视工作流发布结论后：Issue 的结论要求改代码；或 bot PR 的检视采纳了成员或其他检视机器人的修改要求，或有自己的可执行意见 | 开发 Issue、跟进 bot PR |
 | `release.manual` | 「发版本」页的操作 | CI 观察、发行说明 |
 | `actions.run_failed` | 默认分支的 Actions 运行失败 | Actions 失败处理 |
 

@@ -346,6 +346,18 @@ function step(log) {
     if (value.detail) add(element('p', value.detail, 'say'));
     if (cause) add(element('p', '处理：' + cause.action, 'fault-action'), element('p', '错误码 ' + value.code, 'muted'));
   }
+  else if (value.type === 'development_waiting') {
+    title.textContent = '开发等待';
+    add(element('p', value.reason === 'assigned' ? `Issue 已指派给 ${(value.assignees || []).join('、')}，bot 不接手；取消指派后重新加开发标签才会开发。`
+      : value.reason === 'app' ? '开发标签是 App 加的，要由人加上才会开发。' : '等有人加上开发标签。', 'muted'));
+  }
+  else if (value.type === 'revision_requests') {
+    title.textContent = '修订请求';
+    const list = element('ul');
+    for (const r of value.requests || []) { const li = element('li'); li.append(`${r.author_type === 'Bot' ? '其他机器人' : '成员'} ${r.author} 的`, link(r.url || '', r.type === 'review' ? '检视' : r.type === 'review_comment' ? '行内评论' : '评论')); list.append(li); }
+    add(element('p', '检视采纳了这些修改请求，核对作者后据此修订 PR。', 'muted'), list);
+  }
+  else if (value.type === 'revision_deferred') { title.textContent = '修订顺延'; add(element('p', value.detail || '', 'muted')); }
   else if (value.type === 'restart_attempt') { title.textContent = '重新开始一次尝试'; add(element('p', '中断的工作目录保留，新的尝试使用新目录。', 'muted')); }
   else if (value.type === 'runtime_fault') { title.textContent = '运行故障'; add(element('p', value.message || '', 'muted')); if (value.where) add(collapsible('出错位置', value.where)); }
   else if (value.type === 'agent_failure') { title.textContent = '执行进程失败'; add(element('p', value.detail || '执行进程没有给出原因。', 'say')); if (value.error) add(element('p', '错误码 ' + value.error, 'muted')); }
