@@ -102,3 +102,14 @@ test('a missing current policy proof runs deterministic verification and returns
  const result=await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{});
  assert.equal(result.outcome,'return');assert.ok(result.gaps[0].includes('mandatory check failed'));assert.equal(f.requests.length,0);assert.ok(calls.some(r=>r.command==='required-check'));
 });
+
+test('verification commands reject copied executor paths and recover in the pinned candidate checkout',async t=>{
+ const source='a'.repeat(48),calls=[];
+ const f=await fixture(t,(_body,n)=>n<3?{role:'assistant',content:null,tool_calls:[{id:'command'+n,type:'function',function:{name:'run_command',arguments:JSON.stringify({command:n===1?'cat /tasks/'+source+'/repo/report.md':'cat report.md'})}}]}:{role:'assistant',content:JSON.stringify(pass)});
+ f.task.workspace_id=source;f.task.generation=1;
+ f.records.submit(f.task.id,[{kind:'files',reference:'candidate',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40)}}],[],{});
+ const workspace={manager:{call:async(_m,_p,input)=>{calls.push(input.request);return {ok:true,result:input.request.type==='workspace_command'?{exit_code:0,output:'pinned report'}:{tree_sha:'b'.repeat(40)}};}},log:()=>{}};
+ assert.equal((await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{})).outcome,'pass');
+ const commands=calls.filter(r=>r.type==='workspace_command');assert.equal(commands.length,1);assert.equal(commands[0].command,'cat report.md');assert.notEqual(commands[0].workspace_id,source);
+ assert.ok(JSON.stringify(f.requests[1].messages).includes('executor_workspace_reference'));
+});
