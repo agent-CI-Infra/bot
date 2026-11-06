@@ -209,8 +209,14 @@ function gateJob(plan: GatePlan, target: GateTarget): string {
     steps:
 ${setupSteps(plan, target, true)}
       # ci-gates.json maps each event to its lanes. The lane commands run the pull request's code, so they get no token.
+      # A branch cut before the gate was added has no gate.mjs at its head: say so instead of failing on a missing module.
       - name: Run gate lanes
-        run: node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"
+        run: |
+          if [ ! -f scripts/gate/gate.mjs ]; then
+            echo "::error::This commit has no scripts/gate/gate.mjs: the branch predates the CI gate. Merge or rebase it onto the default branch."
+            exit 1
+          fi
+          node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"
 ${upload('ci-gates-reports')}`;
 }
 function releaseJob(plan: GatePlan, target: GateTarget, key = 'gate'): string {

@@ -107,7 +107,10 @@ test('the person replies; lanes the agent leaves out keep their commands, and th
   const workflow = parse(files['.github/workflows/ci.yml']), steps = workflow.jobs.gate.steps;
   assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'merge_group', 'push', 'schedule', 'workflow_dispatch']);
   assert.equal(steps[0].with.ref, workflow.jobs.gate.env.CI_GATES_SHA);
-  assert.deepEqual(steps.filter(step => step.run).map(step => step.run), ['pip install -e ".[test]"', 'node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"']);
+  const runs = steps.filter(step => step.run).map(step => step.run);
+  assert.deepEqual([runs.length, runs[0], runs[1].trim().split('\n').at(-1)], [2, 'pip install -e ".[test]"', 'node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"']);
+  // A branch that predates the gate fails with a message, not with node's missing-module error.
+  assert.match(runs[1], /if \[ ! -f scripts\/gate\/gate\.mjs \]; then\n\s+echo "::error::This commit has no scripts\/gate\/gate\.mjs: the branch predates the CI gate\./);
   assert.ok(releaseWorkflow(files['.github/workflows/release.yml'], 'v1.2.3').matched);
   assert.match(pull.body, /空 lane 只表示还没有配置检查/);
   assert.match(pull.body, /在项目的受控环境里分析仓库/);
