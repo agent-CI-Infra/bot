@@ -249,3 +249,19 @@ test('workspace development keeps publication tools and write capabilities after
   assert.ok(config.tools.some(tool=>tool.function.name==='create_pull_request'));
   assert.ok(!config.tools.some(tool=>tool.function.name==='finish_review'));
 });
+
+test('bounded delivery execution reserves turns to save and submit without claiming acceptance',async t=>{
+ const f=await fixture(t);let saved=false;
+ const submit={type:'function',function:{name:'submit_delivery',description:'Hand a report to acceptance',parameters:{type:'object',properties:{},additionalProperties:false}}};
+ f.respond(body=>{
+  const deadline=body.messages.some(m=>m.role==='user'&&m.content.includes('turns left in this attempt'));
+  return {choices:[{message:{tool_calls:[call(deadline&&saved?'submit_delivery':'inspect')]}}]};
+ });
+ const result=await runAgent({...f.spec,tools:[tool,submit],maxTurns:4,finish:{name:'submit_delivery',validate:()=>({submitted:true})},execute:async()=>{
+  if(f.requests.at(-1).messages.some(m=>m.role==='user'&&m.content.includes('turns left in this attempt')))saved=true;
+  return {artifact_saved:saved};
+ }});
+ assert.deepEqual(result,{submitted:true});assert.ok(saved);assert.equal(f.requests.length,4);
+ assert.equal(f.requests[0].messages.length,2);assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
+ assert.ok(f.requests.at(-1).messages.some(m=>m.role==='user'&&m.content.includes('independent acceptance')));
+});

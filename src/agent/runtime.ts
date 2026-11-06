@@ -98,6 +98,8 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
   const messages: any[] = [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
+    const reserve=Math.min(8,Math.max(2,Math.ceil(maxTurns/4)));
+    if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.`});
     const { value } = await services.request({ tools, tool_choice: tools.length ? 'auto' : 'none', messages,
       ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) }, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
