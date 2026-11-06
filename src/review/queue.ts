@@ -53,7 +53,7 @@ export function updateTrigger(event: string, payload: Json, otherBot = false): {
   const byBot = (payload: any, body: unknown) => otherBot ? botMarker.test(String(body ?? '')) : botWrote(payload, body);
   const by = otherBot ? { actor_type: 'Bot' } : {};
   // Which comment, review or inline comment this is, so a review of the bot's own pull request can name it as a request.
-  const source = (type: string, id: unknown) => /^[1-9]\d*$/.test(String(id ?? '')) ? { source: { type, id: Number(id) } } : {};
+  const source = (type: string, id: unknown) => /^[1-9]\d*$/.test(String(id ?? '')) ? { source: { type, id: Number(id) }, actor_id: String(p.sender?.id ?? '') } : {};
   const open = (object: any) => object?.state === 'open' && object.draft !== true && Number.isSafeInteger(object.number) && object.number > 0;
   if (event === 'issues' && action === 'edited' && open(p.issue) && !p.issue.pull_request && edited(p.changes).length && !byBot(p, null))
     return { kind: 'review.issue', number: p.issue.number, trigger: { reason: 'issue_edited', actor, changed: edited(p.changes),
@@ -101,7 +101,7 @@ export function pullRequestNeeded(store: Store, repositoryId: string, event: str
 const activeStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'running', 'preparing', 'publishing', 'result_ready'];
 // `labeled` is a label a person added that one of the review workflow's label triggers names; it is reviewed as an update.
 function queueUpdate(store: Store, repositoryId: string, event: string, payload: Json, delivery: string, currentPullRequest?: Json, mention?: 'review.issue' | 'review.pr', labeled?: Update) {
-  const update: Update | null = labeled ?? (mention ? { kind: mention, number: Number((payload.issue as any).number), trigger: { reason: 'mention', actor: String((payload.sender as any)?.login || ''), url: String((payload.comment as any)?.html_url || ''), source: { type: 'comment', id: Number((payload.comment as any).id) } } } : updateTrigger(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload)));
+  const update: Update | null = labeled ?? (mention ? { kind: mention, number: Number((payload.issue as any).number), trigger: { reason: 'mention', actor: String((payload.sender as any)?.login || ''), url: String((payload.comment as any)?.html_url || ''), source: { type: 'comment', id: Number((payload.comment as any).id) }, actor_id: String((payload.sender as any)?.id ?? '') } } : updateTrigger(event, payload, otherBotOnBotPullRequest(store, repositoryId, event, payload)));
   if (!update || !mention && !labeled && !updateEnabled(store, repositoryId, update.kind)) return 0;
   const commentKey=mention?`${repositoryId}:${update.kind}:${update.number}:comment:${(payload.comment as any).id}`:null;
   if(commentKey&&(store.get('SELECT 1 FROM tasks WHERE unique_key=?',commentKey)||store.get('SELECT 1 FROM review_updates WHERE event_key=?',commentKey)))return 0;

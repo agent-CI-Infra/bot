@@ -97,10 +97,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bot_pull_requests(repository_id TEXT NOT NULL,number INTEGER NOT NULL,pr_id TEXT NOT NULL,author_id TEXT NOT NULL,
         head_repository_id TEXT NOT NULL,branch TEXT NOT NULL,sha TEXT NOT NULL,source_task_id TEXT NOT NULL,revisions INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(repository_id,number));
-      -- The comments, reviews and inline comments that started a revision of a bot pull request: each one only once, and
-      -- another review bot's only once per pull request.
+      -- Requests on a bot pull request that a review took on: done once a revision was queued for them (each comment only once,
+      -- another review bot only once per pull request), pending while another revision was running, for the next review.
       CREATE TABLE IF NOT EXISTS bot_pr_requests(repository_id TEXT NOT NULL,number INTEGER NOT NULL,source_type TEXT NOT NULL,source_id TEXT NOT NULL,
-        author_id TEXT NOT NULL,author_type TEXT NOT NULL,task_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(repository_id,number,source_type,source_id));
+        author TEXT NOT NULL,author_id TEXT NOT NULL,author_type TEXT NOT NULL,url TEXT NOT NULL,state TEXT NOT NULL,task_id TEXT,created_at TEXT NOT NULL,
+        PRIMARY KEY(repository_id,number,source_type,source_id));
       CREATE TABLE IF NOT EXISTS automation_runs(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id),
         delivery_id TEXT,event TEXT NOT NULL,route TEXT NOT NULL,dry_run INTEGER NOT NULL,actions TEXT NOT NULL,notes TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS automation_repo_time ON automation_runs(repository_id,created_at);
