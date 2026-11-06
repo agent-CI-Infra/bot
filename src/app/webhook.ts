@@ -90,7 +90,8 @@ export async function ingest(
             AND first.status='accepted' AND first.rowid<d.rowid)`,id);
       }
       const policy=store.get('SELECT * FROM policies WHERE repository_id=?',String(owner.id)),pr=payload.pull_request as Json|undefined;
-      Object.assign(response,{review_outcome:pr?.draft===true?'draft':!policy?.enabled||!policy.review_enabled?'review_disabled':'not_trigger'});
+      // A disabled project archives everything, whatever its review switch says; the deliveries page says which one held it back.
+      Object.assign(response,{review_outcome:pr?.draft===true?'draft':policy&&!policy.enabled?'project_disabled':!policy?.review_enabled?'review_disabled':'not_trigger'});
       response.tasks_created = queueWebhook(store, String(owner.id), event, payload, id, currentPullRequest);
       // Rules never write to GitHub here: the run is a plan, applied later by the executor (#1).
       const fallback = repositoryConfigs?.get(String(owner.full_name || '').toLowerCase());

@@ -16,7 +16,9 @@ export function testEvidence(candidate: any) {
 }
 export function implementationText(candidate: any, issue: number) {
   const title = shortTitle(candidate.change_title || `Implement #${issue}: ${candidate.implementation_goal || 'Update implementation'}`);
-  const body = `${candidate.summary}\n\nCloses #${issue}\n\n${testEvidence(candidate)}\nCommit: ${candidate.remote_sha}`;
+  // The model is told the control plane links the Issue; a summary that closes it anyway is not given a second line.
+  const closes = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s+(?:[\\w.-]+/[\\w.-]+)?#${issue}(?!\\d)`, 'i').test(String(candidate.summary));
+  const body = `${candidate.summary}${closes ? '' : `\n\nCloses #${issue}`}\n\n${testEvidence(candidate)}\nCommit: ${candidate.remote_sha}`;
   return { title, body };
 }
 // Presentation-only routing reasons are retained in task results, never published as findings.
@@ -59,8 +61,16 @@ const words = {
     waiting: (w: DevelopmentWait) => w.reason === 'assigned' ? `Development has not started: the Issue is assigned to ${w.assignees.map(a => '`' + a + '`').join(', ')}, so the bot leaves it to them. To have the bot develop it, unassign it and add the \`${w.label}\` label again.`
       : w.reason === 'app' ? `Development has not started: a person, not an app, has to add the \`${w.label}\` label.` : `Development has not started: it waits for a person to add the \`${w.label}\` label.` },
 };
-// One line of a finding for the lists: the model's human_action, else the first line of the finding without markdown.
-const line = (text: string, limit: number) => { const value = text.replace(/[`*_#>]/g, '').split('\n').map(part => part.trim()).find(Boolean) || ''; return value.length > limit ? value.slice(0, limit - 1) + '…' : value; };
+// One line of a finding for the lists: the model's human_action, else the first line of the finding. Heading and quote
+// markers at the start and bold or italic stars go. Code spans and underscores stay, so names such as `total_value` and
+// `__init__.py` read as written; a code span the length limit cuts is closed again.
+const line = (text: string, limit: number) => {
+  const first = text.split('\n').map(part => part.replace(/^\s*(?:#{1,6}\s+|>\s?)+/, '').trim()).find(Boolean) || '';
+  const value = first.split(/(`[^`\n]*`)/).map(part => /^`[^`]*`$/.test(part) ? part : part.replace(/\*+/g, '')).join('').trim();
+  if (value.length <= limit) return value;
+  const cut = value.slice(0, limit - 1);
+  return cut + ((cut.match(/`/g) || []).length % 2 ? '`' : '') + '…';
+};
 export interface HumanItem { text: string, url?: string | null }
 // An inline comment on GitHub, as the summary comment links to it.
 export interface Place { path: string, line: number | null, html_url: string }

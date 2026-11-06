@@ -65,7 +65,7 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 
 任务列表、任务详情、项目最近任务和看板关联任务现在带 `metrics`：`runtime_ms`（累计已观测执行时长，不含排队／等待）、`running`、`complete`（历史或进程中断时可能不完整）、`input_tokens,output_tokens,cached_input_tokens,cache_hit_rate`、`requests,usage_missing_requests,cache_missing_requests,unpriced_requests` 和按币种分开的 `costs`。缓存是输入的子集，命中率用累计缓存 token 除以累计输入 token；缺少必要统计时返回 null，不用 0 冒充。`complete:false` 时显示的是已经观测到的部分。
 
-`GET /api/costs` 的 `tasks.days` 为按任务 `created_at` 的本地日、仓库与 `kind` 聚合的行，`tasks.summary` 为日期范围内按种类的汇总，`tasks.undated` 单独列出授权仓库内无可靠创建日期的历史任务，不进入日期范围内总数或每日分桶。仅统计 `review.issue,review.pr,development.issue,development.pr`。每行含 `count,runtime_ms,incomplete_tasks,running_tasks`；整段累计执行耗时计入创建日，不跨日拆分，运行中含当前已观测执行区间，不含排队与等待。缺失计时或未观测到时长的不完整历史计时返回 null，已有部分则仅累计已观测值并标记不完整。仅覆盖控制面账本与任务，不采集外部执行端自行调用或项目内其他服务。
+`GET /api/costs` 的 `tasks.days` 为按任务 `created_at` 的本地日、仓库与工作流聚合的行，`tasks.summary` 为日期范围内按工作流的汇总（内置工作流按目录顺序在前，其余按名称），`tasks.undated` 单独列出授权仓库内无可靠创建日期的历史任务，不进入日期范围内总数或每日分桶。所有工作流的任务都统计：`workflow` 是自定义工作流的 id（`custom.<id>`），其他任务是任务种类（如 `review.issue`、`actions.failures`、`release.observe`）；`name` 是内置工作流的名称或自定义工作流保存的名称，已删除的自定义工作流为「已删除的工作流」。每行还含 `kind,count,runtime_ms,incomplete_tasks,running_tasks`；整段累计执行耗时计入创建日，不跨日拆分，运行中含当前已观测执行区间，不含排队与等待。缺失计时或未观测到时长的不完整历史计时返回 null，已有部分则仅累计已观测值并标记不完整。仅覆盖控制面账本与任务，不采集外部执行端自行调用或项目内其他服务。
 
 模型创建和带 `version` 的 PATCH 还可提交 `pricing:{currency,input_per_million,output_per_million,cache_per_million}`，单价为每百万 token 的非负数（最多 1000000）。`pricing:null` 清除单价；读模型时返回当前单价，原有模型凭据及共享模型编辑权限不变。每次模型请求保存价格快照，费用为 `((输入-缓存)×输入单价 + 缓存×缓存单价 + 输出×输出单价) / 1000000`。缺少用量或单价时费用为 null；未返回缓存数据且缓存价不同于普通输入价时，也不能完整计价。统计页的费用和 token 只汇总所选币种及尚未定价的请求，币种之间不作换算；币种不影响任务统计。
 

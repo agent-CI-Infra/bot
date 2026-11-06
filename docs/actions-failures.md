@@ -71,4 +71,4 @@ code 来源还必须保留 Current behavior、Expected behavior、Requested code
 
 `test/actions-failures.test.mjs` 通过签名 webhook、独立控制面 SQLite、HTTP GitHub 夹具和扮演分析任务的假 agent（`test/event-tasks.mjs`）覆盖分析结果的核验与降级、扫描、分页断点、重启、一次重跑、未知响应对账、提报去重、凭据过滤和现有开发门槛。`test/release-label.test.mjs` 验证类别读回及失败状态。`e2e/actions-failures.spec.mjs` 覆盖真实管理页面的默认关闭、开关保存、配置错误和窄屏展示。现有开发测试继续验证批准和发布前检查。
 
-真实验收只使用 `agent-test-zone` 组织。若该组织中的安装未订阅 `workflow_run`，应记录现场阻断，不能修改生产配置来绕过它；不得在生产仓库试重跑、试打标签或创建自动化失败 Issue。生产仓库开启开关是验证完成后的独立配置步骤。
+真实验收只在专门用于测试的 GitHub 组织里进行。若该组织中的安装未订阅 `workflow_run`，应记录现场阻断，不能修改生产配置来绕过它；不得在生产仓库试重跑、试打标签或创建自动化失败 Issue。生产仓库开启开关是验证完成后的独立配置步骤。

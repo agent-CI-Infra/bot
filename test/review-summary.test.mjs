@@ -8,7 +8,7 @@ import { GitHub } from '../dist/github/client.js';
 import { Publisher } from '../dist/github/publisher.js';
 import { Redactor } from '../dist/agent/common.js';
 import { validateReview } from '../dist/review/findings.js';
-import { reviewLanguage, summaryComment, promptedBy } from '../dist/github/text.js';
+import { reviewLanguage, summaryComment, promptedBy, humanItems, implementationText } from '../dist/github/text.js';
 import { appGaps } from '../dist/app/access.js';
 
 // A fake GitHub for one pull request (#7): conversation comments that can be edited, reviews with inline comments, and the
@@ -219,4 +219,31 @@ test('an installation with contents: read reports that fixed review threads are 
   const granted = { metadata: 'read', contents: 'read', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', workflows: 'write' };
   const contents = appGaps(granted, ['issues', 'issue_comment', 'pull_request', 'pull_request_review', 'pull_request_review_comment', 'workflow_run']).find(gap => gap.name === 'contents');
   assert.deepEqual(contents, { kind: 'permission', name: 'contents', required: 'write', current: 'read', features: ['review_threads', 'development', 'release', 'gate'] });
+});
+
+test('what a person must do keeps identifiers as written: underscores and code spans stay, emphasis and heading marks go', () => {
+  const finding = (human_action, body = 'x') => ({ id: 'f', body, requires_human_decision: true, ...(human_action ? { human_action } : {}) });
+  const items = humanItems('en', { findings: [
+    finding('Decide whether total_value should skip SKUs missing from prices'),
+    finding('Decide whether `low_stock` and `__init__.py` change'),
+    finding('', '## **[Needs a person]** Decide on `max_revisions`\nDetails follow.'),
+    finding('> Confirm the **release** checklist'),
+  ] }, new Map());
+  assert.deepEqual(items.map(item => item.text), ['Decide whether total_value should skip SKUs missing from prices', 'Decide whether `low_stock` and `__init__.py` change',
+    '[Needs a person] Decide on `max_revisions`', 'Confirm the release checklist']);
+  // The alert's short form closes a code span the length limit cuts, so the rest of the comment is not swallowed into it.
+  const body = summaryComment({ language: 'en', overview: 'o', discussion: [], coverage: 'c', resolved: [], human: [{ text: 'Decide ' + 'x'.repeat(100) + ' `a_very_long_identifier_name` now' }] });
+  const alert = body.split('\n')[1];
+  assert.equal((alert.match(/`/g) || []).length % 2, 0);
+  assert.match(alert, /`…/);
+});
+
+test('a development PR body links its Issue once, also when the summary already closes it', () => {
+  const candidate = summary => ({ summary, change_title: 'Fix it', validation: { source: 'policy', command: 'make test', exit_code: 0 }, test_command: 'make test', remote_sha: 'a'.repeat(40) });
+  const count = text => (text.match(/(?:closes|fixes|resolves):? #3\b/gi) || []).length;
+  assert.equal(count(implementationText(candidate('Rejects over-shipping.'), 3).body), 1);
+  for (const summary of ['Rejects over-shipping.\n\nCloses #3', 'Fixes #3: rejects over-shipping.', 'resolves: #3', 'Resolved octo/hello#3 too'])
+    assert.ok(implementationText(candidate(summary), 3).body.startsWith(summary + '\n\nTests: make test\n'), summary);
+  // Another Issue's number is not this Issue.
+  assert.match(implementationText(candidate('Closes #31'), 3).body, /^Closes #3$/m);
 });
