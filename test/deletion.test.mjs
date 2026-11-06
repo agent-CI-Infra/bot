@@ -387,7 +387,7 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
     row('303', { access_gaps: [...gap, event('pull_request_review', ['review', 'development'])] })] }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [{ repository_id: '101', gate_state: 'live', dashboard_state: 'none', stale: false }] }];
-    if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
+    if (path === '/api/installations?offset=0&limit=50') return [200, { syncs: [], repositories: listing }];
     if (method === 'POST' && path === '/api/installations/permissions/check') return check();
     return [404, { error: 'not_found' }];
   });
@@ -395,7 +395,7 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   const settle = () => new Promise(r => setTimeout(r, 50)), permission = line => line.querySelector('[data-permission]');
   const actions = line => line.querySelectorAll('button').map(b => b.textContent);
   await page.run('render()');
-  const [first, removed, third, actionsRow] = page.$('rows').children;
+  const [first, removed, third, actionsRow] = page.$('rows').querySelectorAll('.row');
   // Every gap is an icon button; amber when it stops a feature that is on, blue when only unused features are affected.
   assert.deepEqual([permission(first).textContent, permission(first).hidden, permission(first).tagName, permission(first).children[0].tagName], ['权限不足', false, 'BUTTON', 'SVG']);
   assert.ok(permission(first).classList.contains('status-info'));
@@ -416,8 +416,8 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   assert.ok(actions(removed).includes('删除')); assert.ok(actions(first).includes('删除')); assert.ok(actions(third).includes('删除'));
   await settle();
   // One background check; the badges changed on the rows already drawn, which stayed on the list.
-  assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations', 'POST /api/installations/permissions/check']);
-  assert.equal(page.run('startCalls'), 0); assert.equal(page.$('rows').children[0], first);
+  assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations?offset=0&limit=50', 'POST /api/installations/permissions/check']);
+  assert.equal(page.run('startCalls'), 0); assert.equal(page.$('rows').querySelector('.row'), first);
   assert.match(permission(first).title, /Contents 需要「Read and write」，现在「No access」（影响检视、开发）/); assert.ok(permission(first).classList.contains('status-warning'));
   assert.deepEqual([permission(third).textContent, permission(third).hidden], ['权限不足 · 事件未订阅', false]);
   assert.match(permission(third).title, /未订阅事件 Pull request review/);
@@ -428,11 +428,11 @@ test('the project list marks reduced permissions, refreshes stale ones in place 
   // The five-second task refresh reads the list again but leaves permission badges alone.
   page.requests.length = 0; listing = listing.map(r => ({ ...r, access_gaps: [], permissions_stale: false, running_tasks: 2 })); const badge = permission(first);
   await page.run('refreshProjectActivity()');
-  assert.deepEqual(page.requests, ['GET /api/installations']); assert.equal(permission(first), badge);
+  assert.deepEqual(page.requests, ['GET /api/installations?offset=0&limit=50']); assert.equal(permission(first), badge);
   assert.match(first.querySelector('.project-task-preview').title, /正在执行 2 个任务/);
   // Fresh grants on the next visit: no check at all.
   page.requests.length = 0; await page.run('render()'); await settle();
-  assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations']);
+  assert.deepEqual(page.requests, ['GET /api/integrations', 'GET /api/installations?offset=0&limit=50']);
 });
 
 test('deletions confirm in the console dialog, which shows the check and a refusal in place instead of a browser popup', async () => {
@@ -441,7 +441,7 @@ test('deletions confirm in the console dialog, which shows the check and a refus
     development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: null, permissions_stale: false }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [] }];
-    if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
+    if (path === '/api/installations?offset=0&limit=50') return [200, { syncs: [], repositories: listing }];
     if (method === 'DELETE' && path === '/api/installations/202/removal') return answer;
     return [404, { error: 'not_found' }];
   });
@@ -449,7 +449,7 @@ test('deletions confirm in the console dialog, which shows the check and a refus
   page.run("var startCalls = 0; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
   await page.run('render()');
   const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20)), deletes = () => page.requests.filter(r => r.startsWith('DELETE')).length;
-  const remove = () => page.$('rows').children[0].querySelectorAll('button').find(b => b.textContent === '删除').listeners.click[0]();
+  const remove = () => page.$('rows').querySelector('.row').querySelectorAll('button').find(b => b.textContent === '删除').listeners.click[0]();
   const buttons = () => view.querySelectorAll('.confirm-actions button'), submit = () => view.querySelector('form').listeners.submit[0]({ preventDefault() {} });
   const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
   // Cancel sends nothing.
@@ -478,7 +478,7 @@ test('a started project row removes the project from this system, never GitHub, 
     development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0, permission_missing: [], permissions_stale: false }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [] }];
-    if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
+    if (path === '/api/installations?offset=0&limit=50') return [200, { syncs: [], repositories: listing }];
     if (method === 'DELETE' && path === '/api/projects/101') return [200, { deleted: true }];
     return [404, { error: 'not_found' }];
   });
@@ -486,7 +486,7 @@ test('a started project row removes the project from this system, never GitHub, 
   await page.run('render()');
   const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20));
   const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
-  const remove = page.$('rows').children[0].querySelectorAll('button').find(button => button.textContent === '删除');
+  const remove = page.$('rows').querySelector('.row').querySelectorAll('button').find(button => button.textContent === '删除');
   assert.ok(remove, 'a started project row offers 删除');
   remove.listeners.click[0]();
   assert.equal(view.open, true);

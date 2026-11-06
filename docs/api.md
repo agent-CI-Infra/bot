@@ -4,6 +4,8 @@
 
 除初始化状态、初始化、登录和健康检查外，管理 API 都需要登录会话。登录／初始化响应设置 `HttpOnly; SameSite=Strict` Cookie，并返回 `csrf_token`；之后的写请求必须提供同值 `X-CSRF-Token` 和 `Content-Type: application/json`。登录后 `GET /api/auth/me` 可读取当前会话的 CSRF 值。接口不接受额外字段，不支持传入 `role` 将自己升级。HTTP 失败只返回稳定错误码，不回显输入或内部异常。
 
+项目列表 `GET /api/repositories`、`GET /api/installations` 和 `GET /api/installations/hidden` 支持 `repository_id,account_id,owner_id` 筛选；先应用权限和筛选，再按原顺序分页。传入 `limit` 或 `offset` 时每页默认 50 条、上限 100 条，`offset` 默认 0；不传分页参数时保留完整列表响应，供其他页面使用。项目页和任务数刷新固定请求当前页的 50 条，再按 `owner_id` 分组展示；分组不改变权限或筛选。
+
 | 路径 | 方法 | 功能和范围 |
 | --- | --- | --- |
 | `/healthz` | GET | 两个监听端口的数据库健康检查 |

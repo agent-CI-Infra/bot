@@ -152,6 +152,10 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
   .rule-table td>.status,.rule-table td>button{justify-self:start}
 }
 
+.project-owner-group,.project-owner-rows{min-width:0}.project-owner-group+.project-owner-group{border-top:1px solid #dde6eb}
+.project-owner-title{margin:0;padding:10px 14px;background:#f3f7f9;border-bottom:1px solid #e3eaf0;font-size:14px;font-weight:600;overflow-wrap:anywhere}
+@media(max-width:760px){.project-owner-title{padding:10px 12px}}
+
 /* The project row keeps feature status, direct switches and task counts together on the right. */
 #rows[data-view=projects] .project-list-row{grid-template-columns:minmax(200px,1fr) minmax(0,max-content) max-content;gap:10px 16px}
 .project-overview{min-width:0;max-width:none}.project-controls{min-width:0}.project-features{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px 12px}
@@ -162,7 +166,7 @@ label.check{flex-direction:row;align-items:flex-start;gap:8px;font-size:13px;lin
 .project-task-preview{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;font-size:12px;padding:6px;border-radius:4px;text-decoration:none}
 .project-task-preview:hover{background:#edf4f6;text-decoration:underline}.task-count-active{color:#16636b;font-weight:700}.project-control-feedback{max-width:460px;text-align:right;overflow-wrap:anywhere}.project-control-feedback:empty{display:none}.project-control-feedback.control-error{color:#a2292b}
 @media(max-width:1000px){#rows[data-view=projects] .project-list-row{grid-template-columns:minmax(0,1fr) auto}#rows[data-view=projects] .project-overview{grid-column:1/-1;grid-row:2;justify-content:flex-start}#rows[data-view=projects] .project-list-row>.actions{grid-column:2;grid-row:1;justify-content:flex-end}.project-features{justify-content:flex-start}.project-control-feedback{text-align:left}}
-@media(max-width:760px){.project-feature-switch{min-height:36px}.project-features{gap:6px 8px}.project-task-preview{min-height:36px}}
+@media(max-width:760px){#rows[data-view=projects] .project-list-row{grid-template-columns:minmax(0,1fr)}#rows[data-view=projects] .project-list-row>.actions{grid-column:1;grid-row:3;justify-content:flex-start;flex-wrap:wrap}.project-feature-switch{min-height:36px}.project-features{gap:6px 8px}.project-task-preview{min-height:36px}}
 
 @media(min-width:1001px){.project-task-preview{min-width:112px;justify-content:flex-end}}
 .permission-check{display:grid;gap:6px;justify-items:start;margin-top:6px;min-width:0}.permission-result{display:grid;gap:6px;min-width:0}.permission-result p,.permission-result ul{margin:0}.permission-result ul{padding-left:20px}.permission-result li,.permission-result a{overflow-wrap:anywhere}.permission-result p:not([class]){color:#22313a}.permission-result a{color:#16636b;text-underline-offset:3px}

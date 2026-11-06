@@ -2,6 +2,110 @@ import {test,expect} from '@playwright/test';
 import {mkdirSync,rmSync} from 'node:fs';
 import {harness,setup,account,repository,testPassword} from '../test/helpers.mjs';
 
+test('项目按所有者分组，筛选和每页 50 条分页保持项目完整，隐藏与恢复仍可用', async ({page, browser}) => {
+  const h = await harness(), {admin, password} = await setup(h), a = await account(admin), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const longOwner = 'organization-with-a-very-long-owner-name';
+  const login = async (target, username, secret) => {
+    await target.goto(h.admin + '/#/projects');
+    await target.getByLabel('用户名', {exact: true}).fill(username); await target.getByLabel('密码', {exact: true}).fill(secret);
+    await target.getByRole('button', {name: '登录', exact: true}).click();
+    await expect(target.getByRole('heading', {name: '项目', exact: true})).toBeVisible();
+  };
+  const groups = target => target.locator('#rows .project-owner-group');
+  const row = id => page.locator(`#rows .row[data-key="${id}"]`);
+  const groupedIds = async target => groups(target).evaluateAll(nodes => nodes.map(group => ({
+    owner: group.dataset.ownerId, ids: [...group.querySelectorAll('.row')].map(line => line.dataset.key)
+  })));
+  const checkWidth = async target => expect(await target.evaluate(() => {
+    const width = innerWidth;
+    return document.documentElement.scrollWidth <= width && [...document.querySelectorAll('.project-owner-title, #rows .row')].every(node => {
+      const box = node.getBoundingClientRect(); return box.x >= 0 && box.right <= width && node.scrollWidth <= node.clientWidth;
+    });
+  })).toBe(true);
+  try {
+    for (const [id, owner, name, ownerLogin] of [
+      ['101', '20', 'a-old/project-with-a-long-unbroken-name-for-narrow-screen-checks', ''],
+      ['202', '10', 'b-owner/second', 'b-owner'], ['303', '20', 'z-renamed/third', longOwner]
+    ]) {
+      await repository(admin, a.id, id);
+      h.store.run('UPDATE repositories SET full_name=?,owner_id=? WHERE id=?', name, owner, id);
+      h.store.run('UPDATE installed_repositories SET full_name=?,owner_id=?,owner_login=?,permissions_at=? WHERE repository_id=?', name, owner, ownerLogin, new Date().toISOString(), id);
+    }
+    for (const [id, name, owner] of [['401', 'a-old/hidden-first', '20'], ['402', 'b-owner/hidden-second', '10'], ['403', 'z-renamed/hidden-third', '20']]) {
+      h.store.run('INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,installed,hidden,synced_at) VALUES(?,?,?,?,?,1,1,?)', a.id, id, name, owner, owner === '20' ? longOwner : 'b-owner', new Date().toISOString());
+    }
+    await login(page, 'administrator', password);
+    await expect(groups(page).locator('h2')).toHaveText([longOwner, 'b-owner']);
+    expect(await groupedIds(page)).toEqual([{owner: '20', ids: ['101', '303']}, {owner: '10', ids: ['202']}]);
+    await expect(row('101').getByRole('button', {name: '设置', exact: true})).toBeVisible();
+    mkdirSync('.tmp/project-org-groups', {recursive: true});
+    for (const [label, width, height] of [['desktop', 1440, 900], ['mobile', 390, 844]]) {
+      await page.setViewportSize({width, height}); await checkWidth(page);
+      if (width === 390) {
+        const content = await row('101').locator('.row-content').boundingBox(), actions = await row('101').locator(':scope > .actions').boundingBox();
+        expect(content.width).toBeGreaterThan(300); expect(actions.y).toBeGreaterThan(content.y + content.height);
+      }
+      await page.screenshot({path: `.tmp/project-org-groups/installed-${label}.png`, fullPage: true});
+    }
+    await row('101').getByRole('switch', {name: / 看板$/, exact: false}).click();
+    await expect(row('101').getByRole('status')).toHaveText('看板已关闭；不再公开展示');
+    await row('101').getByRole('button', {name: '设置', exact: true}).click(); await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
+    await page.getByRole('link', {name: '← 全部项目', exact: true}).click();
+    await page.getByLabel('组织 ID', {exact: true}).fill('10'); await page.getByRole('button', {name: '筛选', exact: true}).click();
+    await expect(groups(page).locator('h2')).toHaveText(['b-owner']); await expect(page.locator('#rows .row')).toHaveCount(1); await expect(row('202')).toBeVisible();
+    await page.getByLabel('组织 ID', {exact: true}).fill('missing'); await page.getByRole('button', {name: '筛选', exact: true}).click();
+    await expect(groups(page)).toHaveCount(0); await expect(page.locator('#rows .row')).toHaveCount(0);
+    await page.getByLabel('组织 ID', {exact: true}).fill(''); await page.getByRole('button', {name: '筛选', exact: true}).click();
+    await page.getByLabel('已隐藏', {exact: true}).check();
+    await expect(groups(page).locator('h2')).toHaveText([longOwner, 'b-owner']);
+    expect(await groupedIds(page)).toEqual([{owner: '20', ids: ['401', '403']}, {owner: '10', ids: ['402']}]);
+    for (const [label, width, height] of [['desktop', 1440, 900], ['mobile', 390, 844]]) {
+      await page.setViewportSize({width, height}); await checkWidth(page);
+      await page.screenshot({path: `.tmp/project-org-groups/hidden-${label}.png`, fullPage: true});
+    }
+    await row('401').getByRole('button', {name: '恢复', exact: true}).click(); await expect(row('401')).toHaveCount(0);
+    await page.getByLabel('已隐藏', {exact: true}).uncheck();
+    await expect(row('401')).toBeVisible(); await row('401').getByRole('button', {name: '删除', exact: true}).click();
+    const dialog = page.getByRole('dialog'); await expect(dialog).toContainText('只从列表里隐藏这一行');
+    await dialog.getByRole('button', {name: '隐藏', exact: true}).click(); await expect(row('401')).toHaveCount(0);
+    const memberPassword = testPassword();
+    await admin('/api/users', 'POST', {username: 'group-member', password: memberPassword, repository_ids: ['101', '202', '303']});
+    const context = await browser.newContext(), member = await context.newPage();
+    try {
+      await login(member, 'group-member', memberPassword);
+      await expect(groups(member).locator('h2')).toHaveText(['a-old', 'b-owner']);
+      expect(await groupedIds(member)).toEqual([{owner: '20', ids: ['101', '303']}, {owner: '10', ids: ['202']}]);
+      await expect(member.locator('#rows .row')).toHaveCount(3); await expect(member.locator('#rows')).not.toContainText('hidden-first');
+      for (const [label, width, height] of [['desktop', 1440, 900], ['mobile', 390, 844]]) {
+        await member.setViewportSize({width, height}); await checkWidth(member);
+        await member.screenshot({path: `.tmp/project-org-groups/member-${label}.png`, fullPage: true});
+      }
+    } finally { await context.close(); }
+    // More than one page: the owner groups contain exactly the rows returned for that page.
+    for (let i = 0; i < 51; i++) {
+      const id = String(1000 + i), owner = i % 2 ? '20' : '10', name = `extra/project-${id}`;
+      h.store.run('INSERT INTO repositories(id,full_name,owner_id,account_id) VALUES(?,?,?,?)', id, name, owner, a.id);
+      h.store.run('INSERT INTO policies(repository_id) VALUES(?)', id);
+      h.store.run('INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,installed,synced_at) VALUES(?,?,?,?,?,1,?)', a.id, id, name, owner, owner === '20' ? longOwner : 'b-owner', new Date().toISOString());
+    }
+    const all = (await admin('/api/installations')).value.repositories.map(item => item.id);
+    await page.getByRole('button', {name: '刷新', exact: true}).click(); await expect(page.locator('#rows .row')).toHaveCount(50);
+    const first = (await groupedIds(page)).flatMap(group => group.ids);
+    expect([...first].sort()).toEqual(all.slice(0, 50).sort());
+    const nextResponse = page.waitForResponse(response => response.url().endsWith('/api/installations?offset=50&limit=50'));
+    await page.getByRole('button', {name: '下一页', exact: true}).click(); await nextResponse;
+    await expect(page.locator('#rows .row')).toHaveCount(4);
+    const second = (await groupedIds(page)).flatMap(group => group.ids);
+    expect([...second].sort()).toEqual(all.slice(50).sort()); expect(new Set([...first, ...second]).size).toBe(54);
+    await expect(page.getByRole('button', {name: '下一页', exact: true})).toBeDisabled();
+    await page.getByLabel('组织 ID', {exact: true}).fill('20'); await page.getByRole('button', {name: '筛选', exact: true}).click();
+    await expect(page.locator('#page-number')).toHaveText('第 1 页');
+    await expect(page.locator('#rows .row')).toHaveCount(27); await expect(groups(page)).toHaveCount(1);
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); rmSync(h.directory, {recursive: true, force: true}); }
+});
+
 test('项目列表直接切换检视和开发，保存失败保留状态，任务数刷新且项目管理员仅见自己的项目',async({page,browser})=>{
   const h=await harness(),{admin,password}=await setup(h),a=await account(admin),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try{
