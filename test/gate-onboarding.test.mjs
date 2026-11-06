@@ -50,9 +50,11 @@ test('gate onboarding is a built-in workflow whose agent works in the project co
   for (const name of ['read_file', 'run_command', 'github_read_token', 'github_read', 'start_agent', 'submit_gate_plan']) assert.ok(names.includes(name), name);
   for (const name of ['create_pull_request', 'create_issue', 'finish_review']) assert.ok(!names.includes(name), name);
   assert.deepEqual([profile.finishTools, profile.capabilities.workspace.write, profile.capabilities.github.publication, profile.capabilities.writes], [['submit_gate_plan'], false, 'none', ['gate_plan']]);
-  // The plan's four lanes are all required, so a submission never leaves one out by accident.
+  // The agent gives only the lanes it changes: a lane left out keeps its commands, so an unchanged command is never retyped
+  // (a live run changed a command's quoting that way).
   const submit = profile.tools.find(tool => tool.function.name === 'submit_gate_plan').function.parameters;
-  assert.deepEqual(submit.properties.plan.properties.lanes.required, ['pr-ready', 'pr-merge', 'daily', 'release']);
+  assert.equal(submit.properties.plan.properties.lanes.required, undefined);
+  assert.match(submit.properties.plan.properties.lanes.description, /A lane left out keeps its commands/);
   assert.match(profile.system, /gate onboarding mode/);
   assert.match(profile.system, /standard_changes/);
 });

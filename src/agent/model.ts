@@ -73,7 +73,7 @@ export function eventTools(kind:string,writes:string[]){
       plan:{type:'object',additionalProperties:false,required:['toolchains','install','lanes','observe','workflow'],properties:{
         toolchains:{type:'object',additionalProperties:false,properties:{node:string,python:string,go:string,java:string},description:'Version strings; empty means not set up. node runs gate.mjs (20 or later). go may name a go.mod'},
         install:{...commands,description:'Shell commands that install dependencies before the lanes run'},
-        lanes:{type:'object',additionalProperties:false,required:['pr-ready','pr-merge','daily','release'],properties:{'pr-ready':commands,'pr-merge':commands,daily:commands,release:commands}},
+        lanes:{type:'object',additionalProperties:false,properties:{'pr-ready':commands,'pr-merge':commands,daily:commands,release:commands},description:'Only the lanes you change, each with its complete command list. A lane left out keeps its commands from ../context/plan.json exactly; do not copy an unchanged lane, since retyping a command can change its quoting'},
         observe:{type:'array',items:{type:'string',enum:['pr-ready','pr-merge','daily','release']},description:'Lanes whose failures are recorded without failing the gate'},
         workflow:{type:'string',description:'Where the gate job goes: one path from targets in ../context/gate.json, or empty for the default'}}}},['reply','plan'])];
   }

@@ -24,7 +24,10 @@ flowchart LR
    passing check; say why it fails and what it needs.
 4. **Design the lanes** (below). Prefer the entry points the repository documents and runs (a `scripts/test.sh`,
    Makefile targets, package scripts) over raw tool invocations; give sub-project commands as `(cd dir && command)`.
-5. **Submit** with `submit_gate_plan`: your reply to the person and the complete plan.
+5. **Submit** with `submit_gate_plan`: your reply to the person and the plan. Give only the lanes you
+   change, each with its complete command list; a lane you leave out keeps its current commands
+   exactly. Do not copy unchanged commands from `../context/plan.json`: retyping a command can
+   change its quoting and break it.
 
 ## Lanes
 
