@@ -24,7 +24,7 @@ export function deleteProjectRecords(store: Store, id: string): void {
     ...['actions_failure_reports', 'actions_failure_issues', 'actions_failure_attempts', 'actions_failure_runs', 'actions_failure_scans'].map((table): [string, number] => [`DELETE FROM ${table} WHERE repository_id=?`, 1]),
     ...['review_updates', 'task_logs', 'task_tools', 'github_effects', 'development_candidates', 'task_metrics'].map((table): [string, number] => [`DELETE FROM ${table} WHERE task_id IN (${tasks})`, 1]),
     [`DELETE FROM model_requests WHERE repository_id=? OR task_id IN (${tasks})`, 2],
-    ['DELETE FROM task_claims WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1],
+    ['DELETE FROM task_claims WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1], ['DELETE FROM bot_pr_requests WHERE repository_id=?', 1],
     ['DELETE FROM tasks WHERE repository_id=?', 1], ['DELETE FROM automation_runs WHERE repository_id=?', 1], ['DELETE FROM deliveries WHERE repository_id=?', 1],
     ['DELETE FROM environment_operations WHERE repository_id=?', 1], ['DELETE FROM project_environments WHERE repository_id=?', 1],
     ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM workflows WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],

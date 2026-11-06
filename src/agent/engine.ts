@@ -5,7 +5,7 @@ import { type Actor, scope } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
-import { testEvidence, reviewLanguage } from '../github/text.js';
+import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
 import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
 import { actionsDevelopmentAllowed, actionsSourceIssue, publicText } from '../actions/safety.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
@@ -363,7 +363,9 @@ export class TaskEngine {
             ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
               diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
-            implementation_goal:implementationGoal,actionable_findings:actionableFindings,review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
+            implementation_goal:implementationGoal,actionable_findings:actionableFindings,
+            // On a revision people or other review bots asked for: their comments, which the findings above carry out.
+            ...(development&&input.revision?.requests?.length?{revision_requests:input.revision.requests}:{}),review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(labeling?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
@@ -496,8 +498,10 @@ export class TaskEngine {
           log({type:'phase',phase:'publish',target:'review',detail:'正在发布到 GitHub：发送检视评论…'});
           const setting=this.store.get('SELECT review_language FROM policies WHERE repository_id=?',task.repository_id)?.review_language;
           // A review a person's comment asked for names that person in the summary comment, which also notifies them of the edit.
-          const asked=input.trigger?.actor?{actor:input.trigger.actor,url:input.trigger.url||null}:input.comment?{actor:input.comment.user?.login||input.sender?.login||null,url:input.comment.html_url||null}:undefined;
-          const outputs=await publisher.review(result,input.files,{language:reviewLanguage(setting,result.summary),trigger:asked});
+          const asked=input.trigger?.actor?{actor:input.trigger.actor,url:input.trigger.url||null,what:promptedBy(input.trigger.reason)}:input.comment?{actor:input.comment.user?.login||input.sender?.login||null,url:input.comment.html_url||null,what:'comment' as const}:undefined;
+          // An Issue the review finds ready for development that will not be developed yet says what it waits for.
+          const development=await this.developmentWait(github,task,input,result).catch(()=>null);
+          const outputs=await publisher.review(result,input.files,{language:reviewLanguage(setting,result.summary),trigger:asked,development});
           // Labels go on only after the summary comment was published: the policy's review label, plus the classification
           // labels the model named that pass classificationLabels against the repository and the object's current labels.
           // publisher.review ends by validating the object, so its labels are current.
@@ -514,12 +518,16 @@ export class TaskEngine {
           let approved=false;
           if(task.kind==='review.issue'&&policy?.development_enabled&&reviewRequestsCode(input.object,result)){
             approved=await this.developmentApproved(github,task).catch(()=>false);
-            if(!approved)log({type:'development_waiting_for_label'});
+            // The log names the reason the summary comment gave: no label yet, someone assigned, or a label added by an app.
+            if(!approved)log({type:'development_waiting',reason:development?.reason||'label',...(development?.assignees.length?{assignees:development.assignees}:{})});
           }
+          // Who wrote the comments a review of the bot's own pull request took on is read from GitHub before the transaction.
+          const requests=await this.revisionRequests(github,task,result).catch(()=>[]);
+          if(requests.length)log({type:'revision_requests',requests:requests.map(r=>({type:r.type,id:r.id,author:r.author,author_type:r.author_type,url:r.url}))});
           this.store.transaction(()=>{
             update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null});
             saveReviewSession(this.store,task);
-            this.queueDevelopment(github,task,input,result,approved);
+            this.queueDevelopment(github,task,input,result,approved,requests);
           });
         }
         else await publishDevelopment();
@@ -608,12 +616,47 @@ export class TaskEngine {
     const events=await github.pages(github.path(`/issues/${task.object_number}/events`));
     return events.filter((e:any)=>e.event==='labeled'&&sameLabel(e.label?.name,label)).at(-1)?.actor?.type==='User';
   }
-  queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved=false){
+  // The requests of people and other review bots that this review of the bot's own pull request took on: each finding that
+  // names the comment, review or inline comment that asked for it is read back from GitHub, so it is on this pull request and
+  // written by a member of the repository or by another bot, never by this bot. Who may ask is checked here; whether a comment
+  // asks for a change at all, or whether another bot's review is right, is the review agent's judgement.
+  async revisionRequests(github:GitHub,task:Row,result:any):Promise<RevisionRequest[]>{
+    if(task.kind!=='review.pr')return [];
+    const requests=new Map<string,RevisionRequest>();
+    for(const finding of result.findings.filter((f:any)=>actionableFinding(f)&&f.requested_in)){
+      const {type,id}=finding.requested_in,key=`${type}:${id}`;
+      if(requests.has(key)){requests.get(key)!.findings.push(finding);continue;}
+      const path=type==='comment'?`/issues/comments/${id}`:type==='review_comment'?`/pulls/comments/${id}`:`/pulls/${task.object_number}/reviews/${id}`;
+      const source=await github.request('GET',github.path(path)).catch(()=>null);
+      const here=type==='comment'?String(source?.issue_url||'').endsWith(`/issues/${task.object_number}`)
+        :type==='review_comment'?String(source?.pull_request_url||'').endsWith(`/pulls/${task.object_number}`):!!source;
+      const user=source?.user,bot=user?.type==='Bot',own=String(user?.id??'')===github.actorId;
+      const member=!bot&&['OWNER','MEMBER','COLLABORATOR'].includes(String(source?.author_association));
+      if(!here||own||!(bot||member))continue;
+      requests.set(key,{type,id:String(id),author:String(user.login||''),author_id:String(user.id),author_type:bot?'Bot':'User',
+        url:String(source.html_url||''),body:String(source.body||'').slice(0,4000),findings:[finding]});
+    }
+    return [...requests.values()];
+  }
+  // Why development of an Issue this review found ready will not start yet: no development label, someone assigned, or the
+  // label added by an app. Null when development may start, or when it is not this review's to start (development or its
+  // triggers off, no explicit code request, an Actions report not cleared for development).
+  async developmentWait(github:GitHub,task:Row,input:any,result:any):Promise<DevelopmentWait|null>{
+    if(task.kind!=='review.issue'||!this.store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1 AND development_enabled=1',task.repository_id))return null;
+    if(!activeTrigger(this.store,task.repository_id,'development.issue','review.published')&&!activeTrigger(this.store,task.repository_id,'development.issue','issue.labeled'))return null;
+    if(!reviewRequestsCode(input.object,result)||!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,input.object,result))return null;
+    const label=this.label(task),issue=await github.object(task.kind,task.object_number);
+    const assignees=[...(Array.isArray(issue.assignees)?issue.assignees:[]),...(issue.assignee&&!issue.assignees?.length?[issue.assignee]:[])].map((a:any)=>String(a?.login||'')).filter(Boolean);
+    if(assignees.length)return {reason:'assigned',label,assignees};
+    if(!(issue.labels||[]).some((l:any)=>sameLabel(typeof l==='string'?l:l?.name,label)))return {reason:'label',label,assignees:[]};
+    const events=await github.pages(github.path(`/issues/${task.object_number}/events`));
+    return events.filter((e:any)=>e.event==='labeled'&&sameLabel(e.label?.name,label)).at(-1)?.actor?.type==='User'?null:{reason:'app',label,assignees:[]};
+  }
+  queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved=false,requests:RevisionRequest[]=[]){
     const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-    if(!policy?.enabled||!policy.development_enabled||!result.requires_code_change||result.clarification_required)return;
-    // A PR conversation mention or update requests another review, including on a bot-owned PR, never a revision.
-    if(task.kind==='review.pr'&&(input.comment||input.trigger))return;
+    if(!policy?.enabled||!policy.development_enabled||result.clarification_required)return;
     if(task.kind==='review.issue'){
+      if(!result.requires_code_change)return;
       // The development workflow starts from a published review only while that trigger is on; its conditions stay.
       if(!activeTrigger(this.store,task.repository_id,'development.issue','review.published'))return;
       if(!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,input.object,result))return;
@@ -628,10 +671,25 @@ export class TaskEngine {
       let owned:Row;try{owned=this.owned(github,task,input.object);}catch{return;}
       const source=this.store.get('SELECT * FROM tasks WHERE id=?',owned.source_task_id);
       if(source&&source.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,source.object_number))return;
-      const findings=result.findings.filter(actionableFinding);
       const goal=source?JSON.parse(source.input).review?.implementation_goal:'';
-      if(owned.revisions>=policy.max_revisions||!findings.length||!goal)return;
-      enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:{...result,implementation_goal:goal,findings}},task.source_delivery_id,task.id);
+      if(!goal)return;
+      // A person's request is acted on whenever it comes, with no budget; each comment only once. Another bot's review is
+      // acted on once per bot and pull request, so two bots cannot keep each other busy.
+      const done=(r:RevisionRequest)=>!!this.store.get('SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND source_type=? AND source_id=?',task.repository_id,task.object_number,r.type,r.id);
+      const botDone=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND author_id=? AND author_type='Bot'",task.repository_id,task.object_number,r.author_id);
+      const accepted=requests.filter(r=>!done(r)&&(r.author_type!=='Bot'||!botDone(r)));
+      // The bot's own findings revise the pull request after a review of a new head, within the revision budget; a review that
+      // revises for a request anyway takes them along. A mention or a discussion alone never starts a revision of them.
+      const own=result.findings.filter((f:any)=>actionableFinding(f)&&!f.requested_in);
+      const ownAllowed=accepted.length>0||!input.comment&&!input.trigger&&!!result.requires_code_change&&owned.revisions<policy.max_revisions;
+      const findings=[...new Set(accepted.flatMap(r=>r.findings)),...(ownAllowed?own:[])];
+      if(!findings.length)return;
+      const revision=accepted.length?{source:'request',requests:accepted.map(({findings,...request})=>request)}:{source:'review'};
+      const created=enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:{...result,implementation_goal:goal,findings},revision},task.source_delivery_id,task.id);
+      if(!created){if(accepted.length)this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),task.id,
+        JSON.stringify({type:'revision_deferred',detail:`PR #${task.object_number} 已有排队或执行中的修订；这次的修改请求留给它推送后的下一次检视。`}),new Date().toISOString());return;}
+      const now=new Date().toISOString();
+      for(const r of accepted)this.store.run('INSERT OR IGNORE INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?)',task.repository_id,task.object_number,r.type,r.id,r.author_id,r.author_type,created,now);
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
@@ -659,3 +717,5 @@ export class TaskEngine {
 }
 
 export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;
+/** A comment, review or inline comment on a bot pull request that a review took on as a change to make. */
+export interface RevisionRequest { type:'comment'|'review'|'review_comment', id:string, author:string, author_id:string, author_type:'User'|'Bot', url:string, body:string, findings:any[] }

@@ -8,7 +8,7 @@ import { GitHub } from '../dist/github/client.js';
 import { Publisher } from '../dist/github/publisher.js';
 import { Redactor } from '../dist/agent/common.js';
 import { validateReview } from '../dist/review/findings.js';
-import { reviewLanguage, summaryComment } from '../dist/github/text.js';
+import { reviewLanguage, summaryComment, promptedBy } from '../dist/github/text.js';
 import { appGaps } from '../dist/app/access.js';
 
 // A fake GitHub for one pull request (#7): conversation comments that can be edited, reviews with inline comments, and the
@@ -188,6 +188,31 @@ test('the summary comment speaks the review language; findings validate their ne
   assert.doesNotThrow(() => validateReview({ ...valid, resolved_comments: [12], findings: [{ ...decision, human_action: 'Decide' }] }));
   assert.throws(() => validateReview({ ...valid, resolved_comments: ['12'] }), /model_review_invalid/);
   assert.throws(() => validateReview({ ...valid, findings: [{ ...decision, human_action: 3 }] }), /model_finding_invalid/);
+  // A finding may name the comment that asked for it; anything else in that field is refused.
+  assert.doesNotThrow(() => validateReview({ ...valid, findings: [{ ...decision, requested_in: { type: 'review_comment', id: 21 } }] }));
+  for (const requested_in of [{ type: 'issue', id: 1 }, { type: 'comment', id: '21' }, { type: 'comment', id: 0 }, null])
+    assert.throws(() => validateReview({ ...valid, findings: [{ ...decision, requested_in }] }), /model_finding_invalid/, JSON.stringify(requested_in));
+});
+
+test('the first line names what the person did, and an Issue ready for development says what it waits for', () => {
+  const base = { overview: 'Ready for development.', discussion: [], coverage: 'Reviewed commit: x', resolved: [], human: [] };
+  const header = (language, what, url = 'https://github.invalid/u/1') => summaryComment({ ...base, language, review: { count: 2, at: '2026-11-06 00:10 UTC', sha: 'a'.repeat(40), actor: 'alice', url, what } }).split('\n')[0];
+  assert.equal(header('en', 'edit', null), "*Review 2, updated 2026-11-06 00:10 UTC, reviewed commit aaaaaaa; responding to @alice's edit*");
+  assert.equal(header('en', 'review'), "*Review 2, updated 2026-11-06 00:10 UTC, reviewed commit aaaaaaa; responding to @alice's [review](https://github.invalid/u/1)*");
+  assert.equal(header('en', 'review_comment'), "*Review 2, updated 2026-11-06 00:10 UTC, reviewed commit aaaaaaa; responding to @alice's [inline comment](https://github.invalid/u/1)*");
+  assert.equal(header('en', 'label', null), '*Review 2, updated 2026-11-06 00:10 UTC, reviewed commit aaaaaaa; responding to the label @alice added*');
+  assert.equal(header('zh', 'edit', null), '*第 2 次检视，更新于 2026-11-06 00:10 UTC，检视提交 aaaaaaa；回应 @alice 的修改*');
+  assert.equal(header('zh', 'comment'), '*第 2 次检视，更新于 2026-11-06 00:10 UTC，检视提交 aaaaaaa；回应 @alice 的[评论](https://github.invalid/u/1)*');
+  assert.deepEqual(['issue_edited', 'pull_request_edited', 'review_submitted', 'review_reply', 'review_comment', 'labeled', 'comment', 'mention'].map(promptedBy),
+    ['edit', 'edit', 'review', 'review_comment', 'review_comment', 'label', 'comment', 'comment']);
+  // Why development has not started follows the overview.
+  const waiting = (language, development) => summaryComment({ ...base, language, development }).split('\n\n')[1];
+  assert.equal(waiting('en', { reason: 'label', label: 'bot-develop', assignees: [] }), 'Development has not started: it waits for a person to add the `bot-develop` label.');
+  assert.equal(waiting('en', { reason: 'assigned', label: 'bot-develop', assignees: ['alice', 'bob'] }),
+    'Development has not started: the Issue is assigned to `alice`, `bob`, so the bot leaves it to them. To have the bot develop it, unassign it and add the `bot-develop` label again.');
+  assert.equal(waiting('en', { reason: 'app', label: 'bot-develop', assignees: [] }), 'Development has not started: a person, not an app, has to add the `bot-develop` label.');
+  assert.equal(waiting('zh', { reason: 'assigned', label: 'bot-develop', assignees: ['alice'] }), '开发还没开始：这个 Issue 已指派给 `alice`，bot 不会接手。要让 bot 开发，请取消指派，再重新加一次 `bot-develop` 标签。');
+  assert.equal(summaryComment({ ...base, language: 'en', development: null }), 'Ready for development.\n\nReviewed commit: x');
 });
 
 test('an installation with contents: read reports that fixed review threads are not closed', () => {
