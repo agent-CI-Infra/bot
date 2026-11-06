@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -276,7 +277,7 @@ test('clear code issue reuses review gates and requires a human development labe
   const f = await fixture(t, { log: log('AssertionError: wrong result') }); await f.tick(); const issue = f.state.issues[0];
   const review = { requires_code_change: true, clarification_required: false, issue_requests_code: true, product_defect: true, implementation_goal: 'Fix the failed assertion', request_quote: 'Please fix the repository defect' };
   const task = f.h.store.get("SELECT * FROM tasks WHERE kind='review.issue'"); f.h.store.run("UPDATE tasks SET status='succeeded',result=? WHERE id=?", JSON.stringify(review), task.id);
-  const engine = new TaskEngine(f.h.store, {}), input = { object: issue, object_hash: 'hash' };
+  const engine = new TaskEngine(f.h.store, {}, undefined, undefined, acceptanceFixture), input = { object: issue, object_hash: 'hash' };
   engine.queueDevelopment({}, task, input, review, false); assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n, 0);
   const label = async (sender, object = issue) => f.h.hook(f.a.path, f.a.secret, 'label-' + Math.random(), { action: 'labeled', repository: { id: 101 }, label: { name: 'bot-develop' }, sender: { type: sender }, issue: object });
   issue.labels = [{ name: 'bot-develop' }]; await label('Bot'); assert.equal(f.h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n, 0);

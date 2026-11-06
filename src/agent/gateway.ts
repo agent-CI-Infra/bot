@@ -13,6 +13,7 @@ export interface ModelRequest {
   body: Record<string, any>;
   requestId: string;
   guard?: () => Promise<void>;
+  maxOutputTokens?: number;
   onToken?: (delta?: ModelDelta) => Promise<void>;
 }
 
@@ -32,6 +33,8 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
     return stop('model_configuration_changed', 'waiting_configuration', '任务运行期间模型配置已变化，请重新启动任务。');
   if (!body || !Array.isArray(body.messages) || Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024)
     return stop('model_request_invalid', undefined, '模型请求缺少 messages 数组，或请求内容超过 2 MiB 上限。');
+  const outputTokens=input.maxOutputTokens??8192;
+  if(!Number.isSafeInteger(outputTokens)||outputTokens<1||outputTokens>32768)return stop('agent_limits_invalid','waiting_configuration','模型输出预算配置无效。');
   const endpoint = modelEndpoints(model.url).chat_url;
   const target = `模型 ${model.model}（${(() => { try { return new URL(endpoint).host; } catch { return '地址无效'; } })()}）`;
   const { stream_options: _streamOptions, max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...requestBody } = body;
@@ -50,7 +53,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
     response = await fetch(endpoint, {
       method: 'POST', redirect: 'error', signal: controller.signal,
       headers: { Authorization: 'Bearer ' + model.key, 'Content-Type': 'application/json' },
-      body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, [limit]: 8192, stream: true, stream_options: { include_usage: true } }))
+      body: JSON.stringify(redactor.clean({ ...requestBody, model: model.model, [limit]: outputTokens, stream: true, stream_options: { include_usage: true } }))
     });
     value = response.ok ? await readModelResponse(response, async delta => {
       reset();

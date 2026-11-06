@@ -1,3 +1,6 @@
+import { checkpoint } from '../tasks/checkpoint.js';
+import { TaskRecords } from '../tasks/service.js';
+import { taskTools, playbookInstructions, playbooks } from '../tasks/playbooks.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
 import { workspaceProfile } from './profiles.js';
@@ -25,7 +28,17 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   if (String(task.kind).startsWith('workflow.') && !saved) stop('workflow_not_found', 'cancelled', `工作流 ${workflowId} 已删除。`);
   const profile = workspaceProfile(String(task.kind), context, workflowPermissions(store, task.repository_id, workflowId), saved ? { id: workflowId, name: String(saved.name), prompt: String(saved.prompt ?? '') } : undefined);
   const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
-  const system = profile.system;
+  const records = new TaskRecords(store);
+  for(const tool of taskTools) {
+    profile.tools.push(tool as any);
+    platform[tool.function.name]=async(_id,args)=>{
+      const result=records.tool(task.id,tool.function.name,redactor.clean(args));
+      if(!('error' in result)&&tool.function.name==='record_progress'&&profile.capabilities.workspace.write)await checkpoint(store,task,workspace);
+      return result;
+    };
+  }
+  const system = profile.system + '\n' + playbookInstructions;
+  context={...context,playbook_request:JSON.parse(task.input||'{}').playbook_request||null,playbook_catalog:playbooks.map(({content,...p})=>p),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.get(task.id):null};
   // Only development ends with its pull request; any other workflow that may open one carries on to its own finish.
   const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,

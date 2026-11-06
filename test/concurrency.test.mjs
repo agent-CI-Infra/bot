@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -56,7 +57,7 @@ async function fixture(t, { holdReaps = 0 } = {}) {
     return { ok: true, result: {} };
   } };
   let engine;
-  h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, 'http://127.0.0.1:' + server.address().port) }));
+  h = await harness(t, manager, store => ({ engine: engine = new TaskEngine(store, manager, 'http://127.0.0.1:' + server.address().port, undefined, acceptanceFixture) }));
   t.after(() => engine.close());
   const { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'fixture-model-key', model_name: 'fixture' })).value.model;

@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
@@ -103,7 +104,7 @@ test('engine recovery excludes downtime and task deletion retains historical pro
   const {h,admin,model}=await fixture(t);metricTask(h.store,'interrupted');usageRequest(h.store,'interrupted',model.id);
   h.store.run("UPDATE tasks SET status='running',next_run_at=? WHERE id='interrupted'",Date.now()+86400000);
   h.store.run("UPDATE task_metrics SET runtime_ms=4321,active_since=? WHERE task_id='interrupted'",Date.now()-86400000);
-  const engine=new TaskEngine(h.store,{call:async()=>null});engine.start();await engine.close();
+  const engine=new TaskEngine(h.store,{call:async()=>null}, undefined, undefined, acceptanceFixture);engine.start();await engine.close();
   const recovered=(await admin('/api/tasks/interrupted')).value.task.metrics;assert.equal(recovered.runtime_ms,4321);assert.equal(recovered.complete,false);assert.equal(recovered.running,false);
   h.store.run("DELETE FROM tasks WHERE id='interrupted'");assert.equal(h.store.get('SELECT count(*) n FROM task_metrics').n,0);
   assert.equal(h.store.get('SELECT task_id FROM model_requests').task_id,null);

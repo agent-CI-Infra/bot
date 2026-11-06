@@ -21,9 +21,12 @@ export interface AgentSpec<T> {
   /** Reuse an execution's trusted snapshot when an adapter resumes before publication. */
   model?: AgentModel;
   temperature?: number;
+  requestPrefix?: string;
   tools?: any[];
   maxTurns?: number;
   maxOutputChars?: number;
+  /** Trusted caller budget; model-supplied request fields never override this. */
+  maxOutputTokens?: number;
   execute?: (name: string, args: any) => Promise<any>;
   validate?: (content: string) => T | Promise<T>;
   /** A transport adapter (for example Pi in a workspace), not a task-kind switch. */
@@ -67,7 +70,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
       const tools = body.tools?.map((tool: any) => allowed.get(tool.function.name));
       const attempts = process.env.BOT_LOCAL_EXECUTION === 'true' ? 3 : 1;
       for (let attempt = 0; ; attempt++) {
-        try { return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId, onToken }); }
+        try { return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken }); }
         catch (error) {
           const transient = error instanceof TaskError && (error.code === 'model_unavailable' || /^model_http_(429|5\d\d)$/.test(error.code));
           if (!transient || attempt + 1 >= attempts) throw error;

@@ -1,4 +1,4 @@
-import { mkdir,readFile,writeFile,open,realpath,symlink,unlink,readlink,chmod,rename,rm,stat } from 'node:fs/promises';
+import { cp,mkdir,readFile,writeFile,open,realpath,symlink,unlink,readlink,chmod,rename,rm,stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve,dirname,sep } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -55,6 +55,21 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     child.on('close',(code,signal)=>code===0?res(Buffer.concat(chunks)):rej(new Error(`git ${args[0]} failed: ${signal||code}`)));
     child.stdin.on('error',()=>{});child.stdin.end(data);
   });
+  // An evaluator gets a distinct checkout of the submitted Git object, never the executor's dirty tree/session.
+  if(input.type==='workspace_acceptance'){
+    if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||input.source_workspace_id===input.workspace_id||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_acceptance_snapshot');
+    const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
+    if(await realpath(source)!==source)throw new Error('invalid_acceptance_source');
+    await mkdir(root,{recursive:true});await rm(repo,{recursive:true,force:true});
+    await storeGit(['clone','--shared','--no-checkout','--',source,repo],{cwd:root});
+    await git(['checkout','--detach',input.sha]);
+    const tree=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
+    if(tree!==input.tree_sha)throw new Error('acceptance_snapshot_mismatch');
+    await linkNotes();
+    const originalContext=`${workspaceRoot}/${input.source_workspace_id}/context`;
+    if(await stat(originalContext).then(s=>s.isDirectory(),()=>false))await cp(originalContext,context,{recursive:true,dereference:false});
+    return {tree_sha:tree,sha:input.sha};
+  }
   if(input.type==='workspace_init'){
     await mkdir(repo,{recursive:true});
     await linkNotes();
@@ -117,7 +132,21 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const commit=(await git(['commit-tree',tree],Buffer.from('Prepare repository snapshot\n'))).toString().trim();await git(['update-ref','refs/heads/bot-local',commit]);
     return {tree_sha:tree,local_sha:commit};
   }
+  if(input.type==='workspace_source'){
+    const local_sha=(await git(['rev-parse','HEAD'])).toString().trim(),tree_sha=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
+    if(input.tree_sha&&tree_sha!==input.tree_sha)throw new Error('source_snapshot_changed');return {local_sha,tree_sha};
+  }
+  if(input.type==='workspace_restore'){
+    if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_recovery_snapshot');
+    const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
+    if(await realpath(source)!==source)throw new Error('invalid_recovery_source');
+    await git(['fetch','--no-tags','--',source,input.sha]);
+    const tree=(await git(['rev-parse',input.sha+'^{tree}'])).toString().trim();
+    if(tree!==input.tree_sha)throw new Error('recovery_snapshot_mismatch');
+    await git(['read-tree','--reset','-u',input.sha]);return {restored:true,tree_sha:tree};
+  }
   if(input.type==='workspace_read'){
+    if(input.sha){if(!/^[a-f0-9]{40}$/.test(input.sha))throw new Error('invalid_read_commit');return {content:(await git(['show',input.sha+':'+safe(input.path)])).toString('utf8'),version:input.sha};}
     if(typeof input.path==='string'&&input.path.startsWith('../notes/'))return notes.read(input.path.slice(9));
     const asked=String(input.path||''),target=asked.startsWith('../context/')?await contextPath(asked.slice(11)):await path(asked),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
     try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}

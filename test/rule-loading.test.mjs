@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';import{createHash}from'node:crypto';import{rmSync}from'node:fs';
 import{harness,setup,account,repository}from'./helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{blobSha}from'../dist/agent/common.js';
 import{RuleService,resolveRules,developmentLabel,skillIndex}from'../dist/rules/service.js';import{explainFailure}from'../dist/agent/failures.js';
@@ -45,7 +46,7 @@ async function repositoryFixture(t,{stopModel=false}={}){
     if(type==='workspace_agent_poll')return{ok:true,result:{state:'completed',result:{summary:'Reviewed.',findings:[],requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:''}}};
     return{ok:true,result:{}};
   }};
-  const h=await harness(undefined,manager,store=>({engine:engine=new TaskEngine(store,manager,githubUrl)})),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const h=await harness(undefined,manager,store=>({engine:engine=new TaskEngine(store,manager,githubUrl, undefined, acceptanceFixture)})),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const model=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://model.invalid/v1',api_key:'fixture-key',model_name:'fixture-model'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true,model_id:model.id});
   Object.assign(fixture,{...h,admin,account:a,

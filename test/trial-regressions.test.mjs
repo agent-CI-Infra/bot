@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import{createServer}from'node:http';import{once}from'node:events';
 import{harness,setup,account,repository}from'./helpers.mjs';import{TaskEngine}from'../dist/agent/engine.js';import{Publisher,assertOwnedPR}from'../dist/github/publisher.js';import{shortTitle,reviewText}from'../dist/github/text.js';import{blobSha,Redactor}from'../dist/agent/common.js';import{GitHub}from'../dist/github/client.js';
 
@@ -36,7 +37,7 @@ test('pushed bot PR waits for its delayed head, completes automatically, pushes 
  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'55','999','101','bot/issue-1-original',?,'original',0)",old);
  const candidate={files:[{path:'fix.js',sha:blobSha(data),base64:data.toString('base64'),mode:'100644'}],tree_sha:tree,branch:pr.head.ref,owner_task_id:'original',expected_sha:old,base_sha:old,base_branch:'main',pr_number:7,date:'2026-10-23T00:00:00Z',summary:'Updated the implementation and ran ten tests.',change_title:'Fix requested behavior',validation:{command:'node --test',exit_code:0}};
  h.store.run("INSERT INTO development_candidates VALUES('revision',?)",JSON.stringify(candidate));
- const manager={call:async()=>({state:'ready',generation:1})},engine=new TaskEngine(h.store,manager,'http://127.0.0.1:'+server.address().port);
+ const manager={call:async()=>({state:'ready',generation:1})},engine=new TaskEngine(h.store,manager,'http://127.0.0.1:'+server.address().port, undefined, acceptanceFixture);
  await engine.run('revision','claim');
  assert.equal(h.store.get("SELECT status FROM tasks WHERE id='revision'").status,'completed');assert.equal(writes,1);assert.ok(readsAfterPush>=4);
  assert.equal(h.store.get("SELECT revisions FROM bot_pull_requests WHERE number=7").revisions,1);
@@ -64,7 +65,7 @@ test('revision scopes retain the original goal and exclude human decisions and u
  const sha='a'.repeat(40),pr={id:77,number:7,user:{id:999},head:{sha,ref:'bot/issue-1-owner',repo:{id:101}}};
  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,object_number) VALUES('owner','101','development.issue','pr_opened','owner',?,1),('r','101','review.pr','succeeded','r','{}',7)",JSON.stringify({review:{implementation_goal:'Add clamp and requested tests'}}));
  h.store.run("INSERT INTO bot_pull_requests VALUES('101',7,'77','999','101','bot/issue-1-owner',?,'owner',0)",sha);
- const engine=new TaskEngine(h.store,{}),task={...h.store.get("SELECT * FROM tasks WHERE id='r'"),head_sha:sha},result={requires_code_change:true,clarification_required:false,implementation_goal:'Add unrequested TypeErrors',findings:[{body:'Optional TypeError',actionable:true,within_goal:false,requires_human_decision:true}]};
+ const engine=new TaskEngine(h.store,{}, undefined, undefined, acceptanceFixture),task={...h.store.get("SELECT * FROM tasks WHERE id='r'"),head_sha:sha},result={requires_code_change:true,clarification_required:false,implementation_goal:'Add unrequested TypeErrors',findings:[{body:'Optional TypeError',actionable:true,within_goal:false,requires_human_decision:true}]};
  engine.queueDevelopment({actorId:'999'},task,{object:pr},result);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,0);
  result.findings.push({body:'Fix a failing requested boundary case',actionable:true,within_goal:true,requires_human_decision:false});result.clarification_required=true;engine.queueDevelopment({actorId:'999'},task,{object:pr},result);assert.equal(h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.pr'").n,0);
  result.clarification_required=false;engine.queueDevelopment({actorId:'999'},task,{object:pr},result);const input=JSON.parse(h.store.get("SELECT input FROM tasks WHERE kind='development.pr'").input);assert.equal(input.review.implementation_goal,'Add clamp and requested tests');assert.equal(input.review.findings.length,1);assert.match(input.review.findings[0].body,/failing/);

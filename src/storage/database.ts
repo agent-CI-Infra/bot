@@ -1,3 +1,4 @@
+import { taskStorage } from '../tasks/storage.js';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -161,6 +162,7 @@ export class Store {
     metricsStorage(this);
     workflowStorage(this);
     gateOnboardingStorage(this);
+    taskStorage(this);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

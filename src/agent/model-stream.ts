@@ -12,8 +12,9 @@ export async function readModelResponse(response: Response, onToken: (delta: Mod
   if (!reader) return stop('model_response_invalid', undefined, '模型响应没有正文。');
   const streaming = response.headers.get('content-type')?.includes('text/event-stream');
   const decoder = new TextDecoder();
-  let bytes = 0, pending = '', data: string[] = [], done = false, sawChoice = false, finished = false;
+  let bytes = 0, payloadBytes = 0, pending = '', data: string[] = [], done = false, sawChoice = false, finished = false;
   const value: any = { object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: null }] };
+  const payload=(text:string)=>{payloadBytes+=Buffer.byteLength(text);if(payloadBytes>responseLimit)stop('model_response_too_large',undefined,'模型响应内容超过 2 MiB 上限。');};
   const choice = value.choices[0], message = choice.message, calls = new Map<number, any>();
   const invalid = (): never => stop('model_response_invalid', undefined, '模型流式响应格式无效或在完成前中断。');
   const event = async () => {
@@ -34,7 +35,7 @@ export async function readModelResponse(response: Response, onToken: (delta: Mod
       for (const key of ['content', 'reasoning_content', 'reasoning', 'reasoning_text']) {
         if (delta[key] == null) continue;
         if (typeof delta[key] !== 'string') return invalid();
-        message[key] = (message[key] || '') + delta[key];
+        payload(delta[key]);message[key] = (message[key] || '') + delta[key];
         if (delta[key].length) { token = true; if (key === 'content') added.content = (added.content || '') + delta[key]; else added.reasoning = (added.reasoning || '') + delta[key]; }
       }
       if (delta.tool_calls !== undefined) {
@@ -44,11 +45,11 @@ export async function readModelResponse(response: Response, onToken: (delta: Mod
           if (!Number.isSafeInteger(part.index) || part.index < 0) return invalid();
           let call = calls.get(part.index);
           if (!call) { call = { id: '', type: 'function', function: { name: '', arguments: '' } }; calls.set(part.index, call); }
-          if (typeof part.id === 'string') call.id += part.id;
-          if (typeof part.function?.name === 'string') call.function.name += part.function.name;
+          if (typeof part.id === 'string') {payload(part.id);call.id += part.id;}
+          if (typeof part.function?.name === 'string') {payload(part.function.name);call.function.name += part.function.name;}
           if (part.function?.arguments !== undefined) {
             if (typeof part.function.arguments !== 'string') return invalid();
-            call.function.arguments += part.function.arguments;
+            payload(part.function.arguments);call.function.arguments += part.function.arguments;
             if (part.function.arguments.length) token = true;
           }
           if (typeof part.function?.name === 'string' || part.function?.arguments) {
@@ -70,7 +71,7 @@ export async function readModelResponse(response: Response, onToken: (delta: Mod
       const next = await reader.read();
       if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > responseLimit) stop('model_response_too_large', undefined, '模型响应超过 2 MiB 上限。');
+      if (bytes > responseLimit * (streaming ? 16 : 1)) stop('model_response_too_large', undefined, '模型响应超过 2 MiB 上限。');
       pending += decoder.decode(next.value, { stream: true });
       if (!streaming) continue; // Some compatible providers still return a complete JSON response.
       let end: number;

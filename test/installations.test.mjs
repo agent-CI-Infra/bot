@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -238,7 +239,7 @@ test('the console reads the output of the command a running task is executing', 
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('t1','101','review.pr','running','pr',4)");
   const op = 'a'.repeat(48);
   h.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')", op, 't1', JSON.stringify({ operation_id: op, generation: 1, request: { type: 'workspace_command', command: 'npm test', timeout_ms: 600000, keep_background: false } }));
-  const engine = new TaskEngine(h.store, manager), url = path => new URL('http://local' + path);
+  const engine = new TaskEngine(h.store, manager, undefined, undefined, acceptanceFixture), url = path => new URL('http://local' + path);
   const user = { id: 'x', role: 'super_admin', repositories: [] };
   assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live?offset=3'), {}),
     { running: true, operation_id: op, command: 'npm test', timeout_ms: 600000, keep_background: false, output: 'step 1\n', offset: 7, state: 'running' });

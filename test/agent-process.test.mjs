@@ -1,3 +1,4 @@
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -13,7 +14,7 @@ import { harness, setup, account, repository } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { resolveRules } from '../dist/rules/service.js';
-import { Redactor } from '../dist/agent/common.js';
+import { Redactor, TaskError } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { Publisher } from '../dist/github/publisher.js';
 import { server as githubFixture } from './fixtures/agent-server.mjs';
@@ -251,7 +252,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 // Run the control-plane publication path against real Git objects and a local GitHub fixture.
 // The manager substitutes for the project computer; no deployment or external API is used.
 // custom: run a custom workflow with these writes instead of development; it files an Issue, opens the PR and replies.
-async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom } = {}) {
+async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
   const endpoint = 'http://127.0.0.1:' + githubFixture.address().port;
@@ -284,6 +285,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
         return { path, mode, sha, size: Number(git('cat-file', '-s', sha)) };
       });
       manifests.push(files); value = { tree_sha, local_sha: tree_sha, files };
+    } else if (r.type === 'workspace_restore') {git('read-tree','--reset','-u',r.sha);value={restored:true,tree_sha:r.tree_sha};
     } else if (r.type === 'workspace_blob') value = { base64: gitBytes('cat-file', 'blob', r.sha).subarray(r.offset, r.offset + 30000).toString('base64') };
     else if (r.type === 'workspace_command') {
       commands.push(r.command);
@@ -302,7 +304,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
           assert.equal(h.store.get('SELECT count(*) n FROM github_effects').n, 0);
         }
         if (reply.pr || reply.status === 'no_changes') terminal = reply;
-        else if (repair) { assert.equal(reply.error, 'validation_failed'); write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
+        else if (repair) { assert.ok(reply.error==='validation_failed'||reply.error?.startsWith('acceptance_'));  write('ready', 'fixed\n'); write('calc.mjs', 'export const add = (a, b) => Number(a) + Number(b);\n'); step++; }
         else value = { error: 'fixture_stopped_after_reply' };
       }
     } else if (r.type === 'workspace_agent_repository_tool') {
@@ -322,7 +324,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   const workflow = custom && (await admin('/api/repositories/101/workflows', 'POST', { name: 'Fix it', prompt: 'Fix what the Issue asks.', triggers: [{ id: 'issue.opened' }], writes: custom.writes })).value.workflow;
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at,workflow_id) VALUES(?,'101',?,'running','dev',1,'claim',?,?,?)", taskId, custom ? 'workflow.issue' : 'development.issue', JSON.stringify(input), new Date().toISOString(), workflow?.id ?? null);
   h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", taskId, new Date().toISOString());
-  const engine = new TaskEngine(h.store, manager, endpoint + '/github');
+  const engine = new TaskEngine(h.store, manager, endpoint + '/github', undefined, acceptor);
   await engine.run(taskId, 'claim');
   const task = h.store.get('SELECT * FROM tasks WHERE id=?', taskId), saved = h.store.get('SELECT data FROM development_candidates WHERE task_id=?', taskId);
   const continueIssue = async () => {
@@ -412,7 +414,7 @@ test('an Actions failure analysis runs as a task in the project computer: the fa
       { job_id: 92, name: 'test', failed_steps: [{ number: 3, name: 'Test' }], failed_step_output: 'AssertionError: 1 + 1 !== 2' }] };
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,head_sha,claim_token,created_at) VALUES('analysis','101','actions.failures','running','analysis','101:actions.failures:800:1',?,?,'claim',?)", JSON.stringify(input), head, new Date().toISOString());
   h.store.run("INSERT INTO task_claims VALUES('analysis','101','claim',?)", new Date().toISOString());
-  await new TaskEngine(h.store, manager, endpoint + '/github').run('analysis', 'claim');
+  await new TaskEngine(h.store, manager, endpoint + '/github', undefined, acceptanceFixture).run('analysis', 'claim');
   const task = h.store.get("SELECT * FROM tasks WHERE id='analysis'");
   assert.equal(task.status, 'succeeded', JSON.stringify(h.store.all("SELECT content FROM task_logs WHERE task_id='analysis'")));
   // A checkout of the failed commit, with the failed steps' output as files next to it.
@@ -543,4 +545,58 @@ test('the runner mailbox waits for publication replies and preserves only the ex
   assert.equal(await waitingAgent(root, [{ pid: 123, cmdline: 'another process' }]), null);
   writeFileSync(join(dir, 'state.json'), JSON.stringify({ state: 'completed', pid: 123 }));
   assert.equal(await waitingAgent(root, processes), null);
+});
+
+for(const outcome of ['return','insufficient_evidence'])test('independent acceptance '+outcome+' feeds back to the same development agent and completes after repair',async t=>{
+ let evaluations=0;
+ const d=await developmentHarness(t,{acceptor:async(store,task)=>{
+  evaluations++;
+  if(evaluations===1)return {outcome,reason:'A specific verifiable gap',gaps:['Repair the candidate and include raw evidence'],residuals:[],core_complete:false,required_evidence_complete:false,acceptable_risk:true};
+  return acceptanceFixture(store,task);
+ }});
+ assert.equal(d.task.status,'pr_opened');assert.equal(evaluations,2);
+ assert.equal(d.replies[0].error,'acceptance_'+outcome);assert.ok(d.replies[1].pr);
+ const history=d.h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance'",d.task.id).map(r=>JSON.parse(r.data));
+ assert.deepEqual(history.map(a=>a.outcome),[outcome,'pass']);
+});
+test('pre-publication pass with issues creates residual tasks only when original delivery completes',async t=>{
+ let checked=false;
+ const d=await developmentHarness(t,{acceptor:async(store,task)=>{
+  assert.equal(store.get('SELECT count(*) n FROM task_followups').n,0);checked=true;
+  return {...await acceptanceFixture(store,task),outcome:'pass_with_issues',residuals:[{key:'docs',description:'Document an independent edge case',evidence:'The requested arithmetic change is complete',impact:'Documentation clarity',nonblocking_reason:'Does not affect the requested addition behavior',goal:'Document numeric strings',criteria:['Explain numeric string behavior with an example']}]};
+ }});
+ assert.ok(checked);assert.equal(d.task.status,'pr_opened');assert.equal(d.h.store.get('SELECT count(*) n FROM task_followups').n,1);
+ assert.equal(d.h.store.get("SELECT count(*) n FROM tasks WHERE kind='task.request' AND status='queued'").n,1);
+});
+
+test('uncertain external publication leaves staged acceptance and no residuals until the PR is reconciled',async t=>{
+ const d=await developmentHarness(t,{faults:{pull_request_server_errors:1},acceptor:async(store,task)=>({...await acceptanceFixture(store,task),outcome:'pass_with_issues',residuals:[{key:'docs',description:'Independent documentation item',evidence:'Candidate verified',impact:'Documentation',nonblocking_reason:'Core code meets its goal',goal:'Document an example',criteria:['Provide a reproducible example']}]})});
+ assert.equal(d.task.status,'retry_wait');
+ await d.engine.run(d.task.id,'claim');
+ assert.equal(d.h.store.get('SELECT status FROM tasks WHERE id=?',d.task.id).status,'waiting_publication');
+ assert.equal(d.h.store.get('SELECT count(*) n FROM task_followups').n,0);
+ const pending=JSON.parse(d.h.store.get('SELECT pending FROM task_records WHERE task_id=?',d.task.id).pending);assert.equal(pending.outcome,'pass_with_issues');
+});
+
+test('a restarted publish phase rejected by acceptance queues execution repair and preserves the exact candidate',async t=>{
+ let calls=0;
+ const d=await developmentHarness(t,{acceptor:async(store,task)=>{
+  calls++;
+  if(calls===1)throw new TaskError('model_unavailable','retry_wait');
+  if(calls===2)return {outcome:'return',reason:'Repair a specific candidate gap',gaps:['Recheck candidate behavior'],residuals:[],core_complete:false,required_evidence_complete:true,acceptable_risk:true};
+  return acceptanceFixture(store,task);
+ }});
+ assert.equal(d.task.phase,'publish');assert.equal(d.task.status,'retry_wait');
+ await d.engine.run(d.task.id,'claim');
+ let row=d.h.store.get('SELECT * FROM tasks WHERE id=?',d.task.id);assert.equal(row.status,'queued');assert.equal(row.phase,'prepare');assert.ok(JSON.parse(row.input).recovery.sha);
+ await d.engine.run(d.task.id,'claim');
+ row=d.h.store.get('SELECT * FROM tasks WHERE id=?',d.task.id);assert.equal(row.status,'pr_opened',JSON.stringify(d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',row.id)));
+ assert.equal(calls,3);assert.ok(d.h.store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='checkpoint_restored'",row.id));
+});
+test('a policy change during evaluation invalidates the verdict before any GitHub publication',async t=>{
+ const d=await developmentHarness(t,{acceptor:async(store,task)=>{
+  store.run("UPDATE policies SET test_command='new-required-command' WHERE repository_id=?",task.repository_id);
+  return acceptanceFixture(store,task);
+ }});
+ assert.equal(d.task.status,'retry_wait');assert.equal(d.task.error_code,'acceptance_context_changed');assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n,0);
 });

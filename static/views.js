@@ -373,6 +373,16 @@ function renderTaskSide(detail, environment) {
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
   side.append(info,taskMetricsCard(task), computerCard(task, environment));
   const result = resultCard(task); if (result) side.append(result);
+  if(task.structured) {
+    const record=task.structured, section=card('任务契约与交付验收');
+    const labels={pass:'通过',pass_with_issues:'带问题通过',return:'退回',insufficient_evidence:'证据不足',needs_human:'需要人决定'};
+    section.append(facts([['目标',record.contract.goal],['需求版本',record.revision],['交付终点',record.contract.endpoint||'尚未明确'],['下一步',record.progress.next_action],['验收',labels[record.acceptance?.outcome]||'尚未验收'],['结论',record.acceptance?.reason]]));
+    for(const criterion of record.contract.criteria||[])section.append(element('p',criterion));
+    for(const p of record.selections||[])section.append(element('p',`${p.id} · ${p.version.slice(0,12)} · ${p.purpose}`));
+    for(const f of record.followups||[])section.append(button('查看遗留任务 '+f.issue_key,()=>openTask(f.task_id)));
+    side.append(section);
+  }
+
   if (publications?.length) {
     const section = card('GitHub 发布记录'), list = element('ul', '', 'history');
     for (const p of publications) {
