@@ -484,7 +484,7 @@ let projectActivityPending = false;
 async function refreshProjectActivity() {
   if (projectActivityPending) return; projectActivityPending = true; const request = renderVersion, requestedAt = Date.now();
   try {
-    const {repositories} = await api(me.role === 'super_admin' ? '/api/installations' : '/api/repositories');
+    const {repositories} = await api(projectListAddress());
     if (request !== renderVersion || tab !== 'projects' || projectRoute()) return;
     const rows = new Map(repositories.map(row => [row.id, row]));
     for (const line of document.querySelectorAll('#rows .project-list-row')) {

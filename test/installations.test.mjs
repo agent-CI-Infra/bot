@@ -204,27 +204,27 @@ test('a background check of stale integration chips updates them in place and ne
   let check = () => [200, { integrations: [integration('live', true)] }];
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [integration('configured', true)] }];
-    if (path === '/api/installations') return [200, { syncs: [], repositories: [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true,
+    if (path === '/api/installations?offset=0&limit=50') return [200, { syncs: [], repositories: [{ id: '101', full_name: 'fixture/project-101', owner_id: '10', installed: true,
       registered: true, enabled: true, review_enabled: true, development_enabled: false, model_id: 'm', running_tasks: 0, queued_tasks: 0 }] }];
     if (method === 'POST' && path === '/api/integrations/check') return check();
     return [404, { error: 'not_found' }];
   });
   page.run("var startCalls = 0; start = async () => { startCalls++; }; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
   const settle = () => new Promise(r => setTimeout(r, 50)), gate = line => line.querySelectorAll('[data-integration]').map(chip => chip.textContent);
-  const once = ['GET /api/integrations', 'GET /api/installations', 'POST /api/integrations/check'];
-  await page.run('render()'); const [line] = page.$('rows').children;
+  const once = ['GET /api/integrations', 'GET /api/installations?offset=0&limit=50', 'POST /api/integrations/check'];
+  await page.run('render()'); const [line] = page.$('rows').querySelectorAll('.row');
   assert.deepEqual(gate(line), ['门禁已配置']);
   const boardChip = line.querySelector('[data-board-status]'); assert.equal(boardChip.textContent, '看板已关闭');
   await settle();
   // The check ran once and only the chips changed, although the answer is still stale: the same row stays on the list.
   assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
-  assert.equal(page.$('rows').children[0], line); assert.deepEqual(gate(line), ['门禁已生效']);
+  assert.equal(page.$('rows').querySelector('.row'), line); assert.deepEqual(gate(line), ['门禁已生效']);
   assert.equal(line.querySelector('[data-board-status]'), boardChip);
   // A failed check leaves the chips as they are and is not retried either.
   check = () => [502, { error: 'github_unavailable' }]; page.requests.length = 0;
-  await page.run('render()'); const [next] = page.$('rows').children; await settle();
+  await page.run('render()'); const [next] = page.$('rows').querySelectorAll('.row'); await settle();
   assert.equal(page.run('startCalls'), 0); assert.deepEqual(page.requests, once);
-  assert.equal(page.$('rows').children[0], next); assert.deepEqual(gate(next), ['门禁已配置']);
+  assert.equal(page.$('rows').querySelector('.row'), next); assert.deepEqual(gate(next), ['门禁已配置']);
   // Refresh still reloads the page; the manual integration-check control has been removed.
   page.$('refresh').listeners.click[0]();
   assert.equal(page.run('startCalls'), 1);
@@ -414,15 +414,15 @@ test('every repository row offers 删除 and an installed but never started row 
   const hiddenRow = { ...row('404'), hidden: true, installed: false };
   const page = loadConsole(['static/app.js', 'static/views.js'], (method, path) => {
     if (path === '/api/integrations') return [200, { integrations: [] }];
-    if (path === '/api/installations') return [200, { syncs: [], repositories: listing }];
-    if (path === '/api/installations/hidden') return [200, { repositories: [hiddenRow] }];
+    if (path === '/api/installations?offset=0&limit=50') return [200, { syncs: [], repositories: listing }];
+    if (path === '/api/installations/hidden?offset=0&limit=50') return [200, { repositories: [hiddenRow] }];
     if (method === 'DELETE' && path === '/api/installations/101') return [200, { hidden: true }];
     if (method === 'POST' && path === '/api/installations/404/restore') return [200, { hidden: false }];
     return [404, { error: 'not_found' }];
   });
   page.run("var startCalls = 0; start = async () => { startCalls++; }; var projectRoute = () => null; me = { role: 'super_admin', csrf_token: 'csrf' }; tab = 'projects';");
   await page.run('render()');
-  const rows = page.$('rows').children, actions = line => line.querySelectorAll('button').map(button => button.textContent);
+  const rows = page.$('rows').querySelectorAll('.row'), actions = line => line.querySelectorAll('button').map(button => button.textContent);
   assert.deepEqual(rows.map(actions).map(names => names.includes('删除')), [true, true, true]);
   const view = page.run('confirmView'), settle = () => new Promise(r => setTimeout(r, 20));
   const texts = selector => view.querySelectorAll(selector).map(node => node.textContent);
@@ -436,8 +436,8 @@ test('every repository row offers 删除 and an installed but never started row 
   assert.equal(page.run('startCalls'), 1);
   // The 已隐藏 filter lists hidden rows and offers 恢复; restoring calls the restore endpoint.
   page.$('hidden-filter').checked = true; page.requests.length = 0; await page.run('render()');
-  const [hiddenLine] = page.$('rows').children;
-  assert.deepEqual(page.requests, ['GET /api/installations/hidden']);
+  const [hiddenLine] = page.$('rows').querySelectorAll('.row');
+  assert.deepEqual(page.requests, ['GET /api/installations/hidden?offset=0&limit=50']);
   assert.deepEqual(actions(hiddenLine), ['恢复']);
   hiddenLine.querySelectorAll('button')[0].listeners.click[0](); await settle();
   assert.ok(page.requests.includes('POST /api/installations/404/restore'));

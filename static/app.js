@@ -65,7 +65,7 @@ async function start() {
   await route();
 }
 // The generic list renderer still understands task rows; their old top-level addresses now select a board category.
-const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['events','external','onboarding'];
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external','onboarding'];
 // The wizard's address may name a step by index (#onboarding/2), so GitHub's return and a reload open that step.
 const onboardingAddress = /^#onboarding(?:\/([0-5]))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
@@ -98,6 +98,16 @@ window.addEventListener('hashchange', () => { if (me) route().catch(error); });
 // `quiet` is the periodic refresh: the list stays on screen while loading, and only rows whose data changed are replaced
 // (a running task's runtime changes every refresh; the rows around it, and whatever the user is pointing at, stay put).
 let listSignature = ''; const rowSignatures = new WeakMap();
+function listParams() {
+  const params = new URLSearchParams({ offset: String(offset), limit: '50' });
+  if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
+  if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
+  if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
+  return params;
+}
+function projectListAddress(hidden = false, params = listParams()) {
+  return (me.role !== 'super_admin' ? '/api/repositories' : hidden ? '/api/installations/hidden' : '/api/installations') + '?' + params;
+}
 async function render(quiet = false) {
   const request=++renderVersion, taskTab = !!taskKinds[tab];
   $('page-title').textContent = titles[tab];
@@ -105,10 +115,7 @@ async function render(quiet = false) {
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
   $('rows').hidden=['external','onboarding','board','costs','settings'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
-  const params = new URLSearchParams({ offset: String(offset), limit: '50' });
-  if ($('repository-filter').value) params.set('repository_id', $('repository-filter').value);
-  if ($('account-filter').value && me.role === 'super_admin') params.set('account_id', $('account-filter').value);
-  if ($('owner-filter').value) params.set('owner_id', $('owner-filter').value);
+  const params = listParams();
   $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren();listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
@@ -134,7 +141,7 @@ async function render(quiet = false) {
     staleIntegrations = !checked && integrations.some(item => item.stale);
   }
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
-  const address = hiddenView ? '/api/installations/hidden' : installedView ? '/api/installations' : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`;
+  const address = tab === 'projects' ? projectListAddress(hiddenView, params) : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`;
   let result;try{result=await api(address);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
   if(request!==renderVersion)return;const rows=result[installedView ? 'repositories' : endpoint];
   const signature=tab+'\n'+(hiddenView?'hidden\n':'')+params+'\n'+JSON.stringify(rows);if(quiet&&signature===listSignature)return;listSignature=signature;
@@ -178,12 +185,32 @@ async function render(quiet = false) {
     if(taskTab)content.append(taskMetricsLine(row));
     line.classList.toggle('has-actions',!!line.querySelector(':scope > .actions'));lines.push(line);
   });
-  const shown=[...$('rows').children];
-  if(quiet&&shown.length===lines.length&&shown.every((node,index)=>node.dataset.key===lines[index].dataset.key))
-    shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(lines[index]))node.replaceWith(lines[index]);});
-  else $('rows').replaceChildren(...lines);
+  const entries = tab === 'projects' ? groupProjectRows(rows, lines) : lines, shown = [...$('rows').children];
+  if(quiet&&shown.length===entries.length&&shown.every((node,index)=>node.dataset.key===entries[index].dataset.key))
+    shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(entries[index]))node.replaceWith(entries[index]);});
+  else $('rows').replaceChildren(...entries);
   if(staleIntegrations)refreshStaleIntegrations();
   if(installedView&&!hiddenView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
+}
+// Group only the rows already loaded, preserving each owner's first position and the order within it.
+function groupProjectRows(rows, lines) {
+  const groups = new Map();
+  rows.forEach((row, index) => {
+    const owner = String(row.owner_id);
+    if (!groups.has(owner)) groups.set(owner, { rows: [], lines: [], login: '', name: '' });
+    const group = groups.get(owner);
+    group.rows.push(row); group.lines.push(lines[index]);
+    group.login ||= row.owner_login;
+    if (row.full_name?.includes('/')) group.name ||= row.full_name.split('/')[0];
+  });
+  return [...groups].map(([owner, group]) => {
+    const section = element('div', '', 'project-owner-group'), title = group.login || group.name || `所有者 ${owner}`;
+    section.setAttribute('role', 'listitem'); section.dataset.ownerId = owner; section.dataset.key = owner;
+    const list = element('div', '', 'project-owner-rows'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', title);
+    list.append(...group.lines); section.append(element('h2', title, 'project-owner-title'), list);
+    rowSignatures.set(section, JSON.stringify(group.rows));
+    return section;
+  });
 }
 // Stale chips are checked once in the background and only the chips change; the list is neither reloaded nor cleared.
 // A result that is still stale (a failed check, or more repositories than one check covers) waits for a manual refresh.

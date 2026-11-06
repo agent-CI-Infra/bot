@@ -1,4 +1,5 @@
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
+import { projectListPage } from './project-list.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Actor, superAdmin } from './auth.js';
 import { boardStatus, publishedRepositories, queueBoard } from '../public-board/state.js';
@@ -309,7 +310,7 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   if (probe && method === 'POST') { superAdmin(user); fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); return sync.probe(probe[1]!); }
   if (!path.startsWith('/api/installations')) return undefined;
   superAdmin(user);
-  if (path === '/api/installations' && method === 'GET') return list(store);
+  if (path === '/api/installations' && method === 'GET') return list(store, url);
   const board = /^\/api\/installations\/([1-9]\d*)\/board$/.exec(path);
   if (board && method === 'PATCH') {
     fields(input, ['enabled']);
@@ -327,7 +328,7 @@ export async function installationApi(store: Store, sync: InstallationSync | und
       return { board: boardStatus(store, id) };
     });
   }
-  if (path === '/api/installations/hidden' && method === 'GET') return hiddenList(store);
+  if (path === '/api/installations/hidden' && method === 'GET') return hiddenList(store, url);
   if (path === '/api/installations/sync' && method === 'POST') { fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); const results = await sync.syncAll(); return { results, ...list(store) }; }
   // The list asks for this when it opens with stale grants and swaps only the permission badges with the answer.
   if (path === '/api/installations/permissions/check' && method === 'POST') {
@@ -345,7 +346,7 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   return match[2] === 'activate' ? activate(store, user, match[1]!, input) : disable(store, user, match[1]!, input);
 }
 // One row per repository: what GitHub shows as installed, merged with registration, policy and environment.
-function list(store: Store): Json {
+function list(store: Store, url?: URL): Json {
   const registered = new Map(store.all(`SELECT r.id,r.full_name,r.owner_id,r.account_id,p.enabled,p.review_enabled,p.development_enabled,p.actions_failures_enabled,p.model_id,
     e.state AS environment_state,${projectActivityColumns} FROM repositories r JOIN policies p ON p.repository_id=r.id LEFT JOIN project_environments e ON e.repository_id=r.id ${projectActivityJoin}`).map(r => [r.id, r]));
   const scope = new Map<string, Row>();
@@ -369,10 +370,11 @@ function list(store: Store): Json {
       running_tasks: reg?.running_tasks || 0, queued_tasks: reg?.queued_tasks || 0, ...permissions,
       board_enabled: publication.enabled, board_state: publication.state, board_url: publication.url };
   }).sort((a, b) => Number(b.registered) - Number(a.registered) || a.full_name.localeCompare(b.full_name));
-  return { repositories, syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
+  return { repositories: url ? projectListPage(repositories, url) : repositories,
+    syncs: store.all('SELECT s.*,a.name AS account_name FROM installation_syncs s JOIN accounts a ON a.id=s.account_id') };
 }
 // Rows removed from the list. They keep their installation row, so sync neither recreates nor unhides them.
-function hiddenList(store: Store): Json {
+function hiddenList(store: Store, url: URL): Json {
   const registered = new Set(store.all('SELECT id FROM repositories').map(row => row.id));
   const rows = store.all(`SELECT i.*,a.name AS account_name FROM installed_repositories i JOIN accounts a ON a.id=i.account_id
     WHERE i.hidden=1 ORDER BY i.full_name,i.account_id`);
@@ -381,7 +383,7 @@ function hiddenList(store: Store): Json {
   }).map(row => ({ id: String(row.repository_id), full_name: String(row.full_name), owner_id: String(row.owner_id), owner_login: String(row.owner_login || ''),
     private: !!row.private, account_id: String(row.account_id), account_name: row.account_name || null, installation_id: row.installation_id || null,
     installed: !!row.installed, synced_at: row.synced_at || null, registered: registered.has(String(row.repository_id)), hidden: true }));
-  return { repositories };
+  return { repositories: projectListPage(repositories, url) };
 }
 // Hiding is a console-only flag on the installation rows; it never asks GitHub and touches no other table.
 function setHidden(store: Store, user: Actor, id: string, input: Json, hidden: boolean): Json {

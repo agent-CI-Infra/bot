@@ -1,4 +1,5 @@
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
+import { projectListPage } from './project-list.js';
 import { createPrivateKey } from 'node:crypto';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
@@ -69,7 +70,8 @@ function credential(type: string, value: unknown): string {
   return result;
 }
 
-export async function management(store: Store, user: Actor, method: string, path: string, body: Json): Promise<Json | undefined> {
+export async function management(store: Store, user: Actor, method: string, url: URL, body: Json): Promise<Json | undefined> {
+  const path = url.pathname;
   if (path === '/api/users') {
     superAdmin(user);
     if (method === 'GET') return { users: store.all('SELECT id,username,role,active FROM users ORDER BY username').map(publicUser) };
@@ -225,8 +227,8 @@ export async function management(store: Store, user: Actor, method: string, path
   if (path === '/api/repositories') {
     if (method === 'GET') {
       const filter = scope(user, 'r.id');
-      return { repositories: store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled,p.automation,${projectActivityColumns} FROM repositories r
-        JOIN policies p ON p.repository_id=r.id ${projectActivityJoin} WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args) };
+      return { repositories: projectListPage(store.all(`SELECT r.*,p.model_id,p.review_enabled,p.development_enabled,p.enabled,p.automation,${projectActivityColumns} FROM repositories r
+        JOIN policies p ON p.repository_id=r.id ${projectActivityJoin} WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args), url) };
     }
   }
   const repoMatch = /^\/api\/repositories\/([^/]+)(\/policy)?$/.exec(path);
