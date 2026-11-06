@@ -1,8 +1,9 @@
 // Which task workspace a project process belongs to: its BOT_WORKSPACE_ID tag, the workspace a runner request or agent
 // was started for, or its working directory under /workspace/tasks; otherwise that of its parent. Null for none.
 // environ(pid) and cwd(pid) read /proc in the computer; tests pass their own.
-export const tasksRoot = '/workspace/tasks/';
-const idPattern = /^[a-f0-9]{48}$/, runnerPrefix = 'node /opt/runner/runner.mjs ', agentPrefix = 'node /opt/runner/pi-entry.mjs ' + tasksRoot;
+import { tasksDirectory, runnerRoot } from './paths.mjs';
+export const tasksRoot = tasksDirectory + '/';
+const idPattern = /^[a-f0-9]{48}$/, runnerPrefix = 'node ' + runnerRoot + '/runner.mjs ', agentPrefix = 'node ' + runnerRoot + '/pi-entry.mjs ' + tasksRoot;
 export const isRunner = row => row.cmdline.startsWith(runnerPrefix);
 export async function ownership(rows, { environ, cwd }) {
   const byPid = new Map(rows.map(row => [row.pid, row])), direct = new Map(), resolved = new Map();

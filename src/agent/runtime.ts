@@ -58,14 +58,25 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   spec.redactor.add(model.key);
   const services: AgentServices = {
     model, guard: spec.guard,
-    request: (body, requestId, onToken) => {
+    request: async (body, requestId, onToken) => {
       if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.some((tool: any) => !tool || tool.type !== 'function' || !allowed.has(tool.function?.name))))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
       const choice = body.tool_choice;
       if (choice && typeof choice === 'object' && !allowed.has(choice.function?.name))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
       const tools = body.tools?.map((tool: any) => allowed.get(tool.function.name));
-      return requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId, onToken });
+      const attempts = process.env.BOT_LOCAL_EXECUTION === 'true' ? 3 : 1;
+      for (let attempt = 0; ; attempt++) {
+        try { return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId, onToken }); }
+        catch (error) {
+          const transient = error instanceof TaskError && (error.code === 'model_unavailable' || /^model_http_(429|5\d\d)$/.test(error.code));
+          if (!transient || attempt + 1 >= attempts) throw error;
+          spec.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), spec.task.id,
+            JSON.stringify({ type: 'model_retry', code: error.code, request_id: requestId, retry: attempt + 1 }), new Date().toISOString());
+          await new Promise(resolve => setTimeout(resolve, 1000 * 3 ** attempt));
+          await spec.guard();
+        }
+      }
     }
   };
   const result = spec.adapter ? await spec.adapter(services) : await runTools(spec, services);

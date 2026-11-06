@@ -2,13 +2,14 @@ import { mkdir, open, rm, stat, readdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { environment } from './command.mjs';
+import { workspaceRoot } from './paths.mjs';
 
 // One git object store per project computer, in its work volume, shared by the tasks on it. The control plane keeps the
 // repository's mirror and the credentials; it sends what this store lacks as a pack, and each task gets its own worktree
 // of a fixed commit. Commits the control plane sent are pinned under refs/bot/commits/<sha>, which is also how it learns
 // what to leave out next time. Nothing here talks to GitHub.
 // root is a parameter for tests; on a computer it is always /workspace/git.
-export const storeRoot = '/workspace/git';
+export const storeRoot = workspaceRoot + '/git';
 const paths = root => ({ store: root + '/repo.git', incoming: root + '/incoming' });
 const objectId = /^[a-f0-9]{40}$/, packId = /^[a-f0-9]{48}$/;
 export function git(args, { cwd = paths(storeRoot).store, input, output } = {}) {
