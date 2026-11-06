@@ -366,7 +366,11 @@ export class TaskEngine {
             implementation_goal:implementationGoal,actionable_findings:actionableFindings,
             // On a revision people or other review bots asked for: their comments, which the findings above carry out.
             ...(development&&input.revision?.requests?.length?{revision_requests:input.revision.requests}:{}),review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
-            ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
+            ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),
+            // On a pull request this bot opened: the comments, reviews and inline comments this review answers. Each change the
+            // review takes on from one of them names it in requested_in.
+            ...(review&&pr&&this.store.get('SELECT 1 FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,task.object_number)
+              ?{discussion_requests:[input.trigger,...(input.merged_updates||[])].filter((t:any)=>t?.source).map((t:any)=>({...t.source,author:t.actor,author_type:t.actor_type||'User',url:t.url||null}))}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(labeling?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
@@ -522,7 +526,7 @@ export class TaskEngine {
             if(!approved)log({type:'development_waiting',reason:development?.reason||'label',...(development?.assignees.length?{assignees:development.assignees}:{})});
           }
           // Who wrote the comments a review of the bot's own pull request took on is read from GitHub before the transaction.
-          const requests=await this.revisionRequests(github,task,result).catch(()=>[]);
+          const requests=await this.revisionRequests(github,task,result,input).catch(()=>[]);
           if(requests.length)log({type:'revision_requests',requests:requests.map(r=>({type:r.type,id:r.id,author:r.author,author_type:r.author_type,url:r.url}))});
           this.store.transaction(()=>{
             update({result:JSON.stringify(result),phase:'done',status:'succeeded',error_code:null});
@@ -620,11 +624,16 @@ export class TaskEngine {
   // names the comment, review or inline comment that asked for it is read back from GitHub, so it is on this pull request and
   // written by a member of the repository or by another bot, never by this bot. Who may ask is checked here; whether a comment
   // asks for a change at all, or whether another bot's review is right, is the review agent's judgement.
-  async revisionRequests(github:GitHub,task:Row,result:any):Promise<RevisionRequest[]>{
+  async revisionRequests(github:GitHub,task:Row,result:any,input:any={}):Promise<RevisionRequest[]>{
     if(task.kind!=='review.pr')return [];
     const requests=new Map<string,RevisionRequest>();
-    for(const finding of result.findings.filter((f:any)=>actionableFinding(f)&&f.requested_in)){
-      const {type,id}=finding.requested_in,key=`${type}:${id}`;
+    // A review a person's comment started that found changes to make but named no request: those changes answer that comment.
+    // Another bot's comment always needs the review's own judgement, so it never stands in this way.
+    const named=result.findings.some((f:any)=>f.requested_in),trigger=input.trigger;
+    const answered=named||!trigger?.source||trigger.actor_type==='Bot'||input.merged_updates?.length?[]
+      :result.findings.filter(actionableFinding).map((f:any)=>[f,trigger.source]);
+    for(const [finding,asked] of [...result.findings.filter((f:any)=>actionableFinding(f)&&f.requested_in).map((f:any)=>[f,f.requested_in]),...answered]){
+      const {type,id}=asked,key=`${type}:${id}`;
       if(requests.has(key)){requests.get(key)!.findings.push(finding);continue;}
       const path=type==='comment'?`/issues/comments/${id}`:type==='review_comment'?`/pulls/comments/${id}`:`/pulls/${task.object_number}/reviews/${id}`;
       const source=await github.request('GET',github.path(path)).catch(()=>null);
@@ -680,7 +689,8 @@ export class TaskEngine {
       const accepted=requests.filter(r=>!done(r)&&(r.author_type!=='Bot'||!botDone(r)));
       // The bot's own findings revise the pull request after a review of a new head, within the revision budget; a review that
       // revises for a request anyway takes them along. A mention or a discussion alone never starts a revision of them.
-      const own=result.findings.filter((f:any)=>actionableFinding(f)&&!f.requested_in);
+      const taken=new Set(requests.flatMap(r=>r.findings));
+      const own=result.findings.filter((f:any)=>actionableFinding(f)&&!f.requested_in&&!taken.has(f));
       const ownAllowed=accepted.length>0||!input.comment&&!input.trigger&&!!result.requires_code_change&&owned.revisions<policy.max_revisions;
       const findings=[...new Set(accepted.flatMap(r=>r.findings)),...(ownAllowed?own:[])];
       if(!findings.length)return;
