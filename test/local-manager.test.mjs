@@ -68,6 +68,7 @@ test('acceptance workspace uses the submitted Git object despite later executor 
  await execute({type:'workspace_init',workspace_id:source});
  await execute({type:'workspace_command',workspace_id:source,command:"git init -q && printf 'submitted' > report.txt && git add report.txt && git -c user.name=Test -c user.email=test@example.invalid commit -qm baseline"});
  const snapshot=(await execute({type:'workspace_finalize',workspace_id:source})).result;
+ await execute({type:'workspace_command',workspace_id:source,command:'git gc --prune=now'});
  await execute({type:'workspace_command',workspace_id:source,command:"printf 'executor-dirty' > report.txt; mkdir -p ../agent; printf 'PRIVATE EXECUTOR SESSION' > ../agent/session.json"});
  const copied=await execute({type:'workspace_acceptance',workspace_id:target,source_workspace_id:source,sha:snapshot.local_sha,tree_sha:snapshot.tree_sha});
  assert.equal(copied.ok,true,JSON.stringify(copied));

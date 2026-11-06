@@ -62,8 +62,8 @@ export class TaskRecords {
     const current=this.get(id);if(expectedRevision!==undefined&&expectedRevision!==current.revision)throw new Error('task_revision_changed');
     if (JSON.stringify(current.contract)===JSON.stringify(value))return;
     if(['completed','succeeded','pr_opened'].includes(current.progress.status))throw new Error('task_already_delivered');
-    this.store.run('UPDATE task_records SET contract=?,revision=revision+1,candidate=NULL,acceptance=NULL,pending=NULL,rounds=0 WHERE task_id=?',JSON.stringify(value),id);
-    this.history(id,'contract',{previous_revision:current.revision,revision:current.revision+1,contract:value});
+    this.store.run("UPDATE task_records SET contract=?,revision=revision+1,candidate=NULL,acceptance=NULL,pending=NULL,rounds=0,completed='[]',next_action=NULL WHERE task_id=?",JSON.stringify(value),id);
+    this.history(id,'contract',{previous_revision:current.revision,revision:current.revision+1,contract:value,previous_progress:current.progress});
     });
   }
 

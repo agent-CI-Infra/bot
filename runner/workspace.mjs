@@ -164,6 +164,8 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
       files.push({path:name,mode,sha:hash,size:Number(size)});
     }
     const local=(await git(['commit-tree',tree,'-p','HEAD'],Buffer.from('Project agent candidate\n'))).toString().trim();
+    // SQLite references must remain readable after Git's ordinary garbage collection.
+    await git(['update-ref','refs/bot/artifacts/'+local,local]);
     return {tree_sha:tree,local_sha:local,files};
   }
   if(input.type==='workspace_blob'){
