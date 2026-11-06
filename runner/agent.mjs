@@ -1,6 +1,7 @@
 import {mkdir,readFile,writeFile,rename,open,unlink} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
 import {environment,workspaceTag} from './command.mjs';
+import {runnerRoot} from './paths.mjs';
 
 async function currentRepositoryRequest(dir){
   return readFile(dir+'/repository-request.json','utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -10,7 +11,7 @@ async function currentRepositoryRequest(dir){
 // that exact agent; an explicit task release still reaps everything.
 export async function waitingAgent(root,processes){
   const state=await readFile(root+'/agent/state.json','utf8').then(JSON.parse).catch(()=>null);
-  return state?.state==='running'&&processes.some(p=>p.pid===state.pid&&p.cmdline==='node /opt/runner/pi-entry.mjs '+root)?state.pid:null;
+  return state?.state==='running'&&processes.some(p=>p.pid===state.pid&&p.cmdline==='node '+runnerRoot+'/pi-entry.mjs '+root)?state.pid:null;
 }
 
 // The project has no path to the control network. A task-owned mailbox transports model data, never provider keys.
@@ -53,7 +54,7 @@ export async function agentOperation(input,root){
     if(old){if(old.state==='running')try{if(old.boot!==boot)throw new Error();process.kill(old.pid,0);}catch{return {error:'agent_interrupted'};}return {started:true};}
     JSON.parse(await readFile(dir+'/input.json','utf8'));
     const out=await open(dir+'/process.log','a',0o600);
-    try{const child=spawn('node',['/opt/runner/pi-entry.mjs',root],{cwd:root+'/repo',env:{...environment,...workspaceTag(input.workspace_id)},detached:true,stdio:['ignore',out.fd,out.fd]});
+    try{const child=spawn('node',[runnerRoot+'/pi-entry.mjs',root],{cwd:root+'/repo',env:{...environment,...workspaceTag(input.workspace_id)},detached:true,stdio:['ignore',out.fd,out.fd]});
       await writeFile(dir+'/state.json',JSON.stringify({state:'running',pid:child.pid,boot}),{mode:0o600});child.unref();}
     finally{await out.close();}return {started:true};
   }

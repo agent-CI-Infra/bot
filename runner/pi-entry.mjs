@@ -10,8 +10,10 @@ import {createRepositoryTool} from './repository-tool.mjs';
 import {createTokenExchange} from './token-exchange.mjs';
 import {createRepositoryResultGuard} from './repository-context.mjs';
 import {runSubagent} from './subagent.mjs';
+import {local} from './paths.mjs';
 
 const root=process.argv[2],dir=root+'/agent',cwd=root+'/repo',config=JSON.parse(await readFile(dir+'/input.json','utf8'));
+if(local)config.system+='\nLocal execution: this is a host process, not a container. Stay inside your task workspace and project notes. Never search the host root filesystem or inspect unrelated projects or credentials. Never use pkill, killall or process-name-wide termination. Use keep_background for servers; the manager cleans your task processes when you finish. Read ../notes/environment.md for verified local tooling.';
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
 let steps=0,session,finished,grant=null,requestFailure;

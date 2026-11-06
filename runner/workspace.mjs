@@ -7,9 +7,10 @@ import { command,environment,workspaceTag } from './command.mjs';
 import {agentOperation} from './agent.mjs';
 import { git as storeGit, storeRoot } from './store.mjs';
 import { Notes } from './notes.mjs';
+import { tasksDirectory, workspaceRoot as projectRoot } from './paths.mjs';
 
 function safe(value){if(typeof value!=='string'||!value||value.length>1024||value.startsWith('/')||value.includes('\\')||value.includes('\0')||value.split('/').some(p=>!p||['.','..','.git'].includes(p.toLowerCase())))throw new Error('invalid_path');return value;}
-export async function workspace(input,workspaceRoot='/workspace/tasks',gitRoot=storeRoot,notesRoot='/workspace/project-notes'){
+export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=storeRoot,notesRoot=projectRoot+'/project-notes'){
   if(!/^[a-f0-9]{48}$/.test(input.workspace_id||''))throw new Error('invalid_workspace');
   const root=`${workspaceRoot}/${input.workspace_id}`,repo=root+'/repo';
   const notes=new Notes(notesRoot),linkNotes=async()=>{

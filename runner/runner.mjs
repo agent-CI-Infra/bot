@@ -7,8 +7,9 @@ import { execFile } from 'node:child_process';
 import { ownership, isRunner, tasksRoot } from './ownership.mjs';
 import { pruneJournal } from './journal.mjs';
 import { storeOperation, pruneTasks } from './store.mjs';
+import {local,workspaceRoot} from './paths.mjs';
 
-const workspace = '/workspace', journal = workspace + '/.runner-journal';
+const workspace = workspaceRoot, journal = workspace + '/.runner-journal';
 const idPattern = /^[a-f0-9]{48}$/;
 async function save(id, value) {
   const target = `${journal}/${id}.json`;
@@ -73,6 +74,8 @@ function usage() {
 // runner requests are left to finish, and keep_agent spares the task's agent while it waits for a policy command.
 async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
   const keep = new Set([1, process.pid]), scoped = idPattern.test(workspaceId || '');
+  // Host execution must never use the container-wide kill path.
+  if(local&&!scoped)throw new Error('local_reap_requires_workspace');
   // The idle keeper is the first child of the container init; later processes cannot take a lower PID.
   const idle = (await processes()).filter(p => p.ppid === 1 && p.cmdline === 'node /opt/runner/idle.mjs').sort((a, b) => a.pid - b.pid)[0];
   if (idle) keep.add(idle.pid);
@@ -91,7 +94,7 @@ async function reap({ workspace_id: workspaceId, keep_agent: keepAgent }) {
   }
   throw new Error('reap_incomplete');
 }
-await mkdir(journal, { recursive: true, mode: 0o700 }); await mkdir('/workspace/home', { recursive: true });
+await mkdir(journal, { recursive: true, mode: 0o700 }); await mkdir(workspace+'/home', { recursive: true }); await mkdir(workspace+'/tmp', {recursive:true});
 const request = JSON.parse(Buffer.from(process.argv[2] || '', 'base64url').toString());
 if (!idPattern.test(request.operation_id || '')) throw new Error('invalid_operation_id');
 let result;
