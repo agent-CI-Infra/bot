@@ -26,7 +26,7 @@ test('real evaluator starts fresh, can inspect raw artifacts, records separate m
  const verdict=await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{},false);
  assert.equal(verdict.outcome,'pass');assert.equal(reads[0].path,'report.md');
  assert.equal(f.requests[0].messages.length,2);assert.ok(!JSON.stringify(f.requests).includes('PRIVATE_EXECUTOR_CONVERSATION_SENTINEL'));
- assert.deepEqual(f.requests[0].tools.map(t=>t.function.name),['read_evidence','read_task_history','read_file']);
+ assert.deepEqual(f.requests[0].tools.map(t=>t.function.name),['read_evidence','read_task_history','read_file','submit_acceptance']);
  assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_evidence'").n,1);
  assert.equal(f.h.store.get('SELECT count(*) n FROM model_requests WHERE task_id=?',f.task.id).n,2);
 });
@@ -136,4 +136,34 @@ test('unrepairable verdicts have two format corrections and a finite evaluation-
  const f=await fixture(t,()=>({role:'assistant',content:'{}'}));
  for(let i=0;i<3;i++)await assert.rejects(evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{}),{code:i===2?'acceptance_unavailable':'acceptance_output_invalid'});
  assert.equal(f.requests.length,9);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
+});
+
+test('typed acceptance submission repairs schema errors while preserving a real core gap',async t=>{
+ const f=await fixture(t,(_body,n)=>({role:'assistant',content:null,tool_calls:[{id:'verdict'+n,type:'function',function:{name:'submit_acceptance',arguments:JSON.stringify(n===1?{...pass,core_complete:false}:{...pass,outcome:'return',core_complete:false,gaps:['Required behavior is absent']})}}]}));
+ const verdict=await evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{});
+ assert.equal(verdict.outcome,'return');assert.equal(verdict.core_complete,false);assert.equal(f.requests.length,2);
+ assert.ok(f.requests[1].messages.some(m=>m.role==='tool'&&m.content.includes('invalid_submission')));
+ assert.equal(f.records.get(f.task.id).acceptance,null);
+});
+test('a fresh evaluation reuses hash-addressed raw verification only for the same candidate and revision',async t=>{
+ const {readEvidence,previousVerificationEvidence}=await import('../dist/tasks/evidence.js');
+ const f=await fixture(t,(body,n)=>{
+  if(n===1)return {role:'assistant',content:null,tool_calls:[{id:'raw-read',type:'function',function:{name:'read_file',arguments:JSON.stringify({path:'report.md'})}}]};
+  if(n===2)return {status:503};
+  if(n===3){const p=JSON.parse(body.messages[1].content);assert.equal(p.previous_verification_evidence.length,1);return {role:'assistant',content:null,tool_calls:[{id:'prior-proof',type:'function',function:{name:'read_evidence',arguments:JSON.stringify({source:p.previous_verification_evidence[0].source})}}]};}
+  assert.ok(body.messages.some(m=>m.role==='tool'&&m.content.includes('Raw previously observed report')));return {role:'assistant',content:JSON.stringify(pass)};
+ });
+ let reads=0;const workspace={call:async()=>{reads++;return {content:'Raw previously observed report',version:'report-v1'};}};
+ await assert.rejects(evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{}),{code:'model_http_503'});
+ assert.equal((await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{})).outcome,'pass');assert.equal(reads,1);
+ const candidate=f.records.get(f.task.id).candidate,prior=previousVerificationEvidence(f.h.store,f.task.id,candidate);assert.equal(prior.length,1);
+ const raw=readEvidence(f.h.store,f.task.id,candidate,{source:prior[0].source});assert.equal(raw.verification_candidate,candidate.id);assert.equal(raw.historical,true);assert.equal(raw.version,'report-v1');
+ const next=f.records.submit(f.task.id,[{kind:'report',reference:'report.md',version:'v2',content:'New candidate'}],[],{});
+ assert.equal(previousVerificationEvidence(f.h.store,f.task.id,next).length,0);assert.equal(readEvidence(f.h.store,f.task.id,next,{source:prior[0].source}).error,'evidence_not_offered');
+});
+test('an unfinished evaluation is an infrastructure fault, never evidence insufficiency or a business rejection',async t=>{
+ const f=await fixture(t,()=>({role:'assistant',content:null,tool_calls:[{id:'unfinished',type:'function',function:{name:'submit_acceptance',arguments:JSON.stringify({...pass,outcome:'evaluation_incomplete',reason:'Verification budget cannot finish the judgment',core_complete:false})}}]}));
+ for(let i=0;i<3;i++)await assert.rejects(evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{}),{code:i===2?'acceptance_unavailable':'acceptance_budget_exhausted'});
+ assert.equal(f.requests.length,3);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
+ assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_fault'").n,3);
 });
