@@ -208,10 +208,8 @@ function gateJob(plan: GatePlan, target: GateTarget): string {
       CI_GATES_SHA: \${{ github.event.pull_request.head.sha || github.sha }}
     steps:
 ${setupSteps(plan, target, true)}
+      # ci-gates.json maps each event to its lanes. The lane commands run the pull request's code, so they get no token.
       - name: Run gate lanes
-        env:
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-        # ci-gates.json maps each event to its lanes.
         run: node scripts/gate/gate.mjs run --event "$GITHUB_EVENT_NAME"
 ${upload('ci-gates-reports')}`;
 }
@@ -229,11 +227,17 @@ ${upload('ci-gates-release')}`;
 }
 
 /** A new gate workflow: one `gate` job runs the lanes ci-gates.json maps to the triggering event. */
+// The header line of a generated gate workflow that says where the merge gate runs; an update rewrites it when that changes.
+const headerTitle = ' CI gates (CI-workflow), generated from the commands confirmed during onboarding.';
+const queueLines = (target: GateTarget) => target.mergeQueue === 'enabled'
+  ? [' This repository uses a merge queue: pr-ready runs on pull requests; the queue (merge_group) runs pr-ready and pr-merge',
+    ' on the merged result, and nothing runs again after merging.']
+  : [' Without a merge queue, pr-ready runs on pull requests and the merge gate (pr-ready and pr-merge) runs after each merge.'];
+const queueLine = (line: string) => [' Without a merge queue,', ' This repository uses a merge queue:', ' on the merged result, and nothing runs again'].some(start => line.startsWith(start));
+
 export function gateWorkflow(plan: GatePlan, target: GateTarget): string {
-  const queue = target.mergeQueue === 'enabled'
-    ? '# This repository uses a merge queue: pr-ready runs on pull requests; the queue (merge_group) runs pr-ready and pr-merge\n# on the merged result, and nothing runs again after merging.\n'
-    : '# Without a merge queue, pr-ready runs on pull requests and the merge gate (pr-ready and pr-merge) runs after each merge.\n';
-  return `# CI gates (CI-workflow), generated from the commands confirmed during onboarding.
+  const queue = queueLines(target).map(line => `#${line}\n`).join('');
+  return `#${headerTitle}
 # One job runs the lanes .github/ci-gates.json maps to the current event, and reports the commit it checked out.
 ${queue}name: ${target.workflowPath.endsWith('/ci.yml') ? 'CI' : q('CI gates')}
 
@@ -283,8 +287,10 @@ const render = (doc: Document) => doc.toString({ lineWidth: 0, nullStr: '', flow
 
 /**
  * The gate job merged into an existing workflow. The job that already runs gate.mjs is replaced; otherwise a `gate` job is
- * added. Missing triggers are added, none is removed: when the file has other triggers, the job's own `if:` limits it to the
- * gate events, so other jobs and their triggers stay as they are.
+ * added. Missing triggers are added. A workflow shared with other jobs keeps all its triggers, and the gate job's own `if:`
+ * limits it to the gate events. A workflow that holds only the gate job is the gate's own: its triggers become exactly the
+ * gate events (a merge queue drops `push`, so merging does not start a skipped run), and its generated header says where the
+ * merge gate now runs.
  */
 export function mergeGateJob(source: string, plan: GatePlan, target: GateTarget): string {
   const doc = parseWorkflow(source, target.workflowPath), events = gateEvents(plan, target);
@@ -295,12 +301,25 @@ export function mergeGateJob(source: string, plan: GatePlan, target: GateTarget)
     const names = isScalar(on) ? [String(on.value)] : on.items.map(item => String(isScalar(item) ? item.value : item));
     on = doc.createNode(Object.fromEntries(names.map(name => [name, null]))) as YAMLMap; doc.set('on', on);
   } else if (!isMap(on)) { on = doc.createNode({}) as YAMLMap; doc.set('on', on); }
+  const triggers = on as YAMLMap, existing = gateJobKey(doc), jobs = doc.get('jobs', true);
+  const gateOnly = !!existing && isMap(jobs) && jobs.items.length === 1;
   const values: Record<string, unknown> = { push: { branches: [target.defaultBranch] }, schedule: [{ cron: '0 16 * * *' }] };
-  for (const event of events) if (!(on as YAMLMap).has(event)) (on as YAMLMap).set(event, values[event] ?? null);
-  const others = (on as YAMLMap).items.map(pair => String(isScalar(pair.key) ? pair.key.value : pair.key)).filter(event => !events.includes(event));
-  if (others.length) job.items.splice(1, 0, doc.createPair('if', events.map(event => `github.event_name == '${event}'`).join(' || ')));
-  placeJob(doc, job, gateJobKey(doc), 'gate');
+  for (const event of events) if (!triggers.has(event)) triggers.set(event, values[event] ?? null);
+  const others = triggers.items.map(pair => String(isScalar(pair.key) ? pair.key.value : pair.key)).filter(event => !events.includes(event));
+  if (gateOnly) { for (const event of others) triggers.delete(event); refreshHeader(doc, target); }
+  else if (others.length) job.items.splice(1, 0, doc.createPair('if', events.map(event => `github.event_name == '${event}'`).join(' || ')));
+  placeJob(doc, job, existing, 'gate');
   return render(doc);
+}
+
+/** Rewrites the merge-queue sentence of a header gateWorkflow wrote; a header someone else wrote is left alone. */
+function refreshHeader(doc: Document, target: GateTarget): void {
+  const first = isMap(doc.contents) ? doc.contents.items[0]?.key : null;
+  const holder = [doc, doc.contents, first].find(node => typeof (node as any)?.commentBefore === 'string' && (node as any).commentBefore.includes(headerTitle)) as any;
+  if (!holder) return;
+  const lines: string[] = holder.commentBefore.split('\n'), at = lines.findIndex(queueLine);
+  if (at < 0) return;
+  holder.commentBefore = [...lines.slice(0, at), ...queueLines(target), ...lines.slice(at).filter(line => !queueLine(line))].join('\n');
 }
 
 /** release.yml: a version tag runs the release lane; the console's release flow waits for this run before the draft. */
