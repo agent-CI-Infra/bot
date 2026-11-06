@@ -113,3 +113,27 @@ test('verification commands reject copied executor paths and recover in the pinn
  const commands=calls.filter(r=>r.type==='workspace_command');assert.equal(commands.length,1);assert.equal(commands[0].command,'cat report.md');assert.notEqual(commands[0].workspace_id,source);
  assert.ok(JSON.stringify(f.requests[1].messages).includes('executor_workspace_reference'));
 });
+
+test('verdict format repair keeps fresh inspection evidence and does not rerun successful reads',async t=>{
+ const f=await fixture(t,(body,n)=>{
+  if(n===1)return {role:'assistant',content:null,tool_calls:[{id:'inspect',type:'function',function:{name:'read_file',arguments:JSON.stringify({path:'report.md'})}}]};
+  if(n===2)return {role:'assistant',content:JSON.stringify({outcome:'pass',reason:'Read the artifact but omitted fields'})};
+  assert.ok(body.messages.at(-1).content.includes('do not repeat verification'));
+  return {role:'assistant',content:JSON.stringify(pass)};
+ });
+ let reads=0;const result=await evaluateDelivery(f.h.store,f.task,{call:async()=>{reads++;return {content:'Actual report'};}},new Redactor(),async()=>{});
+ assert.equal(result.outcome,'pass');assert.equal(reads,1);assert.equal(f.requests.length,3);
+ assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_format_error'").n,1);
+ assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_fault'").n,0);
+ assert.equal(f.records.get(f.task.id).acceptance,null,'format repair cannot finalize delivery');
+});
+test('format feedback can correct an invalid pass into a truthful return instead of relaxing core conditions',async t=>{
+ const f=await fixture(t,(_body,n)=>({role:'assistant',content:JSON.stringify(n===1?{...pass,core_complete:false}:{...pass,outcome:'return',core_complete:false,gaps:['A required behavior is absent']})}));
+ const result=await evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{});
+ assert.equal(result.outcome,'return');assert.equal(result.core_complete,false);assert.equal(f.requests.length,2);assert.equal(f.records.get(f.task.id).acceptance,null);
+});
+test('unrepairable verdicts have two format corrections and a finite evaluation-fault exit',async t=>{
+ const f=await fixture(t,()=>({role:'assistant',content:'{}'}));
+ for(let i=0;i<3;i++)await assert.rejects(evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{}),{code:i===2?'acceptance_unavailable':'acceptance_output_invalid'});
+ assert.equal(f.requests.length,9);assert.equal(f.records.get(f.task.id).rounds,0);assert.equal(f.records.get(f.task.id).acceptance,null);
+});
