@@ -153,7 +153,7 @@ test('运行分析从失败探索代码、其他Issue与PR，并展示脱敏日�
       if (path.endsWith('/pulls/9/files')) { send([{filename:'package.json',patch:'- missing-package'}]); return true; }
       if (path !== '/v1/chat/completions') return false;
       const index = turn++; if (!index) await held;
-      const replies = [tool('token', 'github_read_token'), tool('code', 'github_read', {path:'/contents/package.json'}), tool('issue', 'github_read', {path:'/issues/42/comments'}), tool('pr', 'github_read', {path:'/pulls/9/files'}), tool('log', 'read_job_log', {job_id:1}), tool('related', 'read_job_log', {job_id:2}), {content:JSON.stringify({job_ids:[1],advice:'日志第 1 行显示 package missing；package.json、Issue #42 和 PR #9 表明依赖被移除。'})}];
+      const replies = [tool('token', 'github_read_token'), tool('code', 'github_read', {path:'/contents/package.json'}), tool('issue', 'github_read', {path:'/issues/42/comments'}), tool('pr', 'github_read', {path:'/pulls/9/files'}), tool('log', 'read_job_log', {job_id:1}), tool('related', 'read_job_log', {job_id:2}), {content:JSON.stringify({job_ids:[1],advice:'## 结论\n**日志第 1 行显示 package missing**；`package.json`、Issue #42 和 PR #9 表明依赖被移除。\n\n- 重跑不会通过\n- 恢复依赖后再发版：[job 1](https://github.invalid/job/1)\n\n<img src=x onerror="window.adviceInjected=1">'})}];
       if(index===6){const evidence=JSON.stringify(body.messages);expect(evidence).toContain('dependencies');expect(evidence).toContain('Dependency removed');expect(evidence).toContain('missing-package');}
       send({ choices: [{ message: replies[index] }] }); return true;
     };
@@ -171,6 +171,13 @@ test('运行分析从失败探索代码、其他Issue与PR，并展示脱敏日�
     await expect(page.locator('#project-page')).not.toContainText('observation-ui-secret'); expect(f.state.releases).toHaveLength(0);
     const grant = f.state.tokens.at(-1); expect(grant.repository_ids).toEqual([101]); expect(grant.permissions.contents).toBe('read'); expect(grant.permissions.issues).toBe('read'); expect(grant.permissions.pull_requests).toBe('read'); expect(Object.values(grant.permissions).every(value=>value==='read')).toBe(true);
     await expect(page.locator('#project-page')).toContainText('Issue #42 和 PR #9');
+    // The model's Markdown reads as a heading, bold text, code and a list; HTML in it stays text.
+    const advice = page.locator('.release-advice');
+    await expect(advice.locator('h4')).toHaveText('结论'); await expect(advice.locator('strong')).toHaveText('日志第 1 行显示 package missing');
+    await expect(advice.locator('code')).toHaveText('package.json'); await expect(advice.locator('li')).toHaveCount(2);
+    await expect(advice.locator('a')).toHaveAttribute('href', 'https://github.invalid/job/1');
+    await expect(advice.locator('img')).toHaveCount(0); await expect(advice).toContainText('<img src=x'); await expect(advice).not.toContainText('**');
+    expect(await page.evaluate(() => window.adviceInjected)).toBeUndefined();
     await expect(page.locator('#project-page')).toContainText('related build 日志 · run 801 / attempt 2');
     mkdirSync('.tmp/release-observation', { recursive: true }); await page.screenshot({ path: '.tmp/release-observation/log-evidence.png', fullPage: true });
   } finally { release?.(); for (const close of cleanup.reverse()) await close(); }

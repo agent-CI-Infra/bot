@@ -32,6 +32,32 @@ function input(name, value, attributes = {}) { const el = document.createElement
 function textarea(name, value, attributes = {}) { const el = document.createElement('textarea'); el.name = name; el.value = value ?? ''; Object.assign(el, attributes); return el; }
 function checkbox(name, checked, caption) { const box = input(name, '', { type: 'checkbox', checked: !!checked }), wrap = element('label', '', 'check'); wrap.append(box, ' ' + caption); return wrap; }
 function note(text) { return element('p', text, 'muted'); }
+// The CI observation's advice is the model's Markdown. It is drawn with text nodes only, never parsed as HTML: headings,
+// list items and paragraphs keep their lines, and `code`, **bold** and http(s) links become elements.
+function releaseAdviceInline(target, text) {
+  let at = 0;
+  for (const match of text.matchAll(/`([^`\n]+)`|\*\*([^*\n]+)\*\*|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g)) {
+    target.append(text.slice(at, match.index));
+    target.append(match[1] ? element('code', match[1]) : match[2] ? element('strong', match[2]) : link(match[4], match[3]));
+    at = match.index + match[0].length;
+  }
+  target.append(text.slice(at)); return target;
+}
+function releaseAdvice(markdown) {
+  const box = element('div', '', 'release-advice'); let list = null;
+  for (const raw of String(markdown || '').split('\n')) {
+    const line = raw.trimEnd(), heading = /^#{1,6}\s+(.*)$/.exec(line), item = /^\s*([-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (!line.trim()) { list = null; continue; }
+    if (heading) { list = null; box.append(releaseAdviceInline(element('h4', ''), heading[1])); continue; }
+    if (item) {
+      const tag = /\d/.test(item[1]) ? 'ol' : 'ul';
+      if (!list || list.tagName.toLowerCase() !== tag) { list = element(tag, ''); box.append(list); }
+      list.append(releaseAdviceInline(element('li', ''), item[2])); continue;
+    }
+    list = null; box.append(releaseAdviceInline(element('p', ''), line.trim()));
+  }
+  return box;
+}
 // A settings form: fields, an error line and a save button; `save` receives the form and reports through the error line.
 // `after` receives the result text; without it the project page shows the text and reloads.
 function settingsForm(title, nodes, save, { editable = true, caption = '保存', after = null } = {}) {
@@ -212,7 +238,7 @@ function releaseRecord(r, endpoint, refresh, message) {
   }
   if (r.observation_error) section.append(note(r.observation_error));
   if (r.observation) {
-    section.append(note(`运行分析 · run ${r.observation.run_id} / attempt ${r.observation.attempt} · 仅供排查的建议`), note(r.observation.advice));
+    section.append(note(`运行分析 · run ${r.observation.run_id} / attempt ${r.observation.attempt} · 仅供排查的建议`), releaseAdvice(r.observation.advice));
     for (const job of r.observation.jobs) section.append(link(job.url, `${job.name} · ${job.conclusion}`));
     for (const log of r.observation.logs || []) {
       const related = log.run_id !== r.observation.run_id || log.attempt != null && log.attempt !== r.observation.attempt;

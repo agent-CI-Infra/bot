@@ -25,7 +25,7 @@ test('全局设置按账号、App 和组织显示 GitHub 请求额度的窗口�
     const headers = remaining => new Headers({ 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': String(remaining), 'x-ratelimit-used': String(5000 - remaining), 'x-ratelimit-reset': seconds(reset), 'x-ratelimit-resource': 'core' });
     observe(h.store, appBucket(app.id), headers(4990));
     observe(h.store, installationBucket(app.id, '175700149', 'openJiuwen-ai'), headers(300));
-    refused(h.store, installationBucket(app.id, '175700150', 'agent-test-zone'), headers(0));
+    refused(h.store, installationBucket(app.id, '175700150', 'example-org'), headers(0));
     await page.goto(h.admin + '/#/settings/accounts'); await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
     const card = page.locator('.side-card').filter({ has: page.getByRole('heading', { name: 'GitHub 请求额度' }) });
@@ -33,7 +33,7 @@ test('全局设置按账号、App 和组织显示 GitHub 请求额度的窗口�
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(0)).toContainText('App 自身（JWT） · REST'); await expect(rows.nth(0)).toContainText('正常');
     // Installations follow the App's own window, by organization name.
-    await expect(rows.nth(1)).toContainText('agent-test-zone 上的 App 安装（175700150）'); await expect(rows.nth(1)).toContainText(/流控中，\d\d:\d\d:\d\d 后继续/);
+    await expect(rows.nth(1)).toContainText('example-org 上的 App 安装（175700150）'); await expect(rows.nth(1)).toContainText(/流控中，\d\d:\d\d:\d\d 后继续/);
     await expect(rows.nth(2)).toContainText('openJiuwen-ai 上的 App 安装（175700149） · REST'); await expect(rows.nth(2)).toContainText('将用完');
     await expect(card).toContainText('部门机器人（Token 账号）'); await expect(card).toContainText('还没有记录，点「探测」读取。');
     // Probing the bot account reads its windows now.

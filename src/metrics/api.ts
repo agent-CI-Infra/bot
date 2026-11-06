@@ -1,6 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, type Json } from '../core/security.js';
+import { builtinWorkflow, builtinWorkflows } from '../workflows/catalog.js';
 
 function date(value: string): string {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(Date.parse(value+'T00:00:00Z'))||new Date(value+'T00:00:00Z').toISOString().slice(0,10)!==value)fail(400,'invalid_cost_date');
@@ -44,28 +45,37 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
     FROM model_requests q WHERE ${clauses.join(' AND ')} AND q.currency IS NOT NULL
     AND q.input_per_million IS NOT NULL AND q.output_per_million IS NOT NULL AND q.cache_per_million IS NOT NULL
     ORDER BY q.model_name,q.currency,q.input_per_million,q.output_per_million,q.cache_per_million`,...args);
-  // Aggregate tasks separately: four task kinds must not multiply the cost query's 5,000-group budget.
+  // Aggregate tasks separately, so the task rows never take from the cost query's 5,000-group budget. Every workflow runs
+  // as a task, so every kind is counted: a custom workflow's tasks by the workflow they ran (its id), the others by kind.
   const taskAccess=scope(user,'t.repository_id'),taskClauses=[taskAccess.sql,
-    "t.kind IN ('review.issue','review.pr','development.issue','development.pr')",
     '(statistics_date(t.created_at) BETWEEN ? AND ? OR statistics_date(t.created_at) IS NULL)'];
   const taskArgs=[...taskAccess.args,start,end];
   if(repo){taskClauses.push('t.repository_id=?');taskArgs.push(repo);}
-  const taskRows=store.all(`SELECT statistics_date(t.created_at) date,t.repository_id,r.full_name,t.kind,count(*) count,
+  const taskRows=store.all(`SELECT statistics_date(t.created_at) date,t.repository_id,r.full_name,t.kind,
+    CASE WHEN t.kind IN ('workflow.issue','workflow.pr') AND t.workflow_id IS NOT NULL THEN t.workflow_id ELSE t.kind END workflow,count(*) count,
     sum(CASE WHEN m.task_id IS NULL OR (m.complete=0 AND m.runtime_ms=0 AND m.active_since IS NULL) THEN NULL
       ELSE m.runtime_ms+CASE WHEN m.active_since IS NOT NULL THEN max(0,?-m.active_since) ELSE 0 END END) runtime_ms,
     sum(CASE WHEN m.task_id IS NULL OR m.complete=0 THEN 1 ELSE 0 END) incomplete_tasks,
     sum(CASE WHEN m.active_since IS NOT NULL THEN 1 ELSE 0 END) running_tasks
     FROM tasks t JOIN repositories r ON r.id=t.repository_id LEFT JOIN task_metrics m ON m.task_id=t.id
-    WHERE ${taskClauses.join(' AND ')} GROUP BY date,t.repository_id,t.kind ORDER BY date,t.repository_id,t.kind`,Date.now(),...taskArgs);
+    WHERE ${taskClauses.join(' AND ')} GROUP BY date,t.repository_id,t.kind,workflow ORDER BY date,t.repository_id,t.kind,workflow`,Date.now(),...taskArgs);
+  // Built-in workflows go by their built-in names, custom ones by the name their repository saved.
+  const customNames=new Map(store.all("SELECT id,name FROM workflows WHERE id LIKE 'custom.%'").map(row=>[String(row.id),String(row.name||'')]));
+  const workflowName=(row:Row)=>builtinWorkflow(String(row.workflow))?.name
+    ??(row.workflow!==row.kind?customNames.get(String(row.workflow))||'已删除的工作流':String(row.kind));
+  for(const row of taskRows)row.name=workflowName(row);
   const taskDays=taskRows.filter(r=>r.date!==null),undated=taskRows.filter(r=>r.date===null);
   const taskSummary=new Map<string,Row>();
   for(const row of taskDays){
-    const total=taskSummary.get(row.kind)||{kind:row.kind,count:0,runtime_ms:null,incomplete_tasks:0,running_tasks:0};
+    const total=taskSummary.get(row.workflow)||{kind:row.kind,workflow:row.workflow,name:row.name,count:0,runtime_ms:null,incomplete_tasks:0,running_tasks:0};
     for(const key of ['count','incomplete_tasks','running_tasks'])total[key]+=row[key];
     if(row.runtime_ms!==null)total.runtime_ms=(total.runtime_ms??0)+row.runtime_ms;
-    taskSummary.set(row.kind,total);
+    taskSummary.set(row.workflow,total);
   }
-  return {from:start,to:end,currency,timezone,days:rows,tasks:{days:taskDays,summary:[...taskSummary.values()],undated},
+  // Built-in workflows first, in the catalog's order, then the others by name.
+  const order=(row:Row)=>{const at=builtinWorkflows.findIndex(w=>w.id===row.workflow);return at<0?builtinWorkflows.length:at;};
+  const summaryRows=[...taskSummary.values()].sort((a,b)=>order(a)-order(b)||String(a.name).localeCompare(String(b.name)));
+  return {from:start,to:end,currency,timezone,days:rows,tasks:{days:taskDays,summary:summaryRows,undated},
     prices,
     collection_started_at:store.get("SELECT value FROM settings WHERE key='task_metrics_v1'")?.value||null,
     summary:{cost:rows.reduce((n,r)=>n+Number(r.cost||0),0),requests:rows.reduce((n,r)=>n+r.requests,0),

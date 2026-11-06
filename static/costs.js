@@ -76,7 +76,14 @@ async function loadCosts(version) {
   const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）','已计价费用','模型请求',...costTokenFields.map(([,label])=>label),'未计价请求']);detail.append(element('summary','每日费用与 token 明细'));
   for(const [date,day]of byDate){const row=document.createElement('tr');row.append(element('td',date),element('td',day.requests&&day.requests===day.unpriced_requests?'—':money(day.cost,data.currency)),element('td',String(day.requests)),...costTokenCells(day),element('td',String(day.unpriced_requests)));daily.body.append(row);}detail.append(daily.wrap);body.append(detail);
 }
+// The four kinds every project has always get a row; any other workflow that ran tasks in the range gets one by its name.
 const statisticsKinds=['review.issue','review.pr','development.issue','development.pr'];
+const statisticsKey=row=>row.workflow??row.kind;
+function statisticsWorkflows(data) {
+  const listed=new Map(statisticsKinds.map(kind=>[kind,{key:kind,name:kindLabels[kind]}]));
+  for(const row of data.tasks.summary){const key=statisticsKey(row);listed.set(key,{key,name:row.name||kindLabels[row.kind]||row.kind});}
+  return [...listed.values()];
+}
 function taskStatisticsDuration(row) {
   if(!row)return metricDuration(0);
   const value=metricRuntime({runtime_ms:row.runtime_ms,complete:!row.incomplete_tasks});
@@ -86,25 +93,26 @@ function renderTaskStatistics(body,data) {
   const section=element('section','','cost-breakdown statistics-tasks'),summary=costTable(['任务类别','任务数','累计执行耗时']);
   summary.wrap.classList.add('statistics-task-summary');
   section.append(element('h2','任务统计'),element('p','按任务创建时的浏览器本地日期归日，整段累计执行耗时都计入创建日，不跨日拆分。耗时不含排队和等待，执行中任务含已观测到的当前时长；历史缺失或中断的耗时保留不完整提示。','cost-note'));
-  for(const kind of statisticsKinds){const item=data.tasks.summary.find(r=>r.kind===kind),row=document.createElement('tr');row.dataset.kind=kind;row.append(element('td',kindLabels[kind]),element('td',metricNumber(item?.count??0)),element('td',taskStatisticsDuration(item)));summary.body.append(row);}
+  const workflows=statisticsWorkflows(data);
+  for(const workflow of workflows){const item=data.tasks.summary.find(r=>statisticsKey(r)===workflow.key),row=document.createElement('tr');row.dataset.kind=workflow.key;row.append(element('td',workflow.name),element('td',metricNumber(item?.count??0)),element('td',taskStatisticsDuration(item)));summary.body.append(row);}
   section.append(summary.wrap);
   if(!data.tasks.summary.length)section.append(element('p','这个日期范围内没有任务记录。','cost-empty'));
-  const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）',...statisticsKinds.flatMap(kind=>[kindLabels[kind]+' · 数量',kindLabels[kind]+' · 耗时'])]);detail.append(element('summary','每日任务明细'));
+  const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）',...workflows.flatMap(workflow=>[workflow.name+' · 数量',workflow.name+' · 耗时'])]);detail.append(element('summary','每日任务明细'));
   const days=new Map();
-  for(const item of data.tasks.days){const day=days.get(item.date)||new Map(),total=day.get(item.kind)||{count:0,runtime_ms:null,incomplete_tasks:0,running_tasks:0};
+  for(const item of data.tasks.days){const day=days.get(item.date)||new Map(),total=day.get(statisticsKey(item))||{count:0,runtime_ms:null,incomplete_tasks:0,running_tasks:0};
     for(const key of ['count','incomplete_tasks','running_tasks'])total[key]+=item[key];if(item.runtime_ms!=null)total.runtime_ms=(total.runtime_ms??0)+item.runtime_ms;
-    day.set(item.kind,total);days.set(item.date,day);
+    day.set(statisticsKey(item),total);days.set(item.date,day);
   }
   // These UTC values enumerate date labels only; attribution itself is performed in the browser's time zone by the API.
   for(let time=Date.parse(data.from+'T00:00:00Z');time<=Date.parse(data.to+'T00:00:00Z');time+=86400000){
     const date=new Date(time).toISOString().slice(0,10),day=days.get(date),row=document.createElement('tr');row.append(element('td',date));
-    for(const kind of statisticsKinds){const item=day?.get(kind);row.append(element('td',metricNumber(item?.count??0)),element('td',taskStatisticsDuration(item)));}daily.body.append(row);
+    for(const workflow of workflows){const item=day?.get(workflow.key);row.append(element('td',metricNumber(item?.count??0)),element('td',taskStatisticsDuration(item)));}daily.body.append(row);
   }
   detail.append(daily.wrap);section.append(detail);
   if(data.tasks.undated.length){
     const unknown=element('section','','cost-breakdown statistics-undated'),table=costTable(['项目','任务类别','任务数','累计执行耗时']);
     unknown.append(element('h2','日期不明的历史任务'),element('p','以下任务没有可靠的创建日期，沿用所选项目范围，单独列出，不计入日期范围内的任务总数或任何一天。','cost-incomplete'));
-    for(const item of data.tasks.undated){const row=document.createElement('tr');row.append(element('td',item.full_name),element('td',kindLabels[item.kind]),element('td',metricNumber(item.count)),element('td',taskStatisticsDuration(item)));table.body.append(row);}unknown.append(table.wrap);section.append(unknown);
+    for(const item of data.tasks.undated){const row=document.createElement('tr');row.append(element('td',item.full_name),element('td',item.name||kindLabels[item.kind]||item.kind),element('td',metricNumber(item.count)),element('td',taskStatisticsDuration(item)));table.body.append(row);}unknown.append(table.wrap);section.append(unknown);
   }
   body.append(section);
 }
