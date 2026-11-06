@@ -21,7 +21,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  github.listen(0,'127.0.0.1');await once(github,'listening');t.after(()=>new Promise(r=>{github.close(r);github.closeAllConnections();}));
  const gh='http://127.0.0.1:'+github.address().port;
  await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:'fixture-github-token'})});
- let executionCalls=0,acceptanceCalls=0,firstOutage=true,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false,writeOutage=false,restoredLateWrite=false;
+ let executionCalls=0,acceptanceCalls=0,firstOutage=true,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false,writeOutage=false,restoredLateWrite=false,inheritedContextRead=false;
  const remediations=new Map();
  const model=createServer(async(req,res)=>{
   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
@@ -47,6 +47,8 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   executionCalls++;
   const context=JSON.parse(messages[1].content),multi=context.request.includes('multiple'),wanted=multi?['research','persistence']:['research'];
   if(context.task.contract.source?.parent_task&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'inherited-read'));
+  if(context.task.contract.source?.parent_task&&!calls.some(c=>c.function.name==='read_file'&&JSON.parse(c.function.arguments).path==='../context/parent-proof.txt'))return send(call('read_file',{path:'../context/parent-proof.txt'},'parent-context-read'));
+  if(context.task.contract.source?.parent_task)inheritedContextRead||=messages.some(m=>m.role==='tool'&&m.content.includes('PARENT_AUTHORIZED_CONTEXT'));
   if(context.task.contract.source?.parent_task)inheritedRead||=messages.some(m=>m.role==='tool'&&m.content.includes('Observed repository fact'));
   if(context.task.contract.source?.residual==='follow-report-2'){
    const relatedCalls=calls.filter(c=>c.function.name==='read_related_artifact');
@@ -81,7 +83,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  const engine=new TaskEngine(store,manager,gh+'/github');
  for(const mode of ['single','multiple','return','insufficient_evidence','write-outage']){
   const id=randomBytes(24).toString('hex'),contract={goal:'Write an observed report '+mode,scope:['report'],criteria:['Report a concrete repository observation'],endpoint:'report',source:'request'};
-  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES(?,'101','task.request','running',?,?,'claim')",id,mode,JSON.stringify({request:mode+' guide report',contract}));
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES(?,'101','task.request','running',?,?,'claim')",id,mode,JSON.stringify({request:mode+' guide report',contract,...(mode==='multiple'?{context_files:{'parent-proof.txt':'PARENT_AUTHORIZED_CONTEXT'}}:{})}));
   store.run("INSERT INTO task_claims VALUES(?,'101','claim','now')",id);
   records.history(id,'execution_evidence',{execution:'old-execution',name:'run_command',version:'old-tree',result:{exit_code:0,output:'STALE_EVIDENCE_SENTINEL'}});
   await engine.run(id,'claim');
@@ -112,6 +114,6 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  assert.ok(inheritedRead);assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='inherited_artifact'",child.id));
  if(JSON.parse(child.input).contract.source.residual==='follow-report')writeFileSync(join(root,'tasks',store.get('SELECT workspace_id FROM tasks WHERE id=?',child.id).workspace_id,'repo','report.md'),'MUTATED_AFTER_ACCEPTANCE');
  }
- assert.ok(siblingRead);
+ assert.ok(siblingRead);assert.ok(inheritedContextRead);
  assert.ok(invalidPathObserved);assert.ok(acceptanceCalls>=5);
 });
