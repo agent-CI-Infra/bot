@@ -32,7 +32,7 @@ export interface AgentSpec<T> {
   /** Trusted, opt-in format feedback; at most two corrections within the same finite run. */
   repairInvalid?: (error: unknown) => string | undefined;
   /** An explicitly offered submission tool ends this execution, never the framework's acceptance. */
-  finish?: { name: string; validate: (args: any) => T | Promise<T> };
+  finish?: { name: string; validate: (args: any) => T | Promise<T>; finalizationMessage?: string };
   /** Trusted resource budget: reserve the last turns for saving/submitting, never approval. */
   finalizationTools?: string[];
   /** A transport adapter (for example Pi in a workspace), not a task-kind switch. */
@@ -108,7 +108,7 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
     const reserve=Math.min(8,Math.max(2,Math.ceil(maxTurns/4)));
     const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
     const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));
-    if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
+    if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:spec.finish.finalizationMessage?`${reserve} turns remain. ${spec.finish.finalizationMessage}`:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
     const { value } = await services.request({ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
       ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) }, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
@@ -122,7 +122,12 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
         await services.guard();
         let args: any; try { args = JSON.parse(call.function.arguments); } catch { args = null; }
         const finishing=spec.finish;
-        if(finishing&&finishing.name===call.function.name&&names.has(call.function.name))return await finishing.validate(args);
+        if(finishing&&finishing.name===call.function.name&&names.has(call.function.name)){
+          try{return await finishing.validate(args);}catch(error){
+            const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;
+            messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({error:'invalid_submission',message:spec.redactor.text(feedback)})});continue;
+          }
+        }
         // The model cannot call an unadvertised tool, even if an executor happens to support it.
         const result = !names.has(call.function.name) ? { error: 'tool_not_allowed' }
           : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
