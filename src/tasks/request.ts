@@ -52,7 +52,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
     records.history(task.id,'inherited_artifact',{parent_task:parent.id,candidate_id:link!.candidate_id,source_tree:parentFiles!.version});
   }
   await restoreCheckpoint(store,task,workspace,task.head_sha);
-  const contextFiles={...input.context_files,...inheritedContext};
+  const contextFiles={...(parent?JSON.parse(parent.input||'{}').context_files:{}),...input.context_files,...inheritedContext};
   if(Object.keys(contextFiles).length)await workspace.context(contextFiles);
     for(;;){
       const before=records.get(task.id);
