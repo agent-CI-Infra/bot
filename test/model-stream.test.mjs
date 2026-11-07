@@ -42,7 +42,8 @@ async function fixture(t,{stream=true,failDelivery=false}={}){
     return new Response(new ReadableStream({start(controller){source=controller;signal.addEventListener('abort',()=>controller.error(new DOMException('aborted','AbortError')),{once:true});}}),{headers:{'Content-Type':'text/event-stream'}});
   });
   t.mock.timers.enable({apis:['setTimeout','Date'],now:1000000});
-  const running=agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='stream'"),work,new Redactor(),async()=>{},{});
+  // These fake-clock cases inspect one transport attempt; retry recovery is covered in agent-runtime.test.mjs.
+  const running=agentLoop(h.store,h.store.get("SELECT * FROM tasks WHERE id='stream'"),work,new Redactor(),async()=>{},{},undefined,undefined,undefined,{}, {modelAttempts:1});
   // Attach an error handler now: advancing a fake clock may reject before the assertion awaits it.
   running.catch(()=>{});await until(()=>source);
   return {h,admin,root,dir,running,requests,progress,replies,signal,

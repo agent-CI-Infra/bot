@@ -20,3 +20,12 @@ Findings whose triggers do not apply:
 - Contract revision after completion is rejected, so completed tasks' residuals are historical lineage rather than accidentally current work under a rewritten parent.
 
 Validation includes real SQLite close/reopen and failure injection, obsolete-claim rejection, refreshed verdict on the same candidate, live Git snapshot/restore, failed-verifier cleanup, raw evaluator transport, and ordinary requests using one/multiple guides and correcting invalid paths before an evaluation outage and resume.
+
+## Final PR review follow-up
+
+The repository bot reviewed final head `c908167` and identified two additional issues. Both are fixed before merge:
+
+- F1: Model transport retries no longer depend on `BOT_LOCAL_EXECUTION`. Trusted `AgentSpec.modelAttempts` defaults to three total attempts in all modes, accepts only integers 1–3, and does not read a model-supplied request override. HTTP 429/5xx and transient transport failures may retry; authentication and guard failures still stop. Domain-only runs without a tasks FK retain their model ledger without attempting an invalid task log insert. Regression tests cover recovery, exhaustion, invalid budgets and permanent authentication errors.
+- F2: A rejected final report releases its existing workspace before clearing the generation/workspace identifiers. Regression tests for both return and insufficient_evidence assert exactly one reap for the original workspace and a queued task with cleared identifiers.
+
+The private evidence was verified with the operator's authorized credentials: all 13 persisted trial tasks have accepted, candidate-bound deliveries and SQLite integrity/foreign-key checks pass. The repository bot's read-only token cannot access that private repository; its 404 is an access limit rather than evidence of missing artifacts.

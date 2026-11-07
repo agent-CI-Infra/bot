@@ -267,6 +267,7 @@ export class TaskEngine {
       const acceptReport=async(value:any)=>{
         const checked=await accept(value,this.store.all("SELECT id,content FROM task_logs WHERE task_id=? AND json_valid(content) AND json_extract(content,'$.type')='tool' AND json_extract(content,'$.name') IN ('run_command','read_file') AND json_extract(content,'$.attempt')=? ORDER BY rowid",id,task.attempt).map(row=>observation('task_log:'+row.id,sha(row.content),row.content)));
         if(checked.error){
+          await this.release(workspace,task);
           update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
           stop(checked.error,'queued',checked.reason+' '+checked.gaps?.join('; '));
         }
