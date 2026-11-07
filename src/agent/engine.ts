@@ -680,7 +680,7 @@ export class TaskEngine {
       const last=previous?JSON.parse(previous.content):null,detail=redactor.clean(failure.detail);
       if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||last?.retry_cycle_started_at!==(cycle??undefined)||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
         log({type:'fault',state,code:failure.code,...(cycle!=null?{retry_cycle_started_at:cycle}:{}),...(detail?{detail,detail_sha:sha(detail)}:{})});
-    }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);endRun(this.store,attemptRun,terminal.includes(current?.status)?'succeeded':'stopped',current?.error_code);}
+    }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);endRun(this.store,attemptRun,['completed','succeeded','pr_opened'].includes(current?.status)?'succeeded':'stopped',current?.error_code);}
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.
   async live(user:Actor,id:string,url:URL):Promise<Json>{

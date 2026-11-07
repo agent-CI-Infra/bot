@@ -90,7 +90,7 @@ export function taskTrace(store:Store,taskId:string,url:URL,section:string){
   if(!Number.isSafeInteger(limit)||limit<1||limit>100||!Number.isSafeInteger(after)||after<0)fail(400,'invalid_pagination');
   let sql='task_id=? AND id>?';const args:any[]=[taskId,after];
   for(const [param,col] of [['run_id','run_id'],['type','type']]){const v=url.searchParams.get(param!);if(v){sql+=` AND ${col}=?`;args.push(v);}}
-  for(const field of ['revision','candidate_id']){const value=url.searchParams.get(field);if(value){sql+=` AND (json_extract(data,'$.${field}')=? OR run_id IN(SELECT id FROM task_runs WHERE ${field}=? AND task_id=?))`;args.push(value,value,taskId);}}
+  for(const field of ['revision','candidate_id']){const value=url.searchParams.get(field);if(value){const filter=field==='revision'?Number(value):value;if(field==='revision'&&(!Number.isSafeInteger(filter)||Number(filter)<1))fail(400,'invalid_task_revision');sql+=` AND (json_extract(data,'$.${field}')=? OR run_id IN(SELECT id FROM task_runs WHERE ${field}=? AND task_id=?)${field==='candidate_id'?" OR (type='candidate' AND json_extract(data,'$.id')=?)":''})`;args.push(filter,filter,taskId,...(field==='candidate_id'?[filter]:[]));}}
   const rows=store.all(`SELECT * FROM task_history WHERE ${sql} ORDER BY id LIMIT ?`,...args,limit+1),more=rows.length>limit;rows.splice(limit);
   return {events:rows.map(r=>({...r,event_id:'task_history:'+r.id,data:traceClean(JSON.parse(r.data)),caused_by:JSON.parse(r.caused_by)})),next_after:more?rows.at(-1)!.id:null,coverage:{legacy_run_links_may_be_missing:true}};
 }
