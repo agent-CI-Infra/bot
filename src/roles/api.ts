@@ -1,7 +1,8 @@
+import {harnesses} from './harness.js';
 import type {Store} from '../storage/database.js';
 import {repository,scope,type Actor} from '../app/auth.js';
 import {fields,fail,type Json} from '../core/security.js';
-import {rolePool,harnesses,configuredRoles} from './pool.js';
+import {rolePool,configuredRoles} from './pool.js';
 export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Json|undefined{
  const config=/^\/api\/repositories\/([^/]+)\/roles$/.exec(url.pathname);
  if(config){const repo=config[1]!;repository(s,user,repo);const key='roles:'+repo;
