@@ -242,6 +242,7 @@ export class TaskEngine {
       let validatedPhase:'model'|'publish'|undefined;
       const accept=async(artifact:any, evidence:any[]=[])=>{
         evidence=[...evidence,...this.store.all("SELECT id,data FROM task_history WHERE task_id=? AND type IN ('memory_read','memory_search') AND run_id IN(SELECT id FROM task_runs WHERE task_id=? AND kind='execution' AND attempt=?) ORDER BY id",id,id,task.attempt).map(row=>observation('task_history:'+row.id,sha(row.data),row.data))];
+        evidence=[...evidence,...this.store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='role_result' AND json_extract(data,'$.role') NOT IN ('manager','qa') ORDER BY id",id).map(row=>observation('task_history:'+row.id,sha(row.data),row.data))];
         const inputNow=JSON.parse(task.input||'{}');
         const before=records.get(id);
         const goal=development?inputNow.context?.implementation_goal||inputNow.object?.body||task.summary

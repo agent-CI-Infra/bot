@@ -29,6 +29,6 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  s.run('UPDATE role_instances SET sequence=sequence+1 WHERE id=?',instance.id);
  if(harness==='process')wrapped.adapter=processHarness(wrapped);
  const previousRole=task.active_role;task.active_role=role;let result:T;try{result=await runAgent(wrapped);}finally{task.active_role=previousRole;}
- const reference=traceEvent(s,task.id,'role_result',{instance_id:instance.id,role,assignment_id:assignment??null,contract_revision:s.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision,result:spec.redactor.clean(result)},task.trace_run_id,'role:'+role,[snapshot]);
+ const reference=traceEvent(s,task.id,'role_result',{instance_id:instance.id,role,assignment_id:assignment??null,candidate_version:assignment?s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null:null,contract_revision:s.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision,result:spec.redactor.clean(result)},task.trace_run_id,'role:'+role,[snapshot]);
  return {result,reference,instance_id:instance.id};
 }

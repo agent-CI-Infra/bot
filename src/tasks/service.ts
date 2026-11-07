@@ -83,7 +83,7 @@ export class TaskRecords {
       const offset=args?.offset??0,limit=args?.limit??10;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page'};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      const filter="task_id=? AND type IN ('checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault')";
+      const filter="task_id=? AND type IN ('checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
       return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(JSON.parse(row.data))}))};
