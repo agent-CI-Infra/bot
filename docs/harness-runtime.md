@@ -4,7 +4,7 @@ Role 服务选择执行器并组装角色说明、assignment 和任务事实引�
 
 ## 公共边界
 
-`HarnessSession<T>` 提供 `id / run / cancel / close`。第一版 handle 绑定一次运行的输入和资源；持续上下文保存在 role instance，下一轮可重新连接，不要求进程常驻。Native 使用原工具循环，Process 使用原 Node worker，ACP 使用通用协议客户端；都经过公共生命周期及结果/错误事件。任务取消沿用 task guard；ACP 在等待远端期间也检查 guard 并发送 cancel，有限等待后回收自己的进程组。
+`roleHarness(id).createSession(spec, services)` 创建公共会话；原 adapter 入口保留为兼容包装，实际执行也经过该会话。`HarnessSession<T>` 提供 `id / run / cancel / close`。第一版 handle 绑定一次运行的输入和资源；持续上下文保存在 role instance，下一轮可重新连接，不要求进程常驻。Native 使用原工具循环，Process 使用原 Node worker，ACP 使用通用协议客户端；都经过公共生命周期及结果/错误事件。任务取消沿用 task guard；ACP 在等待远端期间也检查 guard 并发送 cancel，有限等待后回收自己的进程组。
 
 - Role/Manager：选择角色、assignment、人设、记忆入口与 Harness；Review 反馈通过持久化引用回到同一 Dev。
 - 任务工具：外部 ACP 经本轮 loopback MCP HTTP 服务调用与内置路径相同的 offered tools、execute、finish validators。只有本轮工具可用，提交后不再执行后续工具操作。
