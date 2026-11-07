@@ -14,6 +14,9 @@ export interface AgentServices {
 }
 export interface AgentSpec<T> {
   store: Store;
+  harnessState?: { value:Record<string,any>; save:(value:Record<string,any>)=>void };
+  modelTrace?: Record<string,unknown>;
+  executionSignal?: AbortSignal;
   session?: { messages:any[]; save:(messages:any[])=>void };
   onRun?: (id:string)=>void;
   roleRun?: {instance_id:string;role:string;version:string;harness:string;harness_version?:string;assignment_id?:string;recovery_mode:string};
@@ -76,11 +79,12 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   const model = spec.model ?? selectedModel(spec.store, spec.task.repository_id, taskWorkflow(spec.task as any));
   spec.redactor.add(model.key);
   const previousRun=spec.task.trace_run_id;
-  const run=beginRun(spec.store,spec.task,spec.roleRun?.role==='qa'||spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
+  const run=beginRun(spec.store,spec.task,spec.roleRun?.role==='qa'||spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:spec.modelTrace??{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
   spec.task.trace_run_id=run?.id;
   const services: AgentServices = {
     model, guard: spec.guard,
     request: async (body, requestId, onToken) => {
+      if(spec.modelTrace?.source==='external_harness')return stop('external_harness_model_request','failed');
       if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.some((tool: any) => !tool || tool.type !== 'function' || !allowed.has(tool.function?.name))))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
       const choice = body.tool_choice;
@@ -109,7 +113,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   finally {spec.task.trace_run_id=previousRun;}
 }
 
-async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise<T> {
+export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise<T> {
   const maxTurns = spec.maxTurns ?? 16, maxOutput = spec.maxOutputChars ?? 32768;
   if (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 256 || !Number.isSafeInteger(maxOutput) || maxOutput < 1 || maxOutput > 2 * 1024 * 1024)
     return stop('agent_limits_invalid', 'waiting_configuration', 'Agent 运行限制配置无效。');

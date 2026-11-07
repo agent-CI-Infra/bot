@@ -38,3 +38,5 @@ Trusted integrations can add a driver through `registerRoleHarness(metadata, ada
 A registered driver can declare `session: task_records` when it cannot continue a transcript. The framework supplies task references, starts a fresh driver context and records `rebuilt_from_task_records` on subsequent calls. It does not label that path a continued conversation. Native process/PID resumption is not part of this first adapter contract.
 
 Role observations tolerate an evidence string by wrapping the unchanged text in a one-element evidence array, with a normalization event. Other submission-format errors get at most two local corrections in either harness, reusing existing observations. No acceptance verdict or completion boolean is weakened. Failed/interrupted assignments are marked accordingly; a resumed role is offered its prior failed submission source so it can repair packaging without repeating unchanged checks.
+
+统一会话生命周期与外部 ACP 执行器接入见 [Harness Runtime](harness-runtime.md)。第一阶段验证 Codex ACP；Native/Process 继续支持，角色结果仍由独立 QA 验收。
