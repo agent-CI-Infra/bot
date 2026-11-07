@@ -1,3 +1,4 @@
+import { ProjectMemory } from '../dist/memory/project.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -46,6 +47,8 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
   }
   executionCalls++;
   const context=JSON.parse(messages[1].content),multi=context.request.includes('multiple'),wanted=multi?['research','persistence']:['research'];
+  if(multi&&!names.includes('search_project_memory'))return send(call('search_project_memory',{query:'memory'},'memory-search'));
+  if(multi&&!names.includes('read_project_memory'))return send(call('read_project_memory',{id:memorySeed.id,revision:memorySeed.revision},'memory-read'));
   if(context.task.contract.source?.parent_task&&!names.includes('read_file'))return send(call('read_file',{path:'report.md'},'inherited-read'));
   if(context.task.contract.source?.parent_task&&!calls.some(c=>c.function.name==='read_file'&&JSON.parse(c.function.arguments).path==='../context/parent-proof.txt'))return send(call('read_file',{path:'../context/parent-proof.txt'},'parent-context-read'));
   if(context.task.contract.source?.parent_task)inheritedContextRead||=messages.some(m=>m.role==='tool'&&m.content.includes('PARENT_AUTHORIZED_CONTEXT'));
@@ -80,6 +83,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'fixture-model-token'},'model:m'),'now');
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
+ const memorySeed=new ProjectMemory(store).save('101','memory.reuse',{kind:'implementation',body:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',sources:[{reference:'controlled repository fixture'}],scope:{module:'memory'}},0,'user:owner','seed retrieval integration');
  const engine=new TaskEngine(store,manager,gh+'/github');
  for(const mode of ['single','multiple','return','insufficient_evidence','write-outage']){
   const id=randomBytes(24).toString('hex'),contract={goal:'Write an observed report '+mode,scope:['report'],criteria:['Report a concrete repository observation'],endpoint:'report',source:'request'};
@@ -103,6 +107,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    const decisions=store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",id).map(r=>JSON.parse(r.data).outcome);
    assert.deepEqual(decisions,[mode,'pass']);
   }
+  if(mode==='multiple'){assert.ok(!store.all("SELECT data FROM task_history WHERE task_id=? AND type='execution_evidence'",id).some(r=>r.data.includes('fixture-model-token')));const observed=store.get("SELECT id FROM task_history WHERE task_id=? AND type='execution_evidence' AND json_extract(data,'$.name')='read_project_memory'",id);assert.ok(observed);assert.ok(result.candidate.evidence.some(e=>e.source==='task_history:'+observed.id),'actual memory reads are offered to independent acceptance');}
   assert.ok(!JSON.stringify(result.candidate.evidence).includes('STALE_EVIDENCE_SENTINEL'));
   assert.equal(new Set(result.candidate.evidence.map(e=>e.result.execution)).size,1);
   assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='artifact_checkpoint'",id));

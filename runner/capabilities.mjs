@@ -5,7 +5,8 @@ export const platformWrites = { create_issue: 'issue', rerun_failed_run: 'action
 export function toolCapabilityError(config, name, args = {}) {
   const workspace = config.capabilities?.workspace || {};
   const github = config.capabilities?.github || {};
-  if (['read_file','read_task_history'].includes(name) && workspace.read !== true) return 'workspace_read_not_allowed';
+  if (['read_file','read_task_history','search_project_memory','read_project_memory'].includes(name) && workspace.read !== true) return 'workspace_read_not_allowed';
+  if (name === 'remember_project_memory' && workspace.notes !== true && workspace.write !== true) return 'memory_write_not_allowed';
   if (name === 'run_command' && workspace.shell !== true) return 'shell_not_allowed';
   if (name === 'write_file') {
     const note = typeof args.path === 'string' && args.path.startsWith('../notes/');

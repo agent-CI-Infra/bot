@@ -1,3 +1,4 @@
+import { memoryApi } from '../memory/api.js';
 import { interruptRuns, traceEvent, beginRun, endRun } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
 import { playbooks } from '../tasks/playbooks.js';
@@ -236,6 +237,7 @@ export class TaskEngine {
       // ReviewUpdated loop starts without this credit and must read the current object before continuing.
       let validatedPhase:'model'|'publish'|undefined;
       const accept=async(artifact:any, evidence:any[]=[])=>{
+        evidence=[...evidence,...this.store.all("SELECT id,data FROM task_history WHERE task_id=? AND type IN ('memory_read','memory_search') AND run_id IN(SELECT id FROM task_runs WHERE task_id=? AND kind='execution' AND attempt=?) ORDER BY id",id,id,task.attempt).map(row=>observation('task_history:'+row.id,sha(row.data),row.data))];
         const inputNow=JSON.parse(task.input||'{}');
         const before=records.get(id);
         const goal=development?inputNow.context?.implementation_goal||inputNow.object?.body||task.summary
@@ -796,6 +798,7 @@ export class TaskEngine {
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
+    const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;
     const contractMatch=/^\/api\/tasks\/([^/]+)\/contract$/.exec(url.pathname);
     if(contractMatch&&method==='PATCH'){
       fields(input,['contract','expected_revision']);const filter=scope(user,'repository_id');
