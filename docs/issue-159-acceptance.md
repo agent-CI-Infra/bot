@@ -32,7 +32,7 @@ The first verifier assertion incorrectly expected a bare source ID, while the mo
 | Second real Harness | Real #22 process Reviewer plus native roles; process driver and native driver separately run transport-recovery/session tests |
 | Cross-task role memory | Scoped namespace tests; actual fixed-version read in the second task; old experience is applicability-checked data |
 | Query-only factual reconstruction | Real HTTP/auth and fresh model experiment above; conclusions checked against actual role IDs and merge receipt |
-| Compatibility and nonblocking optional state | Existing task entry points retained, legacy review/event executors remain available; optional role-memory query failure explicitly continues; final frozen-source CI: 733 unit tests, 41 browser E2E tests and all four image checks passed |
+| Compatibility and nonblocking optional state | Existing task entry points retained, legacy review/event executors remain available; optional role-memory query failure explicitly continues; frozen core CI: 733 unit tests, 41 browser E2E tests and all four image checks passed; final head checks are attached to PR #160 |
 
 ## Disclosed corrections and limits
 
@@ -49,3 +49,5 @@ Detailed factual records and verification outputs are retained in [OpenToday evi
 Frozen framework source `19fed2e` passed local full regression **733/733**, focused role/trace/acceptance **53/53**, and GitHub required checks: unit **733/733**, browser E2E **41/41**, plus four image builds. A pre-existing cache-test assertion once matched the random hex substring `bad` in a valid commit hash; the assertion now checks invalid ref path components and its 12 targeted tests pass. No cache runtime behavior changed.
 
 The actual UX report initially used evidence strings where the output schema specified arrays. Role output now preserves the same text in a one-element array and records normalization; both harnesses support two bounded local format corrections, preserving inspected observations. Old failed submissions are offered by source on resume, and interrupted/failed assignment metadata is reconciled. The planned upgrade restart is a recorded intervention. The second task then completed through the original continuing role instances, without weakening QA's outcome or task criteria.
+
+A final explicit-map lookup regression also covers a custom role named `constructor`: harness selection uses own configuration properties rather than inherited JavaScript object members. The resulting focused role/trace/acceptance suite passed **54/54**. The final PR check run is the source for the final full-suite count.

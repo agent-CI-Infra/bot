@@ -11,7 +11,7 @@ import { ProjectMemory } from '../memory/project.js';
 export function roleConfig(store:AgentSpec<any>['store'],task:AgentSpec<any>['task']){const saved=store.get('SELECT value FROM settings WHERE key=?','roles:'+task.repository_id);return saved?JSON.parse(saved.value):{enabled:false,harnesses:{}};}
 export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:string,harnessOverride?:string):Promise<{result:T;reference:string;instance_id:string}>{
  const model=spec.model??selectedModel(spec.store,spec.task.repository_id,taskWorkflow(spec.task as any));spec.redactor.add(model.key);
- const s=spec.store,task=spec.task,config=roleConfig(s,task);let definition=roleDefinition(role,config),harness=harnessOverride??config.harnesses?.[role]??definition.harness;
+ const s=spec.store,task=spec.task,config=roleConfig(s,task);let definition=roleDefinition(role,config),harness=harnessOverride??definition.harness;
  roleHarness(harness);
  let instance=s.get('SELECT * FROM role_instances WHERE task_id=? AND role=?',task.id,role);
  if(!instance){const id=randomId();s.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES(?,?,?,?,?,?)',id,task.id,role,JSON.stringify(definition),harness,new Date().toISOString());instance=s.get('SELECT * FROM role_instances WHERE id=?',id)!;}
