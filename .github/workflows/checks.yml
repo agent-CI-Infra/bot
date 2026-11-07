@@ -31,8 +31,12 @@ jobs:
           cache: npm
 
       - run: npm ci
+      # The Pi SDK of the project computer image, for the real Pi controller test; BOT_REQUIRE_PI turns a skip into a failure.
+      - run: npm ci --prefix runner --omit=dev --ignore-scripts
       - run: npm run check
       - run: npm test
+        env:
+          BOT_REQUIRE_PI: '1'
 
       - name: Compose files
         run: |
