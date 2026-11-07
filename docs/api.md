@@ -86,3 +86,5 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 - `POST /api/models/:id/upstream` 可带 `version`、草稿 `api_url`／`api_key`，在编辑权限下使用草稿或已保存 Key 获取列表，不保存这些值；空 Key 使用该模型已保存的 Key。旧的单模型 API 保持兼容。
 
 任务运行、来源保留上限及详情投影的完整说明见 [Task trace](task-trace.md)。文本交付按原始 UTF-8 正文 2 MiB 限制，JSON 转义后的包裹体另有 16 MiB 上限；超限保留路径、版本、读取/脱敏状态及哈希，仅省略正文。
+
+项目记忆（沿用项目权限）：`GET/POST /api/repositories/:repo/memories` 查询/建立条目，GET 支持 query、module、source、kind、status、baseline、after、limit（1–50）、include_superseded=1；`GET/PATCH .../memories/:id` 读取指定 revision 或按 expected_revision 更新，支持 supersedes 同项目 ID 数组；`GET .../:id/versions` 查询修订与来源关系；`POST .../:id/document` 从真实 GitHub PR 和文件验证仓库文档关联。具体契约见 [Project memory](project-memory.md)。
