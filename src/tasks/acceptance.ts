@@ -1,3 +1,4 @@
+import { runRole } from '../roles/run.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
@@ -62,7 +63,7 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
       }
     }
     const model=selectedModel(store,task.repository_id,taskWorkflow(task as any));
-    const verdict=await runAgent({store,task,redactor,guard,model,maxOutputTokens:/^deepseek/i.test(model.model)?16384:8192,system:acceptanceSystem,
+    const {result:verdict}=await runRole({store,task,redactor,guard,model,maxOutputTokens:/^deepseek/i.test(model.model)?16384:8192,system:acceptanceSystem,
       prompt:JSON.stringify({project_memory:hasMemory?new ProjectMemory(store).context({...task,head_sha:snapshot?.local_sha||task.head_sha}):undefined,contract:record.contract,revision:record.revision,project:record.project,candidate,previous_verification_evidence:previousVerificationEvidence(store,task.id,candidate),related_deliveries:related.map(r=>r.description),context_files:[...new Set([...Object.keys(parentContext?JSON.parse(parentContext.row.input||'{}').context_files||{}:{}),...Object.keys(sourceInput.context_files||{}),...(parentContext?['parent-delivery.json','related-deliveries.json']:[])])].map(p=>'../context/'+p),additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
         delivery_boundary:files?.kind==='code'?{stage:'pre_publication',remaining:'Framework creates or updates the PR after acceptance; judge candidate readiness, do not require an unpublished URL or claim it exists.'}:undefined,
         policy:{test_command:candidate.artifacts.some(a=>a.kind==='code')?store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||null:null},workspace:'Candidate files are available at their original paths.'}),
@@ -80,7 +81,7 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
       },validate:content=>{
         let value;try{value=JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{return stop('acceptance_output_invalid','retry_wait','验收器未返回有效 JSON。');}
         return validateDecision(value);
-      }});
+      }},'qa');
     records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict},verificationRun?.id);verificationOutcome=verdict.outcome;return verdict;
   } catch(error) {
     verificationFault=(error as any).code||'runtime_fault';

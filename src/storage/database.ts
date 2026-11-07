@@ -1,3 +1,4 @@
+import { roleStorage } from '../roles/storage.js';
 import { memoryStorage } from '../memory/project.js';
 import { traceStorage } from '../tasks/trace.js';
 import { taskStorage } from '../tasks/storage.js';
@@ -167,6 +168,7 @@ export class Store {
     taskStorage(this);
     traceStorage(this);
     memoryStorage(this);
+    roleStorage(this);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }
