@@ -50,9 +50,12 @@ export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:Adapter
 }
 export function roleHarness(id:string){
  if(!adapters.has(id))throw new Error('unknown_role_harness');const factory=adapters.get(id);
- return {...harnesses.find(h=>h.id===id)!,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
+ const createSession=<T>(spec:AgentSpec<T>,services:AgentServices)=>{
   const emit=(event:import('../harness/session.js').HarnessEvent)=>traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');
-  const session=managedSession(async signal=>{const wrapped={...spec,executionSignal:signal,guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});},emit);
+  return managedSession(async signal=>{const wrapped={...spec,executionSignal:signal,guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});},emit);
+ };
+ return {...harnesses.find(h=>h.id===id)!,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
+  const session=createSession(spec,services);
   try{return await session.run();}finally{await session.close();}
  }};
 }
