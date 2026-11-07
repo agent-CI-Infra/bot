@@ -16,7 +16,7 @@ test('run snapshots survive reopen and input/config changes; interrupted run and
  s.run("UPDATE task_tools SET state='completed',result=? WHERE id='op'",JSON.stringify({exit_code:0,output:'actual observed result'}));
  s.run("UPDATE tasks SET input=? WHERE id='t'",JSON.stringify({request:'changed later'}));s.close();s=new Store(path,Buffer.alloc(32));interruptRuns(s);
  const next=beginRun(s,{id:'t'},'execution',{prompt:'resumed'});assert.equal(s.get('SELECT previous_run_id FROM task_runs WHERE id=?',next.id).previous_run_id,run.id);
- const first=taskTrace(s,'t',url(),'runs').runs[0];assert.equal(first.status,'interrupted');assert.equal(first.context_snapshot.data.input.request,undefined);assert.equal(first.config_snapshot.data.prompt,'original');assert.equal(first.config_snapshot.data.api_key,undefined);
+ const first=taskTrace(s,'t',url('?include_snapshots=1'),'runs').runs[0];assert.equal(first.status,'interrupted');assert.equal(first.context_snapshot.data.input.request,undefined);assert.equal(first.config_snapshot.data.prompt,'original');assert.equal(first.config_snapshot.data.api_key,undefined);
  const ops=taskTrace(s,'t',url('?type=operation'),'events').events;assert.equal(ops.length,2);assert.equal(ops[0].run_id,run.id);assert.match(JSON.stringify(ops[1]),/actual observed result/);assert.doesNotMatch(JSON.stringify(ops),/SECRET/);
  assert.ok(traceSource(s,'t',ops[1].event_id).complete);assert.throws(()=>traceSource(s,'foreign',ops[1].event_id));
  endRun(s,next,'succeeded');endRun(s,next,'succeeded');assert.equal(s.get("SELECT count(*) n FROM task_history WHERE type='run_ended' AND run_id=?",next.id).n,1);

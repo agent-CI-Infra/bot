@@ -295,3 +295,12 @@ test('transport retry budget is bounded and permanent errors are never retried',
   await assert.rejects(runAgent(f.spec), e => e.code === 'model_authentication_failed');
   assert.equal(f.requests.length, 3);
 });
+
+test('trace retains actual sanitized model I/O and immutable run configuration without private reasoning', async t => {
+  const f=await fixture(t);f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('domain-run','r','task.request','running','trace input')");
+  f.respond(()=>({choices:[{message:{content:'public result',reasoning_content:'PRIVATE_REASONING_SENTINEL'}}],usage:{prompt_tokens:5,completion_tokens:2}}));
+  assert.equal(await runAgent({...f.spec,prompt:'source input',requestPrefix:'acceptance:trace:'}), 'public result');
+  const run=f.store.get('SELECT * FROM task_runs'),request=f.store.get('SELECT * FROM model_requests');assert.equal(run.kind,'acceptance');assert.equal(run.status,'succeeded');assert.equal(request.run_id,run.id);
+  const input=JSON.parse(request.request_snapshot),output=JSON.parse(request.response_snapshot);assert.ok(input.complete&&output.complete);assert.equal(input.data.messages[1].content,'source input');assert.equal(output.data.choices[0].message.content,'public result');assert.doesNotMatch(JSON.stringify(output),/PRIVATE_REASONING_SENTINEL/);
+  f.store.run("UPDATE models SET model_name='later-config' WHERE id='m'");assert.equal(JSON.parse(run.config_snapshot).data.model.name,'fixture');assert.doesNotMatch(run.config_snapshot,/secret-model-key/);
+});
