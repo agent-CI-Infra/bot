@@ -16,7 +16,7 @@ export interface AgentSpec<T> {
   store: Store;
   session?: { messages:any[]; save:(messages:any[])=>void };
   onRun?: (id:string)=>void;
-  roleRun?: {instance_id:string;role:string;version:string;harness:string;assignment_id?:string;recovery_mode:string};
+  roleRun?: {instance_id:string;role:string;version:string;harness:string;harness_version?:string;assignment_id?:string;recovery_mode:string};
   task: Row;
   redactor: Redactor;
   guard: () => Promise<void>;
@@ -79,7 +79,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   const run=beginRun(spec.store,spec.task,spec.roleRun?.role==='qa'||spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
   spec.task.trace_run_id=run?.id;
   if(run)spec.onRun?.(run.id);
-  if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,'1',r.assignment_id??null,r.recovery_mode,run.id);}
+  if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,r.harness_version??'1',r.assignment_id??null,r.recovery_mode,run.id);}
   const services: AgentServices = {
     model, guard: spec.guard,
     request: async (body, requestId, onToken) => {

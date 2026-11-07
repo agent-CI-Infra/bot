@@ -1,3 +1,4 @@
+import { harnesses } from './pool.js';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -6,7 +7,9 @@ import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
 /** The worker cannot access provider credentials or obtain arbitrary tools. */
 export function processHarness<T>(spec:AgentSpec<T>){return async(services:AgentServices):Promise<T>=>new Promise((resolve,reject)=>{
+ const runId=spec.task.trace_run_id;
  const child=spawn(process.execPath,[fileURLToPath(new URL('../../runner/role-worker.mjs',import.meta.url))],{env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'},stdio:['pipe','pipe','pipe']});
+ child.once('spawn',()=>traceEvent(spec.store,spec.task.id,'harness_started',{harness:'process',version:'1',pid:child.pid,recovery:'checkpoint_transcript'},runId));
  const lines=createInterface({input:child.stdout});let settled=false,result:T,requests=0,pending=Promise.resolve();let bytes=0;
  const fail=(e:unknown)=>{if(settled)return;settled=true;child.kill('SIGKILL');reject(e);};
  child.on('error',fail);child.stderr.resume();child.stdin.on('error',fail);child.on('close',code=>{if(!settled)fail(new Error('role_worker_exit:'+code));});
@@ -29,3 +32,13 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
  });
  child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,maxTurns:spec.maxTurns??32}})+'\n');
 });}
+
+export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string}
+type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
+const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness]]);
+/** Extensions are registered by trusted integration code, never by task text or a model tool. */
+export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
+ if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!metadata.session||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
+ adapters.set(metadata.id,factory);harnesses.push({...metadata});
+}
+export function roleHarness(id:string){if(!adapters.has(id))throw new Error('unknown_role_harness');return {...harnesses.find(h=>h.id===id)!,adapter:adapters.get(id)};}
