@@ -6,7 +6,7 @@
 
 两种 transport 使用同一入口：
 
-- 工作区任务使用 `loop.ts` 的 Pi mailbox adapter，在隔离项目电脑中读取文件、执行命令和产生修改。`profiles.ts` 把固定的硬限制和工作流提示词组合成系统提示，并按工作流保存的权限生成工具和显式 capabilities。
+- 工作区任务使用正式的 Pi harness（`src/agent/pi.ts` 的 `piAdapter`），在隔离项目电脑中读取文件、执行命令和产生修改；`loop.ts` 只组装工作流的配置和工具回调。`profiles.ts` 把固定的硬限制和工作流提示词组合成系统提示，并按工作流保存的权限生成工具和显式 capabilities。同一个 harness 也运行项目主控会话（见 [Role-Pool](role-pool.md)）：会话配置里的 `control_tools` 由 runner 经控制邮箱交给控制面执行，等待没有期限；控制面只执行本次会话提供过的工具，并在回复里用 `finish` 标出被接受的提交。
 - CI 观察（`release.observe`）、发行说明（`release.notes`）、Actions 失败处理（`actions.failures`）和接入门禁（`gate.onboarding`，对话的每一轮是一个任务）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 只留给控制面的工作流助手。
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
@@ -23,7 +23,7 @@ Issue、PR 或 Actions 失败提供任务起点，不限制证据只能来自这
 
 Pi 在进程内串行执行 `github_read_token` 的令牌交换，控制面继续读取单个 `token-request.json`。活动或排队中的交换取消后及时返回 `github_read_token_cancelled`，后续调用可以继续；清理请求文件前核对请求 ID，避免删除其他调用的请求。`read_file`、发布与会话 boundary 不进入令牌队列。
 
-升级时同步更新控制面、manager 和项目电脑镜像；Pi 的结构化读取使用新的 `workspace_agent_repository_tool` 邮箱操作，旧 manager/runner 不支持该操作。
+升级时同步更新控制面、manager 和项目电脑镜像；Pi 的结构化读取使用新的 `workspace_agent_repository_tool` 邮箱操作，旧 manager/runner 不支持该操作。项目主控另用 `workspace_agent_runtime`（报告 runner 实际安装的 Pi SDK 版本）和 `workspace_agent_control_tool`（控制面工具的回复），旧项目电脑镜像会返回 `pi_runtime_unavailable` 并等待升级。Pi 的会话事件 `pi_session` 记录实际 SDK 版本、提供的工具以及没有混入的扩展、技能和上下文文件；`src/agent/pi.ts` 固定的版本与 `runner/package.json` 由 `npm run check` 核对一致。
 
 Pi 在仓库工具内部串行使用邮箱，其他工具仍可并行执行。每个已进入邮箱的仓库请求最多等待 120 秒，超时返回 `repository_tool_timeout`；超时或取消后的迟到回复不会中断任务。共享执行器按现有 2 MiB 邮箱容量检查脱敏后 JSON 的 UTF-8 字节数，超出时向观察循环和 Pi 返回完整的 `repository_result_too_large` 工具错误。例如 `/git/trees/<sha>?recursive=1` 的结果无法投递时，模型应缩小 path、去掉 recursive 或继续分页，并用 page/per_page 减小每页结果；不会截断 JSON 后冒充成功结果。
 
