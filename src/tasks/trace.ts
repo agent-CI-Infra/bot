@@ -7,11 +7,18 @@ import { randomId, fail } from '../core/security.js';
 const botVersion=(()=>{try{return process.env.BOT_VERSION||execFileSync('git',['rev-parse','HEAD'],{cwd:fileURLToPath(new URL('../../',import.meta.url)),encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();}catch{return 'unknown';}})();
 const now=()=>new Date().toISOString();
 function atomic<T>(store:Store,fn:()=>T):T{const name='trace_'+randomId();store.db.exec('SAVEPOINT '+name);try{const result=fn();store.db.exec('RELEASE '+name);return result;}catch(error){store.db.exec('ROLLBACK TO '+name);store.db.exec('RELEASE '+name);throw error;}}
-export function traceClean(value:any):any {
-  if(typeof value==='string'){if(/^[\[{]/.test(value)){try{return JSON.stringify(traceClean(JSON.parse(value)));}catch{}}return value.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,'[REDACTED]').replace(/\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{15,}|Bearer\s+[\w.\/-]+)/gi,'[REDACTED]').replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/g,'$1[REDACTED]@');}
-  if(Array.isArray(value))return value.map(traceClean);
-  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/^(api_?key|authorization|credentials|claim_token|token|password|private_key|reasoning.*|thinking.*|analysis|base64)$/i.test(k)).map(([k,v])=>[k,traceClean(v)]));
+export function traceClean(value:any,literal=false):any {
+  if(typeof value==='string'){if(!literal&&/^[\[{]/.test(value)){try{return JSON.stringify(traceClean(JSON.parse(value)));}catch{}}return value.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,'[REDACTED]').replace(/\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{15,}|Bearer\s+[\w.\/-]+)/gi,'[REDACTED]').replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/g,'$1[REDACTED]@');}
+  if(Array.isArray(value))return value.map(v=>traceClean(v,literal));
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/^(api_?key|authorization|credentials|claim_token|token|password|private_key|reasoning.*|thinking.*|analysis|base64)$/i.test(k)).map(([k,v])=>[k,traceClean(v,literal||(k==='content'&&value.encoding==='utf8'))]));
   return value;
+}
+export function retainedTextArtifact(path:string,version:string,data:Buffer,expectedBytes:number,redact:(text:string)=>string){
+  const original=data.toString('utf8'),content=traceClean({encoding:'utf8',content:redact(original)}).content;
+  const read_complete=data.length===expectedBytes,binary=!Buffer.from(original).equals(data),sanitized=content!==original;
+  const blob=(bytes:Buffer)=>createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  const captured=Buffer.from(content),matches=blob(data)===version,complete=read_complete&&!binary&&!sanitized&&matches;
+  return {path,version,encoding:'utf8',content,read_complete,complete,binary,sanitized,captured_blob_sha:blob(captured),content_sha256:createHash('sha256').update(captured).digest('hex'),missing_reason:!read_complete?'blob_unavailable':binary?'binary_utf8_conversion':sanitized?'sanitized_representation':!matches?'blob_hash_mismatch':null};
 }
 export function traceSnapshot(value:any){
   const clean=traceClean(value),text=JSON.stringify(clean??null),bytes=Buffer.byteLength(text);
@@ -31,7 +38,7 @@ export function traceStorage(store:Store){
   store.db.exec(`CREATE INDEX IF NOT EXISTS task_history_run ON task_history(task_id,run_id,id);
     DROP TRIGGER IF EXISTS trace_history_scope;
     CREATE TRIGGER trace_history_scope AFTER INSERT ON task_history BEGIN
-      UPDATE task_history SET run_id=coalesce(NEW.run_id,(SELECT id FROM task_runs WHERE task_id=NEW.task_id AND (status='running' OR kind=CASE WHEN NEW.type IN ('candidate','artifact_checkpoint','checkpoint') THEN 'execution' WHEN NEW.type LIKE 'acceptance%' THEN 'acceptance' ELSE 'none' END) ORDER BY rowid DESC LIMIT 1)),actor=CASE WHEN NEW.actor NOT IN ('framework','legacy_unknown') THEN NEW.actor WHEN NEW.type='execution_evidence' THEN 'executor' WHEN NEW.type LIKE 'acceptance%' THEN 'verifier' ELSE 'framework' END,source_ref=coalesce(NEW.source_ref,'task_history:'||NEW.id) WHERE id=NEW.id;
+      UPDATE task_history SET run_id=CASE WHEN NEW.type IN ('acceptance','acceptance_staged') THEN NEW.run_id ELSE coalesce(NEW.run_id,(SELECT id FROM task_runs WHERE task_id=NEW.task_id AND (status='running' OR kind=CASE WHEN NEW.type IN ('candidate','artifact_checkpoint','checkpoint') THEN 'execution' WHEN NEW.type LIKE 'acceptance%' THEN 'verification' ELSE 'none' END) ORDER BY rowid DESC LIMIT 1)) END,actor=CASE WHEN NEW.actor NOT IN ('framework','legacy_unknown') THEN NEW.actor WHEN NEW.type='execution_evidence' THEN 'executor' WHEN NEW.type LIKE 'acceptance%' THEN 'verifier' ELSE 'framework' END,source_ref=coalesce(NEW.source_ref,'task_history:'||NEW.id) WHERE id=NEW.id;
       UPDATE task_runs SET candidate_id=json_extract(NEW.data,'$.id') WHERE id=(SELECT run_id FROM task_history WHERE id=NEW.id) AND NEW.type='candidate';
     END;`);
   store.db.exec(`CREATE TRIGGER IF NOT EXISTS trace_audit_task AFTER INSERT ON audit WHEN EXISTS(SELECT 1 FROM tasks WHERE id=NEW.resource_id) BEGIN
@@ -91,6 +98,6 @@ export function taskTrace(store:Store,taskId:string,url:URL,section:string){
   let sql='task_id=? AND id>?';const args:any[]=[taskId,after];
   for(const [param,col] of [['run_id','run_id'],['type','type']]){const v=url.searchParams.get(param!);if(v){sql+=` AND ${col}=?`;args.push(v);}}
   for(const field of ['revision','candidate_id']){const value=url.searchParams.get(field);if(value){const filter=field==='revision'?Number(value):value;if(field==='revision'&&(!Number.isSafeInteger(filter)||Number(filter)<1))fail(400,'invalid_task_revision');sql+=` AND (json_extract(data,'$.${field}')=? OR run_id IN(SELECT id FROM task_runs WHERE ${field}=? AND task_id=?)${field==='candidate_id'?" OR (type='candidate' AND json_extract(data,'$.id')=?)":''})`;args.push(filter,filter,taskId,...(field==='candidate_id'?[filter]:[]));}}
-  const rows=store.all(`SELECT * FROM task_history WHERE ${sql} ORDER BY id LIMIT ?`,...args,limit+1),more=rows.length>limit;rows.splice(limit);
-  return {events:rows.map(r=>({...r,event_id:'task_history:'+r.id,data:traceClean(JSON.parse(r.data)),caused_by:JSON.parse(r.caused_by)})),next_after:more?rows.at(-1)!.id:null,coverage:{legacy_run_links_may_be_missing:true}};
+  const rows=store.all(`SELECT id,task_id,type,created_at,run_id,actor,source_ref,caused_by,schema_version,length(data) AS body_chars,CASE WHEN length(data)<=8192 THEN data END AS data FROM task_history WHERE ${sql} ORDER BY id LIMIT ?`,...args,limit+1),more=rows.length>limit;rows.splice(limit);
+  return {events:rows.map(r=>({...r,event_id:'task_history:'+r.id,data:r.data&&url.searchParams.get('include_data')==='1'?traceClean(JSON.parse(r.data)):{body_omitted:true,source:'task_history:'+r.id,characters:r.body_chars},caused_by:JSON.parse(r.caused_by)})),next_after:more?rows.at(-1)!.id:null,coverage:{legacy_run_links_may_be_missing:true}};
 }

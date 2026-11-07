@@ -392,6 +392,7 @@ function renderTaskSide(detail, environment) {
     }
     section.append(list); side.append(section);
   }
+  if(detail.history_page){const section=card('结构化过程记录'),index=element('a','按需查看分页索引');index.href='/api/tasks/'+encodeURIComponent(task.id)+'/events?limit=50';index.target='_blank';index.rel='noopener noreferrer';section.append(index,element('p','详情只保留最近 50 条索引；记录正文通过索引中的 source 引用读取。','muted'));side.append(section);}
   const raw = element('details', '', 'fold raw'); raw.append(element('summary', '原始数据'), element('pre', JSON.stringify(detail, null, 2), 'output')); side.append(raw);
 }
 function computerCard(task, environment) {

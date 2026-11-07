@@ -16,6 +16,15 @@ const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.reposit
   error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail,row.retry_cycle_started_at),retry_count:row.retry_count,
   retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
 
+function detailState(store:Store,id:string){
+ const state=new TaskRecords(store).get(id),candidate=state.candidate;
+ if(candidate)state.candidate={...candidate,claims:{preview:JSON.stringify(candidate.claims??null).slice(0,1500),body_omitted:true},artifacts:candidate.artifacts.map(({content,...a})=>({...a,content:{body_omitted:true}})),evidence:candidate.evidence.map(({result,...e})=>({...e,result:{body_omitted:true}}))};
+ return state;
+}
+function detailHistory(store:Store,id:string){
+ const rows=store.all('SELECT id,type,created_at,run_id FROM task_history WHERE task_id=? ORDER BY id DESC LIMIT 51',id),more=rows.length>50;rows.splice(50);rows.reverse();
+ return {history:rows.map(h=>({...h,event_id:'task_history:'+h.id,source_ref:'task_history:'+h.id})),history_page:{has_older:more,events_url:'/api/tasks/'+id+'/events',limit:50}};
+}
 const pushedSha="(SELECT json_extract(data,'$.remote_sha') FROM development_candidates WHERE task_id=tasks.id) AS pushed_sha";
 const repositoryName='(SELECT full_name FROM repositories WHERE id=tasks.repository_id) AS full_name';
 const faultDetail="(SELECT json_extract(content,'$.detail') FROM task_logs WHERE task_id=tasks.id AND json_valid(content) AND json_extract(content,'$.type')='fault' AND json_extract(content,'$.code')=tasks.error_code ORDER BY rowid DESC LIMIT 1)";
@@ -61,7 +70,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   if (task) {
     const row = store.get(`SELECT *,${repositoryName},${pushedSha},${faultDetail} AS error_detail FROM tasks WHERE id=? AND ${filter.sql}`, task[1]!, ...filter.args);
     if (!row) return fail(404, 'task_not_found');
-    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],structured:new TaskRecords(store).get(row.id),error_detail:row.error_detail||null},history:store.all('SELECT id,type,data,created_at FROM task_history WHERE task_id=? ORDER BY id',row.id).map(h=>({...h,data:JSON.parse(h.data)})),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
+    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
   }
   if (path === '/api/audit') return { audit: store.all(`SELECT * FROM audit WHERE ${filter.sql}${repo ? ' AND repository_id=?' : ''}
     ORDER BY created_at DESC LIMIT 100`, ...filter.args, ...(repo ? [repo] : [])) };
