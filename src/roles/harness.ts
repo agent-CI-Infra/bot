@@ -9,7 +9,8 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
  const runId=spec.task.trace_run_id;
  const child=spawn(process.execPath,[fileURLToPath(new URL('../../runner/role-worker.mjs',import.meta.url))],{env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'},stdio:['pipe','pipe','pipe']});
  child.once('spawn',()=>traceEvent(spec.store,spec.task.id,'harness_started',{harness:'process',version:'1',pid:child.pid,recovery:'checkpoint_transcript'},runId));
- const lines=createInterface({input:child.stdout});let settled=false,result:T,requests=0,pending=Promise.resolve();let bytes=0;
+ const lines=createInterface({input:child.stdout});let settled=false,result:T,requests=0,pending=Promise.resolve();let bytes=0,repairs=0;
+ const repair=(error:unknown)=>{const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;return {error:'invalid_submission',message:spec.redactor.text(feedback)};};
  const fail=(e:unknown)=>{if(settled)return;settled=true;child.kill('SIGKILL');reject(e);};
  child.on('error',fail);child.stderr.resume();child.stdin.on('error',fail);child.on('close',code=>{if(!settled)fail(new Error('role_worker_exit:'+code));});
  lines.on('line',line=>{bytes+=line.length;if(bytes>64*1024*1024){fail(new Error('role_worker_output_limit'));return;}
@@ -22,9 +23,9 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
    else if(m.method==='tool'){
     const offered=spec.tools?.some(t=>t.function.name===m.args.name);
     if(!offered||!m.args.offered)value={error:'tool_not_allowed'};
-    else if(m.args.name===spec.finish?.name){result=await spec.finish!.validate(m.args.args);value={submitted:true};}
+    else if(m.args.name===spec.finish?.name){try{result=await spec.finish!.validate(m.args.args);value={submitted:true};}catch(error){value=repair(error);}}
     else {value=await spec.execute?.(m.args.name,m.args.args);traceEvent(spec.store,spec.task.id,'tool_observation',{name:m.args.name,arguments:spec.redactor.clean(m.args.args),observation:spec.redactor.clean(value)},spec.task.trace_run_id,'tool');}
-   }else if(m.method==='final'){if(typeof m.args!=='string')stop('agent_output_invalid','retry_wait');result=spec.validate?await spec.validate(m.args):spec.redactor.text(m.args) as T;value={submitted:true};}
+   }else if(m.method==='final'){if(typeof m.args!=='string')stop('agent_output_invalid','retry_wait');try{result=spec.validate?await spec.validate(m.args):spec.redactor.text(m.args) as T;value={submitted:true};}catch(error){value=repair(error);}}
    else throw new Error('role_worker_protocol');
    child.stdin.write(JSON.stringify({id:m.id,result:spec.redactor.clean(value)})+'\n');
   }).catch(fail);
@@ -38,7 +39,7 @@ type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>
 const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
- if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!metadata.session||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
+ if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
  adapters.set(metadata.id,factory);harnesses.push({...metadata});
 }
 export function roleHarness(id:string){if(!adapters.has(id))throw new Error('unknown_role_harness');return {...harnesses.find(h=>h.id===id)!,adapter:adapters.get(id)};}

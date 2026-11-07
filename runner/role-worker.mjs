@@ -23,7 +23,7 @@ async function run(c){
     if(call.function.name===c.finish&&result.submitted){for(const pending of message.tool_calls.slice(message.tool_calls.indexOf(call)+1))messages.push({role:'tool',tool_call_id:pending.id,content:'{"skipped":"execution_submitted"}'});await rpc('checkpoint',messages);send({done:true});lines.close();return;}
     await rpc('checkpoint',messages);
    }
-  }else{const result=await rpc('final',message?.content);messages.push({role:'assistant',content:message.content});await rpc('checkpoint',messages);send({done:true,result});lines.close();return;}
+  }else{const result=await rpc('final',message?.content);messages.push({role:'assistant',content:message.content});if(result?.error==='invalid_submission'){messages.push({role:'user',content:result.message});await rpc('checkpoint',messages);continue;}await rpc('checkpoint',messages);send({done:true,result});lines.close();return;}
  }
  throw Error('agent_turn_limit');
 }
