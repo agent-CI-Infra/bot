@@ -92,8 +92,8 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
       for (let attempt = 0; ; attempt++) {
         try { return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken }); }
         catch (error) {
-          const transient = error instanceof TaskError && (error.code === 'model_unavailable' || /^model_http_(429|5\d\d)$/.test(error.code));
-          if (!transient || attempt + 1 >= attempts) throw error;
+          const transient = error instanceof TaskError && (error.code === 'model_unavailable' || error.code==='model_response_invalid' || /^model_http_(429|5\d\d)$/.test(error.code));
+          if (!transient || attempt + 1 >= attempts) {if(error instanceof TaskError&&error.code==='model_response_invalid')return stop(error.code,'retry_wait',error.detail);throw error;}
           if (spec.task.id && spec.store.get('SELECT id FROM tasks WHERE id=?', spec.task.id)) spec.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), spec.task.id,
             JSON.stringify({ type: 'model_retry', code: error.code, request_id: requestId, retry: attempt + 1 }), new Date().toISOString());
           await new Promise(resolve => setTimeout(resolve, 1000 * 3 ** attempt));

@@ -1,3 +1,4 @@
+import { cleanRoleMessages } from './storage.js';
 import { selectedModel } from '../agent/model.js';
 import { taskWorkflow } from '../workflows/resolve.js';
 import { runAgent,type AgentSpec } from '../agent/runtime.js';
@@ -16,7 +17,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  if(!instance){const id=randomId();s.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES(?,?,?,?,?,?)',id,task.id,role,JSON.stringify(definition),harness,new Date().toISOString());instance=s.get('SELECT * FROM role_instances WHERE id=?',id)!;}
  // Configuration updates affect new instances, not an existing continuing session.
  definition=JSON.parse(instance.definition);harness=instance.harness;
- const stored=JSON.parse(instance.session),messages=role==='qa'?[]:stored;
+ const stored=cleanRoleMessages(JSON.parse(instance.session)),messages=role==='qa'?[]:stored;
  // A crash can leave an assistant tool batch partially answered. Mark absent receipts as
  // interrupted, never fabricate their observations; the role must query durable task facts.
  for(let i=0;i<messages.length;i++){const msg=messages[i];if(msg.role!=='assistant'||!msg.tool_calls?.length)continue;const replies=new Set<string>();let end=i+1;while(messages[end]?.role==='tool'){replies.add(messages[end].tool_call_id);end++;}const missing=msg.tool_calls.filter((c:any)=>!replies.has(c.id)).map((c:any)=>({role:'tool',tool_call_id:c.id,content:JSON.stringify({error:'interrupted_observation',instruction:'Inspect task records before repeating any action.'})}));messages.splice(end,0,...missing);i=end+missing.length-1;}
@@ -26,7 +27,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  const memory=new ProjectMemory(s).search(task.repository_id,'',{role,limit:5,baseline:task.head_sha});
  const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
  let executionRun:string|undefined;
- const wrapped:AgentSpec<T>={...spec,model,onRun:id=>{executionRun=id;spec.onRun?.(id);},tools:[...(spec.tools??[]),...memoryAliases],execute:async(name,args)=>{if(memoryAliases.some(t=>t.function.name===name))return spec.execute?.(name.replace('_role_','_project_'),{...args,role_scope:role});return spec.execute?.(name,args);},system:definition.prompt+'\n'+spec.system,prompt:JSON.stringify({...(()=>{try{return JSON.parse(sourceInput);}catch{return {input:sourceInput};}})(),role_context:{assignment_ref:snapshot,role_memory:memory}}),requestPrefix:`role:${instance.id}:${instance.sequence}:`,roleRun:{instance_id:instance.id,role,version:definition.version,harness,assignment_id:assignment,recovery_mode:recover},session:{messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(spec.redactor.clean(msgs)),new Date().toISOString(),instance!.id);}}};
+ const wrapped:AgentSpec<T>={...spec,model,onRun:id=>{executionRun=id;spec.onRun?.(id);},tools:[...(spec.tools??[]),...memoryAliases],execute:async(name,args)=>{if(memoryAliases.some(t=>t.function.name===name))return spec.execute?.(name.replace('_role_','_project_'),{...args,role_scope:role});return spec.execute?.(name,args);},system:definition.prompt+'\n'+spec.system,prompt:JSON.stringify({...(()=>{try{return JSON.parse(sourceInput);}catch{return {input:sourceInput};}})(),role_context:{assignment_ref:snapshot,role_memory:memory}}),requestPrefix:`role:${instance.id}:${instance.sequence}:`,roleRun:{instance_id:instance.id,role,version:definition.version,harness,assignment_id:assignment,recovery_mode:recover},session:{messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(cleanRoleMessages(spec.redactor.clean(msgs))),new Date().toISOString(),instance!.id);}}};
  s.run('UPDATE role_instances SET sequence=sequence+1 WHERE id=?',instance.id);
  if(harness==='process')wrapped.adapter=processHarness(wrapped);
  const previousRole=task.active_role;task.active_role=role;let result:T;try{result=await runAgent(wrapped);}finally{task.active_role=previousRole;}
