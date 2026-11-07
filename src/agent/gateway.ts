@@ -1,3 +1,4 @@
+import { traceSnapshot } from '../tasks/trace.js';
 import type { Store, Row } from '../storage/database.js';
 import { beginModelRequest, finishModelRequest } from '../metrics/accounting.js';
 import { errorBody, networkReason, type Redactor, stop, TaskError } from './common.js';
@@ -43,6 +44,8 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   // enter the same repository/model ledger; the request identity retains their provenance.
   const ledgerTask = { ...task, id: task.id && store.get('SELECT id FROM tasks WHERE id=?', task.id) ? task.id : null };
   const requestLog = beginModelRequest(store, ledgerTask, `${task.kind}:${task.id ?? 'run'}:${requestId}`, model);
+  const captured=redactor.clean({ ...requestBody, model: model.model, [limit]: outputTokens, stream: true, stream_options: { include_usage: true } });
+  store.run('UPDATE model_requests SET run_id=?,request_snapshot=? WHERE id=?',task.trace_run_id??null,traceSnapshot(captured),requestLog);
   const controller = new AbortController();
   let callbackFailed = false;
   let lastGuard = -Infinity;
@@ -67,10 +70,12 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
       catch (error) { callbackFailed = true; throw error; }
     }) : await errorBody(response);
   } catch (error) {
+    store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',traceSnapshot({error:callbackFailed?'guard_failed':error instanceof TaskError?error.code:'transport_error'}),requestLog);
     finishModelRequest(store, requestLog, null, response?.status ?? null, callbackFailed ? 'guard_failed' : error instanceof TaskError ? 'invalid_response' : 'transport_error');
     if (callbackFailed || error instanceof TaskError) throw error;
     return stop('model_unavailable', 'retry_wait', redactor.text(`${target}请求失败：${idle ? '连续 90 秒没有 token 输出' : networkReason(error, modelIdleMs)}。`));
   } finally { clearTimeout(timer); }
+  store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',traceSnapshot(redactor.clean(value)),requestLog);
   if (!response.ok) {
     finishModelRequest(store, requestLog, null, response.status, 'http_error');
     const error = value?.error, found = [error?.message, error, value?.message, value?.detail, value?.msg].find(item => typeof item === 'string' && item.trim());

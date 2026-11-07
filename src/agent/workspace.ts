@@ -98,6 +98,7 @@ export class Workspace {
   // Files the agent reads on demand, next to the checkout under ../context/ (the Issue or PR, its discussion, the
   // project's skills). Written straight to the computer, after redaction, without keeping them with the task.
   async context(files:Record<string,string>){
+    this.task.trace_context={...this.task.trace_context,...this.redactor.clean(files)};
     for(const [path,text] of Object.entries(files)){
       safePath(path);const data=Buffer.from(this.redactor.text(text));
       for(let offset=0;offset<data.length||offset===0;offset+=45000){

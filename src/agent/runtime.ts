@@ -1,3 +1,4 @@
+import { beginRun, endRun } from '../tasks/trace.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { selectedModel } from './model.js';
@@ -71,6 +72,9 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   if(spec.finish&&!allowed.has(spec.finish.name))return stop('agent_tools_invalid','waiting_configuration','提交工具未在本次执行中提供。');
   const model = spec.model ?? selectedModel(spec.store, spec.task.repository_id, taskWorkflow(spec.task as any));
   spec.redactor.add(model.key);
+  const previousRun=spec.task.trace_run_id;
+  const run=beginRun(spec.store,spec.task,spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
+  spec.task.trace_run_id=run?.id;
   const services: AgentServices = {
     model, guard: spec.guard,
     request: async (body, requestId, onToken) => {
@@ -93,9 +97,11 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
       }
     }
   };
-  const result = spec.adapter ? await spec.adapter(services) : await runTools(spec, services);
-  await spec.guard();
-  return result;
+  try {
+    const result = spec.adapter ? await spec.adapter(services) : await runTools(spec, services);
+    await spec.guard();endRun(spec.store,run,'succeeded');return result;
+  } catch(error){endRun(spec.store,run,'fault',(error as any).code||'runtime_error');throw error;}
+  finally {spec.task.trace_run_id=previousRun;}
 }
 
 async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise<T> {

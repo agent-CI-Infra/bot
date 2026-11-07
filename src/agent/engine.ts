@@ -1,3 +1,4 @@
+import { interruptRuns, traceEvent } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
 import { playbooks } from '../tasks/playbooks.js';
 import { restoreCheckpoint } from '../tasks/checkpoint.js';
@@ -60,7 +61,7 @@ export class TaskEngine {
   start(){
     // A previous process may have stopped between checkpoints; never charge server downtime as task runtime.
     this.store.run('UPDATE task_metrics SET active_since=NULL,complete=0 WHERE active_since IS NOT NULL');
-    this.store.run('DELETE FROM task_claims');
+    this.store.run('DELETE FROM task_claims');interruptRuns(this.store);
     this.store.run(`UPDATE tasks SET status='queued',claim_token=NULL WHERE ${engineKinds} AND status IN ('running','preparing','implementing','validating','publishing','result_ready')`);
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
     this.timer=setInterval(()=>this.tick(),1000);this.tick();
@@ -809,6 +810,7 @@ export class TaskEngine {
         this.store.run("UPDATE tasks SET input=?,status='queued',phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,error_code=NULL,next_run_at=0,attempt=attempt+1 WHERE id=?",JSON.stringify({...saved,contract,request:task!.kind==='task.request'?contract.goal:saved.request}),task!.id);
         this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task!.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task!.id);
+        traceEvent(this.store,task!.id,'intervention',{action:'contract_revision',before:new TaskRecords(this.store).get(task!.id).revision-1,after:contract,reason:'explicit user contract revision'},null,'user:'+user.id);
         this.store.audit(user.id,'task.contract',task!.id,task!.repository_id);
       });this.tick();return {task:new TaskRecords(this.store).get(task!.id)};
     }
