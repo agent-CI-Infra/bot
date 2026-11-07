@@ -13,6 +13,7 @@ import { rateLimitStorage } from '../github/rate-limits.js';
 import { actionsStorage } from '../actions/storage.js';
 import { workflowStorage } from '../workflows/storage.js';
 import { gateOnboardingStorage } from '../projects/gate-storage.js';
+import { installationStorage } from '../installations/storage.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -125,6 +126,7 @@ export class Store {
     // What GitHub granted on the repository as last read: the installation's permissions for an App, the account's role
     // flags for a bot account. NULL until a sync or permission check has read it.
     extend('installed_repositories', { permissions: 'TEXT', events: 'TEXT', permissions_at: 'TEXT', hidden: 'INTEGER NOT NULL DEFAULT 0' });
+    installationStorage(this);
     // Public exports are independent of review/development activation. Private publication requires local consent.
     this.db.exec(`CREATE TABLE IF NOT EXISTS public_board_consents(account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
       repository_id TEXT NOT NULL,PRIMARY KEY(account_id,repository_id));

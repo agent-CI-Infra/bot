@@ -27,12 +27,13 @@ import { ReleaseService } from './releases/service.js';
 import { HttpError, digest, fail, fields, hashPassword, object, password, randomId, text, verifyPassword, type Json } from './core/security.js';
 
 import { PublicBoards } from './public-board/service.js';
+import { InstallationSetup } from './installations/setup.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
-  imageTag?: string; boards?: PublicBoards; }
+  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -49,6 +50,7 @@ export function createControlPlane(options: Options) {
   const { store } = options;
   const external = options.external || new ExternalService(store);
   const onboarding = options.onboarding || new Onboarding(store);
+  const installationSetup = options.installationSetup || new InstallationSetup(store);
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const workflows = new WorkflowService(store, rules, options.githubUrl);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
@@ -105,6 +107,11 @@ export function createControlPlane(options: Options) {
       await onboarding.callback(url.searchParams.get('code') || '', url.searchParams.get('state') || '');
       // The App now exists, so the wizard reopens at its install step (index 2) rather than the first step.
       res.writeHead(303, { Location: '/#onboarding/2' }); res.end(); return;
+    }
+    if (method === 'GET' && path === '/onboarding/github/setup') {
+      res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
+      const result = await installationSetup.callback(url.searchParams.get('state') || '', url.searchParams.get('installation_id') || '', url.searchParams.get('setup_action') || 'install');
+      respond(res, 200, result); return;
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],

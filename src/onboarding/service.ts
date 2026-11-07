@@ -8,6 +8,7 @@ import { publicOrigin, probeGet } from './public-url.js';
 import { appEvents, appJwt, appPermissions } from '../github/client.js';
 import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
+import { InstallationSetup } from '../installations/setup.js';
 import { tunnelToken } from './tunnel-token.js';
 
 interface Options { tunnelFile?: string; tunnelMetrics?: string; githubUrl?: string; fetcher?: typeof fetch; probe?: typeof probeGet; }
@@ -79,8 +80,11 @@ export class Onboarding {
     const organization=targetAccount.type==='Organization';
     const installed=await get((organization?'/orgs/':'/users/')+encodeURIComponent(targetAccount.login)+'/installation','Bearer '+jwt);
     if(installed&&(!Number.isSafeInteger(installed.id)||installed.id<=0||String(installed.account?.id)!==String(targetAccount.id)||String(installed.app_id)!==String(account.app_id)))return fail(502,'installation_target_lookup_failed');
+    const intent = !installed ? new InstallationSetup(this.store).begin(account.id, String(targetAccount.id)) : null;
+    const installUrl = new URL(installed?(organization?`https://github.com/organizations/${encodeURIComponent(targetAccount.login)}/settings/installations/${installed.id}`:`https://github.com/settings/installations/${installed.id}`):accountInstallUrl(app.slug,targetAccount.id));
+    if (intent) installUrl.searchParams.set('state', intent.state);
     return {account:{id:String(targetAccount.id),login:targetAccount.login,type:targetAccount.type,html_url:'https://github.com/'+targetAccount.login},installed:!!installed,
-      install_url:installed?(organization?`https://github.com/organizations/${encodeURIComponent(targetAccount.login)}/settings/installations/${installed.id}`:`https://github.com/settings/installations/${installed.id}`):accountInstallUrl(app.slug,targetAccount.id)};
+      install_url:installUrl.href};
   }
   async api(user: Actor, method: string, url: URL, input: Json, adminOrigin: string): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/onboarding')) return undefined; superAdmin(user);
@@ -128,7 +132,7 @@ export class Onboarding {
       if (!address?.origin) fail(409, 'public_address_not_verified');
       const state = randomId(), account = randomId(), endpoint = randomId();
       this.store.run("INSERT INTO app_manifest_states VALUES(?,?,?,?,?,'pending')", state, user.id, account, endpoint, Date.now() + 15 * 60000);
-      const manifest = { name, url: address.origin, redirect_url: adminOrigin + '/onboarding/github/callback', public: input.public===true,
+      const manifest = { name, url: address.origin, redirect_url: adminOrigin + '/onboarding/github/callback', setup_url: adminOrigin + '/onboarding/github/setup', public: input.public===true,
         hook_attributes: { url: address.origin + `/hooks/github/${account}/${endpoint}`, active: true },
         default_permissions: appPermissions, default_events: appEvents };
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };

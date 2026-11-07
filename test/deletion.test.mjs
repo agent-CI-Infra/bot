@@ -16,7 +16,7 @@ import { externalFixture } from './external-helpers.mjs';
 const events = ['issues', 'pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment'];
 const full = { contents: 'write', issues: 'write', pull_requests: 'write', statuses: 'write', actions: 'write', checks: 'write', metadata: 'read' };
 const repo = id => ({ id: Number(id), full_name: `fixture/project-${id}`, private: false, owner: { id: 10, login: 'fixture' } });
-const installation = (id, permissions = full, extra = {}) => ({ id, account: { id: 10, login: 'fixture', type: 'Organization' }, permissions, events, ...extra });
+const installation = (id, permissions = full, extra = {}) => ({ id, account: { id: 10, login: 'fixture', type: 'Organization' }, repository_selection: 'all', permissions, events, ...extra });
 const random = () => randomBytes(24).toString('hex');
 const remove = (admin, id, body = { confirm: true }) => admin(`/api/installations/${id}/removal`, 'DELETE', body);
 const listedIds = async admin => (await admin('/api/installations')).value.repositories.map(row => row.id);
@@ -233,7 +233,7 @@ test('the permission check refreshes installation permissions and events and exc
   let rows = (await admin('/api/installations')).value.repositories;
   assert.deepEqual(rows.map(r => [r.id, r.permission_missing.length, r.events_missing, r.permissions_stale]), [['101', 0, [], true], ['202', 0, [], true]]);
   // Someone lowers the installation's Actions access on GitHub; the next check shows it on every repository it covers.
-  github.installations = [installation(77, { ...full, actions: 'read' }, { events: events.filter(event => event !== 'pull_request_review') })]; github.listed = { 77: [] };
+  github.installations = [installation(77, { ...full, actions: 'read' }, { events: events.filter(event => event !== 'pull_request_review') })]; github.listed = { 77: ['101', '202'] };
   const checked = await admin('/api/installations/permissions/check', 'POST', {});
   assert.equal(checked.status, 201); assert.deepEqual(checked.value.errors, []);
   assert.deepEqual(checked.value.repositories.map(r => [r.id, r.permission_missing.map(m => m.permission + ':' + m.current).join(), r.permissions_stale]),
@@ -241,9 +241,11 @@ test('the permission check refreshes installation permissions and events and exc
   assert.deepEqual(checked.value.repositories.map(r => r.events_missing), [['pull_request_review'], ['pull_request_review']]);
   rows = (await admin('/api/installations')).value.repositories;
   assert.deepEqual(rows.map(r => r.installed), [true, true]);
-  // An installation event carries the new grant too.
+  // A positive event requests authoritative synchronization; it does not itself restore permissions.
+  github.installations = [installation(77)];
   await h.hook(a.path, a.secret, 'accepted', { action: 'new_permissions_accepted', installation: { ...installation(77), account: { id: 10, login: 'fixture' } }, repositories: [] },
     { 'X-GitHub-Event': 'installation' });
+  await sync.sync(a.id);
   assert.deepEqual((await admin('/api/installations')).value.repositories.map(r => [r.permission_missing.length, r.events_missing]), [[0, []], [0, []]]);
   // A newly paused installation is no longer an active permission or event gap.
   github.installations = [installation(77, {}, { events: [], suspended_at: '2026-01-01' })];

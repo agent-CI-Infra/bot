@@ -10,6 +10,8 @@ import type { AutomationConfig } from '../automation/config.js';
 import { recordInstallationEvent } from './installations.js';
 import { enqueueForwards } from '../external/forward.js';
 import { actionsWebhook } from '../actions/storage.js';
+import { archiveInstallationEvent, isInstallationControlEvent } from '../installations/archive.js';
+import { dropUninstalledIntegrations } from '../projects/integrations.js';
 
 export async function ingest(
   store: Store,
@@ -42,7 +44,7 @@ export async function ingest(
   // Control/installation events and unknown repositories remain visible only to the super administrator.
   const candidate = payload?.repository;
   const repoId = candidate && typeof candidate === 'object' ? String((candidate as Json).id || '') : '';
-  const owner = status === 200 && event !== 'installation' && event !== 'installation_repositories'
+  const owner = status === 200 && !isInstallationControlEvent(event)
     ? store.get('SELECT * FROM repositories WHERE id=? AND account_id=?', repoId, accountId) : undefined;
   const action = typeof payload?.action === 'string' ? payload.action.slice(0, 100) : '';
   const kind = event === 'issues' ? 'issue' : event;
@@ -59,17 +61,23 @@ export async function ingest(
     currentPullRequest = await github.object('review.pr', Number((payload.issue as Json).number));
   }
   return store.transaction(() => {
-    const duplicate = status === 200 && !!store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId);
+    const duplicate = status === 200 && (!!store.get('SELECT 1 FROM processed_deliveries WHERE account_id=? AND endpoint_id=? AND delivery_id=?', accountId, endpointId, deliveryId)
+      || isInstallationControlEvent(event) && !!store.get(`SELECT 1 FROM installation_events e JOIN github_installations g ON g.ref=e.installation_ref
+        JOIN accounts a ON a.app_id=g.app_id WHERE a.id=? AND e.delivery_id=?`, accountId, deliveryId));
     const id = randomId();
+    const appControl = isInstallationControlEvent(event) && store.get("SELECT 1 FROM accounts WHERE id=? AND type='github_app'", accountId);
     const response = status === 200 ? { ok: true, record_id: id, duplicate, tasks_created: 0 }
       : { ok: false, error: outcome, record_id: id };
     store.run(`INSERT INTO deliveries(id,account_id,endpoint_id,repository_id,delivery_id,event,route,status,duplicate,received_at,
       http_status,request_headers,payload,body_complete,response) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, endpoint ? accountId : null,
       endpoint ? endpointId : null, owner?.id || null, deliveryId, event, route, outcome, Number(duplicate), new Date().toISOString(),
-      status, JSON.stringify(safeHeaders), bytes, Number(complete), JSON.stringify(response));
+      status, JSON.stringify(safeHeaders), appControl && status === 200 ? Buffer.from(JSON.stringify({ installation_evidence_archived: true, event, action })) : bytes, Number(complete), JSON.stringify(response));
     if (status === 200 && !duplicate) store.run('INSERT INTO processed_deliveries VALUES(?,?,?)', accountId, endpointId, deliveryId);
     if (status === 200 && !duplicate && payload) boardWebhook(store, accountId, event, payload);
-    const sync = status === 200 && !duplicate && !!payload && recordInstallationEvent(store, accountId, event, payload);
+    const sync = status === 200 && !!payload && (appControl
+      ? archiveInstallationEvent(store, accountId, endpointId, deliveryId, id, event, payload, bytes)
+      : !duplicate && recordInstallationEvent(store, accountId, event, payload));
+    if (status === 200 && appControl) dropUninstalledIntegrations(store);
     if (status === 200 && !duplicate && event === 'installation' && ['deleted','suspend'].includes(action)) {
       const installation = payload?.installation as Json | undefined, account = installation?.account as Json | undefined;
       const ownerId = String(account?.id || '');

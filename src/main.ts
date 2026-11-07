@@ -36,6 +36,7 @@ void projects.reconcile();
 const timer = setInterval(() => { void projects.reconcile().catch(error => console.error('[projects] reconciliation failed:', error)); }, 5000);
 // Installed repositories are listed on start and every ten minutes; webhook events update them in between.
 const installations = new InstallationSync(store, process.env.BOT_GITHUB_API_URL || undefined);
+installations.start();
 const onboarding = new Onboarding(store, { tunnelFile: process.env.BOT_TUNNEL_TOKEN_FILE, tunnelMetrics: process.env.BOT_TUNNEL_METRICS_URL, githubUrl: process.env.BOT_GITHUB_API_URL });
 setTimeout(() => void installations.syncAll(), 5000).unref();
 const syncTimer = setInterval(() => void installations.syncAll(), 10 * 60_000);
@@ -57,6 +58,6 @@ for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer);
   let remaining = 2;
-  for (const server of Object.values(servers)) server.close(async () => { if (--remaining === 0) { await Promise.all([engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close()]); store.close(); process.exit(0); } });
+  for (const server of Object.values(servers)) server.close(async () => { if (--remaining === 0) { await Promise.all([installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close()]); store.close(); process.exit(0); } });
   setTimeout(() => process.exit(1), 100_000).unref();
 });

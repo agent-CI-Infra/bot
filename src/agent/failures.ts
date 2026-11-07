@@ -5,7 +5,7 @@ export type FailureCause = 'external'|'github_access'|'github_rejected'|'model'|
 const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   external: { label:'外部服务或网络波动', codes:['github_unavailable','github_response_unknown','github_rate_limited','model_unavailable','release_actions_incomplete','github_log_download_failed',
     'actions_scan_incomplete','actions_completion_time_missing'] },
-  github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_token_missing',
+  github_access: { label:'GitHub 权限或配置', codes:['github_permissions_insufficient','github_installation_owner_changed','github_installation_access_revoked','github_token_missing',
     'github_credentials_missing','github_account_missing','github_repository_scope_changed','github_actor_invalid','github_repository_invalid',
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
     'actions_app_required','actions_workflow_run_subscription_missing','gate_repository_unreadable'] },

@@ -8,6 +8,8 @@ import { appEvents, appJwt, appPermissions, missingEvents, missingPermissions, r
 import { appBucket, installationBucket, observe, observeAll, rateLimitView, refused, userBucket, type Bucket } from '../github/rate-limits.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { accessGaps, appGaps } from './access.js';
+import { installationSnapshot, installationRef, accountRef, queueInstallationSync, installationExecutionDenied } from '../installations/archive.js';
+import { assertSyncClaim, claimInstallationSync, commitInstallationProjection, finishInstallationSync, validateInstallation, type SyncClaim } from '../installations/projection.js';
 
 // Installation scope: which repositories each account can see on GitHub. Seeing a repository never registers or
 // enables it; an administrator starts it in the console, and can disable it again.
@@ -82,9 +84,22 @@ function githubOrigin(value: unknown): string {
 }
 export class InstallationSync {
   private readonly running = new Map<string, Promise<Json>>();
+  private readonly leases = new Map<string, SyncClaim>();
+  private timer?: ReturnType<typeof setInterval>;
   // The rate-limit window each credential in use counts against, so every response here updates it too.
   private readonly windows = new Map<string, Bucket>();
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com') {}
+  start(): void {
+    if (this.timer) return;
+    void this.drain();
+    this.timer = setInterval(() => void this.drain(), 1000); this.timer.unref();
+  }
+  async close(): Promise<void> { clearInterval(this.timer); this.timer = undefined; await Promise.allSettled(this.running.values()); }
+  async drain(): Promise<void> {
+    for (const job of this.store.all(`SELECT j.account_id FROM installation_sync_jobs j JOIN accounts a ON a.id=j.account_id
+      WHERE (j.state IN ('pending','retry') AND j.next_attempt<=?) OR (j.state='running' AND j.lease_until<=?)`, Date.now(), Date.now()))
+      this.schedule(String(job.account_id));
+  }
   private keep(token: string, bucket: Bucket): string { if (this.windows.size > 500) this.windows.clear(); if (token) this.windows.set(token, bucket); return token; }
   private appToken(account: Row, secrets: Json): string { return this.keep(appJwt(String(account.app_id), String(secrets.private_key)), appBucket(account.id)); }
   // A Token account's window is its GitHub user's, named by the login so the console can say whose it is. GET /user counts
@@ -107,9 +122,16 @@ export class InstallationSync {
   }
   sync(accountId: string): Promise<Json> {
     const current = this.running.get(accountId); if (current) return current;
-    const run = this.run(accountId).finally(() => this.running.delete(accountId)); this.running.set(accountId, run); return run;
+    const claim = claimInstallationSync(this.store, accountId);
+    if (!claim) return Promise.resolve({ account_id: accountId, status: 'sync_running' });
+    this.leases.set(accountId, claim);
+    const run = this.run(accountId, claim).then(result => { finishInstallationSync(this.store, claim); return result; }, error => {
+      finishInstallationSync(this.store, claim, error); throw error;
+    }).finally(() => { this.running.delete(accountId); this.leases.delete(accountId); });
+    this.running.set(accountId, run); return run;
   }
   private async send(path: string, token: string, method = 'GET', body?: Json): Promise<Response> {
+    for (const claim of this.leases.values()) this.store.run('UPDATE installation_sync_jobs SET lease_until=? WHERE account_id=? AND lease_token=?', Date.now() + 60_000, claim.accountId, claim.token);
     let response: Response;
     try { response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
@@ -155,11 +177,18 @@ export class InstallationSync {
     return response.json();
   }
   private async pages(path: string, token: string, key?: string): Promise<Json[]> {
-    const rows: Json[] = [];
+    const rows: Json[] = []; let total: number | undefined;
     for (let page = 1; page <= 100; page++) {
       const value = await this.request(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`, token), list = key ? value?.[key] : value;
       if (!Array.isArray(list)) throw new Error('github_invalid_page');
-      rows.push(...list); if (list.length < 100) return rows;
+      if (key && value.total_count !== undefined) {
+        if (!Number.isSafeInteger(value.total_count) || value.total_count < 0 || total !== undefined && total !== value.total_count) throw new Error('github_incomplete_page');
+        total = value.total_count;
+      }
+      rows.push(...list); if (list.length < 100) {
+        if (total !== undefined && rows.length !== total) throw new Error('github_incomplete_page');
+        return rows;
+      }
     }
     throw new Error('github_pagination_limit');
   }
@@ -234,44 +263,49 @@ export class InstallationSync {
     const errors: Json[] = [];
     for (const account of this.store.all('SELECT * FROM accounts ORDER BY created_at')) {
       try {
+        // App permission reads and repository snapshots share the same generation fence.
+        if (account.type === 'github_app') { await this.sync(account.id); continue; }
         const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`), now = new Date().toISOString();
-        if (account.type === 'github_app') {
-          if (!secrets.private_key) throw new Error('github_credentials_missing');
-          const installations = await this.pages('/app/installations', this.appToken(account, secrets));
-          this.store.transaction(() => {
-            for (const i of installations) {
-              if (i.suspended_at) this.store.run('UPDATE installed_repositories SET installed=0 WHERE account_id=? AND installation_id=?', account.id, String(i.id));
-              else grantInstallation(this.store, account.id, String(i.id), i.permissions, i.events, now);
-            }
-            dropUninstalledIntegrations(this.store);
-          });
-        } else {
-          if (!secrets.token) throw new Error('github_credentials_missing');
-          const repos = await this.pages('/user/repos', this.keep(String(secrets.token), userBucket(account.id)));
-          this.store.transaction(() => { for (const repo of repos) { const value = granted(repo.permissions);
-            if (value) this.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', value, now, account.id, String(repo.id)); } });
-        }
+        if (!secrets.token) throw new Error('github_credentials_missing');
+        const repos = await this.pages('/user/repos', this.keep(String(secrets.token), userBucket(account.id)));
+        this.store.transaction(() => { for (const repo of repos) { const value = granted(repo.permissions);
+          if (value) this.store.run('UPDATE installed_repositories SET permissions=?,permissions_at=? WHERE account_id=? AND repository_id=?', value, now, account.id, String(repo.id)); } });
       } catch (error) { errors.push({ account_id: account.id, error: /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'github_unavailable' }); }
     }
     return errors;
   }
-  private async run(accountId: string): Promise<Json> {
+  private async run(accountId: string, claim: SyncClaim): Promise<Json> {
     const account = this.store.get('SELECT * FROM accounts WHERE id=?', accountId); if (!account) throw new Error('account_not_found');
-    const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`), rows: Installed[] = [], installations: Json[] = [];
+    const expected = new Map(this.store.all("SELECT ref,revision FROM github_installations WHERE github_host='github.com' AND app_id=?", String(account.app_id)).map(row => [row.ref, row.revision]));
+    const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`), rows: Installed[] = [], installations: Json[] = [], snapshots: Json[] = [];
     try {
       if (account.type === 'github_app') {
         if (!secrets.private_key) throw new Error('github_credentials_missing');
         const jwt = this.appToken(account, secrets); await this.window(jwt);
-        for (const installation of await this.pages('/app/installations', jwt)) {
-          if (installation.suspended_at) continue;
+        for (let installation of await this.pages('/app/installations', jwt)) {
+          validateInstallation(installation, String(account.app_id));
+          const previous = this.store.get('SELECT status FROM github_installations WHERE ref=?', installationRef(accountRef(account, String(installation.id))));
+          if (previous?.status === 'suspended' && !installation.suspended_at) {
+            const reread = await this.request(`/app/installations/${installation.id}`, jwt);
+            validateInstallation(reread, String(account.app_id));
+            if (String(reread.id) !== String(installation.id)) throw new Error('github_invalid_installation');
+            installation = reread;
+          }
+          snapshots.push(installation);
+          if (installation.suspended_at || previous?.status === 'deleted') continue;
           installations.push({ id: String(installation.id), account: String((installation.account as Json | undefined)?.login || ''),
             missing: missingPermissions(installation.permissions), missing_events: missingEvents(installation.events), gaps: appGaps(installation.permissions, installation.events) });
           // A metadata-only token is enough to list the installation's repositories; its window is the installation's.
           const token = this.installationToken(account, installation, await this.request(`/app/installations/${installation.id}/access_tokens`, jwt, 'POST', { permissions: { metadata: 'read' } }));
-          for (const repo of await this.pages('/installation/repositories', token, 'repositories')) {
-            const row = installed(repo, String(installation.id), installation.permissions, installation.events); if (row) rows.push(row);
-          }
-          await this.window(token);
+          if (!token) throw new Error('github_token_missing');
+          try {
+            for (const repo of await this.pages('/installation/repositories', token, 'repositories')) {
+              const row = installed(repo, String(installation.id), installation.permissions, installation.events);
+              if (!row || row.owner_id !== String((installation.account as Json).id) || rows.some(r => r.repository_id === row.repository_id)) throw new Error('github_invalid_repository');
+              rows.push(row);
+            }
+            await this.window(token);
+          } finally { await revokeInstallationToken(this.apiUrl, token).catch(() => false); this.windows.delete(token); }
         }
       } else {
         if (!secrets.token) throw new Error('github_credentials_missing');
@@ -287,9 +321,14 @@ export class InstallationSync {
     }
     const now = new Date().toISOString();
     this.store.transaction(() => {
+      assertSyncClaim(this.store, claim);
+      // Distinct credential configurations can point at the same App; account-level jobs alone cannot fence those races.
+      if (account.type === 'github_app' && this.store.all("SELECT ref,revision FROM github_installations WHERE github_host='github.com' AND app_id=?", String(account.app_id))
+        .some(row => expected.get(row.ref) !== row.revision)) throw new Error('github_installation_sync_superseded');
+      this.store.run('UPDATE installed_repositories SET installed=0 WHERE account_id=?', accountId);
       upsert(this.store, accountId, rows, now);
       // A full listing is authoritative: anything not seen is no longer installed. Enabled repositories stay as they are.
-      this.store.run('UPDATE installed_repositories SET installed=0 WHERE account_id=? AND synced_at<>?', accountId, now);
+      if (account.type === 'github_app') commitInstallationProjection(this.store, account, snapshots, rows, now);
       dropUninstalledIntegrations(this.store);
       this.store.run(`INSERT INTO installation_syncs VALUES(?,?,NULL,?) ON CONFLICT(account_id) DO UPDATE SET synced_at=excluded.synced_at,error=NULL,
         repositories=excluded.repositories`, accountId, now, rows.length);
@@ -310,6 +349,23 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   if (probe && method === 'POST') { superAdmin(user); fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); return sync.probe(probe[1]!); }
   if (!path.startsWith('/api/installations')) return undefined;
   superAdmin(user);
+  if (path === '/api/installations/archive' && method === 'GET') return { contract_version: 1,
+    installations: store.all('SELECT ref FROM github_installations ORDER BY ref').map(row => installationSnapshot(store, row.ref)) };
+  const archive = /^\/api\/installations\/archive\/([^/]+)\/([1-9]\d*)\/([1-9]\d*)(?:\/(repositories|events|sync))?$/.exec(path);
+  if (archive) {
+    const ref = installationRef({ github_host: archive[1]!, app_id: archive[2]!, installation_id: archive[3]! });
+    const snapshot = installationSnapshot(store, ref); if (!snapshot) return fail(404, 'installation_not_found');
+    if (!archive[4] && method === 'GET') return { installation: snapshot };
+    if (archive[4] === 'repositories' && method === 'GET') return { contract_version: 1,
+      repositories: store.all('SELECT repository_id,full_name,owner_id,owner_login,private,present,last_success_at FROM installation_repositories WHERE installation_ref=? ORDER BY repository_id', ref) };
+    if (archive[4] === 'events' && method === 'GET') return { contract_version: 1,
+      events: store.all(`SELECT id,delivery_id,event,action,signature_verified,received_at,payload_hash,sender,requester,evidence_type,result,revision
+        FROM installation_events WHERE installation_ref=? ORDER BY rowid DESC LIMIT 100`, ref).map(r => ({ ...r, sender: JSON.parse(r.sender), requester: JSON.parse(r.requester) })) };
+    if (archive[4] === 'sync' && method === 'POST') { fields(input, []); const row = store.get('SELECT account_id FROM github_installations WHERE ref=?', ref)!;
+      if (!store.get('SELECT 1 FROM accounts WHERE id=?', row.account_id)) return fail(409, 'installation_credentials_missing');
+      return store.transaction(() => ({ contract_version: 1, status: 'pending', generation: queueInstallationSync(store, row.account_id) })); }
+    return fail(404, 'not_found');
+  }
   if (path === '/api/installations' && method === 'GET') return list(store, url);
   const board = /^\/api\/installations\/([1-9]\d*)\/board$/.exec(path);
   if (board && method === 'PATCH') {
@@ -401,6 +457,7 @@ function activate(store: Store, user: Actor, id: string, input: Json): Json {
   const registered = store.get('SELECT * FROM repositories WHERE id=?', id);
   const candidates = store.all('SELECT * FROM installed_repositories WHERE repository_id=? AND installed=1', id);
   const chosen = input.account_id ? candidates.find(c => c.account_id === text(input.account_id)) : candidates[0];
+  if ((chosen || registered) && installationExecutionDenied(store, String((chosen || registered)!.account_id), id)) return fail(409, 'installation_not_ready');
   if (!registered && !chosen) return fail(404, 'repository_not_installed');
   const model = input.model_id === undefined || input.model_id === null || input.model_id === '' ? null : text(input.model_id);
   const modelRow = model ? store.get('SELECT * FROM models WHERE id=? AND (repository_id IS NULL OR repository_id=?)', model, id) : null;
