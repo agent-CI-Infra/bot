@@ -31,14 +31,14 @@ test('account lookup supports organizations and personal accounts, scopes existi
   const app={account_id:a.id,app_id:'123',slug:'fixture-app',installations:0};onboarding.save('app',app);
   const result=await admin('/api/onboarding/installation-target','POST',{target:'https://github.com/Fixture/private-repo/pull/1'});
   assert.equal(result.status,201);assert.deepEqual(result.value.account,{id:'10',login:'fixture',type:'Organization',html_url:'https://github.com/fixture'});assert.equal(result.value.installed,false);
-  assert.equal(result.value.install_url,'https://github.com/apps/fixture-app/installations/new/permissions?suggested_target_id=10');
+  const installUrl=new URL(result.value.install_url);assert.equal(installUrl.origin+installUrl.pathname,'https://github.com/apps/fixture-app/installations/new/permissions');assert.equal(installUrl.searchParams.get('suggested_target_id'),'10');assert.match(installUrl.searchParams.get('state'),/^[a-f0-9]{48}$/);
   assert.equal(requests[0].options.headers.Authorization,undefined);assert.match(requests[1].options.headers.Authorization,/^Bearer /);assert.ok(requests.every(r=>r.url.origin==='https://api.github.com'&&r.options.redirect==='error'));
   assert.deepEqual(onboarding.saved('app'),app);assert.equal(h.store.get('SELECT count(*) n FROM repositories').n,0);assert.ok(!JSON.stringify(result.value).includes(pem));
   installed=true;const existing=await admin('/api/onboarding/installation-target','POST',{target:'fixture'});assert.equal(existing.value.installed,true);assert.equal(existing.value.install_url,'https://github.com/organizations/fixture/settings/installations/77');
   mismatch=true;assert.equal((await admin('/api/onboarding/installation-target','POST',{target:'fixture'})).status,502);mismatch=false;
   installed=false;const personal=await admin('/api/onboarding/installation-target','POST',{target:'https://github.com/personal/repo/issues/2'});
   assert.equal(personal.status,201);assert.deepEqual(personal.value.account,{id:'20',login:'personal',type:'User',html_url:'https://github.com/personal'});assert.equal(personal.value.installed,false);
-  assert.equal(personal.value.install_url,'https://github.com/apps/fixture-app/installations/new/permissions?suggested_target_id=20');
+  assert.equal(new URL(personal.value.install_url).searchParams.get('suggested_target_id'),'20');assert.match(new URL(personal.value.install_url).searchParams.get('state'),/^[a-f0-9]{48}$/);
   assert.equal(requests.at(-1).url.pathname,'/users/personal/installation');assert.match(requests.at(-1).options.headers.Authorization,/^Bearer /);
   installed=true;const installedPersonal=await admin('/api/onboarding/installation-target','POST',{target:'@personal'});assert.equal(installedPersonal.value.installed,true);assert.equal(installedPersonal.value.install_url,'https://github.com/settings/installations/88');
   mismatch=true;assert.equal((await admin('/api/onboarding/installation-target','POST',{target:'personal'})).status,502);mismatch=false;

@@ -7,7 +7,8 @@ import { generateKeyPairSync } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
-import { InstallationSync } from '../dist/app/installations.js';
+import { InstallationSync, recordInstallationEvent } from '../dist/app/installations.js';
+import { commitInstallationProjection } from '../dist/installations/projection.js';
 import { IntegrationChecker } from '../dist/projects/integrations.js';
 import { loadConsole } from './console-page.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
@@ -16,6 +17,15 @@ import { command } from '../runner/command.mjs';
 const installation = { id: 77, account: { id: 10, login: 'fixture', type: 'Organization' } };
 const added = (...ids) => ({ action: 'added', installation, repository_selection: 'all', repositories_removed: [],
   repositories_added: ids.map(id => ({ id, name: 'project-' + id, full_name: 'fixture/project-' + id, private: true })) });
+// These integration-check regressions start from a previously verified scope. Positive webhooks now wait for REST sync.
+function verifiedScope(h, a, ...ids) {
+  const value = { ...installation, app_id: 123, repository_selection: 'all', permissions: {}, events: [] };
+  h.store.transaction(() => {
+    recordInstallationEvent(h.store, a.id, 'installation_repositories', added(...ids));
+    commitInstallationProjection(h.store, h.store.get('SELECT * FROM accounts WHERE id=?', a.id), [value],
+      ids.map(id => ({ repository_id: String(id), installation_id: '77', full_name: 'fixture/project-' + id, owner_id: '10', owner_login: 'fixture', private: true })), new Date().toISOString());
+  });
+}
 
 test('installed repositories are listed but only work after an administrator starts them, and can be disabled', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin), events = { 'X-GitHub-Event': 'installation_repositories' };
@@ -53,6 +63,7 @@ test('a full sync lists every installation repository and marks the rest as no l
   const h = await harness(t), { admin } = await setup(h), keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), token: undefined });
   await h.hook(a.path, a.secret, 'old', added(303, 101), { 'X-GitHub-Event': 'installation_repositories' });
+  verifiedScope(h, a, 303, 101);
   // A failed App check is still cached as unknown with the time of the check; the caller does not see an error.
   const checker = new IntegrationChecker(h.store, 'http://127.0.0.1:9'), cached = id => h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', id);
   await checker.check('303'); await checker.check('101');
@@ -61,7 +72,8 @@ test('a full sync lists every installation repository and marks the rest as no l
   const requests = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://fake'); requests.push(req.method + ' ' + url.pathname); res.setHeader('Content-Type', 'application/json');
-    if (url.pathname === '/app/installations') return res.end(JSON.stringify(url.searchParams.get('page') === '1' ? [{ id: 77 }, { id: 78, suspended_at: '2026-01-01' }] : []));
+    if (url.pathname === '/app/installations') return res.end(JSON.stringify(url.searchParams.get('page') === '1' ?
+      [{ ...installation, repository_selection: 'all', permissions: {}, events: [] }, { ...installation, id: 78, repository_selection: 'all', permissions: {}, events: [], suspended_at: '2026-01-01' }] : []));
     if (url.pathname === '/app/installations/77/access_tokens') return res.end(JSON.stringify({ token: 'installation-token-fixture' }));
     if (url.pathname === '/installation/repositories') {
       assert.equal(req.headers.authorization, 'Bearer installation-token-fixture');
@@ -133,6 +145,7 @@ test('a GitHub App project is checked with a repository-scoped read-only token t
   const github = await appGitHub(t), h = await harness(t), { admin } = await setup(h);
   const a = await account(admin, { type: 'github_app', app_id: '123', private_key: github.privateKey, token: undefined });
   await h.hook(a.path, a.secret, 'app-install', added(101), { 'X-GitHub-Event': 'installation_repositories' });
+  verifiedScope(h, a, 101);
   const checker = new IntegrationChecker(h.store, github.url);
   await checker.check('101');
   const row = h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', '101');
@@ -155,6 +168,7 @@ test('an App that is not installed, or refuses a token, leaves both states unkno
   for (const [options, detail] of [[{ installed: false }, 'GitHub App 没有安装到该仓库'], [{ mint: 403 }, 'github_http_403']]) {
     const github = await appGitHub(t, options), a = await account(admin, { type: 'github_app', app_id: '123', private_key: github.privateKey, token: undefined });
     await h.hook(a.path, a.secret, options.installed === false ? 'app-missing' : 'app-refused', added(101), { 'X-GitHub-Event': 'installation_repositories' });
+    verifiedScope(h, a, 101);
     const checker = new IntegrationChecker(h.store, github.url);
     await checker.check('101');
     const row = h.store.get('SELECT * FROM repo_integrations WHERE repository_id=?', '101');

@@ -5,7 +5,7 @@
 titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
-const settingsSections = [['general', '常规'], ['access', '公网接入'], ['accounts', '机器人账号'], ['models', '模型'], ['users', '用户']];
+const settingsSections = [['general', '常规'], ['access', '公网接入'], ['accounts', '机器人账号'], ['installations', '安装档案'], ['models', '模型'], ['users', '用户']];
 function settingsSection() { const key = /^#\/settings\/([a-z]+)$/.exec(location.hash)?.[1]; return settingsSections.some(([name]) => name === key) ? key : 'general'; }
 // What the cards draw from; the model cards are redrawn together because deleting the default model clears it.
 let settingsView = null;
@@ -21,6 +21,27 @@ async function renderSettings(request) {
 }
 // Each category loads only what its cards show.
 const settingsCards = {
+  async installations() {
+    const { installations } = await api('/api/installations/archive'), section = card('GitHub App 安装档案');
+    section.append(note('安装范围与控制台角色分别管理。事件触发者和申请者不代表当前有权管理的人。'));
+    if (!installations.length) section.append(note('尚无安装档案。同步后也会保留零仓库安装和历史证据缺失标记。'));
+    for (const installation of installations) {
+      const item = card(`${installation.target.login || '目标待同步'} · 安装 ${installation.installation.installation_id}`), evidence = installation.evidence;
+      const person = value => value ? `${value.login || '名称未知'}（${value.id}）` : '未知／未提供';
+      item.append(facts([['GitHub 目标 ID', installation.target.id || '待同步'], ['目标类型', installation.target.type || '待同步'],
+        ['状态', ({ active: '有效', pending_sync: '等待同步', suspended: '已暂停', deleted: '已卸载' })[installation.status]],
+        ['范围', installation.repository_selection === 'all' ? '全部仓库' : installation.repository_selection === 'selected' ? '指定仓库' : '待同步'],
+        ['完整性', ({ complete: '完整', pending: '等待同步', stale: '待核实', error: '同步失败，保留最近成功快照' })[installation.completeness]],
+        ['安装事件触发者', person(evidence.sender)], ['申请者', person(evidence.requester)], ['批准者', evidence.approval.label],
+        ['历史证据', evidence.history_missing ? '历史证据缺失' : '已保留签名安装事件'],
+        ['最近成功同步', installation.last_success_at ? timestamp(installation.last_success_at) : '尚未成功同步'],
+        ['投影／范围／权限版本', `${installation.projection_version} / ${installation.scope_version} / ${installation.permissions_version}`]]));
+      if (!evidence.requester) item.append(note('未提供申请者不等于从未申请。历史安装查询不能补齐完整批准历史。'));
+      if (installation.error) item.append(note(`同步错误：${installation.error}`));
+      section.append(item);
+    }
+    return [section];
+  },
   async general(request) {
     const { settings, version } = await api('/api/settings');
     const about = card('当前运行版本');

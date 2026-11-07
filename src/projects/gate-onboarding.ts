@@ -1,6 +1,7 @@
 import { randomId, fail, type Json } from '../core/security.js';
 import type { Store, Row } from '../storage/database.js';
 import { appJwt, missingPermissions, revokeInstallationToken } from '../github/client.js';
+import { installationExecutionDenied } from '../installations/archive.js';
 import { selectedModel } from '../agent/model.js';
 import { stop, TaskError } from '../agent/common.js';
 import { registerEventWorkflow, enqueueEventTask, eventTaskActive } from '../workflows/events.js';
@@ -22,7 +23,7 @@ const workflowId = 'gate.onboarding';
 type Permissions = Record<string, string>;
 export interface GateMessage { role: 'agent' | 'user' | 'system'; content: string; at: string }
 /** One step's GitHub App credentials; every installation token it mints is revoked when the step ends. */
-interface AppSession { appId: string; privateKey: string; issued: string[] }
+interface AppSession { appId: string; privateKey: string; issued: string[]; guard: () => void }
 
 // The confirmed gate PR mints its own installation token, limited to what it writes and to what the installation granted.
 // Workflow tasks never ask for workflows, so only the confirmed gate PR can change `.github/workflows/`.
@@ -179,12 +180,14 @@ registerEventWorkflow(workflowId, {
 export class GateOnboarding {
   /** Sessions whose gate PR is being created in this process; a `creating` state without one was interrupted by a restart. */
   private readonly running = new Set<string>();
+  private readonly tokenGuards = new Map<string, () => void>();
   constructor(readonly store: Store, readonly apiUrl = 'https://api.github.com',
     readonly templateRepo = process.env.BOT_CI_TEMPLATE_REPO || 'agent-CI-Infra/CI-workflow') { this.recover(); }
 
   // ---- GitHub access for the confirmed PR ----------------------------------------------------------------------------
   /** An empty token sends the request without credentials (public reads). 404 is null; other failures throw. */
   private async request(method: string, path: string, token: string, body?: unknown): Promise<any | null> {
+    this.tokenGuards.get(token)?.();
     let response: Response;
     try {
       response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
@@ -211,15 +214,16 @@ export class GateOnboarding {
       await this.request('PUT', `/repos/${repo}/contents/${encode(path)}`, token, { ...payload, sha: current.sha });
     }
   }
-  private installation(app: AppSession, path: string): Promise<any | null> { return this.request('GET', path, appJwt(app.appId, app.privateKey)); }
+  private installation(app: AppSession, path: string): Promise<any | null> { app.guard(); return this.request('GET', path, appJwt(app.appId, app.privateKey)); }
   /** An installation token with the wanted permissions, lowered to what the installation has granted. */
   private async token(app: AppSession, installation: any, wanted: Permissions, scope: Json = {}): Promise<string> {
+    app.guard();
     const granted = installation?.permissions || {}, permissions: Permissions = {};
     for (const [key, level] of Object.entries(wanted)) if (granted[key]) permissions[key] = granted[key] === 'read' ? 'read' : level;
     const access = await this.request('POST', `/app/installations/${encodeURIComponent(String(installation.id))}/access_tokens`, appJwt(app.appId, app.privateKey), { ...scope, permissions });
     const token = typeof access?.token === 'string' ? access.token : '';
     if (!token) throw new Error('github_token_missing');
-    app.issued.push(token); return token;
+    app.issued.push(token); this.tokenGuards.set(token, app.guard); app.guard(); return token;
   }
   /** The template repository through the App installed on it (needed when private), or a public read. */
   private async templateToken(app: AppSession, token: string): Promise<string | null> {
@@ -245,9 +249,11 @@ export class GateOnboarding {
     if (account?.type !== 'github_app') throw new Blocked('github_app_required', '门禁接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上，需要改为安装 GitHub App');
     const secrets = this.store.secrets.open(account.credentials, `account:${account.id}`);
     if (!secrets.private_key) throw new Blocked('github_credentials_missing', 'GitHub App 账号没有保存私钥');
-    return { row, full: String(row.full_name), app: { appId: String(account.app_id), privateKey: String(secrets.private_key), issued: [] } };
+    const guard = () => { if (installationExecutionDenied(this.store, String(account.id), repositoryId)) throw new Blocked('installation_access_revoked', 'GitHub App 安装已失效或正在核实范围，请先完成安装同步'); };
+    guard();
+    return { row, full: String(row.full_name), app: { appId: String(account.app_id), privateKey: String(secrets.private_key), issued: [], guard } };
   }
-  private async revoke(app: AppSession) { await Promise.all(app.issued.splice(0).map(token => revokeInstallationToken(this.apiUrl, token).catch(() => false))); }
+  private async revoke(app: AppSession) { await Promise.all(app.issued.splice(0).map(token => { this.tokenGuards.delete(token); return revokeInstallationToken(this.apiUrl, token).catch(() => false); })); }
 
   // ---- Conversation --------------------------------------------------------------------------------------------------
   private spawn(id: string, step: () => Promise<void>): void {

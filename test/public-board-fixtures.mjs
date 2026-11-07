@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { harness, setup, account } from './helpers.mjs';
 import { PublicBoards } from '../dist/public-board/service.js';
 import { GateOnboarding } from '../dist/projects/gate-onboarding.js';
+import { commitInstallationProjection } from '../dist/installations/projection.js';
 
 const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
 export async function publicBoardFixture(t, collector) {
@@ -47,6 +48,10 @@ export async function publicBoardFixture(t, collector) {
   const { admin, password } = await setup(h), owner = await account(admin, { type: 'github_app', app_id: '123', private_key: privateKey, token: undefined });
   h.store.run(`INSERT INTO installed_repositories(account_id,repository_id,installation_id,full_name,owner_id,owner_login,private,installed,synced_at)
     VALUES(?,?,?,?,?,?,0,1,?)`, owner.id, '101', '1', 'octo/hello', '10', 'octo', new Date().toISOString());
+  // These publication tests start with an already verified installation, including across database reopen.
+  commitInstallationProjection(h.store, h.store.get('SELECT * FROM accounts WHERE id=?', owner.id),
+    [{ id: 1, account: { id: 10, login: 'octo', type: 'User' }, repository_selection: 'selected', permissions: {}, events: [] }],
+    h.store.all('SELECT * FROM installed_repositories WHERE account_id=?', owner.id), new Date().toISOString());
   h.store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: h.webhook }));
   const hook = (id, headers) => h.hook(owner.path, owner.secret, id, { repository: { id: 101, full_name: 'octo/hello', private: state.private } }, { 'X-GitHub-Event': 'push', ...headers });
   const get = async path => { const response = await fetch(h.webhook + path); return { status: response.status, data: await response.json() }; };

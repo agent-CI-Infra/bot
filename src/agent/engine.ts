@@ -15,6 +15,7 @@ import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
+import { installationExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
@@ -142,6 +143,8 @@ export class TaskEngine {
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
       const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
+      if(installationExecutionDenied(this.store,String(this.store.get('SELECT account_id FROM repositories WHERE id=?',task.repository_id)?.account_id),task.repository_id))
+        stop('github_installation_access_revoked','waiting_permission','安装已失效或正在核实范围，任务等待安装同步。');
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);

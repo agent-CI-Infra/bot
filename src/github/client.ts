@@ -3,6 +3,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { digest } from '../core/security.js';
 import { appBucket, blockedUntil, bucketName, installationBucket, observe, refused, userBucket, utcTime, type Bucket } from './rate-limits.js';
 import { errorBody, networkReason, Redactor, safePath, stop } from '../agent/common.js';
+import { installationExecutionDenied } from '../installations/archive.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
 const treeCache=new WeakMap<object,Map<string,Promise<SnapshotTree>>>();
@@ -89,6 +90,8 @@ export class GitHub {
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
   async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false): Promise<any> {
     await this.guard();
+    if (this.store && installationExecutionDenied(this.store, String(this.repository.account_id), String(this.repository.id)))
+      stop('github_installation_access_revoked', 'waiting_permission', 'GitHub App 安装已暂停、卸载或正在核实范围；请等待安装同步后重试。');
     // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
     const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);

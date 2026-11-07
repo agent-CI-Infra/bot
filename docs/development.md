@@ -44,6 +44,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 共享执行入口、任务扩展方式与权限边界见[共享 Agent 后端](agent-runtime.md)。
 
+安装事实档案、持久化同步、回调与身份模块契约及独立容器验收见[安装档案与同步](installation-archive.md)。
+
 默认关闭的 Actions 失败处理及其扫描、分类和一次重跑设计见 [Actions 失败分类与提报](actions-failures.md)。
 
 ## 按任务选择模型
