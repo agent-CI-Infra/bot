@@ -24,14 +24,14 @@ export function traceStorage(store:Store){
     kind TEXT NOT NULL,attempt INTEGER NOT NULL,revision INTEGER NOT NULL,candidate_id TEXT,parent_run_id TEXT,previous_run_id TEXT,
     started_at TEXT NOT NULL,ended_at TEXT,status TEXT NOT NULL,stop_reason TEXT,context_snapshot TEXT NOT NULL,config_snapshot TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS task_run_task ON task_runs(task_id,started_at,id);`);
-  for(const [table,columns] of Object.entries({task_history:{run_id:'TEXT',actor:"TEXT NOT NULL DEFAULT 'framework'",source_ref:'TEXT',caused_by:"TEXT NOT NULL DEFAULT '[]'",schema_version:'INTEGER NOT NULL DEFAULT 1'},model_requests:{run_id:'TEXT',request_snapshot:'TEXT',response_snapshot:'TEXT'}})){
+  for(const [table,columns] of Object.entries({task_history:{run_id:'TEXT',actor:"TEXT NOT NULL DEFAULT 'legacy_unknown'",source_ref:'TEXT',caused_by:"TEXT NOT NULL DEFAULT '[]'",schema_version:'INTEGER NOT NULL DEFAULT 1'},model_requests:{run_id:'TEXT',request_snapshot:'TEXT',response_snapshot:'TEXT'}})){
     const existing=new Set(store.all(`PRAGMA table_info(${table})`).map(r=>r.name));
     for(const [name,type] of Object.entries(columns))if(!existing.has(name))store.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
   }
   store.db.exec(`CREATE INDEX IF NOT EXISTS task_history_run ON task_history(task_id,run_id,id);
     DROP TRIGGER IF EXISTS trace_history_scope;
     CREATE TRIGGER trace_history_scope AFTER INSERT ON task_history BEGIN
-      UPDATE task_history SET run_id=coalesce(NEW.run_id,(SELECT id FROM task_runs WHERE task_id=NEW.task_id AND (status='running' OR kind=CASE WHEN NEW.type IN ('candidate','artifact_checkpoint','checkpoint') THEN 'execution' WHEN NEW.type LIKE 'acceptance%' THEN 'acceptance' ELSE 'none' END) ORDER BY rowid DESC LIMIT 1)),actor=CASE WHEN NEW.actor<>'framework' THEN NEW.actor WHEN NEW.type='execution_evidence' THEN 'executor' WHEN NEW.type LIKE 'acceptance%' THEN 'verifier' ELSE 'framework' END,source_ref=coalesce(NEW.source_ref,'task_history:'||NEW.id) WHERE id=NEW.id;
+      UPDATE task_history SET run_id=coalesce(NEW.run_id,(SELECT id FROM task_runs WHERE task_id=NEW.task_id AND (status='running' OR kind=CASE WHEN NEW.type IN ('candidate','artifact_checkpoint','checkpoint') THEN 'execution' WHEN NEW.type LIKE 'acceptance%' THEN 'acceptance' ELSE 'none' END) ORDER BY rowid DESC LIMIT 1)),actor=CASE WHEN NEW.actor NOT IN ('framework','legacy_unknown') THEN NEW.actor WHEN NEW.type='execution_evidence' THEN 'executor' WHEN NEW.type LIKE 'acceptance%' THEN 'verifier' ELSE 'framework' END,source_ref=coalesce(NEW.source_ref,'task_history:'||NEW.id) WHERE id=NEW.id;
       UPDATE task_runs SET candidate_id=json_extract(NEW.data,'$.id') WHERE id=(SELECT run_id FROM task_history WHERE id=NEW.id) AND NEW.type='candidate';
     END;`);
   store.db.exec(`CREATE TRIGGER IF NOT EXISTS trace_audit_task AFTER INSERT ON audit WHEN EXISTS(SELECT 1 FROM tasks WHERE id=NEW.resource_id) BEGIN
@@ -62,7 +62,7 @@ export function beginRun(store:Store,task:Row,kind:string,config:any){return ato
   const previous=store.get('SELECT id FROM task_runs WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',task.id,kind);
   const run={id:randomId(),task_id:task.id,kind,attempt:t.attempt,revision:r.revision,candidate_id:candidate?.id??null};
   store.run('INSERT INTO task_runs VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?)',run.id,task.id,kind,t.attempt,r.revision,candidate?.id??null,task.trace_run_id??null,previous?.id??null,now(),null,'running',null,
-    traceSnapshot({context_files:task.trace_context??{},contract:JSON.parse(r.contract),input:JSON.parse(t.input||'{}'),project:project?{...project,facts:JSON.parse(project.facts)}:null,source_sha:t.head_sha,workspace_id:t.workspace_id,recovery:JSON.parse(t.input||'{}').recovery??null}),traceSnapshot({...config,bot_version:botVersion,node_version:process.version,platform:process.platform,environment:store.get('SELECT generation,state,revision FROM project_environments WHERE repository_id=?',t.repository_id)??null}));
+    traceSnapshot({context_files:task.trace_context??{},input_candidate:candidate,contract:JSON.parse(r.contract),input:JSON.parse(t.input||'{}'),project:project?{...project,facts:JSON.parse(project.facts)}:null,source_sha:t.head_sha,workspace_id:t.workspace_id,recovery:JSON.parse(t.input||'{}').recovery??null}),traceSnapshot({...config,bot_version:botVersion,node_version:process.version,platform:process.platform,environment:store.get('SELECT generation,state,revision FROM project_environments WHERE repository_id=?',t.repository_id)??null}));
   traceEvent(store,task.id,'run_started',{...run,parent_run_id:task.trace_run_id??null,previous_run_id:previous?.id??null},run.id);return run;
 });}
 export function endRun(store:Store,run:Row|null,status:string,reason?:string){if(!run)return;return atomic(store,()=>{
