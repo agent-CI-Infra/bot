@@ -1,9 +1,12 @@
+import { recoverRoleCheckpoint } from '../roles/recovery.js';
+import { roleConfig } from '../roles/run.js';
+import { mergeApi } from '../roles/merge.js';
 import { roleApi } from '../roles/api.js';
 import { memoryApi } from '../memory/api.js';
 import { interruptRuns, traceEvent, beginRun, endRun } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
 import { playbooks } from '../tasks/playbooks.js';
-import { restoreCheckpoint } from '../tasks/checkpoint.js';
+import { restoreCheckpoint,checkpoint } from '../tasks/checkpoint.js';
 import { runRequest } from '../tasks/request.js';
 import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery } from '../tasks/acceptance.js';
@@ -472,6 +475,7 @@ export class TaskEngine {
           :{messages:updates.map(row=>JSON.stringify({instruction:'A person updated this review. Respond to this update and revise the final result before publication. Discussion files have been refreshed.',
             update:JSON.parse(row.data),current_object:object,reviewed_sha:task.head_sha}))};
       }};
+      if(development&&task.phase==='model'&&roleConfig(this.store,task).enabled)recoverRoleCheckpoint(this.store,task,input.snapshot_sha);
       if(development&&task.phase==='model')await restoreCheckpoint(this.store,task,workspace,input.snapshot_sha);
       const initial=records.get(id);
       if(['unspecified','legacy_unknown'].includes(initial.contract.completeness||'')) {
@@ -669,6 +673,7 @@ export class TaskEngine {
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
         retry_error_code:counted?failure.code:retrying?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
         rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});
+      if(workspace&&task.phase==='model'&&roleConfig(this.store,task).enabled&&task.kind.startsWith('development.')&&task.workspace_id){try{await checkpoint(this.store,task,workspace);}catch(saved){records.history(id,'checkpoint_fault',{phase:'role_failure_recovery',code:(saved as any).code||'snapshot_failed'});}}
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
@@ -799,6 +804,7 @@ export class TaskEngine {
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
+    const merge=await mergeApi(this.store,user,method,url,input,this.githubUrl);if(merge!==undefined)return merge;
     const roles=roleApi(this.store,user,method,url,input);if(roles!==undefined)return roles;
     const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;
     const contractMatch=/^\/api\/tasks\/([^/]+)\/contract$/.exec(url.pathname);
