@@ -92,7 +92,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
         // Retain the explicitly delivered files independently of disposable execution workspaces.
         for(const delivered of result.artifacts.slice(0,16)){
           const file=snapshot.files.find((f:any)=>f.path===delivered.path);
-          if(!file||file.size>2*1024*1024){traceEvent(store,task.id,'artifact_content',{path:delivered.path,complete:false,missing_reason:file?'capture_limit_exceeded':'not_in_candidate'});continue;}
+          if(!file||file.size>2*1024*1024){traceEvent(store,task.id,'artifact_content',{path:delivered.path,version:file?.sha??null,expected_bytes:file?.size??null,read_complete:false,complete:false,body_omitted:true,sanitized:null,captured_blob_sha:null,content_sha256:null,missing_reason:file?'capture_limit_exceeded':'not_in_candidate'});continue;}
           const chunks:Buffer[]=[];
           for(let offset=0;offset<file.size;offset+=30000){const part=await workspace.call(`archive:${snapshot.local_sha}:${file.sha}:${offset}`,{type:'workspace_blob',sha:file.sha,offset});if(part.error)break;chunks.push(Buffer.from(part.base64||'','base64'));}
           const data=Buffer.concat(chunks),text=data.toString('utf8');

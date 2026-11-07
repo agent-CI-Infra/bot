@@ -56,3 +56,11 @@ test('JSON delivery bytes remain exact unless explicitly sanitized, with capture
  const artifact=retainedTextArtifact('result.json',version,data,data.length,x=>x),wrapped=JSON.parse(traceSnapshot(artifact));assert.equal(wrapped.data.content,original);assert.equal(wrapped.data.complete,true);assert.equal(wrapped.data.captured_blob_sha,version);assert.equal(wrapped.data.sanitized,false);
  const redacted=retainedTextArtifact('result.json',version,data,data.length,x=>x.replace('public value','[REDACTED]'));assert.equal(redacted.read_complete,true);assert.equal(redacted.complete,false);assert.equal(redacted.sanitized,true);assert.notEqual(redacted.captured_blob_sha,version);assert.equal(redacted.missing_reason,'sanitized_representation');
 });
+
+test('near-limit escaped artifact text survives source retrieval and over-limit metadata remains available',()=>{
+ const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);const limit=2*1024*1024,line='"'.repeat(78)+'\n',text=line.repeat(Math.ceil((limit-1)/line.length)).slice(0,limit-1),bytes=Buffer.from(text),version=blobSha(bytes);
+ const full=JSON.parse(traceSnapshot(retainedTextArtifact('large.md',version,bytes,bytes.length,x=>x)));assert.ok(full.original_bytes>limit);assert.equal(full.complete,true);assert.equal(full.data.content,text);assert.equal(full.data.captured_blob_sha,version);
+ const event=traceEvent(s,'t','artifact_content',full),source=traceSource(s,'t',event);assert.equal(source.complete,true);assert.equal(source.data.content,text);assert.equal(source.data.version,version);
+ const oversized=Buffer.from(text+'xx'),trimmed=JSON.parse(traceSnapshot(retainedTextArtifact('too-big.md',blobSha(oversized),oversized,oversized.length,x=>x)));assert.equal(trimmed.complete,false);assert.equal(trimmed.data.path,'too-big.md');assert.equal(trimmed.data.read_complete,true);assert.equal(trimmed.data.sanitized,false);assert.ok(trimmed.data.content_sha256);assert.ok(trimmed.data.captured_blob_sha);assert.equal(trimmed.data.content,undefined);assert.equal(trimmed.data.body_omitted,true);assert.equal(trimmed.data.content_preview,(text+'xx').slice(0,32000));
+ }finally{s.close();}
+});

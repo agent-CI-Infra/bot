@@ -80,3 +80,5 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 - `PATCH /api/models/:id/provider`：以模型 ID 定位所在供应商；必须提供组内全部模型的 `versions:[{id,version}]`，可提交 `api_url`、非空 `api_key` 和待添加的 `model_names`。Key 空白保持原值。组成员、版本发生变化返回 `409 version_conflict`；事务内更新全部连接并添加新模型，返回不含 Key 的 `models`。
 - 同一路径提交 `{versions, revoke_key:true}` 统一撤销组内 Key；不能同时提交 URL、新 Key 或新增模型。项目选择和已有计费单价不变。
 - `POST /api/models/:id/upstream` 可带 `version`、草稿 `api_url`／`api_key`，在编辑权限下使用草稿或已保存 Key 获取列表，不保存这些值；空 Key 使用该模型已保存的 Key。旧的单模型 API 保持兼容。
+
+任务运行、来源保留上限及详情投影的完整说明见 [Task trace](task-trace.md)。文本交付按原始 UTF-8 正文 2 MiB 限制，JSON 转义后的包裹体另有 16 MiB 上限；超限保留路径、版本、读取/脱敏状态及哈希，仅省略正文。
