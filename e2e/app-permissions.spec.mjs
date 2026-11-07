@@ -13,8 +13,9 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
   const everything = { ...full, workflows: 'write' }, allEvents = [...events, 'workflow_run'];
   const app = { slug: 'fixture-app', html_url: 'https://github.com/apps/fixture-app', owner: { login: 'fixture', type: 'Organization' },
     permissions: { ...full, statuses: 'read', actions: undefined }, events: ['issues', 'pull_request'] };
-  const installations = [{ id: 7, account: { login: 'fixture' }, permissions: { ...full, actions: 'read' }, events: ['issues', 'pull_request', 'issue_comment'] },
-    { id: 8, account: { login: 'paused' }, suspended_at: '2026-01-01', permissions: {}, events: [] }];
+  const installations = [{ id: 7, account: { id: 10, login: 'fixture', type: 'Organization' }, repository_selection: 'all',
+    permissions: { ...full, actions: 'read' }, events: ['issues', 'pull_request', 'issue_comment'] },
+    { id: 8, account: { id: 20, login: 'paused', type: 'Organization' }, repository_selection: 'selected', suspended_at: '2026-01-01', permissions: {}, events: [] }];
   let failInstallations = false;
   const github = createServer((req, res) => {
     const url = new URL(req.url, 'http://fake'); res.setHeader('Content-Type', 'application/json');
