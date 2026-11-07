@@ -1,3 +1,4 @@
+import { traceEvent, traceSnapshot } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { observation } from './evidence.js';
 import { selectedModel } from '../agent/model.js';
@@ -88,6 +89,15 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
             catch{return stop('agent_output_invalid','retry_wait','普通任务需要提交结构化报告及 artifact 引用。');}
           }});
         const snapshot=await workspace.artifact(`request:${execution}:candidate`);
+        // Retain the explicitly delivered files independently of disposable execution workspaces.
+        for(const delivered of result.artifacts.slice(0,16)){
+          const file=snapshot.files.find((f:any)=>f.path===delivered.path);
+          if(!file||file.size>2*1024*1024){traceEvent(store,task.id,'artifact_content',{path:delivered.path,complete:false,missing_reason:file?'capture_limit_exceeded':'not_in_candidate'});continue;}
+          const chunks:Buffer[]=[];
+          for(let offset=0;offset<file.size;offset+=30000){const part=await workspace.call(`archive:${snapshot.local_sha}:${file.sha}:${offset}`,{type:'workspace_blob',sha:file.sha,offset});if(part.error)break;chunks.push(Buffer.from(part.base64||'','base64'));}
+          const data=Buffer.concat(chunks),text=data.toString('utf8');
+          traceEvent(store,task.id,'artifact_content',JSON.parse(traceSnapshot({path:file.path,version:file.sha,candidate_tree:snapshot.tree_sha,complete:data.length===file.size,encoding:'utf8',content:redactor.text(text),binary:!Buffer.from(text).equals(data),missing_reason:data.length===file.size?null:'blob_unavailable'})));
+        }
         const evidence=store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='execution_evidence' AND json_extract(data,'$.execution')=? ORDER BY id",task.id,execution).map(row=>observation('task_history:'+row.id,JSON.parse(row.data).version||'unknown',row.data));
         records.submit(task.id,[{kind:'report',reference:`task:${task.id}:report`,version:sha(JSON.stringify(result)),content:result},
           {kind:'files',reference:`workspace:${task.workspace_id}`,version:snapshot.tree_sha,content:{files:snapshot.files,local_sha:snapshot.local_sha,base_sha:task.head_sha}}],evidence,result,task.claim_token);
