@@ -14,6 +14,8 @@ export interface AgentServices {
 }
 export interface AgentSpec<T> {
   store: Store;
+  session?: { messages:any[]; save:(messages:any[])=>void };
+  roleRun?: {instance_id:string;role:string;version:string;harness:string;assignment_id?:string;recovery_mode:string};
   task: Row;
   redactor: Redactor;
   guard: () => Promise<void>;
@@ -73,8 +75,9 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   const model = spec.model ?? selectedModel(spec.store, spec.task.repository_id, taskWorkflow(spec.task as any));
   spec.redactor.add(model.key);
   const previousRun=spec.task.trace_run_id;
-  const run=beginRun(spec.store,spec.task,spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
+  const run=beginRun(spec.store,spec.task,spec.roleRun?.role==='qa'||spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
   spec.task.trace_run_id=run?.id;
+  if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,'1',r.assignment_id??null,r.recovery_mode,run.id);}
   const services: AgentServices = {
     model, guard: spec.guard,
     request: async (body, requestId, onToken) => {
@@ -111,7 +114,8 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
   const offered = spec.tools ?? [], offeredNames=new Set(offered.map(tool=>tool.function?.name));
   if(spec.finalizationTools&&(!spec.finish||!spec.finalizationTools.includes(spec.finish.name)||spec.finalizationTools.some(name=>!offeredNames.has(name))))return stop('agent_tools_invalid','waiting_configuration','收尾工具必须来自本次授权工具并包含提交入口。');
   const finishingNames=spec.finalizationTools?new Set(spec.finalizationTools):null;
-  const messages: any[] = [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
+  const messages: any[] = spec.session?.messages.length ? [...spec.session.messages,{role:'user',content:spec.prompt}] : [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
+  const save=()=>spec.session?.save(spec.redactor.clean(messages));
   let repairs=0;
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
@@ -119,6 +123,7 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
     const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
     const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));
     if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:spec.finish.finalizationMessage?`${reserve} turns remain. ${spec.finish.finalizationMessage}`:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
+    save();
     const { value, request_log_id } = await services.request({ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
       ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) }, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
@@ -134,7 +139,7 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
         const toolEvent=spec.task.trace_run_id?traceEvent(spec.store,spec.task.id,'tool_started',{call_id:call.id,name:call.function.name,arguments:spec.redactor.clean(args),model_request_id:request_log_id},spec.task.trace_run_id,'agent',['model_requests:'+request_log_id+':response']):null;
         const finishing=spec.finish;
         if(finishing&&finishing.name===call.function.name&&names.has(call.function.name)){
-          try{return await finishing.validate(args);}catch(error){
+          try{const result=await finishing.validate(args);messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({submitted:true})});for(const pending of message.tool_calls.slice(message.tool_calls.indexOf(call)+1))messages.push({role:'tool',tool_call_id:pending.id,content:JSON.stringify({skipped:'execution_submitted'})});save();return result;}catch(error){
             const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;
             messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify({error:'invalid_submission',message:spec.redactor.text(feedback)})});continue;
           }
@@ -144,14 +149,14 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
           : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
           : spec.execute ? await spec.execute(call.function.name, args) : { error: 'tool_not_allowed' };
         if(toolEvent)traceEvent(spec.store,spec.task.id,'tool_observation',{call_id:call.id,name:call.function.name,observation:JSON.parse(traceSnapshot(spec.redactor.clean(result)))},spec.task.trace_run_id,'tool',[toolEvent]);
-        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(spec.redactor.clean(result)) });
+        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(spec.redactor.clean(result)) });save();
       }
       continue;
     }
     if (typeof message.content !== 'string' || message.content.length > maxOutput)
       return stop('agent_output_invalid', undefined, 'Agent 返回内容无效或超过输出上限。');
     // Validators see raw content to reject (rather than silently save) sensitive output.
-    try{return spec.validate ? await spec.validate(message.content) : spec.redactor.text(message.content) as T;}
+    try{const result=spec.validate ? await spec.validate(message.content) : spec.redactor.text(message.content) as T;messages.push({role:'assistant',content:spec.redactor.text(message.content)});save();return result;}
     catch(error){
       const feedback=spec.repairInvalid?.(error);
       if(!feedback||repairs++>=2)throw error;

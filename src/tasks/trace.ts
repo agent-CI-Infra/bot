@@ -75,7 +75,7 @@ export function beginRun(store:Store,task:Row,kind:string,config:any){return ato
   const candidate=JSON.parse(r.candidate||'null'),project=store.get('SELECT * FROM project_context WHERE repository_id=?',t.repository_id);
   const previous=store.get('SELECT id FROM task_runs WHERE task_id=? AND kind=? ORDER BY rowid DESC LIMIT 1',task.id,kind);
   const run={id:randomId(),task_id:task.id,kind,attempt:t.attempt,revision:r.revision,candidate_id:candidate?.id??null};
-  store.run('INSERT INTO task_runs VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?)',run.id,task.id,kind,t.attempt,r.revision,candidate?.id??null,task.trace_run_id??null,previous?.id??null,now(),null,'running',null,
+  store.run('INSERT INTO task_runs(id,task_id,kind,attempt,revision,candidate_id,parent_run_id,previous_run_id,started_at,ended_at,status,stop_reason,context_snapshot,config_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?)',run.id,task.id,kind,t.attempt,r.revision,candidate?.id??null,task.trace_run_id??null,previous?.id??null,now(),null,'running',null,
     traceSnapshot({context_files:task.trace_context??{},input_candidate:candidate,contract:JSON.parse(r.contract),input:JSON.parse(t.input||'{}'),project:project?{...project,facts:JSON.parse(project.facts)}:null,source_sha:t.head_sha,workspace_id:t.workspace_id,recovery:JSON.parse(t.input||'{}').recovery??null}),traceSnapshot({...config,bot_version:botVersion,node_version:process.version,platform:process.platform,environment:store.get('SELECT generation,state,revision FROM project_environments WHERE repository_id=?',t.repository_id)??null}));
   traceEvent(store,task.id,'run_started',{...run,parent_run_id:task.trace_run_id??null,previous_run_id:previous?.id??null},run.id);return run;
 });}

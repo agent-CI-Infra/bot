@@ -1,3 +1,5 @@
+import { developmentTeam } from '../roles/development.js';
+import { roleConfig } from '../roles/run.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { checkpoint } from '../tasks/checkpoint.js';
 import { TaskRecords } from '../tasks/service.js';
@@ -45,6 +47,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
+  if(profile.completion==='publication'&&createPullRequest&&roleConfig(store,task).enabled)return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace);
   return runAgent({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: async ({ request, model }) => {
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
     if (conversation) conversation.model = model;

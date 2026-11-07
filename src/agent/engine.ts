@@ -1,3 +1,4 @@
+import { roleApi } from '../roles/api.js';
 import { memoryApi } from '../memory/api.js';
 import { interruptRuns, traceEvent, beginRun, endRun } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
@@ -798,6 +799,7 @@ export class TaskEngine {
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
+    const roles=roleApi(this.store,user,method,url,input);if(roles!==undefined)return roles;
     const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;
     const contractMatch=/^\/api\/tasks\/([^/]+)\/contract$/.exec(url.pathname);
     if(contractMatch&&method==='PATCH'){

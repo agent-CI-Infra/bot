@@ -1,0 +1,6 @@
+import {Workspace} from '../agent/workspace.js';
+import {randomId} from '../core/security.js';
+import {traceEvent} from '../tasks/trace.js';
+import {stop} from '../agent/common.js';
+/** One writer; observers get disposable checkouts bound to the writer's snapshot. */
+export function roleWorkspaces(workspace:Workspace){let active=workspace;return {get current(){return active;},async prepare(role:string){active=workspace;if(role==='dev')return;const snapshot=await workspace.artifact('role-source:'+randomId());const isolated=new Workspace(workspace.store,workspace.manager,{...workspace.task,workspace_id:randomId()},workspace.redactor,workspace.guard,workspace.log);const ready=await isolated.call('role-checkout:'+randomId(),{type:'workspace_acceptance',source_workspace_id:workspace.task.workspace_id,sha:snapshot.local_sha,tree_sha:snapshot.tree_sha});if(ready.error)stop('role_snapshot_unavailable','waiting_environment');traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:isolated.task.workspace_id},workspace.task.trace_run_id);active=isolated;return async()=>{active=workspace;await isolated.release(false);};}};}
