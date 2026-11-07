@@ -1,4 +1,3 @@
-import { harnesses } from './pool.js';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -33,6 +32,7 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
  child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,maxTurns:spec.maxTurns??32}})+'\n');
 });}
 
+export const harnesses=[{id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations'},{id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations'}];
 export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string}
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
 const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness]]);
