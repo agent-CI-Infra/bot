@@ -24,6 +24,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "2.1.0",
     "jose": "^6.2.13",
     "yaml": "2.9.0"
   },
