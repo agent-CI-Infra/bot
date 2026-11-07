@@ -1,3 +1,4 @@
+import { beginRun, endRun } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { readEvidence, previousVerificationEvidence } from './evidence.js';
 import { selectedModel } from '../agent/model.js';
@@ -28,6 +29,9 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
   const evaluationId=randomId(),start=Date.now();
   const files=candidate.artifacts.find(a=>a.kind==='files'||a.kind==='code');
   let snapshot=files?.content as any,sourceTree=files?.version;
+  const previousRun=task.trace_run_id;
+  const verificationRun=beginRun(store,task,'verification',{evaluation_id:evaluationId,system:acceptanceSystem,shell,source_tree:sourceTree});task.trace_run_id=verificationRun?.id;
+  let verificationOutcome:string|undefined,verificationFault:string|undefined;
   let verification=workspace;
   try {
   const sourceInput=JSON.parse(task.input||'{}');
@@ -52,7 +56,7 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
       records.history(task.id,'acceptance_evidence',{evaluation_id:evaluationId,name:'policy_validation',version:sourceTree,command:required,result:additionalVerification});
       if(additionalVerification.error||additionalVerification.exit_code!==0||additionalVerification.timed_out||additionalVerification.truncated){
         const verdict:Verdict={outcome:'return',reason:'Required project verification failed for the submitted candidate',gaps:[required+'; '+String(additionalVerification.output||additionalVerification.error||'verification incomplete').slice(-4000)],residuals:[],core_complete:false,required_evidence_complete:false,acceptable_risk:true};
-        records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict,method:'deterministic_policy'});return verdict;
+        records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict,method:'deterministic_policy'});verificationOutcome=verdict.outcome;return verdict;
       }
     }
     const model=selectedModel(store,task.repository_id,taskWorkflow(task as any));
@@ -74,8 +78,9 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
         let value;try{value=JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{return stop('acceptance_output_invalid','retry_wait','验收器未返回有效 JSON。');}
         return validateDecision(value);
       }});
-    records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict});return verdict;
+    records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict});verificationOutcome=verdict.outcome;return verdict;
   } catch(error) {
+    verificationFault=(error as any).code||'runtime_fault';
     records.history(task.id,'acceptance_fault',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,code:(error as any).code||'runtime_fault'});
     if(['acceptance_output_invalid','agent_turn_limit','acceptance_budget_exhausted'].includes((error as any).code)){
       const failures=store.get("SELECT count(*) n FROM task_history WHERE task_id=? AND type='acceptance_fault' AND json_extract(data,'$.candidate_id')=? AND json_extract(data,'$.code') IN ('acceptance_output_invalid','agent_turn_limit','acceptance_budget_exhausted')",task.id,candidate.id)?.n||0;
@@ -83,5 +88,5 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
     }
     if((error as any).code==='agent_turn_limit')return stop('acceptance_output_invalid','retry_wait','独立验收达到本轮工具预算，候选已保留，自动重新验收。');
     throw error;
-  } finally { if(verification!==workspace)await verification.release(false); }
+  } finally {try{if(verification!==workspace)await verification.release(false);}finally{endRun(store,verificationRun,verificationOutcome?'succeeded':'fault',verificationFault||verificationOutcome);task.trace_run_id=previousRun;}}
 }

@@ -8,7 +8,7 @@ Task history is the process index. Existing logs, project-computer receipts, mod
 
 Authenticated, existing project-scoped GET endpoints:
 
-- `/api/tasks/:id/runs`: execution/acceptance identities, parent/previous run and immutable context/config snapshots.
+- `/api/tasks/:id/runs`: cursor-paginated execution/acceptance identities, parent/previous run and immutable context/config source references; include_snapshots=1 explicitly includes bodies. Transport base64 chunks are omitted from snapshots; public model I/O is captured separately.
 - `/api/tasks/:id/events?after=0&limit=50&type=...&run_id=...&revision=...&candidate_id=...`: chronological cursor pagination, maximum 100; stable event_id and source references. Historical observations lacking version/run metadata remain missing.
 - `/api/tasks/:id/source?ref=task_history:123`: original retained event; `model_requests:<id>:request|response` and `task_runs:<id>:context|config` read sanitized snapshots. Entity references resolve their latest captured event; use event_id to fix an exact observation.
 - `/api/tasks/:id/lineage`: direct parents/children, exact originating acceptance event IDs and parent candidate. Repeating the same query along each edge reconstructs deeper ancestry; no descendant completion gate is introduced.

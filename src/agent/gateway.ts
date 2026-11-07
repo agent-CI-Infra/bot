@@ -21,7 +21,7 @@ export interface ModelRequest {
 /** The single provider boundary. Credentials stay here, never in task tools or prompts.
  * Returns provider data to the trusted adapter, which validates/redacts its domain output.
  */
-export async function requestModel(input: ModelRequest): Promise<{ value: any; status: number; model: AgentModel }> {
+export async function requestModel(input: ModelRequest): Promise<{ value: any; status: number; model: AgentModel; request_log_id: string }> {
   const { store, task, model, redactor, body, requestId } = input;
   await input.guard?.();
   redactor.add(model.key);
@@ -90,5 +90,5 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   // Billable usage is durable even if a subsequent guard or domain validator rejects the result.
   finishModelRequest(store, requestLog, value?.usage, response.status);
   await input.guard?.();
-  return { value, status: response.status, model };
+  return { value, status: response.status, model, request_log_id: requestLog };
 }

@@ -1,4 +1,4 @@
-import { beginRun, endRun } from '../tasks/trace.js';
+import { beginRun, endRun, traceEvent, traceSnapshot } from '../tasks/trace.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { selectedModel } from './model.js';
@@ -119,7 +119,7 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
     const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
     const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));
     if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:spec.finish.finalizationMessage?`${reserve} turns remain. ${spec.finish.finalizationMessage}`:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
-    const { value } = await services.request({ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
+    const { value, request_log_id } = await services.request({ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
       ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) }, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
     if (!message || JSON.stringify(message).length > 2 * 1024 * 1024) return stop('agent_output_invalid', undefined, 'Agent 没有返回有效结果。');
@@ -131,6 +131,7 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
       for (const call of message.tool_calls) {
         await services.guard();
         let args: any; try { args = JSON.parse(call.function.arguments); } catch { args = null; }
+        const toolEvent=spec.task.trace_run_id?traceEvent(spec.store,spec.task.id,'tool_started',{call_id:call.id,name:call.function.name,arguments:spec.redactor.clean(args),model_request_id:request_log_id},spec.task.trace_run_id,'agent',['model_requests:'+request_log_id+':response']):null;
         const finishing=spec.finish;
         if(finishing&&finishing.name===call.function.name&&names.has(call.function.name)){
           try{return await finishing.validate(args);}catch(error){
@@ -142,6 +143,7 @@ async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise
         const result = !names.has(call.function.name) ? { error: 'tool_not_allowed' }
           : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
           : spec.execute ? await spec.execute(call.function.name, args) : { error: 'tool_not_allowed' };
+        if(toolEvent)traceEvent(spec.store,spec.task.id,'tool_observation',{call_id:call.id,name:call.function.name,observation:JSON.parse(traceSnapshot(spec.redactor.clean(result)))},spec.task.trace_run_id,'tool',[toolEvent]);
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(spec.redactor.clean(result)) });
       }
       continue;

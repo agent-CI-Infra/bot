@@ -10,7 +10,7 @@ function atomic<T>(store:Store,fn:()=>T):T{const name='trace_'+randomId();store.
 export function traceClean(value:any):any {
   if(typeof value==='string'){if(/^[\[{]/.test(value)){try{return JSON.stringify(traceClean(JSON.parse(value)));}catch{}}return value.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,'[REDACTED]').replace(/\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{15,}|Bearer\s+[\w.\/-]+)/gi,'[REDACTED]').replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/g,'$1[REDACTED]@');}
   if(Array.isArray(value))return value.map(traceClean);
-  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/^(api_?key|authorization|credentials|claim_token|token|password|private_key|key|reasoning(?:_content|_text)?|analysis)$/i.test(k)).map(([k,v])=>[k,traceClean(v)]));
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/^(api_?key|authorization|credentials|claim_token|token|password|private_key|reasoning.*|thinking.*|analysis|base64)$/i.test(k)).map(([k,v])=>[k,traceClean(v)]));
   return value;
 }
 export function traceSnapshot(value:any){
@@ -79,7 +79,11 @@ export function traceSource(store:Store,taskId:string,source:string){
   fail(404,'trace_source_not_found');
 }
 export function taskTrace(store:Store,taskId:string,url:URL,section:string){
-  if(section==='runs')return {runs:store.all('SELECT * FROM task_runs WHERE task_id=? ORDER BY rowid',taskId).map(r=>({...r,context_snapshot:JSON.parse(r.context_snapshot),config_snapshot:JSON.parse(r.config_snapshot)})),coverage:{legacy_runs_not_reconstructed:true}};
+  if(section==='runs'){
+    const after=Number(url.searchParams.get('after')??0),limit=Number(url.searchParams.get('limit')??20);if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>100)fail(400,'invalid_pagination');
+    const rows=store.all('SELECT rowid AS sequence,* FROM task_runs WHERE task_id=? AND rowid>? ORDER BY rowid LIMIT ?',taskId,after,limit+1),more=rows.length>limit;rows.splice(limit);
+    return {runs:rows.map(r=>{const {context_snapshot,config_snapshot,...metadata}=r;return {...metadata,context_source:'task_runs:'+r.id+':context',config_source:'task_runs:'+r.id+':config',...(url.searchParams.get('include_snapshots')==='1'?{context_snapshot:JSON.parse(context_snapshot),config_snapshot:JSON.parse(config_snapshot)}:{})};}),next_after:more?rows.at(-1)!.sequence:null,coverage:{legacy_runs_not_reconstructed:true}};
+  }
   if(section==='source')return {source:traceSource(store,taskId,url.searchParams.get('ref')||'')};
   if(section==='lineage'){const links=(where:string)=>store.all('SELECT * FROM task_followups WHERE '+where,taskId).map(r=>({...r,acceptance_event_id:store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance' AND json_extract(data,'$.candidate_id')=? AND EXISTS(SELECT 1 FROM json_each(json_extract(data,'$.followups')) WHERE value=?) ORDER BY id LIMIT 1",r.parent_id,r.candidate_id,r.task_id)?.id??null}));return {parents:links('task_id=?'),children:links('parent_id=?'),acceptances:store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",taskId).map(r=>({source:'task_history:'+r.id,data:JSON.parse(r.data)}))};}
   const limit=Number(url.searchParams.get('limit')??50),after=Number(url.searchParams.get('after')??0);

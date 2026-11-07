@@ -1,4 +1,4 @@
-import { interruptRuns, traceEvent } from '../tasks/trace.js';
+import { interruptRuns, traceEvent, beginRun, endRun } from '../tasks/trace.js';
 import { observation } from '../tasks/evidence.js';
 import { playbooks } from '../tasks/playbooks.js';
 import { restoreCheckpoint } from '../tasks/checkpoint.js';
@@ -162,9 +162,10 @@ export class TaskEngine {
       Object.assign(task,values);const keys=Object.keys(values);
       this.store.run(`UPDATE tasks SET ${keys.map(k=>k+'=?').join(',')},updated_at=? WHERE id=? AND claim_token=?`,...keys.map(k=>values[k] as any),new Date().toISOString(),id,token);
     });
-    let workspace:Workspace|undefined;
+    let workspace:Workspace|undefined;let attemptRun:Row|null=null;
     try{
       await guard();const config=selectedModel(this.store,task.repository_id,taskWorkflow(task as any));redactor.add(config.key);await this.share(task.repository_id);
+      attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
       // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.
@@ -679,7 +680,7 @@ export class TaskEngine {
       const last=previous?JSON.parse(previous.content):null,detail=redactor.clean(failure.detail);
       if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||last?.retry_cycle_started_at!==(cycle??undefined)||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
         log({type:'fault',state,code:failure.code,...(cycle!=null?{retry_cycle_started_at:cycle}:{}),...(detail?{detail,detail_sha:sha(detail)}:{})});
-    }
+    }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);endRun(this.store,attemptRun,terminal.includes(current?.status)?'succeeded':'stopped',current?.error_code);}
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.
   async live(user:Actor,id:string,url:URL):Promise<Json>{
