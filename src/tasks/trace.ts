@@ -21,8 +21,15 @@ export function retainedTextArtifact(path:string,version:string,data:Buffer,expe
   return {path,version,encoding:'utf8',content,read_complete,complete,binary,sanitized,captured_blob_sha:blob(captured),content_sha256:createHash('sha256').update(captured).digest('hex'),missing_reason:!read_complete?'blob_unavailable':binary?'binary_utf8_conversion':sanitized?'sanitized_representation':!matches?'blob_hash_mismatch':null};
 }
 export function traceSnapshot(value:any){
-  const clean=traceClean(value),text=JSON.stringify(clean??null),bytes=Buffer.byteLength(text);
-  return JSON.stringify({schema_version:1,sha256:createHash('sha256').update(text).digest('hex'),original_bytes:bytes,complete:bytes<=2*1024*1024,
+  const clean=traceClean(value),text=JSON.stringify(clean??null),bytes=Buffer.byteLength(text),digest=createHash('sha256').update(text).digest('hex');
+  // Text limits refer to raw UTF-8 content, not its JSON escaping. Valid JSON can expand sixfold.
+  const artifact=clean?.encoding==='utf8'&&typeof clean.content==='string'&&typeof clean.content_sha256==='string';
+  if(artifact){const contentBytes=Buffer.byteLength(clean.content),within=contentBytes<=2*1024*1024&&bytes<=16*1024*1024;
+    if(within)return JSON.stringify({schema_version:1,sha256:digest,original_bytes:bytes,content_bytes:contentBytes,complete:true,data:clean});
+    const {content,...metadata}=clean;
+    return JSON.stringify({schema_version:1,sha256:digest,original_bytes:bytes,content_bytes:contentBytes,complete:false,missing_reason:'capture_limit_exceeded',data:{...metadata,complete:false,body_omitted:true,content_preview:content.slice(0,32000),missing_reason:'capture_limit_exceeded'}});
+  }
+  return JSON.stringify({schema_version:1,sha256:digest,original_bytes:bytes,complete:bytes<=2*1024*1024,
     ...(bytes<=2*1024*1024?{data:clean}:{preview:text.slice(0,64000),missing_reason:'capture_limit_exceeded'})});
 }
 export function traceStorage(store:Store){
@@ -80,7 +87,7 @@ export function interruptRuns(store:Store){for(const r of store.all("SELECT * FR
 export function traceSource(store:Store,taskId:string,source:string){
   const model=/^model_requests:([^:]+):(request|response)$/.exec(source);
   if(model){const row=store.get(`SELECT ${model[2]}_snapshot AS snapshot FROM model_requests WHERE id=? AND task_id=?`,model[1]!,taskId);return row?.snapshot?JSON.parse(row.snapshot):{complete:false,missing_reason:'not_captured_or_unavailable'};}
-  const h=/^task_history:(\d+)$/.exec(source);if(h){const row=store.get('SELECT data FROM task_history WHERE id=? AND task_id=?',h[1]!,taskId);if(row)return JSON.parse(traceSnapshot(JSON.parse(row.data)));}
+  const h=/^task_history:(\d+)$/.exec(source);if(h){const row=store.get('SELECT data FROM task_history WHERE id=? AND task_id=?',h[1]!,taskId);if(row){const captured=JSON.parse(row.data);return captured?.schema_version===1&&typeof captured.sha256==='string'&&typeof captured.complete==='boolean'?traceClean(captured):JSON.parse(traceSnapshot(captured));}}
   const run=/^task_runs:([^:]+):(context|config)$/.exec(source);if(run){const row=store.get(`SELECT ${run[2]}_snapshot AS snapshot FROM task_runs WHERE id=? AND task_id=?`,run[1]!,taskId);if(row)return JSON.parse(row.snapshot);}
   const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row)return {...JSON.parse(traceSnapshot(JSON.parse(row.data))),source_event_id:'task_history:'+row.id};}
   fail(404,'trace_source_not_found');
