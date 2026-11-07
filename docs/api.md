@@ -38,7 +38,11 @@
 | `/api/models/upstream`、`/api/models/test` | POST | 未保存的模型：用提交的 `api_url,api_key` 获取上游模型列表；测试另带 `model_name`，发一次最小的 Chat Completions 请求。带 `repository_id` 时要求该项目的管理权限，为 null 时只允许超级管理员；不写数据库 |
 | `/api/models/:id/upstream`、`/api/models/:id/test` | POST | 已保存的模型用自己的 URL、Key 和模型名获取列表／测试，正文 `{}`；权限与编辑该模型相同（共享模型只允许超级管理员），审计记为 `model.upstream_listed`／`model.tested`；Key 已撤销返回 409 `model_key_missing` |
 | `/api/events`、`/api/events/:id` | GET | 范围内投递列表／正文和响应；列表可筛选 `repository_id,account_id,owner_id,event,status,delivery_id,limit,offset` |
-| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
+| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执（详情状态只含候选及证据元数据，历史为最近 50 项并附 history_page，正文从来源入口读取）和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
+| `/api/tasks/:id/events` | GET | 事件索引，`after` 游标、`limit` 1–100（默认 50），支持 `run_id/type/revision/candidate_id`；默认只返回元数据，`include_data=1` 内联至多 8192 字符的数据，完整数据通过来源接口读取 |
+| `/api/tasks/:id/runs` | GET | 运行索引，`after`、`limit` 1–100（默认 20）；`include_snapshots=1` 返回输入/输出快照 |
+| `/api/tasks/:id/source` | GET | `ref` 指向 task_history、task_runs、model_requests 等来源；校验任务及项目范围，保留完整性、缺失及脱敏标记 |
+| `/api/tasks/:id/lineage` | GET | 父子任务、验收决定及关联来源；沿用项目读取授权 |
 | `/api/tasks/:id/live` | GET | 运行中任务当前正在执行的命令及其已产生的输出，参数 `offset` 为已读字节数 |
 | `/api/board` | GET | 当前用户的视图、自定义单选字段及选项、六个固定 bot 阶段；阶段带 `hint` 说明，PR 看板措辞不同时带 `pr:{name,hint}` |
 | `/api/board/cards` | GET | Issue／PR 对象与 `project_releases` 发版本卡片，参数 `view_id`（默认 `default`）、`group_by`、`filters`（JSON 数组）、`limit`（1–100）、`offset`（0–100000）；返回 `cards,has_more,limit,offset,counts,release_count,work_count,column_counts`，对象和发版本均始终限制在当前仓库授权范围。`counts` 为 `{issue,pr}` 总数，忽略 `object_type` 条件、保留其余条件，表示去重的对象数；`work_count` 为筛选后的工作卡片总数，`column_counts` 为当前分列各组的全量工作数；对象卡片带 `card_category`（`review`／`development`）、该类别最新的 `task_id,task_status` 及独立的阶段／执行状态；对象卡片的 `development_pr_number` 是最近开发任务结果里的 PR 编号，发版本卡片带 `release_id,version,release_stage,execution_status,release_url`，不返回原始 `data` |
