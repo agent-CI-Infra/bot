@@ -4,9 +4,10 @@ export const randomId = () => randomBytes(24).toString('hex');
 export const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 
 export class HttpError extends Error {
-  constructor(readonly status: number, readonly code: string) { super(code); }
+  /** field names the configuration path that caused the error, never request contents or credentials. */
+  constructor(readonly status: number, readonly code: string, readonly field?: string) { super(code); }
 }
-export const fail = (status: number, code: string): never => { throw new HttpError(status, code); };
+export const fail = (status: number, code: string, field?: string): never => { throw new HttpError(status, code, field); };
 export type Json = Record<string, unknown>;
 export function object(value: unknown): Json {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return fail(400, 'expected_object');

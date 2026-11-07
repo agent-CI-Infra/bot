@@ -1,6 +1,6 @@
 import { roleWorkspaces } from '../roles/workspace.js';
 import { runTeam } from '../roles/team.js';
-import { roleConfig } from '../roles/run.js';
+import { controlled } from '../roles/run.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { traceEvent, traceSnapshot, retainedTextArtifact } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
@@ -23,7 +23,7 @@ import { randomId } from '../core/security.js';
 export async function runRequest(store: Store, manager: Manager, task: Row, redactor: Redactor, guard:()=>Promise<void>, log:(value:any)=>void, githubUrl?: string, gitCache?: GitCache) {
   const records=new TaskRecords(store),input=JSON.parse(task.input),repo=store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
   const workspace=new Workspace(store,manager,task,redactor,guard,log),spaces=roleWorkspaces(workspace);
-  const executeAgent:typeof runAgent=roleConfig(store,task).enabled?async(spec)=>runTeam(spec,spaces):runAgent;
+  const executeAgent:typeof runAgent=controlled(store,task,'request')?async(spec)=>runTeam(spec,{...spaces,entry:'request'}):runAgent;
   const link=task.source_task_id?store.get('SELECT * FROM task_followups WHERE task_id=? AND parent_id=?',task.id,task.source_task_id):null;
   const parent=link?store.get('SELECT * FROM tasks WHERE id=? AND repository_id=?',link.parent_id,task.repository_id):null;
   const parentRecord=parent?records.get(parent.id):null;

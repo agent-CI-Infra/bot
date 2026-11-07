@@ -92,6 +92,8 @@ export function traceSource(store:Store,taskId:string,source:string){
   const model=/^model_requests:([^:]+):(request|response)$/.exec(source);
   if(model){const row=store.get(`SELECT ${model[2]}_snapshot AS snapshot FROM model_requests WHERE id=? AND task_id=?`,model[1]!,taskId);return row?.snapshot?JSON.parse(row.snapshot):{complete:false,missing_reason:'not_captured_or_unavailable'};}
   const h=/^task_history:(\d+)$/.exec(source);if(h){const row=store.get('SELECT data FROM task_history WHERE id=? AND task_id=?',h[1]!,taskId);if(row){const captured=JSON.parse(row.data);return captured?.schema_version===1&&typeof captured.sha256==='string'&&typeof captured.complete==='boolean'?traceClean(captured):JSON.parse(traceSnapshot(captured));}}
+  // A role run snapshot of this task's project: what a run was configured with, by its content hash.
+  const role=/^role_snapshots:([a-f0-9]{64})$/.exec(source);if(role&&store.hasTable('role_snapshots')){const row=store.get('SELECT s.snapshot FROM role_snapshots s JOIN tasks t ON t.repository_id=s.repository_id WHERE t.id=? AND s.id=?',taskId,role[1]!);if(row)return JSON.parse(row.snapshot);}
   const run=/^task_runs:([^:]+):(context|config)$/.exec(source);if(run){const row=store.get(`SELECT ${run[2]}_snapshot AS snapshot FROM task_runs WHERE id=? AND task_id=?`,run[1]!,taskId);if(row)return JSON.parse(row.snapshot);}
   const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row)return {...JSON.parse(traceSnapshot(JSON.parse(row.data))),source_event_id:'task_history:'+row.id};}
   fail(404,'trace_source_not_found');

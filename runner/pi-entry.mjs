@@ -28,6 +28,22 @@ const exchange=createTokenExchange(dir);
 const repositoryTool=createRepositoryTool(dir);
 // The tools that end the task: finish_review unless the configuration names others (a development task ends with its PR).
 const finishTools=new Set(config.finish_tools||['finish_review']);
+// Tools the control plane runs itself (a project controller's task-record queries and delegation). The call waits
+// without a deadline: a delegation lasts as long as the delegated role runs.
+const controlTools=new Set(config.control_tools||[]);
+// The SDK version that actually runs, from its installed manifest; reported with every state and session event.
+const sdk={agent:'pi',package:'@earendil-works/pi-coding-agent',version:await readFile(new URL('../package.json',import.meta.resolve('@earendil-works/pi-coding-agent')),'utf8').then(text=>JSON.parse(text).version).catch(()=>'unknown'),node:process.version};
+async function controlTool(name,args,signal){
+  const id=randomBytes(24).toString('hex'),reply=dir+'/control-reply-'+id+'.json';
+  await writeFile(dir+'/control-request.tmp',JSON.stringify({id,name,arguments:args}),{mode:0o600});await rename(dir+'/control-request.tmp',dir+'/control-request.json');
+  try{
+    for(;;){
+      if(signal?.aborted)return {result:{error:'control_tool_cancelled'}};
+      const value=await readFile(reply,'utf8').then(JSON.parse).catch(()=>null);if(value)return value;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+  }finally{await unlink(dir+'/control-request.json').catch(()=>{});await unlink(reply).catch(()=>{});}
+}
 // Publication can include a long-running policy command. Wait for the control plane instead of
 // ending the session or imposing a request deadline.
 async function createPullRequest(args){
@@ -73,9 +89,11 @@ try{
       const name=tool.function.name,who=agent?{agent}:{};
       // Start metadata deliberately excludes file contents and publication payloads.
       await writeEvent({type:'tool_start',name,call_id:id,...who,...(['read_file','write_file'].includes(name)?{path:args.path}:name==='run_command'?{command:args.command}:{})});
-      let result;
-      const denied=toolCapabilityError(cfg,name,args);
+      let result,submitted=false;
+      const denied=controlTools.has(name)&&!agent?null:toolCapabilityError(cfg,name,args);
       if(denied) result={error:denied};
+      // The control plane decides the result; only its explicit finish ends this session with the validated submission.
+      else if(controlTools.has(name)&&!agent){const reply=await controlTool(name,args,signal);result=reply.result;if(reply.finish===true){finished=reply.result;submitted=true;}}
       else if(['github_read','github_search','read_job_log','read_task_history','read_playbook','select_playbooks','record_progress','search_project_memory','read_project_memory','remember_project_memory'].includes(name)||Object.hasOwn(platformWrites,name)&&!agent)result=await repositoryTool(name,args,signal);
       else if(finishTools.has(name)&&!agent){finished=args;result={finished:true};}
       else if(name==='create_pull_request'&&!agent){
@@ -102,7 +120,7 @@ try{
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else result={error:'tool_not_allowed'};
       result=await guard.check(id,name,result);
-      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(finishTools.has(name)&&!agent?{terminate:true}:{})};
+      await writeEvent({type:'tool',name,call_id:id,...who,arguments:args,result});return {content:[{type:'text',text:JSON.stringify(result)}],details:{},...(submitted||finishTools.has(name)&&!agent&&!controlTools.has(name)?{terminate:true}:{})};
     }}));
   // A Pi session from one configuration: its system prompt, its tools and the history it is given (none for a sub-agent).
   async function createSession(cfg,agent,history){
@@ -130,6 +148,8 @@ try{
   }
   const history=await readFile(dir+'/restore.json','utf8').then(JSON.parse).catch(()=>[]);
   session=await createSession(config,null,history);
+  // The runtime and the exact tool surface of this session, before its first model request.
+  await writeEvent({type:'pi_session',...sdk,tools:config.tools.map(tool=>tool.function.name),control_tools:[...controlTools],extensions:0,skills:0,context_files:0,restored_messages:history.length});
   if(config.review_session){
     session.setSteeringMode('all');
     const previousFinish=session.agent.finishTurn;
@@ -150,14 +170,15 @@ try{
     try{await session.prompt(prompt);}catch(error){if(!finished||requestFailure)throw error;}
     if(requestFailure)throw new Error(requestFailure);
     await events;
-    const result=finished||JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,''));
-    if(!config.review_session){await save({state:'completed',result,agent:'pi',version:'1.4.0'});break;}
+    // A controlled session ends only through its control-plane submission; without one the control plane decides.
+    const result=finished||(controlTools.size?null:JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,'')));
+    if(!config.review_session){await save({state:'completed',result,...sdk});break;}
     // Persist the compacted projection, not old system prompts, model selection or discarded raw entries.
     const messages=clean(session.messages.filter(message=>['user','assistant','toolResult','compactionSummary'].includes(message.role)).map(message=>message.role==='compactionSummary'
       ?{role:'user',content:[{type:'text',text:'Previous conversation summary:\n'+message.summary}],timestamp:message.timestamp}:message));
     const encoded=JSON.stringify(messages);if(Buffer.byteLength(encoded)>32*1024*1024)throw new Error('agent_context_too_large');
     await writeFile(dir+'/history.json',encoded,{mode:0o600});
-    await save({state:'review_ready',result,agent:'pi',version:'1.4.0'});
+    await save({state:'review_ready',result,...sdk});
     for(;;){if(await readFile(dir+'/continue.json','utf8').catch(()=>null))break;await new Promise(resolve=>setTimeout(resolve,50));}
     await unlink(dir+'/continue.json');finished=undefined;
     await save({state:'review_resuming'});

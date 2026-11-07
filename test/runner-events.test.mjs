@@ -46,6 +46,8 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   assert.equal((await readFile(join(base,'project-notes/repository.md'))).length,131072);
   assert.equal(await readFile(join(base,'project-notes/secret.md'),'utf8'),'secret '+token);
   assert.equal(all.find(event=>event.type==='tool'&&event.arguments?.path==='../notes/secret.md').result.written,true);
+  // The session event comes first: the runtime and the exact tools, with no extensions, skills or context files mixed in.
+  const session=all.shift();assert.deepEqual([session.type,session.agent,session.extensions,session.skills,session.context_files],['pi_session','pi',0,0,0]);
   for(const [i,call] of calls.entries())assert.deepEqual(all.slice(i*3,i*3+3).map(event=>event.type),['model','tool_start','tool'],call.name);
   assert.equal(all.find(event=>event.type==='tool'&&event.name==='run_command').result.output,'[REDACTED]');
   assert.equal(all.at(-2).name,'finish_review');

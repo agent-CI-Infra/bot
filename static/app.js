@@ -11,7 +11,9 @@ let messagePage = null;
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
-  if (!response.ok) throw new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : `${response.status} · ${value.error}`);
+  // authorization_changed has its own guidance; field names the configuration path a validation error concerns
+  // (for example roles.reviewer.harness_ref.id).
+  if (!response.ok) throw Object.assign(new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : `${response.status} · ${value.error}`), value.field ? { field: value.field } : {});
   return value;
 }
 function notice(id, text = '', tone = '') {
