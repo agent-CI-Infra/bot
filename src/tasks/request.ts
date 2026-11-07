@@ -1,4 +1,4 @@
-import { traceEvent, traceSnapshot } from './trace.js';
+import { traceEvent, traceSnapshot, retainedTextArtifact } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { observation } from './evidence.js';
 import { selectedModel } from '../agent/model.js';
@@ -96,7 +96,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
           const chunks:Buffer[]=[];
           for(let offset=0;offset<file.size;offset+=30000){const part=await workspace.call(`archive:${snapshot.local_sha}:${file.sha}:${offset}`,{type:'workspace_blob',sha:file.sha,offset});if(part.error)break;chunks.push(Buffer.from(part.base64||'','base64'));}
           const data=Buffer.concat(chunks),text=data.toString('utf8');
-          traceEvent(store,task.id,'artifact_content',JSON.parse(traceSnapshot({path:file.path,version:file.sha,candidate_tree:snapshot.tree_sha,complete:data.length===file.size,encoding:'utf8',content:redactor.text(text),binary:!Buffer.from(text).equals(data),missing_reason:data.length===file.size?null:'blob_unavailable'})));
+          traceEvent(store,task.id,'artifact_content',JSON.parse(traceSnapshot({...retainedTextArtifact(file.path,file.sha,data,file.size,text=>redactor.text(text)),candidate_tree:snapshot.tree_sha})));
         }
         const evidence=store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='execution_evidence' AND json_extract(data,'$.execution')=? ORDER BY id",task.id,execution).map(row=>observation('task_history:'+row.id,JSON.parse(row.data).version||'unknown',row.data));
         records.submit(task.id,[{kind:'report',reference:`task:${task.id}:report`,version:sha(JSON.stringify(result)),content:result},

@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync,rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { blobSha } from '../dist/agent/common.js';
 import { Store } from '../dist/storage/database.js';
-import { beginRun,endRun,interruptRuns,taskTrace,traceSource,traceSnapshot,traceEvent } from '../dist/tasks/trace.js';
+import { beginRun,endRun,interruptRuns,taskTrace,traceSource,traceSnapshot,traceEvent,retainedTextArtifact } from '../dist/tasks/trace.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { queries } from '../dist/app/queries.js';
 function seed(s){s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('r','a/OpenToday','o','a')");s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('t','r','task.request','running','OpenToday release report','{}')");}
-const url=(q='')=>new URL('http://local/api/tasks/t/events'+q);
+const url=(q='')=>new URL('http://local/api/tasks/t/events'+(q?q+'&':'?')+'include_data=1');
 test('run snapshots survive reopen and input/config changes; interrupted run and recovery have stable ancestry',()=>{
  const dir=mkdtempSync(join(tmpdir(),'bot155-')),path=join(dir,'db');let s=new Store(path,Buffer.alloc(32));try{seed(s);
  const run=beginRun(s,{id:'t'},'execution',{model:'fixed',prompt:'original',api_key:'secret'});
@@ -41,4 +42,17 @@ test('followups resolve exact acceptance event through child and grandchild; rep
 test('bounded capture marks missing content and removes private reasoning and credentials',()=>{
  const captured=JSON.parse(traceSnapshot({api_key:'private',nested:JSON.stringify({authorization:'secret',content:'public'}),reasoning_content:'private thought',content:'public output'}));assert.equal(captured.complete,true);assert.doesNotMatch(JSON.stringify(captured),/private|secret/);
  const large=JSON.parse(traceSnapshot({text:'x'.repeat(3*1024*1024)}));assert.equal(large.complete,false);assert.equal(large.missing_reason,'capture_limit_exceeded');assert.ok(large.sha256);
+});
+
+test('detail polling returns a bounded history index and omits large candidate/operation bodies',()=>{
+ const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);const r=new TaskRecords(s);r.submit('t',[{kind:'report',reference:'large.json',version:'v',content:{text:'PAYLOAD_SENTINEL'.repeat(50000)}}],[{source:'test',version:'v',verified:false,result:{text:'PAYLOAD_SENTINEL'.repeat(50000)}}],{});
+ for(let i=0;i<120;i++)s.run('INSERT INTO task_tools VALUES(?,?,?,?,?)','op'+i,'t',JSON.stringify({command:'inspect',output:'PAYLOAD_SENTINEL'.repeat(1000)}),'{}','completed');
+ const actor={id:'owner',role:'super_admin',repositories:[]},detail=queries(s,actor,new URL('http://local/api/tasks/t'));assert.equal(detail.history.length,50);assert.equal(detail.history_page.has_older,true);assert.ok(JSON.stringify(detail).length<30000);assert.doesNotMatch(JSON.stringify(detail),/PAYLOAD_SENTINEL/);
+ const page=taskTrace(s,'t',new URL('http://local?limit=2&type=operation'),'events');assert.equal(page.events.length,2);assert.ok(page.events[0].data.body_omitted);assert.ok(traceSource(s,'t',page.events[0].event_id).complete);
+ }finally{s.close();}
+});
+test('JSON delivery bytes remain exact unless explicitly sanitized, with captured hashes and completeness',()=>{
+ const original='{\n  "token": "ordinary public value",\n  "analysis": [1, 2]\n}\n',data=Buffer.from(original),version=blobSha(data);
+ const artifact=retainedTextArtifact('result.json',version,data,data.length,x=>x),wrapped=JSON.parse(traceSnapshot(artifact));assert.equal(wrapped.data.content,original);assert.equal(wrapped.data.complete,true);assert.equal(wrapped.data.captured_blob_sha,version);assert.equal(wrapped.data.sanitized,false);
+ const redacted=retainedTextArtifact('result.json',version,data,data.length,x=>x.replace('public value','[REDACTED]'));assert.equal(redacted.read_complete,true);assert.equal(redacted.complete,false);assert.equal(redacted.sanitized,true);assert.notEqual(redacted.captured_blob_sha,version);assert.equal(redacted.missing_reason,'sanitized_representation');
 });

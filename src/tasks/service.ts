@@ -39,7 +39,11 @@ export class TaskRecords {
     const task=this.store.get('SELECT claim_token,status FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
     if(task?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(task?.status))stop('task_claim_revoked','cancelled','任务执行权已变化，拒绝提交旧执行的状态。');
   }
-  history(id: string, type: string, data: unknown) { this.store.run('INSERT INTO task_history(task_id,type,data,created_at) VALUES(?,?,?,?)',id,type,JSON.stringify(data),new Date().toISOString()); }
+  history(id: string, type: string, data: unknown,runId?:string|null) {
+    const value=data as any;
+    const evaluated=(type==='acceptance'||type==='acceptance_staged')&&typeof value?.candidate_id==='string'&&Number.isSafeInteger(value?.revision)?this.store.get("SELECT h.id,h.run_id FROM task_history h JOIN task_runs r ON r.id=h.run_id WHERE h.task_id=? AND h.type='acceptance_evaluated' AND json_extract(h.data,'$.candidate_id')=? AND r.revision=? ORDER BY h.id DESC LIMIT 1",id,value.candidate_id,value.revision):undefined;
+    this.store.run('INSERT INTO task_history(task_id,type,data,created_at,run_id,caused_by) VALUES(?,?,?,?,?,?)',id,type,JSON.stringify(data),new Date().toISOString(),runId??evaluated?.run_id??null,JSON.stringify(evaluated?['task_history:'+evaluated.id]:[]));
+  }
   get(id: string) {
     const r=this.store.get('SELECT * FROM task_records WHERE task_id=?',id),t=this.store.get('SELECT * FROM tasks WHERE id=?',id);
     if (!r||!t) throw new Error('task_not_found');

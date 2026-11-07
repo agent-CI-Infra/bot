@@ -101,6 +101,7 @@ test('a missing current policy proof runs deterministic verification and returns
  const calls=[],workspace={manager:{call:async(_m,_p,input)=>{calls.push(input.request);return {ok:true,result:input.request.type==='workspace_command'?{exit_code:1,output:'A real mandatory check failed'}:{tree_sha:'b'.repeat(40)}};}},log:()=>{}};
  const result=await evaluateDelivery(f.h.store,f.task,workspace,new Redactor(),async()=>{});
  assert.equal(result.outcome,'return');assert.ok(result.gaps[0].includes('mandatory check failed'));assert.equal(f.requests.length,0);assert.ok(calls.some(r=>r.command==='required-check'));
+ const c=f.records.get(f.task.id).candidate;f.records.decide(f.task.id,c.id,c.revision,result);const final=f.h.store.get("SELECT run_id,caused_by FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id DESC LIMIT 1",f.task.id);const verification=f.h.store.get("SELECT id FROM task_runs WHERE task_id=? AND kind='verification' ORDER BY rowid DESC LIMIT 1",f.task.id);assert.equal(final.run_id,verification.id);assert.equal(JSON.parse(final.caused_by).length,1);
 });
 
 test('verification commands reject copied executor paths and recover in the pinned candidate checkout',async t=>{
