@@ -600,3 +600,20 @@ test('a policy change during evaluation invalidates the verdict before any GitHu
  }});
  assert.equal(d.task.status,'retry_wait');assert.equal(d.task.error_code,'acceptance_context_changed');assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n,0);
 });
+
+for (const outcome of ['return','insufficient_evidence']) test('a rejected workflow report reaps the old workspace before clearing its identity: '+outcome, async t => {
+  let oldWorkspace;
+  const d = await developmentHarness(t, { custom: { writes: ['reply','code','pull_request'] }, acceptor: async (store,task) => {
+    const record = JSON.parse(store.get('SELECT candidate FROM task_records WHERE task_id=?',task.id).candidate);
+    if (record.artifacts.some(a => a.kind === 'report')) {
+      oldWorkspace = task.workspace_id;
+      return { outcome, reason: 'Report needs a concrete correction', gaps: ['Add the missing observation'], residuals: [], core_complete: false, required_evidence_complete: false, acceptable_risk: true };
+    }
+    return acceptanceFixture(store,task);
+  }});
+  assert.ok(oldWorkspace);
+  assert.equal(d.task.status,'queued');
+  assert.equal(d.task.workspace_id,null);
+  assert.equal(d.task.generation,null);
+  assert.equal(d.requests.filter(r => r.type === 'reap' && r.workspace_id === oldWorkspace).length,1);
+});

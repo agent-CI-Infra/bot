@@ -4,7 +4,7 @@ import { taskTools, playbookInstructions, playbooks } from '../tasks/playbooks.j
 import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
 import { workspaceProfile } from './profiles.js';
-import { runAgent } from './runtime.js';
+import { runAgent, type AgentSpec } from './runtime.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { validateReview, validateReply } from '../review/findings.js';
 import { taskWorkflow, workflowPermissions, savedWorkflow } from '../workflows/resolve.js';
@@ -17,12 +17,12 @@ export interface ReviewConversation { history?: any[]; resume?: boolean; offset?
 /** The platform's write tools for this task, by tool name: the control plane performs the write and answers the agent. */
 export type PlatformTools = Record<string, (id: string, args: any) => Promise<any>>;
 
-export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}) {
-  try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation, platform); }
+export async function agentLoop(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: Pick<AgentSpec<unknown>, 'modelAttempts'> = {}) {
+  try { return await run(store, task, workspace, redactor, guard, context, tokens, createPullRequest, conversation, platform, limits); }
   // A token the agent exchanged is useless after the model phase; revoke it however the phase ends.
   finally { await tokens?.revoke(); }
 }
-async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}) {
+async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: Pick<AgentSpec<unknown>, 'modelAttempts'> = {}) {
   // Permissions and a custom workflow's prompt are read from trusted storage here, for every caller and every attempt.
   const workflowId = taskWorkflow(task as any), saved = String(task.kind).startsWith('workflow.') ? savedWorkflow(store, task.repository_id, workflowId) : undefined;
   if (String(task.kind).startsWith('workflow.') && !saved) stop('workflow_not_found', 'cancelled', `工作流 ${workflowId} 已删除。`);
@@ -43,7 +43,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
-  return runAgent({ store, task, redactor, guard, system, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: async ({ request, model }) => {
+  return runAgent({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: async ({ request, model }) => {
     // Revising an unpublished result continues this execution; later tasks choose a fresh model.
     if (conversation) conversation.model = model;
     const bytes = Buffer.from(JSON.stringify(redactor.clean(config))); if (bytes.length > 2 * 1024 * 1024) stop('agent_context_too_large', 'waiting_configuration', `执行上下文大小 ${bytes.length} 字节，超过 2 MiB 上限。`);

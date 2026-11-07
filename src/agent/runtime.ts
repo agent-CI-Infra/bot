@@ -27,6 +27,8 @@ export interface AgentSpec<T> {
   maxOutputChars?: number;
   /** Trusted caller budget; model-supplied request fields never override this. */
   maxOutputTokens?: number;
+  /** Trusted transport budget, identical in local and container execution. Includes the initial request. */
+  modelAttempts?: number;
   execute?: (name: string, args: any) => Promise<any>;
   validate?: (content: string) => T | Promise<T>;
   /** Trusted, opt-in format feedback; at most two corrections within the same finite run. */
@@ -58,6 +60,9 @@ export const subagentSystem = 'You are an independent agent started by the main 
  */
 export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   await spec.guard();
+  const attempts = spec.modelAttempts ?? 3;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 3)
+    return stop('agent_limits_invalid', 'waiting_configuration', 'Agent 模型请求尝试次数必须为 1–3。');
   const tools = spec.tools ?? [];
   if (!Array.isArray(tools) || tools.some(tool => !tool || tool.type !== 'function' || typeof tool.function?.name !== 'string' || !tool.function.name) ||
     new Set(tools.map(tool => tool.function.name)).size !== tools.length)
@@ -75,13 +80,12 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
       if (choice && typeof choice === 'object' && !allowed.has(choice.function?.name))
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
       const tools = body.tools?.map((tool: any) => allowed.get(tool.function.name));
-      const attempts = process.env.BOT_LOCAL_EXECUTION === 'true' ? 3 : 1;
       for (let attempt = 0; ; attempt++) {
         try { return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken }); }
         catch (error) {
           const transient = error instanceof TaskError && (error.code === 'model_unavailable' || /^model_http_(429|5\d\d)$/.test(error.code));
           if (!transient || attempt + 1 >= attempts) throw error;
-          spec.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), spec.task.id,
+          if (spec.task.id && spec.store.get('SELECT id FROM tasks WHERE id=?', spec.task.id)) spec.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), spec.task.id,
             JSON.stringify({ type: 'model_retry', code: error.code, request_id: requestId, retry: attempt + 1 }), new Date().toISOString());
           await new Promise(resolve => setTimeout(resolve, 1000 * 3 ** attempt));
           await spec.guard();

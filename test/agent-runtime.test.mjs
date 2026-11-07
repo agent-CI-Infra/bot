@@ -77,7 +77,7 @@ test('generic loop has a turn limit and records provider failures', async t => {
   f.respond(() => ({ choices: [{ message: { tool_calls: [call('inspect')] } }] }));
   await assert.rejects(runAgent({ ...f.spec, tools: [tool], maxTurns: 1, execute: async () => ({ ok: true }) }), error => error.code === 'agent_turn_limit');
   f.respond(() => ({ status: 503, body: { message: 'secret-model-key unavailable' } }));
-  await assert.rejects(runAgent(f.spec), error => error.code === 'model_http_503' && !error.detail.includes('secret-model-key'));
+  await assert.rejects(runAgent({ ...f.spec, modelAttempts: 1 }), error => error.code === 'model_http_503' && !error.detail.includes('secret-model-key'));
   assert.equal(f.store.get("SELECT count(*) n FROM model_requests WHERE state='http_error'").n, 1);
 });
 
@@ -274,4 +274,24 @@ test('delivery finalization closes exploration and requests an honest structured
  assert.equal(invoked,2);assert.equal(f.requests.length,4);assert.deepEqual(f.requests[2].tools.map(t=>t.function.name),['submit_delivery']);
  assert.ok(f.requests[3].messages.some(m=>m.role==='tool'&&m.content.includes('tool_not_allowed')));
  assert.equal(f.requests[3].tool_choice.function.name,'submit_delivery');assert.equal(value.submitted,true);assert.equal(value.gaps.length,1);assert.equal(f.store.get('SELECT count(*) n FROM tasks').n,0);
+});
+
+for (const status of [429, 503]) test('container-default model transport recovers HTTP '+status+' within a trusted finite budget', async t => {
+  const f = await fixture(t); let attempts = 0;
+  f.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES('domain-run','r','custom.analysis','running','retry test')");
+  f.respond(() => ++attempts < 3 ? { status, body: { error: 'transient' } } : { choices: [{ message: { content: 'recovered' } }] });
+  assert.equal(await runAgent(f.spec), 'recovered');
+  assert.equal(attempts, 3);
+  assert.equal(f.store.get("SELECT count(*) n FROM task_logs WHERE json_extract(content,'$.type')='model_retry'").n, 2);
+});
+test('transport retry budget is bounded and permanent errors are never retried', async t => {
+  const f = await fixture(t);
+  for (const modelAttempts of [0, 4, 1.5]) await assert.rejects(runAgent({ ...f.spec, modelAttempts }), e => e.code === 'agent_limits_invalid');
+  assert.equal(f.requests.length, 0);
+  f.respond(() => ({ status: 503, body: { error: 'transient' } }));
+  await assert.rejects(runAgent({ ...f.spec, modelAttempts: 2 }), e => e.code === 'model_http_503');
+  assert.equal(f.requests.length, 2);
+  f.respond(() => ({ status: 401, body: { error: 'unauthorized' } }));
+  await assert.rejects(runAgent(f.spec), e => e.code === 'model_authentication_failed');
+  assert.equal(f.requests.length, 3);
 });
