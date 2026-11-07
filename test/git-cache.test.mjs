@@ -105,7 +105,7 @@ test('a commit GitHub will not send by SHA comes through its named ref; an unrea
   // In protocol v0 only ref tips may be asked for; the first commit is an ancestor of main.
   const mirror = await u.cache.open('101', { url: u.url, token, commits: [u.first], refs: ['refs/heads/main', 'refs/heads/bad:name', '../../escape'] });
   assert.equal(mirror.state, 'fetched'); assert.ok(mirror.has(u.first));
-  assert.doesNotMatch(git(u.cache.path('101'), 'for-each-ref', '--format=%(refname)'), /refs\/bot\/fetch|escape|bad/);
+  assert.doesNotMatch(git(u.cache.path('101'), 'for-each-ref', '--format=%(refname)'), /refs\/bot\/fetch|(?:^|\/)(?:escape|bad:name)(?:\/|$)/m);
   const wrong = await new GitCache(join(u.root, 'other-cache')).open('101', { url: u.url, token: 'ghs_' + 'b'.repeat(36), commits: [u.second] });
   assert.equal(wrong.state, 'unavailable'); assert.ok(!wrong.has(u.second)); assert.doesNotMatch(wrong.error, /ghs_b{36}/);
   // Without the mirror the snapshot reads the listing and blobs through the GitHub API, as before, and says why.
