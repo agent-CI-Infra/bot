@@ -88,3 +88,5 @@ Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后�
 任务运行、来源保留上限及详情投影的完整说明见 [Task trace](task-trace.md)。文本交付按原始 UTF-8 正文 2 MiB 限制，JSON 转义后的包裹体另有 16 MiB 上限；超限保留路径、版本、读取/脱敏状态及哈希，仅省略正文。
 
 项目记忆（沿用项目权限）：`GET/POST /api/repositories/:repo/memories` 查询/建立条目，GET 支持 query、module、source、kind、status、baseline、after、limit（1–50）、include_superseded=1；`GET/PATCH .../memories/:id` 读取指定 revision 或按 expected_revision 更新，支持 supersedes 同项目 ID 数组；`GET .../:id/versions` 查询修订与来源关系；`POST .../:id/document` 从真实 GitHub PR 和文件验证仓库文档关联。具体契约见 [Project memory](project-memory.md)。
+
+角色协调：`GET/PUT /api/repositories/:repo/roles` 查询/配置角色池及 Harness，`GET /api/tasks/:id/roles` 查询实例与委派；沿用项目权限，正文会话不返回。`POST /api/tasks/:id/merge` 以 expected_sha、merge_method 显式授权合入已验收的 Bot PR，校验精确 head、策略与检查，不绕过 GitHub 分支规则。详见 [Role-Pool](role-pool.md)。
