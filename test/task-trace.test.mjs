@@ -25,6 +25,7 @@ test('run snapshots survive reopen and input/config changes; interrupted run and
 test('events are transaction-bound, paginated, filterable and authorized without invented legacy runs',()=>{
  const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);assert.equal(taskTrace(s,'t',url(),'runs').runs.length,0);
  const before=s.get('SELECT count(*) n FROM task_history').n;assert.throws(()=>s.transaction(()=>{s.run("INSERT INTO task_tools VALUES('rollback','t','{}',NULL,'pending')");throw Error('fault');}));assert.equal(s.get('SELECT count(*) n FROM task_history').n,before);
+ traceEvent(s,'t','contract',{revision:2});assert.equal(taskTrace(s,'t',url('?revision=2&type=contract'),'events').events.length,1);
  for(let i=0;i<3;i++)traceEvent(s,'t','intervention',{i},null,'user:owner');
  const first=taskTrace(s,'t',url('?type=intervention&limit=2'),'events');assert.equal(first.events.length,2);const second=taskTrace(s,'t',url('?type=intervention&limit=2&after='+first.next_after),'events');assert.equal(second.events.length,1);assert.equal(second.events[0].actor,'user:owner');assert.throws(()=>taskTrace(s,'t',url('?limit=-1'),'events'));
  assert.throws(()=>queries(s,{id:'outsider',role:'project_admin',repositories:[]},url()),/task_not_found/);
