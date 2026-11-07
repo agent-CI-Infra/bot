@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['notes', '项目笔记'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
+const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['notes', '项目笔记'], ['roles', '角色'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
 // Older addresses open the workflows page: the task overview it replaced, and the review, development and rule pages.
 const legacyProjectSections = { tasks: '', review: 'review.issue', development: 'development.issue', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -150,7 +150,7 @@ function projectBody(section) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, workflows: workflowsSection, model: modelsSection, release: releaseSection, notes: notesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ basic: basicSection, machine: machineSection, workflows: workflowsSection, model: modelsSection, release: releaseSection, notes: notesSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
@@ -283,6 +283,49 @@ function releaseRecord(r, endpoint, refresh, message) {
   return section;
 }
 
+// RoleDefinitionV2: what each role actually resolves to now, and the versioned configuration behind it.
+const roleRefText = ref => ref ? `${ref.id}@${ref.version}` : '—';
+const editableRole = r => ({ role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
+  model_profile_ref: r.model_profile_ref ? { model_id: r.model_profile_ref.model_id, api: r.model_profile_ref.api, tool_calls: r.model_profile_ref.tool_calls, structured_output: r.model_profile_ref.structured_output } : null,
+  skill_bundle_ref: r.skill_bundle_ref ? { id: r.skill_bundle_ref.id } : null, harness_ref: { id: r.harness_ref.id }, capability_policy_ref: { id: r.capability_policy_ref.id },
+  environment_profile_ref: { id: r.environment_profile_ref.id }, budget_policy_ref: r.budget_policy_ref.id === 'bounded' ? { id: 'bounded', max_turns: r.budget_policy_ref.max_turns, max_output_tokens: r.budget_policy_ref.max_output_tokens } : { id: r.budget_policy_ref.id },
+  output_schema_ref: { id: r.output_schema_ref.id } });
+function rolesSection() {
+  const id = current.id, endpoint = `/api/repositories/${id}/roles`, section = card('角色'), body = element('div'), message = element('p', '', 'view-error');
+  message.setAttribute('role', 'alert');
+  section.append(note('项目主控（manager）在 Pi 上运行，只查询任务事实、委派、协调和送验；正式交付仍经过独立 QA。人设提示词只是资料，工具和权限只来自能力策略。保存要带当前 revision；正在运行的角色保留启动时的快照。'), body, message);
+  const render = data => {
+    const config = data.configuration, entries = config.controller.entries;
+    const summary = facts([['配置 revision', String(config.revision) + (config.legacy ? '（旧格式，保存后升级为 V2）' : '')], ['角色协作', config.enabled ? '已开启' : '未开启'], ['主控角色', config.controller.role],
+      ['接入主控的入口', ['development', 'request', 'review', 'actions'].filter(e => entries[e]).map(e => ({ development: '开发', request: '普通任务', review: '检视', actions: 'Actions 分析' })[e]).join('、') || '无'],
+      ['预览工作流', data.workflow]]);
+    const { table, body: rows } = projectTable(['角色', '执行后端', '模型（来源）', '技能包', '能力策略', 'revision'], '角色解析结果');
+    for (const role of config.roles) {
+      const preview = data.preview.find(p => p.role === role.role_id), row = document.createElement('tr');
+      tableCell(row, '角色', element('strong', role.name), note(`${role.role_id} · ${role.kind}${role.enabled ? '' : ' · 已停用'}`));
+      tableCell(row, '执行后端', element('span', roleRefText(role.harness_ref)));
+      tableCell(row, '模型（来源）', preview?.error ? element('span', `${preview.error}${preview.detail ? '：' + preview.detail : ''}`, 'view-error') : element('span', preview ? `${preview.model.name}（${{ role: '角色', workflow: '工作流', project: '项目默认' }[preview.model.source]}）` : '—'));
+      tableCell(row, '技能包', element('span', role.skill_bundle_ref ? `${role.skill_bundle_ref.id}@${role.skill_bundle_ref.revision} · ${role.skill_bundle_ref.content_hash.slice(0, 12)}` : '—'));
+      tableCell(row, '能力策略', element('span', roleRefText(role.capability_policy_ref)));
+      tableCell(row, 'revision', element('span', String(role.revision)));
+      rows.append(row);
+    }
+    const editor = textarea('role_configuration', JSON.stringify({ enabled: config.enabled, controller: config.controller, roles: config.roles.map(editableRole), skills: data.skill_inputs }, null, 2), { rows: 18, spellcheck: false, className: 'code' });
+    const save = button('保存为新 revision', async () => {
+      message.textContent = '';
+      let value; try { value = JSON.parse(editor.value); } catch { message.textContent = '配置不是合法 JSON。'; return; }
+      try { const saved = await api(endpoint, 'PUT', { ...value, expected_revision: config.revision }); current.flash = `角色配置已保存为 revision ${saved.configuration.revision}。`; await refresh(); }
+      catch (err) { message.textContent = err.field ? `${err.message}（字段 ${err.field}）` : err.message; }
+    });
+    const models = note('可引用的模型：' + (data.models.map(m => `${m.id}（${m.name}${m.shared ? '，共享' : ''}）`).join('、') || '无'));
+    const harnessList = note('执行后端能力：' + data.harnesses.map(h => `${h.id}@${h.version}（${h.kinds.join('/')}${h.runtime ? '，' + h.runtime.package : ''}）`).join('；'));
+    const history = note('最近的 revision：' + (data.revisions.map(r => `${r.revision}（${r.created_at}）`).join('、') || '无'));
+    const actions = element('div', '', 'actions'); actions.append(save);
+    body.replaceChildren(summary, table, field('配置（JSON）', editor), models, harnessList, actions, history);
+  };
+  const refresh = async () => { try { const data = await api(endpoint); if (current?.id !== id || current.section !== 'roles') return; render(data); } catch (err) { message.textContent = err.message; } };
+  void refresh(); return [section];
+}
 function notesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/notes`, section = card('项目笔记'), list = element('div', '', 'project-notes-list'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert');

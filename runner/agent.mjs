@@ -66,9 +66,10 @@ export async function agentOperation(input,root){
     const token_request=await readFile(dir+'/token-request.json','utf8').then(JSON.parse).catch(()=>null);
     const pull_request=await readFile(dir+'/pr-request.json','utf8').then(JSON.parse).catch(()=>null);
     const repository_tool=await readFile(dir+'/repository-request.json','utf8').then(JSON.parse).catch(()=>null);
+    const control_tool=await readFile(dir+'/control-request.json','utf8').then(JSON.parse).catch(()=>null);
     const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').filter(Boolean);
     const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
-    return {...state,boundary,request,token_request,pull_request,repository_tool,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
+    return {...state,boundary,request,token_request,pull_request,repository_tool,control_tool,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
   }
   // The answer to the agent's github_read_token request: a read-only token, or the reason there is none.
   if(input.type==='workspace_agent_token'){
@@ -83,11 +84,16 @@ export async function agentOperation(input,root){
     const path=dir+'/progress-'+input.request_id;
     await writeFile(path+'.tmp',JSON.stringify({sequence:input.sequence}),{mode:0o600});await rename(path+'.tmp',path+'.json');return {written:true};
   }
-  if(input.type==='workspace_agent_reply'||input.type==='workspace_agent_pull_request'||input.type==='workspace_agent_repository_tool'){
+  // The Pi SDK this runner would start, read from its installed package rather than assumed from the image tag.
+  if(input.type==='workspace_agent_runtime'){
+    const manifest=await readFile(runnerRoot+'/node_modules/@earendil-works/pi-coding-agent/package.json','utf8').then(JSON.parse).catch(()=>null);
+    return manifest?{agent:'pi',package:manifest.name,version:manifest.version,node:process.version}:{error:'pi_runtime_missing'};
+  }
+  if(input.type==='workspace_agent_reply'||input.type==='workspace_agent_pull_request'||input.type==='workspace_agent_repository_tool'||input.type==='workspace_agent_control_tool'){
     if(!/^[a-f0-9]{48}$/.test(input.request_id||'')||typeof input.base64!=='string'||input.base64.length>48000||!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>2*1024*1024)throw new Error('invalid_agent_reply');
-    const pr=input.type==='workspace_agent_pull_request',repository=input.type==='workspace_agent_repository_tool';
-    const current=repository?await currentRepositoryRequest(dir):JSON.parse(await readFile(dir+(pr?'/pr-request.json':'/request.json'),'utf8'));if(current?.id!==input.request_id)throw new Error('agent_request_changed');
-    const prefix=dir+(pr?'/pr-reply-':repository?'/repository-reply-':'/reply-')+input.request_id;
+    const pr=input.type==='workspace_agent_pull_request',repository=input.type==='workspace_agent_repository_tool',control=input.type==='workspace_agent_control_tool';
+    const current=repository?await currentRepositoryRequest(dir):JSON.parse(await readFile(dir+(pr?'/pr-request.json':control?'/control-request.json':'/request.json'),'utf8').catch(error=>{if(control&&error.code==='ENOENT')return 'null';throw error;}));if(current?.id!==input.request_id)throw new Error('agent_request_changed');
+    const prefix=dir+(pr?'/pr-reply-':repository?'/repository-reply-':control?'/control-reply-':'/reply-')+input.request_id;
     const path=prefix+'.tmp';
     try{
       const file=await open(path,input.offset===0?'w':'r+',0o600);

@@ -22,11 +22,14 @@ export function deleteProjectRecords(store: Store, id: string): void {
     ['DELETE FROM board_values WHERE repository_id=?', 1], ['DELETE FROM board_objects WHERE repository_id=?', 1],
     ['DELETE FROM review_sessions WHERE repository_id=?', 1], ['DELETE FROM review_objects WHERE repository_id=?', 1], ['DELETE FROM review_summaries WHERE repository_id=?', 1],
     ...['actions_failure_reports', 'actions_failure_issues', 'actions_failure_attempts', 'actions_failure_runs', 'actions_failure_scans'].map((table): [string, number] => [`DELETE FROM ${table} WHERE repository_id=?`, 1]),
-    ...['review_updates', 'task_logs', 'task_tools', 'github_effects', 'development_candidates', 'task_metrics'].map((table): [string, number] => [`DELETE FROM ${table} WHERE task_id IN (${tasks})`, 1]),
+    ...['role_assignments', 'role_instances', 'review_updates', 'task_logs', 'task_tools', 'github_effects', 'development_candidates', 'task_metrics'].map((table): [string, number] => [`DELETE FROM ${table} WHERE task_id IN (${tasks})`, 1]),
     [`DELETE FROM model_requests WHERE repository_id=? OR task_id IN (${tasks})`, 2],
     ['DELETE FROM task_claims WHERE repository_id=?', 1], ['DELETE FROM bot_branches WHERE repository_id=?', 1], ['DELETE FROM bot_pull_requests WHERE repository_id=?', 1], ['DELETE FROM bot_pr_requests WHERE repository_id=?', 1],
     ['DELETE FROM tasks WHERE repository_id=?', 1], ['DELETE FROM automation_runs WHERE repository_id=?', 1], ['DELETE FROM deliveries WHERE repository_id=?', 1],
     ['DELETE FROM environment_operations WHERE repository_id=?', 1], ['DELETE FROM project_environments WHERE repository_id=?', 1],
+    // Role configuration revisions, pinned skill bundles and run snapshots belong to the project.
+    ['DELETE FROM role_snapshots WHERE repository_id=?', 1], ['DELETE FROM skill_bundle_revisions WHERE repository_id=?', 1], ['DELETE FROM role_config_revisions WHERE repository_id=?', 1],
+    ["DELETE FROM settings WHERE key='roles:'||?", 1],
     ['DELETE FROM computer_console_specs WHERE repository_id=?', 1], ['DELETE FROM workflows WHERE repository_id=?', 1], ['DELETE FROM repository_rule_sources WHERE repository_id=?', 1],
     // Models only this repository may use, with their prices and grants; a shared model only loses its grant to this repository.
     [`UPDATE policies SET model_id=NULL WHERE model_id IN (${models})`, 1], [`DELETE FROM model_pricing WHERE model_id IN (${models})`, 1],

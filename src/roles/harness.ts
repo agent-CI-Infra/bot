@@ -7,6 +7,8 @@ import { acpHarness } from './acp.js';
 import type { AgentSpec,AgentServices } from '../agent/runtime.js';
 import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
+import { piAdapter,piRuntime } from '../agent/pi.js';
+import type { RoleKind } from './catalog.js';
 /** The worker cannot access provider credentials or obtain arbitrary tools. */
 export function processHarness<T>(spec:AgentSpec<T>){return async(services:AgentServices):Promise<T>=>new Promise((resolve,reject)=>{
  const runId=spec.task.trace_run_id;
@@ -24,11 +26,14 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
    if(m.fault)throw new Error(m.fault);
    if(m.done){settled=true;child.stdin.end();resolve(result??m.result);return;}
    let value:any;
-   if(m.method==='checkpoint'){if(!Array.isArray(m.args)||Buffer.byteLength(JSON.stringify(m.args))>2*1024*1024)stop('agent_context_too_large','needs_replan');spec.session?.save(spec.redactor.clean(m.args));value={saved:true};}
+   if(m.method==='checkpoint'){if(!Array.isArray(m.args)||Buffer.byteLength(JSON.stringify(m.args))>2*1024*1024)stop('agent_context_too_large','needs_replan');spec.session?.save(spec.redactor.clean(m.args));
+    // A transcript whose every tool call has its result is a safe point to end this run (for example on a new role revision).
+    if(spec.checkpoint&&completeTranscript(m.args))await spec.checkpoint();value={saved:true};}
    else if(m.method==='model'){const response=await services.request(m.args,'worker:'+requests++);const message=response.value?.choices?.[0]?.message;value=spec.redactor.clean({role:'assistant',content:typeof message?.content==='string'?message.content:null,...(message?.tool_calls?{tool_calls:message.tool_calls}:{})});}
    else if(m.method==='tool'){
     const offered=spec.tools?.some(t=>t.function.name===m.args.name);
-    if(!offered||!m.args.offered)value={error:'tool_not_allowed'};
+    if(offered&&m.args.offered)spec.screen?.(m.args.name,m.args.args);
+    if(!offered||!m.args.offered){value={error:'tool_not_allowed'};spec.onDenied?.(String(m.args.name),'not_offered');}
     else if(m.args.name===spec.finish?.name){try{result=await spec.finish!.validate(m.args.args);value={submitted:true};}catch(error){value=repair(error);}}
     else {value=await spec.execute?.(m.args.name,m.args.args);traceEvent(spec.store,spec.task.id,'tool_observation',{name:m.args.name,arguments:spec.redactor.clean(m.args.args),observation:spec.redactor.clean(value)},spec.task.trace_run_id,'tool');}
    }else if(m.method==='final'){if(typeof m.args!=='string')stop('agent_output_invalid','retry_wait');try{result=spec.validate?await spec.validate(m.args):spec.redactor.text(m.args) as T;value={submitted:true};}catch(error){value=repair(error);}}
@@ -39,14 +44,60 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
  child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,maxTurns:spec.maxTurns??32}})+'\n');
 });}
 
-export const harnesses:RoleHarnessMetadata[]=[{id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',externalModel:true},{id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations'},{id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations'}];
-export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string;externalModel?:boolean}
+export const completeTranscript=(messages:any[])=>{const last=messages.findLastIndex(m=>m?.role==='assistant');if(last<0||!messages[last].tool_calls?.length)return true;const answered=new Set(messages.slice(last+1).filter(m=>m?.role==='tool').map(m=>m.tool_call_id));return messages[last].tool_calls.every((c:any)=>answered.has(c.id));};
+/**
+ * The capability matrix of a driver. Role configuration is checked against it before a run starts: the role kinds it can
+ * run, the model APIs it speaks, whether it needs tool calls and which structured submissions it supports. A combination
+ * outside the matrix is a configuration error; no other model, provider or driver is substituted.
+ */
+export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string;kinds?:RoleKind[];model_api?:string[];tool_calls?:boolean;structured_output?:string[];environment?:'control_plane'|'workspace';runtime?:{package:string;version:string}|null;
+ /** The driver brings its own model (ACP agents): no project model is resolved, called or accounted for it. */
+ externalModel?:boolean}
+const openai=['openai-chat-completions'];
+export const harnesses:Required<RoleHarnessMetadata>[]=[
+ // A generic ACP agent with its own model; worker roles only. It declares no project model API.
+ {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true},
+ {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false},
+ {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false},
+ // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
+ {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false}];
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
-const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',acpHarness]]);
+const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',acpHarness],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
- if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
- adapters.set(metadata.id,factory);harnesses.push({...metadata});
+ if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
+ adapters.set(metadata.id,factory);harnesses.push({kinds:['writer','observer','evaluator'],model_api:metadata.externalModel?[]:openai,tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:false,...metadata});
+}
+/**
+ * The Pi harness for a role run. spec.pi names the workspace and, for an entry executor, the workflow's own Pi tool
+ * profile. Tools the role run adds on top of that profile (task records, delegation, skills) become control-plane tools:
+ * Pi forwards them through the mailbox and the control plane executes and validates them with the run's own callbacks.
+ */
+function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
+ const env=spec.pi;if(!env)return stop('pi_environment_required','waiting_configuration','Pi harness 需要项目电脑工作区；这个入口没有为角色准备 Pi 会话。');
+ const base=env.session,tools=spec.tools??[],own=new Set((base?.config?.tools??[]).map((t:any)=>t.function.name)),finish=spec.finish;
+ const control=tools.map(t=>t.function.name).filter(name=>!own.has(name));
+ const config={...(base?.config??{capabilities:{workspace:{read:false,write:false,notes:false,shell:false},github:{permissions:{},publication:'none'},agents:false,writes:[]},finish_tools:[],finish_on_pull_request:false,review_session:false}),
+  system:spec.system,prompt:spec.prompt,tools,control_tools:control,workspace_id:env.workspace.task.workspace_id};
+ let submitted:{value:T}|undefined,repairs=0;
+ return piAdapter<T>({store:spec.store,taskId:spec.task.id,guard:spec.guard,workspace:env.workspace,redactor:spec.redactor,config,conversation:base?.conversation,platform:base?.platform,repository:base?.repository,token:base?.token,createPullRequest:base?.createPullRequest,publication:base?.publication,
+  offered:name=>tools.some(t=>t.function.name===name),resume:env.resume,key:env.key,dropReasoning:true,signal:spec.executionSignal,maxRequests:base?undefined:spec.maxTurns,checkpoint:spec.checkpoint,runtime:env.runtime,
+  // Pi may refuse a call itself (unknown tool, schema mismatch) before the control plane sees it; the model output always
+  // passes through here, so every forbidden call is recorded whatever the runtime did with it.
+  inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(!tools.some(t=>t.function.name===name)){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},
+  control:async(name,args)=>{
+   if(finish&&name===finish.name){try{const value=await finish.validate(args);submitted={value};return {result:{submitted:true,submission:args},finish:true};}catch(error){const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;return {result:{error:'invalid_submission',message:spec.redactor.text(feedback)}};}}
+   const value=spec.execute?await spec.execute(name,args):{error:'tool_not_allowed'};
+   traceEvent(spec.store,spec.task.id,'tool_observation',{name,arguments:spec.redactor.clean(args),observation:spec.redactor.clean(value)},spec.task.trace_run_id,'tool');
+   return {result:value};
+  },
+  complete:async(state,publication)=>{
+   if(base?.complete)return base.complete(state,publication);
+   if(submitted)return submitted.value;
+   // A session that finished while the control plane was away carries its submission; validate it again from task facts.
+   if(finish&&state.result?.submitted===true)return finish.validate(state.result.submission);
+   return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
+  }});
 }
 export function roleHarness(id:string){
  if(!adapters.has(id))throw new Error('unknown_role_harness');const factory=adapters.get(id);

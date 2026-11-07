@@ -6,6 +6,7 @@ import { randomId } from '../core/security.js';
 import { taskWorkflow } from '../workflows/resolve.js';
 import { requestModel, type AgentModel } from './gateway.js';
 import type { ModelDelta } from './model-stream.js';
+import type { PiRoleEnvironment } from './pi.js';
 
 export interface AgentServices {
   model: AgentModel;
@@ -19,7 +20,16 @@ export interface AgentSpec<T> {
   executionSignal?: AbortSignal;
   session?: { messages:any[]; save:(messages:any[])=>void };
   onRun?: (id:string)=>void;
-  roleRun?: {instance_id:string;role:string;version:string;harness:string;harness_version?:string;assignment_id?:string;recovery_mode:string};
+  roleRun?: {instance_id:string;role:string;version:string;harness:string;harness_version?:string;assignment_id?:string;recovery_mode:string;snapshot_id?:string};
+  /** A safe checkpoint between turns (every tool result recorded). It may end the run, for example on a new role revision. */
+  checkpoint?: () => Promise<void>;
+  /** The model asked for a tool this run did not offer; the call is refused either way, this only records it. */
+  onDenied?: (name: string, reason: string) => void;
+  /** Sees every offered tool call in model output, whichever runtime then acts on it, to record policy violations.
+   * It cannot allow anything; the executor still checks each call itself. */
+  screen?: (name: string, args: any) => void;
+  /** The workspace session of a role run on the Pi harness. */
+  pi?: PiRoleEnvironment;
   task: Row;
   redactor: Redactor;
   guard: () => Promise<void>;
@@ -105,7 +115,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
     }
   };
   try {
-  if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,r.harness_version??'1',r.assignment_id??null,r.recovery_mode,run.id);}
+  if(run&&spec.roleRun){const r=spec.roleRun;spec.store.run('UPDATE task_runs SET role_instance_id=?,role=?,role_version=?,harness=?,harness_version=?,assignment_id=?,recovery_mode=?,role_snapshot=? WHERE id=?',r.instance_id,r.role,r.version,r.harness,r.harness_version??'1',r.assignment_id??null,r.recovery_mode,r.snapshot_id??null,run.id);}
   if(run)spec.onRun?.(run.id);
     const result = spec.adapter ? await spec.adapter(services) : await runTools(spec, services);
     await spec.guard();endRun(spec.store,run,'succeeded');return result;
@@ -128,6 +138,8 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
     const reserve=Math.min(8,Math.max(2,Math.ceil(maxTurns/4)));
     const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
     const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));
+    // Turn start: the transcript is complete, so a role run may end here and continue later from it.
+    if(turn>0)await spec.checkpoint?.();
     if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:spec.finish.finalizationMessage?`${reserve} turns remain. ${spec.finish.finalizationMessage}`:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
     save();
     const { value, request_log_id } = await services.request({ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
@@ -151,6 +163,7 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
           }
         }
         // The model cannot call an unadvertised tool, even if an executor happens to support it.
+        if(!names.has(call.function.name))spec.onDenied?.(call.function.name,'not_offered');else spec.screen?.(call.function.name,args);
         const result = !names.has(call.function.name) ? { error: 'tool_not_allowed' }
           : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
           : spec.execute ? await spec.execute(call.function.name, args) : { error: 'tool_not_allowed' };

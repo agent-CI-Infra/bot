@@ -1,6 +1,6 @@
 // Every task stop belongs to one cause, so a reader can tell a passing outage from a setting someone has to change
 // and from a defect in the bot itself. The fault detail says what happened; the cause says whose move it is.
-export type FailureCause = 'external'|'github_access'|'github_rejected'|'model'|'environment'|'repository'|'task_changed'|'publication'|'bot';
+export type FailureCause = 'external'|'github_access'|'github_rejected'|'model'|'environment'|'repository'|'task_changed'|'publication'|'role_configuration'|'bot';
 
 const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   external: { label:'外部服务或网络波动', codes:['github_unavailable','github_response_unknown','github_rate_limited','model_unavailable','release_actions_incomplete','github_log_download_failed',
@@ -10,10 +10,10 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
     'actions_app_required','actions_workflow_run_subscription_missing','gate_repository_unreadable'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
-  model: { label:'模型服务或模型配置', codes:['acp_submission_required','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
+  model: { label:'模型服务或模型配置', codes:['role_submission_required','acp_submission_required','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',
     'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid'] },
-  environment: { label:'项目电脑或运行环境', codes:['acp_not_configured','acp_configuration_invalid','acp_protocol_unsupported','acp_mcp_http_unsupported','harness_timeout','acp_turn_incomplete','acp_execution_failed','role_snapshot_unavailable','checkpoint_unavailable','acceptance_snapshot_unavailable','environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
+  environment: { label:'项目电脑或运行环境', codes:['pi_runtime_unavailable','controller_workspace_unavailable','acp_not_configured','acp_configuration_invalid','acp_protocol_unsupported','acp_mcp_http_unsupported','harness_timeout','acp_turn_incomplete','acp_execution_failed','role_snapshot_unavailable','checkpoint_unavailable','acceptance_snapshot_unavailable','environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
     'workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
     'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
@@ -21,7 +21,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
     'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required'] },
-  task_changed: { label:'任务条件已变化', codes:['harness_cancelled','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
+  task_changed: { label:'任务条件已变化', codes:['role_revision_checkpoint','harness_cancelled','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','task_actor_permission_revoked','release_actor_permission_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
     'bot_pr_author_changed','bot_pr_head_repository_changed','bot_pr_branch_changed','bot_pr_ownership_unconfirmed',
@@ -35,8 +35,12 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'gate_session_superseded','gate_repository_stopped',
     // The workflow assistant's run was stopped by the person who started it.
     'assistant_cancelled'] },
+  // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
+  role_configuration: { label:'角色配置', codes:['role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','harness_version_unavailable','harness_role_unsupported',
+    'role_model_not_available','role_model_profile_changed','capability_policy_unavailable','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
+    'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported'] },
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown','pr_release_label_incomplete'] },
-  bot: { label:'Bot 自身问题', codes:['external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
+  bot: { label:'Bot 自身问题', codes:['pi_environment_required','external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed',
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
     'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','actions_report_identity_missing'] },
@@ -114,6 +118,10 @@ const codeActions: Record<string,string> = {
   bot_rule_too_large:'规则文件和 skill 已不再限制大小，点「重试」即可继续。',
   too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
+  role_authority_revoked:'角色的权限、角色本身或角色协作在运行中被收回，后续能力调用已停止。恢复配置后任务自动继续，或改用不需要该角色的方式重试。',
+  role_revision_checkpoint:'角色在安全检查点结束本次运行，同一任务和角色实例会带新 revision 自动续接。',
+  harness_version_mismatch:'项目电脑里的 Pi 版本与角色配置固定的版本不同：升级或回退项目电脑镜像，或按新版本重新保存角色配置。',
+  pi_runtime_unavailable:'项目电脑的 runner 太旧，不支持 Pi 运行时查询。同步升级控制面和项目电脑镜像后会自动继续。',
 };
 const causeActions: Record<FailureCause,(state:string)=>string> = {
   external: state => automatic.has(state) ? '不是配置问题，bot 会自动重试，一般无需处理。'
@@ -125,6 +133,7 @@ const causeActions: Record<FailureCause,(state:string)=>string> = {
     : '请在项目页检查虚拟电脑后点「重试」。',
   repository: () => '按说明修改仓库内容或 bot 规则后点「重试」。',
   task_changed: () => '按说明处理后点「重试」。',
+  role_configuration: state => '说明里写明了出错的角色配置字段。到项目「角色」页按字段修正并保存（需带当前 revision），'+(automatic.has(state)?'修复后任务会自动继续；不会换用其他模型、技能或执行后端。':retry),
   publication: () => 'GitHub 没有确认这次写入，bot 也没在 GitHub 上找到它。点「重试」会先再查一次，确实没有才重新发送，不会重复发布。',
   bot: () => '这是 bot 内部校验失败或运行异常，与外部服务和权限无关。可以先点「重试」；反复出现请把任务链接和上面的说明反馈给 bot 维护者。',
 };

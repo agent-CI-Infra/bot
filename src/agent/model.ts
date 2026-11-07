@@ -15,9 +15,15 @@ export function selectedModel(store: Store, repositoryId: string, taskKind?: str
   const overridden = custom ? !!custom.model_id : !!taskKind && Object.hasOwn(overrides, taskKind);
   const modelId = custom ? custom.model_id || policy?.model_id : overridden ? overrides[taskKind!] : policy?.model_id;
   if (overridden && (typeof modelId !== 'string' || !modelId)) return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。');
-  const row = modelId ? store.get(`SELECT m.* FROM models m WHERE m.id=? AND
-    (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`, modelId, repositoryId, repositoryId) : undefined;
+  const row = modelId ? visibleModel(store, repositoryId, modelId) : undefined;
   if (!row?.api_key) return stop('model_not_configured','waiting_configuration',`仓库 ${repositoryId}${overridden ? ' 的任务 ' + taskKind : ''} 未配置可用模型或模型凭据；不会自动切换到其他模型。`);
+  return openModel(store, row);
+}
+/** A model this project may use: its own, or a shared one granted to it. Returns the row without opening its key. */
+export const visibleModel = (store: Store, repositoryId: string, modelId: string) => store.get(`SELECT m.* FROM models m WHERE m.id=? AND
+    (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))`, modelId, repositoryId, repositoryId);
+/** The run-time model of a visible row; the key is opened here and never stored with a role snapshot. */
+export function openModel(store: Store, row: Record<string, any>) {
   const key=String(store.secrets.open(row.api_key,`model:${row.id}`).value||'');if(!key)return stop('model_key_missing','waiting_configuration',`模型 ${row.id} 的凭据为空，请重新配置。`);
   return {id:String(row.id),version:Number(row.version),url:String(row.api_url),key,model:String(row.model_name),pricing:pricingFor(store,String(row.id))};
 }
