@@ -218,7 +218,7 @@ test('the project controller runs on the Pi harness, delegates by references and
   // The controller session is its own restricted workspace with only control-plane tools.
   const [session] = [...runner.spaces.values()].filter(sp => sp.parsed);
   assert.notEqual(session.id, workspace.task.workspace_id);
-  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'delegate_role', 'list_project_tasks', 'nominate_delivery', 'read_coordination', 'read_playbook', 'read_task_history', 'read_task_record', 'record_progress', 'request_task_coordination', 'select_playbooks']);
+  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'delegate_role', 'list_project_tasks', 'nominate_delivery', 'read_coordination', 'read_playbook', 'read_task_history', 'read_task_record', 'record_progress', 'request_task_coordination', 'select_playbooks', 'wait_for_tasks']);
   assert.deepEqual(session.parsed.control_tools.sort(), session.parsed.tools.map(t => t.function.name).sort());
   assert.deepEqual(session.parsed.capabilities.workspace, { read: false, write: false, notes: false, shell: false });
   for (const body of f.requests.filter(isController)) for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance']) assert.ok(!body.tools.some(t => t.function.name === name));

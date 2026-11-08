@@ -9,7 +9,7 @@ import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {Store} from '../dist/storage/database.js';
 import {TaskRecords} from '../dist/tasks/service.js';
-import {CoordinationWorker,requestCoordination,coordinationContext,acknowledgeCoordination,assertCoordinationCurrent,resumeCoordinatedTasks,coordinationApi} from '../dist/tasks/coordination.js';
+import {CoordinationWorker,waitForCoordinatedTasks,requestCoordination,coordinationContext,acknowledgeCoordination,assertCoordinationCurrent,resumeCoordinatedTasks,coordinationApi} from '../dist/tasks/coordination.js';
 import {runTeam} from '../dist/roles/team.js';
 import {TaskEngine} from '../dist/agent/engine.js';
 import {Redactor} from '../dist/agent/common.js';
@@ -87,4 +87,14 @@ test('objections are retained and re-evaluated, advice updates cannot reuse prio
  let n=coordinationContext(f.s,'a').notices[0];assert.deepEqual(acknowledgeCoordination(f.s,'a',{notice_id:n.id,disposition:'disputed',reason:'Advice needs to preserve legacy export readers too'}),{ok:true});await drain(worker);
  n=coordinationContext(f.s,'a').notices[0];assert.equal(n.state,'pending');assert.equal(f.s.get('SELECT attempts FROM task_coordinations WHERE id=?',req.coordination_id).attempts,2);
  assert.ok(f.s.get("SELECT count(*) n FROM task_history WHERE type='coordination_acknowledged'").n>0);await worker.close();
+});
+
+test('declared dependency waits release the source, reject cycles and resume on delivery or an actionable blocker',async t=>{
+ const f=await setup(t,()=>call('submit_coordination',notices()));const source=f.s.get("SELECT * FROM tasks WHERE id='a'");
+ assert.deepEqual(waitForCoordinatedTasks(f.s,source,{task_ids:['b'],condition:'delivered',reason:'Export reader must be delivered before roundtrip'}),{waiting:true});f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");
+ resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'waiting_coordination');
+ assert.equal(waitForCoordinatedTasks(f.s,f.s.get("SELECT * FROM tasks WHERE id='b'"),{task_ids:['a'],condition:'delivered',reason:'would form a cycle'}).error,'coordination_dependency_cycle');
+ const c=f.records().submit('b',[{kind:'report',reference:'reader',version:'tree'}],[],{});f.records().decide('b',c.id,c.revision,verdict);resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'queued');
+ waitForCoordinatedTasks(f.s,source,{task_ids:['independent'],condition:'delivered',reason:'Check prerequisite'});f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");f.s.run("UPDATE tasks SET status='failed' WHERE id='independent'");resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'queued');
+ assert.ok(JSON.parse(f.s.get("SELECT input FROM tasks WHERE id='a'").input).coordination_dependency_result[0].blocked);
 });

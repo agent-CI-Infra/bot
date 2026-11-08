@@ -31,11 +31,22 @@ export function requestCoordination(s:Store,task:Row,a:unknown){
  if(old){if(old.request!==request)throw new Error('coordination_key_conflict');return {coordination_id:old.id,state:old.state};}
  const id=randomId(),now=new Date().toISOString();
  s.run("INSERT INTO task_coordinations(id,repository_id,source_task_id,request_key,request,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",id,task.repository_id,task.id,a.key,request,now,now);
- traceEvent(s,task.id,'coordination_requested',{coordination_id:id,...a,task_ids:ids},task.trace_run_id,'role:'+String(task.active_role??'manager'));
+ traceEvent(s,task.id,'coordination_requested',{coordination_id:id,...a,task_ids:ids},task.trace_run_id,task.active_role?'role:'+String(task.active_role):'framework');
  return {coordination_id:id,state:'queued'};
  });
 }
-export function coordinationContext(s:Store,id:string){return {requests:s.all('SELECT id,request,state,result,error,updated_at FROM task_coordinations WHERE source_task_id=? ORDER BY created_at',id).map(r=>({...r,request:JSON.parse(r.request),result:r.result?JSON.parse(r.result):null})),notices:s.all('SELECT * FROM coordination_notices WHERE task_id=? ORDER BY id',id)};}
+/** Only declared task dependencies are checked; no project inactivity polling. */
+export function coordinationDependencies(s:Store,id:string){const input=JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',id)?.input||'{}');return (input.coordination_wait_for??[]).map((d:any)=>{const t=s.get('SELECT status FROM tasks WHERE id=?',d.task_id);const accepted=!!s.get("SELECT task_id FROM task_records WHERE task_id=? AND json_extract(acceptance,'$.outcome') IN ('pass','pass_with_issues') AND json_extract(acceptance,'$.candidate_id')=json_extract(candidate,'$.id') AND json_extract(acceptance,'$.revision')=revision",d.task_id);const merged=!!s.get("SELECT task_id FROM task_merge_requests WHERE task_id=? AND state='merged'",d.task_id)||!!s.get("SELECT id FROM task_history WHERE task_id=? AND type='repository_evolved'",d.task_id);return {...d,status:t?.status??'missing',ready:d.condition==='merged'?merged:accepted&&['completed','succeeded','pr_opened'].includes(t?.status),blocked:!t||['failed','cancelled','superseded','needs_replan'].includes(t.status)};});}
+export function waitForCoordinatedTasks(s:Store,task:Row,a:any){
+ if(!a||!Array.isArray(a.task_ids)||!a.task_ids.length||a.task_ids.length>20||!['delivered','merged'].includes(a.condition)||!text(a.reason))return {error:'invalid_coordination_dependency'};
+ for(const id of a.task_ids)if(typeof id!=='string'||id===task.id||!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',id,task.repository_id))return {error:'coordination_task_out_of_scope'};
+ const seen=new Set<string>(),walk=(id:string):boolean=>{if(id===task.id)return true;if(seen.has(id))return false;seen.add(id);const input=JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',id)?.input||'{}');return (input.coordination_wait_for??[]).some((d:any)=>walk(d.task_id));};
+ if(a.task_ids.some(walk))return {error:'coordination_dependency_cycle'};
+ const input=JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',task.id)!.input||'{}');
+ new TaskRecords(s).atomic(()=>{s.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({...input,coordination_wait_for:[...new Set(a.task_ids)].map(task_id=>({task_id,condition:a.condition}))}),task.id);traceEvent(s,task.id,'coordination_dependency',{task_ids:a.task_ids,condition:a.condition,reason:a.reason},task.trace_run_id,'role:manager');});
+ return {waiting:coordinationDependencies(s,task.id).some((d:any)=>!d.ready)};
+}
+export function coordinationContext(s:Store,id:string){return {waiting_dependencies:coordinationDependencies(s,id),requests:s.all('SELECT id,request,state,result,error,updated_at FROM task_coordinations WHERE source_task_id=? ORDER BY created_at',id).map(r=>({...r,request:JSON.parse(r.request),result:r.result?JSON.parse(r.result):null})),notices:s.all('SELECT * FROM coordination_notices WHERE task_id=? ORDER BY id',id)};}
 export function coordinationVersion(s:Store,id:string){const n=s.all('SELECT id,coordination_id,message,task_revision,candidate_id,state,reason,action FROM coordination_notices WHERE task_id=? ORDER BY id',id);return n.length?sha(JSON.stringify(n)):undefined;}
 export function assertCoordinationCurrent(s:Store,id:string,candidate:any){
  const current=coordinationVersion(s,id);
@@ -61,6 +72,7 @@ export function acknowledgeCoordination(s:Store,id:string,a:any){
 const tool=(name:string,description:string,properties:any,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const requestProperties={key:{type:'string'},problem:{type:'string'},proposal:{type:'string'},task_ids:{type:'array',items:{type:'string'}},refs:{type:'array',items:{type:'string'}}};
 export const coordinationTools=[
+ tool('wait_for_tasks','Persist a concrete dependency wait and release this execution slot. Other tasks keep running. Only same-project tasks; cycles rejected.',{task_ids:{type:'array',items:{type:'string'}},condition:{type:'string',enum:['delivered','merged']},reason:{type:'string'}},['task_ids','condition','reason']),
  tool('list_project_tasks','Discover same-project task IDs, goals and current statuses for a concrete coordination request; does not change tasks.',{},[]),
  tool('request_task_coordination','Persist a concrete cross-task coordination request. This yields this task slot; no goal/criteria or permissions are changed. Ordinary scope explanations use record_scope_difference, not this tool.',requestProperties,['key','problem','proposal','task_ids','refs']),
  tool('read_coordination','Read this task coordination requests, notices and feedback.',{},[]),
@@ -103,7 +115,10 @@ export function resumeCoordinatedTasks(s:Store,active:(id:string)=>boolean){
   const blocked=s.get("SELECT state,error FROM task_coordinations WHERE source_task_id=? AND state IN ('needs_human','failed')",t.id);
   if(blocked){s.run("UPDATE tasks SET status='needs_replan',error_code=?,updated_at=? WHERE id=?",blocked.state==='needs_human'?'coordination_needs_human':'coordination_failed',new Date().toISOString(),t.id);continue;}
   if(s.get("SELECT id FROM task_coordinations WHERE source_task_id=? AND state IN ('queued','running','needs_human','failed')",t.id))continue;
-  if(!s.get("SELECT id FROM coordination_notices WHERE task_id=? AND state='pending'",t.id))continue;
+  const dependencies=coordinationDependencies(s,t.id);
+  if(dependencies.some((d:any)=>!d.ready)&&!dependencies.some((d:any)=>d.blocked))continue;
+  if(!dependencies.length&&!s.get("SELECT id FROM coordination_notices WHERE task_id=? AND state='pending'",t.id))continue;
+  if(dependencies.length){const input=JSON.parse(t.input||'{}');s.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({...input,coordination_wait_for:[],coordination_dependency_result:dependencies}),t.id);}
   s.run("UPDATE tasks SET status='queued',phase='model',error_code=NULL,next_run_at=0,attempt=attempt+1,updated_at=? WHERE id=?",new Date().toISOString(),t.id);
   traceEvent(s,t.id,'coordination_resumed',{reason:'Explicit coordination result available; same task and role context; fresh submission/QA required'},null,'framework');
  }
