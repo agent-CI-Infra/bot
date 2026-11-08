@@ -22,6 +22,7 @@ const text=(v:any,max=8000)=>typeof v==='string'&&!!v.trim()&&v.length<=max;
 export function validCoordination(a:any):a is CoordinationRequest{return !!a&&Object.keys(a).every(k=>['key','problem','proposal','task_ids','refs'].includes(k))&&['key','problem','proposal'].every(k=>text(a[k],k==='key'?200:8000))&&Array.isArray(a.task_ids)&&a.task_ids.length>0&&a.task_ids.length<=20&&a.task_ids.every((id:any)=>text(id,200))&&Array.isArray(a.refs)&&a.refs.length<=100&&a.refs.every((r:any)=>text(r,1000));}
 export function requestCoordination(s:Store,task:Row,a:unknown){
  if(!validCoordination(a))throw new Error('invalid_coordination_request');
+ return new TaskRecords(s).atomic(()=>{
  if(task.active_role==='coordinator')throw new Error('recursive_coordination_forbidden');
  const ids=[...new Set([task.id,...a.task_ids])];if(ids.length<2)throw new Error('coordination_requires_multiple_tasks');
  for(const id of ids)if(!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',id,task.repository_id))throw new Error('coordination_task_out_of_scope');
@@ -32,6 +33,7 @@ export function requestCoordination(s:Store,task:Row,a:unknown){
  s.run("INSERT INTO task_coordinations(id,repository_id,source_task_id,request_key,request,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",id,task.repository_id,task.id,a.key,request,now,now);
  traceEvent(s,task.id,'coordination_requested',{coordination_id:id,...a,task_ids:ids},task.trace_run_id,'role:'+String(task.active_role??'manager'));
  return {coordination_id:id,state:'queued'};
+ });
 }
 export function coordinationContext(s:Store,id:string){return {requests:s.all('SELECT id,request,state,result,error,updated_at FROM task_coordinations WHERE source_task_id=? ORDER BY created_at',id).map(r=>({...r,request:JSON.parse(r.request),result:r.result?JSON.parse(r.result):null})),notices:s.all('SELECT * FROM coordination_notices WHERE task_id=? ORDER BY id',id)};}
 export function coordinationVersion(s:Store,id:string){const n=s.all('SELECT id,coordination_id,message,task_revision,candidate_id,state,reason,action FROM coordination_notices WHERE task_id=? ORDER BY id',id);return n.length?sha(JSON.stringify(n)):undefined;}
@@ -40,6 +42,7 @@ export function assertCoordinationCurrent(s:Store,id:string,candidate:any){
  if(s.get("SELECT id FROM coordination_notices WHERE task_id=? AND state IN ('pending','disputed')",id)||candidate?.coordination_version!==current)stop('task_coordination_pending','waiting_coordination','Read coordination notices, acknowledge applicability or raise an objection; submit a candidate under the current coordination context for fresh QA.');
 }
 export function acknowledgeCoordination(s:Store,id:string,a:any){
+ return new TaskRecords(s).atomic(()=>{
  if(!a||!Number.isSafeInteger(a.notice_id)||!['adopted','not_applicable','disputed'].includes(a.disposition)||!text(a.reason))return {error:'invalid_coordination_ack'};
  const n=s.get('SELECT * FROM coordination_notices WHERE id=? AND task_id=?',a.notice_id,id);if(!n)return {error:'coordination_notice_not_found'};
  if(n.state===a.disposition&&n.reason===a.reason)return {ok:true};
@@ -53,6 +56,7 @@ export function acknowledgeCoordination(s:Store,id:string,a:any){
   s.run("UPDATE task_coordinations SET state=?,claim_token=NULL,next_run_at=0,error=? WHERE id=?",row.attempts>=3?'needs_human':'queued',row.attempts>=3?'coordination_dispute_limit':null,row.id);
  }else if(!s.get("SELECT id FROM coordination_notices WHERE coordination_id=? AND state IN ('pending','disputed')",n.coordination_id))s.run("UPDATE task_coordinations SET state='resolved' WHERE id=?",n.coordination_id);
  return {ok:true};
+ });
 }
 const tool=(name:string,description:string,properties:any,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const requestProperties={key:{type:'string'},problem:{type:'string'},proposal:{type:'string'},task_ids:{type:'array',items:{type:'string'}},refs:{type:'array',items:{type:'string'}}};
@@ -65,7 +69,7 @@ export const coordinationTools=[
 export async function runCoordinator(s:Store,row:Row,token:string){
  const source=s.get('SELECT * FROM tasks WHERE id=?',row.source_task_id)!,request=JSON.parse(row.request),task={...source,active_role:'coordinator'};
  let basis:Map<string,any>|undefined;
- const guard=async()=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=?',row.id);if(current?.claim_token!==token||current.state!=='running')stop('coordination_claim_revoked','cancelled');if(!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',source.id,row.repository_id)||!s.get('SELECT enabled FROM policies WHERE repository_id=?',row.repository_id)?.enabled)stop('repository_policy_disabled','cancelled');};
+ const guard=async()=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=?',row.id);if(['cancelled','superseded'].includes(s.get('SELECT status FROM tasks WHERE id=?',source.id)?.status))stop('coordination_source_cancelled','cancelled');if(current?.claim_token!==token||current.state!=='running')stop('coordination_claim_revoked','cancelled');if(!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',source.id,row.repository_id)||!s.get('SELECT enabled FROM policies WHERE repository_id=?',row.repository_id)?.enabled)stop('repository_policy_disabled','cancelled');};
  const submit={type:'function',function:{name:'submit_coordination',description:'Submit coordination advice or a concrete human decision; no product execution or delivery authority.',parameters:coordinationResultSchema}};
  basis=new Map<string,any>(request.task_ids.map((id:string)=>[id,new TaskRecords(s).get(id)]));
  const result=await runRole({store:s,task,redactor:new Redactor(),guard,system:'Task Coordinator. Coordinate only the offered same-project tasks. Query persistent facts and identify dependency/shared-contract adjustments, preserving the original goal/criteria and real permissions. Send concrete notices for Task Managers to evaluate at safe checkpoints. Never edit product code or task contracts, override QA, finish tasks, publish, merge or grant authority. Do not route ordinary product defects/planning scope differences to a human. needs_human is for a specific unresolved user decision/explicit constraint. Read prior notices/objections and resolve them, not recursive coordination. If tasks are already delivered, identify followup work; their historical completion cannot be rewritten.',prompt:JSON.stringify({coordination_id:row.id,request,tasks:request.task_ids.map((id:string)=>({id,...basis!.get(id)})),prior_result:row.result?JSON.parse(row.result):null}),tools:[tool('read_project_task','Read an offered task durable contract, observations and coordination context; no conversations or host credentials.',{task_id:{type:'string'},offset:{type:'integer'}},['task_id']),submit],maxTurns:12,maxOutputTokens:8192,finish:{name:'submit_coordination',validate:v=>{
@@ -88,7 +92,7 @@ export class CoordinationWorker{
  tick(){if(this.closing)return;const s=this.store;
   for(const row of s.all("SELECT c.* FROM task_coordinations c JOIN policies p ON p.repository_id=c.repository_id WHERE c.state='queued' AND c.next_run_at<=? AND p.enabled=1 ORDER BY c.created_at,c.id",Date.now())){
    if(this.active.has(row.repository_id))continue;const token=randomId();const claimed=s.run("UPDATE task_coordinations SET state='running',claim_token=?,attempts=attempts+1,updated_at=? WHERE id=? AND state='queued'",token,new Date().toISOString(),row.id);if(!Number(claimed.changes))continue;
-   const work=runCoordinator(s,row,token).catch(e=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=? AND claim_token=?',row.id,token);if(!current)return;const retry=current.attempts<3;s.run('UPDATE task_coordinations SET state=?,claim_token=NULL,error=?,next_run_at=?,updated_at=? WHERE id=?',retry?'queued':'failed',String(e.code??e.message),Date.now()+current.attempts*15000,new Date().toISOString(),row.id);traceEvent(s,row.source_task_id,'coordination_fault',{coordination_id:row.id,code:String(e.code??e.message),retry},null,'framework');}).finally(()=>this.active.delete(row.repository_id));this.active.set(row.repository_id,work);
+   const work=runCoordinator(s,row,token).catch(e=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=? AND claim_token=?',row.id,token);if(!current)return;const cancelled=e.code==='coordination_source_cancelled',retry=!cancelled&&current.attempts<3;s.run('UPDATE task_coordinations SET state=?,claim_token=NULL,error=?,next_run_at=?,updated_at=? WHERE id=?',cancelled?'cancelled':retry?'queued':'failed',String(e.code??e.message),Date.now()+current.attempts*15000,new Date().toISOString(),row.id);traceEvent(s,row.source_task_id,'coordination_fault',{coordination_id:row.id,code:String(e.code??e.message),retry},null,'framework');}).finally(()=>this.active.delete(row.repository_id));this.active.set(row.repository_id,work);
   }
  }
  async close(){this.closing=true;await Promise.allSettled(this.active.values());}
