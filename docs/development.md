@@ -40,6 +40,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 `npm run test:external:docker` 使用独立临时镜像和无外网容器验证签名转发、兑换临时令牌和 Bot 身份评论；GitHub 为本地测试服务，结束后清理本次镜像及容器，不修改运行实例。
 
+`npm run test:isolation:docker` 验收每次角色运行的独立容器：以本机已有的项目电脑镜像（`BOT_TEST_BASE_IMAGE`，默认 `department-bot-project-computer:local`）为底叠加本检出的 runner，构建带随机标签的测试镜像，在进程内启动本检出的 manager（独立 deployment id），检查 HOME／进程／环境／卷／网络隔离、恶意路径与符号链接、缓存污染、固定候选复制、资源与时限，以及 RoleRun 准入；结束后只删除该 deployment 标签下的容器、网络、卷和测试镜像，证据在 `.tmp/role-run-docker/`。
+
 ## CI 与合入
 
 `main` 只能经 Pull request 合入，合入方式只有 rebase，并且经合并队列（merge queue）排队，不能强推或删除。必需检查在 Pull request 和合并队列上都运行：[`checks.yml`](../.github/workflows/checks.yml) 的 `unit`（`npm run check`、`npm test` 和两个 Compose 文件的校验）与 `e2e`（`npm run test:e2e`，失败时上传 `.tmp/e2e-results`），以及 [`images.yml`](../.github/workflows/images.yml) 构建的四个镜像。新增必需检查的工作流要同时监听 `pull_request` 和 `merge_group`，否则合并队列等不到结果。版本发布见[版本发布与服务器部署](deployment.md#版本发布与服务器部署)。

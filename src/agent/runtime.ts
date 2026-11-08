@@ -18,6 +18,14 @@ export interface AgentSpec<T> {
   harnessState?: { value:Record<string,any>; save:(value:Record<string,any>)=>void };
   modelTrace?: Record<string,unknown>;
   executionSignal?: AbortSignal;
+  /** RoleRun cancellation (operator cancel, exhausted budget); the harness session interrupts its agent through its protocol. */
+  cancelSignal?: AbortSignal;
+  /** The run's capability token for adapters that present it (worker RPC, MCP), and the server-side check of a presented one. */
+  runAccess?: { readonly token: string; check: (presented: unknown) => void };
+  /** Public harness events of the session (session_bound, message, tool, ...), mirrored into the RoleRun event stream. */
+  onHarnessEvent?: (event: { type: string; [key: string]: unknown }) => void;
+  /** A per-run environment the framework provisioned and verified for this run (run_isolation profiles). */
+  runEnvironment?: unknown;
   session?: { messages:any[]; save:(messages:any[])=>void };
   onRun?: (id:string)=>void;
   roleRun?: {instance_id:string;role:string;version:string;harness:string;harness_version?:string;assignment_id?:string;recovery_mode:string;snapshot_id?:string};

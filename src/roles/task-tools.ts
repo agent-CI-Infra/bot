@@ -4,12 +4,14 @@ import {randomId} from '../core/security.js';
 import type {AgentSpec} from '../agent/runtime.js';
 import {traceEvent} from '../tasks/trace.js';
 /** Run-local MCP bridge. All operations reuse the exact offered tools and validators.
- * Only a random loopback endpoint is given to the external agent, never model/GitHub keys. */
+ * Only a loopback endpoint is given to the external agent, never model/GitHub keys. Under a RoleRun the path secret is
+ * the run's capability token: every request is checked again, so an expired, revoked or taken-over run is refused. */
 export async function taskToolServer<T>(spec:AgentSpec<T>){
- const token=randomId();let submitted=false,result:T,active=true,tail=Promise.resolve();
+ const token=spec.runAccess?.token??randomId();let submitted=false,result:T,active=true,tail=Promise.resolve();
  const server=createServer(async(req,res)=>{
   res.setHeader('Content-Type','application/json');
   if(req.url!=='/'+token||!active){res.writeHead(404);res.end('{}');return;}
+  if(spec.runAccess){try{spec.runAccess.check(token);}catch(error){res.writeHead(401);res.end(JSON.stringify({error:(error as any).code??'run_token_invalid'}));return;}}
   if(req.method!=='POST'){res.writeHead(405);res.end('{}');return;}
   let requestId:unknown=null;
   try{

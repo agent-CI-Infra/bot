@@ -49,6 +49,6 @@ ACP 只运行工作角色（writer、observer、evaluator）。项目主控（ma
 
 `test/harness.test.mjs` 使用协议测试替身验证 MCP、持久化恢复、重建、角色隔离、QA 新会话、私有内容过滤、取消、进程退出及未提交结果；`test/roles.test.mjs` 验证现有 Native/Process 与协调/验收边界。真实 Codex 和 OpenToday 证据见 issue #176 验收报告。
 
-第一版不提供完整隔离、权限代理、精确计费、跨 Harness 会话转换、执行中追加输入或自动故障接管。ACP permission request 对既有执行授权允许一次（无此选项则取消）；这是现有授权下的轻量运行方式，不是细粒度权限防线。远端 Agent 自有工具也不保证经 Bot 代理；验收以公共任务工具留下的实际证据为准。运行主机必须适合执行受信任的 Agent；不把部署共享 HOME 或管理员凭据作为默认配置。
+第一版不提供完整隔离、权限代理、精确计费、跨 Harness 会话转换、执行中追加输入或自动故障接管；其后的 [RoleRun 协议](role-run.md) 在同一会话之上补充了版本化输入、租约 epoch、运行令牌、任务工具网关、准入、每运行容器、预算和恢复模式，内置驱动仍不声明隔离。ACP permission request 对既有执行授权允许一次（无此选项则取消）；这是现有授权下的轻量运行方式，不是细粒度权限防线。远端 Agent 自有工具也不保证经 Bot 代理；验收以公共任务工具留下的实际证据为准。运行主机必须适合执行受信任的 Agent；不把部署共享 HOME 或管理员凭据作为默认配置。
 
 真实 ACP 最小复核（会实际调用已认证 Agent，不属于默认测试）：先构建并配置 `BOT_ACP_CONFIG`，连续运行两次 `node scripts/acp-smoke.mjs .tmp/acp-smoke`。两个独立驱动进程使用同一数据库，实际经 MCP 读取随机任务事实并校验提交；proof 文件保留 session ID、恢复方式、run 与事实读取次数。恢复还是重建以实际 Agent 能力为准，不预设成功结论。该 probe 不访问 GitHub、不修改产品仓库，不代替 OpenToday 开发 E2E。

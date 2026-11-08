@@ -9,7 +9,7 @@ const botVersion=(()=>{try{return process.env.BOT_VERSION||execFileSync('git',['
 const now=()=>new Date().toISOString();
 function atomic<T>(store:Store,fn:()=>T):T{const name='trace_'+randomId();store.db.exec('SAVEPOINT '+name);try{const result=fn();store.db.exec('RELEASE '+name);return result;}catch(error){store.db.exec('ROLLBACK TO '+name);store.db.exec('RELEASE '+name);throw error;}}
 export function traceClean(value:any,literal=false):any {
-  if(typeof value==='string'){if(!literal&&/^[\[{]/.test(value)){try{return JSON.stringify(traceClean(JSON.parse(value)));}catch{}}return value.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,'[REDACTED]').replace(/\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{15,}|Bearer\s+[\w.\/-]+)/gi,'[REDACTED]').replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/g,'$1[REDACTED]@');}
+  if(typeof value==='string'){if(!literal&&/^[\[{]/.test(value)){try{return JSON.stringify(traceClean(JSON.parse(value)));}catch{}}return value.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,'[REDACTED]').replace(/\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{15,}|rrt_[\w-]{12}\.[\w-]{20,}|Bearer\s+[\w.\/-]+)/gi,'[REDACTED]').replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/g,'$1[REDACTED]@');}
   if(Array.isArray(value))return value.map(v=>traceClean(v,literal));
   if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/^(api_?key|authorization|credentials|claim_token|token|password|private_key|reasoning.*|thinking.*|analysis|base64)$/i.test(k)).map(([k,v])=>[k,traceClean(v,literal||(k==='content'&&value.encoding==='utf8'))]));
   return value;

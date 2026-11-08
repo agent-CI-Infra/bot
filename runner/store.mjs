@@ -44,6 +44,25 @@ export async function storeOperation(input, root = storeRoot) {
     try { if ((await handle.stat()).size !== input.offset) throw new Error('offset_mismatch'); await handle.write(data, 0, data.length, input.offset); await handle.sync(); } finally { await handle.close(); }
     return { written: true, size: input.offset + data.length };
   }
+  // The other direction: the objects of one commit (its tree and blobs, not its history) as a pack read in chunks. A run
+  // container gets a fixed candidate this way instead of a mount of the computer that produced it.
+  if (input.type === 'git_export') {
+    if (!objectId.test(input.sha || '') || !Number.isSafeInteger(input.offset) || input.offset < 0) throw new Error('invalid_export');
+    const out = `${incoming}/${input.pack_id}.export`;
+    if (input.offset === 0) {
+      await run(['cat-file', '-e', input.sha + '^{commit}']);
+      const objects = await run(['rev-list', '--objects', '--no-walk', input.sha]), pack = await run(['pack-objects', '--stdout', '-q'], { input: objects });
+      const handle = await open(out, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+      try { await handle.write(pack); } finally { await handle.close(); }
+    }
+    const handle = await open(out, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const size = (await handle.stat()).size, buffer = Buffer.alloc(Math.max(0, Math.min(45000, size - input.offset)));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, input.offset), next = input.offset + bytesRead;
+      if (next >= size) await rm(out, { force: true });
+      return { base64: buffer.subarray(0, bytesRead).toString('base64'), offset: input.offset, size, done: next >= size };
+    } finally { await handle.close(); }
+  }
   if (input.type === 'git_import') {
     if (!Array.isArray(input.commits) || !input.commits.length || input.commits.some(sha => !objectId.test(sha))) throw new Error('invalid_commits');
     // index-pack checks every object it stores; the commits must then be complete in the store.

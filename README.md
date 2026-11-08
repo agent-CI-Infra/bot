@@ -36,7 +36,7 @@ App 已经创建好了，不需要自己再建。安装地址只用这一个：
 
 部署、接入向导、项目管理和升级都在[部署这套 bot 和管理员面板](docs/admin.md)。每个仓库运行的检视、开发和发行任务都是可在网页上编辑和新增的[工作流](docs/workflows.md)。
 
-角色池可按角色选择 Native、Process 或通用 ACP 执行器。第一阶段验证 Codex ACP，会话与任务记录持续关联，交付仍经独立 QA；启用方式与边界见 [Harness Runtime](docs/harness-runtime.md)。
+角色池可按角色选择 Native、Process 或通用 ACP 执行器。第一阶段验证 Codex ACP，会话与任务记录持续关联，交付仍经独立 QA；启用方式与边界见 [Harness Runtime](docs/harness-runtime.md)。每次角色运行经版本化的 RoleRun 协议准入、留痕和恢复：租约 epoch、短时运行令牌、受控任务工具网关、可选的每运行独立容器以及跨恢复累计的预算，见 [RoleRun 协议](docs/role-run.md)。
 
 ## 仓库快照与运行日志
 

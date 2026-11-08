@@ -14,7 +14,8 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',
     'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid'] },
   environment: { label:'项目电脑或运行环境', codes:['integration_unavailable','pi_runtime_unavailable','controller_workspace_unavailable','acp_not_configured','acp_configuration_invalid','acp_protocol_unsupported','acp_mcp_http_unsupported','harness_timeout','acp_turn_incomplete','acp_execution_failed','role_snapshot_unavailable','checkpoint_unavailable','acceptance_snapshot_unavailable','environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
-    'workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable'] },
+    'workspace_write_failed','workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable',
+    'run_candidate_export_failed','run_candidate_import_failed','run_candidate_mismatch'] },
   repository: { label:'仓库内容或规则', codes:['repository_has_no_commit','credential_in_repository','unsafe_repository_path','repository_path_conflict',
     'unsupported_blob_encoding','unsafe_bot_rule','pull_request_file_limit','agent_context_too_large','github_pagination_limit',
     // The repository's .bot/ rule files and .agents/skills/ are the repository's to fix.
@@ -34,16 +35,22 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // A newer gate onboarding conversation, or a repository stopped while the agent was answering.
     'gate_session_superseded','gate_repository_stopped',
     // The workflow assistant's run was stopped by the person who started it.
-    'assistant_cancelled'] },
+    'assistant_cancelled',
+    // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
+    'lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
   role_configuration: { label:'角色配置', codes:['role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','harness_version_unavailable','harness_role_unsupported',
     'role_model_not_available','role_model_profile_changed','capability_policy_unavailable','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
-    'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported'] },
+    'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported',
+    // RoleRun admission, budgets and recovery (#169): fail closed instead of downgrading or switching silently.
+    'unsupported_capability','role_budget_exhausted','model_revision_changed','role_recovery_unsupported'] },
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown','pr_release_label_incomplete'] },
   bot: { label:'Bot 自身问题', codes:['pi_environment_required','external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed',
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
-    'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','actions_report_identity_missing'] },
+    'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','actions_report_identity_missing',
+    'role_run_protocol_invalid','role_run_secret_rejected','role_run_operation_used','role_run_unknown','role_checkpoint_not_found','role_run_handle_unknown','role_run_not_started','role_recovery_scope_mismatch','role_run_cursor_invalid',
+    'run_token_ttl_invalid','run_token_invalid','run_token_scope_mismatch','run_token_capability_denied','run_candidate_invalid'] },
 };
 const byCode = new Map(Object.entries(causes).flatMap(([cause,{codes}]) => codes.map(code => [code, cause as FailureCause])));
 export const classifiedCodes = new Set(byCode.keys());
@@ -123,6 +130,11 @@ const codeActions: Record<string,string> = {
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
   role_authority_revoked:'角色的权限、角色本身或角色协作在运行中被收回，后续能力调用已停止。恢复配置后任务自动继续，或改用不需要该角色的方式重试。',
   role_revision_checkpoint:'角色在安全检查点结束本次运行，同一任务和角色实例会带新 revision 自动续接。',
+  unsupported_capability:'角色选用的执行后端或运行环境缺少这个阶段要求的能力（例如隔离、原始证据、取消或固定候选），运行没有启动，也不会换用其他后端。到「角色」页改用满足要求的执行后端或环境，保存后任务自动继续。',
+  role_budget_exhausted:'这个角色在本任务中的累计预算已用尽，运行已取消，已有产物和检查点保留。确认用量后在「角色」页提高该角色的预算策略并保存；已开始的任务固定了启动时的配置，用 POST /api/tasks/:id/roles/apply 把新 revision 应用到这个角色后再重试。不会换模型重开预算。',
+  model_revision_changed:'恢复运行时同一角色版本解析出的模型变了。为避免静默换模型，运行没有继续：恢复原模型，或在「角色」页明确保存新的模型配置。',
+  lease_epoch_stale:'这次运行的租约已被更新的运行接管，它迟到的结果和调用都不再被接受；以接管它的运行为准，无需处理。',
+  candidate_changed:'检视期间固定候选已变化，旧结论不能认证新内容；新的委派会针对当前候选重新执行。',
   harness_version_mismatch:'项目电脑里的 Pi 版本与角色配置固定的版本不同：升级或回退项目电脑镜像，或按新版本重新保存角色配置。',
   pi_runtime_unavailable:'项目电脑的 runner 太旧，不支持 Pi 运行时查询。同步升级控制面和项目电脑镜像后会自动继续。',
 };

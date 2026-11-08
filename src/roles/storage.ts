@@ -1,5 +1,6 @@
 import type { Store } from '../storage/database.js';
 import { roleStorageV2 } from './definition.js';
+import { roleRunStorage } from './role-run.js';
 export function cleanRoleMessages(messages:any[]):any[]{return messages.map(message=>Object.fromEntries(Object.entries(message).filter(([key])=>! /^(reasoning.*|thinking.*|analysis)$/i.test(key))));}
 export function roleStorage(s:Store){s.db.exec(`
  CREATE TABLE IF NOT EXISTS role_instances(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,role TEXT NOT NULL,definition TEXT NOT NULL,harness TEXT NOT NULL,session TEXT NOT NULL DEFAULT '[]',sequence INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,UNIQUE(task_id,role));
@@ -11,5 +12,6 @@ export function roleStorage(s:Store){s.db.exec(`
  // RoleDefinitionV2: an instance pins the snapshot of its current revision; runtime names its live Pi workspace.
  const instance=new Set(s.all('PRAGMA table_info(role_instances)').map(r=>r.name));for(const [name,type] of Object.entries({snapshot_id:'TEXT',config_revision:'INTEGER',role_revision:'INTEGER',pending_revision:'INTEGER',runtime:'TEXT'}))if(!instance.has(name))s.db.exec(`ALTER TABLE role_instances ADD COLUMN ${name} ${type}`);
  roleStorageV2(s);
+ roleRunStorage(s);
  s.db.exec("UPDATE role_assignments SET status='failed' WHERE status='running' AND EXISTS(SELECT 1 FROM task_runs r WHERE r.assignment_id=role_assignments.id AND r.status IN ('fault','interrupted','stopped')) AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.assignment_id=role_assignments.id AND r.status='running')");
 }
