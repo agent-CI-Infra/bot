@@ -14,7 +14,16 @@ const finished = "('succeeded','pr_opened','completed','cancelled','superseded',
 export function deleteProjectRecords(store: Store, id: string): void {
   const clients = 'SELECT id FROM external_clients WHERE repository_id=?', subscriptions = `SELECT id FROM external_subscriptions WHERE repository_id=? OR client_id IN (${clients})`;
   const deliveries = 'SELECT id FROM deliveries WHERE repository_id=?', tasks = 'SELECT id FROM tasks WHERE repository_id=?', models = 'SELECT id FROM models WHERE repository_id=?';
+  const schedules = 'SELECT id FROM schedules WHERE project_id=?', notifications = 'SELECT id FROM notification_outbox WHERE project_id=?';
+  const notificationSubscriptions = 'SELECT id FROM notification_subscriptions WHERE project_id=?';
   const statements: [string, number][] = [
+    // Delete delivery/run children and their scoped accounting before their project-owned parents.
+    [`DELETE FROM notification_attempts WHERE outbox_id IN (${notifications})`, 1],
+    [`DELETE FROM schedule_business_runs WHERE occurrence_id IN (SELECT id FROM schedule_occurrences WHERE project_id=?)`, 1],
+    ...['schedule_usage', 'schedule_notification_slots', 'schedule_budgets'].map((table): [string, number] => [
+      `DELETE FROM ${table} WHERE (scope='project' AND scope_id=?) OR (scope='schedule' AND (scope_id IN (${schedules}) OR scope_id IN (${notificationSubscriptions})))`, 3]),
+    ...['notification_outbox', 'schedule_occurrences', 'schedules', 'notification_subscriptions', 'schedule_events', 'schedule_operations', 'schedule_audit']
+      .map((table): [string, number] => [`DELETE FROM ${table} WHERE project_id=?`, 1]),
     [`DELETE FROM external_event_cursors WHERE client_id IN (${clients})`, 1], [`DELETE FROM external_grants WHERE client_id IN (${clients})`, 1],
     [`DELETE FROM external_deliveries WHERE repository_id=? OR subscription_id IN (${subscriptions}) OR source_id IN (${deliveries})`, 4],
     [`DELETE FROM external_subscriptions WHERE repository_id=? OR client_id IN (${clients})`, 2], ['DELETE FROM external_clients WHERE repository_id=?', 1],

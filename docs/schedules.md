@@ -8,7 +8,9 @@
 
 个人计划的 actor、owner、maintainer 必须是当前操作者，不能修改为项目服务计划，也不能借用另一个用户的授权。后台工作使用当前 principal 授权，不保存或借用登录 token。失权后计划进入 `paused` 并保存原因。
 
-项目计划选择 #163 已有的项目 service principal；创建和修改还要求 `grants.manage`。服务身份必须有 project 范围的显式委托，计划保存创建人、owner、维护人、批准人、授权修订及委托快照。维护人必须仍拥有项目计划管理权限。执行 Actor 只保留该计划批准的最小能力；日报为 `tasks.read` 和 `schedules.manage`，工作流再增加处理器声明的能力。处理器需要的能力改变、委托撤销或改变、维护人失权、安装不可用都会暂停，不自动扩大能力。项目计划的执行不依赖创建人继续登录；有权维护者可显式更新维护人，原 owner 和创建人引用保留用于审计。
+项目计划选择 #163 已有的项目 service principal；创建和修改始终要求操作者拥有 `grants.manage`，只有 `schedules.manage` 的维护人不能修改。新建时 owner 和维护人都必须是 active 且拥有该项目 `schedules.manage` 的人类。更新时 kind、服务身份、owner 和创建人保持不变，历史 owner 离职或失权不影响已有计划的更新和预览；新的维护人仍须 active 且有项目计划管理权限。预览已有计划需在 query arguments 中携带 `schedule_id`，服务端读取原记录并核对身份引用，未携带时按新建计划检查 owner。维护人下拉只表示可被指定的人，不授予保存权限。
+
+服务身份必须有 project 范围的显式委托，计划保存创建人、owner、维护人、批准人、授权修订及委托快照。执行 Actor 只保留该计划批准的最小能力；日报为 `tasks.read` 和 `schedules.manage`，工作流再增加处理器声明的能力。处理器需要的能力改变、委托撤销或改变、维护人失权、安装不可用都会暂停，不自动扩大能力。执行路径检查当前服务身份、显式委托、维护人及目的地，不依赖创建人或 owner 继续登录。拥有 `grants.manage` 的管理员可显式更换维护人；交接不改变服务身份的已批能力，原 owner 和创建人引用保留用于审计。新建 owner 不合格返回 `schedule_owner_required`，新维护人不合格返回 `schedule_maintainer_required`；历史 owner 已离职不会作为已有计划的拒绝原因。
 
 ## 时间和版本
 

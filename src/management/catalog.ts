@@ -22,7 +22,7 @@ export const commands: Record<string, { capability: string; arguments: Json; des
 };
 export const schedulingQueries = ['list_schedules','list_subscriptions','list_occurrences','list_notification_deliveries','list_schedule_audit','list_schedule_destinations','preview_schedule'];
 export const queries = ['list_projects','list_tasks','get_task','get_effective_config','get_usage','list_audit','get_capabilities','search_knowledge', ...schedulingQueries] as const;
-export const querySchema = obj({ operation: { type:'string', enum: queries }, target: obj({ project_id: str, task_id: str, workflow_id: str }), arguments: obj({ offset: integer, limit: { type:'integer',minimum:1,maximum:100 }, section: { type:'string',enum:['detail','logs','runs','events','roles','source'] }, source: str, query: str, plan: planSchema }) }, ['operation','target','arguments']);
+export const querySchema = obj({ operation: { type:'string', enum: queries }, target: obj({ project_id: str, task_id: str, workflow_id: str }), arguments: obj({ offset: integer, limit: { type:'integer',minimum:1,maximum:100 }, section: { type:'string',enum:['detail','logs','runs','events','roles','source'] }, source: str, query: str, plan: planSchema, schedule_id: str }) }, ['operation','target','arguments']);
 export const commandSchema = obj({ operation: { type:'string',enum:Object.keys(commands) }, target: targetSchema, arguments: { type:'object' }, expected_revision: str,
   idempotency_key: { ...str,maxLength:240 }, source_conversation: { ...str,maxLength:240 }, source_message: { ...str,maxLength:240 } }, ['operation','target','arguments','expected_revision','idempotency_key','source_conversation','source_message']);
 

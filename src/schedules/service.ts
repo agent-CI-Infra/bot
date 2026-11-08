@@ -61,7 +61,7 @@ export class ScheduleService {
     }
     return { row, event };
   }
-  private grants(actor: ActorContext, plan: Plan, project: string): Row {
+  private grants(actor: ActorContext, plan: Plan, project: string, existing?: Row): Row {
     const required = ['tasks.read', 'schedules.manage', ...(plan.workflow === 'report.daily' ? [] : [this.handlers.get(plan.workflow)?.capability ?? (plan.workflow.startsWith('release.') ? 'release.manage' : 'tasks.write')])];
     if (plan.kind === 'personal') {
       if (plan.actor_id !== actor.principal_id || plan.owner_id !== actor.principal_id || plan.maintainer_id !== actor.principal_id) fail(403, 'personal_schedule_identity_mismatch');
@@ -70,10 +70,13 @@ export class ScheduleService {
     authorize(actor, 'grants.manage', { project_id: project });
     const principal = this.store.get("SELECT * FROM principals WHERE id=? AND kind='service' AND project_id=?", plan.actor_id, project);
     if (!principal || !principal.maintenance) return fail(403, 'service_paused');
-    for (const id of [plan.owner_id, plan.maintainer_id]) {
+    // An existing owner is an immutable audit reference, not the current maintenance authority.
+    const people: [string, string][] = existing ? [['maintainer', plan.maintainer_id]] : [['owner', plan.owner_id], ['maintainer', plan.maintainer_id]];
+    for (const [role, id] of people) {
       const person = this.store.get("SELECT 1 FROM principals p JOIN users u ON p.user_id=u.id WHERE p.id=? AND p.kind='human' AND p.active=1 AND u.active=1", id);
-      if (!person) fail(403, 'schedule_maintainer_required');
-      authorize(resolvePrincipalActor(this.store, id, principal.tenant_id, project), 'schedules.manage', { project_id: project });
+      if (!person) fail(403, 'schedule_' + role + '_required');
+      try { authorize(resolvePrincipalActor(this.store, id, principal.tenant_id, project), 'schedules.manage', { project_id: project }); }
+      catch { return fail(403, 'schedule_' + role + '_required'); }
     }
     const grants = listEffectiveScopes(this.store, plan.actor_id).filter(g => g.state === 'active' && g.scope === 'project' && g.project_id === project && g.source === 'explicit_delegation' &&
       !!this.store.get('SELECT grantor_id FROM scoped_grants WHERE id=? AND grantor_id IS NOT NULL', g.grant_id));
@@ -161,15 +164,16 @@ export class ScheduleService {
       this.audit(row, 'business.' + state, null, row.source, { run_id: row.run_id });
     });
   }
-  validatePlan(actor: ActorContext, project: string, value: unknown): { plan: Plan; grant: Row; execution: ActorContext } {
+  validatePlan(actor: ActorContext, project: string, value: unknown, existing?: Row): { plan: Plan; grant: Row; execution: ActorContext } {
     validate(planSchema, value); const plan = value as Plan;
+    if (existing && (plan.kind !== existing.kind || plan.actor_id !== existing.actor_id || plan.owner_id !== existing.owner_id)) fail(403, 'schedule_identity_immutable');
     if (!!plan.cron === !!plan.interval_ms || plan.end_at !== undefined && plan.end_at <= plan.start_at) fail(400, 'invalid_schedule_recurrence');
     localParts(this.clock(), plan.timezone); if (plan.cron) parseCron(plan.cron);
     if (plan.enabled && nextTime(plan, this.clock()) === null) fail(400, 'schedule_has_no_future_occurrence');
     if (plan.workflow === 'report.daily') {
       if (Object.keys(plan.parameters).some(k => k !== 'window_ms') || plan.parameters.window_ms !== undefined && (!Number.isSafeInteger(plan.parameters.window_ms) || Number(plan.parameters.window_ms) < 60000 || Number(plan.parameters.window_ms) > 31 * 86400000)) fail(400, 'invalid_report_parameters');
     }
-    const grant = this.grants(actor, plan, project), tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
+    const grant = this.grants(actor, plan, project, existing), tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
     const execution = this.actor({ tenant_id: tenant, project_id: project, grant_snapshot: JSON.stringify(grant) }, plan);
     return { plan, grant, execution };
   }
@@ -208,9 +212,8 @@ export class ScheduleService {
       let result: Json;
       if (operation === 'schedule.register' || operation === 'schedule.update') {
         const old = operation === 'schedule.update' ? this.schedule(project, args.id) : undefined;
-        if (old) { this.owned(actor, old); if (old.state === 'deleted' || old.revision !== args.revision) fail(409, 'schedule_revision_conflict');
-          if (args.plan.kind !== old.kind || args.plan.actor_id !== old.actor_id || args.plan.owner_id !== old.owner_id) fail(403, 'schedule_identity_immutable'); }
-        const { plan, grant, execution } = this.validatePlan(actor, project, args.plan), id = old?.id ?? randomId(), now = this.clock();
+        if (old) { this.owned(actor, old); if (old.state === 'deleted' || old.revision !== args.revision) fail(409, 'schedule_revision_conflict'); }
+        const { plan, grant, execution } = this.validatePlan(actor, project, args.plan, old), id = old?.id ?? randomId(), now = this.clock();
         if (old) this.store.run(`UPDATE schedules SET spec=?,maintainer_id=?,grant_snapshot=?,approver_id=?,authorization_revision=?,revision=revision+1,
           state=?,reason=NULL,next_at=?,updated_at=? WHERE id=?`, JSON.stringify(plan), plan.maintainer_id, JSON.stringify(grant), grant.approver_id, execution.authorization_revision,
           plan.enabled ? 'active' : 'paused', nextTime(plan, now), now, id);
@@ -284,7 +287,9 @@ export class ScheduleService {
     if (!project) fail(400, 'project_target_required'); this.management.scope(actor, project, 'schedules.manage');
     const revision = this.management.revision({ project_id: project }), limit = args.limit ?? 20, offset = args.offset ?? 0;
     if (operation === 'preview_schedule') {
-      const { plan } = this.validatePlan(actor, project, args.plan);
+      const existing = args.schedule_id ? this.schedule(project, args.schedule_id) : undefined;
+      if (existing) this.owned(actor, existing);
+      const { plan } = this.validatePlan(actor, project, args.plan, existing);
       return { revision, plan, timezone: plan.timezone, future: previewTimes(plan, this.clock()), supported: plan.workflow === 'report.daily' || this.handlers.has(plan.workflow),
         report_preview_at: this.clock(),
         report: plan.workflow === 'report.daily' ? this.reports.render(project, this.clock(), plan.timezone, Number(plan.parameters.window_ms ?? 86400000)) : null };
