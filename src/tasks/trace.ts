@@ -90,6 +90,14 @@ export function interruptRuns(store:Store){for(const r of store.all("SELECT * FR
 export function traceSource(store:Store,taskId:string,source:string,access?:MemoryAccess):any{
   const repo=store.get('SELECT repository_id FROM tasks WHERE id=?',taskId)?.repository_id;
   const safe=(value:any)=>visibleMemorySnapshot(store,repo,value,access);
+  const capturedSource=(value:any)=>{
+    // Filter the full source before capture limits can turn a knowledge receipt into an opaque preview.
+    const scoped=safe(value);
+    if(value?.schema_version===1&&typeof value.sha256==='string'&&typeof value.complete==='boolean')return traceClean(scoped);
+    const original=JSON.parse(traceSnapshot(value));
+    if(scoped===value)return original;
+    return {...JSON.parse(traceSnapshot(scoped)),sha256:original.sha256,original_bytes:original.original_bytes,complete:false,missing_reason:'knowledge_filtered'};
+  };
   const permitRun=(runId:string|undefined)=>{if(!access||!runId)return;const r=store.get('SELECT role FROM task_runs WHERE id=?',runId);if(access.role){if((r?.role||'dev')!==access.role)fail(403,'trace_role_private');}else memoryAuthorize(access,repo,true);};
   if(source==='task:'+taskId){const task=store.get('SELECT id,repository_id,kind,status,phase,attempt,head_sha,source_task_id,updated_at FROM tasks WHERE id=?',taskId),record=store.get('SELECT contract,revision,candidate,acceptance FROM task_records WHERE task_id=?',taskId);if(task&&record)return JSON.parse(traceSnapshot({mutable:true,task,revision:record.revision,contract:JSON.parse(record.contract),candidate_id:JSON.parse(record.candidate||'null')?.id??null,acceptance:JSON.parse(record.acceptance||'null')}));}
   const contract=/^contract:revision:(\d+)$/.exec(source);if(contract){const event=store.get("SELECT data FROM task_history WHERE task_id=? AND type='contract' AND json_extract(data,'$.revision')=? ORDER BY id DESC LIMIT 1",taskId,Number(contract[1]));if(event)return JSON.parse(traceSnapshot(JSON.parse(event.data)));const current=store.get('SELECT contract,revision FROM task_records WHERE task_id=? AND revision=?',taskId,Number(contract[1]));if(current)return JSON.parse(traceSnapshot({revision:current.revision,contract:JSON.parse(current.contract)}));fail(404,'trace_source_not_found');}
@@ -97,11 +105,11 @@ export function traceSource(store:Store,taskId:string,source:string,access?:Memo
   const memory=/^project_memories:([^:]+):(\d+)$/.exec(source);if(memory&&store.hasTable('project_memory_versions')){if(!canReadMemory(store,repo,memory[1]!,Number(memory[2]),access))fail(404,'trace_source_not_found');const row=store.get('SELECT v.data FROM project_memory_versions v JOIN project_memories m ON m.id=v.memory_id JOIN tasks t ON t.repository_id=m.repository_id WHERE t.id=? AND m.id=? AND v.revision=?',taskId,memory[1]!,Number(memory[2]));if(row)return JSON.parse(traceSnapshot(new ProjectMemory(store,access).get(repo,memory[1]!,Number(memory[2]))));fail(404,'trace_source_not_found');}
   const model=/^model_requests:([^:]+):(request|response)$/.exec(source);
   if(model){const row=store.get(`SELECT run_id,${model[2]}_snapshot AS snapshot FROM model_requests WHERE id=? AND task_id=?`,model[1]!,taskId);permitRun(row?.run_id);return row?.snapshot?safe(JSON.parse(row.snapshot)):{complete:false,missing_reason:'not_captured_or_unavailable'};}
-  const h=/^task_history:(\d+)$/.exec(source);if(h){const row=store.get('SELECT data,run_id,type FROM task_history WHERE id=? AND task_id=?',h[1]!,taskId);if(row){if(!['role_result','role_candidate','role_handoff','execution_evidence','acceptance_evidence','memory_read','memory_search'].includes(row.type))permitRun(row.run_id);const captured=safe(JSON.parse(row.data));return captured?.schema_version===1&&typeof captured.sha256==='string'&&typeof captured.complete==='boolean'?traceClean(captured):JSON.parse(traceSnapshot(captured));}}
+  const h=/^task_history:(\d+)$/.exec(source);if(h){const row=store.get('SELECT data,run_id,type FROM task_history WHERE id=? AND task_id=?',h[1]!,taskId);if(row){if(!['role_result','role_candidate','role_handoff','execution_evidence','acceptance_evidence','memory_read','memory_search'].includes(row.type))permitRun(row.run_id);return capturedSource(JSON.parse(row.data));}}
   // A role run snapshot of this task's project: what a run was configured with, by its content hash.
   const role=/^role_snapshots:([a-f0-9]{64})$/.exec(source);if(role&&store.hasTable('role_snapshots')){const row=store.get('SELECT s.snapshot FROM role_snapshots s JOIN tasks t ON t.repository_id=s.repository_id WHERE t.id=? AND s.id=?',taskId,role[1]!);if(row)return safe(JSON.parse(row.snapshot));}
   const run=/^task_runs:([^:]+):(context|config)$/.exec(source);if(run){permitRun(run[1]);const row=store.get(`SELECT ${run[2]}_snapshot AS snapshot FROM task_runs WHERE id=? AND task_id=?`,run[1]!,taskId);if(row)return safe(JSON.parse(row.snapshot));}
-  const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data,run_id FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row){permitRun(row.run_id);return {...JSON.parse(traceSnapshot(safe(JSON.parse(row.data)))),source_event_id:'task_history:'+row.id};}}
+  const entity=/^(task_tools|task_logs|github_effects):/.test(source);if(entity){const row=store.get('SELECT id,data,run_id FROM task_history WHERE task_id=? AND source_ref=? ORDER BY id DESC LIMIT 1',taskId,source);if(row){permitRun(row.run_id);return {...capturedSource(JSON.parse(row.data)),source_event_id:'task_history:'+row.id};}}
   fail(404,'trace_source_not_found');
 }
 export function taskTrace(store:Store,taskId:string,url:URL,section:string,access?:MemoryAccess){

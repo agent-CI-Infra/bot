@@ -28,12 +28,21 @@ export function memoryAuthorize(access: MemoryAccess | undefined, repo: string, 
 /** Apply current ACLs to captured knowledge too. Snapshots cannot prolong a withdrawn grant/audience. */
 export function visibleMemorySnapshot(store: Store, repo: string, value: any, access?: MemoryAccess): any {
   if (typeof value === 'string') {
-    if (/^[\[{]/.test(value)) { try { return JSON.stringify(visibleMemorySnapshot(store, repo, JSON.parse(value), access)); } catch (error) { if ((error as any).code) throw error; } }
+    if (/^\s*[\[{]/.test(value)) {
+      try {
+        const parsed = JSON.parse(value), scoped = visibleMemorySnapshot(store, repo, parsed, access);
+        // Preserve file/observation bytes unless a knowledge ACL actually removed something.
+        return scoped === parsed ? value : JSON.stringify(scoped);
+      } catch (error) { if ((error as any).code) throw error; }
+    }
     const ref = /^project_memories:([^:]+):(\d+)$/.exec(value);
     if (ref && !canReadMemory(store, repo, ref[1]!, Number(ref[2]), access)) return '[knowledge unavailable]';
     return value;
   }
-  if (Array.isArray(value)) return value.map(v => visibleMemorySnapshot(store, repo, v, access));
+  if (Array.isArray(value)) {
+    const scoped = value.map(v => visibleMemorySnapshot(store, repo, v, access));
+    return scoped.some((v, i) => v !== value[i]) ? scoped : value;
+  }
   if (!value || typeof value !== 'object') return value;
   // Legacy read_task_record receipts can wrap raw version JSON without an ID inside `content`.
   // Reject the whole receipt when its source is private; filtering only the reference would retain the body.
@@ -43,8 +52,10 @@ export function visibleMemorySnapshot(store: Store, repo: string, value: any, ac
   }
   const memoryShape = value.repository_id && value.catalog && value.sources && Object.hasOwn(value, 'body');
   if (typeof value.id === 'string' && Number.isSafeInteger(value.revision) && (memoryShape || store.get('SELECT 1 FROM project_memories WHERE id=?', value.id)) && !canReadMemory(store, repo, value.id, value.revision, access)) return { availability: 'knowledge_forbidden' };
-  const scoped = Object.fromEntries(Object.entries(value).map(([k,v]) => [k, visibleMemorySnapshot(store, repo, v, access)]));
-  if (value.schema_version === 1 && typeof value.sha256 === 'string' && JSON.stringify(scoped) !== JSON.stringify(value)) {
+  const entries = Object.entries(value).map(([k,v]) => [k, visibleMemorySnapshot(store, repo, v, access)] as const);
+  if (!entries.some(([k,v]) => v !== value[k])) return value;
+  const scoped = Object.fromEntries(entries);
+  if (value.schema_version === 1 && typeof value.sha256 === 'string') {
     // The original digest still identifies retained evidence; a filtered view is explicitly incomplete.
     return { ...scoped, complete: false, missing_reason: 'knowledge_filtered' };
   }
