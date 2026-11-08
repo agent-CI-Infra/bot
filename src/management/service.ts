@@ -81,9 +81,10 @@ export class ManagementService {
     if(operation==='workflow.update'&&!target.workflow_id)fail(400,'workflow_target_required');
     if(!operation.startsWith('task.')&&operation!=='workflow.update'&&(target.task_id||target.workflow_id))fail(400,'invalid_management_target');
     if((operation==='workflow.update'&&target.task_id!)||(operation.startsWith('task.')&&target.workflow_id)||operation==='task.create'&&target.task_id!)fail(400,'invalid_management_target');
-    // Stop/cancel remains available while disabled. A new or resumed execution must pass live checks.
+    // Stop/cancel remains available while disabled. Project defaults only persist configuration;
+    // their switches take effect after an explicit enable. Execution commands still require an active project.
     if(!['task.pause','task.cancel'].includes(operation)){
-      if(!project.enabled&&!(operation==='project.update'&&typeof command.arguments.enabled==='boolean'))fail(409,'project_disabled');
+      if(!project.enabled&&operation!=='project.update')fail(409,'project_disabled');
       const denied=installationExecutionDenied(this.store,project.account_id,target.project_id);if(denied)fail(409,'installation_unavailable');
       if(!this.store.get('SELECT 1 FROM installed_repositories WHERE repository_id=? AND account_id=? AND installed=1',target.project_id,project.account_id))fail(409,'installation_scope_changed');
       const account=this.store.get('SELECT * FROM accounts WHERE id=?',project.account_id);

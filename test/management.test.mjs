@@ -48,6 +48,29 @@ test('configuration commands execute normally, conflict without overwrite, repla
   assert.equal((await query(admin,'list_audit',project)).value.audit.filter(r=>r.state==='succeeded'&&r.operation==='workflow.update').length,2);
 });
 
+test('disabled projects save review and development defaults without enabling execution',async t=>{
+  const {h,admin,member}=await managementFixture(t),single=await member('project-admin',{repository_ids:['101']});
+  assert.equal((await single.client('/api/repositories/101/policy','PATCH',{enabled:false})).status,200);
+  const count=h.store.get('SELECT count(*) n FROM tasks').n;
+  for(const key of ['development_enabled','review_enabled']){
+    h.store.run(`UPDATE policies SET ${key}=0 WHERE repository_id='101'`);
+    const saved=await single.client('/api/repositories/101/policy','PATCH',{[key]:true});
+    assert.equal(saved.status,200,JSON.stringify(saved.value));assert.equal(saved.value.policy[key],1);assert.equal(saved.value.policy.enabled,0);
+    assert.equal(saved.value.management.state,'succeeded');
+    assert.equal(h.store.get("SELECT * FROM policies WHERE repository_id='101'")[key],1);
+    const managed=await command(single.client,'project.update',project,{[key]:false});
+    assert.equal(managed.value.state,'succeeded');assert.equal(managed.value.result.policy.enabled,0);assert.equal(managed.value.result.policy[key],0);
+  }
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,count,'saving defaults does not create work');
+  const create=await command(single.client,'task.create',project,{request:'Inspect facts',contract:{goal:'Inspect facts',scope:['project'],criteria:['Cite records'],endpoint:'report'}});
+  assert.equal(create.status,409);assert.equal(create.value.error,'project_disabled');
+  const retry=await single.client('/api/tasks/blocked/retry','POST',{});assert.equal(retry.status,409);assert.equal(retry.value.error,'project_disabled');
+  assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
+  assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,count);
+  assert.equal((await admin('/api/repositories/101/policy','PATCH',{enabled:true})).value.policy.enabled,1);
+  assert.equal((await admin('/api/repositories/101/policy','PATCH',{enabled:false})).value.policy.enabled,0);
+});
+
 test('concurrent writes commit one revision; task commands create only one business task, append instructions and invalidate obsolete acceptance explicitly',async t=>{
   const {h,admin}=await managementFixture(t),rev=(await query(admin,'get_effective_config',project)).value.revision;
   const writes=await Promise.all(['a','b'].map(text=>command(admin,'workflow.update',workflow,{prompt:text},text,rev)));

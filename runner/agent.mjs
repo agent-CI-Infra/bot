@@ -67,7 +67,9 @@ export async function agentOperation(input,root){
     const pull_request=await readFile(dir+'/pr-request.json','utf8').then(JSON.parse).catch(()=>null);
     const repository_tool=await readFile(dir+'/repository-request.json','utf8').then(JSON.parse).catch(()=>null);
     const control_tool=await readFile(dir+'/control-request.json','utf8').then(JSON.parse).catch(()=>null);
-    const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').filter(Boolean);
+    // An append can still be in progress, especially for large tool arguments. Only consume
+    // newline-terminated records so the next poll retries the unfinished tail at the same offset.
+    const lines=(await readFile(dir+'/events.jsonl','utf8').catch(()=>'')).split('\n').slice(0,-1).filter(Boolean);
     const offset=Number(input.offset)||0,events=lines.slice(offset,offset+20).map(line=>JSON.parse(line));
     return {...state,boundary,request,token_request,pull_request,repository_tool,control_tool,events,offset:offset+events.length,has_more:offset+events.length<lines.length};
   }
