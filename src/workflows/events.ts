@@ -1,3 +1,4 @@
+import { captureTaskConfiguration } from '../tasks/configuration.js';
 import type { Store, Row } from '../storage/database.js';
 import type { GitHub } from '../github/client.js';
 import type { Redactor } from '../agent/common.js';
@@ -46,6 +47,7 @@ export function enqueueEventTask(store: Store, repositoryId: string, kind: strin
   store.transaction(() => {
     store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,head_sha,created_at,updated_at) VALUES(?,?,?,'queued',?,?,?,NULL,?,?,?)`,
       id, repositoryId, kind, summary, unique, JSON.stringify(input), sha, now, now);
+    captureTaskConfiguration(store,id);
     store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), id,
       JSON.stringify({ type: 'queued', repository_id: repositoryId, detail: `排队中，等待仓库 ${repositoryId} 的虚拟电脑空闲…` }), now);
   });

@@ -71,8 +71,7 @@ test('workspace conflicts reach fault logs and the task detail through the exist
 });
 
 test('missing model configuration records a Chinese reason while existing fault logs stay unchanged',async t=>{
-  const h=await emptyRepositoryFixture(t),old=JSON.stringify({type:'fault',state:'failed',code:'tool_operation_conflict'});
-  h.store.run('UPDATE policies SET model_id=NULL WHERE repository_id=?','101');
+  const h=await emptyRepositoryFixture(t,{modelConfigured:false}),old=JSON.stringify({type:'fault',state:'failed',code:'tool_operation_conflict'});
   h.store.run("INSERT INTO task_logs(id,task_id,content) VALUES('old-fault',?,?)",h.taskId,old);
   const task=await h.run();assert.equal(task.status,'waiting_configuration');assert.equal(task.error_code,'model_not_configured');
   const detail=(await h.admin('/api/tasks/'+h.taskId)).value.task.error_detail;

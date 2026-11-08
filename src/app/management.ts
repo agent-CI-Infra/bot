@@ -243,6 +243,29 @@ export async function management(store: Store, user: Actor, method: string, url:
     if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!,
       actions_failures: store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', id) || null, ...concurrency() };
     if (method === 'PATCH' && repoMatch[2]) {
+      return updatePolicy(store,user,id,body);
+    }
+  }
+  if (path === '/api/automation') {
+    if (method !== 'GET') return undefined;
+    const filter = scope(user, 'r.id');
+    return {
+      runs: store.all(`SELECT a.* FROM automation_runs a JOIN repositories r ON r.id=a.repository_id
+        WHERE ${filter.sql} ORDER BY a.created_at DESC LIMIT 100`, ...filter.args),
+    };
+  }
+  return undefined;
+}
+
+export function taskModelEntries(value:unknown):[string,string][] {
+  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>64)fail(400,'invalid_task_models');
+  const entries=Object.entries(value!);
+  if(entries.some(([kind,v])=>!/^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$/.test(kind)||kind.length>100||['constructor','prototype','__proto__'].includes(kind)||typeof v!=='string'||!v.trim()||v.length>200))fail(400,'invalid_task_models');
+  return entries as [string,string][];
+}
+/** Shared policy mutation used by console and management commands. */
+export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
+  repository(store,user,id);
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
       fields(body, ['model_id', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
         'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models']);
@@ -263,10 +286,9 @@ export async function management(store: Store, user: Actor, method: string, url:
       let taskModels: Record<string, string> | undefined;
       const taskModelGrants: string[] = [];
       if (body.task_models !== undefined) {
-        if (!body.task_models || typeof body.task_models !== 'object' || Array.isArray(body.task_models) || Object.keys(body.task_models).length > 64) fail(400, 'invalid_task_models');
+        const entries=taskModelEntries(body.task_models);
         taskModels = Object.create(null) as Record<string, string>;
-        for (const [kind, value] of Object.entries(body.task_models as Json)) {
-          if (!/^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$/.test(kind) || kind.length > 100 || ['constructor', 'prototype', '__proto__'].includes(kind) || typeof value !== 'string' || !value.trim() || value.length > 200) fail(400, 'invalid_task_models');
+        for (const [kind, value] of entries) {
           const chosen = value as string;
           const shared = user.role === 'super_admin' && !!store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL', chosen);
           if (!shared && !store.get(`SELECT id FROM models WHERE id=? AND (repository_id=? OR (repository_id IS NULL AND EXISTS
@@ -305,17 +327,6 @@ export async function management(store: Store, user: Actor, method: string, url:
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
-        return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true, ...concurrency() };
+        return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true, task_concurrency_default: defaultConcurrency(store) };
       });
-    }
-  }
-  if (path === '/api/automation') {
-    if (method !== 'GET') return undefined;
-    const filter = scope(user, 'r.id');
-    return {
-      runs: store.all(`SELECT a.* FROM automation_runs a JOIN repositories r ON r.id=a.repository_id
-        WHERE ${filter.sql} ORDER BY a.created_at DESC LIMIT 100`, ...filter.args),
-    };
-  }
-  return undefined;
 }

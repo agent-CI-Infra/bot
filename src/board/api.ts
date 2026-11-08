@@ -14,7 +14,7 @@ export const boardStages = [
   { id: 'attention', name: '需要处理', hint: '最近一次任务失败、被取消，或在等待配置、权限、重试、重新规划' },
 ];
 const successes = "('pr_opened','succeeded','completed')";
-const attention = "('failed','cancelled','waiting_configuration','waiting_permission','needs_replan','retry_wait')";
+const attention = "('paused','failed','cancelled','waiting_configuration','waiting_permission','needs_replan','retry_wait')";
 const developing = "('queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready')";
 const taskTime = (alias: string) => `coalesce(nullif(${alias}.updated_at,''),${alias}.created_at)`;
 const taskJoin = (alias: string, family: string) => `LEFT JOIN tasks ${alias} ON ${alias}.id=(SELECT t.id FROM tasks t
@@ -36,7 +36,7 @@ const execution = (status: string) => `CASE
   WHEN ${status}='queued' THEN 'queued'
   WHEN ${status}='failed' THEN 'failed'
   WHEN ${status} IN ${successes} THEN 'completed'
-  WHEN ${status} IN ('waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication','retry_wait','needs_replan','result_ready') THEN 'waiting'
+  WHEN ${status} IN ('paused','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication','retry_wait','needs_replan','result_ready') THEN 'waiting'
   ELSE 'other' END`;
 const objectStage = (category: string) => {
   if (category === 'review') return `CASE WHEN r.status IN ${attention} THEN 'attention' WHEN r.status IN ${successes} THEN 'reviewed'

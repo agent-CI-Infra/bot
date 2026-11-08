@@ -135,9 +135,9 @@ test('model failures name the model, its host and the provider explanation witho
   let reply;const model=createServer(async(req,res)=>{for await(const _ of req);res.writeHead(reply.status,{'Content-Type':'application/json'});res.end(JSON.stringify(reply.body));});
   model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(resolve=>model.close(resolve)));
   const host='127.0.0.1:'+model.address().port;
-  const h=await emptyRepositoryFixture(t,{execute(request){
+  const h=await emptyRepositoryFixture(t,{modelUrl:'http://'+host+'/v1',execute(request){
     if(request.type==='workspace_agent_poll')return {ok:true,result:{state:'running',request:{id:'model-1',body:{messages:[{role:'user',content:'Review this.'}]}}}};
-  }});h.setBranch('ready');h.store.run('UPDATE models SET api_url=?','http://'+host+'/v1');
+  }});h.setBranch('ready');
   reply={status:400,body:{error:{message:"This model's maximum context length is 8192 tokens; key fixture-key was rejected"}}};
   let task=await h.run();assert.deepEqual([task.status,task.error_code],['failed','model_http_400']);
   assert.equal(faults(h).at(-1).detail,`模型 fixture-model（${host}）返回 HTTP 400：This model's maximum context length is 8192 tokens; key [REDACTED] was rejected`);

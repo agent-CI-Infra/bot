@@ -1,3 +1,4 @@
+import { captureTaskConfiguration } from '../tasks/configuration.js';
 import type { Store } from '../storage/database.js';
 import { randomId, type Json } from '../core/security.js';
 import { mentionsBot, sameLabel, updateTrigger } from '../review/queue.js';
@@ -69,6 +70,7 @@ function enqueueWorkflow(store: Store, repositoryId: string, workflow: CustomWor
   store.run(`INSERT INTO tasks(id,repository_id,kind,workflow_id,status,summary,unique_key,input,object_number,head_sha,source_delivery_id,created_at,updated_at)
     VALUES(?,?,?,?,'queued',?,?,?,?,?,?,?,?)`, id, repositoryId, kind, workflow.id, `${workflow.name} #${match.number}`, key, JSON.stringify(input), match.number,
     match.object === 'pr' ? sha(match.pullRequest?.head?.sha) : null, delivery, now, now);
+  captureTaskConfiguration(store,id);
   store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', randomId(), id,
     JSON.stringify({ type: 'queued', repository_id: repositoryId, workflow_id: workflow.id, trigger: match.id, detail: `工作流「${workflow.name}」排队中，等待仓库 ${repositoryId} 的虚拟电脑空闲…` }), now);
   return id;

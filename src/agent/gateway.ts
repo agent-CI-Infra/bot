@@ -16,6 +16,7 @@ export interface ModelRequest {
   guard?: () => Promise<void>;
   maxOutputTokens?: number;
   onToken?: (delta?: ModelDelta) => Promise<void>;
+  executionSignal?: AbortSignal;
 }
 
 /** The single provider boundary. Credentials stay here, never in task tools or prompts.
@@ -47,6 +48,9 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
   const captured=redactor.clean({ ...requestBody, model: model.model, [limit]: outputTokens, stream: true, stream_options: { include_usage: true } });
   store.run('UPDATE model_requests SET run_id=?,request_snapshot=? WHERE id=?',task.trace_run_id??null,traceSnapshot(captured),requestLog);
   const controller = new AbortController();
+  const abort=()=>controller.abort();
+  input.executionSignal?.addEventListener('abort',abort,{once:true});
+  if(input.executionSignal?.aborted)controller.abort();
   let callbackFailed = false;
   let lastGuard = -Infinity;
   let idle = false, timer: ReturnType<typeof setTimeout> | undefined, response: Response | undefined, value: any;
@@ -74,7 +78,7 @@ export async function requestModel(input: ModelRequest): Promise<{ value: any; s
     finishModelRequest(store, requestLog, null, response?.status ?? null, callbackFailed ? 'guard_failed' : error instanceof TaskError ? 'invalid_response' : 'transport_error');
     if (callbackFailed || error instanceof TaskError) throw error;
     return stop('model_unavailable', 'retry_wait', redactor.text(`${target}请求失败：${idle ? '连续 90 秒没有 token 输出' : networkReason(error, modelIdleMs)}。`));
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); input.executionSignal?.removeEventListener('abort',abort); }
   store.run('UPDATE model_requests SET response_snapshot=? WHERE id=?',traceSnapshot(redactor.clean(value)),requestLog);
   if (!response.ok) {
     finishModelRequest(store, requestLog, null, response.status, 'http_error');

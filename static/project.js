@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['notes', '项目笔记'], ['roles', '角色'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
+const projectSections = [['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['notes', '项目笔记'], ['roles', '角色'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
 // Older addresses open the workflows page: the task overview it replaced, and the review, development and rule pages.
 const legacyProjectSections = { tasks: '', review: 'review.issue', development: 'development.issue', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -107,6 +107,7 @@ async function renderProject(route) {
   // On the workflows page a shared rule is an item of its own list, already selected by the address.
   if (current.focusRule) { if (section === 'workflows') { /* shown in place */ } else page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
+  if(section==='management')await renderManagement(document.getElementById('project-management-panel'),route.id);
   if (section === 'workflows' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
 }
 async function loadProject(id,section=current.section) {
@@ -150,7 +151,7 @@ function projectBody(section) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, workflows: workflowsSection, model: modelsSection, release: releaseSection, notes: notesSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ management: ()=>{const panel=element('section','');panel.id='project-management-panel';return [panel];}, basic: basicSection, machine: machineSection, workflows: workflowsSection, model: modelsSection, release: releaseSection, notes: notesSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();

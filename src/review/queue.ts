@@ -1,3 +1,4 @@
+import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { type Store } from '../storage/database.js';
 import { randomId, type Json } from '../core/security.js';
 import { reviewObjectState } from './sessions.js';
@@ -166,6 +167,7 @@ export function enqueue(store: Store, repositoryId: string, kind: string, number
   const id = randomId(), now = new Date().toISOString();
   store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,object_number,head_sha,source_task_id,source_delivery_id,created_at,updated_at)
     VALUES(?,?,?,'queued',?,?,?,?,?,?,?,?,?)`, id, repositoryId, kind, `${kind} #${number}`, key, JSON.stringify(input), number, head, sourceTask, delivery, now, now);
+  captureTaskConfiguration(store,id);
   store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,
     JSON.stringify({type:'queued',repository_id:repositoryId,detail:`排队中，等待仓库 ${repositoryId} 的虚拟电脑空闲…`}),now);
   return id;

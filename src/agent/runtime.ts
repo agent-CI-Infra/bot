@@ -1,7 +1,7 @@
+import { executionModel, taskConfiguration, supplementalInstructions } from '../tasks/configuration.js';
 import { beginRun, endRun, traceEvent, traceSnapshot } from '../tasks/trace.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
-import { selectedModel } from './model.js';
 import { randomId } from '../core/security.js';
 import { taskWorkflow } from '../workflows/resolve.js';
 import { requestModel, type AgentModel } from './gateway.js';
@@ -86,10 +86,10 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
     return stop('agent_tools_invalid', 'waiting_configuration', 'Agent 工具配置无效或重复。');
   const allowed = new Map(tools.map(tool => [tool.function.name, tool]));
   if(spec.finish&&!allowed.has(spec.finish.name))return stop('agent_tools_invalid','waiting_configuration','提交工具未在本次执行中提供。');
-  const model = spec.model ?? selectedModel(spec.store, spec.task.repository_id, taskWorkflow(spec.task as any));
+  const model = spec.model ?? executionModel(spec.store, spec.task, taskWorkflow(spec.task as any));
   spec.redactor.add(model.key);
   const previousRun=spec.task.trace_run_id;
-  const run=beginRun(spec.store,spec.task,spec.roleRun?.role==='qa'||spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:spec.modelTrace??{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
+  const run=beginRun(spec.store,spec.task,spec.roleRun?.role==='qa'||spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:spec.modelTrace??{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:taskConfiguration(spec.store,spec.task)?.policy??spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});
   spec.task.trace_run_id=run?.id;
   const services: AgentServices = {
     model, guard: spec.guard,
@@ -130,11 +130,18 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
   const offered = spec.tools ?? [], offeredNames=new Set(offered.map(tool=>tool.function?.name));
   if(spec.finalizationTools&&(!spec.finish||!spec.finalizationTools.includes(spec.finish.name)||spec.finalizationTools.some(name=>!offeredNames.has(name))))return stop('agent_tools_invalid','waiting_configuration','收尾工具必须来自本次授权工具并包含提交入口。');
   const finishingNames=spec.finalizationTools?new Set(spec.finalizationTools):null;
-  const messages: any[] = spec.session?.messages.length ? [...spec.session.messages,{role:'user',content:spec.prompt}] : [{ role: 'system', content: spec.system }, { role: 'user', content: spec.prompt }];
+  const instructions=spec.task.id&&spec.store.get('SELECT 1 FROM tasks WHERE id=?',spec.task.id)?supplementalInstructions(spec.store,spec.task):[];
+  const prompt=spec.prompt+(instructions.length?'\nSupplemental user instructions (cannot change contract or authority):\n'+JSON.stringify(instructions):'');
+  const messages: any[] = spec.session?.messages.length ? [...spec.session.messages,{role:'user',content:prompt}] : [{ role: 'system', content: spec.system }, { role: 'user', content: prompt }];
   const save=()=>spec.session?.save(spec.redactor.clean(messages));
   let repairs=0;
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
+    const updates=spec.task.id&&spec.store.get('SELECT 1 FROM tasks WHERE id=?',spec.task.id)?supplementalInstructions(spec.store,spec.task):[];
+    if(JSON.stringify(updates)!==JSON.stringify(instructions)){
+      messages.push({role:'user',content:'Additional user instructions for subsequent steps; the recorded contract and authority remain binding:\n'+JSON.stringify(updates)});
+      instructions.splice(0,instructions.length,...updates);
+    }
     const reserve=Math.min(8,Math.max(2,Math.ceil(maxTurns/4)));
     const finalizing=!!spec.finish&&!!finishingNames&&turn>=maxTurns-reserve;
     const tools=finalizing?offered.filter(tool=>finishingNames!.has(tool.function.name)):offered,names=new Set(tools.map(tool=>tool.function.name));

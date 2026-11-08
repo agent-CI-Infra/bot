@@ -28,6 +28,9 @@ const rulePath = (path: string) => Object.hasOwn(defaults, path) || skillPath(pa
 const ruleError = (code: string, detail: string): never => { throw Object.assign(new HttpError(400, code), { detail }); };
 // Rule file errors a person has to fix; a task that meets one waits for configuration instead of failing.
 export const ruleErrors = new Set(['bot_rule_too_large', 'invalid_bot_label', 'invalid_bot_computer', 'invalid_bot_rule_file', 'invalid_rule_content', 'too_many_bot_skills', 'unsafe_bot_rule']);
+export function validateRuleContent(value:unknown):void{
+  if(value!==null&&(typeof value!=='string'||value.includes('\0')))fail(400,'invalid_rule_content');
+}
 // The fields of .bot/computer.yaml, the same as the manager's project computer spec.
 const computerKeys = ['cpus', 'memory_mb', 'pids', 'tmp_mb', 'egress', 'packages', 'env', 'setup_script'];
 // The resource values that were fixed before a super administrator could change the defaults.
@@ -155,17 +158,21 @@ export class RuleService {
     const env = await this.manager?.call('GET', '/v1/projects/' + id).catch(() => null);
     return { ...resolveRules(policy, saved ? JSON.parse(saved.files) : {}, this.consoleComputer(id,env?.computer)), sha: saved?.sha || null, updated_at: saved?.updated_at || null, needs_refresh: !saved };
   }
+  save(user:Actor,id:string,input:Json):void{
+    repository(this.store,user,id);
+    fields(input,['path','content']);if(!Object.hasOwn(defaults,String(input.path))||input.path==='.bot/computer.yaml')fail(400,'invalid_rule_path');
+    validateRuleContent(input.content);
+    const row=this.store.get('SELECT * FROM policies WHERE repository_id=?',id)!,values=JSON.parse(row.rule_overrides||'{}');
+    if(input.content===null)delete values[String(input.path)];else values[String(input.path)]=input.content;
+    resolveRules({...row,rule_overrides:JSON.stringify(values)},{});
+    this.store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?',JSON.stringify(values),id);this.store.audit(user.id,'rules.updated',String(input.path),id);
+  }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     const match = /^\/api\/repositories\/([^/]+)\/rules(?:\/(refresh|apply-computer))?$/.exec(url.pathname); if (!match) return undefined;
     const id = match[1]!; repository(this.store, user, id);
     if (method === 'GET' && !match[2]) return { rules: await this.view(id) };
     if (method === 'PUT' && !match[2]) {
-      fields(input, ['path', 'content']); if (!Object.hasOwn(defaults, String(input.path)) || input.path === '.bot/computer.yaml') fail(400, 'invalid_rule_path');
-      if (input.content !== null && (typeof input.content !== 'string' || input.content.includes('\0'))) fail(400, 'invalid_rule_content');
-      const row = this.store.get('SELECT * FROM policies WHERE repository_id=?', id)!, values = JSON.parse(row.rule_overrides || '{}');
-      if (input.content === null) delete values[String(input.path)]; else values[String(input.path)] = input.content;
-      resolveRules({ ...row, rule_overrides: JSON.stringify(values) }, {});
-      this.store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?', JSON.stringify(values), id); this.store.audit(user.id, 'rules.updated', String(input.path), id); return { rules: await this.view(id) };
+      this.save(user,id,input);return {rules:await this.view(id)};
     }
     if (method === 'POST' && match[2] === 'refresh') {
       fields(input, []); const repo = this.store.get('SELECT * FROM repositories WHERE id=?', id)!;

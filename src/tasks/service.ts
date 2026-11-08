@@ -3,6 +3,7 @@ import type { Store } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { createHash } from 'node:crypto';
 import { playbooks } from './playbooks.js';
+import { captureTaskConfiguration } from './configuration.js';
 
 export interface Contract { goal: string; scope: string[]; criteria: string[]; endpoint: string | null; source: unknown; completeness?: string }
 export interface Artifact { kind: string; reference: string; version: string; content?: unknown }
@@ -107,7 +108,8 @@ export class TaskRecords {
     this.assertClaim(id,token);
     const current=this.get(id);
     if(!Array.isArray(artifacts)||!artifacts.length||artifacts.some(a=>!a||!a.kind||!a.reference||!a.version)||!Array.isArray(evidence)||evidence.some(e=>!e||!e.source||!e.version||typeof e.verified!=='boolean'))throw new Error('invalid_task_candidate');
-    const key=hash({revision:current.revision,artifacts,evidence,claims});
+    const executionRevision=this.store.get('SELECT revision FROM task_execution_configs WHERE task_id=?',id)?.revision??JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input||'{}').configuration_revision??1;
+    const key=hash({revision:current.revision,execution_revision:executionRevision,artifacts,evidence,claims});
     if(current.candidate?.id===key)return current.candidate;
     if(['completed','succeeded','pr_opened'].includes(current.progress.status))throw new Error('task_already_delivered');
     const candidate={id:key,revision:current.revision,artifacts,evidence,claims,created_at:new Date().toISOString()};
@@ -150,6 +152,7 @@ export class TaskRecords {
         // Follow-ups use the ordinary request executor. No GitHub write or expanded policy is inherited.
         this.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,source_task_id,created_at,updated_at) VALUES(?,?,'task.request','queued',?,?,?,?,?,?)`,child,task.repository_id,residual.goal,`residual:${id}:${candidateId}:${residual.key}`,JSON.stringify(input),id,now,now);
         this.store.run('UPDATE task_records SET contract=? WHERE task_id=?',JSON.stringify(input.contract),child);
+        captureTaskConfiguration(this.store,child);
         this.store.run('INSERT INTO task_followups VALUES(?,?,?,?)',id,candidateId,residual.key,child);followups.push(child);
       }
       const rounds=current.rounds+1,passing=['pass','pass_with_issues'].includes(verdict.outcome);

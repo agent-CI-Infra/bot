@@ -35,6 +35,8 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
     const model=createServer(async(req)=>{for await(const _ of req);requests++;req.socket.destroy();});
     model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(resolve=>model.close(resolve)));
     const h=await emptyRepositoryFixture(t,{
+      modelUrl:'http://127.0.0.1:'+model.address().port+'/v1',
+      taskKind:kind,
       github(path,send){if(path.endsWith('/issues/1')){send(issue);return true;}},
       execute(request){
         const id=request.workspace_id;
@@ -52,9 +54,9 @@ for(const kind of ['review.issue','development.issue'])for(const fault of ['tran
         if(request.type==='workspace_finalize')return {ok:true,result:{tree_sha:'b'.repeat(40),files:[]}};
       },
     });
-    h.setBranch('ready');h.store.run('UPDATE models SET api_url=?','http://127.0.0.1:'+model.address().port+'/v1');
+    h.setBranch('ready');
     h.store.run("UPDATE policies SET development_enabled=1 WHERE repository_id='101'");
-    h.store.run('UPDATE tasks SET kind=?,attempt=3 WHERE id=?',kind,h.taskId);
+    h.store.run('UPDATE tasks SET attempt=3 WHERE id=?',h.taskId);
     for(let failure=1;failure<=5;failure++){
       h.due();const before=Date.now(),task=await h.run();
       assert.deepEqual([task.status,task.phase,task.workspace_id,task.attempt,task.retry_count],[fault==='transport'?'retry_wait':'waiting_environment','prepare',null,3+failure,failure]);
