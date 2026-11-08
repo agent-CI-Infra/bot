@@ -11,6 +11,7 @@ import { randomId } from '../core/security.js';
 import { traceEvent,endRun } from '../tasks/trace.js';
 import { roleHarness } from './harness.js';
 import { memoryTools } from '../memory/project.js';
+import { taskTraceAccess, visibleMemorySnapshot, memoryViewFence, taskMemoryAccess } from '../memory/access.js';
 import { ProjectMemory } from '../memory/project.js';
 import { TaskError,stop } from '../agent/common.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,type Entry,type RoleConfiguration } from './definition.js';
@@ -93,6 +94,12 @@ const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={s
 
 async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
  const s=spec.store,task=spec.task,workflow=taskWorkflow(task as any),{resolved,continuation}=state;let instance=state.instance;
+ const knowledgeFence=memoryViewFence(s,{...task,active_role:role});
+ if(instance.knowledge_fence!==knowledgeFence){
+  if(instance.sequence>0){s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=NULL WHERE id=?",instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime:null};traceEvent(s,task.id,'role_memory_view_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_task_records'},task.trace_run_id);}
+  s.run('UPDATE role_instances SET knowledge_fence=? WHERE id=?',knowledgeFence,instance.id);instance.knowledge_fence=knowledgeFence;
+ }
+ const scopedInput=()=>visibleMemorySnapshot(s,task.repository_id,(()=>{try{return JSON.parse(shared.sourceInput);}catch{return {input:shared.sourceInput};}})(),taskTraceAccess(s,{...task,active_role:role}));
  const definition=JSON.parse(instance.definition),harness=instance.harness,snapshot=resolved.snapshot,driver=roleHarness(harness),persistence=driver.session;
  // The role's explicit model wins; otherwise the caller's pinned execution model, which follows the workflow/project order.
  // A driver with its own model gets no project model at all.
@@ -104,7 +111,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
  let released=false;const release=async()=>{if(released)return;released=true;await env.release?.();};
  try{
   // rebuildContext: the caller supplies the durable facts, so no stored conversation is restored (as for QA).
-  const stored=cleanRoleMessages(JSON.parse(instance.session)),messages=options.rebuildContext||role==='qa'||persistence!=='checkpoint_transcript'?[]:stored;
+  const stored=visibleMemorySnapshot(s,task.repository_id,cleanRoleMessages(JSON.parse(instance.session)),taskTraceAccess(s,{...task,active_role:role})),messages=options.rebuildContext||role==='qa'||persistence!=='checkpoint_transcript'?[]:stored;
   // A crash can leave an assistant tool batch partially answered. Mark absent receipts as
   // interrupted, never fabricate their observations; the role must query durable task facts.
   for(let i=0;i<messages.length;i++){const msg=messages[i];if(msg.role!=='assistant'||!msg.tool_calls?.length)continue;const replies=new Set<string>();let end=i+1;while(messages[end]?.role==='tool'){replies.add(messages[end].tool_call_id);end++;}const missing=msg.tool_calls.filter((c:any)=>!replies.has(c.id)).map((c:any)=>({role:'tool',tool_call_id:c.id,content:JSON.stringify({error:'interrupted_observation',instruction:'Inspect task records before repeating any action.'})}));messages.splice(end,0,...missing);i=end+missing.length-1;}
@@ -168,10 +175,10 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_result',category:value?.error?'denied':'observation',operation_id:op,data:{name,outcome:value?.error?'error':'ok',error:typeof value?.error==='string'?value.error:null}});
     return value;},
    system:definition.prompt+'\n'+spec.system,
-   prompt:JSON.stringify({...(()=>{try{return JSON.parse(shared.sourceInput);}catch{return {input:shared.sourceInput};}})(),role_context:{task_ref:'task:'+task.id,assignment_ref:ref,recovery_mode:recover,...roleContext,
+   prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,assignment_ref:ref,recovery_mode:recover,...roleContext,
     skills:snapshot.skills?{instruction:'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,files:snapshot.skills.files}:undefined,
     revision_continuation:continuation?{ref:continuation.ref,ended_run:continuation.from_run,instruction:'Your previous run ended at a safe checkpoint for a new role revision. Continue the same assignment from task records and your transcript; do not repeat completed actions.'}:undefined,
-    prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null,role_memory:shared.memory}}),
+    prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null,role_memory:visibleMemorySnapshot(s,task.repository_id,shared.memory,taskTraceAccess(s,{...task,active_role:role}))}}),
    requestPrefix:`role:${instance.id}:${instance.sequence}:`,roleRun:{instance_id:instance.id,role,version:definition.version,harness,harness_version:driver.version,assignment_id:assignment,recovery_mode:recover,snapshot_id:resolved.id},
    session:{messages:messages.length&&messages[0]?.role==='system'?[{role:'system',content:definition.prompt+'\n'+spec.system},...messages.slice(1)]:messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(cleanRoleMessages(spec.redactor.clean(msgs))),new Date().toISOString(),instance!.id);}}};
   // Adapters read the run's credential after the run is bound (the adapter starts after onRun); before that there is none.
@@ -317,7 +324,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  if(instance.snapshot_id!==resolved.id&&!(resolved.snapshot.legacy&&!instance.snapshot_id))instance=rebind(s,task,instance,resolved,'delegation').instance;
  const sourceInput=spec.prompt;
  const priorRun=s.get("SELECT id,stop_reason,assignment_id FROM task_runs WHERE role_instance_id=? ORDER BY rowid DESC LIMIT 1",instance.id),priorSubmission=priorRun?.stop_reason==='role_result_invalid'?s.get("SELECT id FROM task_history WHERE run_id=? AND type='tool_started' AND json_extract(data,'$.name')=? ORDER BY id DESC LIMIT 1",priorRun.id,spec.finish?.name??''):null;
- let memory:any;try{memory={availability:'available',...new ProjectMemory(s).search(task.repository_id,'',{role,limit:5,baseline:executionBaseline(task)})};}catch{memory={availability:'unavailable',instruction:'Role memory lookup failed; continue from task records and repository sources. Do not infer no prior knowledge.'};traceEvent(s,task.id,'memory_fault',{operation:'role_context',role,code:'role_memory_unavailable'},task.trace_run_id);}
+ let memory:any;try{memory={availability:'available',...new ProjectMemory(s,taskMemoryAccess(s,{...task,active_role:role})).search(task.repository_id,'',{role,limit:5,baseline:executionBaseline(task)})};}catch{memory={availability:'unavailable',instruction:'Role memory lookup failed; continue from task records and repository sources. Do not infer no prior knowledge.'};traceEvent(s,task.id,'memory_fault',{operation:'role_context',role,code:'role_memory_unavailable'},task.trace_run_id);}
  const previousRole=task.active_role;task.active_role=role;
  try{
  for(;;){

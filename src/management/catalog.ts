@@ -17,12 +17,12 @@ export const commands: Record<string, { capability: string; arguments: Json; des
   'task.instructions': { capability: 'tasks.write', arguments: obj({ instruction: str }, ['instruction']), description: '追加当前任务补充指令，供后续步骤读取，不改目标或旧 run 快照。' },
   'task.contract': { capability: 'tasks.write', arguments: obj({ contract: contractSchema }, ['contract']), description: '显式修改目标、范围或验收条件并增加 contract revision，使旧候选与验收失效。' },
   'configuration.pr': { capability: 'config.write', arguments: obj({ path: str, content: str }, ['path','content']), description: '通过受信任的 App 发布适配器创建默认分支配置 PR；待合入才生效。' },
-  'knowledge.revise': { capability: 'knowledge.write', arguments: obj({ id: str, revision: integer, body: str }, ['id','revision','body']), description: '知识修订注册入口，未注册时明确不可用。' },
+  'knowledge.revise': { capability: 'knowledge.write', arguments: obj({ id: str, revision: integer, body: str, reason:str, catalog:{type:'object'}, action:{type:'string',enum:['accept','reject','archive','conflict','revoke','restore','merge']}, evidence:strings, supersedes:strings, run_id:str }, ['id','revision']), description: '按精确 revision 修订知识目录或正文，或附证据复核候选；文档晋升通过项目知识页核验合入。' },
   ...schedulingCommands,
 };
 export const schedulingQueries = ['list_schedules','list_subscriptions','list_occurrences','list_notification_deliveries','list_schedule_audit','list_schedule_destinations','preview_schedule'];
-export const queries = ['list_projects','list_tasks','get_task','get_effective_config','get_usage','list_audit','get_capabilities','search_knowledge', ...schedulingQueries] as const;
-export const querySchema = obj({ operation: { type:'string', enum: queries }, target: obj({ project_id: str, task_id: str, workflow_id: str }), arguments: obj({ offset: integer, limit: { type:'integer',minimum:1,maximum:100 }, section: { type:'string',enum:['detail','logs','runs','events','roles','source'] }, source: str, query: str, plan: planSchema, schedule_id: str }) }, ['operation','target','arguments']);
+export const queries = ['list_projects','list_tasks','get_task','get_effective_config','get_usage','list_audit','get_capabilities','search_knowledge','read_knowledge','knowledge_versions', ...schedulingQueries] as const;
+export const querySchema = obj({ operation: { type:'string', enum: queries }, target: obj({ project_id: str, task_id: str, workflow_id: str }), arguments: obj({ offset: integer, limit: { type:'integer',minimum:1,maximum:100 }, section: { type:'string',enum:['detail','logs','runs','events','roles','source'] }, source: str, query: str, id:str, revision:{type:'integer',minimum:1}, baseline:str, plan: planSchema, schedule_id: str }) }, ['operation','target','arguments']);
 export const commandSchema = obj({ operation: { type:'string',enum:Object.keys(commands) }, target: targetSchema, arguments: { type:'object' }, expected_revision: str,
   idempotency_key: { ...str,maxLength:240 }, source_conversation: { ...str,maxLength:240 }, source_message: { ...str,maxLength:240 } }, ['operation','target','arguments','expected_revision','idempotency_key','source_conversation','source_message']);
 

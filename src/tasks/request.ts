@@ -1,3 +1,4 @@
+import { taskTraceAccess } from '../memory/access.js';
 import { executionModel } from './configuration.js';
 import { roleWorkspaces } from '../roles/workspace.js';
 import { runTeam } from '../roles/team.js';
@@ -78,7 +79,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
           execute:async(name,args)=>{
             if(memoryTools.some(t=>t.function.name===name)){const observed=await memoryTool(store,task,name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});records.history(task.id,'execution_evidence',{execution,name,version:observed.revision?`memory:${observed.id}:${observed.revision}`:sha(JSON.stringify(observed)),arguments:redactor.clean(args),result:redactor.clean(observed)});return redactor.clean(observed);}
             if(name==='read_related_artifact'){const result=await readRelatedArtifact(store,task,workspace,args);records.history(task.id,'execution_evidence',{execution,name,version:(result as any).blob_sha||'unknown',arguments:redactor.clean(args),result:redactor.clean(result)});return result;}
-            if(taskTools.some(t=>t.function.name===name)){const result=records.tool(task.id,name,redactor.clean(args));if(!('error' in result)&&name==='record_progress'&&writable)await checkpoint(store,task,workspace);return result;}
+            if(taskTools.some(t=>t.function.name===name)){const result=records.tool(task.id,name,redactor.clean(args),taskTraceAccess(store,task));if(!('error' in result)&&name==='record_progress'&&writable)await checkpoint(store,task,workspace);return result;}
             if(name==='write_file'){
               try{safePath(args?.path);}catch(error){if(error instanceof TaskError&&error.code==='unsafe_repository_path')return {error:'invalid_artifact_path',message:'Use a repository-relative path such as docs/phase1/report.md. Absolute paths and parent traversal are not allowed.'};throw error;}
               if(typeof args?.content!=='string')return {error:'invalid_artifact_content'};

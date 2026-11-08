@@ -24,7 +24,7 @@ test('scoped facts, original logs and revisions agree with legacy API; forged ac
   assert.equal(read.task.status,legacy.task.status);assert.equal(read.task.error_code,'environment_not_ready');assert.ok(read.runs_url);assert.ok(read.allowed_next_steps.includes('task.retry'));
   const logs=(await query(single.client,'get_task',task,{section:'logs',limit:1})).value;
   assert.equal(logs.logs[0].source_ref,'task_logs:log-blocked');assert.ok(logs.logs[0].content.includes('Project computer is stopped'));
-  assert.equal((await query(single.client,'get_task',task,{section:'source',source:'project_memories:foreign:1'})).status,403);
+  assert.equal((await query(single.client,'get_task',task,{section:'source',source:'project_memories:foreign:1'})).status,404);
   assert.equal((await single.client('/api/management/query','POST',{operation:'list_projects',target:{},arguments:{},actor:{capabilities:['*'],tenant_id:'other'}})).status,400);
   assert.equal((await command(admin,'project.update',task,{review_enabled:true},'wrong-revision-resource',read.revision)).value.error,'invalid_management_target');
   const actor=resolveActor(h.store,single.client.cookie().slice('bot_session='.length));
@@ -140,7 +140,7 @@ test('pending commands stop on project, installation, credentials, budget or aut
     mutation();await assert.rejects(()=>svc.submit(actor,{...input,idempotency_key:'deny-'+Math.random()}));
     h.store.run("UPDATE policies SET enabled=1 WHERE repository_id='101'");h.store.run("UPDATE installed_repositories SET installed=1 WHERE repository_id='101'");h.store.run('DELETE FROM management_budgets');
   }
-  assert.equal((await command(admin,'knowledge.revise',project,{id:'entry',revision:1,body:'Updated'})).value.result.error,'knowledge_revise_not_registered');
+  assert.equal((await command(admin,'knowledge.revise',project,{id:'entry',revision:1,body:'Updated'})).value.result.error,'memory_not_found');
 });
 
 test('persistent conversations execute actual model tools, replay messages and survive reconnect without a second write',async t=>{

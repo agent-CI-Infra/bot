@@ -1,4 +1,5 @@
 import {coordinationTools,requestCoordination,waitForCoordinatedTasks} from '../tasks/coordination.js';
+import { taskTraceAccess } from '../memory/access.js';
 import type { AgentSpec } from '../agent/runtime.js';
 import { randomId } from '../core/security.js';
 import { sha,stop } from '../agent/common.js';
@@ -35,7 +36,7 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
  let executed:string|undefined;
  // Which entry point ran under which configuration revision: the task keeps its id, contract, candidate and history.
  traceEvent(s,task.id,'controller_entry',{entry:environment.entry??(task.kind==='task.request'?'request':'development'),controller,config_revision:config.revision,legacy:!!config.legacy,workers,executor:environment.executor?{role:'dev',harness:environment.executor.harness}:null,attempt:task.attempt},task.trace_run_id,'framework');
- const resolve=(ref:string)=>traceSource(s,task.id,ref);
+ const resolve=(ref:string)=>traceSource(s,task.id,ref,taskTraceAccess(s,task));
  const read=async(args:any)=>{if(!Number.isSafeInteger(args.offset??0)||(args.offset??0)<0)return {error:'invalid_offset'};let source;try{source=resolve(String(args.ref));}catch{return {error:'task_record_not_found',ref:args.ref,instruction:'Use an offered task_history source, task:'+task.id+' or contract:revision:'+records.get(task.id).revision};}const text=JSON.stringify(source),offset=args.offset??0;traceEvent(s,task.id,'role_record_read',{role:task.active_role,ref:args.ref,offset},task.trace_run_id,'role:'+task.active_role,[args.ref]);return {ref:args.ref,content:text.slice(offset,offset+16000),next_offset:offset+16000<text.length?offset+16000:null};};
  const commonExecute=async(name:string,args:any)=>{if(name==='wait_for_tasks'){const result=waitForCoordinatedTasks(s,task,args);if(result.waiting)stop('task_coordination_requested','waiting_coordination','Waiting for declared task dependencies; no execution slot held.');return result;}if(name==='list_project_tasks')return s.all("SELECT t.id,t.summary,t.status,r.revision FROM tasks t JOIN task_records r ON r.task_id=t.id WHERE t.repository_id=? ORDER BY t.created_at DESC,t.id LIMIT 100",task.repository_id);if(['read_coordination','acknowledge_coordination'].includes(name))return records.tool(task.id,name,args);if(name==='request_task_coordination'){let request;try{request=requestCoordination(s,task,args);}catch(e){return {error:(e as Error).message};}if(['queued','running'].includes(request.state))return stop('task_coordination_requested','waiting_coordination',request.coordination_id);return request;}if(name==='read_task_record')return read(args);return spec.execute?.(name,args);};
  const findings={type:'function',function:{name:'submit_role_result',description:'Persist findings for the fixed inspected candidate. This cannot approve or finish the task.',parameters:findingsSchema}};
@@ -55,7 +56,7 @@ if(value.contract_revision!==records.get(task.id).revision)return stop('role_nom
   execute:async(name,args)=>{
   if(coordinationTools.some(t=>t.function.name===name))return commonExecute(name,spec.redactor.clean(args));
   if(name==='read_task_record')return read(args);
-  if(taskTools.some(t=>t.function.name===name))return records.tool(task.id,name,spec.redactor.clean(args));
+  if(taskTools.some(t=>t.function.name===name))return records.tool(task.id,name,spec.redactor.clean(args),taskTraceAccess(s,task));
   if(name!=='delegate_role')return {error:'tool_not_allowed'};
   const problem=delegationProblem(args);
   if(problem){denied(problem[0],problem[1],args);return problem[0]==='delegation_scope_invalid'?{error:'delegation_not_allowed',instruction:'Delegation carries only role, purpose and refs; tools, models, harnesses and permissions come from the role configuration.'}

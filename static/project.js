@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['notes', '项目笔记'], ['roles', '角色'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
+const projectSections = [['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['notes', '项目笔记'], ['roles', '角色'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
 // Older addresses open the workflows page: the task overview it replaced, and the review, development and rule pages.
 const legacyProjectSections = { tasks: '', review: 'review.issue', development: 'development.issue', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -151,7 +151,7 @@ function projectBody(section) {
     const item = element('a', caption); item.href = `#/projects/${current.id}/${key}`; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item);
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ management: ()=>{const panel=element('section','');panel.id='project-management-panel';return [panel];}, basic: basicSection, machine: machineSection, workflows: workflowsSection, model: modelsSection, release: releaseSection, notes: notesSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ management: ()=>{const panel=element('section','');panel.id='project-management-panel';return [panel];}, basic: basicSection, machine: machineSection, workflows: workflowsSection, model: modelsSection, release: releaseSection, knowledge: knowledgeSection, notes: notesSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
@@ -330,7 +330,7 @@ function rolesSection() {
 function notesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/notes`, section = card('项目笔记'), list = element('div', '', 'project-notes-list'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert');
-  section.append(note('这是这个项目的长期经验，检视和开发会读也会改；不是规则文件，不进 Git。电脑未启动或项目已禁用时仍可编辑。'),
+  section.append(note('旧版文件笔记独立保留，不自动导入项目知识。新的共享知识与角色经验请在「项目知识」管理；正式规则仍通过仓库文档 PR 更新。'),
     list, message);
   const edit = async (name, content) => {
     const filename = input('note_name', name, { required: true, readOnly: !!name, placeholder: 'repository.md' });
@@ -962,4 +962,75 @@ function modelsSection() {
     tableCell(row, '模型选择', customWorkflowModelEditor(workflow)); body.append(row);
   }
   section.append(table); return [projectDefaultModelCard(current.policy, current.models), section, ...modelManagementSections()];
+}
+
+function knowledgeSection() {
+  const id = current.id, endpoint = `/api/repositories/${id}/memories`, section = card('项目知识'), list = element('div', ''), detail = element('div', ''), message = element('p', '', 'view-error');
+  const query = input('knowledge_query', '', { placeholder: '标题、错误信息或别名' }), path = input('knowledge_path', '', { placeholder: '目录或文件路径' }), module = input('knowledge_module', '', { placeholder: '适用模块' });
+  const choose = (name, rows, value = rows[0]?.[0] ?? '') => { const el = document.createElement('select'); el.name = name; for (const [v, label] of rows) el.add(new Option(label, v)); el.value = value; return el; };
+  const status = choose('knowledge_status', [['', '当前条目'], ...['active', 'needs_review', 'conflict', 'archived', 'revoked'].map(v => [v, v])]);
+  const categories = [['', '全部类别'], ['goal', '目标'], ['decision', '架构决策'], ['convention', '开发约定'], ['operations', '测试运维'], ['experience', '故障经验'], ['hypothesis', '待验证假设']];
+  const category = choose('knowledge_category', categories), filters = element('div', '', 'actions'); let cursor = null;
+  message.setAttribute('role', 'alert');
+  const run = fn => async () => { try { message.textContent = ''; await fn(); } catch (err) { message.textContent = err.message; } };
+  const show = async (memoryId, revision) => {
+    const { memory: m } = await api(endpoint + '/' + encodeURIComponent(memoryId) + (revision ? '?revision=' + revision : ''));
+    const { versions } = await api(endpoint + '/' + encodeURIComponent(memoryId) + '/versions');
+    const box = card(m.catalog.title), version = choose('knowledge_revision', versions.map(v => [String(v.revision), `版本 ${v.revision} · ${v.actor} · ${v.reason}`]), String(m.revision));
+    version.setAttribute('aria-label', '查看历史版本');
+    version.addEventListener('change', run(() => show(memoryId, version.value)));
+    box.append(field('查看历史版本', version), note(`状态 ${m.status}（当前 ${m.current_status}） · ${m.verification} · ${m.authority}${m.review_overdue ? ' · 已到复核时间' : ''}`),
+      note(`范围 ${m.catalog.audience} · 路径 ${m.catalog.path || '—'} · 模块 ${m.catalog.module || '—'} · 负责人 ${m.catalog.owner || '—'}`),
+      note(`上次复核 ${m.catalog.reviewed_at || '—'} · 下次复核 ${m.catalog.review_due_at || '—'}`),
+      element('pre', m.body ?? (m.availability ? `来源状态：${m.availability}。请核对仓库原文。` : '正文位于已合入的仓库文档。')),
+      element('pre', JSON.stringify({ sources: m.sources, scope: m.scope, document: m.document, candidate: m.candidate, review: m.review, supersedes: m.supersedes, superseded_by: m.superseded_by }, null, 2)));
+    if (!m.historical) {
+      const actions = element('div', '', 'actions');
+      actions.append(button('编辑条目', run(() => edit(m))), button('复核／改变状态', run(() => review(m))), button('关联文档 PR', run(() => documentPR(m)))); box.append(actions);
+    }
+    detail.replaceChildren(box);
+  };
+  const refresh = async (after = '') => {
+    const params = new URLSearchParams({ query: query.value, path: path.value, module: module.value, status: status.value, category: category.value, after, limit: '20', include_superseded: '1' });
+    const data = await api(endpoint + '?' + params); cursor = data.next_after;
+    const rows = element('ul', '', 'history knowledge-list');
+    for (const m of data.items) {
+      const row = element('li', ''); row.append(button(m.catalog.title, run(() => show(m.id, m.revision))),
+        note(`${m.kind} · ${m.status} · ${m.verification} · 版本 ${m.revision}${m.review_overdue ? ' · 待复核' : ''}`), note(m.catalog.path || m.catalog.module || m.catalog.audience), note(m.preview || '查看原文并检查来源'));
+      rows.append(row);
+    }
+    list.replaceChildren(data.items.length ? rows : note('没有匹配的知识条目。搜索预览不代表已读正文。'));
+    if (cursor) list.append(button('下一页', run(() => refresh(cursor))));
+  };
+  const changed = async memoryId => { await refresh(); await show(memoryId); };
+  const edit = m => {
+    const c = m?.catalog || {}, key = input('knowledge_key', m?.key, { readOnly: !!m, required: true }), title = input('knowledge_title', c.title || ''), body = textarea('knowledge_body', m?.body || '', { rows: 8, readOnly: m?.authority === 'repository' });
+    const kind = choose('knowledge_kind', ['goal', 'decision', 'implementation', 'experience', 'hypothesis'].map(v => [v, v]), m?.kind || 'experience');
+    const controls = Object.fromEntries(['path', 'module', 'owner', 'audience', 'category', 'review_due_at'].map(k => [k, input('knowledge_' + k, c[k] || (k === 'audience' ? 'project' : ''))]));
+    const tags = input('knowledge_tags', (c.tags || []).join(', ')), aliases = input('knowledge_aliases', (c.aliases || []).join(', ')), sources = textarea('knowledge_sources', JSON.stringify(m?.sources || [{ reference: '' }], null, 2), { rows: 5 }), reason = input('knowledge_reason', '', { required: true });
+    const labels = { path: '目录／文件路径', module: '适用模块', owner: '负责人', audience: '可见范围（project 或 role:dev 等）', category: '类别（goal／decision／convention／operations／experience）', review_due_at: '下次复核时间（ISO 日期，可留空）' };
+    const form = settingsForm(m ? `编辑：${c.title}` : '新建知识', [note(m ? `当前版本 ${m.revision}；保存后保留原文及修改历史。` : '来源必须具体；私人聊天和凭据不得自动导入。'), field('条目标识', key), field('标题', title), field('知识类型', kind), field('正文', body), ...Object.entries(controls).map(([k, el]) => field(labels[k], el)), field('标签（逗号分隔）', tags), field('别名（逗号分隔）', aliases), field('来源与环境（JSON 列表）', sources), field('修改原因', reason)], async () => {
+      const catalog = { title: title.value || key.value, tags: tags.value.split(',').map(v => v.trim()).filter(Boolean), aliases: aliases.value.split(',').map(v => v.trim()).filter(Boolean), ...Object.fromEntries(Object.entries(controls).map(([k, el]) => [k, el.value || null])) };
+      const result = await api(endpoint + (m ? '/' + encodeURIComponent(m.id) : ''), m ? 'PATCH' : 'POST', { key: key.value, expected_revision: m?.revision || 0, ...(m?.authority === 'repository' ? {} : { body: body.value }), kind: kind.value, catalog, sources: JSON.parse(sources.value), reason: reason.value });
+      await changed(result.memory.id);
+    }, { after: () => {} }); detail.replaceChildren(form);
+  };
+  const review = m => {
+    const action = choose('knowledge_review_action', [['accept', '接受并记录已观察证据'], ['conflict', '标记冲突'], ['archive', '归档'], ['reject', '拒绝候选'], ['revoke', '撤销'], ['restore', '恢复为待复核'], ['merge', '合并重复条目']]);
+    const evidence = textarea('knowledge_review_evidence', '', { rows: 4 }), reason = input('knowledge_review_reason', '', { required: true }), replacements = input('knowledge_supersedes', '');
+    const form = settingsForm(`复核：${m.catalog.title}`, [note(`当前版本 ${m.revision}，状态 ${m.status}，验证级别 ${m.verification}。复核不会晋升为仓库规则；证据和历史会保留。`), field('复核操作', action), field('证据引用（每行一条检查结果、运行产物或来源）', evidence), field('原因', reason), field('被合并条目 ID（逗号分隔，仅合并时填写）', replacements)], async () => {
+      const result = await api(endpoint + '/' + encodeURIComponent(m.id) + '/review', 'POST', { expected_revision: m.revision, action: action.value, evidence: evidence.value.split('\n').map(v => v.trim()).filter(Boolean), reason: reason.value, ...(action.value === 'merge' ? { supersedes: replacements.value.split(',').map(v => v.trim()).filter(Boolean) } : {}) }); await changed(result.memory.id);
+    }, { after: () => {} }); detail.replaceChildren(form);
+  };
+  const documentPR = m => {
+    const pr = input('knowledge_document_pr', m.candidate?.pr_number || m.document?.pr_number || '', { type: 'number', min: 1, required: true }), file = input('knowledge_document_path', m.catalog.path || '', { required: true });
+    const form = settingsForm('核验文档 PR', [note(`当前版本 ${m.revision}。只有同仓库真实默认分支合入、提交和文件内容校验通过，正文权威才迁到仓库文件；其他 PR 继续作为候选。`), field('PR 编号', pr), field('文件路径', file)], async () => {
+      const result = await api(endpoint + '/' + encodeURIComponent(m.id) + '/document', 'POST', { expected_revision: m.revision, pr_number: Number(pr.value), path: file.value }); await changed(result.memory.id);
+    }, { after: () => {} }); detail.replaceChildren(form);
+  };
+  filters.append(field('搜索', query), field('路径', path), field('模块', module), field('状态', status), field('类别', category), button('搜索知识', run(() => refresh())), button('新建知识', run(() => edit(null))), button('导出当前视图', run(async () => {
+    const data = await api(endpoint + '?export=1&' + new URLSearchParams({query:query.value,path:path.value,module:module.value,status:status.value,category:category.value})), a = document.createElement('a'), url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })); a.href = url; a.download = 'project-knowledge.json'; a.click(); URL.revokeObjectURL(url);
+  })));
+  section.append(note('共享已复核知识与角色私人经验按权限展示。预览不是已读证明；使用前打开精确版本，检查验证级别、来源和代码基线。知识保存在项目数据库，清理执行工作区不会删除知识。'), filters, message, list, detail);
+  void run(() => refresh())(); return [section];
 }

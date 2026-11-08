@@ -1,3 +1,4 @@
+import { visibleMemorySnapshot } from '../memory/access.js';
 import { builtinWorkflow } from '../workflows/catalog.js';
 import { checkManagementBudget } from './budget.js';
 import type { Store, Row } from '../storage/database.js';
@@ -33,6 +34,7 @@ export class ManagementService {
   // A trusted transport rechecks its persisted source when a deferred command resumes in Web.
   sourceGuard?: (command: Row) => void;
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
+  knowledgeRead?: (actor:ActorContext,project:string,id:string,revision?:number,versions?:boolean,baseline?:string)=>Promise<Json>;
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
   constructor(readonly store: Store, readonly workflows: WorkflowService, readonly tasks: TaskCommands) {}
   register(operation: string, extension: ManagementExtension): void {
@@ -129,7 +131,7 @@ export class ManagementService {
   async query(actor:ActorContext,input:Json):Promise<Json>{
     validate(querySchema,input);assertCurrent(actor);
     const operation=String(input.operation),target=input.target as ManagementCommand['target'],args=input.arguments as any;
-    if(target.project_id)this.scope(actor,target.project_id,operation==='search_knowledge'?'knowledge.read':'tasks.read');
+    if(target.project_id)this.scope(actor,target.project_id,['search_knowledge','read_knowledge','knowledge_versions'].includes(operation)?'knowledge.read':'tasks.read');
     const ids=target.project_id?[target.project_id]:this.projects(actor),offset=args.offset??0,limit=args.limit??20;
     if(schedulingQueries.includes(operation)){
       if(!this.schedulingQuery)fail(409,'scheduling_not_registered');
@@ -142,6 +144,7 @@ export class ManagementService {
     }),total:ids.length,next_offset:offset+limit<ids.length?offset+limit:null};
     if(operation==='get_effective_config'){if(!target.project_id)fail(400,'project_target_required');return this.effective(actor,target.project_id);}
     if(operation==='search_knowledge'){if(!target.project_id)fail(400,'project_target_required');if(!this.knowledgeSearch)fail(409,'knowledge_not_registered');return this.knowledgeSearch!(actor,target.project_id,args.query??'',offset,limit);}
+    if(['read_knowledge','knowledge_versions'].includes(operation)){if(!target.project_id||typeof args.id!=='string')fail(400,'knowledge_target_required');if(!this.knowledgeRead)fail(409,'knowledge_not_registered');return this.knowledgeRead!(actor,target.project_id,args.id,args.revision,operation==='knowledge_versions',args.baseline);}
     const marks=ids.map(()=>'?').join(',')||'NULL';
     if(operation==='list_tasks'){
       const rows=this.store.all(`SELECT id FROM tasks WHERE repository_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`,...ids,limit+1,offset),more=rows.length>limit;rows.splice(limit);
@@ -153,14 +156,14 @@ export class ManagementService {
       const section=args.section??'detail',base='/api/tasks/'+target.task_id;
       if(section==='logs'){
         const rows=this.store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid LIMIT ? OFFSET ?',target.task_id!,limit+1,offset),more=rows.length>limit;rows.splice(limit);
-        return traceClean({logs:rows.map(r=>({...r,source_ref:'task_logs:'+r.id,content:String(r.content).slice(0,24000)})),next_offset:more?offset+limit:null});
+        return traceClean({logs:rows.map(r=>({...r,source_ref:'task_logs:'+r.id,content:String(visibleMemorySnapshot(this.store,target.project_id!,r.content,{actor})).slice(0,24000)})),next_offset:more?offset+limit:null});
       }
       if(section==='roles')return traceClean(roleApi(this.store,this.user(actor),'GET',new URL('http://local'+base+'/roles?after='+offset+'&limit='+limit),{})!);
       if(section!=='detail'){
         // Knowledge records have their own ACL. A trace source must not turn into a knowledge reader.
-        if(section==='source'&&!/^(task_runs:|task_history:|task_logs:|task_tools:|role_snapshots:|github_effects:|model_requests:|contract:revision:|task:)/.test(args.source??''))fail(403,'trace_source_forbidden');
+        if(section==='source'&&!/^(task_runs:|task_history:|task_logs:|task_tools:|role_snapshots:|github_effects:|model_requests:|project_memories:|contract:revision:|task:)/.test(args.source??''))fail(403,'trace_source_forbidden');
         if(section==='source')authorize(actor,'knowledge.read',{project_id:target.project_id});
-        return traceClean(taskTrace(this.store,target.task_id!,new URL('http://local'+base+'/'+section+'?after='+offset+'&limit='+limit+'&ref='+encodeURIComponent(args.source??'')),section));
+        return traceClean(taskTrace(this.store,target.task_id!,new URL('http://local'+base+'/'+section+'?after='+offset+'&limit='+limit+'&ref='+encodeURIComponent(args.source??'')),section,{actor}));
       }
       const result=taskQueries(this.store,this.user(actor),new URL('http://local'+base))!;
       return traceClean({...result,revision:this.revision(target),allowed_next_steps:this.nextSteps(actor,target),url:'#/projects/'+target.project_id+'/activity',logs_url:base+'/logs',runs_url:base+'/runs'});

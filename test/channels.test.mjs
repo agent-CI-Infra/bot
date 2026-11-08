@@ -362,6 +362,7 @@ test('deferred extensions retain the IM source guard across asynchronous steps b
   await group(admin, id);
   h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"knowledge.revise\"]')");
   let entered = false, release, writes = 0; const gate = new Promise(r => { release = r; }); t.after(() => release());
+  service.management.service.extensions.delete('knowledge.revise'); // Replace the real adapter with an asynchronous failure fixture.
   service.management.service.register('knowledge.revise', { execute: async actor => {
     entered = true; await gate; service.management.service.scope(actor, '101', 'knowledge.write'); writes++; return { revised: true };
   }, reconcile: async () => null });

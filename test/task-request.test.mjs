@@ -1,3 +1,4 @@
+import { knowledgeActor, authorizeKnowledgeTask } from './knowledge-fixture.mjs';
 import { ProjectMemory } from '../dist/memory/project.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -83,12 +84,12 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  store.run("INSERT INTO repositories VALUES('101','fixture/project-101','10','a')");
  store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101','http://127.0.0.1:'+model.address().port+'/v1','fixture',store.secrets.seal({value:'fixture-model-token'},'model:m'),'now');
  store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
- const memorySeed=new ProjectMemory(store).save('101','memory.reuse',{kind:'implementation',body:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',sources:[{reference:'controlled repository fixture'}],scope:{module:'memory'}},0,'user:owner','seed retrieval integration');
+ const memorySeed=new ProjectMemory(store,{actor:knowledgeActor(store,'owner','101')}).save('101','memory.reuse',{kind:'implementation',body:'Inspect calc.mjs and actual observations before reporting. fixture-model-token',sources:[{reference:'controlled repository fixture'}],scope:{module:'memory'}},0,'user:owner','seed retrieval integration');
  const engine=new TaskEngine(store,manager,gh+'/github');
  for(const mode of ['single','multiple','return','insufficient_evidence','write-outage']){
   const id=randomBytes(24).toString('hex'),contract={goal:'Write an observed report '+mode,scope:['report'],criteria:['Report a concrete repository observation'],endpoint:'report',source:'request'};
   store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,claim_token) VALUES(?,'101','task.request','running',?,?,'claim')",id,mode,JSON.stringify({request:mode+' guide report',contract,...(mode==='multiple'?{context_files:{'parent-proof.txt':'PARENT_AUTHORIZED_CONTEXT'}}:{})}));
-  store.run("INSERT INTO task_claims VALUES(?,'101','claim','now')",id);
+  authorizeKnowledgeTask(store,id);store.run("INSERT INTO task_claims VALUES(?,'101','claim','now')",id);
   records.history(id,'execution_evidence',{execution:'old-execution',name:'run_command',version:'old-tree',result:{exit_code:0,output:'STALE_EVIDENCE_SENTINEL'}});
   await engine.run(id,'claim');
   if(mode==='single'){
@@ -114,7 +115,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  }
  const children=store.all("SELECT t.* FROM tasks t JOIN task_followups f ON f.task_id=t.id WHERE t.source_task_id IS NOT NULL AND t.kind='task.request' ORDER BY f.issue_key");assert.equal(children.length,2);
  for(const child of children){
- store.run("UPDATE tasks SET status='running',claim_token='child-claim' WHERE id=?",child.id);store.run("INSERT INTO task_claims VALUES(?,'101','child-claim','now')",child.id);
+ store.run("UPDATE tasks SET status='running',claim_token='child-claim' WHERE id=?",child.id);authorizeKnowledgeTask(store,child.id);store.run("INSERT INTO task_claims VALUES(?,'101','child-claim','now')",child.id);
  await engine.run(child.id,'child-claim');assert.equal(records.get(child.id).progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',child.id)));
  assert.ok(inheritedRead);assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='inherited_artifact'",child.id));
  if(JSON.parse(child.input).contract.source.residual==='follow-report')writeFileSync(join(root,'tasks',store.get('SELECT workspace_id FROM tasks WHERE id=?',child.id).workspace_id,'repo','report.md'),'MUTATED_AFTER_ACCEPTANCE');

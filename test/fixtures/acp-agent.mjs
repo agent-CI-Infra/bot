@@ -10,6 +10,13 @@ createInterface({input:process.stdin}).on('line',async line=>{const m=JSON.parse
   prompt=m;if(process.env.FIXTURE_EXIT==='true'){process.exit(7);}
   if(process.env.FIXTURE_WAIT==='true')return;
   const tools=await rpc('tools/list',{});
+  if(process.env.FIXTURE_KNOWLEDGE==='true'){
+   const call=async(name,args)=>JSON.parse((await rpc('tools/call',{name,arguments:args})).content[0].text);
+   const search=await call('search_project_memory',{query:'socket reset'}),item=search.items?.[0];
+   const read=await call('read_project_memory',{id:item?.id,revision:item?.revision});
+   const note=await call('remember_project_memory',{key:'external.candidate',kind:'experience',body:'Observed fixture transport behavior'});
+   await call('finish',{summary:'knowledge fixture',read_revision:read.revision,note_verification:note.verification,write_error:note.error,read_error:read.error});reply({stopReason:'end_turn'});return;
+  }
   if(tools.tools.some(t=>t.name==='read_task_record'))await rpc('tools/call',{name:'read_task_record',arguments:{ref:'task:t'}});
   send({method:'session/update',params:{sessionId,update:{sessionUpdate:'tool_call',toolCallId:'private-tool',title:'Private assessment',kind:'think',status:'in_progress'}}});
   send({method:'session/update',params:{sessionId,update:{sessionUpdate:'tool_call_update',toolCallId:'private-tool',status:'completed',content:[{type:'content',content:{type:'text',text:'PRIVATE_TOOL_REASONING'}}]}}});

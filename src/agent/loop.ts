@@ -1,3 +1,4 @@
+import { taskTraceAccess } from '../memory/access.js';
 import { taskConfiguration } from '../tasks/configuration.js';
 import { developmentTeam } from '../roles/development.js';
 import { controlled } from '../roles/run.js';
@@ -39,7 +40,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   for(const tool of taskTools) {
     profile.tools.push(tool as any);
     platform[tool.function.name]=async(_id,args)=>{
-      const result=records.tool(task.id,tool.function.name,redactor.clean(args));
+      const result=records.tool(task.id,tool.function.name,redactor.clean(args),taskTraceAccess(store,task));
       if(!('error' in result)&&tool.function.name==='record_progress'&&profile.capabilities.workspace.write)await checkpoint(store,task,workspace);
       return result;
     };
