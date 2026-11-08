@@ -14,11 +14,15 @@ import { actionsStorage } from '../actions/storage.js';
 import { workflowStorage } from '../workflows/storage.js';
 import { gateOnboardingStorage } from '../projects/gate-storage.js';
 import { installationStorage } from '../installations/storage.js';
+import { identityStorage } from '../identity/storage.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 export type Row = Record<string, any>;
 export class Store {
   readonly db: DatabaseSync;
   readonly secrets: SecretBox;
+  private readonly authorizationGuard = new AsyncLocalStorage<() => void>();
+  private transactionDepth = 0;
   constructor(path: string, key: Buffer) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
@@ -171,14 +175,28 @@ export class Store {
     traceStorage(this);
     memoryStorage(this);
     roleStorage(this);
+    identityStorage(this);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }
-  run(sql: string, ...args: SQLInputValue[]) { return this.db.prepare(sql).run(...args); }
+  run(sql: string, ...args: SQLInputValue[]) {
+    if (!this.transactionDepth) this.authorizationGuard.getStore()?.();
+    return this.db.prepare(sql).run(...args);
+  }
+  withAuthorizationGuard<T>(guard: () => void, fn: () => T): T { return this.authorizationGuard.run(guard, fn); }
+  checkAuthorization(): void { this.authorizationGuard.getStore()?.(); }
   transaction<T>(fn: () => T): T {
+    if (this.transactionDepth) {
+      const savepoint = 'nested_' + randomId(); this.db.exec('SAVEPOINT ' + savepoint);
+      try { const result = fn(); this.db.exec('RELEASE ' + savepoint); return result; }
+      catch (error) { this.db.exec('ROLLBACK TO ' + savepoint); this.db.exec('RELEASE ' + savepoint); throw error; }
+    }
+    this.authorizationGuard.getStore()?.();
     this.db.exec('BEGIN IMMEDIATE');
+    this.transactionDepth++;
     try { const result = fn(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    finally { this.transactionDepth--; }
   }
   // Some tables belong to services that create them on construction; deletions skip the ones this process has not made.
   hasTable(name: string): boolean { return !!this.get("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", name); }

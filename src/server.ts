@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type Store } from './storage/database.js';
-import { actor, publicActor, session } from './app/auth.js';
+import { actor, publicActor, session, sessionToken } from './app/auth.js';
 import { management } from './app/management.js';
 import { models } from './app/models.js';
 import { queries } from './app/queries.js';
@@ -28,12 +28,15 @@ import { HttpError, digest, fail, fields, hashPassword, object, password, random
 
 import { PublicBoards } from './public-board/service.js';
 import { InstallationSetup } from './installations/setup.js';
+import { GitHubIdentity, type GitHubOAuthConfig } from './identity/github.js';
+import { identityApi } from './identity/api.js';
+import { assertCurrent, assertSessionWrite, authorize, refreshSessionRevision } from './identity/authorization.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
-  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; }
+  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -50,13 +53,16 @@ export function createControlPlane(options: Options) {
   const { store } = options;
   const external = options.external || new ExternalService(store);
   const onboarding = options.onboarding || new Onboarding(store);
-  const installationSetup = options.installationSetup || new InstallationSetup(store);
+  const githubIdentity = options.githubIdentity || (options.githubOAuth ? new GitHubIdentity(store, options.githubOAuth) : undefined);
+  const installationSetup = options.installationSetup || new InstallationSetup(store, githubIdentity);
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const workflows = new WorkflowService(store, rules, options.githubUrl);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
-  const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${options.secureCookies ? '; Secure' : ''}`;
+  const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}${options.secureCookies ? '; Secure' : ''}`;
+  const browserCookie = (token: string) => `bot_oauth=${token}; HttpOnly; SameSite=Lax; Path=/auth/github; Max-Age=600${options.secureCookies ? '; Secure' : ''}`;
+  const browserToken = (req: IncomingMessage) => req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('bot_oauth='))?.slice(10) || '';
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
   // Errors contain stable codes only: never echo a request, credential, SQL statement or stack.
   const wrap = (fn: (req: IncomingMessage, res: ServerResponse) => Promise<void>) => async (req: IncomingMessage, res: ServerResponse) => {
@@ -103,6 +109,26 @@ export function createControlPlane(options: Options) {
   const admin = createServer(wrap(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
     if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'admin')); return; }
+    if (method === 'GET' && path === '/api/auth/github/status') { respond(res, 200, { enabled: !!githubIdentity }); return; }
+    if (method === 'GET' && path === '/auth/github/start') {
+      if (!initialized()) return fail(409, 'local_recovery_setup_required');
+      if (!githubIdentity) return fail(503, 'github_login_not_configured');
+      const browser = randomId(), result = githubIdentity.begin(browser, 'login');
+      res.setHeader('Set-Cookie', browserCookie(browser)); res.writeHead(303, { Location: result.url }); res.end(); return;
+    }
+    if (method === 'GET' && path === '/auth/github/callback') {
+      if (!githubIdentity) return fail(503, 'github_login_not_configured');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      try {
+        const result = await githubIdentity.callback(browserToken(req), url.searchParams.get('state') || '', url.searchParams.get('code') || '', sessionToken(req));
+        const credentials = store.transaction(() => session(store, result.principal_id, result.identity_id));
+        if (result.setup_state) installationSetup.bindIdentity(result.setup_state, githubIdentity.sessionReference(credentials.token));
+        res.setHeader('Set-Cookie', [cookie(credentials.token), browserCookie('')]); res.writeHead(303, { Location: '/#/identity' }); res.end();
+      } catch (error) {
+        const code = error instanceof HttpError ? error.code : 'github_oauth_unavailable';
+        res.writeHead(303, { Location: '/?auth_error=' + encodeURIComponent(code) + '#/identity' }); res.end();
+      } return;
+    }
     if (method === 'GET' && path === '/onboarding/github/callback') {
       await onboarding.callback(url.searchParams.get('code') || '', url.searchParams.get('state') || '');
       // The App now exists, so the wizard reopens at its install step (index 2) rather than the first step.
@@ -114,7 +140,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, result); return;
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
-    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
+    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/workflows.js': ['workflows.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
@@ -130,7 +156,7 @@ export function createControlPlane(options: Options) {
     }
     if (path === '/api/setup' && method === 'POST' && initialized()) fail(409, 'already_initialized');
     const publicRequest = path === '/api/setup' && method === 'POST' || path === '/api/auth/login' && method === 'POST';
-    const user = publicRequest ? null : actor(store, req);
+    let user = publicRequest ? null : actor(store, req);
     if (user && mutation && req.headers['x-csrf-token'] !== user.csrf) fail(403, 'csrf_required');
     let input: Json = {};
     if (mutation) {
@@ -172,7 +198,17 @@ export function createControlPlane(options: Options) {
       res.setHeader('Set-Cookie', cookie(credentials.token)); respond(res, 200, { ok: true, csrf_token: credentials.csrf }); return;
     }
     if (!user) return fail(401, 'login_required');
-    if (path === '/api/auth/me' && method === 'GET') { respond(res, 200, publicActor(user)); return; }
+    if (path === '/api/auth/me' && method === 'GET') { refreshSessionRevision(store, sessionToken(req)); respond(res, 200, publicActor(user)); return; }
+    if (path === '/api/identity/github/bind' && method === 'POST') {
+      fields(input, ['setup_state']);
+      if (!githubIdentity) return fail(503, 'github_login_not_configured');
+      const browser = randomId(), result = githubIdentity.begin(browser, 'bind', sessionToken(req), input.setup_state === undefined ? null : text(input.setup_state));
+      res.setHeader('Set-Cookie', [cookie(sessionToken(req)), browserCookie(browser)]); respond(res, 201, result); return;
+    }
+    if (path === '/api/identity/refresh' && method === 'POST') {
+      fields(input, []); await githubIdentity?.reverify(user.id); refreshSessionRevision(store, sessionToken(req));
+      respond(res, 200, { ok: true }); return;
+    }
     if (path === '/api/auth/logout' && method === 'POST') {
       fields(input, []);
       const token = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('bot_session='))?.slice(12) || '';
@@ -183,13 +219,32 @@ export function createControlPlane(options: Options) {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
     }
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
+    if (mutation && githubIdentity) { await githubIdentity.refresh(user.id); user = actor(store, req); }
+    const current = user, context = current.context!;
+    let resourceProject = /^\/api\/repositories\/([^/]+)/.exec(path)?.[1];
+    const taskId = /^\/api\/tasks\/([^/]+)/.exec(path)?.[1];
+    if (taskId) resourceProject = store.get('SELECT repository_id FROM tasks WHERE id=?', taskId)?.repository_id;
+    const capability = /\/releases(?:\/|$)/.test(path) ? 'release.manage' : /\/roles(?:\/|$)/.test(path) ? 'roles.edit'
+      : /\/(?:memory|notes)(?:\/|$)/.test(path) ? 'knowledge.write' : path.startsWith('/api/tasks') ? 'tasks.write' : 'config.write';
+    const guard = () => {
+      assertCurrent(context);
+      if (mutation) {
+        assertSessionWrite(store, sessionToken(req), context);
+        if (resourceProject) {
+          if (current.role !== 'super_admin' && !current.repositories.includes(resourceProject)) fail(403, 'repository_forbidden');
+          authorize(context, capability, { project_id: resourceProject });
+        }
+        for (const field of ['repository_id', 'project_id']) if (typeof input[field] === 'string') authorize(context, capability, { project_id: input[field] as string });
+      }
+    };
+    guard();
     // The workflow assistant answers as it works: text, tool calls and drafts are streamed as JSON lines.
     if (method === 'POST' && url.searchParams.get('stream') === '1' && /^\/api\/repositories\/[^/]+\/workflows\/assistant$/.test(path)) {
       const closed = new AbortController(); res.on('close', () => { if (!res.writableFinished) closed.abort(); });
-      await workflows.assistantStream(user!, url, input, res, closed.signal); return;
+      await store.withAuthorizationGuard(guard, () => workflows.assistantStream(current, url, input, res, closed.signal)); return;
     }
-    const result = await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
-      ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined);
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+      ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
     const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|releases)(?:\/.*)?$/.test(path);

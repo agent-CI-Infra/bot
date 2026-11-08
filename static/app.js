@@ -5,13 +5,13 @@ let grants = { assignments: [], organization_assignments: [], organizations: [] 
 const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
-  external: '#/external', onboarding: '#onboarding', settings: '#/settings' }, superTabs = ['onboarding', 'settings'];
+  external: '#/external', onboarding: '#onboarding', settings: '#/settings', identity: '#/identity' }, superTabs = ['onboarding', 'settings'];
 const retryableStates = ['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
 async function api(path, method = 'GET', body) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
-  if (!response.ok) throw new Error(`${response.status} · ${value.error}`);
+  if (!response.ok) throw new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : `${response.status} · ${value.error}`);
   return value;
 }
 function notice(id, text = '', tone = '') {
@@ -55,6 +55,9 @@ async function start() {
   $('access-description').textContent = setup ? '初始化只成功一次。请为本部署设置独立的管理员账号。' : '使用本系统账号进入你有权访问的仓库。';
   $('access-submit').textContent = setup ? '初始化并登录' : '登录';
   $('access-form').elements.password.autocomplete = setup ? 'new-password' : 'current-password';
+  $('github-login').hidden = setup || !(await api('/api/auth/github/status')).enabled;
+  const authError = new URLSearchParams(location.search).get('auth_error');
+  if (authError) notice('message', identityError(authError));
   if (!me) return;
   $('who').textContent = `${me.username} · ${me.role === 'super_admin' ? '超级管理员' : '项目管理员'}`;
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
@@ -63,6 +66,7 @@ async function start() {
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
   if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'',tabAddresses.onboarding);
   await route();
+  if (authError) notice('message', identityError(authError));
 }
 // The generic list renderer still understands task rows; their old top-level addresses now select a board category.
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external','onboarding'];
@@ -113,12 +117,13 @@ async function render(quiet = false) {
   $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=['external','onboarding','board','costs','settings'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
+  $('rows').hidden=['external','onboarding','board','costs','settings','identity'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=tab!=='identity';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
   $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren();listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
+  if(tab==='identity'){try{await renderIdentity();}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='settings'){try{await renderSettings(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='onboarding'){$('filters').hidden=true;$('paging').hidden=true;try{await renderOnboarding(request);}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}

@@ -12,6 +12,7 @@ import { enqueueForwards } from '../external/forward.js';
 import { actionsWebhook } from '../actions/storage.js';
 import { archiveInstallationEvent, isInstallationControlEvent } from '../installations/archive.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
+import { invalidate } from '../identity/authorization.js';
 
 export async function ingest(
   store: Store,
@@ -74,6 +75,22 @@ export async function ingest(
       status, JSON.stringify(safeHeaders), appControl && status === 200 ? Buffer.from(JSON.stringify({ installation_evidence_archived: true, event, action })) : bytes, Number(complete), JSON.stringify(response));
     if (status === 200 && !duplicate) store.run('INSERT INTO processed_deliveries VALUES(?,?,?)', accountId, endpointId, deliveryId);
     if (status === 200 && !duplicate && payload) boardWebhook(store, accountId, event, payload);
+    if (status === 200 && !duplicate && payload && event === 'github_app_authorization' && action === 'revoked') {
+      const id = String((payload.sender as Json)?.id || '');
+      for (const identity of store.all("SELECT * FROM external_identities WHERE provider='github' AND external_actor=? AND status<>'revoked'", id)) {
+        store.run("UPDATE external_identities SET status='revoked',credentials=NULL WHERE id=?", identity.id);
+        store.run("UPDATE scoped_grants SET revoked_at=? WHERE principal_id=? AND source='github_derived'", Date.now(), identity.principal_id);
+        store.run('DELETE FROM sessions WHERE identity_id=?', identity.id);
+        invalidate(store, identity.principal_id, 'github.authorization_revoked');
+      }
+    }
+    if (status === 200 && !duplicate && payload && (event === 'organization' && action === 'member_removed' || event === 'member' && action === 'removed')) {
+      const subject = ((payload.membership as Json)?.user || payload.member || payload.user) as Json | undefined;
+      for (const identity of store.all("SELECT * FROM external_identities WHERE provider='github' AND external_actor=? AND status='active'", String(subject?.id || ''))) {
+        store.run("UPDATE scoped_grants SET expires_at=? WHERE principal_id=? AND source='github_derived' AND revoked_at IS NULL", Date.now(), identity.principal_id);
+        invalidate(store, identity.principal_id, 'github.membership_changed');
+      }
+    }
     const sync = status === 200 && !!payload && (appControl
       ? archiveInstallationEvent(store, accountId, endpointId, deliveryId, id, event, payload, bytes)
       : !duplicate && recordInstallationEvent(store, accountId, event, payload));

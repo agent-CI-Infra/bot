@@ -48,6 +48,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 默认关闭的 Actions 失败处理及其扫描、分类和一次重跑设计见 [Actions 失败分类与提报](actions-failures.md)。
 
+GitHub 登录、统一授权、迁移和隔离验收见 [身份与授权](identity-authorization.md)。
+
 ## 按任务选择模型
 
 在项目「模型」页选择项目默认模型，再在「工作流模型」表格（或工作流编辑器）中按需为工作流覆盖模型；继承项目默认的工作流不写入覆盖。内置工作流的 id 就是原来的任务类型，覆盖仍保存在 `task_models` 里；自定义工作流的模型保存在工作流自己的记录上。任务标识仍精确匹配，例如 `review.issue`、`review.pr`、`development.issue`、`development.pr`、`release.observe`、`release.notes`。已经保存在配置中的扩展任务标识会单独显示，可以改模型或移除，不要求修改选择器，也不需要用户手填内部标识。

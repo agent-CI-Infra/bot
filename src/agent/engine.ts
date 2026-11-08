@@ -1,3 +1,4 @@
+import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { recoverRoleCheckpoint } from '../roles/recovery.js';
 import { roleConfig } from '../roles/run.js';
 import { mergeApi } from '../roles/merge.js';
@@ -142,6 +143,13 @@ export class TaskEngine {
       // Only this task's own claim counts; other tasks on the same computer hold their own.
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
+      if (task.kind === 'task.request') {
+        const execution = this.store.get('SELECT * FROM task_authorizations WHERE task_id=?', id);
+        if (execution) {
+          try { authorize(resolvePrincipalActor(this.store, execution.principal_id, execution.tenant_id, task.repository_id), execution.capability); }
+          catch { stop('task_actor_permission_revoked','waiting_permission','发起人的当前任务管理权限已失效。'); }
+        }
+      }
       const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
       if(installationExecutionDenied(this.store,String(this.store.get('SELECT account_id FROM repositories WHERE id=?',task.repository_id)?.account_id),task.repository_id))
         stop('github_installation_access_revoked','waiting_permission','安装已失效或正在核实范围，任务等待安装同步。');
@@ -853,6 +861,8 @@ export class TaskEngine {
         try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
         // Persist the authoritative validated contract for executor recovery.
         this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract}),id);
+        if (user.context) this.store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, user.context.principal_id,
+          this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', input.repository_id as string)!.tenant_id, input.repository_id as string, 'tasks.write');
         this.store.audit(user.id,'task.create',id,input.repository_id as string);
       });this.tick();return {id};
     }

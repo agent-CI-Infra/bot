@@ -14,6 +14,24 @@ import { selectedModel } from '../dist/agent/model.js';
 import { GitHub } from '../dist/github/client.js';
 import { Redactor } from '../dist/agent/common.js';
 
+test('explicit console project administrators release with App tokens without a personal GitHub identity; suspension stops execution', async t => {
+  const f = await releaseFixture(t), password = testPassword();
+  const user = (await f.admin('/api/users', 'POST', { username: 'delegated-release', password, repository_ids: ['101'] })).value.user;
+  const client = f.h.client(); await client('/api/auth/login', 'POST', { username: user.username, password });
+  assert.equal(f.h.store.get('SELECT count(*) n FROM external_identities WHERE principal_id=?', user.id).n, 0);
+  const preview = (await client(f.endpoint + '/preflight?version=v1.2.3')).value;
+  assert.equal(preview.available, true);
+  const created = await client(f.endpoint, 'POST', { version: preview.version, target_sha: preview.target_sha, credential: preview.credential });
+  assert.equal(created.status, 201); await f.service.tick();
+  assert.ok(f.state.requests.some(r => r.method === 'POST' && r.path.endsWith('/git/refs') && r.token.startsWith('Bearer fixture-installation-')));
+  assert.ok(f.state.requests.every(r => !r.token?.includes('fixture-user')));
+  const writesBefore = writes(f.state).length;
+  f.h.store.run("INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,status,scope_pending,updated_at) VALUES('github.com/123/55','github.com','123','55',?,'10','suspended',1,'fixture')", f.h.store.get("SELECT account_id FROM repositories WHERE id='101'").account_id);
+  f.h.store.run("INSERT INTO installation_repositories VALUES('github.com/123/55','101','fixture/project-101','10','fixture',1,0,'fixture')");
+  f.h.store.run('UPDATE project_releases SET next_poll=0 WHERE id=?', created.value.release.id);
+  await f.service.tick(); assert.equal(writes(f.state).length, writesBefore);
+});
+
 test('release versions and precedence follow SemVer without metadata or precision loss', () => {
   for (const v of ['v0.1.0', 'v1.2.3-beta', 'v1.2.3-beta.1', 'v1.2.3-rc.1', 'v999999999999999999.0.0']) assert.ok(validVersion(v), v);
   for (const v of ['v01.2.3', 'v1.2.3-', 'v1.2.3-beta.01', 'v1', '1.2.3', 'v1.2', 'v1.2.3+build', ' v1.2.3', 'v1.2.3\n', 'v1.2.3-a..b']) assert.ok(!validVersion(v), v);
