@@ -21,7 +21,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
     'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required'] },
-  task_changed: { label:'任务条件已变化', codes:['role_revision_checkpoint','harness_cancelled','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
+  task_changed: { label:'任务条件已变化', codes:['task_coordination_requested','task_coordination_pending','coordination_source_cancelled','coordination_claim_revoked','role_revision_checkpoint','harness_cancelled','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','task_actor_permission_revoked','release_actor_permission_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
     'bot_pr_author_changed','bot_pr_head_repository_changed','bot_pr_branch_changed','bot_pr_ownership_unconfirmed',
@@ -40,7 +40,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'role_model_not_available','role_model_profile_changed','capability_policy_unavailable','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
     'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported'] },
   publication: { label:'GitHub 写入结果未知', codes:['github_publication_unknown','release_write_unknown','actions_report_write_unknown','pr_release_label_incomplete'] },
-  bot: { label:'Bot 自身问题', codes:['task_coordination_requested','task_coordination_pending','coordination_claim_revoked','pi_environment_required','external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
+  bot: { label:'Bot 自身问题', codes:['pi_environment_required','external_harness_model_request','acceptance_required','task_runtime_failure','agent_limits_invalid','agent_tools_invalid','tool_operation_conflict','pi_execution_failed','model_request_invalid','github_read_token_limit',
     'github_tree_mismatch','github_commit_tree_mismatch','github_blob_mismatch','candidate_blob_mismatch','candidate_blob_invalid','branch_not_confirmed',
     'github_invalid_response','github_invalid_page','github_response_too_large','repository_blob_invalid','repository_tree_invalid','repository_blob_limit_or_hash','release_operation_changed',
     'github_log_redirect_invalid','github_log_too_large','github_log_job_invalid','actions_report_identity_missing'] },
@@ -60,7 +60,7 @@ export function failureCause(code: string, state?: string): FailureCause {
 }
 
 // These states are polled by the engine and continue on their own; every other paused or failed state waits for 重试.
-const automatic = new Set(['queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
+const automatic = new Set(['queued','retry_wait','waiting_coordination','waiting_configuration','waiting_environment','waiting_pr_head']);
 const environmentFailures = new Set(['execution_interrupted','workspace_init_failed','workspace_write_failed',
   'workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable']);
 // waiting_environment covers both unmet conditions and failed attempts. Only the latter consume the retry burst;
@@ -71,6 +71,8 @@ export function isAttemptFailure(code: string|null|undefined, state: string) {
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
+  task_coordination_requested:'协调请求或显式任务依赖已持久化，框架会在结果可用后自动续接；不占用执行名额。',
+  task_coordination_pending:'协调上下文已变化，读取通知并记录处理意见后重新提交给独立 QA；旧验收不会认证新上下文。',
   acp_not_configured:'请部署操作人配置 BOT_ACP_CONFIG 并安装、认证对应 ACP 执行器。',
   acp_configuration_invalid:'请部署操作人修正 ACP 启动配置。',
   acp_protocol_unsupported:'请选择支持当前 ACP v1 协议的执行器版本。',
