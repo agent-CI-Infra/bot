@@ -1,3 +1,4 @@
+import { authorizeKnowledgeTask } from './knowledge-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -80,8 +81,8 @@ test('memory and execution provenance bind the integrated baseline separately fr
  const s=new Store(':memory:',randomBytes(32));t.after(()=>s.close());s.run("INSERT INTO accounts VALUES('a','fixture','bot_account',NULL,'{}','')");s.run("INSERT INTO repositories VALUES('101','fixture/project','1','a')");
  const ownedHead='1'.repeat(40),baseline='2'.repeat(40),input={snapshot_sha:baseline,integration:{state:'applied'}};
  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,head_sha) VALUES('t','101','development.issue','running','integration',?,?)",JSON.stringify(input),ownedHead);
- const task=s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(executionBaseline(task),baseline);
+ const actor=authorizeKnowledgeTask(s);const task=s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(executionBaseline(task),baseline);
  const result=await memoryTool(s,task,'remember_project_memory',{key:'integration-observation',kind:'experience',body:'Observed on integrated checkout'});
- const memory=new ProjectMemory(s).get('101',result.id);assert.equal(memory.scope.commit,baseline);assert.equal(memory.sources[0].source_sha,baseline);
+ const memory=new ProjectMemory(s,{actor}).get('101',result.id);assert.equal(memory.scope.commit,baseline);assert.equal(memory.sources[0].source_sha,baseline);
  assert.equal(task.head_sha,ownedHead,'ownership fence must still refer to the original PR head');
 });

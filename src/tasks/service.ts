@@ -1,5 +1,6 @@
 import {requestCoordination,validCoordination,coordinationContext,coordinationVersion,assertCoordinationCurrent,acknowledgeCoordination,type CoordinationRequest} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
+import { visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import { stop } from '../agent/common.js';
 import type { Store } from '../storage/database.js';
 import { randomId } from '../core/security.js';
@@ -83,7 +84,7 @@ export class TaskRecords {
     });
   }
 
-  tool(id: string, name: string, args: any) {
+  tool(id: string, name: string, args: any, access?:MemoryAccess) {
     if(name==='read_coordination')return coordinationContext(this.store,id);
     if(name==='acknowledge_coordination')return acknowledgeCoordination(this.store,id,args);
     if(name==='record_scope_difference')return recordScopeDifference(this.store,id,args);
@@ -94,7 +95,7 @@ export class TaskRecords {
       const filter="task_id=? AND type IN ('coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
-      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(JSON.parse(row.data))}))};
+      return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,JSON.parse(row.data),access))}))};
     }
     if(name==='read_playbook'){
       if(!args?.id)return playbooks.map(({content,...p})=>p);

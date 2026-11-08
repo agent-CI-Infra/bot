@@ -10,7 +10,7 @@ export function roleStorage(s:Store){s.db.exec(`
  if(!s.all('PRAGMA table_info(role_instances)').some(r=>r.name==='harness_state'))s.db.exec("ALTER TABLE role_instances ADD COLUMN harness_state TEXT NOT NULL DEFAULT '{}'");
  const existing=new Set(s.all('PRAGMA table_info(task_runs)').map(r=>r.name));for(const [name,type] of Object.entries({role_instance_id:'TEXT',role:'TEXT',role_version:'TEXT',harness:'TEXT',harness_version:'TEXT',assignment_id:'TEXT',recovery_mode:'TEXT',role_snapshot:'TEXT'}))if(!existing.has(name))s.db.exec(`ALTER TABLE task_runs ADD COLUMN ${name} ${type}`);
  // RoleDefinitionV2: an instance pins the snapshot of its current revision; runtime names its live Pi workspace.
- const instance=new Set(s.all('PRAGMA table_info(role_instances)').map(r=>r.name));for(const [name,type] of Object.entries({snapshot_id:'TEXT',config_revision:'INTEGER',role_revision:'INTEGER',pending_revision:'INTEGER',runtime:'TEXT'}))if(!instance.has(name))s.db.exec(`ALTER TABLE role_instances ADD COLUMN ${name} ${type}`);
+ const instance=new Set(s.all('PRAGMA table_info(role_instances)').map(r=>r.name));for(const [name,type] of Object.entries({snapshot_id:'TEXT',config_revision:'INTEGER',role_revision:'INTEGER',pending_revision:'INTEGER',runtime:'TEXT',knowledge_fence:'TEXT'}))if(!instance.has(name))s.db.exec(`ALTER TABLE role_instances ADD COLUMN ${name} ${type}`);
  roleStorageV2(s);
  roleRunStorage(s);
  s.db.exec("UPDATE role_assignments SET status='failed' WHERE status='running' AND EXISTS(SELECT 1 FROM task_runs r WHERE r.assignment_id=role_assignments.id AND r.status IN ('fault','interrupted','stopped')) AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.assignment_id=role_assignments.id AND r.status='running')");

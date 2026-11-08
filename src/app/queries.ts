@@ -1,3 +1,4 @@
+import { visibleMemorySnapshot } from '../memory/access.js';
 import { taskTrace } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
 import { type Store } from '../storage/database.js';
@@ -65,12 +66,12 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`,...args,limit,offset).map(publicTask)),execution_available:true};
   }
   const trace=/^\/api\/tasks\/([^/]+)\/(events|runs|source|lineage)$/.exec(path);
-  if(trace){const row=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,trace[1]!,...filter.args);if(!row)fail(404,'task_not_found');return taskTrace(store,trace[1]!,url,trace[2]!) as any;}
+  if(trace){const row=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,trace[1]!,...filter.args);if(!row)fail(404,'task_not_found');return taskTrace(store,trace[1]!,url,trace[2]!,user.context?{actor:user.context}:undefined) as any;}
   const task = /^\/api\/tasks\/([^/]+)(\/logs)?$/.exec(path);
   if (task) {
     const row = store.get(`SELECT *,${repositoryName},${pushedSha},${faultDetail} AS error_detail FROM tasks WHERE id=? AND ${filter.sql}`, task[1]!, ...filter.args);
     if (!row) return fail(404, 'task_not_found');
-    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
+    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause).map(log=>({...log,content:visibleMemorySnapshot(store,row.repository_id,log.content,user.context?{actor:user.context}:undefined)})) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})) };
   }
   if (path === '/api/audit') return { audit: store.all(`SELECT * FROM audit WHERE ${filter.sql}${repo ? ' AND repository_id=?' : ''}
     ORDER BY created_at DESC LIMIT 100`, ...filter.args, ...(repo ? [repo] : [])) };
