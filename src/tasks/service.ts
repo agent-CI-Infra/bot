@@ -1,3 +1,4 @@
+import {recordScopeDifference,scopeDifferences} from './scope.js';
 import { stop } from '../agent/common.js';
 import type { Store } from '../storage/database.js';
 import { randomId } from '../core/security.js';
@@ -5,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { playbooks } from './playbooks.js';
 import { captureTaskConfiguration } from './configuration.js';
 
-export interface Contract { goal: string; scope: string[]; criteria: string[]; endpoint: string | null; source: unknown; completeness?: string }
+export interface Contract { goal: string; scope: string[]; constraints?: string[]; criteria: string[]; endpoint: string | null; source: unknown; completeness?: string }
 export interface Artifact { kind: string; reference: string; version: string; content?: unknown }
 export interface Evidence { source: string; version: string; verified: boolean; result: unknown }
 export interface Candidate { id: string; revision: number; artifacts: Artifact[]; evidence: Evidence[]; claims: unknown; created_at: string }
@@ -50,7 +51,7 @@ export class TaskRecords {
     if (!r||!t) throw new Error('task_not_found');
     return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|needs_replan$|failed$)/.test(t.status)?t.error_code:null},
       selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
-      project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
+      scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
   project(id: string) { const row=this.store.get('SELECT * FROM project_context WHERE repository_id=?',id);return row?{revision:row.revision,facts:JSON.parse(row.facts),updated_at:row.updated_at}:null; }
   setProject(id: string, facts: {source:string;fact:string}[], expectedRevision: number) {
@@ -62,6 +63,7 @@ export class TaskRecords {
     });
   }
   contract(id: string, value: Contract, expectedRevision?: number) {
+    if(value?.constraints!==undefined&&(!Array.isArray(value.constraints)||value.constraints.some(c=>typeof c!=='string'||!c.trim())))throw new Error('invalid_task_constraints');
     if (!value || typeof value.goal!=='string'||!value.goal.trim()||!Array.isArray(value.scope)||!Array.isArray(value.criteria)||[...value.scope,...value.criteria].some(x=>typeof x!=='string'||!x.trim())||!(value.endpoint===null||typeof value.endpoint==='string')) throw new Error('invalid_task_contract');
     this.atomic(()=>{
     const current=this.get(id);if(expectedRevision!==undefined&&expectedRevision!==current.revision)throw new Error('task_revision_changed');
@@ -80,11 +82,12 @@ export class TaskRecords {
   }
 
   tool(id: string, name: string, args: any) {
+    if(name==='record_scope_difference')return recordScopeDifference(this.store,id,args);
     if(name==='read_task_history'){
       const offset=args?.offset??0,limit=args?.limit??10;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page'};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      const filter="task_id=? AND type IN ('checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized')";
+      const filter="task_id=? AND type IN ('scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
       return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(JSON.parse(row.data))}))};
