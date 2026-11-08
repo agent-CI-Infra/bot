@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,writeFile,appendFile,rm} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
@@ -27,7 +27,11 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
   const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
   let output='';child.stderr.on('data',chunk=>output+=chunk);child.stdout.on('data',chunk=>output+=chunk);
   t.after(async()=>{child.kill('SIGKILL');await closed;});
-  const events=async()=>JSON.parse('['+(await readFile(join(dir,'events.jsonl'),'utf8').catch(()=>'')).trim().split('\n').filter(Boolean).join(',')+']');
+  const events=async()=>{
+    const all=[];let page,offset=0;
+    do{page=await agentOperation({type:'workspace_agent_poll',offset},root);all.push(...page.events);offset=page.offset;}while(page.has_more);
+    return all;
+  };
   const request=await until(()=>readFile(join(dir,'token-request.json'),'utf8').then(JSON.parse).catch(()=>null));
   await writeFile(join(dir,`token-reply-${request.id}.json`),JSON.stringify({token,expires_at:new Date(Date.now()+3600000).toISOString(),permissions:{contents:'read'},repository:'fixture/repo'}));
   await until(async()=>(await events()).find(event=>event.type==='tool_start'&&event.name==='run_command'));
@@ -64,6 +68,25 @@ test('poll exposes event pagination so completed and failed agents can drain all
     do{page=await agentOperation({type:'workspace_agent_poll',offset},root);collected.push(...page.events);offset=page.offset;}while(page.has_more);
     assert.deepEqual(collected,events);assert.equal(offset,45);
   }
+});
+
+test('poll retains an incomplete event across pages until its newline is appended',async t=>{
+  await mkdir('.tmp',{recursive:true});const root=await mkdtemp(resolve('.tmp/event-tail-')),dir=join(root,'agent');
+  await mkdir(dir);t.after(()=>rm(root,{recursive:true,force:true}));
+  await writeFile(join(dir,'state.json'),JSON.stringify({state:'running'}));
+  const prefix=Array.from({length:21},(_,step)=>({type:'tool_start',name:'read_file',path:`src/${step}.js`}));
+  const last={type:'tool',name:'write_file',arguments:{content:'测'.repeat(131072)}},line=Buffer.from(JSON.stringify(last)+'\n'),cut=65536;
+  await writeFile(join(dir,'events.jsonl'),Buffer.concat([Buffer.from(prefix.map(event=>JSON.stringify(event)+'\n').join('')),line.subarray(0,cut)]));
+  const first=await agentOperation({type:'workspace_agent_poll'},root);assert.deepEqual(first.events,prefix.slice(0,20));assert.equal(first.offset,20);assert.equal(first.has_more,true);
+  const second=await agentOperation({type:'workspace_agent_poll',offset:first.offset},root);assert.deepEqual(second.events,prefix.slice(20));assert.equal(second.offset,21);assert.equal(second.has_more,false);
+  const pending=await agentOperation({type:'workspace_agent_poll',offset:second.offset},root);assert.deepEqual(pending.events,[]);assert.equal(pending.offset,21);
+  await appendFile(join(dir,'events.jsonl'),line.subarray(cut,-1));
+  assert.deepEqual((await agentOperation({type:'workspace_agent_poll',offset:21},root)).events,[],'even valid JSON waits for its record delimiter');
+  await appendFile(join(dir,'events.jsonl'),'\n');
+  const complete=await agentOperation({type:'workspace_agent_poll',offset:21},root);assert.deepEqual(complete.events,[last]);assert.equal(complete.offset,22);assert.equal(complete.has_more,false);
+  assert.deepEqual((await agentOperation({type:'workspace_agent_poll',offset:complete.offset},root)).events,[]);
+  await appendFile(join(dir,'events.jsonl'),'{"broken":\n');
+  await assert.rejects(()=>agentOperation({type:'workspace_agent_poll',offset:22},root),SyntaxError,'a malformed complete record is still an error');
 });
 
 test('review file tools can update project notes but refuse repository writes',async t=>{
