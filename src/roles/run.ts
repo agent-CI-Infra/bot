@@ -28,6 +28,8 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
 }
 
 export interface RoleRunOptions {
+ /** Rebuild transient context from caller-provided durable facts; keep the role identity and historical traces. */
+ rebuildContext?: boolean;
  /** Prepares the run's environment once its instance and snapshot are known (for example the Pi workspace). */
  prepare?:(instance:Row,resolved:Resolved)=>Promise<{pi?:PiRoleEnvironment;release?:()=>Promise<void>}|void>;
 }
@@ -71,14 +73,14 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
   // A driver with its own model gets no project model at all.
   const model=snapshot.model.source==='role'||driver.externalModel?resolved.model:spec.model??(taskConfiguration(s,task)?executionModel(s,task,workflow):resolved.model);if(model.key)spec.redactor.add(model.key);
   const env=await options.prepare?.(instance,resolved)||{};
-  const stored=cleanRoleMessages(JSON.parse(instance.session)),messages=role==='qa'||persistence!=='checkpoint_transcript'?[]:stored;
+  const stored=cleanRoleMessages(JSON.parse(instance.session)),messages=options.rebuildContext||role==='qa'||persistence!=='checkpoint_transcript'?[]:stored;
   // A crash can leave an assistant tool batch partially answered. Mark absent receipts as
   // interrupted, never fabricate their observations; the role must query durable task facts.
   for(let i=0;i<messages.length;i++){const msg=messages[i];if(msg.role!=='assistant'||!msg.tool_calls?.length)continue;const replies=new Set<string>();let end=i+1;while(messages[end]?.role==='tool'){replies.add(messages[end].tool_call_id);end++;}const missing=msg.tool_calls.filter((c:any)=>!replies.has(c.id)).map((c:any)=>({role:'tool',tool_call_id:c.id,content:JSON.stringify({error:'interrupted_observation',instruction:'Inspect task records before repeating any action.'})}));messages.splice(end,0,...missing);i=end+missing.length-1;}
   // The starting recovery mode depends on the driver's session kind. An external session is pending until the agent binds
   // it (ACP session_bound then records native_resume or rebuilt_from_task_records); a Pi session is native_resume only
   // when its live session is reattached.
-  const recover=role==='qa'?'fresh_evaluation':persistence==='external_session'?'external_session_pending'
+  const recover=role==='qa'?'fresh_evaluation':options.rebuildContext?'rebuilt_from_task_records':persistence==='external_session'?'external_session_pending'
    :persistence==='native_resume'?(env.pi?.resume?'native_resume':instance.sequence>0?'rebuilt_from_task_records':'new_session')
    :persistence==='checkpoint_transcript'?(messages.length?'checkpoint_transcript':'new_session'):instance.sequence>0?'rebuilt_from_task_records':'new_session';
   const roleContext={role,snapshot_ref:'role_snapshots:'+resolved.id,config_revision:snapshot.config_revision,role_revision:snapshot.role_revision,model_source:snapshot.model.source};

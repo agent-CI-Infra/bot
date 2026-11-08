@@ -304,3 +304,15 @@ test('trace retains actual sanitized model I/O and immutable run configuration w
   const input=JSON.parse(request.request_snapshot),output=JSON.parse(request.response_snapshot);assert.ok(input.complete&&output.complete);assert.equal(input.data.messages[1].content,'source input');assert.equal(output.data.choices[0].message.content,'public result');assert.doesNotMatch(JSON.stringify(output),/PRIVATE_REASONING_SENTINEL/);
   f.store.run("UPDATE models SET model_name='later-config' WHERE id='m'");assert.equal(JSON.parse(run.config_snapshot).data.model.name,'fixture');assert.doesNotMatch(run.config_snapshot,/secret-model-key/);
 });
+
+test('mandatory finish rejects plain text bypass and accepts the subsequent structured submission',async t=>{
+ const f=await fixture(t);let turn=0;
+ f.respond(()=>({choices:[{message:++turn===1?{content:''}:{tool_calls:[call('submit')]}}]}));
+ const submit={...tool,function:{...tool.function,name:'submit'}};
+ const result=await runAgent({...f.spec,tools:[submit],maxTurns:3,finish:{name:'submit',validate:a=>({ok:true})}});
+ assert.deepEqual(result,{ok:true});assert.equal(f.requests.length,2);
+});
+test('output budget exhaustion is explicit and never becomes a successful empty result',async t=>{
+ const f=await fixture(t);f.respond(()=>({choices:[{message:{content:''},finish_reason:'length'}]}));
+ await assert.rejects(runAgent({...f.spec,tools:[{...tool,function:{...tool.function,name:'submit'}}],finish:{name:'submit',validate:a=>a}}),e=>e.code==='agent_output_budget_exhausted');
+});
