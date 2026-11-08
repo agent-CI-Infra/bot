@@ -1,3 +1,4 @@
+import { taskConfiguration } from '../tasks/configuration.js';
 import { developmentTeam } from '../roles/development.js';
 import { controlled } from '../roles/run.js';
 import { runTeam } from '../roles/team.js';
@@ -30,9 +31,9 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
 }
 async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: Pick<AgentSpec<unknown>, 'modelAttempts'> = {}) {
   // Permissions and a custom workflow's prompt are read from trusted storage here, for every caller and every attempt.
-  const workflowId = taskWorkflow(task as any), saved = String(task.kind).startsWith('workflow.') ? savedWorkflow(store, task.repository_id, workflowId) : undefined;
+  const workflowId = taskWorkflow(task as any), saved = String(task.kind).startsWith('workflow.') ? (taskConfiguration(store,task)?.workflow??savedWorkflow(store, task.repository_id, workflowId)) : undefined;
   if (String(task.kind).startsWith('workflow.') && !saved) stop('workflow_not_found', 'cancelled', `工作流 ${workflowId} 已删除。`);
-  const profile = workspaceProfile(String(task.kind), context, workflowPermissions(store, task.repository_id, workflowId), saved ? { id: workflowId, name: String(saved.name), prompt: String(saved.prompt ?? '') } : undefined);
+  const profile = workspaceProfile(String(task.kind), context, (taskConfiguration(store,task)?.permissions??workflowPermissions(store, task.repository_id, workflowId)), saved ? { id: workflowId, name: String(saved.name), prompt: String(saved.prompt ?? '') } : undefined);
   const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
   const records = new TaskRecords(store);
   for(const tool of taskTools) {

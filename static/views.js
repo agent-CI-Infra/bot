@@ -220,7 +220,7 @@ function liveText(task) {
   if(task.status==='waiting_pr_head')return `PR 尚未指向刚推送的提交 ${task.pushed_sha||'（读取中）'}；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。`;
   if (task.status === 'publishing') return '正在发布到 GitHub…';
   if(ownershipErrors[task.error_code])return ownershipErrors[task.error_code]+'；已暂停，不会推送其他作者或分支。';
-  if (task.status.startsWith('waiting_') || task.status === 'retry_wait' || task.status === 'needs_replan') {
+  if (task.status.startsWith('waiting_') || task.status === 'retry_wait' || task.status === 'needs_replan' || task.status === 'paused') {
     const caption = (states[task.status] || [task.status])[0], cause = task.error_cause;
     if (!cause) return `已暂停：${caption}${task.error_code ? '（' + task.error_code + '）' : ''}`;
     const count = !cause.retry_cycle && task.status === 'retry_wait' && task.error_code !== 'github_rate_limited' && task.retry_count ? `同一种失败已连续出现 ${task.retry_count} 次，满 5 次后改为每 8 小时重试。` : '';
@@ -252,7 +252,7 @@ function renderTimeline(task, logs) {
   if (first ? !!live : atBottom) box.scrollTop = box.scrollHeight;
 }
 function setSnapshotStatus(progress,status) {
-  const waiting=status?.startsWith('waiting_')||status==='retry_wait'||status==='needs_replan';
+  const waiting=status?.startsWith('waiting_')||status==='retry_wait'||status==='needs_replan'||status==='paused';
   progress.status.replaceChildren(waiting?badge('已暂停','warning'):state(status));
 }
 function snapshotMessage(value) {

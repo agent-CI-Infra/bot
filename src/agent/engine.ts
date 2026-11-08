@@ -1,3 +1,6 @@
+import { checkManagementBudget } from '../management/budget.js';
+import { executionModel, taskConfiguration, executionRuleFiles } from '../tasks/configuration.js';
+import { TaskCommands } from '../tasks/commands.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { recoverRoleCheckpoint } from '../roles/recovery.js';
 import { controlled } from '../roles/run.js';
@@ -26,7 +29,6 @@ import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
 import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
-import { selectedModel } from './model.js';
 import { isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
@@ -141,6 +143,7 @@ export class TaskEngine {
     };
     const guard=async()=>{
       // Only this task's own claim counts; other tasks on the same computer hold their own.
+      try{checkManagementBudget(this.store,task.repository_id);}catch(error){if(error instanceof HttpError)stop(error.code,'waiting_configuration');throw error;}
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
       if (task.kind === 'task.request') {
@@ -180,7 +183,7 @@ export class TaskEngine {
     });
     let workspace:Workspace|undefined;let attemptRun:Row|null=null;
     try{
-      await guard();const config=selectedModel(this.store,task.repository_id,taskWorkflow(task as any));redactor.add(config.key);await this.share(task.repository_id);
+      await guard();const config=executionModel(this.store,task,taskWorkflow(task as any));redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
@@ -322,13 +325,13 @@ export class TaskEngine {
       if(task.phase==='prepare'&&event){
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         await validate();
-        const target=await event.prepare(this.store,github,task,input,redactor),policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
+        const target=await event.prepare(this.store,github,task,input,redactor),policy=taskConfiguration(this.store,task)?.policy??this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
         const ruleSha=(await github.ref(github.defaultBranch))?.object?.sha||target.sha;
         const mirror=this.gitCache&&github.cloneUrl?await this.gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target.sha,ruleSha],refs:[`refs/heads/${github.defaultBranch}`]}):undefined;
         let effectiveRules:ReturnType<typeof resolveRules>;
         try{
           const ruleFiles=await this.rules.fetch(github,ruleSha,mirror);this.rules.cache(task.repository_id,ruleSha,ruleFiles);
-          effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
+          effectiveRules=resolveRules(policy,executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer));
         }catch(error){
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
@@ -366,7 +369,7 @@ export class TaskEngine {
           }
         }
         if(input.contract?.completeness==='explicit')implementationGoal=input.contract.goal;
-        const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
+        const policy=taskConfiguration(this.store,task)?.policy??this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
         if(task.kind==='development.issue'){
           const owned=this.store.get(`SELECT p.* FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
             WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? ORDER BY t.created_at LIMIT 1`,task.repository_id,task.object_number);
@@ -397,7 +400,7 @@ export class TaskEngine {
         try{
           const ruleFiles=await this.rules.fetch(github,ruleSha,mirror);
           this.rules.cache(task.repository_id,ruleSha,ruleFiles);
-          effectiveRules=resolveRules(policy,ruleFiles,this.rules.consoleComputer(task.repository_id,environment.computer));
+          effectiveRules=resolveRules(policy,executionRuleFiles(this.store,task,ruleFiles,ruleSha),this.rules.consoleComputer(task.repository_id,environment.computer));
         }catch(error){
           if(error instanceof HttpError&&ruleErrors.has(error.code)){const detail=(error as HttpError&{detail?:string}).detail;stop(error.code,'waiting_configuration',`加载仓库行为规则失败（${error.code}）${detail?'：'+detail:''}，请检查 .bot/ 和 .agents/skills/ 配置。`);}
           throw error;
@@ -536,6 +539,7 @@ export class TaskEngine {
             return {status:'no_changes',message:'The working tree has no changes; no pull request was created.'};
           }
           await validate();
+          // Mandatory delivery checks remain live even when the execution behavior is fixed.
           const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)!;
           const command=String(policy.test_command||'').trim();
           let validation:any={command:args.test_command,source:'agent',skipped:true};
@@ -819,73 +823,9 @@ export class TaskEngine {
     const merge=await mergeApi(this.store,user,method,url,input,this.githubUrl);if(merge!==undefined)return merge;
     const roles=roleApi(this.store,user,method,url,input);if(roles!==undefined)return roles;
     const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;
-    const contractMatch=/^\/api\/tasks\/([^/]+)\/contract$/.exec(url.pathname);
-    if(contractMatch&&method==='PATCH'){
-      fields(input,['contract','expected_revision']);const filter=scope(user,'repository_id');
-      const task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,contractMatch[1]!,...filter.args);
-      if(!task)fail(404,'task_not_found');
-      if(this.active.has(task!.id)||task!.status==='running')fail(409,'task_already_running');
-      if(terminal.includes(task!.status)||this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task!.id))fail(409,'task_contract_after_publication');
-      if(!Number.isSafeInteger(input.expected_revision))fail(400,'invalid_task_revision');
-      const records=new TaskRecords(this.store),contract={...(input.contract as any),source:{type:'human_revision',actor:user.id},completeness:'explicit'};
-      records.atomic(()=>{
-        try{records.contract(task!.id,contract,Number(input.expected_revision));}catch(error){fail((error as Error).message==='task_revision_changed'?409:400,(error as Error).message);}
-        const saved=JSON.parse(task!.input);
-        this.store.run("UPDATE tasks SET input=?,status='queued',phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,error_code=NULL,next_run_at=0,attempt=attempt+1 WHERE id=?",JSON.stringify({...saved,contract,request:task!.kind==='task.request'?contract.goal:saved.request}),task!.id);
-        this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task!.id);
-        this.store.run('DELETE FROM development_candidates WHERE task_id=?',task!.id);
-        traceEvent(this.store,task!.id,'intervention',{action:'contract_revision',before:new TaskRecords(this.store).get(task!.id).revision-1,after:contract,reason:'explicit user contract revision'},null,'user:'+user.id);
-        this.store.audit(user.id,'task.contract',task!.id,task!.repository_id);
-      });this.tick();return {task:new TaskRecords(this.store).get(task!.id)};
-    }
-    const contextMatch=/^\/api\/repositories\/([^/]+)\/context$/.exec(url.pathname);
-    if(contextMatch&&(method==='GET'||method==='PATCH')){
-      repository(this.store,user,contextMatch[1]!);const records=new TaskRecords(this.store);
-      if(method==='GET')return {context:records.project(contextMatch[1]!)};
-      fields(input,['facts','expected_revision']);
-      if(!Number.isSafeInteger(input.expected_revision)||Number(input.expected_revision)<0)fail(400,'invalid_project_revision');
-      try{records.setProject(contextMatch[1]!,input.facts as any,Number(input.expected_revision));}
-      catch(error){fail((error as Error).message==='project_revision_changed'?409:400,(error as Error).message);}
-      this.store.audit(user.id,'project.context',contextMatch[1]!,contextMatch[1]!);return {context:records.project(contextMatch[1]!)};
-    }
-    if(url.pathname==='/api/tasks'&&method==='POST') {
-      fields(input,['repository_id','request','contract']);
-      if(typeof input.repository_id!=='string'||typeof input.request!=='string'||!input.request.trim()||input.request.length>60000)fail(400,'invalid_task_request');
-      repository(this.store,user,input.repository_id as string);
-      const id=randomId(),now=new Date().toISOString();
-      const contract=input.contract as any;
-      if(!contract||!Array.isArray(contract.criteria)||!contract.criteria.length||typeof contract.endpoint!=='string'||!contract.endpoint.trim())fail(400,'invalid_task_contract');
-      // Validate before insertion; rollback also removes trigger-created records on failure.
-      this.store.transaction(()=>{
-        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,created_at,updated_at) VALUES(?,?,'task.request','queued',?,?,?,?)",id,input.repository_id as string,(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),now,now);
-        try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
-        // Persist the authoritative validated contract for executor recovery.
-        this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract}),id);
-        if (user.context) this.store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, user.context.principal_id,
-          this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', input.repository_id as string)!.tenant_id, input.repository_id as string, 'tasks.write');
-        this.store.audit(user.id,'task.create',id,input.repository_id as string);
-      });this.tick();return {id};
-    }
     const live=/^\/api\/tasks\/([^/]+)\/live$/.exec(url.pathname);
     if(live&&method==='GET')return this.live(user,live[1]!,url);
-    const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
-    fields(input,[]);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
-    if(!task)return fail(404,'task_not_found');
-    if(this.active.has(task.id)||['queued','running','preparing','implementing','validating','publishing','result_ready'].includes(task.status))fail(409,'task_already_running');
-    if(!['failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status))fail(409,'task_not_retryable');
-    this.store.transaction(()=>{
-      // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
-      const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);
-      if(task.kind!=='task.request'&&(replies(task.kind)&&!wrote || (task.phase!=='publish'||task.status==='needs_replan'&&!wrote)&&['failed','waiting_environment','needs_replan'].includes(task.status))){
-        this.store.run("UPDATE tasks SET phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,review_update_cursor=0,publication_started=0,attempt=attempt+1 WHERE id=?",task.id);
-        if(replies(task.kind))this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task.id);
-        this.store.run('DELETE FROM development_candidates WHERE task_id=?',task.id);
-      }
-      // Pressing 重试 on 发布待确认 is the confirmation the pause waits for: the write is looked up once more and,
-      // only if GitHub still has no trace of it, sent again.
-      if(task.status==='waiting_publication')this.store.run("UPDATE github_effects SET state='recheck' WHERE task_id=? AND state IN ('unknown','inflight')",task.id);
-      this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
-    });this.tick();return {ok:true};
+    return new TaskCommands(this.store,{active:id=>this.active.has(id),tick:()=>this.tick()}).api(user,method,url,input);
   }
 }
 

@@ -20,3 +20,14 @@ a.status-link:hover{text-decoration:underline}
 
 /* Shared configuration dialog: one row per item with its own action. */
 #message:not(:empty),#task-error:not(:empty){display:flex;align-items:center;justify-content:space-between;gap:12px}#message>span,#task-error>span{min-width:0;overflow-wrap:anywhere}#message>button,#task-error>button{flex-shrink:0}
+
+.management-panel { min-width: 0; }
+.management-header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: end; }
+.management-header label { flex: 1; min-width: 12rem; }
+.management-feed { max-height: 32rem; overflow: auto; padding: .75rem; border: 1px solid var(--border, #d1d5db); border-radius: .5rem; }
+.management-feed:empty { display: none; }
+.management-observation { margin-block: .75rem; }
+.management-observation pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+.management-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 1.5rem; margin-top: 1rem; }
+.management-panel textarea { width: 100%; box-sizing: border-box; }
+.management-panel .actions { flex-wrap: wrap; margin-block: .75rem; }

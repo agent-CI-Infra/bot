@@ -60,9 +60,9 @@ export function roleStorageV2(s: Store) {
 }
 
 /** The stored configuration as V2. A configuration saved before V2 keeps running as before (legacy) until it is saved again. */
-export function roleConfiguration(s: Store, repositoryId: string): RoleConfiguration {
-  const saved = s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId);
-  const value = saved ? JSON.parse(saved.value) : { enabled: false, harnesses: {} };
+export function roleConfiguration(s: Store, repositoryId: string, stored?: any): RoleConfiguration {
+  const saved = stored===undefined?s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId):undefined;
+  const value = stored??(saved ? JSON.parse(saved.value) : { enabled: false, harnesses: {} });
   if (value.schema === 2) return value;
   // Legacy: built-in prompts with appended project instructions, the per-role driver map, the native manager.
   const legacy = configuredRoles(value);
@@ -262,8 +262,9 @@ export function rolePrompt(definition: RoleDefinitionV2) {
  * the snapshot body under its own hash. Model order: the role's explicit profile, then the workflow's model, then the
  * project default; the actual result is part of the snapshot. Unsupported combinations stop here, before any run starts.
  */
-export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean } = {}) {
-  const config = roleConfiguration(s, repositoryId);
+export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean;
+  configuration?: RoleConfiguration; fallbackModel?:()=>{model:ReturnType<typeof openModel>;source:'workflow'|'project'} } = {}) {
+  const config = options.configuration??roleConfiguration(s, repositoryId);
   if (options.expectedRevision !== undefined && options.expectedRevision !== config.revision) stop('role_configuration_changed', 'retry_wait', `角色配置已更新到 revision ${config.revision}，请求的是 ${options.expectedRevision}。`);
   const definition = config.roles.find(r => r.role_id === roleId), field = `roles.${roleId}`;
   if (!definition) return stop('unknown_role', 'waiting_configuration', `${field}：项目没有这个角色。`);
@@ -283,10 +284,11 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     if (modelProfileHash(row) !== ref.profile_hash) return stop('role_model_profile_changed', 'waiting_configuration', `${field}.model_profile_ref.profile_hash：模型 ${ref.model_id} 的地址或名称已变化，请重新保存角色配置。`);
     model = openModel(s, row); source = 'role'; profile = { api: ref.api, tool_calls: ref.tool_calls, structured_output: ref.structured_output }; profileHash = ref.profile_hash;
   } else {
-    model = selectedModel(s, repositoryId, workflow);
+    const fallback=options.fallbackModel?.();
+    model = fallback?.model??selectedModel(s, repositoryId, workflow);
     const policy = s.get('SELECT model_id,task_models FROM policies WHERE repository_id=?', repositoryId), overrides = JSON.parse(policy?.task_models || '{}');
     const custom = workflow.startsWith('custom.') ? s.get('SELECT model_id FROM workflows WHERE repository_id=? AND id=?', repositoryId, workflow)?.model_id : undefined;
-    source = custom || Object.hasOwn(overrides, workflow) ? 'workflow' : 'project';
+    source = fallback?.source??(custom || Object.hasOwn(overrides, workflow) ? 'workflow' : 'project');
     profileHash = modelProfileHash({ api_url: model.url, model_name: model.model });
   }
   if (!harness.externalModel) checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => { throw new TaskError(code, 'waiting_configuration', `${at}：${harness.id} 不支持这个模型配置。`); });

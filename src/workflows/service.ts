@@ -25,6 +25,12 @@ const jsonOf = (text: unknown, fallback: any) => { try { return JSON.parse(Strin
 
 export class WorkflowService {
   constructor(readonly store: Store, readonly rules: RuleService, readonly githubUrl?: string) {}
+  save(user: Actor, repositoryId: string, target: string, body: Json): void {
+    allowRepository(this.store,user,repositoryId);
+    const builtin=builtinWorkflow(target),row=savedWorkflow(this.store,repositoryId,target);
+    if(!builtin&&!(row&&target.startsWith('custom.')))fail(404,'workflow_not_found');
+    if(builtin)this.updateBuiltin(user,repositoryId,builtin,body);else this.saveCustom(user,repositoryId,target,body,row);
+  }
   // Prompt layers of a built-in workflow: built-in text, console layer, repository file; the last one present is used.
   private builtinPrompt(workflow: BuiltinWorkflow, view: any, row: Row | undefined) {
     if (workflow.prompt.rule) {
@@ -345,7 +351,7 @@ export class WorkflowService {
     if (!builtin && !(row && target.startsWith('custom.'))) return fail(404, 'workflow_not_found');
     if (method === 'GET') return { workflow: (await this.list(repositoryId)).workflows.find(workflow => workflow.id === target)! };
     if (method === 'PUT') {
-      if (builtin) this.updateBuiltin(user, repositoryId, builtin, body); else this.saveCustom(user, repositoryId, target, body, row);
+      this.save(user,repositoryId,target,body);
       return { workflow: (await this.list(repositoryId)).workflows.find(workflow => workflow.id === target)! };
     }
     if (method === 'DELETE') {

@@ -14,7 +14,7 @@ const commit = 'a'.repeat(40), tree = treeSha([]);
 const settle = () => new Promise(resolve => setTimeout(resolve, 30));
 // Issue reviews on one repository whose agents keep working until the test lets each one finish.
 // holdReaps: release requests wait until that many have arrived, so tasks finishing together overlap in their release.
-async function fixture(t, { holdReaps = 0 } = {}) {
+async function fixture(t, { holdReaps = 0, beforeQueue = null } = {}) {
   const comments = new Map();
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -62,6 +62,7 @@ async function fixture(t, { holdReaps = 0 } = {}) {
   const { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'fixture-model-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, model_id: model.id });
+  await beforeQueue?.({h,admin,model});
   for (const number of [1, 2, 3]) await h.hook(a.path, a.secret, 'issue-' + number, { repository: { id: 101 }, action: 'opened', issue: { number, title: 'Issue ' + number, body: 'Please review.' } });
   const task = number => h.store.get('SELECT * FROM tasks WHERE object_number=?', number);
   const statuses = () => [1, 2, 3].map(number => task(number).status);
@@ -361,9 +362,11 @@ test('TaskEngine runs an override-only review without a default model', {timeout
 });
 
 test('TaskEngine rejects a revoked override before workspace execution, even with a valid default', {timeout: 5000}, async t => {
-  const f = await fixture(t);
-  const chosen = (await f.admin('/api/models', 'POST', {repository_id: '101', api_url: 'https://other.invalid/v1', api_key: testPassword(), model_name: 'override'})).value.model;
-  await f.admin('/api/repositories/101/policy', 'PATCH', {task_models: {'review.issue': chosen.id}});
+  let chosen;
+  const f = await fixture(t,{beforeQueue:async({admin})=>{
+    chosen=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://other.invalid/v1',api_key:testPassword(),model_name:'override'})).value.model;
+    await admin('/api/repositories/101/policy','PATCH',{task_models:{'review.issue':chosen.id}});
+  }});
   await f.admin(`/api/models/${chosen.id}/credentials/revoke`, 'POST', {});
   f.engine.tick(); await f.engine.active.get(f.task(1).id);
   assert.equal(f.task(1).status, 'waiting_configuration');

@@ -1,9 +1,9 @@
+import { executionModel } from './configuration.js';
 import { runRole } from '../roles/run.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
 import { readEvidence, previousVerificationEvidence } from './evidence.js';
-import { selectedModel } from '../agent/model.js';
 import { taskWorkflow } from '../workflows/resolve.js';
 import type { Store, Row } from '../storage/database.js';
 import { Workspace } from '../agent/workspace.js';
@@ -62,7 +62,7 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
         records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict,method:'deterministic_policy'},verificationRun?.id);verificationOutcome=verdict.outcome;return verdict;
       }
     }
-    const model=selectedModel(store,task.repository_id,taskWorkflow(task as any));
+    const model=executionModel(store,task,taskWorkflow(task as any));
     const {result:verdict}=await runRole({store,task,redactor,guard,model,maxOutputTokens:/^deepseek/i.test(model.model)?16384:8192,system:acceptanceSystem,
       prompt:JSON.stringify({project_memory:hasMemory?new ProjectMemory(store).context({...task,head_sha:snapshot?.local_sha||task.head_sha}):undefined,contract:record.contract,revision:record.revision,project:record.project,candidate,previous_verification_evidence:previousVerificationEvidence(store,task.id,candidate),related_deliveries:related.map(r=>r.description),context_files:[...new Set([...Object.keys(parentContext?JSON.parse(parentContext.row.input||'{}').context_files||{}:{}),...Object.keys(sourceInput.context_files||{}),...(parentContext?['parent-delivery.json','related-deliveries.json']:[])])].map(p=>'../context/'+p),additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
         delivery_boundary:files?.kind==='code'?{stage:'pre_publication',remaining:'Framework creates or updates the PR after acceptance; judge candidate readiness, do not require an unpublished URL or claim it exists.'}:undefined,

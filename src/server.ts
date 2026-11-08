@@ -31,6 +31,11 @@ import { InstallationSetup } from './installations/setup.js';
 import { GitHubIdentity, type GitHubOAuthConfig } from './identity/github.js';
 import { identityApi } from './identity/api.js';
 import { assertCurrent, assertSessionWrite, authorize, refreshSessionRevision } from './identity/authorization.js';
+import { resolveActor } from './identity/authorization.js';
+import { ManagementService } from './management/service.js';
+import { ManagementApi } from './management/api.js';
+import { TaskCommands } from './tasks/commands.js';
+import { ConfigurationPR } from './management/configuration-pr.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
@@ -57,6 +62,10 @@ export function createControlPlane(options: Options) {
   const installationSetup = options.installationSetup || new InstallationSetup(store, githubIdentity);
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const workflows = new WorkflowService(store, rules, options.githubUrl);
+  const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
+  const sharedManagement = new ManagementService(store,workflows,taskCommands);
+  sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
+  const managementApi = new ManagementApi(sharedManagement);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
@@ -140,7 +149,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, result); return;
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
-    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'],
+    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/workflows.js': ['workflows.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
@@ -221,6 +230,13 @@ export function createControlPlane(options: Options) {
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
     if (mutation && githubIdentity) { await githubIdentity.refresh(user.id); user = actor(store, req); }
     const current = user, context = current.context!;
+    if(path.startsWith('/api/management/')){
+      if(mutation)assertSessionWrite(store,sessionToken(req),context);
+      const managementActor=resolveActor(store,sessionToken(req),{channel:path.includes('/conversations')?'web':'api'});
+      if(method==='GET'&&url.searchParams.get('stream')==='1')await managementApi.stream(managementActor,url,res);
+      else respond(res,method==='POST'?201:200,(await managementApi.api(managementActor,method,url,input))!);
+      return;
+    }
     let resourceProject = /^\/api\/repositories\/([^/]+)/.exec(path)?.[1];
     const taskId = /^\/api\/tasks\/([^/]+)/.exec(path)?.[1];
     if (taskId) resourceProject = store.get('SELECT repository_id FROM tasks WHERE id=?', taskId)?.repository_id;
@@ -243,7 +259,7 @@ export function createControlPlane(options: Options) {
       const closed = new AbortController(); res.on('close', () => { if (!res.writableFinished) closed.abort(); });
       await store.withAuthorizationGuard(guard, () => workflows.assistantStream(current, url, input, res, closed.signal)); return;
     }
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await managementApi.workflow(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
@@ -252,5 +268,6 @@ export function createControlPlane(options: Options) {
     respond(res, method === 'POST' ? 201 : 200, result);
   }));
   for (const server of [webhook, admin]) { server.requestTimeout = 30_000; server.headersTimeout = 10_000; }
+  admin.once('close',()=>{void managementApi.agent.close().catch(()=>{});});
   return { webhook, admin };
 }

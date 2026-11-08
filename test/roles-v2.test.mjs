@@ -15,6 +15,8 @@ import { roleHarness, harnesses } from '../dist/roles/harness.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { agentLoop } from '../dist/agent/loop.js';
 import { fakeRunner } from './pi-mailbox.mjs';
+import { captureTaskConfiguration } from '../dist/tasks/configuration.js';
+import { roleConfig } from '../dist/roles/run.js';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const call = (name, args, id = 'c' + randomBytes(3).toString('hex')) => ({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
@@ -337,4 +339,43 @@ test('cancelling a Pi session ends the control-plane wait with harness_cancelled
   assert.equal((await runTeam(g.spec, { prepare: async () => {}, controller: controllerWorkspace(space) })).summary, 'implemented');
   const runs = g.s.all("SELECT recovery_mode,status,stop_reason FROM task_runs WHERE role='manager' ORDER BY rowid");
   assert.deepEqual(runs.map(r => [r.status, r.stop_reason, r.recovery_mode]), [['fault', 'harness_cancelled', 'new_session'], ['succeeded', null, 'rebuilt_from_task_records']]);
+});
+
+test('task defaults pin V2 roles and model snapshots while new tasks take the new defaults', async t => {
+  const f=await fixture(t,body=>call('finish',{prompt:body.messages[0].content}));
+  const original=f.put({roles:[{role_id:'reviewer',persona_prompt:'Pinned task persona.',model_profile_ref:{model_id:'m2'}}]});
+  captureTaskConfiguration(f.s,'t');
+  f.put({roles:[{role_id:'reviewer',persona_prompt:'Future task persona.',model_profile_ref:{model_id:'m3'}}]});
+  f.s.run("UPDATE policies SET model_id='m3' WHERE repository_id='r'");
+  const first=await runRole(f.spec,'reviewer',undefined,undefined,{prepare:async(instance,resolved)=>{
+    assert.ok(instance.snapshot_id);assert.equal(instance.config_revision,original.revision);
+    assert.equal(resolved.snapshot.model.id,'m2');
+  }});
+  assert.ok(first.result.prompt.includes('Pinned task persona.'));assert.equal(f.requests[0].model,'reviewer-model');
+  assert.equal(roleConfig(f.s,f.task).revision,original.revision);
+  await runRole(f.spec,'reviewer');assert.equal(f.requests[1].model,'reviewer-model');
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input) VALUES('new','r','task.request','running','New task','{}')");
+  captureTaskConfiguration(f.s,'new');const next=await runRole({...f.spec,task:f.s.get("SELECT * FROM tasks WHERE id='new'")},'reviewer');
+  assert.ok(next.result.prompt.includes('Future task persona.'));assert.equal(f.requests[2].model,'workflow-model');
+});
+
+test('explicit V2 apply continues a pinned task at a checkpoint and keeps the applied revision for later assignments', async t => {
+  let f,applied;
+  f=await fixture(t,(body,n)=>{
+    if(n===1){
+      assert.ok(body.messages[0].content.includes('Creation revision.'));
+      applied=f.put({roles:[{role_id:'reviewer',persona_prompt:'Explicit revision.'}]});
+      assert.equal(roleApi(f.s,admin,'POST',new URL('http://local/api/tasks/t/roles/apply'),{role:'reviewer',expected_revision:applied.revision}).pending,true);
+      return call('read_file',{path:'README.md'});
+    }
+    assert.ok(body.messages[0].content.includes('Explicit revision.'));return call('finish',{ok:true});
+  });
+  f.put({roles:[{role_id:'reviewer',persona_prompt:'Creation revision.'}]});captureTaskConfiguration(f.s,'t');
+  const result=await runRole({...f.spec,tools:[tool('read_file'),tool('finish')],execute:async()=>({content:'Observed file'})},'reviewer');
+  const instance=f.s.get('SELECT * FROM role_instances WHERE id=?',result.instance_id);assert.equal(instance.config_revision,applied.revision);
+  const runs=f.s.all('SELECT * FROM task_runs WHERE role_instance_id=? ORDER BY rowid',result.instance_id);
+  assert.equal(runs[0].stop_reason,'role_revision_checkpoint');assert.notEqual(runs[0].role_snapshot,runs[1].role_snapshot);
+  f.put({roles:[{role_id:'reviewer',persona_prompt:'Future defaults only.'}]});
+  assert.equal((await runRole(f.spec,'reviewer')).instance_id,result.instance_id);
+  assert.equal(f.s.get('SELECT config_revision FROM role_instances WHERE id=?',result.instance_id).config_revision,applied.revision);
 });
