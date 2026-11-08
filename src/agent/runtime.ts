@@ -183,7 +183,7 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
       return stop('agent_output_budget_exhausted', 'retry_wait', 'Model exhausted its output budget before a valid submission. Rebuild bounded context before retrying.');
     if (typeof message.content === 'string' && message.content.length > maxOutput)
       return stop('agent_output_invalid', undefined, 'Agent returned content beyond the output limit.');
-    if (spec.finish) {
+    if (spec.finish && !spec.validate) {
       messages.push({role:'assistant',content:typeof message.content==='string'?spec.redactor.text(message.content):''},
         {role:'user',content:`A text response is not a submission. Call ${spec.finish.name} with the required structured result using the evidence already available.`});
       save();continue;
