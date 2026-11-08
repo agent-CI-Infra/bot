@@ -179,6 +179,15 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
       }
       continue;
     }
+    if (value?.choices?.[0]?.finish_reason === 'length')
+      return stop('agent_output_budget_exhausted', 'retry_wait', 'Model exhausted its output budget before a valid submission. Rebuild bounded context before retrying.');
+    if (typeof message.content === 'string' && message.content.length > maxOutput)
+      return stop('agent_output_invalid', undefined, 'Agent returned content beyond the output limit.');
+    if (spec.finish) {
+      messages.push({role:'assistant',content:typeof message.content==='string'?spec.redactor.text(message.content):''},
+        {role:'user',content:`A text response is not a submission. Call ${spec.finish.name} with the required structured result using the evidence already available.`});
+      save();continue;
+    }
     if (typeof message.content !== 'string' || message.content.length > maxOutput)
       return stop('agent_output_invalid', undefined, 'Agent 返回内容无效或超过输出上限。');
     // Validators see raw content to reject (rather than silently save) sensitive output.

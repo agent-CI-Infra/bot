@@ -98,3 +98,36 @@ test('declared dependency waits release the source, reject cycles and resume on 
  waitForCoordinatedTasks(f.s,source,{task_ids:['independent'],condition:'delivered',reason:'Check prerequisite'});f.s.run("UPDATE tasks SET status='waiting_coordination' WHERE id='a'");f.s.run("UPDATE tasks SET status='failed' WHERE id='independent'");resumeCoordinatedTasks(f.s,()=>false);assert.equal(f.s.get("SELECT status FROM tasks WHERE id='a'").status,'queued');
  assert.ok(JSON.parse(f.s.get("SELECT input FROM tasks WHERE id='a'").input).coordination_dependency_result[0].blocked);
 });
+
+test('coordination rebuilds bounded context on retry and exposes scoped evidence pages',async t=>{
+ const {readCoordinationEvidence}=await import('../dist/tasks/coordination.js');let bodies=[];
+ const f=await setup(t,body=>{bodies.push(body);return call('submit_coordination',notices());});
+ f.records().history('b','large_observation',{text:'x'.repeat(60000)});
+ const evidence=f.s.get("SELECT id FROM task_history WHERE task_id='b' AND type='large_observation'");
+ const page=readCoordinationEvidence(f.s,['a','b'],{task_id:'b',ref:'task_history:'+evidence.id});
+ assert.equal(page.content.length,8000);assert.equal(page.next_offset,8000);
+ assert.equal(readCoordinationEvidence(f.s,['a'],{task_id:'b',ref:'task_history:'+evidence.id}).error,'coordination_task_out_of_scope');
+ const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);const worker=new CoordinationWorker(f.s);await drain(worker);
+ const notice=coordinationContext(f.s,'a').notices[0];acknowledgeCoordination(f.s,'a',{notice_id:notice.id,disposition:'disputed',reason:'Need another bounded evaluation'});await drain(worker);
+ assert.equal(bodies.length,2);for(const body of bodies){assert.ok(JSON.stringify(body.messages).length<20000);assert.ok(!JSON.stringify(body.messages).includes('x'.repeat(1000)));}
+ assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?',req.coordination_id).state,'awaiting_feedback');await worker.close();
+});
+
+
+test('coordinator repairs an omitted source-task notice without repeating evidence collection',async t=>{
+ let calls=0;const f=await setup(t,body=>{calls++;const result=notices();if(calls===1)result.notices=result.notices.filter(n=>n.task_id!=='a');else assert.ok(JSON.stringify(body.messages).includes('requesting task a'));return call('submit_coordination',result);});
+ const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);const worker=new CoordinationWorker(f.s);await drain(worker);
+ assert.equal(calls,2);assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?',req.coordination_id).state,'awaiting_feedback');await worker.close();
+});
+
+test('coordinator discovers omitted same-project owners without expanding cross-project access',async t=>{
+ let turn=0;const f=await setup(t,body=>{
+  turn++;if(turn===1)return call('read_project_task',{});
+  const observations=body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));
+  if(turn===2){const index=observations.at(-1);assert.ok(index.tasks.some(t=>t.id==='independent'));assert.ok(!index.tasks.some(t=>t.id==='foreign'));return call('read_project_task',{task_id:'independent'});}
+  if(turn===3){assert.equal(observations.at(-1).task.id,'independent');return call('read_project_task',{task_id:'foreign'});}
+  assert.equal(observations.at(-1).error,'coordination_task_out_of_scope');return call('submit_coordination',notices());
+ });
+ const req=requestCoordination(f.s,f.s.get("SELECT * FROM tasks WHERE id='a'"),request);const worker=new CoordinationWorker(f.s);await drain(worker);
+ assert.equal(f.s.get('SELECT state FROM task_coordinations WHERE id=?',req.coordination_id).state,'awaiting_feedback');await worker.close();
+});
