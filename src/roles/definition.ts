@@ -39,6 +39,7 @@ const idPattern = /^[a-z][a-z0-9_-]{0,31}$/;
 // Validation errors name the configuration field, so the console and API can point at it.
 const invalid = (code: string, field: string): never => fail(400, code, field);
 const builtinNames: Record<string, [string, string]> = {
+  coordinator:['Task Coordinator','Resolves explicit cross-task coordination requests without product execution or acceptance authority.'],
   manager: ['Project controller', 'Coordinates the project flow for one task: queries task facts, delegates bounded work, nominates a delivery for independent QA.'],
   dev: ['Developer', 'Implements or investigates the task within the entry point\'s existing authority.'],
   test: ['Tester', 'Independently tests the fixed candidate.'], reviewer: ['Reviewer', 'Independently inspects the fixed candidate for actionable defects.'],
@@ -63,15 +64,19 @@ export function roleStorageV2(s: Store) {
 export function roleConfiguration(s: Store, repositoryId: string, stored?: any): RoleConfiguration {
   const saved = stored===undefined?s.get('SELECT value FROM settings WHERE key=?', 'roles:' + repositoryId):undefined;
   const value = stored??(saved ? JSON.parse(saved.value) : { enabled: false, harnesses: {} });
-  if (value.schema === 2) return value;
+  if (value.schema === 2) {
+    if(value.roles.some((r:RoleDefinitionV2)=>r.role_id==='coordinator'))return value;
+    const fallback=roleConfiguration(s,repositoryId,{enabled:value.enabled,harnesses:{}}).roles.find(r=>r.role_id==='coordinator')!;
+    return {...value,roles:[...value.roles,fallback]};
+  }
   // Legacy: built-in prompts with appended project instructions, the per-role driver map, the native manager.
   const legacy = configuredRoles(value);
   return { schema: 2, revision: 0, enabled: !!value.enabled, legacy: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } }, skills: [],
     roles: legacy.map(r => { const kind = roleKind(r.id), [name, responsibility] = names(r.id);
       const custom = (value.roles ?? []).find((c: any) => c.id === r.id);
       return { role_id: r.id, revision: 0, enabled: true, kind, name, responsibility, persona_prompt: custom?.prompt ?? '', model_profile_ref: null, skill_bundle_ref: null,
-        harness_ref: harnessRef(r.harness), capability_policy_ref: catalogRef(capabilityPolicies, allowedFor(kind).capability[0]!), environment_profile_ref: catalogRef(environmentProfiles, allowedFor(kind).environment[0]!),
-        budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'), output_schema_ref: catalogRef(outputSchemas, allowedFor(kind).output[0]!) }; }) };
+        harness_ref: harnessRef(r.harness), capability_policy_ref: catalogRef(capabilityPolicies,r.id==='coordinator'?'coordinator':r.id==='manager'?'controller-coordination':allowedFor(kind).capability.find(id=>id==='controller')??allowedFor(kind).capability[0]!), environment_profile_ref: catalogRef(environmentProfiles, allowedFor(kind).environment[0]!),
+        budget_policy_ref: catalogRef(budgetPolicies, 'entry-default'), output_schema_ref: catalogRef(outputSchemas,r.id==='coordinator'?'coordination-result':allowedFor(kind).output[0]!) }; }) };
 }
 export const entryEnabled = (config: RoleConfiguration, entry: Entry) => config.enabled && config.controller.entries[entry] === true;
 
@@ -162,11 +167,11 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       const entry = list.find(e => e.id === ref.id)!; if (ref.version !== undefined && ref.version !== entry.version) invalid('reference_version_unavailable', `${field}.${key}.version`);
       return { id: entry.id, version: entry.version };
     };
-    const harnessInput = given.harness_ref ?? { id: defaultHarness(kind) };
+    const harnessInput = given.harness_ref ?? { id: given.role_id==='coordinator'?'native':defaultHarness(kind) };
     if (!harnessInput || typeof harnessInput.id !== 'string') invalid('invalid_role_reference', `${field}.harness_ref`);
     const harness = harnesses.find(h => h.id === harnessInput.id); if (!harness) invalid('unknown_role_harness', `${field}.harness_ref.id`);
     // The project controller runs on the real Pi harness; a worker kind cannot be moved onto a driver that cannot run it.
-    if (!harness!.kinds.includes(kind)) invalid('harness_role_unsupported', `${field}.harness_ref.id`);
+    if (!(id==='coordinator'?harness!.environment==='control_plane':harness!.kinds.includes(kind))) invalid('harness_role_unsupported', `${field}.harness_ref.id`);
     if (harnessInput.version !== undefined && harnessInput.version !== harness!.version) invalid('harness_version_unavailable', `${field}.harness_ref.version`);
     let model: ModelProfileRef | null = null;
     if (given.model_profile_ref !== undefined && given.model_profile_ref !== null) {
@@ -202,9 +207,9 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     }
     const definition: RoleDefinitionV2 = { role_id: id, revision: 0, enabled, kind, name: textField('name', 80, defaultName), responsibility: textField('responsibility', 2000, defaultResponsibility),
       persona_prompt: textField('persona_prompt', 16000, ''), model_profile_ref: model, skill_bundle_ref: skill, harness_ref: { id: harness!.id, version: harness!.version },
-      capability_policy_ref: pick('capability_policy_ref', capabilityPolicies, allowed.capability, allowed.capability[0]!, 'capability_policy_not_allowed'),
+      capability_policy_ref: pick('capability_policy_ref', capabilityPolicies, allowed.capability, (given.role_id==='coordinator'?'coordinator':kind==='controller'?'controller-coordination':allowed.capability[0]!), 'capability_policy_not_allowed'),
       environment_profile_ref: pick('environment_profile_ref', environmentProfiles, allowed.environment, allowed.environment[0]!, 'environment_profile_not_allowed'),
-      budget_policy_ref: budget, output_schema_ref: pick('output_schema_ref', outputSchemas, allowed.output, allowed.output[0]!, 'output_schema_not_allowed') };
+      budget_policy_ref: budget, output_schema_ref: pick('output_schema_ref', outputSchemas, allowed.output, (id==='coordinator'?'coordination-result':allowed.output[0]!), 'output_schema_not_allowed') };
     // A role's revision moves only when its own definition changes.
     const previous = current.roles.find(r => r.role_id === id);
     definition.revision = previous && !current.legacy && definitionHash(previous) === definitionHash(definition) ? previous.revision : (previous?.revision ?? 0) + 1;
@@ -214,7 +219,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   if (typeof controllerInput !== 'object' || Array.isArray(controllerInput) || Object.keys(controllerInput).some(k => !['role', 'entries'].includes(k))) invalid('invalid_controller', 'controller');
   const controllerRole = controllerInput.role ?? 'manager';
   // Exactly one project controller: the controller-kind role.
-  if (roles.find(r => r.role_id === controllerRole)?.kind !== 'controller') invalid('invalid_controller', 'controller.role');
+  if (controllerRole==='coordinator'||roles.find(r => r.role_id === controllerRole)?.kind !== 'controller') invalid('invalid_controller', 'controller.role');
   const entryInput = controllerInput.entries ?? current.controller.entries;
   if (!entryInput || typeof entryInput !== 'object' || Object.keys(entryInput).some(k => !entries.includes(k as Entry)) || Object.values(entryInput).some(v => typeof v !== 'boolean')) invalid('invalid_controller_entries', 'controller.entries');
   const config: RoleConfiguration = { schema: 2, revision: current.revision + 1, enabled: input.enabled, controller: { role: controllerRole, entries: Object.fromEntries(entries.map(e => [e, entryInput[e] ?? false])) as Record<Entry, boolean> }, roles, skills };
@@ -292,7 +297,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     profileHash = modelProfileHash({ api_url: model.url, model_name: model.model });
   }
   if (!harness.externalModel) checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => { throw new TaskError(code, 'waiting_configuration', `${at}：${harness.id} 不支持这个模型配置。`); });
-  if (!harness.kinds.includes(definition.kind) && !options.harness && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
+  if (!(roleId==='coordinator'?harness.environment==='control_plane':harness.kinds.includes(definition.kind)) && !options.harness && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
   const policy = capabilityPolicy(definition.capability_policy_ref.id);
   if (!policy || policy.version !== definition.capability_policy_ref.version) return stop('capability_policy_unavailable', 'waiting_configuration', `${field}.capability_policy_ref：策略版本已不存在。`);
   const environment = environmentProfiles.find(e => e.id === definition.environment_profile_ref.id)!, schema = outputSchemas.find(o => o.id === definition.output_schema_ref.id)!;
