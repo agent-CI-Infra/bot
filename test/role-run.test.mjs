@@ -13,6 +13,7 @@ import { taskToolServer } from '../dist/roles/task-tools.js';
 import { TaskToolGateway } from '../dist/roles/gateway.js';
 import { traceEvent, beginRun } from '../dist/tasks/trace.js';
 import { ProjectMemory } from '../dist/memory/project.js';
+import { authorizeKnowledgeTask } from './knowledge-fixture.mjs';
 import { validateCandidateRef, validateRunContext, assertSecretFree, protocolRecovery } from '../dist/roles/protocol.js';
 import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, recordCheckpoint } from '../dist/roles/role-run.js';
 import { verifyRunEnvironment } from '../dist/projects/run-environment.js';
@@ -54,7 +55,7 @@ function bound(s, { task = 't', scope = 'assign-1', project = 'r', role = 'dev',
   const run = beginRun(s, s.get('SELECT * FROM tasks WHERE id=?', task), 'execution', {});
   s.run('UPDATE task_runs SET role=?,role_instance_id=? WHERE id=?', role, instance, run.id);
   const lease = allocateLease(s, task, scope, run.id);
-  const tenant = 'account:a';
+  const tenant = s.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)?.tenant_id ?? 'account:a';
   return { run, epoch: lease.epoch, binding: { tenant_id: tenant, project_id: project, task_id: task, run_id: run.id, lease_epoch: lease.epoch } };
 }
 
@@ -137,9 +138,9 @@ test('capability tokens are bound to tenant, project, task, run and epoch; reuse
 
 test('the gateway expands only this run\'s permitted references: other tasks, other role instances and guessed ids read as missing', async t => {
   const f = await fixture(t, () => call('finish', {}));
-  const memory = new ProjectMemory(f.s);
-  memory.save('r', 'role.reviewer.private-note', { body: 'REVIEWER_ONLY_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: { role: 'reviewer' } }, 0, 'agent:t', 'fixture');
-  memory.save('r', 'shared-note', { body: 'SHARED_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: {} }, 0, 'agent:t', 'fixture');
+  const memory = new ProjectMemory(f.s, { actor: authorizeKnowledgeTask(f.s) });
+  memory.save('r', 'role.reviewer.private-note', { body: 'REVIEWER_ONLY_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: { role: 'reviewer' } }, 0, 'user:owner', 'fixture');
+  const shared = memory.save('r', 'shared-note', { body: 'SHARED_NOTE', kind: 'experience', sources: [{ task_id: 't' }], scope: {} }, 0, 'user:owner', 'fixture');
   f.s.run("INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at) VALUES('dev-i','t','dev','{}','native','now'),('rev-i','t','reviewer','{}','native','now')");
   const dev = bound(f.s, { instance: 'dev-i' }), reviewer = bound(f.s, { role: 'reviewer', scope: 'assign-r', instance: 'rev-i' });
   f.s.run("INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)", hash('9'), 'r', 'dev', 1, 1, JSON.stringify({ schema: 2, legacy: true, role_id: 'dev', kind: 'writer', capability: { id: 'writer', version: 'x', tools: null } }), 'now');
@@ -159,6 +160,12 @@ test('the gateway expands only this run\'s permitted references: other tasks, ot
   assert.ok(list.records.some(r => r.ref === ownFinding)); assert.ok(!list.records.some(r => r.ref === reviewerInput));
   const reviewerMemory = f.s.get("SELECT id FROM project_memories WHERE fact_key='role.reviewer.private-note'").id;
   assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: reviewerMemory } })).error, 'knowledge_not_found');
+  assert.ok((await read(`project_memories:${shared.id}:1`)).content.includes('SHARED_NOTE'));
+  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: shared.id, revision: 1 } })).body, 'SHARED_NOTE');
+  memory.save('r', shared.key, { catalog: { audience: 'role:reviewer' } }, 1, 'user:owner', 'withdraw Dev view');
+  assert.equal((await read(`project_memories:${shared.id}:1`)).error, 'task_record_not_found');
+  assert.equal((await g.call(token, { tool: 'read_knowledge', arguments: { id: shared.id, revision: 1 } })).error, 'knowledge_not_found');
+  assert.equal((await g.call(token, { tool: 'propose_experience', arguments: { key: 'withdrawn', body: 'not retained', evidence: [`project_memories:${shared.id}:1`] } })).error, 'experience_evidence_invalid');
   // Tools that are not the gateway's (publication, merge, configuration, SQL, shell) do not exist here.
   for (const name of ['create_pull_request', 'merge_pull_request', 'update_role_configuration', 'sql', 'run_command'])
     assert.equal((await g.call(token, { tool: name, arguments: {} })).error, 'tool_not_allowed', name);
