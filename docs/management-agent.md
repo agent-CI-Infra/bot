@@ -53,6 +53,6 @@ RoleDefinitionV2 的显式角色 apply 仍在安全检查点结束旧 run，并�
 
 ## 扩展与验证
 
-`ManagementService.register` 为配置发布、知识修订、计划和通知提供可信 execute / reconcile 注册接口。`knowledgeSearch` 是受限检索接入点。知识、计划和通知模块未注册时返回明确不可用，不创建内存计划。角色配置沿用 RoleDefinitionV2 接口与版本检查；Pi prepare、角色快照和显式 revision 续接与项目主控共用现有实现。
+`ManagementService.register` 为配置发布、知识修订、计划和通知提供可信 execute / reconcile 注册接口。`knowledgeSearch` 是受限检索接入点。计划和通知由 [持久化调度模块](schedules.md) 注册，表单和管理工具走同一服务；未注册的业务工作流处理器明确不支持。知识模块未注册时返回明确不可用。角色配置沿用 RoleDefinitionV2 接口与版本检查；Pi prepare、角色快照和显式 revision 续接与项目主控共用现有实现。
 
 `test/management.test.mjs` 覆盖权限、并发、幂等、配置来源、审批、未知结果、停止和会话隔离；`e2e/management.spec.mjs` 使用独立 SQLite、随机监听端口和本地模型协议夹具验证真实持久化查询、配置修改、任务管理及浏览器/API 一致性。全部临时产物应放在工作树 `.tmp/`，运行测试时设置 `TMPDIR` 为该目录。

@@ -20,7 +20,7 @@ async function renderManagement(panel, projectId = null) {
   const input=document.createElement('form'),message=textarea('management-message','',{rows:3,placeholder:'例如：任务为什么没有继续？将检视提示词改成……'}),send=element('button','发送'),stopButton=element('button','停止','quiet');
   message.setAttribute('aria-label','管理消息');send.type='submit';stopButton.type='button';stopButton.hidden=true;input.append(field('管理消息',message),send,stopButton);panel.append(input);
   const forms=element('div','','management-forms');panel.append(forms);
-  let conversation=null,cursor=0,active=null,reading=false,scopeGeneration=0,streamController=null;
+  let conversation=null,cursor=0,active=null,reading=false,scopeGeneration=0,streamController=null,formGeneration=0;
   const output=(label,value)=>{
     const box=element('article','','management-observation');box.append(element('h4',label));
     if(typeof value==='string')box.append(element('p',value));
@@ -102,9 +102,11 @@ async function renderManagement(panel, projectId = null) {
     catch(e){status.textContent=e.message.includes('management_revision_conflict')?'配置或任务已有更新，请重新读取当前事实和版本后提交。':e.message;}
   }
   async function configureForms(){
+    const generation=++formGeneration;
     forms.replaceChildren();if(!target().project_id){forms.append(note('选择具体项目后可以修改配置或管理任务。'));return;}
     const project=target().project_id;
     const effective=await api(endpoint+'/query','POST',{operation:'get_effective_config',target:{project_id:project},arguments:{}});
+    if(generation!==formGeneration)return;
     const workflow=document.createElement('select');workflow.setAttribute('aria-label','工作流');
     for(const w of effective.workflows){const o=element('option',w.name+' · '+w.prompt.source);o.value=w.id;workflow.append(o);}
     const prompt=textarea('prompt','',{rows:5});prompt.setAttribute('aria-label','默认提示词');
@@ -114,6 +116,7 @@ async function renderManagement(panel, projectId = null) {
     form.onsubmit=async e=>{e.preventDefault();await submit({command:{operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision}});};if(chosen()?.prompt.path){const publish=button('创建配置 PR',()=>submit({command:{operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision}}),'quiet');form.append(publish);}
     forms.append(form);
     const tasks=(await api(endpoint+'/query','POST',{operation:'list_tasks',target:{project_id:project},arguments:{limit:100}})).tasks;
+    if(generation!==formGeneration)return;
     const task=document.createElement('select');task.setAttribute('aria-label','管理任务');
     for(const t of tasks){const o=element('option',t.task.summary+' · '+t.task.status);o.value=t.task.id;task.append(o);}
     const taskBox=element('section','');taskBox.append(element('h3','任务管理'),field('任务',task));
@@ -121,6 +124,10 @@ async function renderManagement(panel, projectId = null) {
     for(const [action,caption] of [['pause','暂停任务'],['cancel','取消任务'],['retry','重试任务'],['adopt-config','采用新执行配置']])taskBox.append(button(caption,async()=>{try{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});await submit({command:{operation:'task.'+action,target:{project_id:project,task_id:task.value},arguments:{},expected_revision:current.revision}});}catch(e){status.textContent=e.message;}},'quiet'));
     const instruction=textarea('instruction','',{rows:2});instruction.setAttribute('aria-label','补充指令');taskBox.append(field('追加补充指令',instruction),button('追加指令',async()=>{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});await submit({command:{operation:'task.instructions',target:{project_id:project,task_id:task.value},arguments:{instruction:instruction.value},expected_revision:current.revision}});},'quiet'));
     forms.append(taskBox);
+    if (typeof renderSchedules === 'function') {
+      const schedules = element('section', ''); forms.append(schedules);
+      try { await renderSchedules(schedules, project); } catch (e) { schedules.append(note('定时计划暂不可用：' + e.message)); }
+    }
   }
   input.onsubmit=e=>{e.preventDefault();if(message.value.trim()){void submit({content:message.value});message.value='';}};
   stopButton.onclick=async()=>{if(active)await api(endpoint+'/conversations/'+conversation+'/messages/'+active+'/stop','POST',{});};

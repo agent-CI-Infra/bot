@@ -55,9 +55,9 @@ export function bindFixture(h, id, principal, actor = 'ou_alice', tenant = 'acto
   h.store.run(`INSERT INTO external_identities(id,principal_id,provider,host,connector,external_tenant,external_actor,display_name,status,verified_at)
     VALUES(?,?,'feishu','open.feishu.cn',?,?,?,?,'active',?)`, randomId(), principal, id + ':' + app, tenant, actor, actor, Date.now());
 }
-export async function channelFixture(t) {
+export async function channelFixture(t, options = {}) {
   const wire = transport(); let service;
-  const f = await managementFixture(t, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }, onChannels: s => { service = s; } });
+  const f = await managementFixture(t, { ...options, channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }, onChannels: s => { service = s; } });
   const id = await connector(f.admin), principal = (await f.admin('/api/auth/me')).value.id;
   bindFixture(f.h, id, principal);
   return { ...f, wire, service, id, principal };

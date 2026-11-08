@@ -13,7 +13,8 @@ import { updatePolicy } from '../app/management.js';
 import { TaskError } from '../agent/common.js';
 import { roleApi } from '../roles/api.js';
 import { installationExecutionDenied } from '../installations/archive.js';
-import { commands, commandSchema, querySchema, queries as queryNames, validate } from './catalog.js';
+import { commands, commandSchema, querySchema, queries as queryNames, schedulingQueries, validate } from './catalog.js';
+import { schedulingCommands } from '../schedules/schema.js';
 
 export interface ManagementCommand {
   operation: string; target: {project_id:string;task_id?:string;workflow_id?:string}; arguments: Json; expected_revision: string;
@@ -32,9 +33,10 @@ export class ManagementService {
   // A trusted transport rechecks its persisted source when a deferred command resumes in Web.
   sourceGuard?: (command: Row) => void;
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
+  schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
   constructor(readonly store: Store, readonly workflows: WorkflowService, readonly tasks: TaskCommands) {}
   register(operation: string, extension: ManagementExtension): void {
-    if(!['configuration.pr','knowledge.revise','schedule.register','notification.register'].includes(operation)||this.extensions.has(operation))throw new Error('invalid_management_registration');
+    if(!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation))throw new Error('invalid_management_registration');
     this.extensions.set(operation,extension);
   }
   user(actor: ActorContext): Actor {
@@ -60,6 +62,8 @@ export class ManagementService {
       return parameterHash({task:t,record:this.store.get('SELECT * FROM task_records WHERE task_id=?',target.task_id!),instructions:this.store.get("SELECT max(id) AS id FROM task_history WHERE task_id=? AND type='supplemental_instruction'",target.task_id!)});
     }
     return parameterHash({policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',target.project_id),
+      schedules:this.store.all('SELECT id,revision FROM schedules WHERE project_id=? ORDER BY id',target.project_id),
+      subscriptions:this.store.all('SELECT id,revision FROM notification_subscriptions WHERE project_id=? ORDER BY id',target.project_id),
       workflows:this.store.all('SELECT * FROM workflows WHERE repository_id=? ORDER BY id',target.project_id),
       roles:this.store.get('SELECT value FROM settings WHERE key=?','roles:'+target.project_id),
       sources:this.store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',target.project_id),
@@ -85,7 +89,7 @@ export class ManagementService {
     if((operation==='workflow.update'&&target.task_id!)||(operation.startsWith('task.')&&target.workflow_id)||operation==='task.create'&&target.task_id!)fail(400,'invalid_management_target');
     // Stop/cancel remains available while disabled. Project defaults only persist configuration;
     // their switches take effect after an explicit enable. Execution commands still require an active project.
-    if(!['task.pause','task.cancel'].includes(operation)){
+    if(!['task.pause','task.cancel','schedule.pause','schedule.delete','subscription.pause','subscription.delete'].includes(operation)){
       if(!project.enabled&&operation!=='project.update')fail(409,'project_disabled');
       const denied=installationExecutionDenied(this.store,project.account_id,target.project_id);if(denied)fail(409,'installation_unavailable');
       if(!this.store.get('SELECT 1 FROM installed_repositories WHERE repository_id=? AND account_id=? AND installed=1',target.project_id,project.account_id))fail(409,'installation_scope_changed');
@@ -127,7 +131,11 @@ export class ManagementService {
     const operation=String(input.operation),target=input.target as ManagementCommand['target'],args=input.arguments as any;
     if(target.project_id)this.scope(actor,target.project_id,operation==='search_knowledge'?'knowledge.read':'tasks.read');
     const ids=target.project_id?[target.project_id]:this.projects(actor),offset=args.offset??0,limit=args.limit??20;
-    if(operation==='get_capabilities')return {queries:queryNames,commands:Object.entries(commands).map(([operation,c])=>({operation,...c,available:!['configuration.pr','knowledge.revise','schedule.register','notification.register'].includes(operation)||this.extensions.has(operation)})),scopes:listEffectiveScopes(this.store,actor.principal_id).filter(s=>s.state==='active'&&(!actor.tenant_id||!s.tenant_id||s.tenant_id===actor.tenant_id)&&(!actor.project_id||s.scope!=='project'||s.project_id===actor.project_id))};
+    if(schedulingQueries.includes(operation)){
+      if(!this.schedulingQuery)fail(409,'scheduling_not_registered');
+      return this.schedulingQuery!(actor,operation,target.project_id,args);
+    }
+    if(operation==='get_capabilities')return {queries:queryNames,commands:Object.entries(commands).map(([operation,c])=>({operation,...c,available:!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation)})),scopes:listEffectiveScopes(this.store,actor.principal_id).filter(s=>s.state==='active'&&(!actor.tenant_id||!s.tenant_id||s.tenant_id===actor.tenant_id)&&(!actor.project_id||s.scope!=='project'||s.project_id===actor.project_id))};
     if(operation==='list_projects')return {projects:ids.slice(offset,offset+limit).map(id=>{
       const project=this.scope(actor,id),policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',id)!;
       return {id,tenant_id:this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',id)?.tenant_id,full_name:project.full_name,enabled:!!project.enabled,configuration_gaps:[...(!policy.model_id?['model_not_configured']:[]),...(installationExecutionDenied(this.store,project.account_id,id)?['installation_unavailable']:[])],url:'#/projects/'+id+'/basic'};
