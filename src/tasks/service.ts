@@ -1,3 +1,4 @@
+import {requestCoordination,validCoordination,coordinationContext,coordinationVersion,assertCoordinationCurrent,acknowledgeCoordination,type CoordinationRequest} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
 import { stop } from '../agent/common.js';
 import type { Store } from '../storage/database.js';
@@ -9,15 +10,16 @@ import { captureTaskConfiguration } from './configuration.js';
 export interface Contract { goal: string; scope: string[]; constraints?: string[]; criteria: string[]; endpoint: string | null; source: unknown; completeness?: string }
 export interface Artifact { kind: string; reference: string; version: string; content?: unknown }
 export interface Evidence { source: string; version: string; verified: boolean; result: unknown }
-export interface Candidate { id: string; revision: number; artifacts: Artifact[]; evidence: Evidence[]; claims: unknown; created_at: string }
+export interface Candidate { id: string; revision: number; artifacts: Artifact[]; evidence: Evidence[]; claims: unknown; created_at: string; coordination_version?: string }
 export type Outcome = 'pass' | 'pass_with_issues' | 'return' | 'insufficient_evidence' | 'needs_human';
 export interface Residual { key: string; description: string; evidence: string; impact: string; nonblocking_reason: string; goal: string; criteria: string[] }
-export interface Verdict { outcome: Outcome; reason: string; gaps: string[]; residuals: Residual[]; core_complete: boolean; required_evidence_complete: boolean; acceptable_risk: boolean }
+export interface Verdict { coordination?: CoordinationRequest; outcome: Outcome; reason: string; gaps: string[]; residuals: Residual[]; core_complete: boolean; required_evidence_complete: boolean; acceptable_risk: boolean }
 const hash = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 const outcomes = new Set(['pass','pass_with_issues','return','insufficient_evidence','needs_human']);
 export function validateVerdict(value: any): Verdict {
   if (!value || !outcomes.has(value.outcome) || typeof value.reason !== 'string' || !value.reason.trim() || !Array.isArray(value.gaps) || value.gaps.some((x: unknown)=>typeof x!=='string') ||
     !Array.isArray(value.residuals) || ['core_complete','required_evidence_complete','acceptable_risk'].some(k=>typeof value[k]!=='boolean')) throw new Error('invalid_acceptance_result');
+  if(value.coordination!==undefined&&(!validCoordination(value.coordination)||value.outcome!=='needs_human'))throw new Error('invalid_acceptance_coordination');
   const passing = ['pass','pass_with_issues'].includes(value.outcome);
   if (passing && (!value.core_complete || !value.required_evidence_complete || !value.acceptable_risk || value.gaps.length)) throw new Error('acceptance_core_incomplete');
   if (!passing && !value.gaps.length) throw new Error('acceptance_gap_required');
@@ -51,7 +53,7 @@ export class TaskRecords {
     if (!r||!t) throw new Error('task_not_found');
     return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|needs_replan$|failed$)/.test(t.status)?t.error_code:null},
       selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
-      scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
+      coordination:coordinationContext(this.store,id),scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
   project(id: string) { const row=this.store.get('SELECT * FROM project_context WHERE repository_id=?',id);return row?{revision:row.revision,facts:JSON.parse(row.facts),updated_at:row.updated_at}:null; }
   setProject(id: string, facts: {source:string;fact:string}[], expectedRevision: number) {
@@ -82,12 +84,14 @@ export class TaskRecords {
   }
 
   tool(id: string, name: string, args: any) {
+    if(name==='read_coordination')return coordinationContext(this.store,id);
+    if(name==='acknowledge_coordination')return acknowledgeCoordination(this.store,id,args);
     if(name==='record_scope_difference')return recordScopeDifference(this.store,id,args);
     if(name==='read_task_history'){
       const offset=args?.offset??0,limit=args?.limit??10;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page'};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      const filter="task_id=? AND type IN ('scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized')";
+      const filter="task_id=? AND type IN ('coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
       return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(JSON.parse(row.data))}))};
@@ -112,10 +116,11 @@ export class TaskRecords {
     const current=this.get(id);
     if(!Array.isArray(artifacts)||!artifacts.length||artifacts.some(a=>!a||!a.kind||!a.reference||!a.version)||!Array.isArray(evidence)||evidence.some(e=>!e||!e.source||!e.version||typeof e.verified!=='boolean'))throw new Error('invalid_task_candidate');
     const executionRevision=this.store.get('SELECT revision FROM task_execution_configs WHERE task_id=?',id)?.revision??JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input||'{}').configuration_revision??1;
-    const key=hash({revision:current.revision,execution_revision:executionRevision,artifacts,evidence,claims});
+    const coordination_version=coordinationVersion(this.store,id);
+    const key=hash({...(coordination_version?{coordination_version}:{}),revision:current.revision,execution_revision:executionRevision,artifacts,evidence,claims});
     if(current.candidate?.id===key)return current.candidate;
     if(['completed','succeeded','pr_opened'].includes(current.progress.status))throw new Error('task_already_delivered');
-    const candidate={id:key,revision:current.revision,artifacts,evidence,claims,created_at:new Date().toISOString()};
+    const candidate={id:key,...(coordination_version?{coordination_version}:{}),revision:current.revision,artifacts,evidence,claims,created_at:new Date().toISOString()};
     this.store.run('UPDATE task_records SET candidate=?,acceptance=NULL,pending=NULL WHERE task_id=?',JSON.stringify(candidate),id);this.history(id,'candidate',candidate);return candidate;
     });
   }
@@ -123,6 +128,7 @@ export class TaskRecords {
   stage(id: string, candidateId: string, revision: number, verdict: Verdict, token?: string, binding?: {policy_hash:string}) {
     return this.atomic(()=>{
     this.assertClaim(id,token);validateVerdict(verdict);const current=this.get(id);
+    assertCoordinationCurrent(this.store,id,current.candidate);
     if(current.candidate?.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
     this.store.run('UPDATE task_records SET pending=? WHERE task_id=?',JSON.stringify({...verdict,...binding,candidate_id:candidateId,revision}),id);
     this.history(id,'acceptance_staged',{...verdict,candidate_id:candidateId,revision});
@@ -136,6 +142,7 @@ export class TaskRecords {
       this.assertClaim(id,token);
       const current=this.get(id),task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
       if(!current.candidate||current.candidate.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
+      if(['pass','pass_with_issues'].includes(verdict.outcome))assertCoordinationCurrent(this.store,id,current.candidate);
       if(['cancelled','superseded'].includes(task.status))throw new Error('task_cancelled');
       if(current.acceptance?.candidate_id===candidateId) {
         const {candidate_id:_,revision:_revision,followups:_followups,created_at:_time,exhausted:_exhausted,...previous}=current.acceptance;
@@ -164,7 +171,9 @@ export class TaskRecords {
       this.store.run('UPDATE task_records SET acceptance=?,rounds=?,pending=NULL,next_action=? WHERE task_id=?',JSON.stringify(acceptance),rounds,passing?null:verdict.gaps.join('; '),id);
       const status=passing?successStatus:verdict.outcome==='needs_human'||exhausted?'needs_replan':'queued';
       this.store.run('UPDATE tasks SET status=?,phase=?,error_code=?,next_run_at=0,updated_at=? WHERE id=?',status,passing?(finalize?'done':task.phase):verdict.outcome==='needs_human'||exhausted?'acceptance':'prepare',passing?null:exhausted?'acceptance_no_progress':`acceptance_${verdict.outcome}`,new Date().toISOString(),id);
-      this.history(id,'acceptance',acceptance);return acceptance;
+      this.history(id,'acceptance',acceptance);
+      if(verdict.outcome==='needs_human'&&verdict.coordination){const request=requestCoordination(this.store,task,verdict.coordination);this.store.run("UPDATE tasks SET status='waiting_coordination',error_code='task_coordination_requested' WHERE id=?",id);return {...acceptance,coordination_requested:request.coordination_id};}
+      return acceptance;
     });
   }
 }

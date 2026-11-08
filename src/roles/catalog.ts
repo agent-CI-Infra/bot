@@ -8,7 +8,7 @@ const version = (value: unknown) => createHash('sha256').update(JSON.stringify(v
 
 /** A role's kind fixes the most authority it can ever hold; configuration can only choose an equal or narrower policy. */
 export type RoleKind = 'controller' | 'writer' | 'observer' | 'evaluator';
-export const builtinKinds: Record<string, RoleKind> = { manager: 'controller', dev: 'writer', test: 'observer', reviewer: 'observer', ux: 'observer', qa: 'evaluator' };
+export const builtinKinds: Record<string, RoleKind> = { coordinator:'controller', manager: 'controller', dev: 'writer', test: 'observer', reviewer: 'observer', ux: 'observer', qa: 'evaluator' };
 export const roleKind = (id: string): RoleKind => Object.hasOwn(builtinKinds, id) ? builtinKinds[id]! : 'observer';
 
 /** Authorities that no role policy grants. They stay with the framework, an explicit operator or GitHub rules. */
@@ -19,6 +19,8 @@ const policies = [
   { id: 'controller', kind: 'controller', tools: ['read_task_record', 'read_task_history', 'read_playbook', 'select_playbooks', 'record_progress', 'delegate_role', 'nominate_delivery', 'read_skill'],
     authorities: { ...reserved, query_facts: true, delegate: true, coordinate: true, nominate: true } },
   // The writer keeps the entry's existing trusted tool profile (the workflow permissions); null means "the entry's tools".
+  { id:'controller-coordination',kind:'controller',tools:['read_task_record','read_task_history','read_playbook','select_playbooks','record_progress','delegate_role','nominate_delivery','read_skill','read_coordination','list_project_tasks','request_task_coordination','acknowledge_coordination'],authorities:{...reserved,query_facts:true,delegate:true,coordinate:true,nominate:true}},
+  { id:'coordinator',kind:'controller',tools:['read_project_task','submit_coordination'],authorities:{...reserved,query_facts:true,coordinate:true,delegate:false,nominate:false}},
   { id: 'writer', kind: 'writer', tools: null, authorities: { ...reserved, edit_candidate: true, query_facts: true, delegate: false, nominate: false } },
   { id: 'observer', kind: 'observer', tools: observerTools, authorities: { ...reserved, query_facts: true, delegate: false, nominate: false } },
   { id: 'observer-readonly', kind: 'observer', tools: observerTools.filter(name => name !== 'run_command'), authorities: { ...reserved, query_facts: true, delegate: false, nominate: false } },
@@ -47,8 +49,10 @@ export const budgetPolicies = budgets.map(b => ({ ...b, version: version(b) }));
 // The structured submissions each kind ends with. The schema text itself is the versioned content.
 export const findingsSchema = { type: 'object', properties: { summary: { type: 'string' }, findings: { type: 'array', items: { type: 'object', properties: { description: { type: 'string' }, evidence: { type: 'array', items: { type: 'string' } }, severity: { type: 'string' } }, required: ['description', 'evidence'], additionalProperties: false } }, inspected_scope: { type: 'array', items: { type: 'string' } }, unknowns: { type: 'array', items: { type: 'string' } } }, required: ['summary', 'findings', 'inspected_scope', 'unknowns'], additionalProperties: false };
 export const nominationSchema = { type: 'object', properties: { result_ref: { type: 'string' } }, required: ['result_ref'], additionalProperties: false };
+export const coordinationResultSchema={type:'object',properties:{summary:{type:'string'},outcome:{type:'string',enum:['notices','needs_human']},notices:{type:'array',items:{type:'object',properties:{task_id:{type:'string'},message:{type:'string'},action:{type:'string',enum:['review','rework']}},required:['task_id','message','action'],additionalProperties:false}}},required:['summary','outcome','notices'],additionalProperties:false};
 const schemas = [
   { id: 'delivery-nomination', kinds: ['controller'], tool: 'nominate_delivery', schema: nominationSchema },
+  { id: 'coordination-result', kinds: ['controller'], tool: 'submit_coordination', schema: coordinationResultSchema },
   { id: 'entry-delivery', kinds: ['writer'], tool: null, schema: null, description: 'The entry point\'s own submission: submit_delivery, finish_review or the event workflow finish tool.' },
   { id: 'role-findings', kinds: ['observer'], tool: 'submit_role_result', schema: findingsSchema },
   { id: 'acceptance-verdict', kinds: ['evaluator'], tool: 'submit_acceptance', schema: null, description: 'The framework acceptance verdict validated by validateVerdict.' }

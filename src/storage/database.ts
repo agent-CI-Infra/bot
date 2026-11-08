@@ -1,3 +1,4 @@
+import {coordinationStorage} from '../tasks/coordination.js';
 import { integrationStorage } from '../tasks/integration.js';
 import { roleStorage } from '../roles/storage.js';
 import { memoryStorage } from '../memory/project.js';
@@ -179,6 +180,7 @@ export class Store {
     traceStorage(this);
     memoryStorage(this);
     integrationStorage(this);
+    coordinationStorage(this);
     roleStorage(this);
     identityStorage(this);
     managementStorage(this);

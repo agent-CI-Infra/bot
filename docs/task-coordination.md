@@ -1,0 +1,20 @@
+# On-demand task coordination
+
+Task scope is an initial plan. Ordinary scope differences are explained by Dev, checked by Review and judged by QA; they do not require a coordinator. Explicit user constraints and platform capabilities remain binding.
+
+A Task Manager can use `list_project_tasks` and `request_task_coordination` for a concrete cross-task dependency or shared-contract issue. The request contains an idempotency key, problem, proposal, same-project task IDs and persistent references. It is written before the source task yields with `waiting_coordination`. It does not wait for the model while holding a project execution slot.
+
+`CoordinationWorker` runs only queued explicit requests, one per project in the running control plane. The Coordinator is a controller role with a distinct restricted policy, a native control-plane harness by default, its own role session and retained run/snapshot history. It can read the offered task records and submit advice. It cannot edit code, goals, criteria, permissions, acceptance, task completion or GitHub state. The existing Pi Task Manager remains supported. Existing V2 capability pins are not silently expanded; an older controller policy can be explicitly updated to `controller-coordination` through normal role configuration/apply. Legacy configurations and new controllers use that policy. A missing Coordinator definition in an older V2 configuration gets the default restricted definition.
+
+The result is a set of concrete notices. Each captures the task contract revision and candidate observed by the Coordinator. Notices do not mutate running tasks or in-flight QA. At a safe submission/acceptance boundary, unresolved notices or a changed coordination context prevent publishing with the old candidate/QA. The task resumes on the same role context, reads notices and acknowledges `adopted`, `not_applicable` or `disputed` with reasons. A new submission binds the current notice/feedback version and gets independent QA, even if the code tree is unchanged. Original policy observations can still be reused when applicable. Old decisions remain history. Delivered tasks retain their historical completion; advice for them is recorded as a followup requirement for the source Task Manager, not an automatic reopening of a merged PR.
+
+An objection requeues that explicit request for the Coordinator. Repeated unresolved rounds stop for an explicit human decision after the bounded attempt limit. Model/tool failures retry up to three attempts with backoff, then expose `failed`. Explicit human decisions remain `needs_human`. QA may attach a structured `coordination` request to its `needs_human` verdict when the specific issue is actually cross-task; the original verdict is retained, and the framework schedules coordination before waiting for a person. An ordinary fix or extra file must instead return to execution. There is no global inactivity scanner or blanket automatic escalation.
+
+SQLite tables:
+
+- `task_coordinations`: request, result reference, state, attempt/backoff and claim.
+- `coordination_notices`: versioned advice, feedback and acknowledgement.
+
+`task_history` retains request, notices, feedback, failures and continuation events; Coordinator role runs use the existing run/snapshot tables. Restart recovers unfinished claims and marks abandoned Coordinator runs interrupted. Replays deduplicate requests and notices. Operators may query `GET /api/tasks/:id/coordination` and retry a failed/human-wait request with `POST /api/tasks/:id/coordination/:request_id/retry`, supplying any new instructions via the existing task instruction API. Retries do not approve a delivery.
+
+Regression coverage uses real SQLite and native role execution with a controlled HTTP model. It includes an actual child-process kill during a Coordinator model request, restart continuation, same-project isolation, safe acknowledgement, stale QA rejection and an independent task dispatching while coordination waits. This is not a claim of live Codex/OpenToday acceptance on the new implementation. The running #178 experiment is not silently upgraded by these PRs.

@@ -1,3 +1,4 @@
+import {assertCoordinationCurrent} from '../tasks/coordination.js';
 import type { Store } from '../storage/database.js';
 import { scope,type Actor } from '../app/auth.js';
 import { fields,fail,type Json } from '../core/security.js';
@@ -61,6 +62,7 @@ async function mergeRequest(s:Store,user:Actor,method:string,url:URL,input:Json,
  const filter=scope(user,'repository_id'),task=s.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);if(!task)fail(404,'task_not_found');
  const record=new TaskRecords(s).get(task!.id),result=JSON.parse(task!.result||'null'),accepted=record.acceptance;
  if(!['pr_opened','completed'].includes(task!.status)||!accepted||!['pass','pass_with_issues'].includes(accepted.outcome)||accepted.candidate_id!==record.candidate?.id||accepted.revision!==record.revision||!result?.pr_number||result.sha!==head)fail(409,'merge_requires_accepted_delivery');
+ assertCoordinationCurrent(s,task!.id,record.candidate);
  const policy=s.get('SELECT * FROM policies WHERE repository_id=?',task!.repository_id);
  if(!policy?.enabled||!policy.development_enabled||accepted.policy_hash!==sha(String(policy.test_command||'')))fail(409,'merge_policy_changed');
  const owned=s.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task!.repository_id,result.pr_number);if(!owned||owned.sha!==head)fail(409,'merge_requires_owned_head');
@@ -68,6 +70,7 @@ async function mergeRequest(s:Store,user:Actor,method:string,url:URL,input:Json,
  let pr:any;
  const validate=async()=>{
   const current=new TaskRecords(s).get(task!.id);if(!['pr_opened','completed'].includes(current.progress.status)||current.revision!==record.revision||current.candidate?.id!==record.candidate?.id||current.acceptance?.candidate_id!==accepted.candidate_id)fail(409,'merge_context_changed');
+  assertCoordinationCurrent(s,task!.id,current.candidate);
   const currentPolicy=s.get('SELECT * FROM policies WHERE repository_id=?',task!.repository_id);if(!currentPolicy?.enabled||!currentPolicy.development_enabled||sha(String(currentPolicy.test_command||''))!==accepted.policy_hash)fail(409,'merge_policy_changed');
   pr=await github.object('review.pr',result.pr_number);if(pr.head?.sha!==head||pr.base?.ref!==github.defaultBranch||pr.draft||pr.state!=='open'&&!pr.merged)fail(409,'merge_head_or_target_changed');
  };

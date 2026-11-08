@@ -1,3 +1,4 @@
+import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {requestIntegration,integratedPublication} from '../tasks/integration.js';
 import { checkManagementBudget } from '../management/budget.js';
 import { executionModel, taskConfiguration, executionRuleFiles } from '../tasks/configuration.js';
@@ -64,20 +65,21 @@ export class TaskEngine {
   // The parallel runner calls last granted by the manager, per repository.
   private readonly granted=new Map<string,number>();
   private timer:ReturnType<typeof setInterval>|undefined;private closing=false;private readonly merging=new Map<string,Promise<unknown>>();
-  readonly rules:RuleService;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);}
+  readonly rules:RuleService;readonly coordinator:CoordinationWorker;
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.coordinator=new CoordinationWorker(store);}
   // The running tasks of one repository, for callers that must wait until they have stopped.
   working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
     // A previous process may have stopped between checkpoints; never charge server downtime as task runtime.
     this.store.run('UPDATE task_metrics SET active_since=NULL,complete=0 WHERE active_since IS NOT NULL');
-    this.store.run('DELETE FROM task_claims');interruptRuns(this.store);
+    this.store.run('DELETE FROM task_claims');interruptRuns(this.store);this.coordinator.recover();
     this.store.run(`UPDATE tasks SET status='queued',claim_token=NULL WHERE ${engineKinds} AND status IN ('running','preparing','implementing','validating','publishing','result_ready')`);
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
     this.timer=setInterval(()=>this.tick(),1000);this.tick();
   }
   tick(){
     if(this.closing)return;
+    this.coordinator.tick();resumeCoordinatedTasks(this.store,id=>this.active.has(id));
     // Old installations may have parked candidates at the removed SHA fence. Recover once,
     // retaining their actual snapshots, without requiring an operator script.
     for(const old of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code='base_branch_changed'")){
@@ -153,7 +155,7 @@ export class TaskEngine {
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
-  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled([...this.active.values(),...this.merging.values()]);}
+  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.coordinator.close();}
   async run(id:string,token:string){
     const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor(),event=eventWorkflow(task.kind);
     const policyHashFor=(artifacts:any[])=>sha(artifacts.some(a=>a.kind==='code')?String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||''):'');
@@ -311,6 +313,7 @@ export class TaskEngine {
         if(policyHash!==policyHashFor(artifacts))stop('acceptance_context_changed','retry_wait','验收期间必需验证策略变化，将重新验收。');
         if(['pass','pass_with_issues'].includes(verdict.outcome)){records.stage(id,candidate.id,candidate.revision,verdict,token,{policy_hash:policyHash});return {ok:true};}
         const result=records.decide(id,candidate.id,candidate.revision,verdict,'running',false,token);
+        if((result as any).coordination_requested)stop('task_coordination_requested','waiting_coordination',String((result as any).coordination_requested));
         if(verdict.outcome==='needs_human'||result.exhausted)stop(result.exhausted?'acceptance_no_progress':'acceptance_needs_human','needs_replan',verdict.reason+' '+verdict.gaps.join('; '));
         // Continue this same execution when called as a tool; a finished report retries with explicit feedback.
         this.store.run("UPDATE tasks SET status='running',phase=? WHERE id=?",task.phase,id);
@@ -758,7 +761,7 @@ export class TaskEngine {
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        task.kind!=='task.request'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
+        state!=='waiting_coordination'&&task.kind!=='task.request'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});
@@ -885,6 +888,7 @@ export class TaskEngine {
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
+    const coordination=coordinationApi(this.store,user,method,url,input);if(coordination!==undefined)return coordination;
     const merge=await mergeApi(this.store,user,method,url,input,this.githubUrl);if(merge!==undefined)return merge;
     const roles=roleApi(this.store,user,method,url,input);if(roles!==undefined)return roles;
     const memory=await memoryApi(this.store,user,method,url,input,this.githubUrl);if(memory!==undefined)return memory;

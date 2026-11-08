@@ -78,3 +78,7 @@ The default-branch ref is read directly before deciding whether integration is n
 ### Planning scope differences
 
 `contract.scope` is a planning expectation, not a file allowlist. Existing records retain this meaning without migration. Explicit user prohibitions (`contract.constraints` when provided), the goal/criteria and framework tool permissions remain binding. The Dev can use `record_scope_difference` to retain paths, necessity, relation to the goal, risk/impact, verification references and the actual tree/artifact `source_version`. Review checks the explanation against the diff; fresh QA independently judges it. Missing explanations or product defects normally return to execution; exceeding a planned file list alone does not justify `needs_human`. No extra approval gate is added. QA receives explanations with an explicit version-match flag; a match is not proof and an old explanation cannot certify a new candidate.
+
+### On-demand Task Coordinator
+
+Concrete cross-task issues use a persistent request, not a synchronous wait on an occupied task slot. The restricted Coordinator sends advice for the affected Task Managers to acknowledge; it cannot execute code, change acceptance criteria, override QA or merge. Requests survive restart and only explicit requests wake the worker. See [coordination lifecycle and query API](task-coordination.md). Planning scope differences alone still use the normal Dev → Review → QA path.

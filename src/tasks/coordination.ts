@@ -1,0 +1,113 @@
+import {coordinationResultSchema} from '../roles/catalog.js';
+import type {Store,Row} from '../storage/database.js';
+import {randomId,fail,type Json} from '../core/security.js';
+import {scope,type Actor} from '../app/auth.js';
+import {sha,stop,Redactor} from '../agent/common.js';
+import {traceEvent} from './trace.js';
+import {TaskRecords} from './service.js';
+import {runRole} from '../roles/run.js';
+
+export interface CoordinationRequest {key:string;problem:string;proposal:string;task_ids:string[];refs:string[]}
+export function coordinationStorage(s:Store){s.db.exec(`
+ CREATE TABLE IF NOT EXISTS task_coordinations(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+ source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,request_key TEXT NOT NULL,request TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'queued',
+ result TEXT,claim_token TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_run_at INTEGER NOT NULL DEFAULT 0,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+ UNIQUE(source_task_id,request_key));
+ CREATE INDEX IF NOT EXISTS coordination_due ON task_coordinations(state,next_run_at);
+ CREATE TABLE IF NOT EXISTS coordination_notices(id INTEGER PRIMARY KEY AUTOINCREMENT,coordination_id TEXT NOT NULL REFERENCES task_coordinations(id) ON DELETE CASCADE,
+ task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,message TEXT NOT NULL,action TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',reason TEXT,
+ task_revision INTEGER NOT NULL,candidate_id TEXT,updated_at TEXT NOT NULL,UNIQUE(coordination_id,task_id));
+`);}
+const text=(v:any,max=8000)=>typeof v==='string'&&!!v.trim()&&v.length<=max;
+export function validCoordination(a:any):a is CoordinationRequest{return !!a&&Object.keys(a).every(k=>['key','problem','proposal','task_ids','refs'].includes(k))&&['key','problem','proposal'].every(k=>text(a[k],k==='key'?200:8000))&&Array.isArray(a.task_ids)&&a.task_ids.length>0&&a.task_ids.length<=20&&a.task_ids.every((id:any)=>text(id,200))&&Array.isArray(a.refs)&&a.refs.length<=100&&a.refs.every((r:any)=>text(r,1000));}
+export function requestCoordination(s:Store,task:Row,a:unknown){
+ if(!validCoordination(a))throw new Error('invalid_coordination_request');
+ if(task.active_role==='coordinator')throw new Error('recursive_coordination_forbidden');
+ const ids=[...new Set([task.id,...a.task_ids])];if(ids.length<2)throw new Error('coordination_requires_multiple_tasks');
+ for(const id of ids)if(!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',id,task.repository_id))throw new Error('coordination_task_out_of_scope');
+ const old=s.get('SELECT * FROM task_coordinations WHERE source_task_id=? AND request_key=?',task.id,a.key);
+ const request=JSON.stringify({...a,task_ids:ids});
+ if(old){if(old.request!==request)throw new Error('coordination_key_conflict');return {coordination_id:old.id,state:old.state};}
+ const id=randomId(),now=new Date().toISOString();
+ s.run("INSERT INTO task_coordinations(id,repository_id,source_task_id,request_key,request,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",id,task.repository_id,task.id,a.key,request,now,now);
+ traceEvent(s,task.id,'coordination_requested',{coordination_id:id,...a,task_ids:ids},task.trace_run_id,'role:'+String(task.active_role??'manager'));
+ return {coordination_id:id,state:'queued'};
+}
+export function coordinationContext(s:Store,id:string){return {requests:s.all('SELECT id,request,state,result,error,updated_at FROM task_coordinations WHERE source_task_id=? ORDER BY created_at',id).map(r=>({...r,request:JSON.parse(r.request),result:r.result?JSON.parse(r.result):null})),notices:s.all('SELECT * FROM coordination_notices WHERE task_id=? ORDER BY id',id)};}
+export function coordinationVersion(s:Store,id:string){const n=s.all('SELECT id,coordination_id,message,task_revision,candidate_id,state,reason,action FROM coordination_notices WHERE task_id=? ORDER BY id',id);return n.length?sha(JSON.stringify(n)):undefined;}
+export function assertCoordinationCurrent(s:Store,id:string,candidate:any){
+ const current=coordinationVersion(s,id);
+ if(s.get("SELECT id FROM coordination_notices WHERE task_id=? AND state IN ('pending','disputed')",id)||candidate?.coordination_version!==current)stop('task_coordination_pending','waiting_coordination','Read coordination notices, acknowledge applicability or raise an objection; submit a candidate under the current coordination context for fresh QA.');
+}
+export function acknowledgeCoordination(s:Store,id:string,a:any){
+ if(!a||!Number.isSafeInteger(a.notice_id)||!['adopted','not_applicable','disputed'].includes(a.disposition)||!text(a.reason))return {error:'invalid_coordination_ack'};
+ const n=s.get('SELECT * FROM coordination_notices WHERE id=? AND task_id=?',a.notice_id,id);if(!n)return {error:'coordination_notice_not_found'};
+ if(n.state===a.disposition&&n.reason===a.reason)return {ok:true};
+ if(n.state!=='pending')return {error:'coordination_ack_already_recorded'};
+  if(new TaskRecords(s).get(id).revision!==n.task_revision){s.run("UPDATE coordination_notices SET state='superseded',reason='Authoritative contract revised after advice' WHERE id=?",n.id);traceEvent(s,id,'coordination_superseded',{notice_id:n.id,coordination_id:n.coordination_id},null,'framework');return {error:'coordination_task_revision_changed'};}
+ s.run('UPDATE coordination_notices SET state=?,reason=?,updated_at=? WHERE id=?',a.disposition,a.reason,new Date().toISOString(),n.id);
+ traceEvent(s,id,'coordination_acknowledged',{coordination_id:n.coordination_id,notice_id:n.id,disposition:a.disposition,reason:a.reason},null,'executor');
+ if(a.disposition==='disputed'){
+  const row=s.get('SELECT * FROM task_coordinations WHERE id=?',n.coordination_id)!;
+  // One re-evaluation per objection generation, never an unbounded same-request retry loop.
+  s.run("UPDATE task_coordinations SET state=?,claim_token=NULL,next_run_at=0,error=? WHERE id=?",row.attempts>=3?'needs_human':'queued',row.attempts>=3?'coordination_dispute_limit':null,row.id);
+ }else if(!s.get("SELECT id FROM coordination_notices WHERE coordination_id=? AND state IN ('pending','disputed')",n.coordination_id))s.run("UPDATE task_coordinations SET state='resolved' WHERE id=?",n.coordination_id);
+ return {ok:true};
+}
+const tool=(name:string,description:string,properties:any,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
+const requestProperties={key:{type:'string'},problem:{type:'string'},proposal:{type:'string'},task_ids:{type:'array',items:{type:'string'}},refs:{type:'array',items:{type:'string'}}};
+export const coordinationTools=[
+ tool('list_project_tasks','Discover same-project task IDs, goals and current statuses for a concrete coordination request; does not change tasks.',{},[]),
+ tool('request_task_coordination','Persist a concrete cross-task coordination request. This yields this task slot; no goal/criteria or permissions are changed. Ordinary scope explanations use record_scope_difference, not this tool.',requestProperties,['key','problem','proposal','task_ids','refs']),
+ tool('read_coordination','Read this task coordination requests, notices and feedback.',{},[]),
+ tool('acknowledge_coordination','Record adoption, non-applicability or objection with reasons. Adoption does not approve code or make old QA current.',{notice_id:{type:'integer'},disposition:{type:'string',enum:['adopted','not_applicable','disputed']},reason:{type:'string'}},['notice_id','disposition','reason'])
+];
+export async function runCoordinator(s:Store,row:Row,token:string){
+ const source=s.get('SELECT * FROM tasks WHERE id=?',row.source_task_id)!,request=JSON.parse(row.request),task={...source,active_role:'coordinator'};
+ let basis:Map<string,any>|undefined;
+ const guard=async()=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=?',row.id);if(current?.claim_token!==token||current.state!=='running')stop('coordination_claim_revoked','cancelled');if(!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',source.id,row.repository_id)||!s.get('SELECT enabled FROM policies WHERE repository_id=?',row.repository_id)?.enabled)stop('repository_policy_disabled','cancelled');};
+ const submit={type:'function',function:{name:'submit_coordination',description:'Submit coordination advice or a concrete human decision; no product execution or delivery authority.',parameters:coordinationResultSchema}};
+ basis=new Map<string,any>(request.task_ids.map((id:string)=>[id,new TaskRecords(s).get(id)]));
+ const result=await runRole({store:s,task,redactor:new Redactor(),guard,system:'Task Coordinator. Coordinate only the offered same-project tasks. Query persistent facts and identify dependency/shared-contract adjustments, preserving the original goal/criteria and real permissions. Send concrete notices for Task Managers to evaluate at safe checkpoints. Never edit product code or task contracts, override QA, finish tasks, publish, merge or grant authority. Do not route ordinary product defects/planning scope differences to a human. needs_human is for a specific unresolved user decision/explicit constraint. Read prior notices/objections and resolve them, not recursive coordination. If tasks are already delivered, identify followup work; their historical completion cannot be rewritten.',prompt:JSON.stringify({coordination_id:row.id,request,tasks:request.task_ids.map((id:string)=>({id,...basis!.get(id)})),prior_result:row.result?JSON.parse(row.result):null}),tools:[tool('read_project_task','Read an offered task durable contract, observations and coordination context; no conversations or host credentials.',{task_id:{type:'string'},offset:{type:'integer'}},['task_id']),submit],maxTurns:12,maxOutputTokens:8192,finish:{name:'submit_coordination',validate:v=>{
+  if(!v||!text(v.summary)||!['notices','needs_human'].includes(v.outcome)||!Array.isArray(v.notices)||v.notices.length>20||v.notices.some((n:any)=>!n||Object.keys(n).some(k=>!['task_id','message','action'].includes(k))||!request.task_ids.includes(n.task_id)||!text(n.message)||!['review','rework'].includes(n.action))||new Set(v.notices.map((n:any)=>n.task_id)).size!==v.notices.length||v.outcome==='notices'&&!v.notices.some((n:any)=>n.task_id===source.id))throw new Error('invalid_coordination_result');return v as {summary:string;outcome:string;notices:{task_id:string;message:string;action:string}[]};}},finalizationTools:['submit_coordination'],execute:async(name,a)=>{if(name!=='read_project_task'||!request.task_ids.includes(a?.task_id))return {error:'coordination_task_out_of_scope'};return {task:new TaskRecords(s).get(a.task_id),history:new TaskRecords(s).tool(a.task_id,'read_task_history',{offset:a.offset??0,limit:10})};}},'coordinator');
+ await guard();for(const [id,record] of basis!)if(new TaskRecords(s).get(id).revision!==record.revision)throw new Error('coordination_context_changed');s.transaction(()=>{
+  for(const n of result.result.notices){if(['completed','pr_opened','succeeded','cancelled','superseded'].includes(s.get('SELECT status FROM tasks WHERE id=?',n.task_id)?.status)){traceEvent(s,source.id,'coordination_followup_required',{coordination_id:row.id,target_task:n.task_id,message:n.message},null,'role:coordinator');continue;}const record=basis!.get(n.task_id),existing=s.get('SELECT * FROM coordination_notices WHERE coordination_id=? AND task_id=?',row.id,n.task_id);
+   if(existing&&existing.state!=='disputed')continue;
+   s.run("INSERT INTO coordination_notices(coordination_id,task_id,message,action,task_revision,candidate_id,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(coordination_id,task_id) DO UPDATE SET message=excluded.message,action=excluded.action,state='pending',reason=NULL,task_revision=excluded.task_revision,candidate_id=excluded.candidate_id,updated_at=excluded.updated_at",row.id,n.task_id,n.message,n.action,record.revision,record.candidate?.id??null,new Date().toISOString());
+   traceEvent(s,n.task_id,'coordination_notice',{coordination_id:row.id,...n,result_ref:result.reference},null,'role:coordinator');
+  }
+  s.run('UPDATE task_coordinations SET state=?,result=?,claim_token=NULL,error=NULL,updated_at=? WHERE id=? AND claim_token=?',result.result.outcome==='needs_human'?'needs_human':'awaiting_feedback',JSON.stringify({...result.result,result_ref:result.reference}),new Date().toISOString(),row.id,token);
+  traceEvent(s,source.id,'coordination_result',{coordination_id:row.id,result_ref:result.reference,outcome:result.result.outcome},null,'role:coordinator');
+ });
+}
+/** Only explicit requests are scheduled; this is not a project inactivity scanner. */
+export class CoordinationWorker{
+ readonly active=new Map<string,Promise<void>>();private closing=false;
+ constructor(readonly store:Store){}
+ recover(){this.store.run("UPDATE task_runs SET status='interrupted',ended_at=?,stop_reason='coordination_process_restart' WHERE role='coordinator' AND status='running'",new Date().toISOString());this.store.run("UPDATE task_coordinations SET state='queued',claim_token=NULL WHERE state='running'");}
+ tick(){if(this.closing)return;const s=this.store;
+  for(const row of s.all("SELECT c.* FROM task_coordinations c JOIN policies p ON p.repository_id=c.repository_id WHERE c.state='queued' AND c.next_run_at<=? AND p.enabled=1 ORDER BY c.created_at,c.id",Date.now())){
+   if(this.active.has(row.repository_id))continue;const token=randomId();const claimed=s.run("UPDATE task_coordinations SET state='running',claim_token=?,attempts=attempts+1,updated_at=? WHERE id=? AND state='queued'",token,new Date().toISOString(),row.id);if(!Number(claimed.changes))continue;
+   const work=runCoordinator(s,row,token).catch(e=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=? AND claim_token=?',row.id,token);if(!current)return;const retry=current.attempts<3;s.run('UPDATE task_coordinations SET state=?,claim_token=NULL,error=?,next_run_at=?,updated_at=? WHERE id=?',retry?'queued':'failed',String(e.code??e.message),Date.now()+current.attempts*15000,new Date().toISOString(),row.id);traceEvent(s,row.source_task_id,'coordination_fault',{coordination_id:row.id,code:String(e.code??e.message),retry},null,'framework');}).finally(()=>this.active.delete(row.repository_id));this.active.set(row.repository_id,work);
+  }
+ }
+ async close(){this.closing=true;await Promise.allSettled(this.active.values());}
+}
+export function resumeCoordinatedTasks(s:Store,active:(id:string)=>boolean){
+ for(const t of s.all("SELECT * FROM tasks WHERE status='waiting_coordination'")){
+  if(active(t.id))continue;
+  const blocked=s.get("SELECT state,error FROM task_coordinations WHERE source_task_id=? AND state IN ('needs_human','failed')",t.id);
+  if(blocked){s.run("UPDATE tasks SET status='needs_replan',error_code=?,updated_at=? WHERE id=?",blocked.state==='needs_human'?'coordination_needs_human':'coordination_failed',new Date().toISOString(),t.id);continue;}
+  if(s.get("SELECT id FROM task_coordinations WHERE source_task_id=? AND state IN ('queued','running','needs_human','failed')",t.id))continue;
+  if(!s.get("SELECT id FROM coordination_notices WHERE task_id=? AND state='pending'",t.id))continue;
+  s.run("UPDATE tasks SET status='queued',phase='model',error_code=NULL,next_run_at=0,attempt=attempt+1,updated_at=? WHERE id=?",new Date().toISOString(),t.id);
+  traceEvent(s,t.id,'coordination_resumed',{reason:'Explicit coordination result available; same task and role context; fresh submission/QA required'},null,'framework');
+ }
+}
+export function coordinationApi(s:Store,user:Actor,method:string,url:URL,input:Json):Json|undefined{
+ const match=/^\/api\/tasks\/([^/]+)\/coordination(?:\/([^/]+)\/retry)?$/.exec(url.pathname);if(!match)return;
+ const filter=scope(user,'repository_id'),t=s.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);if(!t)fail(404,'task_not_found');
+ if(method==='GET'&&!match[2])return coordinationContext(s,t!.id);
+ if(method==='POST'&&match[2]){const c=s.get('SELECT * FROM task_coordinations WHERE id=? AND source_task_id=?',match[2],t!.id);if(!c||!['failed','needs_human'].includes(c.state))fail(409,'coordination_not_retryable');s.run("UPDATE task_coordinations SET state='queued',claim_token=NULL,attempts=0,error=NULL,next_run_at=0 WHERE id=?",c!.id);s.run("UPDATE tasks SET status='waiting_coordination',error_code='task_coordination_requested' WHERE id=? AND status='needs_replan' AND error_code IN ('coordination_needs_human','coordination_failed')",t!.id);traceEvent(s,t!.id,'coordination_retry',{coordination_id:c!.id,actor:user.id},null,'user:'+user.id);return {ok:true};}
+ return;
+}
