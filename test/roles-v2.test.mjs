@@ -10,7 +10,8 @@ import { runTeam } from '../dist/roles/team.js';
 import { roleApi } from '../dist/roles/api.js';
 import { resolveRole } from '../dist/roles/definition.js';
 import { controllerWorkspace } from '../dist/roles/workspace.js';
-import { Redactor } from '../dist/agent/common.js';
+import { Redactor, TaskError } from '../dist/agent/common.js';
+import { roleHarness, harnesses } from '../dist/roles/harness.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { agentLoop } from '../dist/agent/loop.js';
 import { fakeRunner } from './pi-mailbox.mjs';
@@ -131,6 +132,7 @@ test('a role run pins its snapshot; skills record provided and actually read ver
   assert.equal(roles.runs[0].role_snapshot, run.role_snapshot); assert.equal(roles.snapshots[run.role_snapshot].skills.content_hash, snapshot.skills.content_hash);
   assert.equal(roles.instances.find(i => i.id === instance_id).snapshot_id, run.role_snapshot);
   assert.ok(!('session' in roles.instances[0]));
+  assert.deepEqual(roles.instances[0].harness_state, {});
 });
 
 test('a new revision applies to the next assignment and to a running role only at a safe checkpoint, on the same instance', async t => {
@@ -284,4 +286,55 @@ test('review under the controller keeps its task, executor, tools and completion
   assert.equal(direct.result.summary, 'Short summary.');
   assert.equal(direct.runner.spaces.get('b'.repeat(48)).parsed.control_tools, undefined);
   assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE task_id='rv' AND role='manager'").n, 1);
+});
+
+test('the matrix holds both drivers: ACP runs worker roles with its own model, Pi runs only the controller', async t => {
+  const f = await fixture(t, () => call('finish', {}));
+  const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, ...body });
+  const view = roleApi(f.s, admin, 'GET', rolesUrl, {});
+  const acp = view.harnesses.find(h => h.id === 'acp'), pi = view.harnesses.find(h => h.id === 'pi');
+  assert.deepEqual([acp.kinds, acp.session, acp.externalModel, acp.model_api], [['writer', 'observer', 'evaluator'], 'external_session', true, []]);
+  assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller'], 'native_resume', false]);
+  for (const id of ['acp', 'native', 'process']) rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'manager', harness_ref: { id } }] }), 'harness_role_unsupported', 'roles.manager.harness_ref.id');
+  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' }, model_profile_ref: { model_id: 'm2' } }] }), 'harness_model_profile_unsupported', 'roles.reviewer.model_profile_ref');
+  const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' } }] }).configuration;
+  assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'acp');
+  assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'native']);
+  // An external-model driver resolves no project model and records where the model comes from, without any key.
+  const { snapshot, model } = resolveRole(f.s, 'r', 'reviewer', 'development.issue');
+  assert.deepEqual([snapshot.model.source, snapshot.model.id, snapshot.model.profile_hash, snapshot.harness.id, model.key], ['external_harness', 'acp', null, 'acp', '']);
+  assert.ok(!JSON.stringify(snapshot).includes('fixture-private-value'));
+  // A role model written onto an ACP role some other way is still refused before any run starts, at its field.
+  const stored = JSON.parse(f.s.get("SELECT value FROM settings WHERE key='roles:r'").value);
+  stored.roles.find(r => r.role_id === 'reviewer').model_profile_ref = { model_id: 'm2', name: 'reviewer-model', profile_hash: 'x', version: 1, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' };
+  f.s.run("UPDATE settings SET value=? WHERE key='roles:r'", JSON.stringify(stored));
+  assert.throws(() => resolveRole(f.s, 'r', 'reviewer', 'development.issue'), e => e.code === 'harness_model_profile_unsupported' && e.detail.startsWith('roles.reviewer.model_profile_ref'));
+  await assert.rejects(runRole(f.spec, 'reviewer'), e => e.code === 'harness_model_profile_unsupported');
+  assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE role='reviewer'").n, 0, 'nothing started');
+  assert.equal(harnesses.filter(h => ['acp', 'pi', 'native', 'process'].includes(h.id)).length, 4);
+});
+
+test('cancelling a Pi session ends the control-plane wait with harness_cancelled; the next run is rebuilt, never native_resume', async t => {
+  // The managed session factory: an abort while Pi waits for its model reply.
+  const f = await fixture(t, () => new Promise(() => {}));
+  const runner = fakeRunner({ reapKills: false }), workspace = new Workspace(f.s, runner.manager, { ...f.task, workspace_id: 'c'.repeat(48) }, f.spec.redactor, async () => {}, () => {});
+  const services = { guard: async () => {}, model: {}, request: () => new Promise(() => {}) };
+  const session = roleHarness('pi').createSession({ ...f.spec, pi: { workspace } }, services);
+  const pending = session.run();
+  setTimeout(() => void session.cancel(), 80);
+  await assert.rejects(pending, { code: 'harness_cancelled' });
+  await session.close();
+  assert.equal(JSON.parse(f.s.get("SELECT data FROM task_history WHERE type='harness_event' ORDER BY id DESC LIMIT 1").data).status, 'cancelled');
+  // A controller run that ended as cancelled leaves no session to reattach, even if its process were still alive.
+  const script = controllerScript();
+  let cancel = true;
+  const g = await fixture(t, body => isController(body) ? script(body) : call('finish', { summary: 'implemented' }));
+  g.put({});
+  const live = fakeRunner({ reapKills: false }), space = new Workspace(g.s, live.manager, { ...g.task, workspace_id: 'd'.repeat(48) }, g.spec.redactor, async () => {}, () => {});
+  const guarded = { ...g.spec, guard: async () => { if (cancel && g.s.get("SELECT 1 FROM task_runs WHERE role='dev'")) { cancel = false; throw new TaskError('harness_cancelled', 'cancelled'); } } };
+  await assert.rejects(runTeam(guarded, { prepare: async () => {}, controller: controllerWorkspace(space) }), { code: 'harness_cancelled' });
+  assert.equal([...live.spaces.values()].find(sp => sp.parsed).alive, true);
+  assert.equal((await runTeam(g.spec, { prepare: async () => {}, controller: controllerWorkspace(space) })).summary, 'implemented');
+  const runs = g.s.all("SELECT recovery_mode,status,stop_reason FROM task_runs WHERE role='manager' ORDER BY rowid");
+  assert.deepEqual(runs.map(r => [r.status, r.stop_reason, r.recovery_mode]), [['fault', 'harness_cancelled', 'new_session'], ['succeeded', null, 'rebuilt_from_task_records']]);
 });
