@@ -47,6 +47,15 @@ function otherWorker(f, t, transport) {
   const service = new ScheduleService(store, management, channels, f.now), worker = new Scheduler(service, transport);
   t.after(async () => { await worker.close(); store.close(); }); return worker;
 }
+async function projectPlan(f, maintainer, owner = f.principal) {
+  const service = randomId();
+  f.h.store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service','101','github.com:10','project maintainers')", service);
+  f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
+    VALUES(?,?,'github.com:10','101','project','service',?,'explicit_delegation',?,'schedule','fixture approval',?)`, randomId(), service, JSON.stringify(['tasks.read', 'schedules.manage']), f.principal, f.now());
+  await group(f.admin, f.id);
+  const destination = f.service.enqueue(f.actor(), f.service.adapter(f.service.connector(f.id)).normalize(inGroup('/project 101 /destination')), '101', 'handover-group').operation_id;
+  return f.plan({ kind: 'project', actor_id: service, maintainer_id: maintainer, owner_id: owner, destination_id: destination });
+}
 test('wall-clock preview chooses first DST fold, skips gaps, uses cron OR semantics and bounds misfires', () => {
   const plan = { timezone: 'America/New_York', cron: '30 1 * * *', start_at: 0 };
   assert.deepEqual(previewTimes(plan, Date.parse('2026-11-01T00:00Z'), 2).map(v => new Date(v).toISOString()), ['2026-11-01T05:30:00.000Z', '2026-11-02T06:30:00.000Z']);
@@ -145,6 +154,53 @@ test('project service uses explicit minimum capabilities, survives creator depar
   assert.equal(f.h.store.get('SELECT state FROM schedule_occurrences').state, 'succeeded');
   f.h.store.run('UPDATE scoped_grants SET revoked_at=? WHERE id=?', f.now(), grant); invalidate(f.h.store, service, 'fixture revoke');
   await f.worker.tick(); assert.equal(f.h.store.get('SELECT state FROM schedules').state, 'paused');
+});
+test('an authorized administrator hands over a service plan after owner departure without changing its identity or capabilities', async t => {
+  const f = await fixture(t), admin = await f.member('handover-admin', { role: 'super_admin' }), first = await f.member('first-maintainer', { repository_ids: ['101'] }), replacement = await f.member('replacement-maintainer', { repository_ids: ['101'] });
+  const plan = await projectPlan(f, first.id), original = await f.create(plan), store = f.h.store;
+  assert.equal((await admin.client('/api/users/' + f.principal, 'PATCH', { active: false })).status, 200);
+  f.advance(60000); await f.worker.tick();
+  assert.equal(store.get('SELECT state FROM schedules WHERE id=?', original.id).state, 'active');
+  assert.equal(store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
+  const preview = await query(f, 'preview_schedule', { plan, schedule_id: original.id }, admin.client); assert.equal(preview.plan.owner_id, f.principal);
+  const noId = await admin.client('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan } }); assert.equal(noId.value.error, 'schedule_owner_required');
+  const denied = await command(f, 'schedule.update', { id: original.id, revision: 1, plan: { ...plan, maintainer_id: replacement.id } }, first.client);
+  assert.notEqual(denied.value.state, 'succeeded'); assert.equal(denied.value.result.error, 'capability_forbidden'); assert.equal(store.get('SELECT revision FROM schedules').revision, 1);
+  assert.equal((await admin.client('/api/users/' + first.id, 'PATCH', { active: false })).status, 200);
+  await f.worker.tick(); const paused = store.get('SELECT * FROM schedules'); assert.equal(paused.state, 'paused');
+  assert.throws(() => f.worker.service.actor(paused, plan), /principal_inactive/);
+  const invalid = await command(f, 'schedule.update', { id: original.id, revision: paused.revision, plan }, admin.client); assert.equal(invalid.value.result.error, 'schedule_maintainer_required');
+  for (const patch of [{ owner_id: replacement.id }, { actor_id: randomId() }, { kind: 'personal' }]) {
+    const rejected = await admin.client('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan: { ...plan, ...patch }, schedule_id: original.id } });
+    assert.equal(rejected.value.error, 'schedule_identity_immutable');
+  }
+  const changed = await command(f, 'schedule.update', { id: original.id, revision: paused.revision, plan: { ...plan, maintainer_id: replacement.id } }, admin.client);
+  assert.equal(changed.value.state, 'succeeded', JSON.stringify(changed.value)); const saved = changed.value.result.schedule;
+  for (const key of ['creator_id', 'owner_id', 'actor_id', 'kind']) assert.equal(saved[key], original[key], key);
+  assert.equal(saved.maintainer_id, replacement.id); assert.deepEqual(saved.grant_snapshot.capabilities, original.grant_snapshot.capabilities);
+  assert.equal(store.get('SELECT capabilities FROM scoped_grants WHERE principal_id=?', plan.actor_id).capabilities, JSON.stringify(['tasks.read', 'schedules.manage']));
+  f.advance(60000); await f.worker.tick(); assert.equal(store.get('SELECT count(*) n FROM schedule_business_runs').n, 2);
+});
+test('an existing owner who loses project permission remains an audit reference but cannot own a new project plan', async t => {
+  const f = await fixture(t), owner = await f.member('historical-owner', { repository_ids: ['101'] }), first = await f.member('current-maintainer', { repository_ids: ['101'] }), next = await f.member('next-maintainer', { repository_ids: ['101'] });
+  const plan = await projectPlan(f, first.id, owner.id), original = await f.create(plan);
+  f.h.store.run('DELETE FROM project_admin_assignments WHERE user_id=?', owner.id);
+  const nextPlan = { ...plan, maintainer_id: next.id };
+  assert.equal((await query(f, 'preview_schedule', { plan: nextPlan, schedule_id: original.id })).plan.owner_id, owner.id);
+  const saved = await command(f, 'schedule.update', { id: original.id, revision: 1, plan: nextPlan }); assert.equal(saved.value.state, 'succeeded');
+  assert.equal(saved.value.result.schedule.owner_id, owner.id); assert.equal(saved.value.result.schedule.creator_id, original.creator_id);
+  const invalid = await command(f, 'schedule.register', { plan: nextPlan }); assert.equal(invalid.value.result.error, 'schedule_owner_required');
+  const disabled = await f.member('disabled-new-owner', { repository_ids: ['101'] }); await f.admin('/api/users/' + disabled.id, 'PATCH', { active: false });
+  assert.equal((await command(f, 'schedule.register', { plan: { ...nextPlan, owner_id: disabled.id } })).value.result.error, 'schedule_owner_required');
+  assert.equal((await command(f, 'schedule.register', { plan: { ...plan, owner_id: f.principal, maintainer_id: disabled.id } })).value.result.error, 'schedule_maintainer_required');
+});
+test('personal plans still require the current actor as owner and maintainer and cannot change identity', async t => {
+  const f = await fixture(t), other = await f.member('personal-other', { repository_ids: ['101'] });
+  for (const field of ['actor_id', 'owner_id', 'maintainer_id']) assert.equal((await command(f, 'schedule.register', { plan: f.plan({ [field]: other.id }) })).value.result.error, 'personal_schedule_identity_mismatch');
+  const original = await f.create();
+  for (const patch of [{ kind: 'project' }, { actor_id: other.id }, { owner_id: other.id }]) assert.equal((await command(f, 'schedule.update', { id: original.id, revision: 1, plan: { ...original.spec, ...patch } })).value.result.error, 'schedule_identity_immutable');
+  assert.equal((await command(f, 'schedule.update', { id: original.id, revision: 1, plan: { ...original.spec, maintainer_id: other.id } })).value.result.error, 'personal_schedule_identity_mismatch');
+  assert.equal(f.h.store.get('SELECT creator_id FROM schedules').creator_id, f.principal);
 });
 test('outbox timeout is unknown, crash recovery never blindly resends and reconciliation retains the logical key', async t => {
   const f = await fixture(t); await f.create(); f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());

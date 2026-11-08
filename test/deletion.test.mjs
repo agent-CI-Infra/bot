@@ -208,6 +208,60 @@ test('a GitHub App project is deleted only when GitHub, asked right then, says t
   assert.equal((await remove(member, '505')).status, 403);
 });
 
+test('project removal deletes scheduling children and project accounting while retaining other projects, tenant budgets and audit', async t => {
+  const h = await harness(t, undefined, { schedules: { automatic: false } }), { admin } = await setup(h), a = await account(admin), store = h.store;
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+  const projectTables = ['notification_outbox', 'schedule_occurrences', 'schedules', 'notification_subscriptions', 'schedule_events', 'schedule_operations', 'schedule_audit'];
+  const accounting = ['schedule_usage', 'schedule_notification_slots', 'schedule_budgets'];
+  store.transaction(() => {
+    for (const id of ['101', '202']) {
+      store.run(`INSERT INTO schedules(id,tenant_id,project_id,creator_id,owner_id,maintainer_id,actor_id,kind,authorization_revision,grant_snapshot,spec,revision,state,created_at,updated_at)
+        VALUES(?,'github.com:10',?,'creator','owner','maintainer','service','project',1,'{}','{}',1,'active',0,0)`, 'schedule-' + id, id);
+      store.run(`INSERT INTO schedule_occurrences(id,schedule_id,tenant_id,project_id,revision,logical_key,logical_at,scheduled_at,source,snapshot,authorization,run_id,state)
+        VALUES(?,?,'github.com:10',?,1,'time:0',0,0,'timer','{}','{}',?,'pending')`, 'occurrence-' + id, 'schedule-' + id, id, 'run-' + id);
+      store.run("INSERT INTO schedule_business_runs VALUES(?,?,'report.daily','report','queued','{}',0)", 'run-' + id, 'occurrence-' + id);
+      store.run(`INSERT INTO notification_subscriptions(id,tenant_id,project_id,principal_id,spec,revision,state,event_cursor,created_at,updated_at)
+        VALUES(?,'github.com:10',?,'owner','{}',1,'active',0,0,0)`, 'subscription-' + id, id);
+      for (const state of ['pending', 'retry']) {
+        const message = state + '-' + id;
+        store.run(`INSERT INTO notification_outbox(id,tenant_id,project_id,destination_id,schedule_id,occurrence_id,subscription_id,actor_id,authorization,logical_key,incident,payload,state,next_attempt,created_at)
+          VALUES(?,'github.com:10',?,'destination',?,?,?,'service','{}',?,'incident','{}',?,0,0)`, message, id, 'schedule-' + id, 'occurrence-' + id, 'subscription-' + id, message, state);
+        store.run("INSERT INTO notification_attempts(outbox_id,attempt,worker,state,started_at) VALUES(?,1,'worker','unknown',0)", message);
+      }
+      store.run("INSERT INTO schedule_events(event_key,project_id,type,incident,payload,created_at) VALUES(?,?,'task.failed','incident','{}',0)", 'event-' + id, id);
+      store.run("INSERT INTO schedule_operations VALUES(?,?,'{}')", 'operation-' + id, id);
+      store.run(`INSERT INTO schedule_audit(project_id,resource_id,initiator,actor_id,authorization_revision,revision,source,action,detail,created_at)
+        VALUES(?,'schedule','creator','service',1,1,'timer','created','{}',0)`, id);
+    }
+    for (const [scope, id] of [['project', '101'], ['project', '202'], ['schedule', 'schedule-101'], ['schedule', 'subscription-101'], ['schedule', 'schedule-202'], ['schedule', 'subscription-202'], ['tenant', 'github.com:10']]) {
+      store.run("INSERT INTO schedule_budgets VALUES(?,?,'report','{}')", scope, id);
+      store.run("INSERT INTO schedule_usage(scope,scope_id,category,day,runs) VALUES(?,?,'report',0,3)", scope, id);
+      store.run('INSERT INTO schedule_notification_slots VALUES(?,?,0,2)', scope, id);
+    }
+    store.run("INSERT INTO notification_channel_limits VALUES('shared-connector',5000)");
+  });
+  const otherRows = projectTables.map(table => store.all(`SELECT * FROM ${table} WHERE project_id='202'`));
+  const retainedAccounting = accounting.map(table => store.all(`SELECT * FROM ${table} WHERE scope='tenant' OR scope_id IN ('202','schedule-202','subscription-202')`));
+  assert.equal((await admin('/api/projects/101', 'DELETE', { confirm: true })).status, 200);
+  for (const [index, table] of projectTables.entries()) {
+    assert.equal(store.get(`SELECT count(*) n FROM ${table} WHERE project_id='101'`).n, 0, table);
+    assert.deepEqual(store.all(`SELECT * FROM ${table} WHERE project_id='202'`), otherRows[index], table);
+  }
+  assert.equal(store.get("SELECT count(*) n FROM schedule_business_runs WHERE id='run-101'").n, 0);
+  assert.equal(store.get("SELECT count(*) n FROM notification_attempts WHERE outbox_id IN ('pending-101','retry-101')").n, 0);
+  assert.equal(store.get("SELECT count(*) n FROM schedule_business_runs WHERE id='run-202'").n, 1);
+  assert.equal(store.get("SELECT count(*) n FROM notification_attempts WHERE outbox_id IN ('pending-202','retry-202')").n, 2);
+  for (const [index, table] of accounting.entries()) {
+    assert.equal(store.get(`SELECT count(*) n FROM ${table} WHERE (scope='project' AND scope_id='101') OR (scope='schedule' AND scope_id IN ('schedule-101','subscription-101'))`).n, 0, table);
+    assert.deepEqual(store.all(`SELECT * FROM ${table} WHERE scope='tenant' OR scope_id IN ('202','schedule-202','subscription-202')`), retainedAccounting[index], table);
+  }
+  assert.equal(store.get("SELECT next_at FROM notification_channel_limits WHERE connector_id='shared-connector'").next_at, 5000);
+  assert.ok(store.get("SELECT 1 FROM audit WHERE repository_id='101' AND action='repository.deleted'"));
+  await repository(admin, a.id, '101');
+  assert.equal(store.get("SELECT count(*) n FROM schedules WHERE project_id='101'").n, 0);
+  assert.equal(store.get("SELECT count(*) n FROM notification_outbox WHERE project_id='101'").n, 0);
+});
+
 test('a bot account project is not deletable while it is still listed, even with less than write access', async t => {
   const github = await fakeGitHub(t); let sync;
   const h = await harness(t, undefined, store => ({ installations: sync = new InstallationSync(store, github.url) })), { admin } = await setup(h), a = await account(admin);

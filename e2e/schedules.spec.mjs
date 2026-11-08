@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { randomId } from '../dist/core/security.js';
 import { channelFixture, envelope, post, finished, group, inGroup } from '../test/channel-fixture.mjs';
 
 async function environment() {
@@ -79,5 +80,33 @@ test('user group destination rejects private project content at preview and befo
     expect(delivery.state).toBe('blocked'); expect(f.wire.sent.length).toBe(before);
     await page.screenshot({ path: '.tmp/schedules-166/group-private-rejected.png', fullPage: true });
     writeFileSync('.tmp/schedules-166/group-scope-evidence.json', JSON.stringify({ delivery, sends_before: before, sends_after: f.wire.sent.length, preview_error: 'channel_group_scope_required' }, null, 2));
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('an administrator previews and saves a maintainer handover after the project owner leaves', async ({ page }) => {
+  test.setTimeout(90000); const f = await environment();
+  try {
+    const successor = await f.member('handover-admin-browser', { role: 'super_admin' }), maintainer = await f.member('handover-maintainer-browser', { repository_ids: ['101'] });
+    const service = randomId(), capabilities = JSON.stringify(['tasks.read', 'schedules.manage']);
+    f.h.store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service','101','github.com:10','project maintainers')", service);
+    f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
+      VALUES(?,?,'github.com:10','101','project','service',?,'explicit_delegation',?,'schedule','fixture approval',?)`, randomId(), service, capabilities, f.principal, Date.now());
+    await group(f.admin, f.id);
+    const registered = await post(f.h, f.id, inGroup('/project 101 /destination')); await finished(f.h, registered.value.operation_id);
+    const destination = f.h.store.all("SELECT * FROM channel_outbox WHERE state='registered'").find(r => f.h.store.secrets.open(r.payload, 'channel-outbox:' + r.id).event.chat_type === 'group').id;
+    await login(page, f); await page.getByLabel('执行身份类型', { exact: true }).selectOption('project');
+    await page.getByLabel('项目服务身份', { exact: true }).selectOption(service); await page.getByLabel('项目维护人', { exact: true }).selectOption(f.principal);
+    await page.getByLabel('计划目的地', { exact: true }).selectOption(destination); await page.getByRole('button', { name: '保存计划', exact: true }).click();
+    await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1); const original = (await read(f, 'list_schedules')).schedules[0];
+    expect((await successor.client('/api/users/' + f.principal, 'PATCH', { active: false })).status).toBe(200); await f.worker.tick();
+    expect(f.h.store.get('SELECT state FROM schedules').state).toBe('paused');
+    await page.context().clearCookies(); await page.reload(); await login(page, f, 'handover-admin-browser', successor.password);
+    await page.getByLabel('编辑计划', { exact: true }).selectOption(original.id); await page.getByLabel('项目维护人', { exact: true }).selectOption(maintainer.id);
+    await page.getByRole('button', { name: '预览日报计划', exact: true }).click(); await expect(page.getByLabel('计划预览')).toContainText('Asia/Shanghai');
+    await page.getByRole('button', { name: '保存计划', exact: true }).click();
+    await expect.poll(() => f.h.store.get('SELECT maintainer_id FROM schedules').maintainer_id).toBe(maintainer.id);
+    const saved = f.h.store.get('SELECT * FROM schedules'); expect(saved.owner_id).toBe(original.owner_id); expect(saved.creator_id).toBe(original.creator_id); expect(saved.actor_id).toBe(service);
+    expect(JSON.parse(saved.grant_snapshot).capabilities).toEqual(original.grant_snapshot.capabilities);
+    expect(f.h.store.get('SELECT capabilities FROM scoped_grants WHERE principal_id=?', service).capabilities).toBe(capabilities);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
