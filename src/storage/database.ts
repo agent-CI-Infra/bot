@@ -17,6 +17,7 @@ import { installationStorage } from '../installations/storage.js';
 import { identityStorage } from '../identity/storage.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { managementStorage } from '../management/storage.js';
+import { channelStorage } from '../channels/storage.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -178,6 +179,7 @@ export class Store {
     roleStorage(this);
     identityStorage(this);
     managementStorage(this);
+    channelStorage(this);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

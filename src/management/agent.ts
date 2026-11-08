@@ -23,7 +23,7 @@ export class ManagementAgent {
     const project=scope.startsWith('project:')?scope.slice(8):undefined;
     const tenant=project?this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',project)?.tenant_id:scope.startsWith('tenant:')?scope.slice(7):null;
     if(!tenant||actor.tenant_id&&actor.tenant_id!==tenant||actor.project_id&&actor.project_id!==project)fail(403,'scope_forbidden');
-    const scoped=resolvePrincipalActor(this.store,actor.principal_id,tenant,project,actor.channel);
+    const scoped=resolvePrincipalActor(this.store,actor.principal_id,tenant,project,actor.channel,actor);
     if(!this.service.projects(scoped).length)fail(403,'scope_forbidden');return scoped;
   }
   conversation(actor:ActorContext,id:string):{row:Row;actor:ActorContext}{

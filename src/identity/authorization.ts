@@ -12,7 +12,12 @@ export interface EffectiveScope {
   capabilities: string[]; source: string; verified_at: number; expires_at: number | null; state: string;
 }
 // Object identity is the trust boundary. Deserializing an ActorContext never creates an authenticated actor.
-const issued = new WeakMap<ActorContext, { store: Store; session?: string }>();
+const issued = new WeakMap<ActorContext, { store: Store; session?: string; guard?: () => void; parent?: ActorContext }>();
+// Trusted adapters attach a live credential/connector fence; narrowing scope preserves it.
+export function restrictActor(actor: ActorContext, guard: () => void): ActorContext {
+  const trust = issued.get(actor); if (!trust) return fail(403, 'untrusted_actor');
+  const previous = trust.guard; trust.guard = () => { previous?.(); guard(); }; return actor;
+}
 export function revision(store: Store, principal: string): number {
   return Number(store.get(`SELECT authorization_revision FROM principals p WHERE id=? AND active=1
     AND (kind='service' OR EXISTS(SELECT 1 FROM users u WHERE u.id=p.user_id AND u.active=1))`, principal)?.authorization_revision || 0);
@@ -73,6 +78,8 @@ export function resolveActor(store: Store, sessionRef: string, options: { channe
 export function assertCurrent(actor: ActorContext): void {
   const trusted = issued.get(actor); if (!trusted) return fail(403, 'untrusted_actor');
   const { store } = trusted;
+  if (trusted.parent) assertCurrent(trusted.parent);
+  trusted.guard?.();
   // Installation projections are also checked below; a worker need not have consumed an event yet.
   if (revision(store, actor.principal_id) !== actor.authorization_revision) fail(409, 'authorization_changed');
   const principal = store.get('SELECT kind,maintenance,project_id,tenant_id FROM principals WHERE id=?', actor.principal_id);
@@ -132,12 +139,13 @@ export function resolveServiceActor(store: Store, principal: string): ActorConte
   issued.set(actor, { store }); return Object.freeze(actor);
 }
 // For trusted asynchronous workers/adapters. This function is never exposed as an HTTP/model tool.
-export function resolvePrincipalActor(store: Store, principal: string, tenant: string, project?: string, channel: ActorContext['channel'] = 'api'): ActorContext {
+export function resolvePrincipalActor(store: Store, principal: string, tenant: string, project?: string, channel: ActorContext['channel'] = 'api', parent?: ActorContext): ActorContext {
+  if (parent) { assertCurrent(parent); if (parent.principal_id !== principal) fail(403, 'principal_mismatch'); }
   identityProjection(store); consumeInstallationChanges(store);
   if (!revision(store, principal)) return fail(403, 'principal_inactive');
   const scopes = listEffectiveScopes(store, principal).filter(g => g.state === 'active' && (!g.tenant_id || g.tenant_id === tenant));
   const actor: ActorContext = { principal_id: principal, tenant_id: tenant, ...(project ? { project_id: project } : {}), channel,
     capabilities: [...new Set(scopes.flatMap(s => s.capabilities))], authorization_revision: revision(store, principal), request_id: randomId() };
-  issued.set(actor, { store }); return Object.freeze(actor);
+  issued.set(actor, { store, parent }); return Object.freeze(actor);
 }
 export function migrationReport(store: Store): Row[] { return store.all('SELECT version,applied_at,report FROM identity_migrations'); }

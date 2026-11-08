@@ -5,7 +5,7 @@ import { GitHubIdentity } from '../dist/identity/github.js';
 import { harness, setup, account, repository } from './helpers.mjs';
 
 // Real HTTP OAuth and GitHub endpoints, confined to this test's random loopback port.
-export async function identityFixture(t) {
+export async function identityFixture(t, options = {}) {
   const state = { id: 42, login: 'administrator', owner: true, admin: false, type: 'Organization', selection: 'all', failure: 0,
     accessible: ['101'], codes: new Map(), exchanges: 0, requests: [], refreshed: 0 };
   const server = createServer(async (req, res) => {
@@ -37,7 +37,7 @@ export async function identityFixture(t) {
   t?.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const base = `http://127.0.0.1:${server.address().port}`;
   let identity;
-  const h = await harness(t, undefined, store => { identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: base, webUrl: base }); return { githubIdentity: identity }; });
+  const h = await harness(t, undefined, store => { identity = new GitHubIdentity(store, { clientId: 'fixture-client', clientSecret: 'fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback', apiUrl: base, webUrl: base }); return { githubIdentity: identity, ...options }; });
   identity.config.redirectUri = h.admin + '/auth/github/callback';
   const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   // Another tenant has an enabled project. It is never in the user's App installation.

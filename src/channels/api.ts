@@ -1,0 +1,109 @@
+import type { ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize } from '../identity/authorization.js';
+import { fail, fields, randomId, text, type Json } from '../core/security.js';
+import { ChannelService } from './service.js';
+
+export class ChannelApi {
+  constructor(readonly service: ChannelService) {}
+  api(actor: ActorContext, method: string, url: URL, input: Json): Json {
+    const store = this.service.store, path = url.pathname;
+    assertCurrent(actor);
+    const receipt = /^\/api\/channels\/operations\/([a-f0-9]{48})$/.exec(path);
+    if (receipt && method === 'GET') {
+      const row = store.get('SELECT * FROM channel_control_operations WHERE id=?', receipt[1]!);
+      if (!row) return fail(404, 'channel_operation_not_found');
+      authorize(actor, 'config.write', row.project_id ? { project_id: row.project_id } : { tenant_id: row.tenant_id });
+      return JSON.parse(row.receipt);
+    }
+    if (path === '/api/channels/bindings' && method === 'GET') return {
+      bindings: store.all("SELECT id,provider,connector,external_tenant,external_actor,display_name,status,verified_at FROM external_identities WHERE principal_id=? AND provider='feishu'", actor.principal_id),
+      pending: this.service.bindings.pending(actor.principal_id),
+    };
+    if (path === '/api/channels/connectors' && method === 'GET') {
+      const rows = store.all('SELECT * FROM channel_connectors').filter(c => { try { authorize(actor, 'config.write', { tenant_id: c.tenant_id }); return true; } catch { return false; } });
+      return { connectors: rows.map(c => ({ ...c, actor_tenants: JSON.parse(c.actor_tenants), capabilities: this.service.adapter(c).capabilities,
+        callback_path: '/hooks/feishu/' + c.id, health: { enabled: !!c.enabled, connection_state: c.connection_state, last_received_at: c.last_received_at, last_error: c.last_error,
+          queued: store.get("SELECT count(*) n FROM channel_inbox WHERE connector_id=? AND state IN ('queued','submitted')", c.id)!.n,
+          failed: store.get("SELECT count(*) n FROM channel_outbox WHERE connector_id=? AND state='failed'", c.id)!.n } })) };
+    }
+    const match = /^\/api\/channels\/connectors\/([a-f0-9]{48})(?:\/(groups|outbox|events))?$/.exec(path);
+    if (path === '/api/channels/connectors' && method === 'POST' || match && !match[2] && method === 'PATCH') {
+      fields(input, ['tenant_id', 'app_id', 'installation_tenant', 'actor_tenants', 'bot_open_id', 'application_type', 'transport', 'enabled', 'credentials', 'expected_revision']);
+      const current = match ? store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!) : undefined;
+      if (match && !current) return fail(404, 'channel_connector_not_found');
+      const tenant = current?.tenant_id ?? text(input.tenant_id);
+      authorize(actor, 'config.write', { tenant_id: tenant });
+      if (!store.get('SELECT 1 FROM tenants WHERE id=?', tenant)) fail(404, 'tenant_not_found');
+      if (current && input.tenant_id !== undefined && input.tenant_id !== tenant) fail(409, 'channel_tenant_immutable');
+      const expected = current?.revision ?? 0;
+      if (input.expected_revision !== expected) fail(409, 'channel_revision_conflict');
+      const get = (key: string) => input[key] ?? current?.[key];
+      const app = text(get('app_id'), 200), installation = text(get('installation_tenant')), bot = text(get('bot_open_id'));
+      if (store.get('SELECT 1 FROM channel_connectors WHERE app_id=? AND installation_tenant=? AND id<>?', app, installation, current?.id ?? '')) fail(409, 'channel_installation_conflict');
+      const type = get('application_type'), transport = get('transport'), enabled = input.enabled ?? (current ? !!current.enabled : false);
+      if (!['enterprise', 'saas'].includes(String(type)) || !['http', 'websocket'].includes(String(transport)) || transport === 'websocket' && type !== 'enterprise') fail(400, 'channel_transport_invalid');
+      if (typeof enabled !== 'boolean') fail(400, 'channel_enabled_invalid');
+      const tenants = input.actor_tenants ?? (current ? JSON.parse(current.actor_tenants) : undefined);
+      if (!Array.isArray(tenants) || !tenants.length || tenants.length > 100 || tenants.some(t => typeof t !== 'string' || !t || t.length > 256)) fail(400, 'channel_actor_tenants_required');
+      let credential = current?.credential_ref;
+      const id = current?.id ?? randomId(), operation = randomId();
+      return store.transaction(() => {
+        assertCurrent(actor);
+        if (current && store.get('SELECT revision FROM channel_connectors WHERE id=?', id)?.revision !== expected) fail(409, 'channel_revision_conflict');
+        if (store.get('SELECT 1 FROM channel_connectors WHERE app_id=? AND installation_tenant=? AND id<>?', app, installation, id)) fail(409, 'channel_installation_conflict');
+        if (input.credentials !== undefined) {
+          const value = input.credentials as Json;
+          if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400, 'channel_credentials_required');
+          fields(value, ['app_secret', 'verification_token', 'encrypt_key']);
+          const secret = Object.fromEntries(['app_secret', 'verification_token', 'encrypt_key'].map(k => [k, text(value[k], 4096)]));
+          credential = randomId(); store.run('INSERT INTO channel_credentials VALUES(?,?)', credential, store.secrets.seal(secret, 'channel-credential:' + credential));
+        }
+        if (!credential) fail(400, 'channel_credentials_required');
+        if (current) {
+          store.run('UPDATE channel_connectors SET app_id=?,installation_tenant=?,actor_tenants=?,bot_open_id=?,application_type=?,transport=?,credential_ref=?,enabled=?,revision=revision+1 WHERE id=? AND revision=?',
+            app, installation, JSON.stringify(tenants), bot, String(type), String(transport), credential, Number(enabled), id, expected);
+          if (current.credential_ref !== credential) store.run('DELETE FROM channel_credentials WHERE id=?', current.credential_ref);
+        } else store.run('INSERT INTO channel_connectors(id,provider,tenant_id,app_id,installation_tenant,actor_tenants,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          id, 'feishu', tenant, app, installation, JSON.stringify(tenants), bot, String(type), String(transport), credential, Number(enabled), 1, Date.now());
+        store.audit(actor.principal_id, 'channel.connector.updated', id);
+        const result = { operation_id: operation, state: 'succeeded', connector_id: id, revision: expected + 1 };
+        store.run('INSERT INTO channel_control_operations VALUES(?,?,NULL,?)', operation, tenant, JSON.stringify(result));
+        return result;
+      });
+    }
+    if (!match) return fail(404, 'channel_endpoint_not_found');
+    const c = store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!);
+    if (!c) return fail(404, 'channel_connector_not_found');
+    if (match[2] === 'groups') {
+      if (method === 'GET') return { groups: store.all('SELECT * FROM channel_group_scopes WHERE connector_id=?', c.id).filter(s => {
+        try { authorize(actor, 'config.write', { project_id: s.project_id }); return true; } catch { return false; }
+      }).map(s => ({ ...s, fields: JSON.parse(s.fields) })) };
+      if (method !== 'PUT') return fail(405, 'method_not_allowed');
+      fields(input, ['chat_id', 'project_id', 'fields', 'sensitivity', 'audience_verified_until', 'enabled', 'expected_revision']);
+      const project = text(input.project_id), chat = text(input.chat_id);
+      authorize(actor, 'config.write', { project_id: project });
+      if (store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)?.tenant_id !== c.tenant_id) fail(403, 'channel_project_tenant_mismatch');
+      if (!Array.isArray(input.fields) || !input.fields.length || input.fields.some(f => !['summary', 'status', 'operation', 'result'].includes(String(f))) ||
+        !['public', 'private'].includes(String(input.sensitivity)) || typeof input.enabled !== 'boolean' || !Number.isSafeInteger(input.audience_verified_until) ||
+        Number(input.audience_verified_until) < 0 || Number(input.audience_verified_until) > Date.now() + 3600_000) fail(400, 'channel_group_scope_invalid');
+      const row = store.get('SELECT * FROM channel_group_scopes WHERE connector_id=? AND installation_tenant=? AND chat_id=? AND project_id=?', c.id, c.installation_tenant, chat, project);
+      if (input.expected_revision !== (row?.revision ?? 0)) fail(409, 'channel_revision_conflict');
+      const id = row?.id ?? randomId(), result = { operation_id: randomId(), state: 'succeeded', group_id: id, revision: (row?.revision ?? 0) + 1 };
+      store.transaction(() => {
+        if (store.get('SELECT revision FROM channel_connectors WHERE id=?', c.id)?.revision !== c.revision) fail(409, 'channel_revision_conflict');
+        const locked = store.get('SELECT revision FROM channel_group_scopes WHERE connector_id=? AND installation_tenant=? AND chat_id=? AND project_id=?', c.id, c.installation_tenant, chat, project);
+        if ((locked?.revision ?? 0) !== input.expected_revision) fail(409, 'channel_revision_conflict');
+        store.run(`INSERT INTO channel_group_scopes VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET fields=excluded.fields,sensitivity=excluded.sensitivity,
+          audience_verified_until=excluded.audience_verified_until,enabled=excluded.enabled,revision=excluded.revision`, id, c.id, c.installation_tenant, chat, project,
+          JSON.stringify(input.fields), String(input.sensitivity), Number(input.audience_verified_until), Number(input.enabled), (row?.revision ?? 0) + 1);
+        store.audit(actor.principal_id, 'channel.group.updated', id, project);
+        store.run('INSERT INTO channel_control_operations VALUES(?,?,?,?)', result.operation_id, c.tenant_id, project, JSON.stringify(result));
+      });
+      return result;
+    }
+    authorize(actor, 'config.write', { tenant_id: c.tenant_id });
+    if (method === 'GET' && match[2] === 'outbox') return { deliveries: store.all('SELECT id,state,attempts,last_error,remote_message_id,created_at FROM channel_outbox WHERE connector_id=? ORDER BY created_at DESC LIMIT 100', c.id) };
+    if (method === 'GET' && match[2] === 'events') return { operations: store.all('SELECT id AS operation_id,state,error,conversation_id,message_id,created_at FROM channel_inbox WHERE connector_id=? ORDER BY created_at DESC LIMIT 100', c.id) };
+    return fail(404, 'channel_endpoint_not_found');
+  }
+}

@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "2.1.0",
+    "@larksuiteoapi/node-sdk": "^1.76.0",
     "jose": "^6.2.13",
     "yaml": "2.9.0"
   },

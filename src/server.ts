@@ -36,12 +36,16 @@ import { ManagementService } from './management/service.js';
 import { ManagementApi } from './management/api.js';
 import { TaskCommands } from './tasks/commands.js';
 import { ConfigurationPR } from './management/configuration-pr.js';
+import { ChannelService, type ChannelOptions } from './channels/service.js';
+import { ChannelApi } from './channels/api.js';
+import { ChannelConnections } from './channels/connections.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
-  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; }
+  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity;
+  channels?: ChannelOptions; onChannels?: (service: ChannelService) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -66,6 +70,9 @@ export function createControlPlane(options: Options) {
   const sharedManagement = new ManagementService(store,workflows,taskCommands);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
+  const channels = new ChannelService(store, managementApi.agent, { origin: options.adminOrigin, ...options.channels });
+  const channelApi = new ChannelApi(channels), channelConnections = new ChannelConnections(channels);
+  options.onChannels?.(channels);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
@@ -91,6 +98,11 @@ export function createControlPlane(options: Options) {
       if (await options.boards.serve(req, res, url)) return;
     }
     if (req.method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
+    const feishu = /^\/hooks\/feishu\/([a-f0-9]{48})$/.exec(path);
+    if (req.method === 'POST' && feishu) {
+      const raw = await body(req, 2 * 1024 * 1024); if (!raw.complete) fail(413, 'payload_too_large');
+      respond(res, 200, channels.receiveHTTP(feishu[1]!, req.headers, raw.bytes)); return;
+    }
     if(req.method==='GET'&&path==='/external/events'){
       if(url.search)fail(400,'unexpected_query');
       await external.events.poll(String(req.headers.authorization||''),value=>new Promise<void>((resolve,reject)=>{
@@ -119,6 +131,15 @@ export function createControlPlane(options: Options) {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
     if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'admin')); return; }
     if (method === 'GET' && path === '/api/auth/github/status') { respond(res, 200, { enabled: !!githubIdentity }); return; }
+    if (method === 'GET' && path === '/auth/channels/start') {
+      if (!githubIdentity) return fail(503, 'github_login_not_configured');
+      const challenge = text(url.searchParams.get('challenge'));
+      channels.bindings.request(challenge);
+      const browser = randomId(), result = githubIdentity.begin(browser, 'login');
+      channels.bindings.associateOAuth(challenge, new URL(result.url).searchParams.get('state')!);
+      res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Set-Cookie', browserCookie(browser));
+      res.writeHead(303, { Location: result.url }); res.end(); return;
+    }
     if (method === 'GET' && path === '/auth/github/start') {
       if (!initialized()) return fail(409, 'local_recovery_setup_required');
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
@@ -131,8 +152,9 @@ export function createControlPlane(options: Options) {
       try {
         const result = await githubIdentity.callback(browserToken(req), url.searchParams.get('state') || '', url.searchParams.get('code') || '', sessionToken(req));
         const credentials = store.transaction(() => session(store, result.principal_id, result.identity_id));
+        const channelBinding = await channels.bindings.githubAuthenticated(url.searchParams.get('state') || '', credentials.token);
         if (result.setup_state) installationSetup.bindIdentity(result.setup_state, githubIdentity.sessionReference(credentials.token));
-        res.setHeader('Set-Cookie', [cookie(credentials.token), browserCookie('')]); res.writeHead(303, { Location: '/#/identity' }); res.end();
+        res.setHeader('Set-Cookie', [cookie(credentials.token), browserCookie('')]); res.writeHead(303, { Location: channelBinding ? '/#/channels' : '/#/identity' }); res.end();
       } catch (error) {
         const code = error instanceof HttpError ? error.code : 'github_oauth_unavailable';
         res.writeHead(303, { Location: '/?auth_error=' + encodeURIComponent(code) + '#/identity' }); res.end();
@@ -149,7 +171,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, result); return;
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
-    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
+    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/workflows.js': ['workflows.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
@@ -230,6 +252,12 @@ export function createControlPlane(options: Options) {
     if (path.startsWith('/api/environments') && !options.projects) fail(503, 'manager_not_configured');
     if (mutation && githubIdentity) { await githubIdentity.refresh(user.id); user = actor(store, req); }
     const current = user, context = current.context!;
+    if (path.startsWith('/api/channels/')) {
+      if (mutation) assertSessionWrite(store, sessionToken(req), context);
+      const result = channelApi.api(context, method, url, input);
+      if (mutation && options.channels?.longConnections !== false) channelConnections.reconcile();
+      respond(res, method === 'POST' ? 201 : 200, result); return;
+    }
     if(path.startsWith('/api/management/')){
       if(mutation)assertSessionWrite(store,sessionToken(req),context);
       const managementActor=resolveActor(store,sessionToken(req),{channel:path.includes('/conversations')?'web':'api'});
@@ -268,6 +296,14 @@ export function createControlPlane(options: Options) {
     respond(res, method === 'POST' ? 201 : 200, result);
   }));
   for (const server of [webhook, admin]) { server.requestTimeout = 30_000; server.headersTimeout = 10_000; }
-  admin.once('close',()=>{void managementApi.agent.close().catch(()=>{});});
+  let connectionTimer: ReturnType<typeof setInterval>;
+  webhook.once('listening', () => {
+    channels.start();
+    if (options.channels?.longConnections !== false) {
+      channelConnections.reconcile();
+      connectionTimer = setInterval(() => channelConnections.reconcile(), 1000); connectionTimer.unref();
+    }
+  });
+  admin.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); void managementApi.agent.close().catch(()=>{}); });
   return { webhook, admin };
 }

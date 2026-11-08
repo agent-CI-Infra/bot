@@ -96,6 +96,8 @@ export function identityStorage(store: Store): void {
   const columns = store.all('PRAGMA table_info(sessions)');
   for (const [name, type] of Object.entries({ authorization_revision: 'INTEGER', tenant_id: 'TEXT', identity_id: 'TEXT' }))
     if (!columns.some(c => c.name === name)) store.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+  if (!store.all('PRAGMA table_info(bind_challenges)').some(c => c.name === 'verified_origin'))
+    store.db.exec('ALTER TABLE bind_challenges ADD COLUMN verified_origin INTEGER NOT NULL DEFAULT 0');
   store.transaction(() => {
     identityProjection(store);
     if (!store.get('SELECT 1 FROM identity_migrations WHERE version=1')) {

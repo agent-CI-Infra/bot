@@ -1,6 +1,6 @@
 import type { Store } from '../storage/database.js';
 import { digest, fail, randomId } from '../core/security.js';
-import { invalidate, listEffectiveScopes, resolveActor } from './authorization.js';
+import { invalidate, listEffectiveScopes, resolveActor, resolvePrincipalActor, restrictActor, type ActorContext } from './authorization.js';
 
 export interface ExternalSubject { provider: string; host: string; connector: string; external_tenant: string; external_actor: string }
 export interface VerifiedExternalProof extends ExternalSubject { proof_id: string; challenge: string; expires_at: number }
@@ -11,14 +11,24 @@ const valid = (subject: ExternalSubject) => subjectKeys.every(k => typeof subjec
 
 // A connector supplies its verifier in trusted server code. No HTTP endpoint accepts a self-asserted proof.
 export class ExternalBindings {
-  constructor(readonly store: Store, private readonly verify: ProofVerifier) {}
+  constructor(readonly store: Store, private readonly verify: ProofVerifier, private readonly assertProof: (proof: VerifiedExternalProof) => void = () => {}) {}
+  // Association can precede project authorization. This never creates a scoped_grant.
+  async beginVerifiedExternalBinding(sessionRef: string, credential: unknown): Promise<{ challenge: string; expires_at: number }> {
+    const actor = resolveActor(this.store, sessionRef, { channel: 'api' }), proof = await this.verify(credential);
+    if (!proof || !valid(proof) || !proof.proof_id || proof.expires_at <= Date.now()) return fail(403, 'binding_proof_mismatch');
+    this.assertProof(proof);
+    const challenge = randomId(), expires = Math.min(proof.expires_at, Date.now() + 5 * 60_000);
+    this.store.run(`INSERT INTO bind_challenges(challenge_hash,principal_id,session_hash,tenant_id,provider,host,connector,external_tenant,external_actor,expires_at,verified_origin)
+      VALUES(?,?,?,?,?,?,?,?,?,?,1)`, digest(challenge), actor.principal_id, digest(sessionRef), actor.tenant_id ?? '', ...subjectKeys.map(k => proof[k]), expires);
+    return { challenge, expires_at: expires };
+  }
   beginExternalBinding(sessionRef: string, subject: ExternalSubject): { challenge: string; expires_at: number } {
     const actor = resolveActor(this.store, sessionRef, { channel: 'api' });
     if (!actor.tenant_id) return fail(400, 'tenant_selection_required');
     if (!listEffectiveScopes(this.store, actor.principal_id).some(g => g.state === 'active' && (g.scope === 'platform' || g.tenant_id === actor.tenant_id))) return fail(403, 'tenant_forbidden');
     if (!valid(subject)) return fail(400, 'invalid_external_subject');
     const challenge = randomId(), expires = Date.now() + 5 * 60_000;
-    this.store.run('INSERT INTO bind_challenges VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL)', digest(challenge), actor.principal_id, digest(sessionRef),
+    this.store.run('INSERT INTO bind_challenges(challenge_hash,principal_id,session_hash,tenant_id,provider,host,connector,external_tenant,external_actor,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)', digest(challenge), actor.principal_id, digest(sessionRef),
       actor.tenant_id, ...subjectKeys.map(k => subject[k]), expires);
     return { challenge, expires_at: expires };
   }
@@ -26,12 +36,13 @@ export class ExternalBindings {
     const actor = resolveActor(this.store, sessionRef, { channel: 'api' }), proof = await this.verify(credential);
     const current = resolveActor(this.store, sessionRef, { channel: 'api' });
     if (current.principal_id !== actor.principal_id || current.tenant_id !== actor.tenant_id) return fail(403, 'binding_context_mismatch');
-    if (!listEffectiveScopes(this.store, current.principal_id).some(g => g.state === 'active' && (g.scope === 'platform' || g.tenant_id === current.tenant_id))) return fail(403, 'tenant_forbidden');
     return this.store.transaction(() => {
       const row = this.store.get('SELECT * FROM bind_challenges WHERE challenge_hash=?', digest(challenge));
-      if (!row || row.session_hash !== digest(sessionRef) || row.principal_id !== actor.principal_id || row.tenant_id !== actor.tenant_id) return fail(403, 'binding_context_mismatch');
+      if (!row || row.session_hash !== digest(sessionRef) || row.principal_id !== actor.principal_id || row.tenant_id !== (actor.tenant_id ?? '')) return fail(403, 'binding_context_mismatch');
+      if (!row.verified_origin && !listEffectiveScopes(this.store, current.principal_id).some(g => g.state === 'active' && (g.scope === 'platform' || g.tenant_id === current.tenant_id))) return fail(403, 'tenant_forbidden');
       if (!proof || !valid(proof) || !proof.proof_id || proof.challenge !== challenge || proof.expires_at <= Date.now() ||
         subjectKeys.some(k => row[k] !== proof[k])) return fail(403, 'binding_proof_mismatch');
+      this.assertProof(proof);
       if (row.identity_id) {
         const identity = this.store.get("SELECT * FROM external_identities WHERE id=? AND status='active'", row.identity_id);
         if (!identity || row.proof_id !== proof.proof_id) return fail(409, 'binding_replayed');
@@ -58,9 +69,20 @@ export class ExternalBindings {
   async resolveExternalPrincipal(credential: unknown): Promise<string | null> {
     const proof = await this.verify(credential);
     if (!proof || !valid(proof) || !proof.proof_id || proof.expires_at <= Date.now()) return null;
+    this.assertProof(proof);
     const row = this.store.get(`SELECT e.principal_id FROM external_identities e JOIN principals p ON p.id=e.principal_id
       WHERE provider=? AND host=? AND connector=? AND external_tenant=? AND external_actor=? AND status='active' AND p.active=1`, ...subjectKeys.map(k => proof[k]));
     return row?.principal_id || null;
+  }
+  async resolveExternalActor(credential: unknown, tenant: string, project: string | undefined, guard: () => void): Promise<ActorContext> {
+    const proof = await this.verify(credential), principal = await this.resolveExternalPrincipal(credential);
+    if (!proof || !principal) return fail(403, 'external_binding_required');
+    const actor = resolvePrincipalActor(this.store, principal, tenant, project, 'im');
+    return restrictActor(actor, () => {
+      guard();
+      if (!this.store.get(`SELECT 1 FROM external_identities WHERE provider=? AND host=? AND connector=? AND external_tenant=? AND external_actor=? AND principal_id=? AND status='active'`,
+        ...subjectKeys.map(k => proof[k]), principal)) fail(403, 'external_binding_required');
+    });
   }
 }
 export function revokeIdentity(store: Store, principal: string, id: string): void {
