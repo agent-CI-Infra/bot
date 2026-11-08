@@ -129,8 +129,8 @@ test('organization approval binds exact parameters/revision and never bypasses t
 test('pending commands stop on project, installation, credentials, budget or authorization changes; unknown effects reconcile without repeating creation',async t=>{
   const {h,admin}=await managementFixture(t),svc=service(h),actor=resolveActor(h.store,admin.cookie().slice('bot_session='.length));
   let sent=0,found=null;
-  svc.register('schedule.register',{execute:async()=>{sent++;throw new Error('connection dropped after write');},reconcile:async()=>found});
-  const rev=svc.revision(project),input={operation:'schedule.register',target:project,arguments:{name:'Future schedule',specification:'daily'},expected_revision:rev,idempotency_key:'uncertain',source_conversation:'fixture',source_message:'uncertain'};
+  svc.register('knowledge.revise',{execute:async()=>{sent++;throw new Error('connection dropped after write');},reconcile:async()=>found});
+  const rev=svc.revision(project),input={operation:'knowledge.revise',target:project,arguments:{id:'fixture-entry',revision:1,body:'Updated knowledge'},expected_revision:rev,idempotency_key:'uncertain',source_conversation:'fixture',source_message:'uncertain'};
   const unknown=await svc.submit(actor,input);assert.equal(unknown.state,'unknown');assert.equal(sent,1);
   assert.equal((await svc.submit(actor,input)).state,'unknown');assert.equal(sent,1);
   assert.equal((await svc.resume(actor,unknown.id)).state,'unknown');assert.equal(sent,1);
@@ -140,7 +140,7 @@ test('pending commands stop on project, installation, credentials, budget or aut
     mutation();await assert.rejects(()=>svc.submit(actor,{...input,idempotency_key:'deny-'+Math.random()}));
     h.store.run("UPDATE policies SET enabled=1 WHERE repository_id='101'");h.store.run("UPDATE installed_repositories SET installed=1 WHERE repository_id='101'");h.store.run('DELETE FROM management_budgets');
   }
-  assert.equal((await command(admin,'notification.register',project,{name:'Delivery',event:'completed'})).value.result.error,'notification_register_not_registered');
+  assert.equal((await command(admin,'knowledge.revise',project,{id:'entry',revision:1,body:'Updated'})).value.result.error,'knowledge_revise_not_registered');
 });
 
 test('persistent conversations execute actual model tools, replay messages and survive reconnect without a second write',async t=>{

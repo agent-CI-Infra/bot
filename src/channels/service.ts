@@ -15,7 +15,7 @@ const card = (value: string, link?: string, token?: string): Json => ({ config: 
     ...(link ? [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '登录后台查看' }, url: link },
       ...(token ? [{ tag: 'button', text: { tag: 'plain_text', content: '刷新执行状态' }, value: { token } }] : [])] }] : [])] });
 export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; }
-/** Transport work only: this queue does not schedule future notifications (#166). */
+/** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
 export class ChannelService {
   readonly bindings: ChannelBindings;
   private timer?: ReturnType<typeof setInterval>;
@@ -164,7 +164,7 @@ export class ChannelService {
   enqueue(actor: ActorContext, e: ChannelEvent, project: string, key: string): Json {
     authorize(actor, 'schedules.manage', { project_id: project });
     this.source(e); if (e.chat_type === 'group') this.groupScope(e, project);
-    // Future delivery must be registered by #166. Queueing never claims it was sent.
+    // Schedules consume this sealed registration as a destination, never as proof of delivery.
     const id = this.queue(e, card('通知已入队，尚未发送。', this.url()), 'notification:' + digest(JSON.stringify([actor.principal_id, project, e.connector_id, e.actor_tenant, e.chat_id, key])), undefined, { principal_id: actor.principal_id, project_id: project }, true);
     return { operation_id: id, state: 'registered', sent: false };
   }
@@ -201,7 +201,10 @@ export class ChannelService {
       this.management.service.scope(actor, project);
       if (e.chat_type === 'group') this.groupScope(e, project);
       const linked = /^\/link ([a-f0-9]{48})$/.exec(request);
-      if (linked) { this.link(actor, e, project, linked[1]!); reply('已显式关联本人同一项目的管理会话。'); }
+      if (request === '/destination' || request === '登记通知目的地') {
+        const registered = this.enqueue(actor, e, project, 'destination:' + row.id);
+        reply('通知目的地已登记：' + registered.operation_id + '。可在后台创建日报或事件订阅；登记不表示已发送通知。');
+      } else if (linked) { this.link(actor, e, project, linked[1]!); reply('已显式关联本人同一项目的管理会话。'); }
       else {
         const session = this.session(actor, e, project);
         if (e.created_at < session.last_message_at) fail(409, 'channel_message_out_of_order');

@@ -12,7 +12,15 @@ export interface EffectiveScope {
   capabilities: string[]; source: string; verified_at: number; expires_at: number | null; state: string;
 }
 // Object identity is the trust boundary. Deserializing an ActorContext never creates an authenticated actor.
-const issued = new WeakMap<ActorContext, { store: Store; session?: string; guard?: () => void; parent?: ActorContext }>();
+const issued = new WeakMap<ActorContext, { store: Store; session?: string; guard?: () => void; parent?: ActorContext; allowedCapabilities?: string[] }>();
+/** Trusted background work can attenuate authority; this never creates or expands a grant. */
+export function narrowActor(actor: ActorContext, capabilities: string[]): ActorContext {
+  assertCurrent(actor);
+  const trust = issued.get(actor)!;
+  const allowed = capabilities.filter(c => !trust.allowedCapabilities || trust.allowedCapabilities.includes(c));
+  const narrowed = Object.freeze({ ...actor, capabilities: Object.freeze([...allowed]) as unknown as string[] });
+  issued.set(narrowed, { store: trust.store, parent: actor, allowedCapabilities: allowed }); return narrowed;
+}
 // Trusted adapters attach a live credential/connector fence; narrowing scope preserves it.
 export function restrictActor(actor: ActorContext, guard: () => void): ActorContext {
   const trust = issued.get(actor); if (!trust) return fail(403, 'untrusted_actor');
@@ -89,6 +97,8 @@ export function assertCurrent(actor: ActorContext): void {
 export function authorize(actor: ActorContext, capability: string, resource: { tenant_id?: string | null; project_id?: string } = {}): void {
   assertCurrent(actor);
   const { store } = issued.get(actor)!;
+  const permitted = issued.get(actor)!.allowedCapabilities;
+  if (permitted && !permitted.includes(capability)) fail(403, 'capability_forbidden');
   let tenant = resource.tenant_id || actor.tenant_id;
   const project = resource.project_id || actor.project_id;
   if (project) {

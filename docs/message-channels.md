@@ -51,7 +51,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 重启不会重放已提交的管理消息：管理服务标记中断，需要查看原会话/回执；尚未提交的收件继续处理。发送 outbox 独立保存 `queued`、`sending`、`retry`、`sent`、`failed`、尝试次数和稳定错误码，网络失败指数退避，使用相同 Feishu uuid 对账重发。连接/身份/范围失效为终止失败。所有发送内容和入站正文密封保存，SDK 原始日志关闭，访问令牌只在服务端调用期间使用。
 
-`ChannelService.enqueue` 是 `NotificationOutbox` 的授权注册入口，返回 `registered`、`sent:false`，不会进入本项即时回复 worker。#166 消费授权目的地并实现调度/主动推送；本项没有通知计时器，也不宣称通知已送达。
+`ChannelService.enqueue` 是 `NotificationOutbox` 的授权目的地注册入口，返回 `registered`、`sent:false`，不会进入即时回复 worker。用户可以发送 `/project <项目ID> /destination` 登记当前会话；[持久化调度模块](schedules.md) 消费该授权目的地，负责定时日报、事件订阅及可靠发送。登记仍不表示送达，发送前重检当前权限和群范围。
 
 ## 验证
 

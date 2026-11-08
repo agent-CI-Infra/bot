@@ -5,6 +5,9 @@ import { fail, HttpError, object, text, type Json } from '../core/security.js';
 import type { ChannelAdapter, ChannelDelivery, ChannelEvent } from './types.js';
 
 export type ChannelFetch = typeof fetch;
+export class ChannelRateLimitError extends HttpError {
+  constructor(readonly retryAfterMs: number) { super(503, 'channel_rate_limited'); }
+}
 const equal = (a: string, b: string) => !!a && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 /** Only this adapter reads credential values; persisted configuration and callers hold a reference. */
 export class FeishuAdapter implements ChannelAdapter {
@@ -86,8 +89,13 @@ export class FeishuAdapter implements ChannelAdapter {
       this.guard();
       const r = await this.request('https://open.feishu.cn/open-apis' + path, { ...init, redirect: 'error', signal: AbortSignal.timeout(15000),
         headers: { 'Content-Type': 'application/json', ...(authenticated ? { Authorization: 'Bearer ' + token } : {}) } });
-      const data = await r.json() as any;
-      if (!r.ok || data.code !== 0) fail(502, 'channel_delivery_failed');
+      const data = await r.json().catch(error => { if (r.status === 429) return {}; throw error; }) as any;
+      if (r.status === 429 || [99991400, 99991401].includes(data.code)) {
+        const retry = r.headers.get('retry-after') ?? '1';
+        const delay = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+        throw new ChannelRateLimitError(Number.isFinite(delay) ? Math.min(3600000, Math.max(1000, delay)) : 1000);
+      }
+      if (!r.ok || data.code !== 0) fail(502, 'channel_delivery_rejected');
       return data;
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }
   }

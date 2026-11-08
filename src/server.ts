@@ -39,13 +39,16 @@ import { ConfigurationPR } from './management/configuration-pr.js';
 import { ChannelService, type ChannelOptions } from './channels/service.js';
 import { ChannelApi } from './channels/api.js';
 import { ChannelConnections } from './channels/connections.js';
+import { ScheduleService } from './schedules/service.js';
+import { Scheduler } from './schedules/worker.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
   imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity;
-  channels?: ChannelOptions; onChannels?: (service: ChannelService) => void; }
+  channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
+  schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
   const chunks: Buffer[] = []; let size = 0, complete = true;
   for await (const chunk of req) {
@@ -73,6 +76,8 @@ export function createControlPlane(options: Options) {
   const channels = new ChannelService(store, managementApi.agent, { origin: options.adminOrigin, ...options.channels });
   const channelApi = new ChannelApi(channels), channelConnections = new ChannelConnections(channels);
   options.onChannels?.(channels);
+  const schedules = new ScheduleService(store, sharedManagement, channels, options.schedules?.clock);
+  const scheduler = new Scheduler(schedules); options.onSchedules?.(scheduler);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
@@ -171,7 +176,7 @@ export function createControlPlane(options: Options) {
       respond(res, 200, result); return;
     }
     if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
-    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
+    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/schedules.js': ['schedules.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/workflows.js': ['workflows.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
     if (method === 'GET' && assets[path]) {
@@ -299,11 +304,12 @@ export function createControlPlane(options: Options) {
   let connectionTimer: ReturnType<typeof setInterval>;
   webhook.once('listening', () => {
     channels.start();
+    if (options.schedules?.automatic !== false) scheduler.start();
     if (options.channels?.longConnections !== false) {
       channelConnections.reconcile();
       connectionTimer = setInterval(() => channelConnections.reconcile(), 1000); connectionTimer.unref();
     }
   });
-  admin.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); void managementApi.agent.close().catch(()=>{}); });
+  admin.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); void scheduler.close().catch(()=>{}); void managementApi.agent.close().catch(()=>{}); });
   return { webhook, admin };
 }

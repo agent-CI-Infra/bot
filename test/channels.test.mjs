@@ -236,7 +236,7 @@ test('HTTP and enterprise SDK ingress share dedup; config CAS, outbox retries, c
   wire.state.failures = 1;
   const retry = await post(h, id, envelope('/identity')); await finished(h, retry.value.operation_id);
   const queued = await until(() => h.store.get("SELECT * FROM channel_outbox WHERE source_event=? AND state='retry'", retry.value.operation_id));
-  assert.equal(queued.attempts, 1); assert.equal(queued.last_error, 'channel_delivery_failed');
+  assert.equal(queued.attempts, 1); assert.equal(queued.last_error, 'channel_delivery_rejected');
   h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', queued.id);
   await until(() => h.store.get('SELECT state FROM channel_outbox WHERE id=?', queued.id).state, s => s === 'sent');
   assert.equal(h.store.get('SELECT attempts FROM channel_outbox WHERE id=?', queued.id).attempts, 2);
