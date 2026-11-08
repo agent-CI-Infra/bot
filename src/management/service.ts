@@ -1,7 +1,7 @@
 import { builtinWorkflow } from '../workflows/catalog.js';
 import { checkManagementBudget } from './budget.js';
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
 import type { Actor } from '../app/auth.js';
 import { WorkflowService } from '../workflows/service.js';
@@ -29,6 +29,8 @@ export const parameterHash = (v: unknown): string => digest(canonical(v));
 const now=()=>new Date().toISOString();
 export class ManagementService {
   readonly extensions = new Map<string,ManagementExtension>();
+  // A trusted transport rechecks its persisted source when a deferred command resumes in Web.
+  sourceGuard?: (command: Row) => void;
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
   constructor(readonly store: Store, readonly workflows: WorkflowService, readonly tasks: TaskCommands) {}
   register(operation: string, extension: ManagementExtension): void {
@@ -230,6 +232,8 @@ export class ManagementService {
     const extension=this.extensions.get(command.operation);
     try{
       const row=this.store.get('SELECT * FROM management_commands WHERE id=?',id)!;
+      if(row.channel==='im'&&this.sourceGuard)restrictActor(actor,()=>this.sourceGuard?.(row));
+      this.sourceGuard?.(row);
       if(row.principal_id!==actor.principal_id||row.authorization_revision!==actor.authorization_revision)fail(409,'authorization_changed');
       this.check(actor,command);
       if(row.execution_fence!==this.fence(actor,command.target.project_id))fail(409,'execution_context_changed');
@@ -238,12 +242,12 @@ export class ManagementService {
       if(extension){
         // Any uncertain external response is reconciled using the persisted effect key, never blindly retried.
         if(['executing','unknown'].includes(row.state)){
-          const found=await extension.reconcile(actor,command,id);this.check(actor,command);
+          const found=await extension.reconcile(actor,command,id);this.sourceGuard?.(row);this.check(actor,command);
           if(found)this.finish(id,'succeeded',found);else this.finish(id,'unknown',{error:'external_result_unknown',reconcile_required:true});
         }else{
           if(this.revision(command.target)!==command.expected_revision)fail(409,'management_revision_conflict');
           this.store.run("UPDATE management_commands SET state='executing',updated_at=? WHERE id=?",now(),id);
-          const result=await extension.execute(actor,command,id);this.check(actor,command);this.finish(id,'succeeded',result);
+          const result=await extension.execute(actor,command,id);this.sourceGuard?.(row);this.check(actor,command);this.finish(id,'succeeded',result);
         }
       }else this.store.transaction(()=>{
         this.check(actor,command);

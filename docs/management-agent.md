@@ -2,6 +2,8 @@
 
 管理控制台的「管理对话」支持全部有权项目、组织和单项目作用域；项目设置中也有入口。查询、显式表单和自然语言工具调用使用 `ManagementService`。已有工作流编辑、项目策略、角色配置与 Task 操作也进入相同命令服务。ActorContext 由服务端的 `resolveActor` 创建；可信 IM 适配器可使用身份模块解析后的 actor，不能反序列化客户端 actor 或自行授予权限。
 
+飞书应用机器人已接入相同服务，安装、双端身份证明、群范围和渠道回执的使用方式见 [消息渠道与飞书应用机器人](message-channels.md)。
+
 ## 查询与命令契约
 
 `POST /api/management/query` 接受 `{ operation, target, arguments }`。目录与 JSON Schema 见 `src/management/catalog.ts`；`get_capabilities` 返回当前作用域和可用注册项。分页使用 `offset`、`limit`，Task run、事件与角色记录中的 offset 对应返回的 `next_after`。

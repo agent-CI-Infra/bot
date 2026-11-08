@@ -31,3 +31,8 @@ a.status-link:hover{text-decoration:underline}
 .management-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 1.5rem; margin-top: 1rem; }
 .management-panel textarea { width: 100%; box-sizing: border-box; }
 .management-panel .actions { flex-wrap: wrap; margin-block: .75rem; }
+
+#channels-panel .channel-binding{display:flex;flex-direction:column;align-items:flex-start;gap:.5rem;padding:.75rem 0;overflow-wrap:anywhere}
+#channels-panel form{display:grid;gap:.75rem}#channels-panel label{display:grid;gap:.35rem}#channels-panel label:has(input[type=checkbox]){display:flex;flex-direction:row;align-items:center;gap:.5rem}#channels-panel input[type=checkbox]{width:auto}
+
+#channels-panel{display:grid;gap:1rem;padding:1rem}#channels-panel>.side-card{margin:0}#channels-panel form{max-width:50rem}
