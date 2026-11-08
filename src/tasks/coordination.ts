@@ -102,7 +102,8 @@ export function readCoordinationEvidence(s:Store,ids:string[],a:any){
  return {task:coordinationTaskSummary(s,a.task_id),events:rows.slice(0,10).map(r=>({...r,ref:'task_history:'+r.id})),next_offset:rows.length>10?offset+10:null};
 }
 export async function runCoordinator(s:Store,row:Row,token:string){
- const source=s.get('SELECT * FROM tasks WHERE id=?',row.source_task_id)!,request=JSON.parse(row.request),task={...source,active_role:'coordinator'};
+ // The coordinator runs under its own coordination claim, not the source task's claim: its RoleRun lease is not bound to it.
+ const source=s.get('SELECT * FROM tasks WHERE id=?',row.source_task_id)!,request=JSON.parse(row.request),task={...source,active_role:'coordinator',claim_token:null};
  let basis:Map<string,any>|undefined;
  const guard=async()=>{const current=s.get('SELECT * FROM task_coordinations WHERE id=?',row.id);if(['cancelled','superseded'].includes(s.get('SELECT status FROM tasks WHERE id=?',source.id)?.status))stop('coordination_source_cancelled','cancelled');if(current?.claim_token!==token||current.state!=='running')stop('coordination_claim_revoked','cancelled');if(!s.get('SELECT id FROM tasks WHERE id=? AND repository_id=?',source.id,row.repository_id)||!s.get('SELECT enabled FROM policies WHERE repository_id=?',row.repository_id)?.enabled)stop('repository_policy_disabled','cancelled');};
  const submit={type:'function',function:{name:'submit_coordination',description:'Submit coordination advice or a concrete human decision; no product execution or delivery authority.',parameters:coordinationResultSchema}};

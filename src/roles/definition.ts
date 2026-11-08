@@ -22,7 +22,7 @@ export interface SkillBundleRef { id: string; revision: number; content_hash: st
 export interface RoleDefinitionV2 {
   role_id: string; revision: number; enabled: boolean; kind: RoleKind; name: string; responsibility: string; persona_prompt: string;
   model_profile_ref: ModelProfileRef | null; skill_bundle_ref: SkillBundleRef | null; harness_ref: Ref; capability_policy_ref: Ref;
-  environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number }; output_schema_ref: Ref;
+  environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number; max_total_tokens?: number; max_model_requests?: number; max_tool_calls?: number; max_wall_seconds?: number; max_cost?: { amount: number; currency: string } }; output_schema_ref: Ref;
 }
 export type Entry = 'development' | 'request' | 'review' | 'actions';
 export interface RoleConfiguration {
@@ -198,17 +198,25 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       skill = { id: bundle!.id, revision: bundle!.revision, content_hash: bundle!.content_hash };
     }
     const budget = pick('budget_policy_ref', budgetPolicies, budgetPolicies.map(b => b.id), 'entry-default', 'unknown_budget_policy') as RoleDefinitionV2['budget_policy_ref'];
-    if (budget.id === 'bounded') {
-      const b = given.budget_policy_ref, turns = b.max_turns, tokens = b.max_output_tokens;
-      if (turns === undefined && tokens === undefined) invalid('invalid_budget_policy', `${field}.budget_policy_ref`);
-      if (turns !== undefined && (!Number.isSafeInteger(turns) || turns < 4 || turns > 256)) invalid('invalid_budget_policy', `${field}.budget_policy_ref.max_turns`);
-      if (tokens !== undefined && (!Number.isSafeInteger(tokens) || tokens < 256 || tokens > 32768)) invalid('invalid_budget_policy', `${field}.budget_policy_ref.max_output_tokens`);
-      Object.assign(budget, turns !== undefined ? { max_turns: turns } : {}, tokens !== undefined ? { max_output_tokens: tokens } : {});
+    if (budget.id === 'bounded' || budget.id === 'metered') {
+      const b = given.budget_policy_ref, bfield = `${field}.budget_policy_ref`;
+      // Integer limits and their bounds; metered adds the cumulative ones.
+      const limits: Record<string, [number, number]> = { max_turns: [4, 256], max_output_tokens: [256, 32768], ...(budget.id === 'metered' ? { max_total_tokens: [1000, 100_000_000], max_model_requests: [1, 10000], max_tool_calls: [1, 10000], max_wall_seconds: [60, 86400] } : {}) };
+      const budgetFields = ['id', 'version', ...Object.keys(limits), ...(budget.id === 'metered' ? ['max_cost'] : [])];
+      const unknown = Object.keys(b).find(k => !budgetFields.includes(k)); if (unknown) invalid('unknown_field', `${bfield}.${unknown}`);
+      if (Object.keys(b).every(k => k === 'id' || k === 'version')) invalid('invalid_budget_policy', bfield);
+      for (const [key, [min, max]] of Object.entries(limits)) if (b[key] !== undefined && (!Number.isSafeInteger(b[key]) || b[key] < min || b[key] > max)) invalid('invalid_budget_policy', `${bfield}.${key}`);
+      if (b.max_cost !== undefined && (!b.max_cost || typeof b.max_cost !== 'object' || Object.keys(b.max_cost).some(k => !['amount', 'currency'].includes(k)) || typeof b.max_cost.amount !== 'number' || !(b.max_cost.amount > 0) || b.max_cost.amount > 1_000_000 || !['USD', 'CNY'].includes(b.max_cost.currency))) invalid('invalid_budget_policy', `${bfield}.max_cost`);
+      Object.assign(budget, Object.fromEntries(Object.keys(limits).filter(k => b[k] !== undefined).map(k => [k, b[k]])), b.max_cost !== undefined ? { max_cost: { amount: b.max_cost.amount, currency: b.max_cost.currency } } : {});
     }
+    const environmentRef = pick('environment_profile_ref', environmentProfiles, allowed.environment, allowed.environment[0]!, 'environment_profile_not_allowed');
+    // A per-run container profile needs a driver that runs inside it; built-in drivers do not, so they are refused here and
+    // again by run admission (unsupported_capability), never silently run on the shared computer.
+    if ((environmentProfiles.find(e => e.id === environmentRef.id) as { isolation?: string } | undefined)?.isolation === 'run_container' && harness!.capabilities?.isolation !== 'run_environment') invalid('unsupported_capability', `${field}.environment_profile_ref.id`);
     const definition: RoleDefinitionV2 = { role_id: id, revision: 0, enabled, kind, name: textField('name', 80, defaultName), responsibility: textField('responsibility', 2000, defaultResponsibility),
       persona_prompt: textField('persona_prompt', 16000, ''), model_profile_ref: model, skill_bundle_ref: skill, harness_ref: { id: harness!.id, version: harness!.version },
       capability_policy_ref: pick('capability_policy_ref', capabilityPolicies, allowed.capability, (given.role_id==='coordinator'?'coordinator':kind==='controller'?'controller-coordination':allowed.capability[0]!), 'capability_policy_not_allowed'),
-      environment_profile_ref: pick('environment_profile_ref', environmentProfiles, allowed.environment, allowed.environment[0]!, 'environment_profile_not_allowed'),
+      environment_profile_ref: environmentRef,
       budget_policy_ref: budget, output_schema_ref: pick('output_schema_ref', outputSchemas, allowed.output, (id==='coordinator'?'coordination-result':allowed.output[0]!), 'output_schema_not_allowed') };
     // A role's revision moves only when its own definition changes.
     const previous = current.roles.find(r => r.role_id === id);
@@ -252,7 +260,7 @@ export interface RoleSnapshot {
   skills: { id: string; revision: number; content_hash: string; source: any; files: { path: string; sha256: string; bytes: number }[] } | null;
   harness: { id: string; version: string; session: string; events: string; environment: string; runtime: { package: string; version: string } | null; source: 'role' | 'entry_executor' | 'legacy' };
   capability: { id: string; version: string; tools: readonly string[] | null; authorities: Record<string, boolean> };
-  environment: { id: string; version: string; workspace: string; repository: boolean };
+  environment: { id: string; version: string; workspace: string; repository: boolean; isolation?: string };
   budget: RoleDefinitionV2['budget_policy_ref'];
   output_schema: { id: string; version: string; tool: string | null };
 }
@@ -311,7 +319,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     skills: bundle ? { id: bundle.id, revision: bundle.revision, content_hash: bundle.content_hash, source: bundle.source, files: bundle.files } : null,
     harness: { id: harness.id, version: harness.version, session: harness.session, events: harness.events, environment: harness.environment, runtime: harness.runtime, source: options.harness ? (options.pinned ? 'legacy' : 'entry_executor') : config.legacy ? 'legacy' : 'role' },
     capability: { id: policy.id, version: policy.version, tools: policy.tools, authorities: policy.authorities },
-    environment: { id: environment.id, version: environment.version, workspace: environment.workspace, repository: environment.repository },
+    environment: { id: environment.id, version: environment.version, workspace: environment.workspace, repository: environment.repository, ...('isolation' in environment ? { isolation: environment.isolation } : {}) },
     budget: definition.budget_policy_ref, output_schema: { id: schema.id, version: schema.version, tool: schema.tool } };
   const id = sha256(JSON.stringify(snapshot));
   if (options.persist !== false) s.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING', id, repositoryId, roleId, config.revision, definition.revision, JSON.stringify(snapshot), new Date().toISOString());

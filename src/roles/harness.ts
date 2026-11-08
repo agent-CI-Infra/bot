@@ -9,6 +9,7 @@ import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
 import { piAdapter,piRuntime } from '../agent/pi.js';
 import type { RoleKind } from './catalog.js';
+import type { HarnessCapabilities } from './protocol.js';
 /** The worker cannot access provider credentials or obtain arbitrary tools. */
 export function processHarness<T>(spec:AgentSpec<T>){return async(services:AgentServices):Promise<T>=>new Promise((resolve,reject)=>{
  const runId=spec.task.trace_run_id;
@@ -31,6 +32,8 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
     if(spec.checkpoint&&completeTranscript(m.args))await spec.checkpoint();value={saved:true};}
    else if(m.method==='model'){const response=await services.request(m.args,'worker:'+requests++);const message=response.value?.choices?.[0]?.message;value=spec.redactor.clean({role:'assistant',content:typeof message?.content==='string'?message.content:null,...(message?.tool_calls?{tool_calls:message.tool_calls}:{})});}
    else if(m.method==='tool'){
+    // The worker presents its run token on every tool call; a revoked, expired or taken-over run is refused here.
+    if(spec.runAccess){try{spec.runAccess.check(m.args?.token);}catch(error){value={error:(error as any).code??'run_token_invalid'};spec.onDenied?.(String(m.args?.name),(error as any).code??'run_token_invalid');child.stdin.write(JSON.stringify({id:m.id,result:value})+'\n');return;}}
     const offered=spec.tools?.some(t=>t.function.name===m.args.name);
     if(offered&&m.args.offered)spec.screen?.(m.args.name,m.args.args);
     if(!offered||!m.args.offered){value={error:'tool_not_allowed'};spec.onDenied?.(String(m.args.name),'not_offered');}
@@ -41,7 +44,7 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
    child.stdin.write(JSON.stringify({id:m.id,result:spec.redactor.clean(value)})+'\n');
   }).catch(fail);
  });
- child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,maxTurns:spec.maxTurns??32}})+'\n');
+ child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,maxTurns:spec.maxTurns??32,token:spec.runAccess?.token??null}})+'\n');
 });}
 
 export const completeTranscript=(messages:any[])=>{const last=messages.findLastIndex(m=>m?.role==='assistant');if(last<0||!messages[last].tool_calls?.length)return true;const answered=new Set(messages.slice(last+1).filter(m=>m?.role==='tool').map(m=>m.tool_call_id));return messages[last].tool_calls.every((c:any)=>answered.has(c.id));};
@@ -50,23 +53,40 @@ export const completeTranscript=(messages:any[])=>{const last=messages.findLastI
  * run, the model APIs it speaks, whether it needs tool calls and which structured submissions it supports. A combination
  * outside the matrix is a configuration error; no other model, provider or driver is substituted.
  */
-export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string;kinds?:RoleKind[];model_api?:string[];tool_calls?:boolean;structured_output?:string[];environment?:'control_plane'|'workspace';runtime?:{package:string;version:string}|null;
+export interface RoleHarnessMetadata {id:string;version:string;session:string;events:string;kinds?:RoleKind[];model_api?:string[];tool_calls?:boolean;structured_output?:string[];environment?:'control_plane'|'workspace'|'run_environment';runtime?:{package:string;version:string}|null;
  /** The driver brings its own model (ACP agents): no project model is resolved, called or accounted for it. */
- externalModel?:boolean}
+ externalModel?:boolean;
+ /** What the driver's protocol does, checked by RoleRun admission (see protocol.ts). Undeclared means unsupported. */
+ capabilities?:HarnessCapabilities}
 const openai=['openai-chat-completions'];
+// None of the built-in drivers runs its agent inside a per-run environment: Native and Pi loops and the Process worker
+// run on the control plane or the shared project computer, and an ACP agent runs on the control-plane host. Their
+// registration therefore never claims run isolation; admission refuses them for profiles that require it.
+const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 export const harnesses:Required<RoleHarnessMetadata>[]=[
- // A generic ACP agent with its own model; worker roles only. It declares no project model API.
- {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true},
- {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false},
- {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false},
+ // A generic ACP agent with its own model; worker roles only. It declares no project model API. Only the Bot task tools
+ // are observed by the control plane; the agent's own terminal and tools are not.
+ {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true,
+  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
+ {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
+ // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
+ {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
  // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
- {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false}];
+ {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
+  capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
 const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',acpHarness],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
- adapters.set(metadata.id,factory);harnesses.push({kinds:['writer','observer','evaluator'],model_api:metadata.externalModel?[]:openai,tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:false,...metadata});
+ if(metadata.capabilities!==undefined&&!validCapabilities(metadata.capabilities))throw new Error('invalid_role_harness_capabilities');
+ adapters.set(metadata.id,factory);harnesses.push({kinds:['writer','observer','evaluator'],model_api:metadata.externalModel?[]:openai,tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:false,...metadata,capabilities:metadata.capabilities??{}});
+}
+// Capability declarations use the protocol vocabulary only; anything else is a registration error, not a silent default.
+const capabilityValues:Record<string,readonly unknown[]>={raw_evidence:['control_plane_tools','task_tools','none'],cancel:['abort_signal','protocol_then_kill','none'],isolation:['run_environment','none'],version_binding:[true,false],output_validation:[true,false],fresh_context:[true,false]};
+function validCapabilities(value:any){
+ if(!value||typeof value!=='object'||Array.isArray(value))return false;
+ return Object.entries(value).every(([key,v])=>key==='recovery'?Array.isArray(v)&&v.every(m=>['native_resume','checkpoint_restore','rebuilt_from_task_records','unsupported'].includes(m)):capabilityValues[key]?.includes(v));
 }
 /**
  * The Pi harness for a role run. spec.pi names the workspace and, for an entry executor, the workflow's own Pi tool
@@ -102,8 +122,11 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
 export function roleHarness(id:string){
  if(!adapters.has(id))throw new Error('unknown_role_harness');const factory=adapters.get(id);
  const createSession=<T>(spec:AgentSpec<T>,services:AgentServices)=>{
-  const emit=(event:import('../harness/session.js').HarnessEvent)=>traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');
-  return managedSession(async signal=>{const wrapped={...spec,executionSignal:signal,guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});},emit);
+  const emit=(event:import('../harness/session.js').HarnessEvent)=>{traceEvent(spec.store,spec.task.id,'harness_event',spec.redactor.clean(event),spec.task.trace_run_id,'harness');spec.onHarnessEvent?.(spec.redactor.clean(event));};
+  const session=managedSession(async signal=>{const wrapped={...spec,executionSignal:signal,guard:async()=>{if(signal.aborted)throw signal.reason;await spec.guard();}};return factory?factory(wrapped)({...services,guard:wrapped.guard}):runTools(wrapped,{...services,guard:wrapped.guard});},emit);
+  // A RoleRun cancel or an exhausted budget interrupts the session the same way the task guard does.
+  const external=spec.cancelSignal;if(external){const cancel=()=>void session.cancel();if(external.aborted)cancel();else external.addEventListener('abort',cancel,{once:true});}
+  return session;
  };
  return {...harnesses.find(h=>h.id===id)!,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
   const session=createSession(spec,services);

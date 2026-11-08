@@ -59,7 +59,7 @@ A registered driver can declare `session: task_records` when it cannot continue 
 
 Role observations tolerate an evidence string by wrapping the unchanged text in a one-element evidence array, with a normalization event. Other submission-format errors get at most two local corrections in either harness, reusing existing observations. No acceptance verdict or completion boolean is weakened. Failed/interrupted assignments are marked accordingly; a resumed role is offered its prior failed submission source so it can repair packaging without repeating unchanged checks.
 
-统一会话生命周期与外部 ACP 执行器接入见 [Harness Runtime](harness-runtime.md)。第一阶段验证 Codex ACP；Native/Process 继续支持，角色结果仍由独立 QA 验收。
+统一会话生命周期与外部 ACP 执行器接入见 [Harness Runtime](harness-runtime.md)；每次运行的协议、准入、隔离环境 profile（`isolated-workspace`、`isolated-candidate`）和累计预算 `metered` 见 [RoleRun 协议](role-run.md)。第一阶段验证 Codex ACP；Native/Process 继续支持，角色结果仍由独立 QA 验收。
 
 ### Parallel integration and durable merge requests (#183)
 

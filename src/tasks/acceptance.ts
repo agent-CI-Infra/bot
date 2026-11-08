@@ -1,6 +1,7 @@
 import {scopeInstructions} from './scope.js';
 import { executionModel } from './configuration.js';
 import { runRole } from '../roles/run.js';
+import { isolatedRunEnvironment } from '../roles/workspace.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { beginRun, endRun } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
@@ -82,7 +83,7 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
       },validate:content=>{
         let value;try{value=JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{return stop('acceptance_output_invalid','retry_wait','验收器未返回有效 JSON。');}
         return validateDecision(value);
-      }},'qa');
+      }},'qa',undefined,undefined,{prepare:isolatedRunEnvironment(verification)});
     records.history(task.id,'acceptance_evaluated',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,verdict},verificationRun?.id);verificationOutcome=verdict.outcome;return verdict;
   } catch(error) {
     verificationFault=(error as any).code||'runtime_fault';

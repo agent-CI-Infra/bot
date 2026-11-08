@@ -250,8 +250,8 @@ test('controller recovery records native resume of a live Pi session after a res
   let runs = f.s.all("SELECT recovery_mode,status FROM task_runs WHERE role='manager' ORDER BY rowid");
   assert.deepEqual(runs.map(r => [r.recovery_mode, r.status]), [['new_session', 'interrupted'], ['native_resume', 'succeeded']]);
   assert.deepEqual([live.configs, live.starts], [1, 1], 'the living session was reattached, not restarted');
-  // The abandoned run cannot answer the session any more: it was already taken over.
-  hung(call('finish', { summary: 'late' })); assert.ok(['execution_interrupted', 'tool_operation_conflict'].includes((await abandoned).code));
+  // The abandoned run cannot answer the session any more: it was already taken over, so its lease epoch is stale.
+  hung(call('finish', { summary: 'late' })); assert.equal((await abandoned).code, 'lease_epoch_stale');
   // A later run whose previous session is gone (its workspace was released) starts a fresh session from task records.
   f.s.run("UPDATE task_runs SET status='interrupted' WHERE id=(SELECT id FROM task_runs WHERE role='manager' ORDER BY rowid DESC LIMIT 1)");
   const completed = f.s.get("SELECT count(*) n FROM role_assignments WHERE status='completed'").n;

@@ -30,19 +30,27 @@ export interface CapabilityPolicy { id: string; version: string; kind: RoleKind;
 export const capabilityPolicies: CapabilityPolicy[] = policies.map(p => ({ ...p, version: version(p) }));
 export const capabilityPolicy = (id: string) => capabilityPolicies.find(p => p.id === id);
 
-/** Environment profiles describe where a role run executes. #169 will add separately provisioned environments. */
+/**
+ * Environment profiles describe where a role run executes. The first four share the project computer (directories of one
+ * container, one uid). The isolated profiles provision a container for each run (see src/projects/run-environment.ts);
+ * admission requires a harness that executes inside it and the manager's inspection of that container.
+ */
 const environments = [
   { id: 'control-session', kinds: ['controller'], workspace: 'empty', repository: false, description: 'Fresh restricted Pi session per task run; no repository checkout or shell.' },
   { id: 'task-workspace', kinds: ['writer'], workspace: 'task', repository: true, description: 'The task workspace that holds the candidate.' },
   { id: 'candidate-checkout', kinds: ['observer'], workspace: 'disposable', repository: true, description: 'A disposable checkout of the fixed candidate snapshot.' },
-  { id: 'evaluation-checkout', kinds: ['evaluator'], workspace: 'disposable', repository: true, description: 'A fresh checkout of the exact candidate for independent acceptance.' }
+  { id: 'evaluation-checkout', kinds: ['evaluator'], workspace: 'disposable', repository: true, description: 'A fresh checkout of the exact candidate for independent acceptance.' },
+  { id: 'isolated-workspace', kinds: ['writer'], workspace: 'run', repository: true, isolation: 'run_container', description: 'A container of its own for each run: own HOME, processes, tmp, caches and network identity; writes only its own tmpfs workspace, seeded from the fixed source.' },
+  { id: 'isolated-candidate', kinds: ['observer', 'evaluator'], workspace: 'run', repository: true, isolation: 'run_container', description: 'A container of its own for each run, built from the fixed candidate; no developer volume is mounted.' }
 ] as const;
 export const environmentProfiles = environments.map(e => ({ ...e, version: version(e) }));
 
 /** Budgets can only lower the trusted limits an entry already applies. */
 const budgets = [
   { id: 'entry-default', description: 'The entry point\'s trusted turn and output limits.' },
-  { id: 'bounded', description: 'Explicit max_turns (4-256) and max_output_tokens (256-32768), each capped by the entry limit.' }
+  { id: 'bounded', description: 'Explicit max_turns (4-256) and max_output_tokens (256-32768), each capped by the entry limit.' },
+  // Cumulative over every run of the role in its task (recoveries, attempts, delegations, sub-agents); see src/roles/role-run.ts.
+  { id: 'metered', description: 'bounded limits plus cumulative max_total_tokens, max_model_requests, max_tool_calls, max_wall_seconds and an estimated max_cost for the role within its task. Unknown usage is never counted as zero.' }
 ] as const;
 export const budgetPolicies = budgets.map(b => ({ ...b, version: version(b) }));
 

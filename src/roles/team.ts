@@ -6,7 +6,7 @@ import { traceEvent,traceSource } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
 import { taskTools,playbookInstructions,playbooks } from '../tasks/playbooks.js';
 import { runRole,roleConfig,roleInstance,type RoleRunOptions } from './run.js';
-import { findingsSchema,nominationSchema } from './catalog.js';
+import { findingsSchema,nominationSchema,environmentProfiles } from './catalog.js';
 const tool=(name:string,description:string,properties:any,required:string[]=[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const readRecord=tool('read_task_record','Read a durable record from THIS task by offered reference; use offset to page its JSON.',{ref:{type:'string'},offset:{type:'integer'}},['ref']);
 export interface TeamEnvironment {
@@ -20,6 +20,8 @@ export interface TeamEnvironment {
  executor?:{harness:string;round:string;prepare:RoleRunOptions['prepare']};
  /** The entry point recorded with this coordination (development, request, review, actions). */
  entry?:string;
+ /** A container of its own per run for roles whose environment profile requires run isolation. */
+ isolated?:RoleRunOptions['prepare'];
 }
 /** The controller has no executor callback, publication tool or completion authority. */
 export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):Promise<T>{
@@ -61,7 +63,9 @@ if(value.contract_revision!==records.get(task.id).revision)return stop('role_nom
   if(typeof args.purpose!=='string'||!args.purpose.trim()||args.purpose.length>2000||!Array.isArray(args.refs)||args.refs.length>20||args.refs.some((ref:any)=>typeof ref!=='string'||ref.length>200))return {error:'invalid_role_assignment'};
   if(environment.executor&&args.role==='dev'&&executed)return {result_ref:executed,reused:true,instruction:'This entry runs its executor once per call. Read this result and nominate it.'};
   for(const ref of args.refs){try{resolve(String(ref));}catch{return {error:'invalid_task_reference',ref,instruction:'Read task history or use the offered current task/contract refs.'};}}
-  const revision=records.get(task.id).revision,context=await environment.prepare(args.role);
+  // A role with an isolated environment profile gets its own run container instead of a checkout on the shared computer.
+  const isolatedRole=(environmentProfiles.find(e=>e.id===pool.find(r=>r.role_id===args.role)?.environment_profile_ref.id) as {isolation?:string}|undefined)?.isolation==='run_container';
+  const revision=records.get(task.id).revision,context=isolatedRole?undefined:await environment.prepare(args.role);
   try{
    const sourceVersion=s.get("SELECT json_extract(data,'$.version') version FROM task_history WHERE task_id=? AND type='role_candidate' AND json_extract(data,'$.role')=? ORDER BY id DESC LIMIT 1",task.id,args.role)?.version??null;
    const inputKey=sha(JSON.stringify({role:args.role,purpose:args.purpose,refs:args.refs,revision,attempt:task.attempt,...(args.role==='dev'?environment.executor?{round:environment.executor.round}:{}:{candidate_version:sourceVersion})}));
@@ -76,9 +80,11 @@ if(value.contract_revision!==records.get(task.id).revision)return stop('role_nom
    const executor=dev?environment.executor:undefined,instance=roleInstance(s,task,role,executor?.harness);
    if(!existing)s.run('INSERT INTO role_assignments VALUES(?,?,?,?,?,?,?,?)',assignment,task.id,instance.id,revision,sourceVersion,'running',inputKey,null);
    s.run("UPDATE role_assignments SET status='running' WHERE id=?",assignment);
-   try{const result=await runRole({...roleSpec,prompt:JSON.stringify({...JSON.parse(roleSpec.prompt),candidate_version:s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null})},role,assignment,executor?.harness,{prepare:executor?.prepare});
+   try{const result=await runRole({...roleSpec,prompt:JSON.stringify({...JSON.parse(roleSpec.prompt),candidate_version:s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null})},role,assignment,executor?.harness,{prepare:executor?.prepare??(isolatedRole?environment.isolated:undefined)});
    s.run("UPDATE role_assignments SET status='completed',result_ref=? WHERE id=?",result.reference,assignment);if(executor)executed=result.reference;
-   return {result_ref:result.reference,instance_id:result.instance_id};}catch(error){s.run("UPDATE role_assignments SET status='failed' WHERE id=?",assignment);traceEvent(s,task.id,'role_assignment_fault',{assignment_id:assignment,role,code:(error as any).code??'runtime_fault'},task.trace_run_id,'framework');throw error;}
+   return {result_ref:result.reference,instance_id:result.instance_id};}catch(error){
+    // A run whose lease was taken over no longer owns the assignment: the current run decides its status.
+    if((error as any)?.code!=='lease_epoch_stale')s.run("UPDATE role_assignments SET status='failed' WHERE id=? AND status='running'",assignment);traceEvent(s,task.id,'role_assignment_fault',{assignment_id:assignment,role,code:(error as any).code??'runtime_fault'},task.trace_run_id,'framework');throw error;}
   }finally{await context?.();}
  }};
  return (await runRole(managerSpec,controller,undefined,undefined,{prepare:environment.controller})).result;

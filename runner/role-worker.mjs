@@ -18,7 +18,8 @@ async function run(c){
    for(const call of message.tool_calls){
     if(!/^[\w-]{1,128}$/.test(call.id||'')||typeof call.function?.arguments!=='string')throw Error('invalid_tool_call');
     let args;try{args=JSON.parse(call.function.arguments);}catch{args=null;}
-    const result=await rpc('tool',{name:call.function.name,args,finish:call.function.name===c.finish,offered:tools.some(t=>t.function.name===call.function.name)});
+    // The run token from start is presented on every tool call; the parent checks it before executing.
+    const result=await rpc('tool',{name:call.function.name,args,finish:call.function.name===c.finish,offered:tools.some(t=>t.function.name===call.function.name),token:c.token});
     messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
     if(call.function.name===c.finish&&result.submitted){for(const pending of message.tool_calls.slice(message.tool_calls.indexOf(call)+1))messages.push({role:'tool',tool_call_id:pending.id,content:'{"skipped":"execution_submitted"}'});await rpc('checkpoint',messages);send({done:true});lines.close();return;}
     await rpc('checkpoint',messages);

@@ -4,9 +4,36 @@ import {traceEvent} from '../tasks/trace.js';
 import {stop} from '../agent/common.js';
 import type {Row} from '../storage/database.js';
 import type {RoleRunOptions} from './run.js';
+import {environmentProfiles} from './catalog.js';
+import {RunEnvironmentClient,provisionRunEnvironment,copyCommit} from '../projects/run-environment.js';
+/**
+ * A container of its own for one run of a role whose environment profile requires run isolation. It is seeded with the
+ * fixed snapshot of the task workspace by copying that commit's objects, never by mounting the workspace, and its tree is
+ * verified. The adapter receives {client, run_id}; the manager's inspection decides run_isolation in admission.
+ */
+export function isolatedRunEnvironment(workspace:Workspace,given?:RunEnvironmentClient):NonNullable<RoleRunOptions['prepare']>{
+ return async(instance,resolved)=>{
+  const profile=environmentProfiles.find(e=>e.id===resolved.snapshot.environment.id) as {isolation?:string}|undefined;
+  if(profile?.isolation!=='run_container')return;
+  // Built only when a profile needs it: most runs never touch the run-environment API.
+  const client=given??new RunEnvironmentClient(workspace.manager,String(workspace.task.repository_id));
+  const id=randomId(),kind=resolved.snapshot.kind;
+  const env=await provisionRunEnvironment(client,{run_id:id,task_id:String(workspace.task.id),lease_epoch:0,profile:kind==='writer'?'writer':'observer',network:'none'});
+  traceEvent(workspace.store,workspace.task.id,'role_run_environment',{role:instance.role,instance_id:instance.id,environment_id:id,verified:env.facts.verified,violations:(env.facts.detail as any)?.violations??[],container:(env.facts.detail as any)?.container??null,limits:(env.facts.detail as any)?.limits??null},workspace.task.trace_run_id);
+  if(!env.facts.verified)return {environment:{facts:env.facts,handle:null}};
+  try{
+   const snapshot=await workspace.artifact('role-source:'+randomId());
+   const seeded=await copyCommit({call:request=>workspace.deliver(request)},client,id,snapshot.local_sha,snapshot.tree_sha);
+   traceEvent(workspace.store,workspace.task.id,'role_candidate',{role:instance.role,version:seeded.tree_hash,sha:seeded.commit_sha,workspace_id:id,environment:'run:'+id},workspace.task.trace_run_id);
+  }catch(error){await env.release();throw error;}
+  // Only a writer's environment produces a candidate snapshot; an observer's build output never becomes one.
+  const snapshot=kind==='writer'?async()=>{const s=await client.call(id,{type:'workspace_finalize'});return s?.tree_sha&&s?.local_sha?{tree_sha:s.tree_sha,local_sha:s.local_sha}:null;}:undefined;
+  return {environment:{facts:env.facts,handle:{client,run_id:id},...(snapshot?{snapshot}:{})},release:env.release};
+ };
+}
 /** One writer; observers get disposable checkouts bound to the writer's snapshot. */
 export function roleWorkspaces(workspace:Workspace){let active=workspace;return {get current(){return active;},async prepare(role:string){active=workspace;const snapshot=await workspace.artifact('role-source:'+randomId());if(role==='dev'){traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:workspace.task.workspace_id},workspace.task.trace_run_id);return;}const isolated=new Workspace(workspace.store,workspace.manager,{...workspace.task,workspace_id:randomId()},workspace.redactor,workspace.guard,workspace.log);const ready=await isolated.call('role-checkout:'+randomId(),{type:'workspace_acceptance',source_workspace_id:workspace.task.workspace_id,sha:snapshot.local_sha,tree_sha:snapshot.tree_sha});if(ready.error)stop('role_snapshot_unavailable','waiting_environment');traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:isolated.task.workspace_id},workspace.task.trace_run_id);active=isolated;return async()=>{active=workspace;await isolated.release(false);};},
- controller:controllerWorkspace(workspace)};}
+ controller:controllerWorkspace(workspace),isolated:isolatedRunEnvironment(workspace)};}
 
 /** The runner's view of a Pi session in one workspace; null when that workspace or session no longer exists. */
 async function piState(space:Workspace){try{const state=await space.call('pi:probe:'+randomId(),{type:'workspace_agent_poll',offset:0});return state.error?null:state;}catch{return null;}}

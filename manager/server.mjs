@@ -5,10 +5,11 @@ import { logFailure } from './projects.mjs';
 
 // Listen during recovery so callers can distinguish startup from an unreachable manager. Project APIs stay fenced
 // until every saved project has stopped uncertain work and been recovered according to its desired state.
-export function createManagerServer({ projects, token }) {
+export function createManagerServer({ projects, token, runs = null }) {
   const bearer = 'Bearer ' + token.toString('base64');
   let ready = false;
-  const recovered = Promise.resolve().then(() => projects.recover()).then(() => { ready = true; });
+  // Run environments left from before a restart belong to runs whose outcome is unknown; they are removed, never reused.
+  const recovered = Promise.resolve().then(() => projects.recover()).then(() => runs?.reap({ all: true })).then(() => { ready = true; });
   // General operations retain their transport bound; note contents have no application size limit.
   async function json(req, limit = 1500000) {
     const chunks = []; let size = 0;
@@ -44,6 +45,14 @@ export function createManagerServer({ projects, token }) {
         const input = await json(req);
         if (Object.keys(input).some(k => k !== 'tasks')) throw new ManagerError('invalid_input', 400);
         result = projects.parallelism(path.split('/')[3], input.tasks);
+      } else if (runs && /^\/v1\/projects\/[1-9]\d{0,19}\/runs(?:\/[a-f0-9]{48}(?:\/execute)?)?$/.test(path)) {
+        // Per-run environments of RoleRun (run-environments.mjs).
+        const [, , , repo, , run, action] = path.split('/');
+        if (req.method === 'POST' && !run) { const input = await json(req); if (Object.keys(input).some(k => k !== 'run')) throw new ManagerError('invalid_input', 400); result = await runs.create(repo, input.run); }
+        else if (req.method === 'GET' && run && !action) result = await runs.inspect(repo, run);
+        else if (req.method === 'POST' && run && action === 'execute') result = await runs.execute(repo, run, await json(req));
+        else if (req.method === 'DELETE' && run && !action) result = await runs.release(repo, run, 'released');
+        else throw new ManagerError('not_found', 404);
       } else {
         const match = /^\/v1\/projects\/([1-9]\d{0,19})(?:\/(start|stop|reset|delete|execute|configure|refresh))?$/.exec(path);
         if (!match) throw new ManagerError('not_found', 404);
