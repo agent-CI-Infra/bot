@@ -2,6 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { TaskError } from '../agent/common.js';
 import { traceEvent, traceSource } from '../tasks/trace.js';
 import { memoryTool } from '../memory/project.js';
+import { canReadMemory, taskTraceAccess } from '../memory/access.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { roleAuthority, type RoleSnapshot } from './definition.js';
 import { verifyRunToken, tenantOf } from './role-run.js';
@@ -88,10 +89,8 @@ export class TaskToolGateway {
     if (name === 'search_knowledge') return memoryTool(s, scoped, 'search_project_memory', { query: args.query ?? '', module: args.module, kind: args.kind, role_scope: role });
     if (name === 'read_knowledge') {
       if (typeof args.id !== 'string') return refusal('knowledge_not_found');
-      const row = s.get('SELECT v.data FROM project_memory_versions v JOIN project_memories m ON m.id=v.memory_id WHERE m.id=? AND m.repository_id=? ORDER BY v.revision DESC LIMIT 1', args.id, task.repository_id);
-      const owner = row ? JSON.parse(String(row.data))?.scope?.role : undefined;
-      if (!row || owner && owner !== role) return refusal('knowledge_not_found');
       const result = await memoryTool(s, scoped, 'read_project_memory', { id: args.id, revision: args.revision, offset: args.offset });
+      if (result?.error === 'memory_not_found') return refusal('knowledge_not_found');
       return result?.error ? result : { ...result, ref: `project_memories:${result.id}:${result.revision}`, version: contentHash(result.body ?? null) };
     }
     // An experience candidate is idempotent per request id across every run of the scope: a confirmed write is not replayed.
@@ -114,7 +113,7 @@ export class TaskToolGateway {
       return !!owner && (owner.role_instance_id ?? null) === (run.role_instance_id ?? null);
     }
     const memory = /^project_memories:([^:]+):(\d+)$/.exec(ref);
-    if (memory) { const row = s.get('SELECT v.data FROM project_memory_versions v JOIN project_memories m ON m.id=v.memory_id WHERE m.id=? AND m.repository_id=? AND v.revision=?', memory[1]!, task.repository_id, Number(memory[2])); const owner = row ? JSON.parse(String(row.data))?.scope?.role : undefined; return !!row && (!owner || owner === role); }
+    if (memory) return canReadMemory(s, String(task.repository_id), memory[1]!, Number(memory[2]), taskTraceAccess(s, { ...task, active_role: role, trace_run_id: run.id }));
     const history = /^task_history:(\d+)$/.exec(ref);
     if (history) {
       const row = s.get('SELECT type,run_id FROM task_history WHERE id=? AND task_id=?', Number(history[1]), task.id);
@@ -130,7 +129,7 @@ export class TaskToolGateway {
     if (!Number.isSafeInteger(offset) || offset < 0) return refusal('invalid_offset');
     const ref = String(args.ref ?? ''), missing = { error: 'task_record_not_found', ref, instruction: 'Use an offered task_history source, task:' + task.id + ' or contract:revision:' + (this.store.get('SELECT revision FROM task_records WHERE task_id=?', task.id)?.revision ?? 0) };
     if (!this.visible(task, run, role, ref)) return missing;
-    let source: unknown; try { source = traceSource(this.store, String(task.id), ref); } catch { return missing; }
+    let source: unknown; try { source = traceSource(this.store, String(task.id), ref, taskTraceAccess(this.store, { ...task, active_role: role, trace_run_id: run.id })); } catch { return missing; }
     const text = JSON.stringify(source), version = contentHash(source);
     traceEvent(this.store, String(task.id), 'role_record_read', { role, ref, offset, version, via: 'gateway' }, String(run.id), 'role:' + role, [ref]);
     return { ref, content: text.slice(offset, offset + 16000), next_offset: offset + 16000 < text.length ? offset + 16000 : null, version };
