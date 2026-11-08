@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 // through the control mailbox, ends on a Pi-native finish tool or a control-plane finish, and refuses unknown tools the
 // way Pi does. It exercises the control-plane side of the Pi harness deterministically; test/pi-controller.test.mjs
 // runs the real Pi SDK.
-export function fakeRunner({ version = '1.4.0' } = {}) {
+export function fakeRunner({ version = '1.4.0', reapKills = true } = {}) {
   const spaces = new Map(), operations = [];
   const space = id => { if (!spaces.has(id)) spaces.set(id, { id, config: [], state: 'missing', pending: null, alive: true, configs: 0, starts: 0, result: null, chunks: new Map(), events: [] }); return spaces.get(id); };
   const ask = (sp, kind, payload) => new Promise(resolve => { sp.pending = { kind, id: randomBytes(24).toString('hex'), ...payload, resolve }; });
@@ -39,7 +39,7 @@ export function fakeRunner({ version = '1.4.0' } = {}) {
     switch (request.type) {
       case 'workspace_init': return { initialized: true };
       // Releasing a workspace ends its processes, as the real runner does.
-      case 'reap': sp.alive = false; return {};
+      case 'reap': if (reapKills) sp.alive = false; return {};
       case 'workspace_agent_runtime': return { agent: 'pi', package: '@earendil-works/pi-coding-agent', version, node: process.version };
       case 'workspace_agent_config': if (request.offset === 0) { sp.config = []; sp.configs++; } sp.config.push(Buffer.from(request.base64, 'base64')); return { written: true };
       case 'workspace_agent_start':
