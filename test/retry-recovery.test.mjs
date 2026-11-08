@@ -96,7 +96,6 @@ const conditions=[
   ['goal','development.issue','needs_replan','issue_needs_replan'],
   ['label','development.issue','needs_replan','development_not_approved'],
   ['assignee','development.issue','needs_replan','development_not_approved'],
-  ['base','development.issue','needs_replan','base_branch_changed'],
   ['owner','development.pr','waiting_permission','bot_pr_author_changed'],
   ['bot_pr_closed','development.issue','cancelled','object_closed_or_draft'],
 ];

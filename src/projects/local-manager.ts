@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { concurrencyValue } from '../app/settings.js';
 import { randomId, fail, type Json } from '../core/security.js';
 import type { Manager } from './service.js';
 
@@ -51,7 +52,7 @@ export class LocalManager implements Manager {
     if (!action && method === 'GET') return this.state;
     if (!action && method === 'PUT') return this.register();
     const state = this.register();
-    if (action === 'parallel' && method === 'PUT') { if (input?.tasks !== 1) fail(409, 'local_single_task_only'); return { parallel: 1 }; }
+    if (action === 'parallel' && method === 'PUT') { const tasks = concurrencyValue(input?.tasks); state.parallel = tasks; this.save(); return { parallel: tasks }; }
     if (Number(input?.generation) !== state.generation) fail(409, 'stale_generation');
     if (action === 'execute' && method === 'POST') {
       const request = input?.request as any;

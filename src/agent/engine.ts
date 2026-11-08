@@ -1,3 +1,4 @@
+import {requestIntegration,integratedPublication} from '../tasks/integration.js';
 import { checkManagementBudget } from '../management/budget.js';
 import { executionModel, taskConfiguration, executionRuleFiles } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
@@ -62,7 +63,7 @@ export class TaskEngine {
   private readonly finishing=new Set<string>();
   // The parallel runner calls last granted by the manager, per repository.
   private readonly granted=new Map<string,number>();
-  private timer:ReturnType<typeof setInterval>|undefined;private closing=false;
+  private timer:ReturnType<typeof setInterval>|undefined;private closing=false;private readonly merging=new Map<string,Promise<unknown>>();
   readonly rules:RuleService;
   constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);}
   // The running tasks of one repository, for callers that must wait until they have stopped.
@@ -77,6 +78,20 @@ export class TaskEngine {
   }
   tick(){
     if(this.closing)return;
+    // Old installations may have parked candidates at the removed SHA fence. Recover once,
+    // retaining their actual snapshots, without requiring an operator script.
+    for(const old of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code='base_branch_changed'")){
+      if(this.active.has(old.id))continue;
+      try{requestIntegration(this.store,old,'latest','legacy_base_branch_changed');}catch(error){
+        const code=(error as any).code??'integration_snapshot_unavailable';
+        if(!this.store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='integration_blocked' AND json_extract(data,'$.code')=?",old.id,code))traceEvent(this.store,old.id,'integration_blocked',{code,reason:'Retained integration source unavailable; operator attention required. Existing candidate was not discarded.'},null,'framework');
+      }
+    }
+    for(const request of this.store.all("SELECT m.* FROM task_merge_requests m JOIN tasks t ON t.id=m.task_id WHERE m.state IN ('waiting','queued','cancelling') AND m.next_run_at<=? AND (m.state='cancelling' OR t.status IN ('pr_opened','completed'))",Date.now())){
+      if(this.active.has(request.task_id)||this.merging.has(request.task_id))continue;
+      this.store.run('UPDATE task_merge_requests SET next_run_at=? WHERE task_id=?',Date.now()+15000,request.task_id);
+      const work=this.continueMerge(request).finally(()=>this.merging.delete(request.task_id));this.merging.set(request.task_id,work);
+    }
     const checkpoint=Date.now();pruneReviewSessions(this.store,checkpoint);
     this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
     const tasks=this.store.all(`SELECT * FROM tasks WHERE ${engineKinds} AND
@@ -103,6 +118,23 @@ export class TaskEngine {
       });this.active.set(task.id,work);
     }
   }
+  private async continueMerge(request:Row){
+    try{
+      const user=JSON.parse(request.actor) as Actor;
+      if(user.context){const project=String(this.store.get('SELECT repository_id FROM tasks WHERE id=?',request.task_id)?.repository_id),tenant=user.context.tenant_id??this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',project)?.tenant_id??'';const context=resolvePrincipalActor(this.store,user.context.principal_id,tenant,project);authorize(context,'tasks.write',{project_id:project});user.context=context;}
+      await mergeApi(this.store,user,request.state==='cancelling'?'DELETE':'POST',new URL('http://local/api/tasks/'+request.task_id+'/merge'),request.state==='cancelling'?{}:{expected_sha:request.expected_sha,merge_method:request.method},this.githubUrl);
+    }catch(error){
+      const code=(error as any).code??'merge_runtime_failure';
+      const waiting=['merge_checks_not_green','merge_checks_unavailable','merge_base_advanced','merge_base_unavailable','github_response_unknown','github_rate_limited','github_http_429','github_http_500','github_http_502','github_http_503','github_http_504'].includes(code);
+      // A queued poll can finish after another caller already integrated/cancelled this intent.
+      // Its old failure must not overwrite the new state or strand the replacement candidate.
+      const live=this.store.get('SELECT * FROM task_merge_requests WHERE task_id=?',request.task_id);
+      if(!live||live.state!==request.state||live.expected_sha!==request.expected_sha)return;
+      const previous=live.error;
+      this.store.run('UPDATE task_merge_requests SET error=?,state=?,updated_at=? WHERE task_id=?',code,waiting?request.state:'blocked',new Date().toISOString(),request.task_id);
+      if(previous!==code)traceEvent(this.store,request.task_id,'merge_wait',{code,automatic:waiting,action:waiting?'retry scheduled':'operator attention required'},null,'framework');
+    }
+  }
   // The manager lets as many runner calls share a computer as tasks may run on it, and never fewer than run there now,
   // so lowering the setting lets running tasks finish instead of starving them.
   private async share(repositoryId:string){
@@ -121,7 +153,7 @@ export class TaskEngine {
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
-  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled(this.active.values());}
+  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled([...this.active.values(),...this.merging.values()]);}
   async run(id:string,token:string){
     const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor(),event=eventWorkflow(task.kind);
     const policyHashFor=(artifacts:any[])=>sha(artifacts.some(a=>a.kind==='code')?String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||''):'');
@@ -239,9 +271,6 @@ export class TaskEngine {
         }
         if(development){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=saved?JSON.parse(saved.data):null;
-          // Once the branch is on GitHub, only its PR is left to open, and a base that moved on since is normal for a PR.
-          const pushed=!!this.store.get("SELECT 1 FROM github_effects WHERE id=? AND state='sent'",operationId(id+':branch'));
-          if(candidate&&!candidate.pr_number&&!pushed&&(await github.ref(candidate.base_branch))?.object?.sha!==candidate.base_sha)stop('base_branch_changed','needs_replan',`基础分支 ${candidate.base_branch} 已偏离提交 ${candidate.base_sha}，需要重新规划。`);
           if(input.bot_pr){
             const pr=await github.object('review.pr',input.bot_pr.number),owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);
@@ -317,6 +346,7 @@ export class TaskEngine {
         if(checked.error)return checked;
         const commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
         log({type:'published',outputs:[{html_url:pr.html_url,branch:candidate.branch,sha:commit}]});
+        integratedPublication(this.store,task,commit);
         await publisher.discussion('development-result',`Implemented in ${pr.html_url}\n\n${candidate.summary}\n\n${testEvidence(candidate)}\nCommit: ${commit}`);
         update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
@@ -379,7 +409,7 @@ export class TaskEngine {
           }
         }
         const baseBranch=input.bot_pr?.base?.ref||policy.base_branch||github.defaultBranch;
-        const ref=task.kind.endsWith('.pr')||input.bot_pr?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
+        const ref=!input.integration&&(task.kind.endsWith('.pr')||input.bot_pr)?{object:{sha:task.head_sha}}:await github.ref(baseBranch);
         if(!ref?.object?.sha)stop('repository_has_no_commit','waiting_configuration',`基础分支 ${baseBranch} 没有可读取的提交，请先初始化仓库或检查分支配置。`);
         if(development&&task.kind.endsWith('.pr')){
           const owned=this.owned(github,task,object);
@@ -417,6 +447,16 @@ export class TaskEngine {
         }
         if(!snapshot)snapshot=mirror?await workspace.checkout(github,ref.object.sha,mirror,prBase?[prBase]:[]):null;
         if(!snapshot){if(mirror?.has(ref.object.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,ref.object.sha,mirror);}
+        if(development&&input.integration){
+          const integration=input.integration;
+          const merged=await workspace.call('integrate:'+integration.id+':'+ref.object.sha,{type:'workspace_integrate',source_workspace_id:integration.source_workspace_id,sha:integration.sha,tree_sha:integration.tree_sha,base_tree:integration.base_tree});
+          if(merged.error)stop('integration_unavailable','waiting_environment',merged.detail||merged.error);
+          const event=traceEvent(this.store,id,'integration_result',{...integration,target_base:ref.object.sha,...merged,workspace_id:task.workspace_id},task.trace_run_id,'framework');
+          input.integration={...integration,state:'applied',target_base:ref.object.sha,result_ref:event,conflicts:merged.conflicts};
+          update({input:JSON.stringify({...JSON.parse(task.input),integration:input.integration})});
+          // The next model/controller input explains the new baseline and the exact retained delta.
+          input.context={...input.context,integration:input.integration};
+        }
         if(!development)await workspace.deliver({type:'workspace_cache',sha:ref.object.sha,tree_sha:snapshot.tree_sha});
         const files=task.kind.endsWith('.pr')?await github.pages(github.path(`/pulls/${task.object_number}/files`)):[];
         if(files.length>=3000)stop('pull_request_file_limit','failed',`PR #${task.object_number} 返回 ${files.length} 个文件，已达到 GitHub 的 3000 文件列表上限，无法确认完整差异。`);
@@ -451,7 +491,7 @@ export class TaskEngine {
             ...(pr?{pull_request:{base:{ref:object.base?.ref||null,sha:prBase},head:{ref:object.head?.ref||null,sha:object.head?.sha||null},
               diff:snapshot.history&&prBase?`git diff ${prBase}...${object.head?.sha}`:null}}:{}),
             context_files:contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
-            implementation_goal:implementationGoal,actionable_findings:actionableFindings,
+            implementation_goal:implementationGoal,actionable_findings:actionableFindings,...(input.integration?{integration:{...input.integration,instruction:'Continue the same task on the current main checkout with your earlier delta preserved. Resolve listed conflicts, inspect failed integration checks, rerun required policy, and submit a NEW candidate; historical QA does not approve it.'}}:{}),
             // On a revision people or other review bots asked for: their comments, which the findings above carry out.
             ...(development&&input.revision?.requests?.length?{revision_requests:input.revision.requests}:{}),review:development&&task.kind.endsWith('.pr')?null:input.review||null,effective_rules:effectiveRules,
             ...(input.comment?{trigger_comment:input.comment}:{}),...(input.trigger?{trigger:input.trigger}:{}),
@@ -463,6 +503,27 @@ export class TaskEngine {
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
+        if(development&&input.integration)await restoreCheckpoint(this.store,task,workspace,ref.object.sha);
+        if(development&&input.integration&&!input.integration.conflicts?.length){
+          // Clean three-way integration needs verification, not a fresh development loop.
+          const integration=input.integration,prior=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
+          const artifact=await workspace.artifact('integration-artifact:'+integration.id+':'+ref.object.sha);
+          const command=String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||'').trim();
+          const validation=command?{...await workspace.call('integration-tests:'+integration.id+':'+ref.object.sha,{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'}:{command:'',source:'policy',skipped:true};
+          const valid=!validation.error&&(validation.skipped||validation.exit_code===0&&!validation.timed_out&&!validation.truncated);
+          const checked=traceEvent(this.store,id,'integration_validation',{integration_id:integration.id,base_sha:ref.object.sha,source_sha:integration.sha,tree_sha:artifact.tree_sha,passed:valid,validation},task.trace_run_id,'framework');
+          if(valid){
+            const candidate={...prior,...artifact,source_workspace_id:task.workspace_id,files:await workspace.contents(artifact.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,
+              base_sha:ref.object.sha,expected_sha:input.bot_pr?.head?.sha??null,pr_number:input.bot_pr?.number??prior.pr_number,publication_key:integration.id,integration,validation,
+              remote_sha:undefined,published_tree_sha:undefined,published:undefined};
+            this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),id);
+            update({phase:'publish',result:JSON.stringify({summary:prior.summary,test_command:prior.test_command})});
+          }else{
+            input.integration={...integration,failure_ref:checked};input.context.integration={...input.context.integration,failure_ref:checked,instruction:'The three-way merge was clean but combined policy tests failed. Read this failure record and repair this integrated checkout in the SAME Dev context; do not overwrite changes from main.'};
+            update({input:JSON.stringify(redactor.clean(input))});
+          }
+        }
+
       }
       if(task.phase==='validate')stop('create_pull_request_required','needs_replan','任务停在 validate 阶段，需要重新规划并通过 create_pull_request 提交候选修改。');
       // Every attempt refreshes GitHub before its first request. Turn boundaries do the same for pending updates.
@@ -531,6 +592,10 @@ export class TaskEngine {
             if(error instanceof TaskError&&error.code==='pr_release_category_required')return {error:error.code,message:'Read the current contribution guide and create-github-pr skill, choose exactly one release:* category, and call create_pull_request again with release_label.'};
             throw error;
           }
+          if(input.integration){
+            const checked=await workspace!.call('integration-check:'+requestId,{type:'workspace_integration_check'});
+            if(checked.error||checked.unresolved?.length)return {error:'integration_conflict_unresolved',conflicts:checked.unresolved,integration_ref:input.integration.result_ref};
+          }
           // Fix the only candidate snapshot before any policy command can create or modify files.
           const snapshot=await workspace!.artifact('create-pr:'+requestId+':snapshot');
           if(snapshot.tree_sha===input.snapshot_tree){
@@ -552,9 +617,9 @@ export class TaskEngine {
             const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-          const candidate={...snapshot,files:await workspace!.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,summary:args.summary,change_title:args.change_title,test_command:args.test_command,release_label:args.release_label,
+          const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,summary:args.summary,change_title:args.change_title,test_command:args.test_command,release_label:args.release_label,
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
-            branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
+            ...(input.integration?{publication_key:input.integration.id,integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
           if(!development)return publishPullRequest();
           update({result:JSON.stringify(args),phase:'publish'});

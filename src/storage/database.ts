@@ -1,3 +1,4 @@
+import { integrationStorage } from '../tasks/integration.js';
 import { roleStorage } from '../roles/storage.js';
 import { memoryStorage } from '../memory/project.js';
 import { traceStorage } from '../tasks/trace.js';
@@ -175,6 +176,7 @@ export class Store {
     taskStorage(this);
     traceStorage(this);
     memoryStorage(this);
+    integrationStorage(this);
     roleStorage(this);
     identityStorage(this);
     managementStorage(this);

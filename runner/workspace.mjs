@@ -136,6 +136,32 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const local_sha=(await git(['rev-parse','HEAD'])).toString().trim(),tree_sha=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
     if(input.tree_sha&&tree_sha!==input.tree_sha)throw new Error('source_snapshot_changed');return {local_sha,tree_sha};
   }
+  // Three-way integration in a NEW task workspace. Both synthetic tips share the exact old base
+  // tree; this also works for file-copy checkouts without remote commit history. The original
+  // candidate workspace is read-only, and Git leaves real unmerged index stages for the writer.
+  if(input.type==='workspace_integrate'){
+    if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||input.source_workspace_id===input.workspace_id||
+      ![input.sha,input.tree_sha,input.base_tree].every(v=>/^[a-f0-9]{40}$/.test(v||'')))throw new Error('invalid_integration_snapshot');
+    const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
+    if(await realpath(source)!==source)throw new Error('invalid_integration_source');
+    await git(['fetch','--no-tags','--',source,input.sha]);
+    if((await git(['rev-parse',input.sha+'^{tree}'])).toString().trim()!==input.tree_sha)throw new Error('integration_snapshot_mismatch');
+    const current=(await git(['rev-parse','HEAD'])).toString().trim(),tree=(await git(['rev-parse','HEAD^{tree}'])).toString().trim();
+    const base=(await git(['commit-tree',input.base_tree],Buffer.from('Integration common base\n'))).toString().trim();
+    const ours=(await git(['commit-tree',tree,'-p',base,'-p',current],Buffer.from('Integration target\n'))).toString().trim();
+    const theirs=(await git(['commit-tree',input.tree_sha,'-p',base,'-p',input.sha],Buffer.from('Integration candidate\n'))).toString().trim();
+    await git(['reset','--hard',ours]);
+    let merged=true;try{await git(['merge','--no-commit','--no-ff',theirs]);}catch{merged=false;}
+    const conflicts=(await git(['diff','--name-only','--diff-filter=U','-z'])).toString().split('\0').filter(Boolean);
+    if(!merged&&!conflicts.length)throw new Error('integration_merge_failed');
+    await writeFile(root+'/integration.json',JSON.stringify({conflicts,source_sha:input.sha,target_sha:current}),{mode:0o600});
+    return {merged,conflicts,source_sha:input.sha,target_sha:current};
+  }
+  if(input.type==='workspace_integration_check'){
+    const saved=await readFile(root+'/integration.json','utf8').then(JSON.parse).catch(()=>({conflicts:[]})),unresolved=[];
+    for(const name of saved.conflicts){const bytes=await readFile(await path(name)).catch(()=>null);if(bytes&&/^(?:<<<<<<< |=======\r?$|>>>>>>> )/m.test(bytes.toString('utf8')))unresolved.push(name);}
+    return {unresolved};
+  }
   if(input.type==='workspace_restore'){
     if(!/^[a-f0-9]{48}$/.test(input.source_workspace_id||'')||!/^[a-f0-9]{40}$/.test(input.sha||'')||!/^[a-f0-9]{40}$/.test(input.tree_sha||''))throw new Error('invalid_recovery_snapshot');
     const source=`${workspaceRoot}/${input.source_workspace_id}/repo`;
