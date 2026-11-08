@@ -10,6 +10,7 @@ import { validVersion } from './version.js';
 import { ReleaseWorker } from './worker.js';
 import { requestObservation } from './observe.js';
 import { savedWorkflow, activeTrigger } from '../workflows/resolve.js';
+import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 // The release.notes workflow's console prompt; a repository skill still replaces it at preflight.
 const releaseNotesPrompt = (store: Store, id: string) => savedWorkflow(store, id, 'release.notes')?.prompt ?? null;
 
@@ -179,6 +180,11 @@ export class ReleaseService {
     });
   }
   async guard(row: any) {
+    const project = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', row.repository_id);
+    try {
+      if (!project?.tenant_id) throw new Error('tenant_unknown');
+      authorize(resolvePrincipalActor(this.store, row.actor_id, project.tenant_id, row.repository_id), 'release.manage');
+    } catch { return stop('release_actor_permission_revoked', 'waiting_permission', '发起人的当前项目发布权限已失效，请由仍有权限的管理员处理。'); }
     const found = this.store.run('UPDATE project_releases SET lease_until=? WHERE id=? AND lease=? AND lease_until>?', Date.now() + 300_000, row.id, row.lease, Date.now());
     if (!found.changes) return stop('release_lease_lost', 'write_unknown', '发布租约已失效，停止写入并等待查证。');
   }

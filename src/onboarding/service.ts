@@ -133,8 +133,9 @@ export class Onboarding {
       const state = randomId(), account = randomId(), endpoint = randomId();
       this.store.run("INSERT INTO app_manifest_states VALUES(?,?,?,?,?,'pending')", state, user.id, account, endpoint, Date.now() + 15 * 60000);
       const manifest = { name, url: address.origin, redirect_url: adminOrigin + '/onboarding/github/callback', setup_url: adminOrigin + '/onboarding/github/setup', public: input.public===true,
+        callback_urls: [adminOrigin + '/auth/github/callback'],
         hook_attributes: { url: address.origin + `/hooks/github/${account}/${endpoint}`, active: true },
-        default_permissions: appPermissions, default_events: appEvents };
+        default_permissions: { ...appPermissions, members: 'read' }, default_events: [...appEvents, 'organization'] };
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };
     }
     if (method === 'POST' && url.pathname === '/api/onboarding/installation') { fields(input, ['skip']); if (typeof input.skip !== 'boolean') fail(400, 'invalid_skip'); this.save('installation_skipped', input.skip); return { skipped: input.skip }; }

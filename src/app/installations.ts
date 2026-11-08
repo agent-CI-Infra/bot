@@ -1,3 +1,4 @@
+import { InstallationArchive, type InstallationIdentity } from '../installations/archive.js';
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { projectListPage } from './project-list.js';
 import { type Store, type Row } from '../storage/database.js';
@@ -340,7 +341,7 @@ export class InstallationSync {
 }
 
 // Listing, starting and disabling need only the database; a full sync needs the configured GitHub client.
-export async function installationApi(store: Store, sync: InstallationSync | undefined, user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
+export async function installationApi(store: Store, sync: InstallationSync | undefined, user: Actor, method: string, url: URL, input: Json, identity?: InstallationIdentity): Promise<Json | undefined> {
   const path = url.pathname, check = /^\/api\/accounts\/([^/]+)\/permissions$/.exec(path);
   if (check && method === 'GET') { superAdmin(user); if (!sync) return fail(503, 'sync_not_configured'); return sync.permissions(check[1]!); }
   // GitHub's request windows per App, installation (organization) and bot account, as last reported; probe reads them now.
@@ -348,6 +349,16 @@ export async function installationApi(store: Store, sync: InstallationSync | und
   const probe = /^\/api\/accounts\/([^/]+)\/rate-limits\/probe$/.exec(path);
   if (probe && method === 'POST') { superAdmin(user); fields(input, []); if (!sync) return fail(503, 'sync_not_configured'); return sync.probe(probe[1]!); }
   if (!path.startsWith('/api/installations')) return undefined;
+  if (user.role !== 'super_admin' && identity && user.context) {
+    const match = /^\/api\/installations\/archive\/([^/]+)\/([1-9]\d*)\/([1-9]\d*)(?:\/(repositories|sync))?$/.exec(path);
+    if (!match) return fail(403, 'installation_forbidden');
+    const archive = new InstallationArchive(store, identity), ref = { github_host: match[1]!, app_id: match[2]!, installation_id: match[3]! };
+    // The server passes a session reference through a scoped adapter, never from request parameters.
+    const sessionRef = user.context.request_id;
+    if (method === 'GET') return match[4] === 'repositories' ? archive.listInstallationRepositories(sessionRef, ref) : { installation: await archive.getInstallationSnapshot(sessionRef, ref) };
+    if (method === 'POST' && match[4] === 'sync') { fields(input, []); return archive.requestInstallationSync(sessionRef, ref); }
+    return fail(404, 'not_found');
+  }
   superAdmin(user);
   if (path === '/api/installations/archive' && method === 'GET') return { contract_version: 1,
     installations: store.all('SELECT ref FROM github_installations ORDER BY ref').map(row => installationSnapshot(store, row.ref)) };

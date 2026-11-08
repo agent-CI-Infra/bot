@@ -1,3 +1,4 @@
+import { identityProjection } from '../identity/storage.js';
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { projectListPage } from './project-list.js';
 import { createPrivateKey } from 'node:crypto';
@@ -29,7 +30,7 @@ function grants(store: Store, body: Json, userId: string | null = null): Grants 
     UNION ALL SELECT 1 FROM project_admin_organizations WHERE owner_id=? AND user_id=?`, id, id, userId))) fail(400, 'organization_not_found');
   return { repositories, organizations };
 }
-function saveGrants(store: Store, userId: string, { repositories, organizations }: Grants): void {
+function saveGrants(store: Store, userId: string, { repositories, organizations }: Grants, grantor: string): void {
   if (repositories) {
     store.run('DELETE FROM project_admin_assignments WHERE user_id=?', userId);
     for (const id of repositories) store.run('INSERT INTO project_admin_assignments VALUES(?,?)', userId, id);
@@ -38,6 +39,8 @@ function saveGrants(store: Store, userId: string, { repositories, organizations 
     store.run('DELETE FROM project_admin_organizations WHERE user_id=?', userId);
     for (const id of organizations) store.run('INSERT INTO project_admin_organizations VALUES(?,?)', userId, id);
   }
+  identityProjection(store);
+  store.run("UPDATE scoped_grants SET grantor_id=?,verified_at=?,evidence='console manual authorization' WHERE principal_id=? AND policy='legacy'", grantor, Date.now(), userId);
 }
 // What grants can be chosen from: installed repositories, one group per owner_id named by the newest login GitHub reported.
 function installedOrganizations(store: Store): Json[] {
@@ -86,7 +89,7 @@ export async function management(store: Store, user: Actor, method: string, url:
         const granted = role === 'project_admin' ? grants(store, { repository_ids: body.repository_ids ?? [], organization_ids: body.organization_ids ?? [] }) : {};
         if (store.get('SELECT id FROM users WHERE username=?', username)) fail(409, 'username_exists');
         store.run('INSERT INTO users(id,username,password_hash,role) VALUES(?,?,?,?)', id, username, encoded, String(role));
-        saveGrants(store, id, granted);
+        saveGrants(store, id, granted, user.id);
         store.audit(user.id, 'user.created', id);
         return { user: publicUser(store.get('SELECT * FROM users WHERE id=?', id)!) };
       });
@@ -137,7 +140,7 @@ export async function management(store: Store, user: Actor, method: string, url:
       if (body.repository_ids === undefined && body.organization_ids === undefined) fail(400, 'invalid_repository_ids');
       if (!store.get("SELECT id FROM users WHERE id=? AND role='project_admin'", id)) fail(400, 'project_admin_not_found');
       return store.transaction(() => {
-        saveGrants(store, id, grants(store, body, id));
+        saveGrants(store, id, grants(store, body, id), user.id);
         store.audit(user.id, 'assignments.updated', id);
         return { ok: true };
       });

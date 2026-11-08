@@ -64,6 +64,8 @@ GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令�
 | `BOT_ADMIN_ORIGIN` | 空 | 管理站的 HTTPS origin；创建 GitHub App 后 GitHub 也回调到这里 |
 | `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 时虚拟电脑没有外网出口 |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
+| `BOT_GITHUB_OAUTH_CLIENT_ID` | 空 | GitHub App 的用户授权 Client ID；留空继续仅用本地登录 |
+| `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE` | `/run/secrets/github-oauth-client-secret`（Compose） | 只读挂载的 Client secret 文件；启用 OAuth 时必须存在 |
 | `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 评论中提到时一定再检视一次的 `@名字`，逗号分隔、忽略大小写；设置后替换默认值，`off` 关闭提到触发。不提到名字的评论是否触发，由项目「检视」里的更新开关决定 |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许转发到的内网主机名，逗号分隔，见[外部执行端](external-executors.md) |
 
@@ -78,3 +80,12 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 ## 备份与恢复
 
 备份前停止 bot 和 manager，并备份四个部署卷及项目具名卷；数据库停止写入后再复制，恢复时使用同一套内部认证和管理账本。丢失主密钥会无法解密凭据，丢失内部认证会改变部署 ID，不能用新的空账本直接接管旧容器。`docker compose down` 保留卷；`--volumes` 会删除部署认证和账本，日常升级不要使用。动态项目资源需要通过环境接口管理，Compose down 不会直接删除它们。
+
+
+## GitHub 用户登录
+
+GitHub App 添加用户授权 Callback URL `<BOT_ADMIN_ORIGIN>/auth/github/callback`。这与 manifest 注册和安装 Setup 回调不同，三者须分别保留。启用时设置 `BOT_GITHUB_OAUTH_CLIENT_ID`、明确的 HTTPS `BOT_ADMIN_ORIGIN`，并以只读文件挂载 Client secret 到 `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE`；本地测试可用 loopback HTTP。生产环境设置 `BOT_COOKIE_SECURE=true`。secret 不写进镜像、仓库或浏览器配置，Compose 基础配置不会在未启用 OAuth 时要求该文件。
+
+例如用私有 Compose 覆盖文件给 bot 服务增加 `volumes: ["./secrets/github-oauth-client-secret:/run/secrets/github-oauth-client-secret:ro"]`，文件按运行 UID 10001 设置最小读取权限。Client ID 与 App ID 不同，不能互换。组织 owner 识别需要组织 Members 只读权限，不申请成员写权限。SSO 组织需要用户先建立组织 SAML 会话再重新授权；无法证明当前权限时显示待验证。
+
+先完成原有本地超级管理员初始化，再允许用户 GitHub 登录；升级后本地恢复账号不变。备份仍须同时保护数据库与原 master key，新增用户 token 也由 SecretBox 加密。迁移报告、未知归属处理、权限来源和撤销说明见 [GitHub 登录与统一授权](identity-authorization.md)。

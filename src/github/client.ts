@@ -90,6 +90,7 @@ export class GitHub {
   path(suffix = ''): string { return '/repos/' + this.fullName.split('/').map(encodeURIComponent).join('/') + suffix; }
   async request(method: string, path: string, body?: unknown, allow404 = false, token = this.token, allowEmptyRepository = false, snapshotBlob = false, jobLogs = false): Promise<any> {
     await this.guard();
+    this.store?.checkAuthorization();
     if (this.store && installationExecutionDenied(this.store, String(this.repository.account_id), String(this.repository.id)))
       stop('github_installation_access_revoked', 'waiting_permission', 'GitHub App 安装已暂停、卸载或正在核实范围；请等待安装同步后重试。');
     // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
