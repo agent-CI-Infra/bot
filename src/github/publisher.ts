@@ -185,7 +185,7 @@ export class Publisher {
     const branch=this.store.get('SELECT * FROM bot_branches WHERE repository_id=? AND branch=?',this.task.repository_id,candidate.branch);
     if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-'))stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
-    if(candidate.remote_sha && this.store.get("SELECT state FROM github_effects WHERE id=?",operationId(this.task.id+':branch'))?.state==='sent'){
+    if(candidate.remote_sha && this.store.get("SELECT state FROM github_effects WHERE id=?",operationId(this.task.id+':'+(candidate.publication_key?'branch:'+candidate.publication_key:'branch')))?.state==='sent'){
       if((await this.github.ref(candidate.branch))?.object?.sha!==candidate.remote_sha)stop('branch_head_changed','superseded',`分支 ${candidate.branch} 已偏离已发布提交 ${candidate.remote_sha}。`);
       return candidate.remote_sha;
     }
@@ -215,7 +215,7 @@ export class Publisher {
     candidate.published_tree_sha=expected;
     const author={name:'Department Bot',email:this.github.authorEmail(),date:candidate.date};
     const commit=await this.github.request('POST',this.github.path('/git/commits'),{message:implementationText(candidate,this.task.object_number).title,
-      tree:expected,parents:[candidate.base_sha],author,committer:author});
+      tree:expected,parents:[candidate.base_sha,...(candidate.expected_sha&&candidate.expected_sha!==candidate.base_sha?[candidate.expected_sha]:[])],author,committer:author});
     if(commit.tree?.sha!==expected)stop('github_commit_tree_mismatch',undefined,`GitHub 提交 ${commit.sha} 的文件树不一致：预期 ${expected}，实际 ${commit.tree?.sha}。`);
     candidate.remote_sha=commit.sha;
     this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),this.task.id);
@@ -225,7 +225,7 @@ export class Publisher {
     if(!current&&candidate.expected_sha)stop('branch_disappeared','superseded',`待更新的分支 ${candidate.branch} 已不存在。`);
     const path=this.github.path('/git/refs'+(candidate.expected_sha?'/heads/'+encodeURIComponent(candidate.branch):''));
     const request=candidate.expected_sha?{sha:commit.sha,force:false}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
-    const ref=await this.effect('branch','branch',request,()=>this.github.request(candidate.expected_sha?'PATCH':'POST',path,request),async()=>{
+    const ref=await this.effect(candidate.publication_key?'branch:'+candidate.publication_key:'branch','branch',request,()=>this.github.request(candidate.expected_sha?'PATCH':'POST',path,request),async()=>{
       const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;
     });
     if(ref.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,`分支 ${candidate.branch} 发布未确认：预期提交 ${commit.sha}，返回 ${ref.object?.sha||'无提交'}。`);
@@ -246,8 +246,8 @@ export class Publisher {
       if(pr?.head.sha!==sha)stop('pr_head_pending','waiting_pr_head',`PR #${candidate.pr_number} 尚未更新到提交 ${sha}，当前 head=${pr?.head.sha||'未知'}。`);
       const source=this.store.get('SELECT object_number FROM tasks WHERE id=?',owned!.source_task_id);
       const content=implementationText(candidate,Number(source?.object_number||this.task.object_number));
-      const marker=this.marker('pr-update'),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
-      await this.effect('pr-update','pull_request',payload,()=>this.github.request('PATCH',this.github.path('/pulls/'+pr.number),payload),async()=>{
+      const marker=this.marker(candidate.publication_key?'pr-update:'+candidate.publication_key:'pr-update'),payload={...content,body:content.body+'\n\n'+(this.store.get("SELECT marker FROM github_effects WHERE task_id=? AND kind='pull_request'",owned!.source_task_id)?.marker||'')+'\n\n'+marker};
+      await this.effect(candidate.publication_key?'pr-update:'+candidate.publication_key:'pr-update','pull_request',payload,()=>this.github.request('PATCH',this.github.path('/pulls/'+pr.number),payload),async()=>{
         const current=await this.github.object('review.pr',pr.number);assertOwnedPR(owned,current,this.github.actorId,this.task.repository_id);
         return current.head.sha===sha&&current.title===payload.title&&current.body===payload.body?current:null;
       },true);

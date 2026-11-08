@@ -1,3 +1,4 @@
+import {executionBaseline} from '../agent/common.js';
 import { executionModel, taskConfiguration } from '../tasks/configuration.js';
 import { cleanRoleMessages } from './storage.js';
 import { taskWorkflow } from '../workflows/resolve.js';
@@ -61,7 +62,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  if(instance.snapshot_id!==resolved.id&&!(resolved.snapshot.legacy&&!instance.snapshot_id))instance=rebind(s,task,instance,resolved,'delegation').instance;
  const sourceInput=spec.prompt;
  const priorRun=s.get("SELECT id,stop_reason,assignment_id FROM task_runs WHERE role_instance_id=? ORDER BY rowid DESC LIMIT 1",instance.id),priorSubmission=priorRun?.stop_reason==='role_result_invalid'?s.get("SELECT id FROM task_history WHERE run_id=? AND type='tool_started' AND json_extract(data,'$.name')=? ORDER BY id DESC LIMIT 1",priorRun.id,spec.finish?.name??''):null;
- let memory:any;try{memory={availability:'available',...new ProjectMemory(s).search(task.repository_id,'',{role,limit:5,baseline:task.head_sha})};}catch{memory={availability:'unavailable',instruction:'Role memory lookup failed; continue from task records and repository sources. Do not infer no prior knowledge.'};traceEvent(s,task.id,'memory_fault',{operation:'role_context',role,code:'role_memory_unavailable'},task.trace_run_id);}
+ let memory:any;try{memory={availability:'available',...new ProjectMemory(s).search(task.repository_id,'',{role,limit:5,baseline:executionBaseline(task)})};}catch{memory={availability:'unavailable',instruction:'Role memory lookup failed; continue from task records and repository sources. Do not infer no prior knowledge.'};traceEvent(s,task.id,'memory_fault',{operation:'role_context',role,code:'role_memory_unavailable'},task.trace_run_id);}
  const previousRole=task.active_role;task.active_role=role;
  try{
  for(;;){

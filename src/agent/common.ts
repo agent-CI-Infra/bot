@@ -78,3 +78,11 @@ export function safePath(path: unknown): string {
   if (typeof path !== 'string' || !path || path.length > 1024 || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(p => !p || p === '..' || p === '.' || p.toLowerCase() === '.git')) return stop('unsafe_repository_path',undefined,`Unsafe repository path: ${JSON.stringify(path)}`);
   return path;
 }
+
+/** PR ownership head and the code being executed differ during integration. */
+export function executionBaseline(task:{input?:unknown;head_sha?:string|null}):string|undefined {
+ try{const input=typeof task.input==='string'?JSON.parse(task.input):task.input as any;
+  if(input?.integration?.state==='applied'&&/^[a-f0-9]{40}$/.test(input.snapshot_sha??''))return input.snapshot_sha;
+ }catch{/* Historical malformed input does not invent a source version. */}
+ return task.head_sha??undefined;
+}

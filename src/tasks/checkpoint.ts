@@ -10,12 +10,14 @@ export async function checkpoint(store:Store,task:Row,workspace:Workspace){
   const revision=records.get(task.id).revision;
   const snapshot=await workspace.artifact('checkpoint:'+randomId());
   const recovery={source_workspace_id:task.workspace_id,base_sha:input.snapshot_sha||task.head_sha,revision,
-    sha:snapshot.local_sha,tree_sha:snapshot.tree_sha,created_at:new Date().toISOString()};
+    sha:snapshot.local_sha,tree_sha:snapshot.tree_sha,base_tree:input.source_tree||input.snapshot_tree,created_at:new Date().toISOString()};
   records.atomic(()=>{
     records.assertClaim(task.id,task.claim_token);
     const current=store.get('SELECT input,workspace_id FROM tasks WHERE id=?',task.id)!;
     if(records.get(task.id).revision!==revision||current.workspace_id!==task.workspace_id)return stop('checkpoint_context_changed','retry_wait','保存进度时需求版本或工作区已变化。');
-    store.run('UPDATE tasks SET input=?,updated_at=? WHERE id=?',JSON.stringify({...JSON.parse(current.input),recovery}),new Date().toISOString(),task.id);
+    const saved=JSON.parse(current.input);
+    const integration=saved.integration&&recovery.base_tree?{...saved.integration,state:'pending',source_workspace_id:recovery.source_workspace_id,sha:recovery.sha,tree_sha:recovery.tree_sha,base_tree:recovery.base_tree,previous_base:recovery.base_sha}:saved.integration;
+    store.run('UPDATE tasks SET input=?,updated_at=? WHERE id=?',JSON.stringify({...saved,recovery,...(integration?{integration}:{})}),new Date().toISOString(),task.id);
     records.history(task.id,'artifact_checkpoint',recovery);
   });return recovery;
 }

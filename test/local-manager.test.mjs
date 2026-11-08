@@ -101,3 +101,19 @@ test('restoring a checkpoint preserves an unpublished patch against the same bas
  assert.equal((await execute({type:'workspace_read',workspace_id:target,path:'file.txt'})).result.content,'unpublished checkpoint');
  assert.equal((await execute({type:'workspace_read',workspace_id:target,path:'added.txt'})).result.content,'new artifact');
 });
+
+test('local parallel tasks keep writes and cleanup in their own workspaces', async t => {
+ const root=mkdtempSync(join(tmpdir(),'bot-local-parallel-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const manager=new LocalManager('123',root);await manager.call('PUT','/v1/projects/123');
+ assert.deepEqual(await manager.call('PUT','/v1/projects/123/parallel',{tasks:4}),{parallel:4});
+ assert.equal((await new LocalManager('123',root).call('GET','/v1/projects/123')).parallel,4);
+ await assert.rejects(manager.call('PUT','/v1/projects/123/parallel',{tasks:0}),/invalid_task_concurrency/);
+ const execute=request=>manager.call('POST','/v1/projects/123/execute',{generation:1,operation_id:randomBytes(24).toString('hex'),request});
+ const ids=['1'.repeat(48),'2'.repeat(48)];
+ await Promise.all(ids.map(workspace_id=>execute({type:'workspace_init',workspace_id})));
+ const results=await Promise.all(ids.map((workspace_id,i)=>execute({type:'workspace_command',workspace_id,command:`printf '${i}' > own.txt; sleep 1; cat own.txt`,timeout_ms:10000})));
+ for(let i=0;i<results.length;i++){assert.equal(results[i].ok,true);assert.equal(results[i].result.exit_code,0);assert.equal(results[i].result.output,String(i));}
+ await execute({type:'reap',workspace_id:ids[0]});
+ const survivor=await execute({type:'workspace_command',workspace_id:ids[1],command:'cat own.txt',timeout_ms:10000});
+ assert.equal(survivor.result.exit_code,0);assert.equal(survivor.result.output,'1');
+});
