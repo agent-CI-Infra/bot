@@ -144,9 +144,15 @@ export function createProjectServicePrincipal(store: Store, actor: ActorContext,
 export function resolveServiceActor(store: Store, principal: string): ActorContext {
   const row = store.get("SELECT * FROM principals WHERE id=? AND kind='service' AND active=1 AND maintenance<>''", principal);
   if (!row || !store.get('SELECT 1 FROM identity_projects WHERE project_id=? AND tenant_id=?', row.project_id, row.tenant_id)) return fail(403, 'service_paused');
-  const actor: ActorContext = { principal_id: principal, tenant_id: row.tenant_id, project_id: row.project_id, channel: 'service', capabilities: projectCapabilities,
+  const actor: ActorContext = { principal_id: principal, tenant_id: row.tenant_id, project_id: row.project_id, channel: 'service', capabilities: [],
     authorization_revision: row.authorization_revision, request_id: randomId() };
-  issued.set(actor, { store }); return Object.freeze(actor);
+  issued.set(actor, { store });
+  const candidates = [...new Set(listEffectiveScopes(store, principal).filter(g => g.state === 'active').flatMap(g => g.capabilities))];
+  actor.capabilities = candidates.filter(capability => {
+    try { authorize(actor, capability); return true; }
+    catch (error) { if ((error as any).code === 'capability_forbidden') return false; throw error; }
+  });
+  return Object.freeze(actor);
 }
 // For trusted asynchronous workers/adapters. This function is never exposed as an HTTP/model tool.
 export function resolvePrincipalActor(store: Store, principal: string, tenant: string, project?: string, channel: ActorContext['channel'] = 'api', parent?: ActorContext): ActorContext {

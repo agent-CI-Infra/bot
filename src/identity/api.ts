@@ -2,7 +2,7 @@ import type { Store } from '../storage/database.js';
 import type { Actor } from '../app/auth.js';
 import { digest, fail, fields, randomId, text, type Json } from '../core/security.js';
 import { authorize, createProjectServicePrincipal, invalidate, listEffectiveScopes, migrationReport, refreshSessionRevision } from './authorization.js';
-import { projectCapabilities } from './storage.js';
+import { projectCapabilities, explicitDelegationCapabilities } from './storage.js';
 import { revokeIdentity } from './bindings.js';
 
 export function identityApi(store: Store, user: Actor, token: string, method: string, url: URL, body: Json): Json | undefined {
@@ -51,8 +51,11 @@ export function identityApi(store: Store, user: Actor, token: string, method: st
       if (principal === context.principal_id) return fail(403, 'self_delegation_forbidden');
       if (!store.get('SELECT 1 FROM principals WHERE id=? AND active=1', principal)) return fail(404, 'principal_not_found');
       if (!store.get('SELECT 1 FROM tenants WHERE id=?', tenant)) return fail(404, 'tenant_not_found');
-      if (!Array.isArray(body.capabilities) || !body.capabilities.length || body.capabilities.some(c => !projectCapabilities.includes(String(c)))) return fail(400, 'invalid_capabilities');
-      for (const capability of body.capabilities) authorize(context, String(capability), { tenant_id: tenant, project_id: project });
+      const grantable = [...projectCapabilities, ...explicitDelegationCapabilities];
+      if (!Array.isArray(body.capabilities) || !body.capabilities.length || body.capabilities.some(c => !grantable.includes(String(c)))) return fail(400, 'invalid_capabilities');
+      // Grant managers can configure an opt-in capability without themselves holding that capability.
+      // Ordinary capabilities still require the grantor's own effective permission, as before.
+      for (const capability of body.capabilities) if (!explicitDelegationCapabilities.includes(String(capability))) authorize(context, String(capability), { tenant_id: tenant, project_id: project });
       const id = randomId();
       store.transaction(() => {
         store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
