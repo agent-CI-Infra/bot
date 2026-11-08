@@ -22,7 +22,7 @@ This report separates deterministic tests, the real Pi SDK driven through a real
 ## Limits
 
 - No real model or real GitHub repository was used. The user scenario on the test organization needs a deployment of this change.
-- Pi runs the project controller and the review/Actions entry executor. Worker roles of the development and request teams stay on `native`/`process`; the three CLI harnesses are later issues.
+- Pi runs the project controller and the review/Actions entry executor. Worker roles of the development and request teams run on `native`, `process` or the generic `acp` driver from #176, which brings its own model and is recorded as `external_harness`; the controller cannot select those drivers, and worker roles cannot select Pi. The three CLI harnesses are later issues.
 - Native resume covers a session that is still running after a control-plane crash. A graceful stop (`SIGTERM`, `stop_grace_period`) lets the run finish instead; a session that already ended is rebuilt from task records, reusing completed delegations.
 - Scheduled entries that consume #166 tasks are not part of this change.
 - The existing `npm run test:agent` journey was not run for this change: its cleanup uses `docker compose down --volumes`.

@@ -31,19 +31,19 @@ Role 服务选择执行器并组装角色说明、assignment 和任务事实引�
 
 `env` 是显式附加环境；默认只传 PATH、LANG、TMPDIR，不继承控制面的模型或 GitHub 凭据。配置自身可能包含认证环境，须按部署凭据保护，不入仓。可选 `model` 用 ACP session/set_config_option（model）设置，可选 `mode` 用 session/set_mode 设置；省略使用执行器默认值。实际支持依赖 Agent 能力，配置失败如实报错，不静默换模型。
 
-然后 `PUT /api/repositories/:repo/roles`：
+然后用 RoleDefinitionV2 给工作角色选择 ACP（`expected_revision` 取当前 revision，详见 [Role-Pool](role-pool.md)）：
 
 ```json
-{"enabled":true,"harnesses":{"dev":"acp","test":"acp","reviewer":"acp","ux":"acp"}}
+{"expected_revision":3,"enabled":true,"roles":[{"role_id":"dev","harness_ref":{"id":"acp"}},{"role_id":"test","harness_ref":{"id":"acp"}},{"role_id":"reviewer","harness_ref":{"id":"acp"}},{"role_id":"ux","harness_ref":{"id":"acp"}}]}
 ```
 
-Manager/QA 默认仍为 Native。第一版只配置一个外部 ACP 启动 profile；将来多个厂商/profile 可复用客户端扩展，不作为本期验收前提。API 可选择已注册执行器，但不修改可信启动文件。已有 role instance 保持最初 Harness 绑定，配置修改作用于新实例。
+ACP 只运行工作角色（writer、observer、evaluator）。项目主控（manager）在 Pi 上运行，不能选 ACP；QA 和其他工作角色默认 Native。ACP 使用执行器自带的模型，角色上不能再写 `model_profile_ref`，运行快照里模型来源记为 `external_harness`。第一版只配置一个外部 ACP 启动 profile；将来多个厂商/profile 可复用客户端扩展，不作为本期验收前提。API 可选择已注册执行器，但不修改可信启动文件。V2 配置下新的委派按当前 revision 解析；V2 之前保存的旧格式配置下，已有 role instance 保持最初 Harness 绑定。
 
 ## 恢复与查询
 
-`role_instances.harness_state` 保留外部 session ID、cwd、Agent 信息、配置哈希及恢复方式；`GET /api/tasks/:id/roles` 返回该状态及现有 assignment 列表，不返回密钥或会话全文。
+`role_instances.harness_state` 保留外部 session ID、cwd、Agent 信息、配置哈希及恢复方式；`GET /api/tasks/:id/roles` 返回该状态、现有 assignment 列表、各次角色运行及其快照，不返回密钥或会话全文。
 
-支持 loadSession 时优先恢复原 session，并抑制加载回放；失败/不支持时新建 session，用本轮 task 及证据引用重建。task_runs.recovery_mode 与 session_bound 事件记录实际 new_session/native_resume/rebuilt_from_task_records，QA 始终 fresh_evaluation。role_input 的 external_session_pending 是连接前状态，不是恢复成功证明。重建后原会话对话可能不可得，应重新查询已有事实、核对副作用，而非无条件重跑。
+支持 loadSession 时优先恢复原 session，并抑制加载回放；失败/不支持时新建 session，用本轮 task 及证据引用重建。task_runs.recovery_mode 与 session_bound 事件记录实际 new_session/native_resume/rebuilt_from_task_records，QA 始终 fresh_evaluation。role_input 的 external_session_pending 是连接前状态，不是恢复成功证明。Pi 主控的 native_resume 另有来源：只在控制面崩溃、项目电脑里的 Pi 会话仍在运行时接回；会话被取消（harness_cancelled）或已经结束时，下一次运行记为 rebuilt_from_task_records。重建后原会话对话可能不可得，应重新查询已有事实、核对副作用，而非无条件重跑。
 
 ## 验证与限制
 
