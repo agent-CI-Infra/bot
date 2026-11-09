@@ -161,12 +161,17 @@ function fillWorkflowDetail(detail, { notice = '', chat = false } = {}) {
   // The Actions failure status (subscription, pause reasons) keeps refreshing while its editor is open.
   if (item === 'actions.failures' && current.policy.actions_failures_enabled) { clearTimeout(projectTimer); const token = renderToken; projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000); }
 }
+// A workflow is an entry point: when it runs, which prompt and model it uses, which writes it may make. What one task
+// must achieve, who works on it and how it is accepted belong to the task and the 角色 page, so the list does not invite
+// a new workflow per task; adding one stays available, below the list, for a new trigger.
 function workflowSidebar(selected) {
   const side = element('aside', '', 'workflow-sidebar'), head = element('div', '', 'workflow-sidebar-head');
   side.setAttribute('aria-label', '工作流列表');
-  const add = element('div', '', 'actions'); add.append(button('新增工作流', () => selectWorkflowItem('new'), ''), button('用聊天新增', () => selectWorkflowItem('new', { chat: true })));
-  head.append(element('h2', '工作流'), add);
-  side.append(head, workflowLists(selected), ruleSync());
+  head.append(element('h2', '工作流'), note('每条工作流只决定什么时候运行、用哪份提示词和模型、允许哪些写入。任务的目标、分工和验收记在任务里，不需要为单个任务新写工作流。'));
+  const add = element('div', '', 'workflow-add'), actions = element('div', '', 'actions');
+  actions.append(button('新增工作流', () => selectWorkflowItem('new')), button('用聊天新增', () => selectWorkflowItem('new', { chat: true })));
+  add.append(element('h3', '新的触发入口'), note('只有现有工作流接不住的新触发条件（例如另一个标签或事件）才需要新增。'), actions);
+  side.append(head, workflowLists(selected), add, ruleSync());
   return side;
 }
 // The workflows and the shared rules; redrawn in place when the default branch is read again.
@@ -266,11 +271,13 @@ function workflowEditor(workflow, { chat, notice }) {
   panel('overview').append(field('名称', input('name', workflow?.name || '', { required: true })), field('说明', textarea('description', workflow?.description || '', { rows: 2 })), switchBox);
   if (workflow?.project_switch && !workflow.project_switch.on) panel('overview').append(element('p', `${workflow.project_switch.title}已关闭，这条工作流现在不会运行；在项目列表打开${workflow.project_switch.title.replace('项目的', '')}后生效。`, 'endpoint-warning'));
   if (workflow?.status !== undefined) panel('overview').append(actionsStatusLine(workflow));
+  // What the saved workflow does, in four answers plus who executes it.
+  if (workflow) panel('overview').append(element('h3', '这条工作流'), workflowSummary(workflow));
   // Every chart of this workflow shows the triggers ticked below, saved or not, so a change is seen at once.
   const charts = [], chart = (text, title) => { const box = element('div', '', 'workflow-chart'); charts.push([box, text, title]); return box; };
   const drawCharts = () => { const names = chosenTriggers().map(trigger => triggerName(options, trigger)); for (const [box, text, title] of charts) box.replaceChildren(flowFigure(parseFlow(text()), title, names)); drawPreview(); };
   // A saved workflow shows what runs now; a new one shows the prompt being written.
-  panel('overview').append(chart(() => workflow ? workflow.prompt.effective : editor.value, '流程图'));
+  panel('overview').append(chart(() => workflow ? workflow.prompt.effective : editor.value, '流程图'), note(flowBoundary));
   // Triggers: the same catalog for every workflow; the conditions the control plane checks stay whatever is chosen.
   const triggerBox = element('div', '', 'workflow-triggers'), chosen = workflow?.triggers || [];
   for (const option of options) {
@@ -281,7 +288,7 @@ function workflowEditor(workflow, { chat, notice }) {
     if (option.note) row.append(element('span', option.note, 'muted'));
     triggerBox.append(row);
   }
-  panel('overview').append(element('h3', '触发源'), triggerBox, note(triggerRules(workflow)), ...(workflow ? [workflowSummary(workflow)] : []));
+  panel('overview').append(element('h3', '触发源'), triggerBox, note(triggerRules(workflow)));
   triggerBox.addEventListener('change', drawCharts); triggerBox.addEventListener('input', drawCharts);
   // Prompt: the effective text and its flowchart, then the console layer being edited with a live flowchart.
   const prompt = workflow?.prompt, consoleLayer = prompt?.layers.find(layer => layer.source === 'console');
@@ -431,14 +438,28 @@ function triggerRules(workflow) {
     : '草稿 PR、已关闭的 Issue／PR、bot 自己写的内容和仓库外人员的评论不会触发；按标签触发时，标签必须由人（不是 App）加上。';
   return rules + (base === 'review' ? ' 同一对象上还在排队的检视会合并后来的更新，不重复检视。' : '');
 }
+// The flowchart is the prompt's own step list for the agent; the page must not let it read as roles or permissions.
+const flowBoundary = '流程图来自提示词，只说明 agent 按什么步骤做。它不会按节点创建角色，也不授予写入；写入以「权限与模型」里勾选的为准。';
 function workflowSummary(workflow) {
-  const list = element('dl', '', 'workflow-summary'), row = (term, value) => list.append(element('dt', term), element('dd', value));
-  if (!workflow.triggers.length) row('触发源', '没有触发源，不会运行');
+  const list = element('dl', '', 'workflow-summary'), row = (term, ...value) => { const dd = element('dd', ''); dd.append(...value); list.append(element('dt', term), dd); };
+  const options = workflow.trigger_options || [], title = trigger => { const option = options.find(entry => entry.id === trigger.id); return (option?.title || trigger.id) + (trigger.label ? '：' + trigger.label : option?.fixed_label ? '：' + option.fixed_label : ''); };
+  row('何时触发', workflow.triggers.length ? workflow.triggers.map(title).join('、') : '没有触发源，不会运行');
   row('提示词', `${layerNames[workflow.prompt.source]} · ${promptLocation(workflow)}`);
-  row('读取', workflowReads(workflow).join('、') + '（所有工作流都允许）');
-  row('写入', workflow.permissions.writes.length ? workflow.write_options.filter(option => workflow.permissions.writes.includes(option.id)).map(option => option.title).join('、') : '不写 GitHub');
   row('模型', workflowModelName(workflow));
+  row('允许的写入', workflow.permissions.writes.length ? workflow.write_options.filter(option => workflow.permissions.writes.includes(option.id)).map(option => option.title).join('、') : '不写 GitHub');
+  const runs = workflowExecution(workflow); if (runs) row('谁来执行', ...runs);
   return list;
+}
+// The role coordination entry a workflow belongs to; workflows outside these always keep their executor.
+const workflowEntries = { development: 'development', review: 'review', actions: 'actions' };
+// Who executes this workflow's tasks now, from the project's role configuration (read with the workflows page).
+function workflowExecution(workflow) {
+  const config = current.roleConfig; if (!config) return null;
+  const entry = workflowEntries[workflow.base], coordinated = !!entry && config.enabled && config.controller.entries[entry] === true;
+  const roles = element('a', '查看角色'); roles.href = `#/projects/${current.id}/roles`;
+  if (!coordinated) return [`原来的执行器：项目电脑里的 Pi 进程${entry ? '（这个入口没有接入主控）' : ''}。完成前由独立 QA 验收。`, ' ', roles];
+  const controller = config.roles.find(role => role.role_id === config.controller.role), executor = controller ? roleExecutor(controller, config) : null;
+  return [`主控 Manager（${executor ? executor.name + (executor.legacy ? '，旧配置沿用' : '') : '未配置'}）按需委派 Dev、Test、Reviewer、UX${entry === 'development' ? '' : '，Dev 那一步仍是这条工作流的 Pi 执行器'}。完成前由独立 QA 验收。`, ' ', roles];
 }
 function actionsStatusLine(workflow) {
   // A switched-off workflow reports nothing else: an old scan error no longer matters.

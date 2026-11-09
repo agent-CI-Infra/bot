@@ -31,6 +31,7 @@ class FakeElement {
     }
   }
   replaceChildren(...nodes) { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
+  createTHead() { const head = new FakeElement('thead'); this.prepend(head); return head; }
   prepend(...nodes) { const previous=[...this.children]; this.replaceChildren(...nodes, ...previous); }
   replaceWith(...nodes) {
     const parent = this.parentElement; if (!parent) return;

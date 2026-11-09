@@ -288,3 +288,36 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 
 /* Knowledge previews remain separate rows on narrow screens. */
 .history.knowledge-list li{display:block}.knowledge-list li button{max-width:100%;text-align:left;white-space:normal;overflow-wrap:anywhere}.knowledge-list li p{margin:4px 0;overflow-wrap:anywhere}
+
+/* Task view (static/views.js): the next step first, then the task's own facts and who executes it. */
+.task-next{border-color:#b9cdea;background:#f4f8fd}.task-next h3{color:#2c5791}.task-next .task-next-text{margin:0;font-size:14px;line-height:1.6;color:#183142;overflow-wrap:anywhere}
+.task-facts{display:grid;gap:0}.task-facts>h3{margin-bottom:4px}
+.task-fact{padding:9px 0;border-top:1px solid #edf1f4;min-width:0}.task-fact:first-of-type{border-top:0;padding-top:4px}
+.task-fact-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.task-fact-head h4{margin:0;font-size:13px;color:#365564}
+.task-fact .facts{margin-top:6px}.task-fact>p{margin:6px 0 0}.task-fact .history{margin-top:4px}.task-fact>button{margin-top:8px}
+.task-fact-list{margin:0;padding-left:18px;font-size:12px;display:grid;gap:4px}.task-fact-list li{overflow-wrap:anywhere}.task-fact-list li>.status{margin-left:6px}.task-fact-list li code{margin-left:6px;font-size:11px;color:#637c89}
+.task-execution h4{margin:10px 0 4px;font-size:13px;color:#365564}
+.role-work{margin:0;padding-left:20px;display:grid;gap:8px;font-size:13px}.role-work p{margin:3px 0 0;overflow-wrap:anywhere}
+.role-work-head{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap}
+
+/* 角色 page (static/project.js rolesSection): entries under the controller, then how the controller delegates. */
+.roles-page{display:flex;flex-direction:column;gap:12px;min-width:0}
+.roles-state{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px}
+.role-entries{list-style:none;margin:10px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
+.role-entries li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:2px 8px;padding:8px 10px;border:1px solid #e3eaf0;border-radius:6px;font-size:13px}
+.role-entries li>.muted{grid-column:1;overflow-wrap:anywhere}.role-entries li>.status{grid-column:2;grid-row:1/3}
+.role-lanes{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,2fr) auto minmax(0,1fr);gap:10px;align-items:stretch;margin-top:10px}
+.role-lane{display:grid;align-content:start;gap:8px;min-width:0;padding:10px;border-radius:7px;background:#f7fafb;border:1px solid #e3eaf0}
+.role-lane>h4{margin:0;font-size:12px;color:#637c89;letter-spacing:.04em}
+.role-lane:nth-of-type(2){grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}.role-lane:nth-of-type(2)>h4{grid-column:1/-1}
+.role-lane-arrow{align-self:center;color:#7f98a5;font-size:18px}
+.role-tile{display:grid;align-content:start;gap:5px;min-width:0;padding:9px 10px;border:1px solid #dce6eb;border-radius:6px;background:#fff}
+.role-tile p{margin:0;font-size:12px;line-height:1.55;overflow-wrap:anywhere}.role-tile-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.role-tile-head strong{font-size:14px}
+.role-executor{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px}
+.role-disabled{opacity:.6}.role-framework{border-style:dashed;background:#fbfcfd}
+.roles-delegation>h4{margin-top:14px}.role-coordinator{display:grid;grid-template-columns:minmax(0,420px);margin-top:6px}
+@media(max-width:900px){.role-lanes{grid-template-columns:minmax(0,1fr)}.role-lane-arrow{justify-self:center;transform:rotate(90deg)}}
+
+/* Workflows page: adding a workflow sits under the list, for a new trigger rather than a new task. */
+.workflow-sidebar-head>.muted{margin:0;line-height:1.55}.workflow-summary a{color:#16636b;text-underline-offset:3px}
+.workflow-add{display:grid;gap:6px;padding-top:10px;border-top:1px solid #e3eaf0}.workflow-add>h3{margin:0}.workflow-add>.muted{margin:0;line-height:1.5}

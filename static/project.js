@@ -114,8 +114,11 @@ async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  const workflows=['workflows','model'].includes(section)?await api('/api/repositories/'+id+'/workflows').catch(()=>null):null;
-  Object.assign(current, { external, workflows, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+  // The workflow summary says who executes each workflow, so the workflows page reads the role configuration too.
+  const [workflows,roles]=await Promise.all([['workflows','model'].includes(section)?api('/api/repositories/'+id+'/workflows').catch(()=>null):null,
+    section==='workflows'?api('/api/repositories/'+id+'/roles').catch(()=>null):null]);
+  const roleConfig=roles?.configuration||null;
+  Object.assign(current, { external, workflows, roleConfig, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
@@ -284,66 +287,164 @@ function releaseRecord(r, endpoint, refresh, message) {
   return section;
 }
 
-// RoleDefinitionV2: what each role actually resolves to now, and the versioned configuration behind it.
+// The 角色 page: which entries run under the project controller, how the controller (Manager) delegates Dev, Test,
+// Reviewer and UX, and which executor (harness) each role runs on. It explains a division of work and grants nothing:
+// tools come from capability policies, writes from the workflow, completion from independent QA.
+
 const roleRefText = ref => ref ? `${ref.id}@${ref.version}` : '—';
-const editableRole = r => ({ role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
+// The entries a project may put under the controller (controller.entries); every other workflow keeps its executor.
+const roleEntries = [['development', '开发', '开发 Issue、跟进 bot PR'], ['request', '普通任务', '管理对话或接口创建的任务'], ['review', '检视', '检视 Issue、检视 PR'], ['actions', 'Actions 失败分析', 'Actions 失败处理']];
+const roleDuties = {
+  manager: '读任务契约和记录，按需委派，再把候选提名给独立 QA。不能改代码、跑命令、发布、验收或合入。',
+  dev: '唯一可写的角色：在任务检出里实现或排查，交出候选。',
+  test: '在固定候选的独立检出里测试，只报告结果。',
+  reviewer: '在固定候选的独立检出里检视，报告可执行的问题。',
+  ux: '检查交互、可见状态和无障碍，只报告结果。',
+  qa: '每次正式验收都新开上下文，判断候选是否满足任务契约。主控不能委派或代替它。',
+  coordinator: '只在出现明确的跨任务请求时运行，给相关任务的主控提建议；不执行、不验收。' };
+const harnessDetails = { pi: '项目电脑里的 Pi 会话', native: '控制面的工具循环', process: '控制面启动的独立 Node 进程', acp: '外部智能体，用它自带的模型' };
+const modelSources = { role: '角色', workflow: '工作流', project: '项目默认' };
+
+/** Which entries run under the controller now: only when coordination is on and the entry is switched on. */
+function coordinationEntries(config) {
+  return roleEntries.map(([id, title, covers]) => ({ id, title, covers, coordinated: !!config.enabled && config.controller.entries[id] === true }));
+}
+/**
+ * How a role runs. New configurations run the controller on Pi. A configuration saved before V2 with coordination on
+ * keeps its old controller (Native) until it is saved again: that is the old configuration still in use (legacy), not a
+ * second recommended choice. An old or never saved configuration with coordination off runs no controller at all; it
+ * shows the Pi controller a save would give it (pending).
+ */
+function roleExecutor(role, config, harnesses = []) {
+  const old = !!config.legacy && role.role_id === config.controller.role && role.harness_ref.id !== 'pi';
+  if (old && !config.enabled) { const pi = harnesses.find(h => h.id === 'pi'); return { id: 'pi', name: 'Pi', ref: pi ? `pi@${pi.version}` : 'pi', legacy: false, pending: true }; }
+  return { id: role.harness_ref.id, name: harnessName(role.harness_ref.id), ref: `${role.harness_ref.id}@${role.harness_ref.version}`, legacy: old, pending: false };
+}
+function roleModelText(preview) {
+  if (!preview) return '—';
+  if (preview.error) return `${preview.error}${preview.detail ? '：' + preview.detail : ''}`;
+  return preview.model.source === 'external_harness' ? '执行器自带模型' : `${preview.model.name}（${modelSources[preview.model.source] || preview.model.source}）`;
+}
+// The JSON the editor starts from. Saving an old configuration upgrades it to V2, where the controller runs on Pi; its
+// old controller would be refused at roles.manager.harness_ref.id, so the editor offers Pi for it.
+const editableRole = (r, config) => ({ role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
   model_profile_ref: r.model_profile_ref ? { model_id: r.model_profile_ref.model_id, api: r.model_profile_ref.api, tool_calls: r.model_profile_ref.tool_calls, structured_output: r.model_profile_ref.structured_output } : null,
-  skill_bundle_ref: r.skill_bundle_ref ? { id: r.skill_bundle_ref.id } : null, harness_ref: { id: r.harness_ref.id }, capability_policy_ref: { id: r.capability_policy_ref.id },
+  skill_bundle_ref: r.skill_bundle_ref ? { id: r.skill_bundle_ref.id } : null, harness_ref: { id: config.legacy && r.role_id === config.controller.role ? 'pi' : r.harness_ref.id }, capability_policy_ref: { id: r.capability_policy_ref.id },
   environment_profile_ref: { id: r.environment_profile_ref.id }, budget_policy_ref: Object.fromEntries(Object.entries(r.budget_policy_ref).filter(([key]) => key !== 'version')),
   output_schema_ref: { id: r.output_schema_ref.id } });
+
 function rolesSection() {
-  const id = current.id, endpoint = `/api/repositories/${id}/roles`, section = card('角色'), body = element('div'), message = element('p', '', 'view-error');
-  message.setAttribute('role', 'alert');
-  section.append(note('每个角色都可以选择 Agent 后端，默认推荐 Pi。角色职责和权限由能力策略决定：主控只查询、委派和提名，正式交付仍经过独立 QA。保存后创建新 revision；正在运行的角色保留启动时的快照。'), body, message);
-  const render = data => {
-    const config = data.configuration, entries = config.controller.entries, backends = data.backends || data.harnesses.map(h => ({ ...h, name: h.id, available: true }));
-    const draft = { enabled: config.enabled, controller: config.controller, roles: config.roles.map(r => ({ ...editableRole(r), ...(!data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })), skills: data.skill_inputs };
-    const editor = textarea('role_configuration', JSON.stringify(draft, null, 2), { rows: 18, spellcheck: false, className: 'code' });
-    const summary = facts([['配置 revision', String(config.revision) + (config.legacy ? '（旧格式，保存后升级为 V2）' : '')], ['角色协作', config.enabled ? '已开启' : '未开启'], ['主控角色', config.controller.role],
-      ['接入主控的入口', ['development', 'request', 'review', 'actions'].filter(e => entries[e]).map(e => ({ development: '开发', request: '普通任务', review: '检视', actions: 'Actions 分析' })[e]).join('、') || '无'],
-      ['预览工作流', data.workflow]]);
-    const { table, body: rows } = projectTable(['角色', '执行后端', '模型（来源）', '技能包', '能力策略', 'revision'], '角色解析结果');
-    for (const role of config.roles) {
-      const preview = data.preview.find(p => p.role === role.role_id), row = document.createElement('tr');
-      tableCell(row, '角色', element('strong', role.name), note(`${role.role_id} · ${role.kind}${role.enabled ? '' : ' · 已停用'}`));
-      const picker = document.createElement('select'); picker.setAttribute('aria-label', `${role.role_id} Agent 后端`);
-      for (const backend of backends) {
-        const option = new Option(`${backend.name}${backend.recommended ? '（推荐）' : ''}${backend.available ? '' : '（驱动待接入）'}`, backend.id);
-        option.disabled = !backend.available || !backend.kinds.includes(role.kind); picker.add(option);
-      }
-      picker.value = draft.roles.find(r => r.role_id === role.role_id).harness_ref.id;
-      picker.addEventListener('change', () => {
-        try {
-          const value = JSON.parse(editor.value), entry = value.roles.find(r => r.role_id === role.role_id);
-          if (!entry) throw new Error('配置中缺少该角色');
-          entry.harness_ref = { id: picker.value };
-          editor.value = JSON.stringify(value, null, 2); message.textContent = '';
-        } catch { message.textContent = '请先修正配置 JSON，再选择后端。'; }
-      });
-      tableCell(row, '执行后端', picker, note(`已保存：${roleRefText(role.harness_ref)}`));
-      if (data.configured && role.role_id === 'dev' && role.entry_harness_source !== 'role' && role.harness_ref.id !== 'pi')
-        row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更'));
-      tableCell(row, '模型（来源）', preview?.error ? element('span', `${preview.error}${preview.detail ? '：' + preview.detail : ''}`, 'view-error') : element('span', preview ? `${preview.model.name}（${{ role: '角色', workflow: '工作流', project: '项目默认', external_harness: '后端自带' }[preview.model.source]}）` : '—'));
-      tableCell(row, '技能包', element('span', role.skill_bundle_ref ? `${role.skill_bundle_ref.id}@${role.skill_bundle_ref.revision} · ${role.skill_bundle_ref.content_hash.slice(0, 12)}` : '—'));
-      tableCell(row, '能力策略', element('span', roleRefText(role.capability_policy_ref)));
-      tableCell(row, 'revision', element('span', String(role.revision)));
-      rows.append(row);
-    }
-    const save = button('保存为新 revision', async () => {
-      message.textContent = ''; message.className = 'view-error'; message.setAttribute('role', 'alert');
-      let value; try { value = JSON.parse(editor.value); } catch { message.textContent = '配置不是合法 JSON。'; return; }
-      try { const saved = await api(endpoint, 'PUT', { ...value, expected_revision: config.revision }); await refresh();
-        message.className = 'view-success flash'; message.setAttribute('role', 'status'); message.textContent = `角色配置已保存为 revision ${saved.configuration.revision}。`; }
-      catch (err) { message.textContent = err.field ? `${err.message}（字段 ${err.field}）` : err.message; }
-    });
-    const models = note('可引用的模型：' + (data.models.map(m => `${m.id}（${m.name}${m.shared ? '，共享' : ''}）`).join('、') || '无'));
-    const harnessList = note('Agent 后端：' + backends.map(h => `${h.name}（${h.available ? h.id + '@' + h.version : '驱动待接入，#' + h.integration_issue}）`).join('；'));
-    const history = note('最近的 revision：' + (data.revisions.map(r => `${r.revision}（${r.created_at}）`).join('、') || '无'));
-    const actions = element('div', '', 'actions'); actions.append(save);
-    body.replaceChildren(summary, table, field('配置（JSON）', editor), models, harnessList, actions, history);
+  const id = current.id, endpoint = `/api/repositories/${id}/roles`, holder = element('div', '', 'roles-page'), message = element('p', '', 'view-error');
+  message.setAttribute('role', 'alert'); holder.append(note('正在读取角色配置…'));
+  const refresh = async () => {
+    try { const data = await api(endpoint); if (current?.id !== id || current.section !== 'roles') return; holder.replaceChildren(...roleCards(data, message)); }
+    catch (err) { message.textContent = err.message; }
   };
-  const refresh = async () => { try { const data = await api(endpoint); if (current?.id !== id || current.section !== 'roles') return; render(data); } catch (err) { message.textContent = err.message; } };
-  void refresh(); return [section];
+  void refresh(); return [holder, message];
+}
+function roleCards(data, message) {
+  const config = data.configuration, byId = new Map(config.roles.map(role => [role.role_id, role]));
+  const preview = roleId => data.preview.find(p => p.role === roleId), executorOf = role => roleExecutor(role, config, data.harnesses);
+  // Every role picks an Agent backend; a project that never saved its roles starts from the recommended one.
+  const backends = data.backends || data.harnesses.map(h => ({ ...h, name: h.id, available: true }));
+  const draft = { enabled: config.enabled, controller: config.controller, roles: config.roles.map(r => ({ ...editableRole(r, config), ...(!data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })), skills: data.skill_inputs };
+  const editor = textarea('role_configuration', JSON.stringify(draft, null, 2), { rows: 18, spellcheck: false, className: 'code' });
+  return [coordinationCard(config), delegationCard(config, byId, preview, executorOf), roleTableCard(data, config, preview, executorOf, { backends, draft, editor, message }), roleEditorCard(data, config, message, { backends, editor })];
+}
+// Whether role coordination is on, and for which entries; without it every entry keeps its own executor.
+function coordinationCard(config) {
+  const section = card('角色协调'), head = element('div', '', 'roles-state'), entries = coordinationEntries(config);
+  section.classList.add('roles-coordination');
+  head.append(config.enabled ? badge('已开启', 'success') : badge('未开启'), element('span', `配置 revision ${config.revision}`, 'muted'));
+  section.append(head);
+  if (!config.enabled) section.append(element('p', '没有开启：开发、普通任务、检视和 Actions 失败分析都走原来的执行器，也就是各工作流在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收。'));
+  else {
+    const list = element('ul', '', 'role-entries');
+    for (const entry of entries) {
+      const item = element('li', ''); item.dataset.entry = entry.id;
+      item.append(element('strong', entry.title), element('span', entry.covers, 'muted'), entry.coordinated ? badge('主控委派', 'info') : badge('原执行器'));
+      list.append(item);
+    }
+    section.append(list, note('上面关着的入口和其他工作流（自定义工作流、CI 观察、发行说明、接入门禁）走原来的执行器。无论哪种方式，交付前都由独立 QA 验收。'));
+  }
+  if (config.legacy && config.enabled) section.append(element('p', `这份配置保存于 V2 之前，仍按旧配置运行：主控还是 ${harnessName(config.roles.find(role => role.role_id === config.controller.role)?.harness_ref.id)}。在下方「修改配置」里保存一次就升级为 V2，之后新开始的任务由 Pi 上的主控协调；正在运行的任务保留启动时的快照。`, 'endpoint-warning'));
+  else if (config.legacy) section.append(note('还没有保存过 V2 角色配置。开启协调并保存后，主控在 Pi 上运行。'));
+  return section;
+}
+// One tile per role: what it does, the executor it runs on and the model it resolves to.
+function roleTile(role, preview, executorOf) {
+  const tile = element('article', '', 'role-tile' + (role.enabled ? '' : ' role-disabled')), executor = executorOf(role), head = element('div', '', 'role-tile-head');
+  tile.dataset.role = role.role_id;
+  head.append(element('strong', roleLabel(role.role_id)), ...(role.enabled ? [] : [badge('已停用')]));
+  const runs = element('p', '', 'role-executor');
+  runs.append(badge(executor.name, executor.legacy ? 'warning' : executor.id === 'pi' ? 'info' : ''), element('span', harnessDetails[executor.id] || executor.ref, 'muted'));
+  if (executor.legacy) runs.append(badge('旧配置沿用', 'warning')); else if (executor.pending) runs.append(badge('保存后生效'));
+  tile.append(head, element('p', roleDuties[role.role_id] || (role.kind === 'observer' ? '项目自定义的只读角色：看固定候选，只报告结果。' : role.responsibility)), runs, element('p', '模型：' + roleModelText(preview(role.role_id)), 'muted'));
+  return tile;
+}
+function delegationCard(config, byId, preview, executorOf) {
+  const section = card('主控怎样委派'), lanes = element('div', '', 'role-lanes'), lane = (title, ...tiles) => { const box = element('section', '', 'role-lane'); box.append(element('h4', title), ...tiles); return box; };
+  const arrow = () => { const mark = element('span', '→', 'role-lane-arrow'); mark.setAttribute('aria-hidden', 'true'); return mark; };
+  section.classList.add('roles-delegation');
+  const controller = byId.get(config.controller.role), workers = config.roles.filter(role => !['controller', 'evaluator'].includes(role.kind)), qa = config.roles.find(role => role.kind === 'evaluator');
+  const publish = element('article', '', 'role-tile role-framework'); publish.append(element('strong', '控制面发布'), element('p', '按工作流允许的写入发布到 GitHub。合入另需人授权，任何角色都没有发布或合入工具。'));
+  const tile = role => roleTile(role, preview, executorOf);
+  lanes.append(lane('主控', ...(controller ? [tile(controller)] : [])), arrow(), lane('按需委派', ...workers.map(tile)), arrow(), lane('验收与发布', ...(qa ? [tile(qa)] : []), publish));
+  section.append(note('主控按任务决定要谁：可能只委派 Dev，也可能再请 Test、Reviewer、UX 看同一份固定候选；检视意见回到同一个 Dev。'), lanes,
+    note('这是分工说明，不是每个任务都要走一遍的流程，也不授予权限：工具只来自能力策略，写入只来自工作流设置。检视和 Actions 失败分析接入主控后，Dev 那一步仍由该入口原有的 Pi 执行器完成。'));
+  const coordinator = byId.get('coordinator');
+  if (coordinator) { const line = element('div', '', 'role-coordinator'); line.append(tile(coordinator)); section.append(element('h4', '不在单个任务里的角色'), line); }
+  return section;
+}
+// The exact resolution of every role, as a run would start now.
+function roleTableCard(data, config, preview, executorOf, { backends, draft, editor, message }) {
+  const section = card('每个角色的解析结果'), { table, body } = projectTable(['角色', '执行后端', '模型（来源）', '技能包', '能力策略', 'revision'], '角色解析结果');
+  for (const role of config.roles) {
+    const row = document.createElement('tr'), executor = executorOf(role), model = preview(role.role_id);
+    tableCell(row, '角色', element('strong', role.name), note(`${role.role_id} · ${role.kind}${role.enabled ? '' : ' · 已停用'}`));
+    // The backend picker edits the configuration below; nothing changes until it is saved.
+    const picker = document.createElement('select'); picker.setAttribute('aria-label', `${role.role_id} Agent 后端`);
+    for (const backend of backends) {
+      const option = new Option(`${backend.name}${backend.recommended ? '（推荐）' : ''}${backend.available ? '' : '（驱动待接入）'}`, backend.id);
+      option.disabled = !backend.available || !backend.kinds.includes(role.kind); picker.add(option);
+    }
+    picker.value = draft.roles.find(r => r.role_id === role.role_id).harness_ref.id;
+    picker.addEventListener('change', () => {
+      try {
+        const value = JSON.parse(editor.value), entry = value.roles.find(r => r.role_id === role.role_id);
+        if (!entry) throw new Error('配置中缺少该角色');
+        entry.harness_ref = { id: picker.value };
+        editor.value = JSON.stringify(value, null, 2); message.textContent = '';
+      } catch { message.textContent = '请先修正配置 JSON，再选择后端。'; }
+    });
+    tableCell(row, '执行后端', picker, note(`已保存：${roleRefText(role.harness_ref)}`), ...(executor.legacy ? [badge('旧配置沿用', 'warning')] : executor.pending ? [badge('保存后生效')] : []), element('code', executor.ref));
+    if (data.configured && role.role_id === 'dev' && role.entry_harness_source !== 'role' && role.harness_ref.id !== 'pi')
+      row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更'));
+    tableCell(row, '模型（来源）', element('span', roleModelText(model), model?.error ? 'view-error' : ''));
+    tableCell(row, '技能包', element('span', role.skill_bundle_ref ? `${role.skill_bundle_ref.id}@${role.skill_bundle_ref.revision} · ${role.skill_bundle_ref.content_hash.slice(0, 12)}` : '—'));
+    tableCell(row, '能力策略', element('span', `${role.capability_policy_ref.id}@${role.capability_policy_ref.version}`));
+    tableCell(row, 'revision', element('span', String(role.revision)));
+    body.append(row);
+  }
+  section.append(note(`模型按工作流 ${data.workflow} 预览：角色自己的模型优先，其次是工作流的模型，最后是项目默认；ACP 用执行器自带的模型。`), table);
+  return section;
+}
+function roleEditorCard(data, config, message, { backends, editor }) {
+  const section = card('修改配置'), endpoint = `/api/repositories/${current.id}/roles`;
+  const save = button('保存为新 revision', async () => {
+    message.textContent = '';
+    let value; try { value = JSON.parse(editor.value); } catch { message.textContent = '配置不是合法 JSON。'; return; }
+    try { const saved = await api(endpoint, 'PUT', { ...value, expected_revision: config.revision }); current.flash = `角色配置已保存为 revision ${saved.configuration.revision}。`; await reloadProject(); }
+    catch (err) { message.textContent = err.field ? `${err.message}（字段 ${err.field}）` : err.message; }
+  });
+  const actions = element('div', '', 'actions'); actions.append(save);
+  section.append(note('人设提示词只是资料，改它不会改变工具、权限或任务契约。保存要带当前 revision；正在运行的角色保留启动时的快照。'),
+    ...(config.legacy ? [note('这是旧格式的配置：编辑器里主控的执行器已换成 pi，保存后升级为 V2。')] : []),
+    field('配置（JSON）', editor), actions, message,
+    note('可引用的模型：' + (data.models.map(m => `${m.id}（${m.name}${m.shared ? '，共享' : ''}）`).join('、') || '无')),
+    note('Agent 后端：' + backends.map(h => `${h.name}（${h.available ? h.id + '@' + h.version : '驱动待接入，#' + h.integration_issue}）`).join('；')),
+    note('最近的 revision：' + (data.revisions.map(r => `${r.revision}（${r.created_at}）`).join('、') || '无')));
+  return section;
 }
 function notesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/notes`, section = card('项目笔记'), list = element('div', '', 'project-notes-list'), message = element('p', '', 'view-error');
