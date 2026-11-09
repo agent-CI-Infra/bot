@@ -8,37 +8,34 @@ test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独�
   mkdirSync('.tmp/actions-failures', { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    await page.goto(h.admin + '/#/projects/101/workflows');
+    await page.goto(h.admin + '/#/projects/101/roles');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    // Actions failure handling is one of the workflows: its switch, trigger and status are in its editor.
-    const list = page.getByRole('complementary', { name: '工作流列表', exact: true }), item = list.locator('[data-workflow-item="actions.failures"]');
-    await expect(item).toContainText('已关闭');
-    await item.click();
-    const detail = page.getByRole('region', { name: '工作流：Actions 失败处理', exact: true }), toggle = detail.locator('[name="enabled"]');
-    await expect(toggle).not.toBeChecked(); await toggle.check(); await detail.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(detail.locator('.flash')).toHaveText('已保存工作流');
+    // Actions failure handling is one of the work types: its switch, writes and status are in the work type table.
+    const row = page.locator('[data-work-type="actions.failures"]'), toggle = row.getByLabel('开启', { exact: true }), save = page.getByRole('button', { name: '保存工作类型', exact: true });
+    await expect(row).toContainText('已关闭'); await expect(toggle).not.toBeChecked();
+    const status = page.locator('[data-actions-status]');
+    await expect(status).toHaveText('未开启。');
+    await toggle.check(); await save.click();
+    await expect(page.getByText('已保存工作类型', { exact: true })).toBeVisible();
     expect((await admin('/api/repositories/101')).value.policy.actions_failures_enabled).toBe(1);
     expect((await admin('/api/repositories/101')).value.policy.development_enabled).toBe(0);
-    await expect(toggle).toBeChecked(); await expect(item).toContainText('运行中');
-    const status = detail.locator('[data-actions-status]');
+    await expect(toggle).toBeChecked(); await expect(row).toContainText('运行中');
     await expect(status).toContainText('配置检查通过后');
-    // Its trigger is chosen in the overview and drawn on the left of its chart.
-    await expect(detail.getByLabel('默认分支的 Actions 运行失败', { exact: true })).toBeChecked();
-    await expect(detail.locator('figure').first().locator('svg text.flow-trigger-label')).toHaveText(['Actions 运行失败']);
+    await expect(row.getByLabel('重跑失败的 Actions 运行', { exact: true })).toBeChecked(); await expect(row.getByLabel('提报 Issue', { exact: true })).toBeChecked();
     h.store.run("UPDATE actions_failure_scans SET error='actions_workflow_run_subscription_missing'");
     await expect(status).toContainText('此仓库使用的 App 安装未订阅 workflow_run', { timeout: 10000 }); await expect(status).toContainText('本功能已停止写入');
-    await page.screenshot({ path: '.tmp/actions-failures/desktop.png' });
+    await status.scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/actions-failures/desktop.png' });
     await page.setViewportSize({ width: 390, height: 844 }); await status.scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/actions-failures/mobile.png' });
     await page.setViewportSize({ width: 1440, height: 1000 });
-    // Saving the Actions switch leaves the review workflows alone.
-    await toggle.uncheck(); await detail.getByRole('button', { name: '保存', exact: true }).click();
-    await expect(detail.locator('.flash')).toHaveText('已保存工作流');
+    // Saving the Actions switch leaves the review work types alone.
+    await toggle.uncheck(); await save.click();
+    await expect(page.getByText('已保存工作类型', { exact: true })).toBeVisible();
     expect((await admin('/api/repositories/101')).value.policy.actions_failures_enabled).toBe(0);
     await expect(toggle).not.toBeChecked();
-    await expect(list.locator('[data-workflow-item="review.issue"]')).toContainText('项目的检视开关已关');
+    await expect(page.locator('[data-work-type="review.issue"]')).toContainText('项目的检视开关已关');
     await expect(page.getByText('此仓库使用的 App 安装未订阅 workflow_run', { exact: false })).not.toBeVisible();
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }

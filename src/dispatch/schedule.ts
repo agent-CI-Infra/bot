@@ -26,7 +26,8 @@ export function registerScheduledChecks(schedules: ScheduleService) {
         facts: { occurrence_id: trigger.occurrence_id, logical_at: new Date(trigger.logical_at).toISOString(), instruction: instruction || null },
         options: [{ id: 'check', work: 'task.request', title: '定时检查', spec: { type: 'request', key: trigger.occurrence_id,
           request: instruction || '按 Manager 提示词「定时检查」章节检查这个项目，只报告发现。', principal: { principal_id: actor.principal_id, tenant_id: trigger.tenant_id } } }] });
-      return { run_id: trigger.run_id, state: 'queued' };
+      // The occurrence's business run is handing the check to the Manager, done here; a task it starts runs on its own.
+      return { run_id: trigger.run_id, state: 'succeeded' };
     }
   });
 }

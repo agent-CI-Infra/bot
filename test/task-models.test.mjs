@@ -95,9 +95,9 @@ test('project model console preserves custom task IDs, shows stale models and re
   const inherited = page.run('inherited');
   assert.equal(inherited.querySelector('select').value, ''); await click(inherited, '保存模型');
   assert.deepEqual(bodies[2], {task_models: {'custom.science': 'model'}});
-  await click(page.run('custom'), '移除自定义任务');
+  await click(page.run('custom'), '移除这项设置');
   assert.deepEqual(bodies[3], {task_models: {}}); assert.equal(page.run('reloads'), 4);
-  assert.equal(page.run("projectSections.map(([id,title])=>id+':'+title).join(',')"), 'basic:基本设置,management:管理对话,machine:机器配置,workflows:工作流,model:模型,release:发版本,knowledge:项目知识,notes:项目笔记,roles:角色,external:外部执行,members:成员,activity:运行状态');
+  assert.equal(page.run("projectSections.map(([id,title])=>id+':'+title).join(',')"), 'basic:基本设置,management:管理对话,machine:机器配置,model:模型,release:发版本,knowledge:项目知识,notes:项目笔记,roles:Manager 与角色,external:外部执行,members:成员,activity:运行状态');
   assert.equal(page.run("kindLabels['release.observe']+'/'+kindLabels['release.notes']"), 'CI 观察/发行说明');
 });
 

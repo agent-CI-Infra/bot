@@ -1,8 +1,8 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['workflows', '工作流'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['notes', '项目笔记'], ['roles', '角色'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
-// Older addresses open the workflows page: the task overview it replaced, and the review, development and rule pages.
-const legacyProjectSections = { tasks: '', review: 'review.issue', development: 'development.issue', rules: 'rule-sources' };
+const projectSections = [['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['notes', '项目笔记'], ['roles', 'Manager 与角色'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
+// Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.
+const legacyProjectSections = { workflows: 'manager-prompt', tasks: '', review: 'work-types', development: 'work-types', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
 const ruleFiles = [
   ['.bot/guide.md', '行为指南', '全部任务', 'tasks'],
@@ -24,7 +24,7 @@ function parseEnv(text) {
   });
   return env;
 }
-// A section may name one item inside it, e.g. #/projects/<id>/workflows/review.pr.
+// A section may name one item inside it (older workflow addresses did, e.g. #/projects/<id>/workflows/review.pr).
 function projectRoute() { const m = /^#\/projects\/([1-9]\d*)(?:\/([a-z]+)(?:\/([\w.-]+))?)?$/.exec(location.hash); return m ? { id: m[1], section: m[2] || 'basic', item: m[3] || null } : null; }
 function openProject(id, section = 'basic') { location.hash = `#/projects/${id}/${section}`; }
 function field(label, control) { const wrap = element('label', label); wrap.append(control); return wrap; }
@@ -88,36 +88,30 @@ let current = null, projectTimer = null, renderToken = 0;
 async function renderProject(route) {
   const legacyFocus = legacyProjectSections[route.section];
   if (legacyFocus !== undefined) {
-    route = { ...route, section: 'workflows' };
-    history.replaceState(null, '', `#/projects/${route.id}/workflows`);
+    route = { ...route, section: 'roles' };
+    history.replaceState(null, '', `#/projects/${route.id}/roles`);
   }
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
   if (current?.id !== route.id) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
-  if (route.section === 'workflows') current.workflowItem = route.item || (legacyFocus && legacyFocus !== 'rule-sources' ? legacyFocus : legacyFocus === 'rule-sources' ? 'rules.files' : current.workflowItem);
   try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) page.replaceChildren(element('p', err.message, 'view-error')); return; }
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   current.section = section; page.replaceChildren(projectHeader(), projectBody(section));
-  // The workflows page uses the whole width: a list beside a tabbed editor.
-  page.classList.toggle('wide-project', section === 'workflows');
-  if(section==='workflows')page.querySelector('.project-nav [aria-current=page]')?.scrollIntoView({block:'nearest',inline:'nearest'});
-  if (current.focusAnchor) { page.querySelector(`[data-overview-anchor="${CSS.escape(current.focusAnchor)}"]`)?.scrollIntoView({ block: 'start' }); current.focusAnchor = null; }
+  // The Manager page draws its cards after reading them; the anchor of an older address is scrolled to once they are there.
+  if (current.focusAnchor) { const anchor = current.focusAnchor; current.focusAnchor = null;
+    const scroll = () => page.querySelector(`[data-overview-anchor="${CSS.escape(anchor)}"]`)?.scrollIntoView({ block: 'start' });
+    if (section === 'roles') current.managerAnchor = scroll; else scroll(); }
   // Opening a rule file from the overview, or saving one, brings its card into view.
-  // On the workflows page a shared rule is an item of its own list, already selected by the address.
-  if (current.focusRule) { if (section === 'workflows') { /* shown in place */ } else page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
+  if (current.focusRule) { page.querySelector(`[data-rule-path="${CSS.escape(current.focusRule)}"]`)?.scrollIntoView({ block: 'start' }); current.focusRule = null; }
   if (['machine', 'activity'].includes(section)) refreshProjectStatus(token);
-  if (section === 'workflows' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
+  if (section === 'roles' && current.policy.actions_failures_enabled) projectTimer = setTimeout(() => refreshActionsFailureStatus(token), 5000);
 }
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  // The workflow summary says who executes each workflow, so the workflows page reads the role configuration too.
-  const [workflows,roles]=await Promise.all([['workflows','model'].includes(section)?api('/api/repositories/'+id+'/workflows').catch(()=>null):null,
-    section==='workflows'?api('/api/repositories/'+id+'/roles').catch(()=>null):null]);
-  const roleConfig=roles?.configuration||null;
-  Object.assign(current, { external, workflows, roleConfig, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section }); }
@@ -154,7 +148,7 @@ function projectBody(section) {
     if (key === 'management') { const project = current.id; item.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); }); }
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, workflows: workflowsSection, model: modelsSection, release: releaseSection, knowledge: knowledgeSection, notes: notesSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, knowledge: knowledgeSection, notes: notesSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
@@ -235,7 +229,8 @@ function releaseRecord(r, endpoint, refresh, message) {
   if (r.stage === 'failed' && ['release_ci_unsuccessful', 'release_rerun_not_started'].includes(r.error) && r.run_id) actions.append(action('重跑', 'rerun'));
   if (['failed', 'write_unknown', 'waiting_permission'].includes(r.stage) && r.error !== 'release_ci_unsuccessful') actions.append(action('继续／查证此步骤', 'resume'));
   if (r.run_id) actions.append(action('让智能体看这次运行（只读）', 'observe'));
-  // The analysis is a task of the CI observation workflow in the project computer; this page refreshes until it is done.
+  // The request goes to the Manager first; its task runs in the project computer, and this page refreshes until it is done.
+  if (r.observation_event && !r.observation_task) section.append(note('运行分析的请求在等 Manager 分派，安排后在项目电脑里执行。'));
   if (r.observation_task) {
     const pending = element('p', '运行分析在项目电脑里排队或执行中，完成后显示在这里。', 'muted');
     pending.append(' ', button('查看分析过程', () => openTask(r.observation_task), 'quiet')); section.append(pending);
@@ -287,13 +282,13 @@ function releaseRecord(r, endpoint, refresh, message) {
   return section;
 }
 
-// The 角色 page: which entries run under the project controller, how the controller (Manager) delegates Dev, Test,
-// Reviewer and UX, and which Agent backend (harness) each role runs on; every role picks its backend, Pi is recommended.
-// It explains a division of work and grants nothing: tools come from capability policies, writes from the workflow,
-// completion from independent QA.
+// The 「Manager 与角色」 page: the Manager configuration (manager.js) above the roles: which entries run under the project
+// controller, how the controller delegates Dev, Test, Reviewer and UX, and which Agent backend (harness) each role runs on;
+// every role picks its backend, Pi is recommended. It explains a division of work and grants nothing: tools come from
+// capability policies, writes from the work type configuration, completion from independent QA.
 
 const roleRefText = ref => ref ? `${ref.id}@${ref.version}` : '—';
-// The entries a project may put under the controller (controller.entries); every other workflow keeps its executor.
+// The entries a project may put under the controller (controller.entries); every other work type keeps its executor.
 const roleEntries = [['development', '开发', '开发 Issue、跟进 bot PR'], ['request', '普通任务', '管理对话或接口创建的任务'], ['review', '检视', '检视 Issue、检视 PR'], ['actions', 'Actions 失败分析', 'Actions 失败处理']];
 const roleDuties = {
   manager: '读任务契约和记录，按需委派，再把候选提名给独立 QA。不能改代码、跑命令、发布、验收或合入。',
@@ -304,7 +299,7 @@ const roleDuties = {
   qa: '每次正式验收都新开上下文，判断候选是否满足任务契约。主控不能委派或代替它。',
   coordinator: '只在出现明确的跨任务请求时运行，给相关任务的主控提建议；不执行、不验收。' };
 const harnessDetails = { pi: '项目电脑里的 Pi 会话', native: '控制面的工具循环', process: '控制面启动的独立 Node 进程', acp: '外部智能体，用它自带的模型', claude_code: 'Claude Code CLI，用它自带的模型' };
-const modelSources = { role: '角色', workflow: '工作流', project: '项目默认' };
+const modelSources = { role: '角色', workflow: '工作类型', project: '项目默认' };
 
 /** Which entries run under the controller now: only when coordination is on and the entry is switched on. */
 function coordinationEntries(config) {
@@ -356,11 +351,16 @@ const editableRole = r => ({ role_id: r.role_id, enabled: r.enabled, name: r.nam
 function rolesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/roles`, holder = element('div', '', 'roles-page'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert'); holder.append(note('正在读取角色配置…'));
+  const managerHolder = element('div', '', 'manager-holder');
   const refresh = async () => {
-    try { const data = await api(endpoint); if (current?.id !== id || current.section !== 'roles') return; holder.replaceChildren(...roleCards(data, message)); }
-    catch (err) { message.textContent = err.message; }
+    // The Manager cards say who executes each work type, so they are drawn with the role configuration when it can be read.
+    let data = null, failure = null;
+    try { data = await api(endpoint); } catch (err) { failure = err; }
+    if (current?.id !== id || current.section !== 'roles') return;
+    managerHolder.replaceChildren(...managerSection(data));
+    if (data) holder.replaceChildren(...roleCards(data, message)); else { holder.replaceChildren(); message.textContent = failure.message; }
   };
-  void refresh(); return [holder, message];
+  void refresh(); return [managerHolder, holder, message];
 }
 function roleCards(data, message) {
   const config = data.configuration, byId = new Map(config.roles.map(role => [role.role_id, role]));
@@ -378,7 +378,7 @@ function coordinationCard(config, configured = true) {
   section.classList.add('roles-coordination');
   head.append(config.enabled ? badge('已开启', 'success') : badge('未开启'), element('span', `配置 revision ${config.revision}`, 'muted'));
   section.append(head);
-  if (!config.enabled) section.append(element('p', '没有开启：开发、普通任务、检视和 Actions 失败分析都走原来的执行器，也就是各工作流在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收。'));
+  if (!config.enabled) section.append(element('p', '没有开启：开发、普通任务、检视和 Actions 失败分析都走原来的执行器，也就是每类工作在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收。'));
   else {
     const list = element('ul', '', 'role-entries');
     for (const entry of entries) {
@@ -387,7 +387,7 @@ function coordinationCard(config, configured = true) {
       if (entry.coordinated) item.append(element('span', ['review', 'actions'].includes(entry.id) ? entryDevText(config) : '可委派：' + workerNames(entryWorkers(config, entry.id)), 'role-entry-workers'));
       list.append(item);
     }
-    section.append(list, note('上面关着的入口和其他工作流（自定义工作流、CI 观察、发行说明、接入门禁）走原来的执行器。无论哪种方式，交付前都由独立 QA 验收。'));
+    section.append(list, note('上面关着的入口和其他工作类型（通用回复、CI 观察、发行说明、接入门禁）走原来的执行器。无论哪种方式，交付前都由独立 QA 验收。'));
   }
   const controller = config.roles.find(role => role.role_id === config.controller.role);
   if (!configured) section.append(note('还没有保存过角色配置。下面显示的是保存后各角色的默认后端（推荐 Pi）；开启协调并保存后才会运行。'));
@@ -411,11 +411,11 @@ function delegationCard(config, byId, preview, executorOf) {
   const arrow = () => { const mark = element('span', '→', 'role-lane-arrow'); mark.setAttribute('aria-hidden', 'true'); return mark; };
   section.classList.add('roles-delegation');
   const controller = byId.get(config.controller.role), workers = config.roles.filter(role => !['controller', 'evaluator'].includes(role.kind)), qa = config.roles.find(role => role.kind === 'evaluator');
-  const publish = element('article', '', 'role-tile role-framework'); publish.append(element('strong', '控制面发布'), element('p', '按工作流允许的写入发布到 GitHub。合入另需人授权，任何角色都没有发布或合入工具。'));
+  const publish = element('article', '', 'role-tile role-framework'); publish.append(element('strong', '控制面发布'), element('p', '按工作类型配置允许的写入发布到 GitHub。合入另需人授权，任何角色都没有发布或合入工具。'));
   const tile = role => roleTile(role, preview, executorOf);
   lanes.append(lane('主控', ...(controller ? [tile(controller)] : [])), arrow(), lane('按需委派', ...workers.map(tile)), arrow(), lane('验收与发布', ...(qa ? [tile(qa)] : []), publish));
   section.append(note('主控按任务决定要谁：可能只委派 Dev，也可能再请 Test、Reviewer、UX 看同一份固定候选；检视意见回到同一个 Dev。'), lanes,
-    note('这是分工说明，不是每个任务都要走一遍的流程，也不授予权限：工具只来自能力策略，写入只来自工作流设置，换后端也不改变它们。开发和普通任务里，主控可以委派这里已启用的工作角色；检视和 Actions 失败分析接入主控后只委派 Dev，Dev 用这个入口自己的工具和工作区，后端按 Dev 的选择（旧 V2 配置在改选前仍用 Pi）。独立 QA 不是被委派的角色，它在主控提名候选之后验收。'));
+    note('这是分工说明，不是每个任务都要走一遍的流程，也不授予权限：工具只来自能力策略，写入只来自工作类型配置，换后端也不改变它们。开发和普通任务里，主控可以委派这里已启用的工作角色；检视和 Actions 失败分析接入主控后只委派 Dev，Dev 用这个入口自己的工具和工作区，后端按 Dev 的选择（旧 V2 配置在改选前仍用 Pi）。独立 QA 不是被委派的角色，它在主控提名候选之后验收。'));
   const coordinator = byId.get('coordinator');
   if (coordinator) { const line = element('div', '', 'role-coordinator'); line.append(tile(coordinator)); section.append(element('h4', '不在单个任务里的角色'), line); }
   return section;
@@ -451,7 +451,7 @@ function roleTableCard(data, config, preview, executorOf, { backends, draft, edi
     body.append(row);
   }
   section.append(note('每个角色都可以选择 Agent 后端，默认推荐 Pi；换后端不改变它的工具和权限。在这里改选会同步到下方的配置，保存后才生效。'),
-    note(`模型按工作流 ${data.workflow} 预览：角色自己的模型优先，其次是工作流的模型，最后是项目默认；ACP 和 Claude Code 用后端自带的模型。`), table);
+    note(`模型按工作类型 ${data.workflow} 预览：角色自己的模型优先，其次是工作类型的模型，最后是项目默认；ACP 和 Claude Code 用后端自带的模型。`), table);
   return section;
 }
 function roleEditorCard(data, config, message, { backends, editor, configured }) {
@@ -529,7 +529,7 @@ function machineSection() {
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
   const number = (name, step) => input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
     placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
-  const sourceLink=element('a','查看工作流');sourceLink.href=`#/projects/${current.id}/workflows`;
+  const sourceLink=element('a','查看规则文件来源');sourceLink.href=`#/projects/${current.id}/roles`;
   const sourceActions=element('div','','actions');sourceActions.append(sourceLink);
   // Tasks apply the repository file when they prepare; a super administrator can apply it right away.
   if(source?.source==='repository'&&editable){const apply=button('立即应用仓库文件',async()=>{apply.disabled=true;apply.textContent='正在按仓库文件重建虚拟电脑…';
@@ -616,15 +616,20 @@ async function refreshProjectStatus(token) {
   projectTimer = setTimeout(() => refreshProjectStatus(token), 5000);
 }
 
-// Event workflow tasks (CI observation, Actions failures, gate onboarding turns) have no Issue or PR number.
+// Event tasks (CI observation, Actions failures, gate onboarding turns) have no Issue or PR number.
 function projectTaskLabel(task) { return `${kindLabels[task.kind] || task.kind}${task.object_number == null ? '' : ' #' + task.object_number}`; }
 const builtInTasks = [
-  { kind: 'review.issue', group: '检视', title: '检视 Issue', description: '检视新 Issue，判断意图、核对代码证据，并按规则决定是否衔接开发。', rule: '.bot/rules/issue-review.md' },
+  { kind: 'manager', group: 'Manager', title: 'Manager 分派', description: '每个交给 Manager 的事件调用一次：决定新建任务、续接已有任务还是不处理。' },
+  { kind: 'review.issue', group: '检视', title: '检视 Issue', description: '检视 Issue，判断意图、核对代码证据，回复评论并加分类标签。', rule: '.bot/rules/issue-review.md' },
   { kind: 'review.pr', group: '检视', title: '检视 PR', description: '检视 PR 的变更、测试与证据，发布 COMMENT 检视结论。', rule: '.bot/rules/pr-review.md' },
   { kind: 'development.issue', group: '开发', title: '开发 Issue', description: 'Issue 明确要求改代码时，在虚拟电脑里实现、测试并创建 bot PR。', rule: '.bot/rules/issue-development.md' },
-  { kind: 'development.pr', group: '开发', title: '跟进 bot PR', description: '跟进 bot 自己创建的 PR：新提交或讨论触发后，按开发 Issue 的同一份规则自动修订。' },
+  { kind: 'development.pr', group: '开发', title: '跟进 bot PR', description: '检视采纳了 bot PR 上的修改要求，或发现可执行问题后，修订 bot 自己的 PR。' },
+  { kind: 'reply', group: '通用', title: '通用回复', description: '按 Manager 提示词「通用回复」章节在 Issue 或 PR 上完成一项工作并回复。' },
   { kind: 'release.observe', group: '发版本', title: 'CI 观察', description: '只读分析一次 Release 工作流运行并汇总失败线索；观察操作仍留在「发版本」。' },
-  { kind: 'release.notes', group: '发版本', title: '发行说明', description: '把已核验的提交和合并 PR 整理成发行说明；起草与正式发布仍留在「发版本」。' }
+  { kind: 'release.notes', group: '发版本', title: '发行说明', description: '把已核验的提交和合并 PR 整理成发行说明；起草与正式发布仍留在「发版本」。' },
+  { kind: 'actions.failures', group: 'Actions', title: 'Actions 失败处理', description: '分析默认分支 Actions 运行失败的原因，外部原因重跑一次，其他提报 Issue。' },
+  { kind: 'gate.onboarding', group: '门禁', title: '接入门禁', description: '「接入门禁」对话的每一轮。' },
+  { kind: 'task.request', group: '通用', title: '普通任务与定时检查', description: '管理对话、接口或定时检查发起的通用任务。' }
 ];
 const releaseNotesSkill = '.agents/skills/release-notes/SKILL.md';
 function taskModelMap(policy) {
@@ -689,7 +694,7 @@ function taskModelEditor(kind, title, policy, models, { custom = false } = {}) {
   };
   actions.append(button('保存模型', () => persist(select.value, `已保存${title}的模型`)));
   if (!custom && configured) actions.append(button('恢复继承', () => persist('', `已恢复${title}继承项目默认模型`)));
-  if (custom) actions.append(button('移除自定义任务', () => persist('', `已移除自定义任务 ${kind}`), 'quiet destructive'));
+  if (custom) actions.append(button('移除这项设置', () => persist('', `已移除 ${kind} 的模型设置`), 'quiet destructive'));
   section.append(note(`当前使用：${currentText}`), field('任务模型', select), message, actions);
   return section;
 }
@@ -921,12 +926,12 @@ function showActionsFailureStatus(message, status) {
   message.className = status?.error ? 'endpoint-warning' : 'muted';
   message.textContent = status?.error ? status.error === 'actions_workflow_run_subscription_missing'
     ? '配置错误：此仓库使用的 App 安装未订阅 workflow_run。本功能已停止写入，请 App 管理员添加事件订阅。'
-    : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「权限与模型」里选择可用的模型，或检查项目默认模型。`
+    : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「模型」页为 Actions 失败处理选择可用的模型，或检查项目默认模型。`
     : `Actions 失败处理已暂停：${status.error}。请检查账号授权或日志读取状态。`
     : status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。';
 }
 async function refreshActionsFailureStatus(token) {
-  if (token !== renderToken || current?.section !== 'workflows' || !current.policy.actions_failures_enabled) return;
+  if (token !== renderToken || current?.section !== 'roles' || !current.policy.actions_failures_enabled) return;
   try {
     const value = await api('/api/repositories/' + current.id);
     if (token !== renderToken) return;
@@ -1003,7 +1008,7 @@ function ruleCard(path) {
   const save = async content => {
     try { const { rules } = await api(`/api/repositories/${id}/rules`, 'PUT', { path, content }); if (current?.id !== id) return; current.rules = rules;
       current.ruleNotice = { path, text: content === null ? '已清除控制台覆盖' : '已保存控制台覆盖' };
-      updateRuleSources();
+      updateRuleSources(); if (typeof managerChanged === 'function') void managerChanged();
       const common = section.closest('details.common-rule');
       if (common) common.querySelector('.common-rule-body').replaceChildren(ruleCard(path));
       else if ($('project-detail')?.redraw) $('project-detail').redraw();
@@ -1034,7 +1039,6 @@ function ruleSource(path) {
 }
 function updateRuleSources() {
   $('project-page')?.querySelectorAll('[data-rule-source]').forEach(node => node.replaceWith(ruleSource(node.dataset.ruleSource)));
-  if (typeof refreshWorkflowTable === 'function') refreshWorkflowTable();
 }
 function commonRule(path, title) {
   const details = element('details', '', 'common-rule'), summary = element('summary'), body = element('div', '', 'common-rule-body');
@@ -1054,7 +1058,6 @@ function ruleSync() {
       const { rules } = await api(`/api/repositories/${id}/rules/refresh`, 'POST', {});
       if (current?.id !== id) return;
       current.rules = rules; updateRuleSources(); describe();
-      if (typeof redrawSharedRule === 'function') redrawSharedRule();
       // Refresh saved content without discarding an editor's unsaved draft.
       $('project-page').querySelectorAll('.common-rule').forEach(details => {
         const body = details.querySelector('.common-rule-body');
@@ -1089,21 +1092,15 @@ function tableCell(row, caption, ...nodes) {
   const td = document.createElement('td'); td.dataset.label = caption; td.append(...nodes); row.append(td); return td;
 }
 function modelsSection() {
-  const section = card('工作流模型'), { table, body } = projectTable(['工作流', '模型选择'], '工作流模型');
-  section.append(note('未指定模型时继承项目默认。也可以在「工作流」页的编辑器里改模型，两处是同一份设置。失效的模型不会自动替换。'));
+  const section = card('工作类型模型'), { table, body } = projectTable(['工作类型', '模型选择'], '工作类型模型');
+  section.append(note('未指定模型时继承项目默认。失效的模型不会自动替换。「Manager 分派」是每个事件调用一次的分派模型。'));
   let overrides = {}; try { overrides = taskModelMap(current.policy); } catch {}
-  const customs = current.workflows?.workflows.filter(workflow => !workflow.builtin) || [];
-  // Saved task identifiers that are neither built-in nor custom workflows stay visible so they can be changed or removed.
-  const other = Object.keys(overrides).filter(kind => !builtInTasks.some(task => task.kind === kind) && !customs.some(workflow => workflow.id === kind));
+  // Saved identifiers that are no work type (such as models of former custom workflows) stay visible so they can be removed.
+  const other = Object.keys(overrides).filter(kind => !builtInTasks.some(task => task.kind === kind));
   for (const definition of [...builtInTasks, ...other.map(kind => ({ kind, title: kind, custom: true }))]) {
     const row = document.createElement('tr'); row.dataset.taskKind = definition.kind; row.dataset.overviewAnchor = definition.kind;
-    tableCell(row, '工作流', element('strong', definition.title), element('code', definition.kind));
+    tableCell(row, '工作类型', element('strong', definition.title), element('code', definition.kind));
     tableCell(row, '模型选择', taskModelEditor(definition.kind, definition.title, current.policy, current.models, definition)); body.append(row);
-  }
-  for (const workflow of customs) {
-    const row = document.createElement('tr'); row.dataset.taskKind = workflow.id; row.dataset.overviewAnchor = workflow.id;
-    tableCell(row, '工作流', element('strong', workflow.name), element('code', workflow.id));
-    tableCell(row, '模型选择', customWorkflowModelEditor(workflow)); body.append(row);
   }
   section.append(table); return [projectDefaultModelCard(current.policy, current.models), section, ...modelManagementSections()];
 }

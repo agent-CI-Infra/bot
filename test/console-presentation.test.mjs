@@ -9,7 +9,7 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { evaluateDelivery } from '../dist/tasks/acceptance.js';
 import { Redactor } from '../dist/agent/common.js';
 
-// The console's three layers: a workflow says when it runs, with which prompt, model and writes; the 角色 page says how
+// The console's three layers: the Manager page says what each work type may write and who executes it; the roles say how
 // the controller delegates and on which executor each role runs; a task shows its own facts and who is doing what now.
 const text = node => [node.textContent, ...node.children.map(text)].filter(Boolean).join('\n');
 const record = (overrides = {}) => ({ contract: { goal: 'Keep the query string on the login redirect', scope: [], criteria: ['The redirect keeps ?next='], endpoint: null },
@@ -137,7 +137,7 @@ test('the 角色 page: without coordination every entry keeps its original execu
   const view = rolesPage(roleData({ schema: 2, revision: 3, enabled: false, controller: { role: 'manager', entries }, roles: team('pi'), skills: [] }));
   assert.deepEqual(view.cards.map(c => c.children[0].textContent), ['角色协调', '主控怎样委派', '每个角色的解析结果', '修改配置']);
   const state = text(view.byTitle('角色协调'));
-  assert.match(state, /未开启/); assert.match(state, /都走原来的执行器，也就是各工作流在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收/);
+  assert.match(state, /未开启/); assert.match(state, /都走原来的执行器，也就是每类工作在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收/);
   assert.doesNotMatch(state, /旧配置/);
 });
 
@@ -191,31 +191,32 @@ test('the 角色 page: a project that never saved its roles shows the recommende
   assert.deepEqual([...new Set(JSON.parse(view.byTitle('修改配置').querySelector('textarea').value).roles.map(r => r.harness_ref.id))], ['pi']);
 });
 
-test('the workflow summary answers when, which prompt, which model, which writes and who executes', () => {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/workflows.js'], () => [404, {}]);
-  const workflow = (id, base, triggers) => ({ id, base, name: id, triggers, trigger_options: [{ id: 'review.published', title: '检视发布结论' }, { id: 'issue.labeled', title: '有人加上标签' }, { id: 'issue.opened', title: 'Issue 打开' }],
-    prompt: { source: 'builtin', path: `.bot/rules/${id}.md` }, model: { id: null, default_id: null, inherited: true }, permissions: { writes: ['code', 'pull_request'] }, write_options: [{ id: 'code', title: '修改工作区代码' }, { id: 'pull_request', title: '开或更新 bot PR' }] });
-  const summary = (config, value) => page.run(`current = { id: '101', models: [], policy: {}, roleConfig: ${JSON.stringify(config)} }; [...workflowSummary(${JSON.stringify(value)}).children].map(node => node.tagName === 'DT' ? '#' + node.textContent : [node.textContent, ...node.children.map(c => c.textContent)].join('')).join('\\n')`);
+test('each work type on the Manager page says what it may write and who executes it', () => {
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/manager.js'], () => [404, {}]);
+  const work = id => ({ id, name: id, description: '', kinds: [id], section: id, enabled: true, active: true, project_switch: null, writes: ['code', 'pull_request'],
+    write_options: [{ id: 'code', title: '修改工作区代码', tool: 'write_file', detail: '', locked: true }, { id: 'pull_request', title: '开或更新 bot PR', tool: 'create_pull_request', detail: '', locked: true }, { id: 'issue', title: '提报 Issue', tool: 'create_issue', detail: '', locked: false }],
+    model: { id: null, default_id: null, inherited: true } });
+  const runs = (config, value) => page.run(`current = { id: '101', models: [], policy: {} }; workExecution(${JSON.stringify(value)}, { configuration: ${JSON.stringify(config)} })`);
   const coordinated = { enabled: true, controller: { role: 'manager', entries }, roles: team('pi') };
-  const development = summary(coordinated, workflow('development.issue', 'development', [{ id: 'review.published' }, { id: 'issue.labeled', label: 'bot-develop' }]));
-  assert.equal(development, ['#何时触发', '检视发布结论、有人加上标签：bot-develop', '#提示词', '内置默认 · .bot/rules/development.issue.md', '#模型', '未选择 · 继承项目默认',
-    '#允许的写入', '修改工作区代码、开或更新 bot PR', '#谁来执行', '主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。 查看角色'].join('\n'));
-  assert.match(summary(coordinated, workflow('review.issue', 'review', [{ id: 'issue.opened' }])), /#谁来执行\n原来的执行器：项目电脑里的 Pi 进程（这个入口没有接入主控）。完成前由独立 QA 验收。/);
-  assert.match(summary({ ...coordinated, enabled: false }, workflow('custom.abc', undefined, [])), /#何时触发\n没有触发源，不会运行[\s\S]*#谁来执行\n原来的执行器：项目电脑里的 Pi 进程。/);
-  assert.match(summary({ ...coordinated, legacy: true, roles: team('native') }, workflow('development.pr', 'development', [])), /主控 Manager（Native，旧配置沿用）/);
-  // Adding a workflow is offered under the list, for a new trigger, not as the page's first action.
-  page.run("current = { id: '101', workflows: { workflows: [] }, rules: { files: [] } }; ruleSync = () => element('div', '');");
-  const side = page.run('workflowSidebar("review.issue")'), add = side.querySelector('.workflow-add');
-  assert.deepEqual(side.children.map(child => child.className), ['workflow-sidebar-head', 'workflow-lists', 'workflow-add', '']);
-  assert.match(text(side.querySelector('.workflow-sidebar-head')), /不需要为单个任务新写工作流/);
-  assert.deepEqual(add.querySelectorAll('button').map(b => b.textContent + ':' + b.className), ['新增工作流:quiet', '用聊天新增:quiet']);
+  assert.equal(runs(coordinated, work('development.issue')), '主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
+  assert.equal(runs(coordinated, work('review.issue')), '原来的执行器：项目电脑里的 Pi 进程（这个入口没有接入主控）。完成前由独立 QA 验收。');
+  assert.equal(runs({ ...coordinated, enabled: false }, work('reply')), '原来的执行器：项目电脑里的 Pi 进程。完成前由独立 QA 验收。');
+  assert.match(runs({ ...coordinated, legacy: true, roles: team('native') }, work('development.pr')), /主控 Manager（Native，旧配置沿用）/);
+  assert.equal(runs(null, work('reply')), '');
+  // The writes of a work type are its checkboxes, a fixed one cannot be unticked, and nothing else grants a write.
+  page.run(`current = { id: '101', models: [], policy: { review_language: 'auto', max_revisions: 1 }, actionsFailures: null, manager: { prompt: { revision: 0 } } };
+    window.workCard = workTypesCard({ work: [${JSON.stringify(work('development.issue'))}] }, null, async () => {});`);
+  const row = page.run('workCard').querySelectorAll('tr[data-work-type]').find(node => node.dataset.workType === 'development.issue');
+  assert.deepEqual(row.querySelectorAll('input').map(box => box.name + ':' + box.checked + ':' + !!box.disabled),
+    ['enabled:development.issue:true:false', 'write:development.issue:code:true:true', 'write:development.issue:pull_request:true:true', 'write:development.issue:issue:false:false']);
+  assert.match(text(page.run('workCard')), /不能扩大/);
 });
 
 // ---- Against the real control plane: the page reads the same routes and fields the server returns. ----
 
 // A project with an idle task engine (it serves the role and task routes but never runs tasks) and a console page whose
 // requests go to that server with the administrator's session.
-async function realProject(t, files = ['static/app.js', 'static/views.js', 'static/project.js', 'static/workflows.js'], rewrite = null) {
+async function realProject(t, files = ['static/app.js', 'static/views.js', 'static/project.js', 'static/manager.js'], rewrite = null) {
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
   const h = await harness(t, manager, store => ({ engine: new TaskEngine(store, manager) })), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   const page = loadConsole(files, async (method, path, body) => { const response = await admin(path, method, body); return rewrite?.(path, response) || [response.status, response.value]; });
@@ -358,8 +359,9 @@ test('review and Actions summaries offer only Dev on its backend in the entry; d
   const p = await realProject(t);
   const saved = await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: true, actions: true } }, roles: [{ role_id: 'ux', enabled: false }] });
   assert.equal(saved.status, 200);
-  const workflows = (await p.admin('/api/repositories/101/workflows')).value.workflows, config = saved.value.configuration;
-  const runs = id => p.page.run(`current = { id: '101', models: [], policy: {}, roleConfig: ${JSON.stringify(config)} }; workflowExecution(${JSON.stringify(workflows.find(w => w.id === id))})[0]`);
+  const work = (await p.admin('/api/repositories/101/manager')).value.manager.work, config = saved.value.configuration;
+  const execution = (configuration, id) => p.page.run(`current = { id: '101', models: [], policy: {} }; workExecution(${JSON.stringify(work.find(w => w.id === id))}, { configuration: ${JSON.stringify(configuration)} })`);
+  const runs = id => execution(config, id);
   assert.equal(runs('development.issue'), '主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer。候选由主控提名后交给独立 QA 验收。');
   for (const id of ['review.issue', 'review.pr', 'actions.failures'])
     assert.equal(runs(id), '主控 Manager（Pi）只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。', id);
@@ -372,12 +374,12 @@ test('review and Actions summaries offer only Dev on its backend in the entry; d
   // Dev's own backend applies once chosen; an older V2 configuration keeps Pi in these entries until Dev's choice changes.
   const devTo = async (harness, revision) => (await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: true, actions: true } }, roles: [{ role_id: 'ux', enabled: false }, { role_id: 'dev', harness_ref: { id: harness } }] })).value.configuration;
   const processDev = await devTo('process', 1);
-  assert.equal(p.page.run(`current = { id: '101', models: [], policy: {}, roleConfig: ${JSON.stringify(processDev)} }; workflowExecution(${JSON.stringify(workflows.find(w => w.id === 'review.issue'))})[0]`),
+  assert.equal(execution(processDev, 'review.issue'),
     '主控 Manager（Pi）只委派 Dev，Dev 用这个入口的工具和工作区，后端 Process；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
   const older = JSON.parse(p.h.store.get("SELECT value FROM settings WHERE key='roles:101'").value), dev = older.roles.find(r => r.role_id === 'dev');
   delete dev.entry_harness_source; dev.harness_ref = { id: 'native', version: '1' }; p.h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(older));
   const kept = (await p.admin('/api/repositories/101/roles')).value.configuration;
-  assert.equal(p.page.run(`current = { id: '101', models: [], policy: {}, roleConfig: ${JSON.stringify(kept)} }; workflowExecution(${JSON.stringify(workflows.find(w => w.id === 'actions.failures'))})[0]`),
+  assert.equal(execution(kept, 'actions.failures'),
     '主控 Manager（Pi）只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi（旧 V2 配置沿用 Pi，Dev 的后端选择改变后才换）；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
 });
 

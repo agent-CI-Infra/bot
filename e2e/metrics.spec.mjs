@@ -25,7 +25,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await expect(page.locator('#task-side .task-metrics')).toContainText('输出 100,000');await expect(page.locator('#task-side .task-metrics')).toContainText('缓存 800,000');await expect(page.locator('#task-side .task-metrics')).toContainText('命中率 80.0%');
     await page.screenshot({path:'.tmp/metrics-evidence/task-detail.png',fullPage:true});await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
     await page.goto(h.admin+'/#/developments');await page.locator('[data-card-key="101/issue/1"] .board-card-title').click();await expect(page.locator('#task-side')).toContainText('统计不完整');
-    await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();await page.getByRole('group',{name:'工作流',exact:true}).getByRole('button',{name:'全部工作流',exact:true}).click();
+    await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();await page.getByRole('group',{name:'工作类型',exact:true}).getByRole('button',{name:'全部工作类型',exact:true}).click();
     await page.locator('[data-card-key="101/issue/1"][data-card-category="review.issue"] .board-card-title').click();
     await expect(page.locator('#task-picker')).toBeHidden();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);await page.locator('#task-actions').getByRole('button',{name:'关闭',exact:true}).click();
     await page.goto(h.admin+'/#/projects/101/activity');await expect(page.getByRole('heading',{name:'最近任务',exact:true})).toBeVisible();await expect(page.locator('#project-page .task-metrics')).toHaveCount(2);
@@ -52,7 +52,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
       expect(await member.getByLabel('统计项目',{exact:true}).locator('option').count()).toBe(2);
       await member.screenshot({path:'.tmp/metrics-evidence/cost-member.png',fullPage:true});
     }finally{await context.close();}
-    await page.goto(h.admin+'/#/reviews');await expect(page.getByRole('group',{name:'工作流',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','review');await page.locator('[data-card-key="101/issue/1"][data-card-category="review.issue"] .board-card-title').click();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);
+    await page.goto(h.admin+'/#/reviews');await expect(page.getByRole('group',{name:'工作类型',exact:true}).locator('button[aria-pressed=true]')).toHaveAttribute('data-value','review');await page.locator('[data-card-key="101/issue/1"][data-card-category="review.issue"] .board-card-title').click();await expect(page.locator('#task-side .task-metrics')).toHaveCount(1);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/metrics-evidence/task-mobile.png',fullPage:true});expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });

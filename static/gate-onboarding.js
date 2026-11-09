@@ -16,7 +16,7 @@ const gateOnboardingErrors = {
   gate_pr_open: '仓库已有未合入的门禁 PR，请先合入或关闭它。', gate_workflow_invalid: '选的 workflow 不能放门禁 job，请换一个位置。',
   gate_no_changes: '方案和仓库现有的门禁一致，没有需要提交的改动。', gate_file_changed: '默认分支上的门禁文件在对话开始后有变化，请重新开始。',
   gate_project_not_started: '项目还没有启动：先在仓库列表点「启动」，等虚拟电脑就绪后再接入门禁。', gate_project_disabled: '项目已禁用，启用后再接入门禁。',
-  gate_environment_not_ready: '项目的虚拟电脑还没有就绪，就绪后再接入门禁。', workflow_disabled: '工作流「接入门禁」已关闭，请在项目的工作流页打开它。',
+  gate_environment_not_ready: '项目的虚拟电脑还没有就绪，就绪后再接入门禁。', work_disabled: '项目配置里关闭了「接入门禁」，请在项目的「Manager 与角色」页打开它。', workflow_disabled: '「接入门禁」已关闭，请在项目的「Manager 与角色」页打开它。',
   model_not_configured: '项目没有可用的模型，请先在项目设置里选择模型。', github_app_required: '门禁接入只使用 GitHub App；这个仓库挂在机器人账号上。',
   gate_onboarding_busy: '上一步还在进行，请稍候。',
   gate_onboarding_superseded: '已经开始了新的接入对话，请关闭后重新打开。', gate_onboarding_closed: '这个对话已经结束，可以重新开始。',
@@ -24,7 +24,7 @@ const gateOnboardingErrors = {
   gate_plan_invalid: '方案格式无效：安装命令不能包含 ${{ }} 表达式或控制字符。', gate_plan_secret: '方案里像是包含了令牌或密钥，不能写进仓库。', message_required: '请输入要发给 agent 的内容。',
 };
 const gateOnboardingBusy = ['collecting', 'thinking', 'creating'];
-// Where a turn's task is: it waits in the project's queue like every other workflow task.
+// Where a turn's task is: the Manager starts it, then it waits in the project's queue like every other task.
 const gateOnboardingTaskStates = { queued: '排队等待项目电脑', preparing: '在项目电脑里准备检出', running: '在项目电脑里分析', retry_wait: '等待重试',
   waiting_environment: '等待项目电脑就绪', waiting_configuration: '等待模型或配置', waiting_permission: '等待 GitHub 权限' };
 const gateOnboardingView = document.createElement('dialog'); gateOnboardingView.id = 'quickstart-view'; gateOnboardingView.className = 'gate-dialog';
@@ -37,7 +37,7 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <p>门禁按 lane 组织。每个 lane 在不同的时机运行这个仓库自己的检查命令，结果写进门禁报告和看板；命令为空的 lane 只表示还没有配置，不表示检查通过。门禁检出并报告同一个提交：PR 上检查的就是 PR 的 head 提交。</p>
 <dl id="gate-onboarding-lanes" class="gate-lanes"></dl>
 <p>pr-merge 是合入门禁：仓库启用了 merge queue 时，它就是队列的门禁，所以门禁可以设为必需检查，合入后不再重复运行；没有 merge queue 时，它在每次合入默认分支后运行。发版本时，bot 打版本标签，标签触发 release lane，通过后生成 Release 草稿。</p>
-<p>点「开始适配」后，接入门禁和其他工作流一样在项目的虚拟电脑里工作：每次开始或回复是一轮任务，agent 检出默认分支，分析目录结构和子项目、语言和工具链、README 和脚本、构建和测试方式、已有 workflow 和它们的耗时，必要时安装依赖、试跑命令并计时，再按仓库实际情况设计每个 lane 的命令，说明理由，不确定的会在对话里问你。仓库已经有 CI 或门禁时，agent 会先审视现有配置，说明哪里不合理并给出建议。所以项目要先启动、虚拟电脑就绪、选好模型，才能接入门禁。</p>
+<p>点「开始适配」后，接入门禁和其他工作一样在项目的虚拟电脑里工作：每次开始或回复是一轮任务，agent 检出默认分支，分析目录结构和子项目、语言和工具链、README 和脚本、构建和测试方式、已有 workflow 和它们的耗时，必要时安装依赖、试跑命令并计时，再按仓库实际情况设计每个 lane 的命令，说明理由，不确定的会在对话里问你。仓库已经有 CI 或门禁时，agent 会先审视现有配置，说明哪里不合理并给出建议。所以项目要先启动、虚拟电脑就绪、选好模型，才能接入门禁。</p>
 <p>你确认之前，不会创建分支或 PR，也不会写仓库；确认前可以预览 PR 会新增或修改的每个文件。</p>
 <p id="gate-onboarding-ready" class="view-error" role="status"></p>
 <p id="gate-onboarding-last" class="muted"></p>
@@ -112,7 +112,7 @@ function gateOnboardingShowChat(show) {
 }
 function gateOnboardingIntro() {
   const session = gateOnboardingContext.session, last = $('gate-onboarding-last'), ready = gateOnboardingContext.ready; last.replaceChildren();
-  // Like every workflow, gate onboarding runs in the project computer: a project that is not ready cannot start it.
+  // Like every task, gate onboarding runs in the project computer: a project that is not ready cannot start it.
   $('gate-onboarding-ready').textContent = ready && !ready.ok ? ready.reason : '';
   $('gate-onboarding-start').disabled = !ready?.ok;
   $('gate-onboarding-resume').hidden = !session;

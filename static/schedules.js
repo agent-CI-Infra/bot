@@ -30,7 +30,7 @@ async function renderSchedules(panel, project) {
   const zone = input('计划时区', 'Asia/Shanghai'), recurrence = select('重复方式', [['cron', 'Cron（本地时间）'], ['interval', '固定周期']]);
   const cron = input('Cron 表达式', '0 9 * * *'), interval = input('固定周期分钟', '1440', 'number');
   const start = input('有效期开始', new Date().toISOString(), 'text'), end = input('有效期结束（可留空）', '', 'text');
-  const destination = select('计划目的地', destinationOptions), workflow = select('执行内容', [['report.daily', '项目日报'], ['release.scheduled', '定时发布（处理器未就绪时不支持）']]);
+  const destination = select('计划目的地', destinationOptions), workflow = select('执行内容', [['report.daily', '项目日报'], ['manager.check', 'Manager 定时检查'], ['release.scheduled', '定时发布（处理器未就绪时不支持）']]);
   const misfire = select('遗漏策略', [['skip', '跳过遗漏'], ['once', '宽限期内只补一次']]), grace = input('宽限期分钟', '1', 'number');
   const limits = {};
   const budgetBox = element('details', ''); budgetBox.append(element('summary', '运行限制'));

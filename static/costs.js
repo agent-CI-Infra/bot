@@ -76,7 +76,7 @@ async function loadCosts(version) {
   const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）','已计价费用','模型请求',...costTokenFields.map(([,label])=>label),'未计价请求']);detail.append(element('summary','每日费用与 token 明细'));
   for(const [date,day]of byDate){const row=document.createElement('tr');row.append(element('td',date),element('td',day.requests&&day.requests===day.unpriced_requests?'—':money(day.cost,data.currency)),element('td',String(day.requests)),...costTokenCells(day),element('td',String(day.unpriced_requests)));daily.body.append(row);}detail.append(daily.wrap);body.append(detail);
 }
-// The four kinds every project has always get a row; any other workflow that ran tasks in the range gets one by its name.
+// The four kinds every project has always get a row; any other work type that ran tasks in the range gets one by its name.
 const statisticsKinds=['review.issue','review.pr','development.issue','development.pr'];
 const statisticsKey=row=>row.workflow??row.kind;
 function statisticsWorkflows(data) {

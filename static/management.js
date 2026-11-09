@@ -32,8 +32,6 @@ function minimizeManagementChat(focus = true) {
 async function openManagementChat(projectId = null) {
   syncManagementChat(); const chat = managementChat; if (!chat) return;
   const version = ++chat.openVersion;
-  // Keep the two existing assistants from covering each other; their sessions continue while minimized.
-  const workflow = $('workflow-assistant'); if (workflow) workflow.hidden = true;
   chat.window.hidden = false; chat.launcher.hidden = true; chat.launcher.setAttribute('aria-expanded', 'true'); chat.unread = false;
   const activity = (active, received = false) => {
     if (managementChat !== chat) return;
@@ -168,7 +166,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       if (receipt.id && receipt.operation) {
         toolsDirty = true;
         const links = element('p', ''); links.append(link('/api/management/commands/' + receipt.id, '命令回执'));
-        if (receipt.project_id) links.append(' · ', link('#/projects/' + receipt.project_id + '/workflows', '配置'), ' · ', link('#/projects/' + receipt.project_id + '/activity', '任务'));
+        if (receipt.project_id) links.append(' · ', link('#/projects/' + receipt.project_id + '/roles', '配置'), ' · ', link('#/projects/' + receipt.project_id + '/activity', '任务'));
         box.append(links);
         const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? receipt.result?.id : null);
         if (taskId) box.append(button('查看任务', () => openTask(taskId), 'quiet'));
@@ -257,12 +255,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     const project=target().project_id;
     const effective=await api(endpoint+'/query','POST',{operation:'get_effective_config',target:{project_id:project},arguments:{}});
     if(generation!==formGeneration)return;
-    const workflow=document.createElement('select');workflow.setAttribute('aria-label','工作流');
+    const workflow=document.createElement('select');workflow.setAttribute('aria-label','工作类型');
     for(const w of effective.workflows){const o=element('option',w.name+' · '+w.prompt.source);o.value=w.id;workflow.append(o);}
     const prompt=textarea('prompt','',{rows:5});prompt.setAttribute('aria-label','默认提示词');
     const chosen=()=>effective.workflows.find(w=>w.id===workflow.value);
     const fill=()=>{prompt.value=chosen()?.prompt.effective??'';};workflow.onchange=fill;fill();
-    const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','工作流默认行为'),field('工作流',workflow),field('默认提示词',prompt),note('仓库来源高于控制台层。被覆盖时会保存控制台设置并明确显示实际行为尚未改变；配置 PR 合入后才生效。'),save);
+    const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','Manager 章节'),field('工作类型',workflow),field('默认提示词',prompt),note('保存的是 Manager 提示词里这类工作的章节。仓库来源高于控制台层：被覆盖时会保存章节并明确显示实际行为尚未改变；配置 PR 合入后才生效。'),save);
     form.onsubmit=async e=>{e.preventDefault();await submitForm({command:{operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision}});};if(chosen()?.prompt.path){const publish=button('创建配置 PR',()=>submitForm({command:{operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision}}),'quiet');form.append(publish);}
     forms.append(form);
     const tasks=(await api(endpoint+'/query','POST',{operation:'list_tasks',target:{project_id:project},arguments:{limit:100}})).tasks;

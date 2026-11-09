@@ -15,7 +15,7 @@ const contract = { goal: 'Keep the query string on the login redirect', scope: [
 const candidate = { id: 'cand1234567890abcdef', revision: 1, created_at: '2026-11-09T01:00:00Z', claims: {}, artifacts: [{ kind: 'code', reference: 'task:coordinated:candidate', version: 'tree9876543210fedcba' }],
   evidence: [{ source: 'policy_validation', version: 'tree9876543210fedcba', verified: true, result: { command: 'npm test', exit_code: 0 } }] };
 
-test('控制台按工作流、角色、任务三层展示：没开协调时走原执行器，旧主控标成沿用，任务写清目标、候选、证据、验收、发布和谁在做什么', async ({ page }) => {
+test('控制台按 Manager、角色、任务三层展示：没开协调时走原执行器，旧主控标成沿用，任务写清目标、候选、证据、验收、发布和谁在做什么', async ({ page }) => {
   test.setTimeout(90000);
   // The role and task routes belong to the task engine; it is never started, so the seeded tasks stay as written.
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
@@ -35,7 +35,7 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     // 1. A project that never saved roles: coordination is off, every entry keeps its executor, QA stays; the controller a
     //    save would give is Pi, not an old Native one.
     await expect(cardOf('角色协调')).toContainText('未开启');
-    await expect(cardOf('角色协调')).toContainText('都走原来的执行器，也就是各工作流在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收。');
+    await expect(cardOf('角色协调')).toContainText('都走原来的执行器，也就是每类工作在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收。');
     await expect(tile('manager')).toContainText('Pi'); await expect(tile('manager')).toContainText('保存后生效'); await expect(tile('manager')).not.toContainText('Native');
     await expect(cardOf('主控怎样委派').locator('.role-lane h4')).toHaveText(['主控', '按需委派', '验收与发布']);
     await expect(cardOf('主控怎样委派').locator('.role-lane').nth(1).locator('[data-role]')).toHaveCount(4);
@@ -61,18 +61,14 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     await expect(cardOf('角色协调')).not.toContainText('旧配置');
     await page.screenshot({ path: `${out}/roles-v2.png`, fullPage: true });
 
-    // 4. Workflows say when they run, with which prompt, model and writes, and who executes them; the chart is not a grant.
-    await page.goto(h.admin + '/#/projects/101/workflows/development.issue');
-    const detail = page.getByRole('region', { name: '工作流：开发 Issue', exact: true }), summary = detail.locator('.workflow-summary');
-    await expect(summary.locator('dt')).toHaveText(['何时触发', '提示词', '模型', '允许的写入', '谁来执行']);
-    await expect(summary.locator('dd').nth(4)).toContainText('主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
-    await expect(detail).toContainText('流程图来自提示词，只说明 agent 按什么步骤做。它不会按节点创建角色，也不授予写入');
-    const list = page.getByRole('complementary', { name: '工作流列表', exact: true });
-    await expect(list.locator('.workflow-sidebar-head')).toContainText('不需要为单个任务新写工作流');
-    await expect(list.locator('.workflow-add').getByRole('button')).toHaveText(['新增工作流', '用聊天新增']);
-    await page.screenshot({ path: `${out}/workflow-development.png`, fullPage: true });
-    await list.locator('[data-workflow-item="review.issue"]').click();
-    await expect(page.getByRole('region', { name: '工作流：检视 Issue', exact: true }).locator('.workflow-summary dd').nth(4)).toContainText('原来的执行器：项目电脑里的 Pi 进程（这个入口没有接入主控）');
+    // 4. The Manager page says, per work type, what it may write and who executes it; its prompt grants nothing.
+    await page.goto(h.admin + '/#/projects/101/roles');
+    const work = id => page.locator(`[data-work-type="${id}"]`);
+    await expect(work('development.issue')).toContainText('主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
+    await expect(work('review.issue')).toContainText('原来的执行器：项目电脑里的 Pi 进程（这个入口没有接入主控）');
+    await expect(cardOf('Manager 提示词')).toContainText('提示词只描述流程，不能授予写入');
+    await expect(cardOf('工作类型：开关、写入与设置')).toContainText('不能扩大');
+    await page.screenshot({ path: `${out}/manager-work-types.png`, fullPage: true });
 
     // 5. Tasks: one without the controller (the original executor, QA accepting now) and one under it (a Reviewer at work).
     const now = '2026-11-09T01:00:00Z', task = (id, kind, number, phase) => h.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,attempt,created_at,updated_at)
@@ -101,7 +97,7 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     await expect(next).toHaveText('独立 QA 正在新的上下文里验收候选 cand12345678。');
     await expect(side.locator('.task-fact')).toHaveCount(5);
     await expect(side.locator('.task-fact h4')).toHaveText(['目标', '候选', '证据', '验收', '发布']);
-    await expect(side.locator('.task-execution')).toContainText('原来的执行器：这个任务没有经过主控，由工作流在项目电脑里的 Pi 进程直接执行。');
+    await expect(side.locator('.task-execution')).toContainText('原来的执行器：这个任务没有经过主控，由项目电脑里的 Pi 进程直接执行。');
     await expect(side.locator('.task-execution')).not.toContainText('委派记录');
     await page.screenshot({ path: `${out}/task-original-executor.png` });
     // The dialog's close event arrives after the click; open the next task once it has.
@@ -112,7 +108,7 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     await expect(fact('目标')).toContainText('The redirect keeps ?next='); await expect(fact('候选')).toContainText('cand12345678');
     await expect(fact('证据')).toContainText('项目测试命令'); await expect(fact('证据')).toContainText('1/1 已核验');
     await expect(fact('验收')).toContainText('退回修改'); await expect(fact('验收')).toContainText('Keep #fragment as well');
-    await expect(fact('发布')).toContainText('验收通过后，由控制面按工作流允许的写入发布到 GitHub。');
+    await expect(fact('发布')).toContainText('验收通过后，由控制面按工作类型允许的写入发布到 GitHub。');
     const execution = side.locator('.task-execution');
     await expect(execution).toContainText('角色协调：主控 Manager（Pi）按需委派工作'); await expect(execution).toContainText('运行过 1 次，每次都是新的上下文');
     await expect(execution.locator('.role-work > li')).toHaveCount(2);

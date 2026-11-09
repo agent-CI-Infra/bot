@@ -1,5 +1,5 @@
 // Saved views and custom fields belong to the signed-in user. Execution stages remain read-only.
-// A card is one workflow's work on one object (or a release); saved views include object scope as well as grouping.
+// A card is one work type's work on one object (or a release); saved views include object scope as well as grouping.
 let boardState = null, boardRequest = 0, boardDragging = false;
 const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR']];
 const boardMedia = matchMedia('(max-width:760px)');
@@ -30,23 +30,23 @@ function boardOptions(labelText,choices,value,change) {
 }
 function boardView() { return boardState.views.find(v=>v.id===boardState.viewId); }
 function boardTypeName(type=boardState.type) { return type==='pr'?'PR':type==='release'?'发版本':'Issue'; }
-// The workflows of the visible repositories, named as their repositories name them. A view saved before the board listed
-// workflows may filter a family (every review or every development workflow); it is offered while it is selected.
+// The work types with cards. A view saved before the board listed them may filter a family (every review or every
+// development), offered while it is selected; one saved with a former custom workflow shows the reply cards.
 const boardFamilies={review:'检视（Issue 与 PR）',development:'开发与跟进（Issue 与 PR）'};
 const boardObjectWorkflow=id=>/^(review|development)\.(issue|pr)$/.test(id||'');
 function boardCategories() {
   const list=boardState.workflows||[],names=list.map(w=>w.name),category=boardCategory();
   const choices=list.map(w=>[w.id,w.repository&&names.filter(n=>n===w.name).length>1?`${w.name}（${w.repository}）`:w.name]);
-  return [['','全部工作流'],...(boardFamilies[category]?[[category,boardFamilies[category]]]:[]),...choices];
+  return [['','全部工作类型'],...(boardFamilies[category]?[[category,boardFamilies[category]]]:[]),...choices];
 }
 const boardInCategory=id=>{const category=boardCategory();return category==='all'||id===category||!!boardFamilies[category]&&id.startsWith(category+'.');};
 const boardExecutionStatuses=[['running','正在执行'],['queued','排队'],['failed','失败'],['completed','已完成'],['waiting','等待处理'],['other','其他 / 未开始']];
 const boardStandardGroups=['bot_stage','repository','execution_status','category'];
 // The PR board renames development stages: there the bot revises its own PR after a review.
-// A custom workflow's card moves through the review stages; their names say it ran rather than reviewed.
+// A reply card moves through the review stages; their names say it ran rather than reviewed.
 function boardStage(stage,type=boardState.type) {
   const category=boardCategory();if(boardObjectWorkflow(category))type=category.split('.')[1];
-  const mixed=(category==='release'?{developing:'发版本中',developed:'发版本完成'}:/^custom\./.test(category)?{unreviewed:'未执行',reviewing:'正在执行',reviewed:'已执行'}
+  const mixed=(category==='release'?{developing:'发版本中',developed:'发版本完成'}:category==='reply'||/^custom\./.test(category)?{unreviewed:'未执行',reviewing:'正在执行',reviewed:'已执行'}
     :type==='all'?{developing:'开发 / 跟进 / 发版中',developed:'开发 / 跟进 / 发版完成'}:{})[stage.id];
   return {...stage,...(type==='pr'?stage.pr:{}),...(mixed?{name:mixed}:{})};
 }
@@ -56,10 +56,10 @@ function boardColumns() {
   if(boardState.group==='repository')return repositories.filter(r=>!boardFilter('repository_id')||r.id===boardFilter('repository_id')).map(r=>({id:r.id,name:r.full_name,hint:'仅列出你有权访问的仓库'}));
   if(boardState.group==='execution_status')return boardExecutionStatuses.map(([id,name])=>({id,name}));
   if(boardState.group==='category'){
-    // Cards of a workflow that was deleted since keep a column of their own.
+    // Cards of any other category keep a column of their own.
     const columns=boardCategories().slice(1).filter(([id])=>!boardFamilies[id]&&boardInCategory(id)).map(([id,name])=>({id,name}));
     for(const id of Object.keys(boardState.columnCounts||{}))if(!columns.some(c=>c.id===id)&&boardInCategory(id))
-      columns.push({id,name:boardState.cards.find(c=>c.card_category===id)?.card_category_name||'已删除的工作流'});
+      columns.push({id,name:boardState.cards.find(c=>c.card_category===id)?.card_category_name||'已删除的工作类型'});
     return columns;
   }
   return [{id:'unassigned',name:'未设置',hint:'还没有为这个字段选值'},...(boardCustomField()?.options||[])];
@@ -125,7 +125,7 @@ function boardShell() {
   const repoChoices=[['','全部仓库'],...repositories.map(r=>[r.id,r.full_name])],repo=boardFilter('repository_id');
   if(repo&&!repoChoices.some(c=>c[0]===repo))repoChoices.push([repo,'仓库不可访问']);
   const repository=boardOptions('仓库',repoChoices,repo||'',value=>apply('repository_id',value));
-  const categories=boardOptions('工作流',boardCategories(),category==='all'?'':category,value=>apply('category',value,true));
+  const categories=boardOptions('工作类型',boardCategories(),category==='all'?'':category,value=>apply('category',value,true));
   const execution=boardOptions('执行状态',[['','全部状态'],...boardExecutionStatuses],boardFilter('execution_status')||'',value=>apply('execution_status',value));
   const types=boardOptions('对象类型',boardTypes,boardState.type==='all'?'':boardState.type,async value=>{
     boardSetType(value);boardShell();await boardLoadCards();
@@ -139,7 +139,7 @@ function boardShell() {
   controls.append(repository,categories,execution,types,search,closed);filters.append(controls);
   const chips=element('div','','board-chips');chips.id='board-chips';chips.setAttribute('aria-label','当前筛选');
   const arrangement=element('div','','board-arrangement');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label','排列与视图');
-  const groups=boardOptions('按…分列',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','工作流'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group,async value=>{
+  const groups=boardOptions('按…分列',[['bot_stage','bot 执行阶段'],['repository','仓库'],['execution_status','执行状态'],['category','工作类型'],...boardState.fields.map(f=>[f.id,f.name])],boardState.group,async value=>{
     if(boardView().builtin&&!boardStandardGroups.includes(value)){boardSaveAs(value);return false;}
     boardState.group=value;boardState.hidden=[];boardState.mobileColumn=null;boardDirty();boardShell();await boardLoadCards();
   });groups.classList.add('board-grouping');
@@ -167,7 +167,7 @@ function boardViewControls() {
 }
 function boardChips() {
   const chips=$('board-chips');if(!chips)return;chips.replaceChildren();
-  const choices={repository_id:['仓库',repositories.map(r=>[r.id,r.full_name])],category:['工作流',boardCategories()],
+  const choices={repository_id:['仓库',repositories.map(r=>[r.id,r.full_name])],category:['工作类型',boardCategories()],
     execution_status:['执行状态',boardExecutionStatuses],object_type:['对象类型',boardTypes],
     bot_stage:['阶段',boardState.stages.map(s=>[s.id,boardStage(s).name])],text:['搜索',[]],include_closed:['含已关闭',[]]};
   for(const filter of boardConditions()){
@@ -271,7 +271,7 @@ function boardTime(value) {
   const date=new Date(value),pad=n=>String(n).padStart(2,'0');if(Number.isNaN(date.getTime()))return '';
   return `${date.getFullYear()===new Date().getFullYear()?'':date.getFullYear()+'-'}${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
-// The latest task of the card's workflow explains why it sits in its stage, e.g. which task failed.
+// The latest task of the card's work type explains why it sits in its stage, e.g. which task failed.
 function boardTaskBadge(prefix,status) { const [caption,tone]=states[status]||[status,''],b=badge(`${prefix} ${caption}`,tone);b.title=status;return b; }
 function boardCard(item) {
   const release=item.card_type==='release',customMode=!!boardCustomField(),category=boardCardCategory(item);
@@ -335,8 +335,8 @@ function boardForm(title,description,labels,submitCaption,submit) {
   });modal.addEventListener('close',()=>modal.remove(),{once:true});modal.showModal();
 }
 function boardSaveAs(group=boardState.group) {
-  const groupName={bot_stage:'我的看板',repository:'按仓库',execution_status:'按执行状态',category:'按工作流'}[group]||boardCustomField()?.name+'看板';
-  boardForm('另存视图','筛选、查看维度和折叠的列仅为当前账号保存，所有工作流共用。',[['name','视图名称',groupName]],'创建视图',async({name})=>{
+  const groupName={bot_stage:'我的看板',repository:'按仓库',execution_status:'按执行状态',category:'按工作类型'}[group]||boardCustomField()?.name+'看板';
+  boardForm('另存视图','筛选、查看维度和折叠的列仅为当前账号保存，所有工作类型共用。',[['name','视图名称',groupName]],'创建视图',async({name})=>{
     const result=await api('/api/board/views','POST',{name,group_by:group,filters:boardConditions(),hidden_columns:group===boardState.group?boardState.hidden:[]});
     boardState.viewId=result.view.id;await renderBoard(renderVersion,true);
   });
