@@ -3,35 +3,125 @@ let managementChat = null;
 function syncManagementChat() {
   if (managementChat?.user === me?.id && me) return;
   managementChat?.client?.dispose();
+  managementChat?.cleanup();
   managementChat?.window.remove(); managementChat?.launcher.remove(); managementChat = null;
+  document.body.classList.remove('management-page-mode', 'management-fullscreen-mode');
   if (!me) return;
   const box = element('section', '', 'management-window'); box.id = 'management-chat'; box.hidden = true;
   box.setAttribute('role', 'dialog'); box.setAttribute('aria-labelledby', 'management-chat-title');
   const head = element('div', '', 'management-window-head'), title = element('div', '', 'management-window-title');
   const heading = element('h2', '管理助手'); heading.id = 'management-chat-title';
   title.append(heading, element('p', '聊任务、查进展、调整项目配置'));
-  const minimize = button('收起', () => minimizeManagementChat(), 'quiet'); minimize.setAttribute('aria-label', '收起管理助手');
-  head.append(title, minimize);
-  const panel = element('div', '', 'management-panel'); box.append(head, panel);
+  const minimize = button('收起', () => Promise.resolve(minimizeManagementChat()).catch(error), 'quiet');
+  const maximize = button('全屏', () => toggleManagementFullscreen(), 'quiet');
+  const controls = element('div', '', 'actions'); controls.append(maximize, minimize); head.append(title, controls);
+  const resize = button('↖', () => {}, 'management-size-handle');
+  resize.setAttribute('aria-label', '调整管理助手窗口大小'); resize.title = '拖动左上角调整大小；方向键微调';
+  const panel = element('div', '', 'management-panel'); box.append(resize, head, panel);
   const launcher = button('', () => openManagementChat(), 'management-launcher'); launcher.id = 'management-launcher';
   launcher.setAttribute('aria-controls', box.id); launcher.setAttribute('aria-expanded', 'false'); launcher.setAttribute('aria-label', '打开管理助手');
   const icon = element('span', '✦', 'management-launcher-icon'); icon.setAttribute('aria-hidden', 'true');
   const label = element('span', '', 'management-launcher-label'), state = element('small', '随时唤起');
   label.append(element('strong', '管理助手'), state); launcher.append(icon, label);
   document.body.append(box, launcher);
-  managementChat = { user: me.id, window: box, launcher, panel, state, client: null, loading: null, openVersion: 0, active: false, unread: false };
-  box.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); event.stopPropagation(); minimizeManagementChat(); }
+  const chat = managementChat = { user: me.id, window: box, launcher, panel, state, minimize, maximize, resize, client: null, loading: null, openVersion: 0, active: false, unread: false,
+    mode: 'floating', fullscreenFrom: 'floating', returnAddress: '#/projects', requestedProject: null, size: { width: 480, height: 740 } };
+  try { const saved = JSON.parse(localStorage.getItem('management-window-size:' + chat.user)); if (saved && Number.isFinite(saved.width) && Number.isFinite(saved.height)) chat.size = saved; } catch { /* Use the default size when storage is unavailable. */ }
+  const header = document.querySelector('body > header');
+  const updateViewport = () => {
+    box.style.setProperty('--management-header-height', (header?.getBoundingClientRect().height || 0) + 'px');
+    if (chat.mode === 'floating') fitManagementWindow(chat);
+  };
+  chat.updateViewport = updateViewport;
+  const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(updateViewport) : null;
+  if (header) observer?.observe(header);
+  window.addEventListener('resize', updateViewport);
+  chat.cleanup = () => { observer?.disconnect(); window.removeEventListener('resize', updateViewport); };
+  resize.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || chat.mode !== 'floating') return;
+    event.preventDefault(); resize.setPointerCapture(event.pointerId);
+    const start = box.getBoundingClientRect(), x = event.clientX, y = event.clientY;
+    const move = next => resizeManagementWindow(chat, start.width + x - next.clientX, start.height + y - next.clientY);
+    const end = () => { resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', end); resize.removeEventListener('pointercancel', end); };
+    resize.addEventListener('pointermove', move); resize.addEventListener('pointerup', end); resize.addEventListener('pointercancel', end);
   });
+  resize.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault(); const rect = box.getBoundingClientRect(), step = event.shiftKey ? 64 : 24;
+    resizeManagementWindow(chat, rect.width + (event.key === 'ArrowLeft' ? step : event.key === 'ArrowRight' ? -step : 0), rect.height + (event.key === 'ArrowUp' ? step : event.key === 'ArrowDown' ? -step : 0));
+  });
+  setManagementPresentation(chat, 'floating');
+  box.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !event.defaultPrevented && chat.mode !== 'page') {
+      event.preventDefault(); event.stopPropagation();
+      if (chat.mode === 'fullscreen') { toggleManagementFullscreen(); maximize.focus(); } else minimizeManagementChat();
+    }
+    if (event.key === 'Tab' && chat.mode === 'fullscreen') {
+      const items = [...box.querySelectorAll('button, input, textarea, select, summary, a[href]')].filter(node => !node.disabled && node.getClientRects().length);
+      if (event.shiftKey && document.activeElement === items[0]) { event.preventDefault(); items.at(-1)?.focus(); }
+      else if (!event.shiftKey && document.activeElement === items.at(-1)) { event.preventDefault(); items[0]?.focus(); }
+    }
+  });
+}
+// The same DOM and client serve all three presentations; changing size or mode never reopens a conversation.
+function fitManagementWindow(chat) {
+  const margin = innerWidth <= 600 ? 10 : 24, maxWidth = Math.max(1, innerWidth - margin * 2), maxHeight = Math.max(1, innerHeight - margin * 2);
+  const width = Math.max(Math.min(360, maxWidth), Math.min(chat.size.width, maxWidth)), height = Math.max(Math.min(460, maxHeight), Math.min(chat.size.height, maxHeight));
+  chat.window.style.width = Math.round(width) + 'px'; chat.window.style.height = Math.round(height) + 'px';
+}
+function resizeManagementWindow(chat, width, height) {
+  chat.size = { width, height }; fitManagementWindow(chat);
+  const rect = chat.window.getBoundingClientRect(); chat.size = { width: rect.width, height: rect.height };
+  try { localStorage.setItem('management-window-size:' + chat.user, JSON.stringify(chat.size)); } catch { /* Keep the size for this visit. */ }
+}
+function setManagementPresentation(chat, mode) {
+  chat.mode = mode;
+  const page = mode === 'page' || mode === 'fullscreen' && chat.fullscreenFrom === 'page';
+  chat.window.classList.toggle('management-page', mode === 'page'); chat.window.classList.toggle('management-fullscreen', mode === 'fullscreen');
+  chat.window.setAttribute('role', mode === 'page' ? 'region' : 'dialog');
+  if (mode === 'fullscreen') chat.window.setAttribute('aria-modal', 'true'); else chat.window.removeAttribute('aria-modal');
+  document.body.classList.toggle('management-page-mode', page); document.body.classList.toggle('management-fullscreen-mode', mode === 'fullscreen');
+  chat.maximize.textContent = mode === 'fullscreen' ? '退出全屏' : '全屏'; chat.maximize.setAttribute('aria-label', mode === 'fullscreen' ? '退出管理助手全屏' : '全屏显示管理助手');
+  chat.minimize.textContent = page ? '悬浮窗口' : '收起'; chat.minimize.setAttribute('aria-label', page ? '切换为悬浮窗口' : '收起管理助手');
+  chat.resize.hidden = mode !== 'floating';
+  if (mode !== 'floating') { chat.window.style.removeProperty('width'); chat.window.style.removeProperty('height'); }
+  chat.updateViewport();
+}
+function toggleManagementFullscreen() {
+  const chat = managementChat; if (!chat) return;
+  if (chat.mode === 'fullscreen') setManagementPresentation(chat, chat.fullscreenFrom);
+  else { chat.fullscreenFrom = chat.mode; setManagementPresentation(chat, 'fullscreen'); }
+}
+async function openManagementPage(projectId = null) {
+  syncManagementChat(); const chat = managementChat; if (!chat) return;
+  if (location.hash !== '#/management') { chat.returnAddress = location.hash || '#/projects'; history.pushState(null, '', '#/management'); }
+  chat.requestedProject = projectId; await route();
+}
+async function renderManagementPage() {
+  syncManagementChat(); const project = managementChat?.requestedProject || null;
+  if (managementChat) managementChat.requestedProject = null;
+  window.scrollTo(0, 0); await openManagementChat(project, { mode: 'page' });
+}
+function leaveManagementPage() {
+  const chat = managementChat; if (!chat || !(chat.mode === 'page' || chat.mode === 'fullscreen' && chat.fullscreenFrom === 'page')) return;
+  chat.openVersion++; setManagementPresentation(chat, 'floating'); minimizeManagementChat(false);
+}
+async function floatManagementPage() {
+  const chat = managementChat; if (!chat) return;
+  setManagementPresentation(chat, 'floating'); history.replaceState(null, '', chat.returnAddress); await route();
+  if (managementChat === chat) await openManagementChat();
 }
 function minimizeManagementChat(focus = true) {
   const chat = managementChat; if (!chat || chat.window.hidden) return;
+  if (chat.mode === 'page' || chat.mode === 'fullscreen' && chat.fullscreenFrom === 'page') return floatManagementPage();
+  if (chat.mode === 'fullscreen') setManagementPresentation(chat, 'floating');
   chat.window.hidden = true; chat.launcher.hidden = false; chat.launcher.setAttribute('aria-expanded', 'false');
   if (focus) chat.launcher.focus();
 }
-async function openManagementChat(projectId = null) {
+async function openManagementChat(projectId = null, { mode = 'floating' } = {}) {
   syncManagementChat(); const chat = managementChat; if (!chat) return;
   const version = ++chat.openVersion;
+  setManagementPresentation(chat, mode);
   chat.window.hidden = false; chat.launcher.hidden = true; chat.launcher.setAttribute('aria-expanded', 'true'); chat.unread = false;
   const activity = (active, received = false) => {
     if (managementChat !== chat) return;
@@ -46,7 +136,7 @@ async function openManagementChat(projectId = null) {
       chat.client = client;
     }).catch(err => {
       if (managementChat !== chat) return;
-      chat.panel.replaceChildren(element('p', '暂时无法连接：' + err.message, 'view-error'), button('重新连接', () => openManagementChat(projectId), 'quiet'));
+      chat.panel.replaceChildren(element('p', '暂时无法连接：' + err.message, 'view-error'), button('重新连接', () => openManagementChat(projectId, { mode: chat.mode }), 'quiet'));
     }).finally(() => { chat.loading = null; });
   }
   await chat.loading;

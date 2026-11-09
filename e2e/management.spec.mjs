@@ -10,7 +10,7 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await page.setViewportSize({width:1440,height:1100});await page.goto(h.admin+'/#/management');
     await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
     await page.getByLabel('当前管理作用域').selectOption('project:101');
-    await expect(page.getByRole('dialog',{name:'管理助手',exact:true})).toBeVisible();
+    await expect(page.getByRole('region',{name:'管理助手',exact:true})).toBeVisible();
     await expect(page.getByLabel('默认提示词',{exact:true})).toBeHidden();
     const feed=page.getByRole('log',{name:'管理会话记录'}),message=page.getByLabel('管理消息',{exact:true});
     // A natural language request uses actual management_query, which reads the same SQLite task as the API.
@@ -36,7 +36,7 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await expect(feed).toContainText('操作 task.pause · succeeded');await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     expect((await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value.task.status).toBe('paused');expect((await admin('/api/tasks/blocked')).value.task.status).toBe('paused');
     const writes=h.store.get('SELECT count(*) n FROM management_commands').n;
-    await page.reload();await page.getByRole('button',{name:'打开管理助手',exact:true}).click();await expect(feed).toContainText('操作 task.pause · succeeded');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
+    await page.reload();await expect(page).toHaveURL(/#\/management$/);await expect(feed).toContainText('操作 task.pause · succeeded');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
     // Explicit UI form shares the task command handler and updates the same persisted state.
     await page.getByRole('button',{name:'快捷操作',exact:true}).click();
     await page.getByLabel('管理任务',{exact:true}).selectOption('blocked');await page.getByRole('button',{name:'重试任务',exact:true}).click();
@@ -60,7 +60,7 @@ test('global management chat keeps drafts and a running conversation across navi
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const launcher = page.getByRole('button', { name: '打开管理助手', exact: true }), chat = page.getByRole('dialog', { name: '管理助手', exact: true });
     await expect(launcher).toBeVisible(); await expect(chat).toBeHidden();
-    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await launcher.click();
     await expect(page).toHaveURL(/#\/projects$/); await expect(chat).toBeVisible();
     await page.getByLabel('当前管理作用域').selectOption('project:101');
     const message = page.getByLabel('管理消息', { exact: true }); await message.fill('任务为什么没有继续？');
@@ -131,6 +131,8 @@ test('project chat links select the project, and a delayed old read cannot repla
     await expect(scope).toHaveValue('project:102'); await expect(message).toHaveValue('102 的草稿');
     await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
     await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
+    await expect(page).toHaveURL(/#\/management$/); await expect(page.getByRole('region', { name: '管理助手', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
     // With the chat collapsed on a narrow screen, its launcher covers none of the header navigation.
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     const unobstructed = node => { const rect = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)); };
@@ -206,4 +208,72 @@ test('loading a scope disables composing until its draft is restored, and abando
     await scope.selectOption('project:201'); await expect(message).toHaveValue('201 载入后的新草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(0); expect(errors).toEqual([]);
   } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('management tab opens a full page, and resizing or maximizing the floating view preserves its conversation and draft', async ({ page }) => {
+  test.setTimeout(60000);
+  const f = await managementFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message)); mkdirSync('.tmp/management-display', { recursive: true });
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(f.h.admin + '/#/projects');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const chat = page.locator('#management-chat'), launcher = page.getByRole('button', { name: '打开管理助手', exact: true });
+    await launcher.click(); await page.getByLabel('当前管理作用域').selectOption('project:101');
+    const message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
+    await message.fill('任务为什么没有继续？'); await send.click();
+    await expect(page.getByRole('log', { name: '管理会话记录' })).toContainText('任务正在等待项目电脑'); await expect(send).toBeEnabled();
+    await message.fill('保留这条尚未发送的草稿');
+    const grip = page.getByRole('button', { name: '调整管理助手窗口大小', exact: true }), before = await chat.boundingBox(), handle = await grip.boundingBox();
+    await page.mouse.move(handle.x + 8, handle.y + 8); await page.mouse.down(); await page.mouse.move(handle.x - 132, handle.y - 62, { steps: 10 }); await page.mouse.up();
+    const grown = await chat.boundingBox(); expect(grown.width).toBeGreaterThan(before.width + 100); expect(grown.height).toBeGreaterThan(before.height + 40);
+    await grip.focus(); await page.keyboard.press('ArrowRight');
+    const resized = await chat.boundingBox(); expect(Math.abs(resized.width - (grown.width - 24))).toBeLessThan(2);
+    await expect(send).toBeInViewport(); await page.screenshot({ path: '.tmp/management-display/floating-desktop.png' });
+    await page.getByRole('button', { name: '全屏显示管理助手', exact: true }).click();
+    await expect(chat).toHaveAttribute('aria-modal', 'true');
+    const fullscreen = await chat.boundingBox(); expect([fullscreen.x, fullscreen.y, fullscreen.width, fullscreen.height]).toEqual([0, 0, 1440, 1000]);
+    await expect(message).toHaveValue('保留这条尚未发送的草稿'); await send.focus(); await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: '退出管理助手全屏', exact: true })).toBeFocused();
+    await page.keyboard.press('Escape'); const restored = await chat.boundingBox();
+    expect(Math.abs(restored.width - resized.width)).toBeLessThan(2); expect(Math.abs(restored.height - resized.height)).toBeLessThan(2);
+    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await expect(page).toHaveURL(/#\/management$/); await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理对话');
+    await expect(chat).toHaveAttribute('role', 'region'); await expect(grip).toBeHidden(); await expect(launcher).toBeHidden();
+    const pageBox = await chat.boundingBox(), header = await page.locator('body > header').boundingBox();
+    expect(pageBox.x).toBe(0); expect(pageBox.width).toBe(1440); expect(Math.abs(pageBox.y - header.height)).toBeLessThan(2); expect(pageBox.y + pageBox.height).toBe(1000);
+    await expect(message).toHaveValue('保留这条尚未发送的草稿'); await expect(send).toBeInViewport();
+    await page.screenshot({ path: '.tmp/management-display/page-desktop.png' });
+    await page.getByRole('button', { name: '全屏显示管理助手', exact: true }).click();
+    await page.getByRole('button', { name: '退出管理助手全屏', exact: true }).click(); await expect(chat).toHaveAttribute('role', 'region');
+    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click();
+    await expect(page).toHaveURL(/#\/projects$/); expect(Math.abs((await chat.boundingBox()).width - resized.width)).toBeLessThan(2);
+    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await page.locator('#tabs').getByRole('button', { name: '身份与权限', exact: true }).click();
+    await expect(chat).toBeHidden(); await launcher.click(); await expect(message).toHaveValue('保留这条尚未发送的草稿');
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
+    expect(f.h.store.get("SELECT count(*) n FROM management_conversations WHERE scope='project:101'").n).toBe(1);
+    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click(); await page.reload();
+    await expect(page).toHaveURL(/#\/management$/); await expect(chat).toHaveAttribute('role', 'region');
+    await expect(page.getByLabel('当前管理作用域')).toHaveValue('project:101');
+    await message.fill('窄屏整页中的草稿'); await page.setViewportSize({ width: 390, height: 844 });
+    await expect(send).toBeInViewport(); await expect(message).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: '.tmp/management-display/page-mobile.png' });
+    await page.getByRole('button', { name: '全屏显示管理助手', exact: true }).click();
+    const mobileFull = await chat.boundingBox(); expect([mobileFull.x, mobileFull.y, mobileFull.width, mobileFull.height]).toEqual([0, 0, 390, 844]);
+    await expect(send).toBeInViewport(); await message.focus(); await page.keyboard.press('Escape');
+    await expect(chat).toHaveAttribute('role', 'region'); await expect(message).toHaveValue('窄屏整页中的草稿');
+    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await grip.focus();
+    for (let n = 0; n < 12; n++) { await page.keyboard.press('Shift+ArrowRight'); await page.keyboard.press('Shift+ArrowDown'); }
+    const small = await chat.boundingBox(); expect(small.width).toBe(360); expect(small.height).toBe(460); expect(small.x).toBeGreaterThanOrEqual(0); expect(small.y).toBeGreaterThanOrEqual(0);
+    await expect(send).toBeInViewport(); await expect(message).toHaveValue('窄屏整页中的草稿');
+    await page.screenshot({ path: '.tmp/management-display/floating-mobile.png' });
+    await page.setViewportSize({ width: 520, height: 430 }); await expect(send).toBeInViewport();
+    const short = await chat.boundingBox(); expect(short.y).toBeGreaterThanOrEqual(0); expect(short.y + short.height).toBeLessThanOrEqual(430);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: '收起管理助手', exact: true }).click(); await launcher.click();
+    expect((await chat.boundingBox()).width).toBe(360); expect((await chat.boundingBox()).height).toBe(460);
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1); expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
