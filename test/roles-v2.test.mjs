@@ -425,6 +425,11 @@ test('backend selection is independent of role; ACP keeps its own model and new 
   const acp = view.harnesses.find(h => h.id === 'acp'), pi = view.harnesses.find(h => h.id === 'pi');
   assert.deepEqual([acp.kinds, acp.session, acp.externalModel, acp.model_api], [['controller', 'writer', 'observer', 'evaluator'], 'external_session', true, []]);
   assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller', 'writer', 'observer', 'evaluator'], 'native_resume', false]);
+  // Codex is the same external-session client with its own declared capabilities and locked CLI; like Claude Code it runs
+  // worker roles only, so the controller and coordinator stay on another backend.
+  const codex = view.harnesses.find(h => h.id === 'codex');
+  assert.deepEqual([codex.kinds, codex.session, codex.externalModel, codex.model_api, codex.runtime.version, codex.capabilities.isolation], [['writer', 'observer', 'evaluator'], 'external_session', true, [], '0.166.0', 'none']);
+  for (const role_id of ['manager', 'coordinator']) rejects(() => put({ expected_revision: 0, roles: [{ role_id, harness_ref: { id: 'codex' } }] }), 'harness_role_unsupported', `roles.${role_id}.harness_ref.id`);
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' }, model_profile_ref: { model_id: 'm2' } }] }), 'harness_model_profile_unsupported', 'roles.reviewer.model_profile_ref');
   const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' } }] }).configuration;
   assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'acp');

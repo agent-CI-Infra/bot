@@ -1,7 +1,8 @@
 import { randomId } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
 
-export type HarnessEvent = {type:'session_bound'|'message'|'tool'|'artifact'|'permission'|'configuration'|'ended';[key:string]:unknown};
+// turn: one prompt's lifecycle and terminal status; usage: tokens the agent reported for its own model calls.
+export type HarnessEvent = {type:'session_bound'|'message'|'tool'|'artifact'|'permission'|'configuration'|'turn'|'usage'|'ended';[key:string]:unknown};
 export interface HarnessSession<T> {
  readonly id:string;
  run():Promise<T>;

@@ -70,7 +70,7 @@ export interface HarnessCapabilities {
   /** Recovery modes the harness can actually perform. */
   recovery?: readonly RecoveryMode[];
 }
-export const eventTypes = ['run_started', 'session_bound', 'message', 'tool_call', 'tool_result', 'artifact', 'permission', 'configuration', 'checkpoint', 'budget', 'cancel_requested', 'ended'] as const;
+export const eventTypes = ['run_started', 'session_bound', 'message', 'tool_call', 'tool_result', 'artifact', 'permission', 'configuration', 'turn', 'usage', 'checkpoint', 'budget', 'cancel_requested', 'ended'] as const;
 export const resultCategories = ['progress', 'observation', 'artifact', 'checkpoint', 'budget', 'denied', 'error', 'completed', 'cancelled', 'failed'] as const;
 export interface RunEvent { run_id: string; seq: number; lease_epoch: number; type: typeof eventTypes[number]; category: typeof resultCategories[number]; operation_id: string | null; source_version: string; data: Record<string, unknown> }
 
