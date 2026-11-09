@@ -218,11 +218,17 @@ function usageOf(s: Store, column: 'lease_scope' | 'role_instance_id', value: st
   // too, identified by the turn id its notifications carried; with reports for that id it is already counted, and without any
   // id no report can belong to it.
   const reported = s.get(`SELECT count(*) n,coalesce(sum(json_extract(data,'$.delta.input_tokens')),0) i,coalesce(sum(json_extract(data,'$.delta.output_tokens')),0) o FROM task_history WHERE run_id IN (${marks}) AND type='harness_event' AND json_extract(data,'$.type')='usage'`, ...ids)!;
-  const unreported = Number(s.get(`SELECT count(*) n FROM task_history t JOIN task_runs r ON r.id=t.run_id WHERE t.run_id IN (${marks}) AND t.type='harness_event' AND json_extract(t.data,'$.type')='turn'
-      AND json_extract(t.data,'$.phase') IN ('started','start_unconfirmed')
-      AND NOT EXISTS (SELECT 1 FROM task_history u WHERE u.run_id=t.run_id AND u.type='harness_event' AND json_extract(u.data,'$.type')='usage' AND json_extract(u.data,'$.turnId')=json_extract(t.data,'$.turnId'))
-      AND (json_extract(t.data,'$.phase')='start_unconfirmed' OR r.ended_at IS NOT NULL
-        OR EXISTS (SELECT 1 FROM task_history e WHERE e.run_id=t.run_id AND e.type='harness_event' AND json_extract(e.data,'$.type')='turn' AND json_extract(e.data,'$.phase')='ended' AND json_extract(e.data,'$.turnId')=json_extract(t.data,'$.turnId')))`, ...ids)!.n);
+  // One unknown request per turn id (whatever records name it: started, answered, an unanswered start with its id), unless a
+  // usage report for that id exists in any run of the scope; a started turn counts once it or its run ended. An unanswered
+  // start without any id cannot be matched and counts by itself.
+  const turnEvent = (alias: string, phases: string) => `${alias}.run_id IN (${marks}) AND ${alias}.type='harness_event' AND json_extract(${alias}.data,'$.type')='turn' AND json_extract(${alias}.data,'$.phase') IN (${phases})`;
+  const unreported = Number(s.get(`SELECT
+      (SELECT count(DISTINCT json_extract(t.data,'$.turnId')) FROM task_history t JOIN task_runs r ON r.id=t.run_id
+        WHERE ${turnEvent('t', "'started','answered','start_unconfirmed'")} AND json_extract(t.data,'$.turnId') IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM task_history u WHERE u.run_id IN (${marks}) AND u.type='harness_event' AND json_extract(u.data,'$.type')='usage' AND json_extract(u.data,'$.turnId')=json_extract(t.data,'$.turnId'))
+        AND (json_extract(t.data,'$.phase')<>'started' OR r.ended_at IS NOT NULL
+          OR EXISTS (SELECT 1 FROM task_history e WHERE e.run_id=t.run_id AND e.type='harness_event' AND json_extract(e.data,'$.type')='turn' AND json_extract(e.data,'$.phase')='ended' AND json_extract(e.data,'$.turnId')=json_extract(t.data,'$.turnId'))))
+      + (SELECT count(*) FROM task_history t WHERE ${turnEvent('t', "'start_unconfirmed'")} AND json_extract(t.data,'$.turnId') IS NULL) n`, ...ids, ...ids, ...ids)!.n);
   const wall = runs.reduce((sum, r) => sum + Math.max(0, (r.ended_at ? Date.parse(String(r.ended_at)) : at) - Date.parse(String(r.started_at))), 0);
   // External drivers report a monotonically updated per-run snapshot. Never invent native model_requests or count
   // every snapshot as another request; interrupted runs may retain only a lower bound, with unknown use explicit.

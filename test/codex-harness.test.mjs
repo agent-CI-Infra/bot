@@ -358,6 +358,37 @@ test('A failure after the start answer named the turn keeps that turn for reconc
   assert.equal(f.events().filter(e=>e.phase==='start_unconfirmed').length,0,'the accepted C is not reported as a start without an answer');
   await resumed(f,c);
  });
+ await t.test('the first save of C fails, after B was the hint and has a terminal',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const b=f.state().lastTurnId;await runRole(f.spec,'dev');
+  // Fault injection: the first harness_state UPDATE naming a new in-progress turn (C, not the hint B) fails; later writes pass.
+  const run=f.s.run.bind(f.s);let failed=0;
+  f.s.run=(sql,...args)=>{if(!failed&&/^UPDATE role_instances SET harness_state=/.test(sql)){const v=JSON.parse(args[0]);
+   if(v.lastTurnStatus==='inProgress'&&v.lastTurnId&&v.lastTurnId!==b){failed++;throw new Error('injected harness_state failure');}}return run(sql,...args);};
+  f.configure({FIXTURE_STALE_BEFORE:'true',FIXTURE_WAIT:'true'});
+  await assert.rejects(runRole(f.spec,'dev'));f.s.run=run;
+  const c=f.lines('prompts.jsonl')[2].turnId;assert.equal(failed,1);
+  assert.deepEqual(turns(f),[c,'inProgress',c],'the database row names C, not the hint B');
+  assert.equal(f.events().filter(e=>e.phase==='start_unconfirmed').length,0);
+  f.configure({});await runRole(f.spec,'dev');
+  assert.deepEqual(f.events().filter(e=>e.type==='session_bound').at(-1).reconciled,{turnId:c,recorded:'inProgress',observed:'interrupted'});
+ });
+ await t.test('an answered turn whose started event is missing counts once as unknown, by its id',async t=>{
+  const f=fixture(t);const first=await runRole(f.spec,'dev',undefined,'codex');
+  const usage=()=>{const u=instanceUsage(f.s,first.instance_id);return [u.model_requests,u.unknown_requests,u.total_tokens,u.semantics];};
+  assert.deepEqual(usage(),[1,0,110,'exact'],'A');
+  failStarted(f);f.configure({FIXTURE_WAIT:'true'});await assert.rejects(runRole(f.spec,'dev'),{code:'acp_execution_failed'});
+  const c=f.lines('prompts.jsonl')[1].turnId;
+  assert.deepEqual(usage(),[2,1,110,'lower_bound'],'A and the unreported C');
+  assert.deepEqual(f.events().filter(e=>e.type==='turn'&&e.phase==='answered').map(e=>[e.turnId,e.usage]),[[c,'unknown']]);
+  assert.equal(f.events().filter(e=>e.phase==='start_unconfirmed').length,0);
+  // Resume without new usage for C, then D reports 110 tokens: C still counts once, D adds itself.
+  f.s.db.exec('DROP TRIGGER fail_started');f.configure({});await runRole(f.spec,'dev');
+  assert.deepEqual(usage(),[3,1,220,'lower_bound'],'A, C unknown once, D');
+  // A usage report for C arriving later replaces its unknown request instead of adding to it.
+  const runId=f.s.get("SELECT run_id FROM task_history WHERE type='harness_event' AND json_extract(data,'$.phase')='answered'").run_id;
+  f.s.run("INSERT INTO task_history(task_id,type,data,created_at,run_id,actor) VALUES('t','harness_event',?,?,?,'harness')",JSON.stringify({type:'usage',source:'codex_app_server',turnId:c,delta:{input_tokens:40,output_tokens:10,total_tokens:50}}),new Date().toISOString(),runId);
+  assert.deepEqual(usage(),[3,0,270,'exact'],'A, C by its report, D');
+ });
 });
 
 test('A session refused before its binding counts a restated usage increment once, on the attempt that binds',async t=>{

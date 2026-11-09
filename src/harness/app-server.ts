@@ -175,11 +175,14 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  // - knownTurn: the last turn known to really exist. It survives a reconciliation that found nothing new and later starts,
  //   so a late notification of that turn is never taken for the turn a new start began.
  let lastTurn:{id:string|null;status:string|null}={id:null,status:null},knownTurn:string|null=null;
- const persist=(turn:typeof lastTurn,known:string|null=knownTurn)=>{lastTurn=turn;knownTurn=known;ctx.save({lastTurnId:turn.id,lastTurnStatus:turn.status,knownTurnId:known});};
+ // The binding is written first; the in-memory view follows only a successful write, so it never claims a turn the database
+ // does not hold.
+ const persist=(turn:typeof lastTurn,known:string|null=knownTurn)=>{ctx.save({lastTurnId:turn.id,lastTurnStatus:turn.status,knownTurnId:known});lastTurn=turn;knownTurn=known;};
  // id: the turn named by the start answer, bound the moment that answer is read; only its terminal ends this start. hint: a
  // turn id seen before any answer arrived (it may never come), only a guess: hintStarted when a turn/started named it.
  // previous: the turn known before this start, whose late notifications must not set the hint.
- type Waiter={id:string|null;hint:string|null;hintStarted:boolean;previous:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;usage:boolean};
+ // announced: the started event of the answered turn was recorded (the basis of its usage accounting).
+ type Waiter={id:string|null;hint:string|null;hintStarted:boolean;previous:string|null;done:boolean;announced:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;usage:boolean};
  let current:Waiter|null=null,rerouted:{from:string;to:string}|null=null;
  // Cancel receipts are per turn id: the turns whose terminal arrived on this connection, and a cancel waiting for one turn.
  // A terminal of any other turn (a late one, a wrong guess) never answers that cancel. The end of the connection does.
@@ -378,7 +381,7 @@ export function appServerDialect(ctx:DialectContext):Dialect{
   },
   async turn(prompt){
    text='';
-   const waiter:Waiter={id:null,hint:null,hintStarted:false,previous:knownTurn,done:false,usage:false,resolve:()=>{},reject:()=>{}};
+   const waiter:Waiter={id:null,hint:null,hintStarted:false,previous:knownTurn,done:false,announced:false,usage:false,resolve:()=>{},reject:()=>{}};
    const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=ok;waiter.reject=fail;});
    terminal.catch(()=>{});current=waiter;
    const before={turn:lastTurn,known:knownTurn};
@@ -390,7 +393,7 @@ export function appServerDialect(ctx:DialectContext):Dialect{
     const started=check.turn(result?.turn,'turn/start.result.turn');
     // The answer settles which turn this start began; a different hint was a late turn and is dropped from the binding.
     if(waiter.hint&&waiter.hint!==started.id)anomaly('hint_not_started_turn',{method:'turn/start'});
-    waiter.id=started.id;persist({id:started.id,status:'inProgress'},started.id);emit({type:'turn',phase:'started',threadId,turnId:started.id});
+    waiter.id=started.id;persist({id:started.id,status:'inProgress'},started.id);emit({type:'turn',phase:'started',threadId,turnId:started.id});waiter.announced=true;
     const known=early.get(started.id);if(known){early.delete(started.id);waiter.done=true;waiter.resolve(known);}
     return started;
    };
@@ -398,8 +401,14 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    catch(error){
     // Once the answer named the turn, a later failure (saving it, recording its start) fails this run only: that turn stays
     // the binding's unconfirmed turn for the next run to reconcile, never replaced by a hint and never reported as a start
-    // without an answer. Usage it consumed is counted when the thread total it raised is next reported.
-    if(waiter.id){if(lastTurn.id!==waiter.id)try{persist({id:waiter.id,status:'inProgress'},waiter.id);}catch{}throw error;}
+    // without an answer. The binding is written again whatever memory says (the first write may be the one that failed),
+    // and a start whose started event is missing is recorded as answered under its own id, the basis for counting it once
+    // as an unknown request until a usage report for that id exists.
+    if(waiter.id){
+     try{persist({id:waiter.id,status:'inProgress'},waiter.id);}catch{}
+     if(!waiter.announced)try{emit({type:'turn',phase:'answered',threadId,turnId:waiter.id,usage:waiter.usage?'observed':'unknown',reason:'started_event_not_recorded'});}catch{}
+     throw error;
+    }
     // An explicit refusal started nothing: the binding is exactly what it was before. Otherwise the turn may have run: a turn
     // id its notifications carried is already persisted as an unconfirmed turn, and without one the binding keeps "start
     // requested". Its usage counts once: as the reports already received, or as one unknown request when there were none.
