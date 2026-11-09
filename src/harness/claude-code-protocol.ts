@@ -15,6 +15,8 @@ export function wireUsage(v: any): ClaudeUsage | null {
   return { input_tokens: v.input_tokens, output_tokens: v.output_tokens, cache_read_input_tokens: v.cache_read_input_tokens, cache_creation_input_tokens: v.cache_creation_input_tokens };
 }
 function fault(value: any) {
+  const declared: Record<string,string> = { authentication_failed: 'authentication', billing_error: 'authentication', rate_limit: 'rate_limit', invalid_request: 'model', server_error: 'transport', api_error: 'transport' };
+  if (value.error && value.error !== 'api_error' && declared[value.error]) return declared[value.error];
   const description = [value.error, ...(Array.isArray(value.errors) ? value.errors : []), ...(value.message?.content ?? []).filter((c: any) => c?.type === 'text').map((c: any) => c.text)].filter(v => typeof v === 'string').join(' ');
   if (/authentication|unauthorized|invalid.api.key|\b40[13]\b/i.test(description)) return 'authentication';
   if (/rate.limit|\b429\b/i.test(description)) return 'rate_limit';
@@ -28,6 +30,7 @@ export function claudeMessage(v: any): any {
   if (['system', 'assistant', 'user', 'result'].includes(v.type) && (typeof v.session_id !== 'string' || !uuidPattern.test(v.session_id))) return incompatible();
   if (v.type === 'system') {
     if (typeof v.subtype !== 'string') return incompatible();
+    if (v.subtype === 'api_retry') return { type: 'api_retry', error: fault(v), attempt: count(v.attempt) ? v.attempt : null };
     if (v.subtype !== 'init') return { type: 'ignored' };
     if (typeof v.model !== 'string' || !Array.isArray(v.tools) || v.tools.some((t: any) => typeof t !== 'string')) return incompatible();
     return { type: 'init', session_id: v.session_id, model: v.model, tools: v.tools, mcp_servers: v.mcp_servers };

@@ -293,6 +293,8 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   const harnessId = harnessOverride ?? definition.harness_ref.id, harness = harnesses.find(h => h.id === harnessId);
   if (!harness) return stop('unknown_role_harness', 'waiting_configuration', `${field}.harness_ref.id：没有注册 ${harnessId}。`);
   if (!harnessOverride && harness.version !== definition.harness_ref.version) return stop('harness_version_unavailable', 'waiting_configuration', `${field}.harness_ref.version：固定的是 ${definition.harness_ref.version}，当前注册的是 ${harness.version}。`);
+  // The worker-only CLI must enforce its declared kinds even for legacy bindings and explicit overrides.
+  if(harness.id==='claude_code'&&!harness.kinds.includes(definition.kind))return stop('harness_role_unsupported','waiting_configuration',`${field}.harness_ref.id：${harness.id} 未声明 ${definition.kind} 能力。`);
   // Resolve the model in order, and keep the precise reason when a configured one is not usable.
   let model: ReturnType<typeof openModel>, source: RoleSnapshot['model']['source'], profile: { api: string | null; tool_calls: boolean | null; structured_output: string | null } = { api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' }, profileHash: string | null;
   if (harness.externalModel) {

@@ -188,7 +188,6 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // Adapters read the run's credential after the run is bound (the adapter starts after onRun); before that there is none.
   Object.defineProperty(wrapped,'runAccess',{get:()=>live.bound?access:undefined,enumerable:true,configurable:true});
   wrapped.runContext=()=>live.bound?.ctx;
-  wrapped.runUsage=()=>instanceUsage(s,instance.id);
   wrapped.onExternalUsage=usage=>{const b=live.bound;if(!b)return;assertLease(s,b.run_id,b.epoch);traceEvent(s,task.id,'external_model_usage',usage,b.run_id,'harness');budgetGuard();};
   // Public harness events also enter the run's normalized stream; session_bound settles a pending recovery mode.
   wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=harnessEventType[event.type];if(!b||!mapped)return;
@@ -252,7 +251,7 @@ const internal=<T>(handle:RoleRunHandle<T>)=>{const h=handles.get(handle.operati
 /** checkpoint(handle) → the session reference that may be kept, confirmed tool receipts and the workspace snapshot. */
 export async function checkpointRoleRun<T>(handle:RoleRunHandle<T>,reason='requested'){
  const h=internal(handle),b=h.prepared.live.bound;if(!b)return stop('role_run_not_started','failed');
- const workspace=await (h.prepared.env.environment?.snapshot??h.prepared.spec.candidateSnapshot)?.().catch(()=>null)??null;
+ const workspace=await (h.prepared.resolved.snapshot.kind==='writer'?(h.prepared.env.environment?.snapshot??h.prepared.spec.candidateSnapshot):undefined)?.().catch(()=>null)??null;
  return recordCheckpoint(h.prepared.spec.store,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:h.prepared.instance.id,reason,workspace});
 }
 /**
@@ -302,13 +301,12 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
    throw error;
   }
   const b=live.bound;
-  const snapshotter=p.env.environment?.snapshot??p.spec.candidateSnapshot;
+  const snapshotter=p.resolved.snapshot.kind==='writer'?(p.env.environment?.snapshot??p.spec.candidateSnapshot):undefined;
   let snapshot:{tree_sha:string;local_sha:string}|null=null;
   if(b&&snapshotter){try{snapshot=await snapshotter()??null;if(!snapshot||!/^([a-f0-9]{40})$/.test(snapshot.tree_sha)||!/^([a-f0-9]{40})$/.test(snapshot.local_sha))throw new Error('invalid_snapshot');}
    catch{traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,reason:'role_snapshot_unavailable'},b.run_id,'framework');appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'ended',category:'failed',data:{code:'role_snapshot_unavailable'}});stop('role_snapshot_unavailable','waiting_environment');}}
   if(b){
    if(!leaseCurrent(s,b.run_id,b.epoch)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'lease_epoch_stale'},b.run_id,'framework');stop('lease_epoch_stale','cancelled','运行的租约已被接管，迟到的结果不被接受。');}
-   if(snapshot&&['observer','evaluator'].includes(p.resolved.snapshot.kind)&&b.ctx.candidate_ref?.kind==='code'&&snapshot.tree_sha!==b.ctx.candidate_ref.tree_hash)stop('candidate_changed','retry_wait','实际工作区文件快照与固定候选不符，旧结论不被接受。');
    const live2=roleAuthority(s,task.repository_id,p.resolved.snapshot);if(live2){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:live2},b.run_id,'framework');stop('role_authority_revoked','waiting_configuration',`${p.role}：${live2}`);}
    if(p.resolved.snapshot.kind==='observer'&&b.ctx.candidate_ref){const now=inputCandidate(s,task,p.role,'observer').ref;if(!now||contentHash(now)!==contentHash(b.ctx.candidate_ref)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'candidate_changed',started_with:b.ctx.candidate_ref,current:now},b.run_id,'framework');stop('candidate_changed','retry_wait','检视期间固定候选已变化；旧环境的结论不能认证新内容。');}}
   }

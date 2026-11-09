@@ -11,14 +11,14 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { Redactor, TaskError } from '../dist/agent/common.js';
 import { runRole, roleRuns } from '../dist/roles/run.js';
 import { roleApi } from '../dist/roles/api.js';
-import { instanceUsage, verifyRunToken, revokeRunTokens } from '../dist/roles/role-run.js';
+import { instanceUsage, revokeRunTokens } from '../dist/roles/role-run.js';
 import { claudeCodeRuntime, ClaudeJsonStream } from '../dist/harness/claude-code-protocol.js';
 import { claudeBinary } from '../dist/harness/claude-code.js';
 import { contentHash } from '../dist/roles/protocol.js';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
 const model = 'claude-sonnet-4-5-20250929';
-export async function claudeFixture(t, { mode = 'normal', native = false, provider = false, respond, gatewayStatus = 200, wrongScope = false, wrongModel = false } = {}) {
+export async function claudeFixture(t, { mode = 'normal', native = false, respond, gatewayStatus = 200, wrongModel = false } = {}) {
   mkdirSync('.tmp/claude-tests', { recursive: true }); const root = mkdtempSync(resolve('.tmp/claude-tests/run-'));
   const s = new Store(join(root, 'db'), randomBytes(32));
   s.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");
@@ -31,17 +31,16 @@ export async function claudeFixture(t, { mode = 'normal', native = false, provid
   const server = createServer(async (req, res) => {
     try {
       const token = req.headers['x-api-key'];
-      const run = provider ? (assert.equal(token, 'service-key-fixture-170'), s.get("SELECT id run_id,lease_epoch FROM task_runs WHERE status='running' ORDER BY rowid DESC LIMIT 1")) : verifyRunToken(s, token, {});
+      assert.equal(token, 'service-key-fixture-170');
       if (req.url.startsWith('/v1/models')) {
-        res.setHeader('x-bot-run-id', wrongScope ? 'other' : run.run_id); res.setHeader('x-bot-lease-epoch', run.lease_epoch);
         res.writeHead(gatewayStatus, { 'content-type': 'application/json' }); res.end(JSON.stringify({ data: [{ id: wrongModel ? 'unavailable' : model }] })); return;
       }
-      if (respond) { modelCalls++; await respond(req, res, modelCalls, s); return; }
-      res.writeHead(503); res.end();
+      modelCalls++; if (respond) { await respond(req, res, modelCalls, s); return; }
+      res.writeHead(mode === 'rate_error' ? 429 : 503); res.end('{}');
     } catch (e) { res.writeHead(401); res.end('{}'); }
   }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const file = join(root, 'config.json'), config = { command: native ? claudeBinary() : resolve('test/fixtures/claude-code.mjs'), version: claudeCodeRuntime.version, stateDirectory: join(root, 'sessions'), model, gatewayUrl: 'http://127.0.0.1:' + server.address().port, timeoutMs: native ? 30_000 : 5000 };
-  if (provider) { const credentialFile = join(root, 'service.key'); writeFileSync(credentialFile, 'service-key-fixture-170', { mode: 0o600 }); config.provider = { baseUrl: config.gatewayUrl, credentialFile }; delete config.gatewayUrl; }
+  const file = join(root, 'config.json'), config = { command: native ? claudeBinary() : resolve('test/fixtures/claude-code.mjs'), version: claudeCodeRuntime.version, stateDirectory: join(root, 'sessions'), model, timeoutMs: native ? 30_000 : 5000 };
+  const credentialFile = join(root, 'service.key'); writeFileSync(credentialFile, 'service-key-fixture-170', { mode: 0o600 }); config.provider = { baseUrl: 'http://127.0.0.1:' + server.address().port, credentialFile };
   writeFileSync(file, JSON.stringify(config)); const old = process.env.BOT_CLAUDE_CODE_CONFIG; process.env.BOT_CLAUDE_CODE_CONFIG = file;
   t.after(async () => { server.closeAllConnections(); await new Promise(r => server.close(r)); s.close(); if (old === undefined) delete process.env.BOT_CLAUDE_CODE_CONFIG; else process.env.BOT_CLAUDE_CODE_CONFIG = old; rmSync(root, { recursive: true, force: true }); });
   const spec = { store: s, task: s.get("SELECT * FROM tasks WHERE id='t'"), redactor: new Redactor(), guard: async () => {}, system: 'Execute only the assigned protocol probe.', prompt: JSON.stringify({ task_ref: 'task:t', fixture_mode: mode }), maxTurns: 8,
@@ -97,7 +96,7 @@ for (const [mode, code] of Object.entries({ malformed: 'claude_protocol_incompat
   assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'running');
 });
 
-for (const [options, code] of [[{ gatewayStatus: 401 }, 'claude_authentication_failed'], [{ gatewayStatus: 429 }, 'claude_rate_limited'], [{ wrongScope: true }, 'claude_gateway_scope_unverified'], [{ wrongModel: true }, 'claude_model_unavailable']]) test('Claude Code pre-start gateway validation: ' + code, async t => {
+for (const [options, code] of [[{ gatewayStatus: 401 }, 'claude_authentication_failed'], [{ gatewayStatus: 429 }, 'claude_rate_limited'], [{ wrongModel: true }, 'claude_model_unavailable']]) test('Claude Code pre-start gateway validation: ' + code, async t => {
   const f = await claudeFixture(t, options); await assert.rejects(runRole(f.spec, 'dev', undefined, 'claude_code'), { code }); assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='harness_event' AND json_extract(data,'$.type')='session_bound'").n, 0);
 });
 
@@ -160,18 +159,32 @@ test('Claude Code rejects model/config drift during recovery and accounts metere
     roleApi(f.s, admin, 'PUT', url, { expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision, enabled: true, roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' }, budget_policy_ref: { id: 'metered', max_cost: { amount: 1, currency: 'USD' } } }] });
     await assert.rejects(runRole(f.spec, 'dev'), { code: 'claude_cost_budget_unsupported' }); assert.equal(f.modelCalls, 0);
   });
-  await t.test('unknown usage stays unknown and cannot replenish a cumulative token budget', async t => {
+  await t.test('missing CLI result usage remains unknown but does not permanently block retry', async t => {
     const f = await claudeFixture(t, { mode: 'unknown_usage' }), first = await runRole(f.spec, 'dev', undefined, 'claude_code');
     assert.equal(instanceUsage(f.s, first.instance_id).unknown_requests, 2); assert.equal(instanceUsage(f.s, first.instance_id).semantics, 'lower_bound');
     const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] }, url = new URL('http://local/api/repositories/r/roles');
     roleApi(f.s, admin, 'PUT', url, { expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision, enabled: true, roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' }, budget_policy_ref: { id: 'metered', max_total_tokens: 1000 } }] });
-    await assert.rejects(runRole(f.spec, 'dev'), { code: 'claude_usage_budget_unknown' });
+    f.spec.prompt = JSON.stringify({ task_ref: 'task:t', fixture_mode: 'normal' });
+    await runRole(f.spec, 'dev'); assert.equal(instanceUsage(f.s, first.instance_id).unknown_requests, 2);
   });
 });
 
+// Synthetic Anthropic SSE; the native CLI, not this helper, produces the harness NDJSON events.
+function providerReply(res, { id, content, args = {}, input = 5, output = 777, textBlock = false }) {
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'request-id': id });
+  const event = (type, data) => res.write('event: ' + type + '\ndata: ' + JSON.stringify({ type, ...data }) + '\n\n');
+  event('message_start', { message: { id, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: input, output_tokens: 0 } } });
+  let index = 0;
+  if (textBlock) { event('content_block_start', { index, content_block: { type: 'text', text: '' } }); event('content_block_delta', { index, delta: { type: 'text_delta', text: 'Public preparation.' } }); event('content_block_stop', { index }); index++; }
+  event('content_block_start', { index, content_block: content });
+  if (content.type === 'tool_use') event('content_block_delta', { index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(args) } });
+  event('content_block_stop', { index });
+  event('message_delta', { delta: { stop_reason: content.type === 'tool_use' ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: output } }); event('message_stop', {}); res.end();
+}
+
 // Real pinned native executable + synthetic Anthropic wire server. This proves CLI/MCP compatibility, never live-model QA.
 test('pinned native Claude Code binary uses stream-json, bare restrictions and real broker calls (synthetic provider)', async t => {
-  let nativeToolCalls = 0;
+  let nativeToolCalls = 0, nativeRequests = 0;
   const f = await claudeFixture(t, { native: true, provider: true, respond: async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw);
     if (!req.url.startsWith('/v1/messages')) { res.writeHead(404); res.end('{}'); return; }
@@ -188,14 +201,7 @@ test('pinned native Claude Code binary uses stream-json, bare restrictions and r
     const name = !alreadyRead ? 'mcp__bot__read_task_record' : !observing && !called('mcp__bot__write_file') ? 'mcp__bot__write_file' : !called('mcp__bot__run_command') ? 'mcp__bot__run_command' : 'mcp__bot__finish';
     const args = { mcp__bot__read_task_record: { ref: 'task:t' }, mcp__bot__write_file: { path: 'add.mjs', content: 'export const add = (a, b) => a + b;\n' }, mcp__bot__run_command: { command: 'node --test add.test.mjs' }, mcp__bot__finish: observing ? { summary: 'Preseeded defect detected', findings: [{ description: 'add returns one too many', evidence: ['node --test add.test.mjs exited 1'] }], inspected_scope: ['add.mjs'], unknowns: [] } : { summary: 'Real CLI read the broker' } }[name];
     const content = submitted ? { type: 'text', text: 'Submitted.' } : { type: 'tool_use', id: 'toolu_native_' + (++nativeToolCalls), name, input: {} };
-    const id = 'msg_native_' + nativeToolCalls;
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-    const event = (type, data) => res.write('event: ' + type + '\ndata: ' + JSON.stringify({ type, ...data }) + '\n\n');
-    event('message_start', { message: { id, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 12, output_tokens: 0 } } });
-    event('content_block_start', { index: 0, content_block: content });
-    if (!submitted) event('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(args) } });
-    event('content_block_stop', { index: 0 });
-    event('message_delta', { delta: { stop_reason: submitted ? 'end_turn' : 'tool_use', stop_sequence: null }, usage: { output_tokens: 10 } }); event('message_stop', {}); res.end();
+    providerReply(res, { id: 'msg_native_' + (++nativeRequests), content, args, textBlock: !submitted });
   } });
   const code = join(f.root, 'candidate'); mkdirSync(code); let active = code;
   writeFileSync(join(code, 'add.mjs'), 'export const add = (a, b) => a - b;\n');
@@ -215,13 +221,15 @@ test('pinned native Claude Code binary uses stream-json, bare restrictions and r
   f.spec.finish.validate = v => { assert.equal(observation.exit_code, 0); assert.equal(contentHash(readFileSync(join(code, 'add.mjs'), 'utf8')), observation.candidate_hash); return { ...v, evidence: observation }; };
   const output = await runRole(f.spec, 'dev', undefined, 'claude_code');
   assert.equal(output.result.summary, 'Real CLI read the broker'); assert.ok(f.modelCalls >= 2);
+  let measured = instanceUsage(f.s, output.instance_id); assert.equal(measured.model_requests, nativeRequests); assert.equal(measured.output_tokens, nativeRequests * 777); assert.equal(measured.unknown_requests, 0);
+  const reconciled = f.s.all("SELECT data FROM task_history WHERE type='harness_event' AND json_extract(data,'$.stage')='usage_reconciliation'").map(r => JSON.parse(r.data)); assert.ok(reconciled.some(r => r.cli_result_usage.output_tokens === measured.output_tokens && r.matches));
   assert.equal(f.state().version, '2.1.319'); assert.ok(f.s.get("SELECT 1 FROM task_history WHERE type='gateway_call'"));
   const state = f.state(), poison = join(f.root, 'hook-ran');
   mkdirSync(join(state.cwd, '.claude'), { recursive: true });
   writeFileSync(join(state.cwd, 'CLAUDE.md'), 'MALICIOUS_AUTOLOADED_CONTEXT');
   writeFileSync(join(state.cwd, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'touch ' + poison }] }] } }));
   writeFileSync(join(state.cwd, '.mcp.json'), JSON.stringify({ mcpServers: { poison: { command: 'touch', args: [poison] } } }));
-  await runRole(f.spec, 'dev'); assert.equal(f.state().recoveryMode, 'native_resume'); assert.ok(!existsSync(poison)); assert.equal(writes, 1);
+  await runRole(f.spec, 'dev'); assert.equal(f.state().recoveryMode, 'native_resume'); assert.ok(!existsSync(poison)); assert.equal(writes, 1); measured = instanceUsage(f.s, output.instance_id); assert.equal(measured.model_requests, nativeRequests); assert.equal(measured.output_tokens, nativeRequests * 777); assert.equal(measured.unknown_requests, 0);
   active = join(f.root, 'review-candidate'); mkdirSync(active);
   writeFileSync(join(active, 'add.mjs'), 'export const add = (a, b) => a + b + 1;\n'); writeFileSync(join(active, 'add.test.mjs'), readFileSync(join(code, 'add.test.mjs')));
   const fixedHash = contentHash(readFileSync(join(active, 'add.mjs'), 'utf8'));
@@ -243,4 +251,49 @@ test('Claude collect uses the trusted workspace snapshot and fails closed if the
     await assert.rejects(roleRuns.collect(await roleRuns.start(p)), { code: 'role_snapshot_unavailable' });
     assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_result'").n, 0); assert.equal(f.s.get('SELECT count(*) n FROM role_run_tokens WHERE revoked_at IS NULL').n, 0);
   });
+});
+
+test('pinned native CLI + synthetic provider: max-turns result exits 1 and is a non-retryable budget stop', async t => {
+  const f = await claudeFixture(t, { native: true, respond: async (req, res, n) => {
+    for await (const chunk of req) {}
+    providerReply(res, { id: 'msg_budget_' + n, content: { type: 'tool_use', id: 'toolu_budget_' + n, name: 'mcp__bot__read_task_record', input: {} }, args: { ref: 'task:t' } });
+  } });
+  await assert.rejects(runRole({ ...f.spec, maxTurns: 1 }, 'dev', undefined, 'claude_code'), e => e.code === 'claude_budget_exhausted' && e.state === 'needs_replan');
+  const events = f.s.all("SELECT data FROM task_history WHERE type='harness_event'").map(r => JSON.parse(r.data));
+  assert.ok(events.some(e => e.stage === 'process_exit' && e.result_subtype === 'error_max_turns' && e.exit_code === 1));
+  const run = f.s.get('SELECT * FROM task_runs ORDER BY rowid DESC LIMIT 1'); assert.equal(run.stop_reason, 'claude_budget_exhausted');
+  const { explainFailure } = await import('../dist/agent/failures.js'); assert.equal(explainFailure('claude_budget_exhausted', 'needs_replan').automatic, false);
+  const measured = instanceUsage(f.s, run.role_instance_id); assert.equal(measured.output_tokens, 777); assert.equal(measured.model_requests, 1); assert.equal(measured.unknown_requests, 0);
+});
+
+test('Claude protocol fixture + synthetic provider: a metered 429 rejection can retry the same role instance', async t => {
+  const f = await claudeFixture(t, { mode: 'rate_error', respond: async (req, res) => { for await (const chunk of req) {} res.writeHead(429, { 'content-type': 'application/json' }); res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Synthetic rate limit' } })); } });
+  const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] }, url = new URL('http://local/api/repositories/r/roles');
+  roleApi(f.s, admin, 'PUT', url, { expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision, enabled: true, roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' }, budget_policy_ref: { id: 'metered', max_total_tokens: 100000 } }] });
+  await assert.rejects(runRole(f.spec, 'dev'), e => e.code === 'claude_rate_limited' && e.state === 'retry_wait');
+  const id = f.s.get("SELECT id FROM role_instances WHERE role='dev'").id;
+  assert.equal(f.modelCalls, 1); assert.equal(instanceUsage(f.s, id).unknown_requests, 0); assert.equal(instanceUsage(f.s, id).model_requests, 1);
+  f.spec.prompt = JSON.stringify({ task_ref: 'task:t', fixture_mode: 'normal' });
+  const next = await runRole(f.spec, 'dev'); assert.equal(next.instance_id, id); assert.equal(next.result.summary, 'read through gateway'); assert.equal(instanceUsage(f.s, id).unknown_requests, 0);
+});
+
+test('Claude configuration refuses external gateway profiles and controller roles before CLI startup', async t => {
+  const f = await claudeFixture(t), { provider, ...external } = f.config;
+  writeFileSync(f.file, JSON.stringify({ ...external, gatewayUrl: provider.baseUrl }));
+  await assert.rejects(roleRuns.prepare(f.spec, 'dev', undefined, 'claude_code'), { code: 'claude_configuration_invalid' });
+  writeFileSync(f.file, JSON.stringify(f.config));
+  const admin = { id: 'admin', role: 'project_admin', repositories: ['r'] }, url = new URL('http://local/api/repositories/r/roles');
+  for (const role of ['coordinator', 'manager']) {
+    assert.throws(() => roleApi(f.s, admin, 'PUT', url, { expected_revision: roleApi(f.s, admin, 'GET', url, {}).revision, enabled: true, roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }), { code: 'harness_role_unsupported' });
+    await assert.rejects(runRole(f.spec, role, undefined, 'claude_code'), { code: 'harness_role_unsupported' });
+  }
+  const { runClaudeCode } = await import('../dist/harness/claude-code.js');
+  await assert.rejects(runClaudeCode({ ...f.spec, harnessPreparation: { config: f.config }, runContext: () => ({ execution_context: { kind: 'controller' } }), runAccess: { token: 'unusable-capability', check() {} } }, {}, new AbortController().signal, () => {}), { code: 'harness_role_unsupported' });
+  assert.equal(f.s.get('SELECT count(*) n FROM task_runs').n, 0);
+});
+
+test('Claude smoke probe requires an explicit public launch profile', t => {
+  mkdirSync('.tmp/claude-smoke-env', { recursive: true }); const root = resolve('.tmp/claude-smoke-env');
+  assert.throws(() => execFileSync(process.execPath, ['scripts/claude-code-smoke.mjs', join(root, 'must-not-create')], { env: { LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] }), e => e.status === 1 && String(e.stderr).includes('BOT_CLAUDE_CODE_CONFIG'));
+  assert.equal(existsSync(join(root, 'must-not-create')), false);
 });
