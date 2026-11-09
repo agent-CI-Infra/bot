@@ -15,8 +15,8 @@ export async function taskToolServer<T>(spec:AgentSpec<T>){
   if(req.method!=='POST'){res.writeHead(405);res.end('{}');return;}
   let requestId:unknown=null;
   try{
-   let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>2*1024*1024)throw new Error('mcp_input_too_large');}
-   const request=JSON.parse(raw),{id,method,params}=request;requestId=id;
+   const chunks:Buffer[]=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes>2*1024*1024)throw new Error('mcp_input_too_large');chunks.push(chunk);}
+   const request=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))),{id,method,params}=request;requestId=id;
    if(id===undefined){res.writeHead(202);res.end();return;}
    let value:any;
    if(method==='initialize')value={protocolVersion:params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'bot-task-tools',version:'1'}};
@@ -26,11 +26,14 @@ export async function taskToolServer<T>(spec:AgentSpec<T>){
     // Serialize calls: a submission cannot race a write and the active workspace is role-local.
     const work=tail.then(async()=>{
      await spec.guard();if(!active)throw new Error('harness_run_closed');if(submitted)return {error:'execution_already_submitted'};
+     // A queued request may have outlived the lease check at HTTP ingress.
+     spec.runAccess?.check(token);
      const name=params?.name,args=params?.arguments??{},offered=spec.tools?.some(t=>t.function.name===name);
-     if(!offered)return {error:'tool_not_allowed'};
-     const started=traceEvent(spec.store,spec.task.id,'tool_started',{name,arguments:spec.redactor.clean(args),transport:'mcp'},spec.task.trace_run_id,'harness');
+     if(!offered){spec.onDenied?.(String(name),'not_offered');return {error:'tool_not_allowed'};}
+     spec.screen?.(name,args);
+     const started=traceEvent(spec.store,spec.task.id,'tool_started',{name,call_id:String(id),arguments:spec.redactor.clean(args),transport:'mcp'},spec.task.trace_run_id,'harness');
      let observation:any;
-     try{if(name===spec.finish?.name){result=await spec.finish!.validate(args);submitted=true;observation={submitted:true};}else observation=await spec.execute?.(name,args);}
+     try{if(name===spec.finish?.name){const validated=await spec.finish!.validate(args);await spec.guard();spec.runAccess?.check(token);if(!active)throw new Error('harness_run_closed');result=validated;submitted=true;observation={submitted:true};}else observation=await spec.execute?.(name,args);}
      catch(error){const feedback=spec.repairInvalid?.(error);if(!feedback)throw error;observation={error:'invalid_submission',message:spec.redactor.text(feedback)};}
      const clean=spec.redactor.clean(observation??null);
      traceEvent(spec.store,spec.task.id,'tool_observation',{name,observation:clean},spec.task.trace_run_id,'tool',[started]);return clean;

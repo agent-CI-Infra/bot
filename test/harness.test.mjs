@@ -1,5 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {randomBytes} from 'node:crypto';import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join,resolve} from 'node:path';
 import {roleHarness} from '../dist/roles/harness.js';
+import {request as httpRequest} from 'node:http';
 import {roleApi} from '../dist/roles/api.js';
 import {Store} from '../dist/storage/database.js';import {TaskRecords} from '../dist/tasks/service.js';import {runRole} from '../dist/roles/run.js';import {Redactor,TaskError} from '../dist/agent/common.js';import {managedSession} from '../dist/harness/session.js';import {taskToolServer} from '../dist/roles/task-tools.js';
 const tool=name=>({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
@@ -17,3 +18,13 @@ test('public session lifecycle cancels without reporting successful completion a
 test('MCP exposes only offered tools, serializes submission and rejects post-submission work',async t=>{const f=fixture(t),bridge=await taskToolServer(f.spec);t.after(()=>bridge.close());const call=async(name,args={})=>(await (await fetch(bridge.url,{method:'POST',body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}})})).json()).result;assert.equal((await call('unknown')).isError,true);await call('finish',{summary:'result'});assert.equal(bridge.submitted,true);assert.equal((await call('read_task_record')).isError,true);assert.equal(f.reads,0);});
 
 test('Native, Process and ACP expose the same cancellable session factory',async t=>{for(const harness of ['native','process','acp'])await t.test(harness,async t=>{const f=fixture(t,{FIXTURE_WAIT:'true'});const services={guard:async()=>{},model:{},request:async()=>{await new Promise(resolve=>setTimeout(resolve,150));return {value:{choices:[{message:{role:'assistant',content:'late response'}}]}};}};const session=roleHarness(harness).createSession(f.spec,services);const pending=session.run();setTimeout(()=>void session.cancel(),40);await assert.rejects(pending,{code:'harness_cancelled'});await session.close();const events=f.s.all("SELECT data FROM task_history WHERE type='harness_event'").map(r=>JSON.parse(r.data));assert.equal(events.at(-1).status,'cancelled');});});
+
+test('MCP preserves UTF-8 tool arguments split inside a multibyte character', async t => {
+ const f=fixture(t);let observed;
+ const spec={...f.spec,tools:[...f.spec.tools,tool('write_file')],execute:async(name,args)=>{assert.equal(name,'write_file');observed=args.content;return {written:true};}};
+ const bridge=await taskToolServer(spec);t.after(()=>bridge.close());
+ const raw=Buffer.from(JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'write_file',arguments:{path:'example.txt',content:'测试😀'}}}));
+ const split=raw.indexOf(Buffer.from('测'))+1;
+ const response=await new Promise((resolve,reject)=>{const req=httpRequest(bridge.url,{method:'POST'},res=>{let raw='';res.on('data',c=>raw+=c);res.on('end',()=>resolve(JSON.parse(raw)));});req.on('error',reject);req.write(raw.subarray(0,split));setTimeout(()=>req.end(raw.subarray(split)),20);});
+ assert.equal(response.result.isError,false);assert.equal(observed,'测试😀');
+});

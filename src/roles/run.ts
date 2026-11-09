@@ -187,14 +187,18 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
    session:{messages:messages.length&&messages[0]?.role==='system'?[{role:'system',content:definition.prompt+'\n'+spec.system},...messages.slice(1)]:messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(cleanRoleMessages(spec.redactor.clean(msgs))),new Date().toISOString(),instance!.id);}}};
   // Adapters read the run's credential after the run is bound (the adapter starts after onRun); before that there is none.
   Object.defineProperty(wrapped,'runAccess',{get:()=>live.bound?access:undefined,enumerable:true,configurable:true});
+  wrapped.runContext=()=>live.bound?.ctx;
+  wrapped.runUsage=()=>instanceUsage(s,instance.id);
+  wrapped.onExternalUsage=usage=>{const b=live.bound;if(!b)return;assertLease(s,b.run_id,b.epoch);traceEvent(s,task.id,'external_model_usage',usage,b.run_id,'harness');budgetGuard();};
   // Public harness events also enter the run's normalized stream; session_bound settles a pending recovery mode.
   wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=harnessEventType[event.type];if(!b||!mapped)return;
-   if(event.type==='session_bound'&&b.ctx.resume_from_run_id){const mode=protocolRecovery(String(event.recoveryMode))??(event.recoveryMode==='new_session'?'rebuilt_from_task_records':null);if(mode)s.run('UPDATE task_runs SET protocol_recovery=? WHERE id=?',mode,b.run_id);}
+   if(event.type==='session_bound'&&b.ctx.resume_from_run_id){const mode=protocolRecovery(String(event.recoveryMode))??(['new_session','fresh_evaluation'].includes(String(event.recoveryMode))?'rebuilt_from_task_records':null);if(mode)s.run('UPDATE task_runs SET protocol_recovery=? WHERE id=?',mode,b.run_id);}
    appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:mapped[0],category:mapped[1],data:{harness_event:event.type,...Object.fromEntries(Object.entries(event).filter(([k])=>k!=='type'))}});};
   // Binding a new task_runs row: the scheduler's lease epoch, the RunContext, the recovery plan and a capability token.
   const bind=(runId:string)=>{
    const lease=allocateLease(s,task.id,scope,runId,typeof task.claim_token==='string'?task.claim_token:null),previous=options.recover?.previous_run_id??lease.previous_run_id;
    const ctx=buildRunContext(s,{task,scope,run_id:runId,lease_epoch:lease.epoch,...(previous?{resume_from_run_id:previous}:{}),instance,role,snapshot,snapshot_id:resolved.id,candidate:candidate.ref});
+   if(wrapped.harnessBinding){ctx.model_revision=wrapped.harnessBinding.model_revision;ctx.harness_revision=wrapped.harnessBinding.harness_revision;}
    let mode:string|null=null,plan:ReturnType<typeof planRecovery>|null=null;
    if(previous){
     plan=planRecovery(s,{previous_run_id:previous,checkpoint_ref:options.recover?.checkpoint_ref,capabilities:driver.capabilities,model_revision:ctx.model_revision,role_revision:ctx.role_revision,session_kind:recover,resumable_session:recover==='native_resume'||recover==='checkpoint_transcript'});
@@ -219,6 +223,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // The external session binding persists on the instance; QA always starts a new one.
   wrapped.harnessState={value:qaState,save:value=>s.run('UPDATE role_instances SET harness_state=?,updated_at=? WHERE id=?',JSON.stringify(spec.redactor.clean(value)),new Date().toISOString(),instance!.id)};
   if(driver.externalModel)wrapped.modelTrace={source:'external_harness',model:'unknown'};
+  await driver.prepare?.(wrapped);
   // The driver decides the transport; the native driver is the control-plane tool loop.
   wrapped.adapter=driver.adapter?.(wrapped);
   const prepared:PreparedRun<T>={protocol:roleRunProtocol.id,operation_id:operationId,role,...(assignment?{assignment}:{}),scope,spec,wrapped,instance,resolved,recovery_start:recover,admission,candidate,budget,live,env:{release,environment:env.environment},inputRef:ref,released:false};
@@ -247,7 +252,7 @@ const internal=<T>(handle:RoleRunHandle<T>)=>{const h=handles.get(handle.operati
 /** checkpoint(handle) → the session reference that may be kept, confirmed tool receipts and the workspace snapshot. */
 export async function checkpointRoleRun<T>(handle:RoleRunHandle<T>,reason='requested'){
  const h=internal(handle),b=h.prepared.live.bound;if(!b)return stop('role_run_not_started','failed');
- const workspace=await h.prepared.env.environment?.snapshot?.().catch(()=>null)??null;
+ const workspace=await (h.prepared.env.environment?.snapshot??h.prepared.spec.candidateSnapshot)?.().catch(()=>null)??null;
  return recordCheckpoint(h.prepared.spec.store,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:h.prepared.instance.id,reason,workspace});
 }
 /**
@@ -297,9 +302,13 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
    throw error;
   }
   const b=live.bound;
-  const snapshot=b?await p.env.environment?.snapshot?.().catch(()=>null)??null:null;
+  const snapshotter=p.env.environment?.snapshot??p.spec.candidateSnapshot;
+  let snapshot:{tree_sha:string;local_sha:string}|null=null;
+  if(b&&snapshotter){try{snapshot=await snapshotter()??null;if(!snapshot||!/^([a-f0-9]{40})$/.test(snapshot.tree_sha)||!/^([a-f0-9]{40})$/.test(snapshot.local_sha))throw new Error('invalid_snapshot');}
+   catch{traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,reason:'role_snapshot_unavailable'},b.run_id,'framework');appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'ended',category:'failed',data:{code:'role_snapshot_unavailable'}});stop('role_snapshot_unavailable','waiting_environment');}}
   if(b){
    if(!leaseCurrent(s,b.run_id,b.epoch)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'lease_epoch_stale'},b.run_id,'framework');stop('lease_epoch_stale','cancelled','运行的租约已被接管，迟到的结果不被接受。');}
+   if(snapshot&&['observer','evaluator'].includes(p.resolved.snapshot.kind)&&b.ctx.candidate_ref?.kind==='code'&&snapshot.tree_sha!==b.ctx.candidate_ref.tree_hash)stop('candidate_changed','retry_wait','实际工作区文件快照与固定候选不符，旧结论不被接受。');
    const live2=roleAuthority(s,task.repository_id,p.resolved.snapshot);if(live2){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:live2},b.run_id,'framework');stop('role_authority_revoked','waiting_configuration',`${p.role}：${live2}`);}
    if(p.resolved.snapshot.kind==='observer'&&b.ctx.candidate_ref){const now=inputCandidate(s,task,p.role,'observer').ref;if(!now||contentHash(now)!==contentHash(b.ctx.candidate_ref)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'candidate_changed',started_with:b.ctx.candidate_ref,current:now},b.run_id,'framework');stop('candidate_changed','retry_wait','检视期间固定候选已变化；旧环境的结论不能认证新内容。');}}
   }
@@ -313,7 +322,7 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
    revokeRunTokens(s,b.run_id,'collected');
   }
   return {result,reference,instance_id:String(p.instance.id),candidate_ref:candidate,context:b?.ctx??null};
- }finally{await p.env.release?.().catch(()=>{});handles.delete(h.operation_id);}
+ }finally{if(live.bound)revokeRunTokens(s,live.bound.run_id,'collect_ended');await p.env.release?.().catch(()=>{});handles.delete(h.operation_id);}
 }
 /** events(handle, after_cursor) → a bounded page of the run's normalized events. */
 export function roleRunEvents<T>(store:Store,handle:RoleRunHandle<T>|string,after=0,limit=100){const id=typeof handle==='string'?handle:handle.run_id;if(!id)return stop('role_run_not_started','failed');return runEvents(store,id,after,limit);}

@@ -213,8 +213,13 @@ function usageOf(s: Store, column: 'lease_scope' | 'role_instance_id', value: st
   const costs = s.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE run_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`, ...ids).map(r => ({ currency: String(r.currency), amount: Number(r.amount) }));
   const tools = Number(s.get(`SELECT count(*) n FROM task_history WHERE run_id IN (${marks}) AND type='tool_observation'`, ...ids)!.n);
   const wall = runs.reduce((sum, r) => sum + Math.max(0, (r.ended_at ? Date.parse(String(r.ended_at)) : at) - Date.parse(String(r.started_at))), 0);
-  const unknown = Number(m.unknown ?? 0);
-  return { runs: ids.length, model_requests: Number(m.n), input_tokens: Number(m.i), output_tokens: Number(m.o), total_tokens: Number(m.i) + Number(m.o), unknown_requests: unknown, tool_calls: tools, wall_ms: wall, cost: costs, unpriced_requests: Number(m.unpriced ?? 0), semantics: unknown ? 'lower_bound' as const : 'exact' as const };
+  // External drivers report a monotonically updated per-run snapshot. Never invent native model_requests or count
+  // every snapshot as another request; interrupted runs may retain only a lower bound, with unknown use explicit.
+  const external = s.all(`SELECT h.data FROM task_history h WHERE h.run_id IN (${marks}) AND h.type='external_model_usage'
+    AND h.id=(SELECT max(x.id) FROM task_history x WHERE x.run_id=h.run_id AND x.type='external_model_usage')`, ...ids).map(r => JSON.parse(String(r.data)));
+  const sum = (key: string) => external.reduce((n, u) => n + Number(u[key] ?? 0), 0);
+  const unknown = Number(m.unknown ?? 0) + sum('unknown_requests'), input = Number(m.i) + sum('input_tokens'), output = Number(m.o) + sum('output_tokens');
+  return { runs: ids.length, model_requests: Number(m.n) + sum('model_requests'), input_tokens: input, output_tokens: output, total_tokens: input + output, unknown_requests: unknown, tool_calls: tools, wall_ms: wall, cost: costs, unpriced_requests: Number(m.unpriced ?? 0) + sum('model_requests'), semantics: unknown || external.some(u => u.semantics === 'lower_bound') ? 'lower_bound' as const : 'exact' as const };
 }
 /** The first budget limit the scope's usage reached, or null. With unknown usage the known part is a lower bound. */
 export function budgetExceeded(budget: Budget, usage: ReturnType<typeof scopeUsage>, pending: { tool_calls?: number } = {}): string | null {
@@ -264,7 +269,7 @@ export function admitRun(s: Store, input: { task: Row; role: string; kind: strin
 
 // ---------------------------------------------------------------- checkpoint and recovery
 // Harness state fields that may be kept for native resume. Anything else stays out of checkpoints.
-const retainedState = ['sessionId', 'previousSessionId', 'recoveryMode', 'agentInfo', 'version', 'configurationHash', 'cwd'];
+const retainedState = ['sessionId', 'previousSessionId', 'recoveryMode', 'agentInfo', 'version', 'configurationHash', 'cwd', 'scope', 'inputHash', 'run_id', 'lease_epoch', 'raw_cursor'];
 export function sessionReference(s: Store, instanceId: string) {
   const row = s.get('SELECT session,harness_state,runtime FROM role_instances WHERE id=?', instanceId);
   if (!row) return null;
