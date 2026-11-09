@@ -23,6 +23,7 @@ export function workStorage(store: Store) {
       work_settings TEXT NOT NULL,event_filters TEXT NOT NULL,source TEXT NOT NULL,actor TEXT,created_at TEXT NOT NULL,PRIMARY KEY(repository_id,revision));
     CREATE TABLE IF NOT EXISTS manager_migrations(repository_id TEXT PRIMARY KEY,migrated_at TEXT NOT NULL,archive TEXT NOT NULL,report TEXT NOT NULL);
   `);
+  store.db.exec(`CREATE TABLE IF NOT EXISTS manager_dispatch_prompts(repository_id TEXT NOT NULL,revision INTEGER NOT NULL,content TEXT NOT NULL,PRIMARY KEY(repository_id,revision))`);
   const columns = new Set(store.all('PRAGMA table_info(policies)').map(row => String(row.name)));
   if (!columns.has('work_settings')) store.db.exec("ALTER TABLE policies ADD COLUMN work_settings TEXT NOT NULL DEFAULT '{}'");
   if (!columns.has('event_filters')) store.db.exec("ALTER TABLE policies ADD COLUMN event_filters TEXT NOT NULL DEFAULT '{}'");
@@ -214,16 +215,17 @@ function checkWork(value: unknown, current: Record<string, WorkSetting>) {
   }
   return { next, changed, actions };
 }
-export interface ManagerChange { expected_revision: number; content?: string; work?: unknown; events?: unknown }
+export interface ManagerChange { expected_revision: number; content?: string; prompt?: string; work?: unknown; events?: unknown }
 /**
- * Saves a new revision. The prompt may only describe the flow: it is validated as sections, its rule sections must still
- * resolve (the development label line), and it never changes writes. Writes and switches come only from `work`.
+ * Saves one revision atomically. `prompt` is the complete dispatch text; legacy `content` still edits task rule sections.
+ * Neither text grants writes. Existing task rules remain validated and switches/writes come only from `work`.
  */
 export function saveManager(store: Store, repositoryId: string, change: ManagerChange, actor: string | null, source = 'console', onActions?: (enabled: boolean) => void) {
   return store.transaction(() => {
     const policy = policyOf(store, repositoryId); if (!policy) return fail(404, 'repository_not_found');
     const current = managerPrompt(store, repositoryId);
     if (!Number.isSafeInteger(change.expected_revision) || change.expected_revision !== current.revision) fail(409, 'manager_revision_conflict', 'expected_revision');
+    if (change.prompt !== undefined && (typeof change.prompt !== 'string' || !change.prompt.trim() || change.prompt.includes('\0') || Buffer.byteLength(change.prompt) > 512 * 1024)) fail(400, 'invalid_manager_prompt', 'prompt');
     let content = current.content;
     if (change.content !== undefined) {
       if (typeof change.content !== 'string' || change.content.includes('\0') || Buffer.byteLength(change.content) > 512 * 1024) fail(400, 'invalid_manager_prompt', 'content');
@@ -249,6 +251,7 @@ export function saveManager(store: Store, repositoryId: string, change: ManagerC
     const revision = current.revision + 1, now = new Date().toISOString();
     store.run('INSERT INTO manager_revisions VALUES(?,?,?,?,?,?,?,?)', repositoryId, revision, content, JSON.stringify(work.next),
       JSON.stringify(eventFilters(store, repositoryId)), source, actor, now);
+    if (change.prompt !== undefined) store.run('INSERT INTO manager_dispatch_prompts VALUES(?,?,?)', repositoryId, revision, change.prompt);
     return managerPrompt(store, repositoryId);
   });
 }

@@ -6,6 +6,9 @@ import {repository,scope,type Actor} from '../app/auth.js';
 import {fields,fail,type Json} from '../core/security.js';
 import {TaskError} from '../agent/common.js';
 import {traceEvent} from '../tasks/trace.js';
+import {rolePool,sharedInstructions} from './pool.js';
+import {playbooks} from '../tasks/playbooks.js';
+import {capabilityNames} from './protocol.js';
 import {catalog} from './catalog.js';
 import {roleConfiguration,saveConfiguration,configurationRevision,resolveRole,modelProfileHash} from './definition.js';
 // A resolve error names the configuration field before "：" in its detail; the API returns it as field.
@@ -32,7 +35,7 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
    // The editable sources of the current bundles, so a console edit can resave them unchanged.
    const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}'),files=JSON.parse(row?.files??'[]');
     return {id:b.id,source:source.type==='inline'?{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}:source.type==='builtin'?{type:'builtin',playbooks:source.playbooks}:{type:'repository',commit:source.commit,paths:source.paths}};});
-   return {configuration:current,configured:!!s.get('SELECT value FROM settings WHERE key=?','roles:'+repo),revision:current.revision,workflow,preview,harnesses,backends:agentBackends(),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
+   return {configuration:current,configured:!!s.get('SELECT value FROM settings WHERE key=?','roles:'+repo),revision:current.revision,workflow,preview,builtin_prompts:Object.fromEntries(current.roles.map(r=>[r.role_id,rolePool.find(p=>p.id===r.role_id)?.prompt??sharedInstructions])),stage_capabilities:capabilityNames.map(id=>({id,name:({fixed_candidate_read:'读取固定候选',raw_evidence:'提供原始证据',run_isolation:'运行隔离',cancel:'可中断',version_binding:'绑定执行版本',output_validation:'校验输出',fresh_context:'全新上下文'})[id]})),playbooks:playbooks.map(p=>({id:p.id,name:p.id})),harnesses,backends:agentBackends(),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
     skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(JSON.parse(source.files)).filter(p=>p.startsWith('.agents/skills/'))}:null},
     revisions:s.all('SELECT revision,hash,actor,created_at FROM role_config_revisions WHERE repository_id=? ORDER BY revision DESC LIMIT 20',repo)};
   }

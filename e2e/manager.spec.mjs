@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { TaskEngine } from '../dist/agent/engine.js';
 import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { RuleService } from '../dist/rules/service.js';
@@ -8,7 +9,7 @@ import { queueWebhook } from '../dist/review/queue.js';
 // The 「Manager 与角色」 page replaces the workflows page: the Manager prompt, the work types, the events and the decisions.
 test('the Manager page edits the prompt, work types and events, lists decisions and opens from old workflow addresses', async ({ page }) => {
   test.setTimeout(90000);
-  const h = await harness(), errors = [];
+  const h = await harness(undefined, undefined, store => ({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   mkdirSync('.tmp/manager-207', { recursive: true });
   try {
@@ -30,38 +31,21 @@ test('the Manager page edits the prompt, work types and events, lists decisions 
     await page.getByRole('button', { name: '登录', exact: true }).click();
     // An old workflows address opens the Manager page; the navigation has no workflows page any more.
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
-    await expect(page.locator('.project-nav').getByRole('link', { name: 'Manager 与角色', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('.project-nav').getByRole('link', { name: '角色', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(page.locator('.project-nav').getByRole('link', { name: '工作流', exact: true })).toHaveCount(0);
-    const prompt = page.getByLabel('Manager 提示词', { exact: true });
-    await expect(prompt).toHaveValue('');
-    // A repository file replaces its section; unwritten sections show their built-in text and can be inserted.
-    await page.getByText(/^章节与内置文本/).click();
-    await expect(page.locator('[data-manager-section="review.pr"]')).toContainText('仓库文件');
-    await page.locator('[data-manager-section="review.issue"]').getByRole('button', { name: '插入这一章开始改写', exact: true }).click();
-    await expect(prompt).toHaveValue(/^## 检视 Issue `review\.issue`\n/);
-    await prompt.fill('## 分派 `dispatch`\n\nPR 推送新提交时不检视。\n\n## 检视 Issue `review.issue`\n\nReview issues briefly.\n');
-    await page.getByRole('button', { name: '保存提示词', exact: true }).click();
-    await expect(page.getByText('已保存 Manager 提示词，之后的分派和新任务使用新版本', { exact: true })).toBeVisible();
-    await page.getByText(/^章节与内置文本/).click();
-    await expect(page.locator('[data-manager-section="review.issue"]')).toContainText('项目已写');
-    expect(JSON.parse(h.store.get("SELECT rule_overrides FROM policies WHERE repository_id='101'").rule_overrides)['.bot/rules/issue-review.md']).toBe('Review issues briefly.');
-    // An unknown section id is refused with its reason.
-    await prompt.fill('## 别的 `unknown.part`\n\n内容\n');
-    await page.getByRole('button', { name: '保存提示词', exact: true }).click();
-    await expect(page.getByText(/章节 id 不认识/)).toBeVisible();
-
-    // Work types: the issue review may also file Issues; the reply work type is switched on.
-    const work = id => page.locator(`[data-work-type="${id}"]`);
-    await expect(work('review.issue').getByLabel('回复评论（固定）', { exact: true })).toBeDisabled();
-    await work('review.issue').getByLabel('提报 Issue', { exact: true }).check();
-    await work('reply').getByLabel('开启', { exact: true }).check();
-    await page.getByLabel('测试命令', { exact: true }).fill('npm test');
-    await page.getByRole('button', { name: '保存工作类型', exact: true }).click();
-    await expect(page.getByText('已保存工作类型', { exact: true })).toBeVisible();
-    const view = (await admin('/api/repositories/101/manager')).value.manager;
-    expect(view.work.find(w => w.id === 'review.issue').writes).toEqual(['reply', 'labels', 'issue']);
-    expect(view.work.find(w => w.id === 'reply').enabled).toBe(true);
-    expect((await admin('/api/repositories/101')).value.policy.test_command).toBe('npm test');
+    await page.locator('.role-nav').getByRole('link',{name:'Manager',exact:true}).click();
+    const prompt=page.getByLabel('Manager 提示词',{exact:true});
+    await expect(prompt).toHaveValue(/Every event/);
+    await expect(page.getByText(/^章节与内置文本/)).toHaveCount(0);
+    await expect(page.getByText('工作类型：开关、写入与设置',{exact:true})).toHaveCount(0);
+    const plain='按项目目标安排任务。\n\n## 普通标题 `custom.heading`\n遇到重复请求时续接。';
+    await prompt.fill(plain);
+    await page.locator('.role-nav').getByRole('link',{name:'Dev',exact:true}).click();
+    await page.locator('.role-nav').getByRole('link',{name:'Manager',exact:true}).click();
+    await expect(prompt).toHaveValue(plain);
+    await page.getByRole('button',{name:'保存 Manager 提示词',exact:true}).click();
+    await expect(prompt).toHaveValue(plain);await page.reload();await expect(prompt).toHaveValue(plain);
+    expect((await admin('/api/repositories/101/manager')).value.manager.prompt.content).toBe(plain);
 
     // Events: PR pushes stop reaching the Manager; a label is dispatched.
     await page.getByLabel('PR 推送新提交', { exact: true }).uncheck();
@@ -86,7 +70,7 @@ test('the Manager page edits the prompt, work types and events, lists decisions 
     for (const kind of ['manager', 'review.issue', 'reply', 'actions.failures', 'gate.onboarding']) await expect(page.locator(`[data-task-kind="${kind}"]`)).toBeVisible();
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(h.admin + '/#/projects/101/roles');
+    await page.goto(h.admin + '/#/projects/101/roles/manager');
     await expect(page.getByLabel('Manager 提示词', { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
     await page.screenshot({ path: '.tmp/manager-207/manager-mobile.png', fullPage: true });

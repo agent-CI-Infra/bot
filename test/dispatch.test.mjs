@@ -56,7 +56,7 @@ test('an event reaches the Manager once; its decision creates the task with the 
   assert.ok(f.h.store.all('SELECT content FROM task_logs WHERE task_id=?', task.id).some(r => JSON.parse(r.content).type === 'dispatch'));
   // One bounded call: the fixed frame, the project's dispatch section and the offered options with their writes.
   assert.equal(f.requests.length, 1);
-  assert.match(f.requests[0].messages[0].content, /project Manager/); assert.match(f.requests[0].messages[0].content, /`dispatch`/);
+  assert.match(f.requests[0].messages[0].content, /project Manager/); assert.match(f.requests[0].messages[0].content, /# Event dispatch/);
   const input = JSON.parse(f.requests[0].messages[1].content);
   assert.equal(input.event.type, 'issue.opened'); assert.equal(input.event.facts.object.title, issue.title);
   assert.deepEqual(input.options.create.find(o => o.work === 'review.issue').writes, ['reply', 'labels']);

@@ -9,7 +9,7 @@ import { runAgent, startAgentTool, subagentSystem } from '../dist/agent/runtime.
 import { workspaceProfile } from '../dist/agent/profiles.js';
 import { selectedModel } from '../dist/agent/model.js';
 import { narrowPermissions, workAccess as workflowAccess, githubScopes, defaultWrites, workTypes, writeOptions } from '../dist/work/catalog.js';
-import { workPermissions, parseSections, withSection, ruleOverrides } from '../dist/work/settings.js';
+import { workPermissions, managerPrompt, parseSections, withSection, ruleOverrides } from '../dist/work/settings.js';
 import { runSubagent, subagentConfig } from '../runner/subagent.mjs';
 import { narrowCapabilities, toolCapabilityError } from '../runner/capabilities.mjs';
 
@@ -53,13 +53,13 @@ test('a Manager section is the console layer of its rule file; the repository fi
   assert.equal(await managerSection(admin, '101', 'review.issue'), 'Review only the public API.');
   // The rules API writes the same section.
   assert.equal((await admin('/api/repositories/101/rules', 'PUT', { path: '.bot/guide.md', content: 'Be brief.' })).status, 200);
-  assert.match((await admin('/api/repositories/101/manager')).value.manager.prompt.content, /## 行为指南 `guide`\n\nBe brief\./);
+  assert.match((await admin('/api/repositories/101/manager')).value.manager.prompt.content, /## 行为指南\nBe brief\./);
   // A repository file on the default branch replaces the section.
   h.store.run("INSERT INTO repository_rule_sources VALUES('101',?,?,?)", 'a'.repeat(40), JSON.stringify({ '.bot/rules/issue-review.md': 'Repository review rules.' }), new Date().toISOString());
   const section = (await admin('/api/repositories/101/manager')).value.manager.sections.find(entry => entry.id === 'review.issue');
   assert.deepEqual([section.effective_source, section.effective, section.content], ['repository', 'Repository review rules.', 'Review only the public API.']);
   // A development section without the label line keeps bot-develop; an invalid label is refused.
-  const current = (await admin('/api/repositories/101/manager')).value.manager.prompt.content;
+  const current = managerPrompt(h.store, '101').content;
   assert.equal((await saveManager(admin, '101', { content: withSection(current, 'development', 'Implement it.') })).status, 200);
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.development_label, 'bot-develop');
   const refused = await saveManager(admin, '101', { content: withSection(current, 'development', 'development_label: " bad"') });
@@ -202,4 +202,22 @@ test('a project administrator manages only their own project\'s Manager, and the
     const removed = await member('/api/repositories/101' + path, method, method === 'GET' ? undefined : {});
     assert.deepEqual([removed.status, removed.value.error], [410, 'workflows_removed'], method + ' ' + path);
   }
+});
+
+
+test('the complete Manager prompt is plain text, revisioned, restart-safe and independent of task rule sections', async t => {
+  const {h,admin}=await project(t);
+  const before=(await admin('/api/repositories/101/manager')).value.manager;
+  assert.match(before.prompt.content,/Every event/);
+  const text='按项目目标分派。\n## 任意标题 `not.a.section`\n优先续接已有任务。';
+  const writes=workPermissions(h.store,'101','review.issue');
+  const saved=await admin('/api/repositories/101/manager','PUT',{expected_revision:before.prompt.revision,prompt:text});
+  assert.equal(saved.status,200);assert.equal((await admin('/api/repositories/101/manager')).value.manager.prompt.content,text);
+  const revision=(await admin('/api/repositories/101/manager')).value.manager.prompt.revision;
+  assert.equal((await admin('/api/repositories/101/manager','PUT',{expected_revision:revision,events:{'issue.opened':false}})).status,200);
+  await admin('/api/repositories/101/rules','PUT',{path:'.bot/guide.md',content:'Keep task rules independent.'});
+  assert.equal((await admin('/api/repositories/101/manager')).value.manager.prompt.content,text);
+  assert.deepEqual(workPermissions(h.store,'101','review.issue'),writes);
+  await h.stop();await h.start();assert.equal((await admin('/api/repositories/101/manager')).value.manager.prompt.content,text);
+  assert.equal((await admin('/api/repositories/101/manager','PUT',{expected_revision:before.prompt.revision,prompt:'stale'})).value.error,'manager_revision_conflict');
 });

@@ -6,6 +6,7 @@ import { workTypes, workType, sections, section, writeOptions } from './catalog.
 import { managerPrompt, parseSections, workEnabled, workActive, workPermissions, workSettings, eventFilters, saveManager, sectionText, withSection } from './settings.js';
 import { retryEvent } from '../dispatch/worker.js';
 import { activateActions } from '../actions/storage.js';
+import { dispatchPrompt } from '../dispatch/manager.js';
 import { taskDispatch } from '../dispatch/store.js';
 
 const json = (text: unknown, fallback: any) => { try { return JSON.parse(String(text)) ?? fallback; } catch { return fallback; } };
@@ -26,7 +27,7 @@ export async function managerView(store: Store, rules: RuleService, repositoryId
   const files = new Map<string, any>(view.files.map((file: any) => [file.path, file]));
   const migration = store.get('SELECT migrated_at,report FROM manager_migrations WHERE repository_id=?', repositoryId);
   return {
-    prompt: { revision: prompt.revision, content: prompt.content, updated_at: prompt.updated_at, updated_by: prompt.actor, source: prompt.source },
+    prompt: { revision: prompt.revision, content: dispatchPrompt(store, repositoryId), updated_at: prompt.updated_at, updated_by: prompt.actor, source: prompt.source },
     sections: sections.map(entry => {
       const file = entry.rule ? files.get(entry.rule) : entry.repository ? files.get(entry.repository) : undefined;
       // A repository file replaces both the project's section and the built-in text, as rule files always did.
@@ -65,9 +66,9 @@ export async function workCompatibility(store: Store, rules: RuleService, reposi
 }
 /** A Manager save through the management command service; `args` are the command arguments. */
 export function applyManagerChange(store: Store, repositoryId: string, args: Json, actor: string) {
-  fields(args, ['expected_revision', 'content', 'work', 'events']);
+  fields(args, ['expected_revision', 'content', 'prompt', 'work', 'events']);
   const expected = args.expected_revision === undefined ? managerPrompt(store, repositoryId).revision : Number(args.expected_revision);
-  return saveManager(store, repositoryId, { expected_revision: expected, content: args.content as string | undefined, work: args.work, events: args.events }, actor, 'console',
+  return saveManager(store, repositoryId, { expected_revision: expected, content: args.content as string | undefined, prompt: args.prompt as string | undefined, work: args.work, events: args.events }, actor, 'console',
     () => activateActions(store, repositoryId));
 }
 /**

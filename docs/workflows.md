@@ -38,7 +38,7 @@
 - **新建选项**：完整的任务规格（类型、对象、head、输入、唯一键），只在开发条件、修订预算、一次一个修订等控制面条件满足时才出现；
 - **续接选项**：同一项目同一对象上还没开始发布的检视（PR 还要求同一 head），在分派时重新查询。
 
-后台的分派器逐条认领事件（带租约），调用一次 Manager：系统提示是固定的分派规则，后面是 Manager 提示词的前言、「分派」章节和项目写过的其他章节；用户消息是事件摘要、同一对象上最近的任务和选项（每个新建选项附带它的写入）。模型用 `dispatch` 工具回答一种结果：
+后台的分派器逐条认领事件（带租约），调用一次 Manager：系统提示是固定的分派规则，后面是完整 Manager 分派提示词；用户消息是事件摘要、同一对象上最近的任务和选项（每个新建选项附带它的写入）。模型用 `dispatch` 工具回答一种结果：
 
 - `create`：一到三个新建选项，可附简要说明（目标和验收标准），可收窄写入；
 - `continue`：一个续接选项，事件作为更新交给那个检视，它在发布前回应；
@@ -52,26 +52,11 @@
 
 ## Manager 提示词
 
-提示词是 Markdown，在项目「Manager 与角色」页编辑，每次保存是一版（`manager_revisions`）。二级标题以反引号里的章节 id 结尾时开始一个章节，例如 `## 检视 Issue \`review.issue\``；第一个章节之前的文字是前言，和「分派」章节一起交给 Manager。没写的章节使用内置文本。
+Manager 分派提示词在「角色 → Manager」里作为一份完整文本编辑。新项目显示完整的内置默认提示词，保存后整份替换；普通 Markdown 标题没有章节 id 语义。控制面仍固定校验可选任务、对象和写入范围。`PUT /api/repositories/:id/manager` 的 `prompt` 字段保存这份文本，并用 `expected_revision` 防止覆盖别人的修改。
 
-| 章节 id | 用途 | 内置文本 |
-| --- | --- | --- |
-| `dispatch` | 哪类事件需要哪种工作、何时续接或不处理 | `docs/prompts/manager-dispatch.md` |
-| `review.issue` | 检视 Issue | `.bot/rules/issue-review.md` 的内置层 |
-| `review.pr` | 检视 PR | `.bot/rules/pr-review.md` 的内置层 |
-| `development` | 开发 Issue 和跟进 bot PR，第一行 `development_label:` 是开发标签 | `.bot/rules/issue-development.md` 的内置层 |
-| `labels` | 检视标签和分类标签 | `.bot/rules/labels.md` 的内置层 |
-| `guide` | 所有任务的行为指南 | `.bot/guide.md` 的内置层 |
-| `reply` | 通用回复任务做什么（原自定义工作流迁到这里） | 空 |
-| `release.observe` | CI 观察 | `docs/prompts/release-observe.md` |
-| `release.notes` | 发行说明 | 默认分支的 `.agents/skills/release-notes/SKILL.md` 优先；都没有时用内置规则直接列出来源 |
-| `actions.failures` | Actions 失败处理 | `docs/prompts/actions-failures.md` |
-| `gate.onboarding` | 接入门禁 | `docs/prompts/gate-onboarding.md` |
-| `schedule` | 定时检查做什么 | 空 |
+升级前的章节配置继续作为任务规则保留，原有项目指令会合入首次显示的完整 Manager 文本。新分派提示词单独版本化保存在 `manager_dispatch_prompts`；编辑任务规则或事件开关不会覆盖它，旧任务的规则快照和权限保持原有约束。旧 `content` 字段供兼容客户端编辑已有任务规则，界面不再暴露章节编辑器。
 
-检视、开发、标签和行为指南这几个章节就是对应 `.bot` 规则文件的控制台层：默认分支上的仓库文件仍然整份替换它，`PUT /api/repositories/:id/rules` 也改写同一个章节。开发标签那一行的校验不变，删掉仍按 `bot-develop` 要求。
-
-提示词只描述流程，不能授予任何权限：写在提示词里的「允许提报 Issue」之类的话不会改变写入，写入只来自下一节的项目配置。
+项目界面不再展示「工作类型：开关、写入与设置」表格。工作类型标识仍用于内部任务分类、模型覆盖和既有权限校验。
 
 ## 工作类型
 
@@ -120,7 +105,7 @@
 | 路径 | 方法 | 说明 |
 | --- | --- | --- |
 | `/api/repositories/:id/manager` | GET | 提示词（`revision`、`content`）、各章节（内置文本、是否写过、实际来源和生效文本）、工作类型（开关、写入、可选写入、模型）、分派模型、事件开关、规则来源和迁移记录 |
-| `/api/repositories/:id/manager` | PUT | `expected_revision` 必填，`content`、`work`（`{<工作类型>: {enabled, writes}}`）、`events`（事件开关和标签列表）可选；经管理服务的 `manager.update` 命令执行，审批和审计相同；版本不一致返回 409 `manager_revision_conflict` |
+| `/api/repositories/:id/manager` | PUT | `expected_revision` 必填，`prompt`（完整分派提示词）、旧 `content`（任务规则）、`work`（`{<工作类型>: {enabled, writes}}`）、`events`（事件开关和标签列表）可选；经管理服务的 `manager.update` 命令执行，审批和审计相同；版本不一致返回 409 `manager_revision_conflict` |
 | `/api/repositories/:id/dispatch` | GET | 事件记录，最新在前：类型、摘要、状态、结果、理由、简要说明、新建或续接的任务、模型、失败原因；`state`、`limit`、`offset` 可选 |
 | `/api/repositories/:id/dispatch/:event/retry` | POST | 重试失败的分派 |
 | `/api/tasks/:id/dispatch` | GET | 任务因哪些事件新建或续接，以及 Manager 的理由 |

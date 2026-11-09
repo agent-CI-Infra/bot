@@ -298,7 +298,7 @@ export class GateOnboarding {
     if (!policy?.enabled) return no('gate_project_disabled', '项目已禁用：启用后再接入门禁。');
     const account = this.store.get('SELECT a.type FROM accounts a JOIN repositories r ON r.account_id=a.id WHERE r.id=?', repositoryId);
     if (account?.type !== 'github_app') return no('github_app_required', '门禁接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上，需要改为安装 GitHub App。');
-    if (!workActive(this.store, repositoryId, workflowId)) return no('work_disabled', '项目配置里关闭了「接入门禁」：在项目的「Manager 与角色」页打开它。');
+    if (!workActive(this.store, repositoryId, workflowId)) return no('work_disabled', '项目配置里关闭了「接入门禁」：在项目的「角色」页打开它。');
     const environment = this.store.get('SELECT state FROM project_environments WHERE repository_id=?', repositoryId);
     if (!['ready', 'busy'].includes(String(environment?.state))) return no('gate_environment_not_ready', `项目的虚拟电脑还没有就绪（当前：${environment?.state || '未创建'}），就绪后再接入门禁。`);
     try { return { ok: true, model: selectedModel(this.store, repositoryId, workflowId).model }; }

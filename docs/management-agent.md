@@ -4,7 +4,7 @@
 
 窗口以对话为主，按消息列出用户请求、助手回复和可展开的事实与命令回执；「会话记录」可以切换或新建持久会话。「快捷操作」集中放置查询、Manager 章节表单、任务管理及定时计划，执行配置或任务命令后返回对话查看结果。Ctrl / ⌘ + Enter 发送，Escape 收起；收起和重新连接不会重复提交命令。
 
-查询、显式表单和自然语言工具调用使用 `ManagementService`。「Manager 与角色」页的 Manager 配置、项目策略、角色配置与 Task 操作也进入相同命令服务。ActorContext 由服务端的 `resolveActor` 创建；可信 IM 适配器可使用身份模块解析后的 actor，不能反序列化客户端 actor 或自行授予权限。
+查询、显式表单和自然语言工具调用使用 `ManagementService`。「角色」页的 Manager 配置、项目策略、角色配置与 Task 操作也进入相同命令服务。ActorContext 由服务端的 `resolveActor` 创建；可信 IM 适配器可使用身份模块解析后的 actor，不能反序列化客户端 actor 或自行授予权限。
 
 飞书应用机器人已接入相同服务，安装、双端身份证明、群范围和渠道回执的使用方式见 [消息渠道与飞书应用机器人](message-channels.md)。
 
