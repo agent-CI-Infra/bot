@@ -28,7 +28,7 @@ export const codexAppServer={
 } as const;
 // Notifications the client does not need. Deltas are suppressed at the server; the complete item arrives in item/completed.
 const optOut=['item/agentMessage/delta','item/reasoning/textDelta','item/reasoning/summaryTextDelta','item/reasoning/summaryPartAdded','item/plan/delta','item/commandExecution/outputDelta','item/fileChange/outputDelta','command/exec/outputDelta','process/outputDelta','remoteControl/status/changed','account/rateLimits/updated'];
-const ignored=new Set(['thread/started','thread/status/changed','thread/readState/changed','thread/name/updated','thread/goal/updated','thread/goal/cleared','thread/settings/updated','thread/compacted','thread/closed','turn/started','turn/diff/updated','turn/plan/updated',
+const ignored=new Set(['thread/started','thread/status/changed','thread/readState/changed','thread/name/updated','thread/goal/updated','thread/goal/cleared','thread/settings/updated','thread/compacted','thread/closed','turn/diff/updated','turn/plan/updated',
  'serverRequest/resolved','item/mcpToolCall/progress','item/commandExecution/terminalInteraction','item/fileChange/patchUpdated','item/autoApprovalReview/started','item/autoApprovalReview/completed','hook/started','hook/completed','skills/changed','account/updated','app/list/updated','mcpServer/event/stream/notification',...optOut]);
 const turnStatuses=['completed','interrupted','failed','inProgress'];
 /**
@@ -165,8 +165,11 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  const {config,cwd,emit,redactor}=ctx;
  const home=resolve(String(config.env?.CODEX_HOME??''));
  let threadId='',cli:string|null=null,text='',usageBase:Usage|null=null;
- // hint: the turn id carried by notifications that arrive before the turn/start answer is processed (same chunk).
- type Waiter={id:string|null;hint:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;settled:Promise<void>;usage:boolean};
+ // The binding's last turn as persisted: its id when known and its status (startRequested: a start was sent, unanswered).
+ let lastTurn:{id:string|null;status:string|null}={id:null,status:null};
+ // hint: the turn id carried by notifications that arrive before the turn/start answer is processed (same chunk, or an
+ // answer that never comes); previous: the turn known before this start, whose late notifications must not set the hint.
+ type Waiter={id:string|null;hint:string|null;previous:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;settled:Promise<void>;usage:boolean};
  let current:Waiter|null=null,rerouted:{from:string;to:string}|null=null;
  const early=new Map<string,any>(),seen=new Set<string>(),reported=new Set<string>(),servers=new Map<string,{status:string;error:string|null}>();
  let serverChange:(()=>void)|null=null,committed=false;
@@ -176,7 +179,7 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  // An anomaly is recorded once per kind and method; the stream continues.
  const anomaly=(kind:string,detail:Record<string,unknown>={})=>{const key=kind+':'+String(detail.method??'');if(reported.has(key))return;reported.add(key);emit({type:'configuration',stage:'protocol_anomaly',anomaly:kind,...detail});};
  // Before the thread is bound nothing belongs to this run yet (e.g. a usage total restated while resuming); that is no anomaly.
- const ours=(params:any,at:string)=>{if(!threadId)return false;if(params?.threadId===threadId){if(current&&!current.id&&id(params.turnId))current.hint=params.turnId;return true;}anomaly('foreign_thread',{method:at});return false;};
+ const ours=(params:any,at:string)=>{if(!threadId)return false;if(params?.threadId===threadId){if(current&&!current.id&&id(params.turnId)&&params.turnId!==current.previous)current.hint=params.turnId;return true;}anomaly('foreign_thread',{method:at});return false;};
  // A built-in tool acted although it was not granted: recorded as a denial, then the whole run stops through the shared path
  // (task tools refused, turn/interrupt, bounded wait, process group reclaimed). Sub-agents are refused the same way: their
  // threads, usage and evidence are not part of this role's run.
@@ -187,6 +190,8 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    :new TaskError('codex_builtin_tool_refused','waiting_configuration',`Codex 内建工具 ${itemType}（${reason}）不在角色授权内却已执行；本次运行已停止，请检查 Codex 版本与启动配置。`));
  };
  const notification=(method:string,params:any)=>{
+  // Only its turn id matters: it identifies a turn whose start answer may still be pending (or never come).
+  if(method==='turn/started'){ours(params,method);return;}
   if(method==='turn/completed'){
    if(!ours(params,method))return;const turn=check.turn(params?.turn,'turn/completed.turn');
    if(current&&current.id===turn.id){if(current.done){anomaly('duplicate_terminal',{method});return;}current.done=true;current.resolve(turn);}
@@ -213,7 +218,7 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    if(total.total<base.total){anomaly('usage_decreased',{method});usageBase=total;ctx.save({usage:total});return;}
    if(total.total===base.total)return;
    const delta={input_tokens:total.input-base.input,cached_input_tokens:total.cached-base.cached,output_tokens:total.output-base.output,reasoning_output_tokens:total.reasoning-base.reasoning,total_tokens:total.total-base.total};
-   usageBase=total;ctx.save({usage:total});if(current&&(current.id===params.turnId||current.id===null))current.usage=true;
+   usageBase=total;ctx.save({usage:total});if(current&&(current.id===params.turnId||current.id===null&&params.turnId!==current.previous))current.usage=true;
    const event:HarnessEvent={type:'usage',source:'codex_app_server',threadId,turnId:String(params.turnId),delta,thread_total:total};
    if(committed)emit(event);else pendingUsage.push(event);
   }else if(method==='error'){
@@ -312,11 +317,19 @@ export function appServerDialect(ctx:DialectContext):Dialect{
      if(thread.thread.id!==prior.sessionId||resolve(thread.cwd)!==resolve(cwd))stop('codex_thread_ownership_mismatch','failed','恢复的 thread 不属于这个角色实例。');
      if(switched(thread.model,thread.modelProvider))stop('codex_resume_incompatible','waiting_configuration',`恢复的 thread 使用 ${thread.modelProvider}/${thread.model}，绑定的是 ${prior.modelProvider}/${prior.model}。`);
      recovery='native_resume';usageBase=prior.usage&&count(prior.usage.total)?prior.usage:null;
-     // Unknown state is reconciled first: the last turn the binding did not see end is read back from the thread itself.
-     if(prior.lastTurnId&&prior.lastTurnStatus!=='completed'){
-      let status='unknown';try{const page=await rpc.request('thread/turns/list',{threadId:prior.sessionId,limit:1});const last=page?.data?.[0];if(last?.id===prior.lastTurnId&&turnStatuses.includes(last.status))status=last.status;}catch(error){if(!(error instanceof RpcError))throw error;}
-      reconciled={turnId:prior.lastTurnId,recorded:prior.lastTurnStatus??null,observed:status};
-      notice=`Your previous turn ${prior.lastTurnId} did not end with a confirmed completion (observed: ${status}). Before repeating any action, check task records for its effects.`;
+     // Unknown state is reconciled first: the last turn the binding did not see end is read back from the thread itself. A
+     // known turn is matched by id. A start that was never answered may still have begun: the thread's newest turn, if it
+     // is not the turn known before that start, is that turn.
+     if(prior.lastTurnStatus&&!['completed','not_started'].includes(prior.lastTurnStatus)){
+      let status='unknown',turnId:string|null=id(prior.lastTurnId)?prior.lastTurnId:null;
+      try{
+       const page=await rpc.request('thread/turns/list',{threadId:prior.sessionId,limit:1}),last=Array.isArray(page?.data)?page.data[0]:undefined;
+       if(turnId){if(last?.id===turnId&&turnStatuses.includes(last.status))status=last.status;}
+       else if(last&&id(last.id)&&last.id!==prior.previousTurnId&&turnStatuses.includes(last.status)){turnId=last.id;status=last.status;}
+       else if(Array.isArray(page?.data))status='not_started';
+      }catch(error){if(!(error instanceof RpcError))throw error;}
+      reconciled={turnId,recorded:prior.lastTurnStatus??null,observed:status};
+      notice=`Your previous turn ${turnId??'(its start was never confirmed)'} did not end with a confirmed completion (observed: ${status}). Before repeating any action, check task records for its effects.`;
      }
     }
    }
@@ -329,25 +342,36 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    // The model and provider are what the server reports for this thread; a configured value it did not take is refused.
    if(config.model&&thread.model!==config.model||config.modelProvider&&thread.modelProvider!==config.modelProvider)stop('codex_model_mismatch','waiting_configuration',`配置 ${config.modelProvider??'-'}/${config.model??'-'}，app-server 实际为 ${thread.modelProvider}/${thread.model}。`);
    const builtins=await verifyBuiltins(thread),tools=await verifyTools();
+   lastTurn=prior&&recovery==='native_resume'?{id:(reconciled?.turnId as string|null|undefined)??prior.lastTurnId??null,status:(reconciled?.observed as string|undefined)??prior.lastTurnStatus??null}:{id:null,status:null};
    return {sessionId:threadId,recovery,notice,agentInfo:{name:'codex-app-server',version:cli},
-    state:{protocol:'codex-app-server',model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,...(prior&&recovery==='native_resume'?{lastTurnId:prior.lastTurnId??null,lastTurnStatus:reconciled?.observed??prior.lastTurnStatus??null}:{lastTurnId:null,lastTurnStatus:null}),usage:usageBase},
+    state:{protocol:'codex-app-server',model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,lastTurnId:lastTurn.id,lastTurnStatus:lastTurn.status,previousTurnId:prior&&recovery==='native_resume'?prior.previousTurnId??null:null,usage:usageBase},
     bound:{threadId,model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,approvalPolicy:redactor.clean(thread.approvalPolicy??null),sandbox:redactor.clean(thread.sandbox??null),disabledBuiltins:builtins,instructionSources:redactor.clean(thread.instructionSources??[]),tools,reconciled}};
   },
   async turn(prompt){
    text='';let resolveSettled!:()=>void;
    const settled=new Promise<void>(r=>{resolveSettled=r;});
-   const waiter:Waiter={id:null,hint:null,done:false,usage:false,resolve:()=>{},reject:()=>{},settled};
+   const waiter:Waiter={id:null,hint:null,previous:lastTurn.id,done:false,usage:false,resolve:()=>{},reject:()=>{},settled};
    const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=turn=>{resolveSettled();ok(turn);};waiter.reject=error=>{resolveSettled();fail(error);};});
    terminal.catch(()=>{});current=waiter;
    let answer:any;
-   // A start the server may have begun but never answered can have used the model; its usage is unknown, not zero.
-   try{answer=await rpc.request('turn/start',{threadId,input:[{type:'text',text:prompt}]});}catch(error){if(!(error instanceof RpcError))emit({type:'turn',phase:'start_unconfirmed',threadId,turnId:null,usage:'unknown'});throw error;}
+   const before=lastTurn,mark=(turn:typeof lastTurn,extra:Record<string,unknown>={})=>{lastTurn=turn;ctx.save({lastTurnId:turn.id,lastTurnStatus:turn.status,...extra});};
+   // Before asking, the binding records that a turn may begin: the server can start it and never answer.
+   mark({id:null,status:'startRequested'},{previousTurnId:before.id});
+   try{answer=await rpc.request('turn/start',{threadId,input:[{type:'text',text:prompt}]});}
+   catch(error){
+    // An explicit refusal started nothing. Otherwise the turn may have run: a turn id its notifications carried is kept as an
+    // unconfirmed turn for the next run to reconcile, and without one the binding keeps "start requested". Its usage counts
+    // once: as the reports already received, or as one unknown request when there were none.
+    if(error instanceof RpcError)mark(before);
+    else{if(waiter.hint)mark({id:waiter.hint,status:'inProgress'});emit({type:'turn',phase:'start_unconfirmed',threadId,turnId:waiter.hint,usage:waiter.usage?'observed':'unknown'});}
+    throw error;
+   }
    const started=check.turn(answer?.turn,'turn/start.result.turn');
-   waiter.id=started.id;ctx.save({lastTurnId:started.id,lastTurnStatus:'inProgress'});emit({type:'turn',phase:'started',threadId,turnId:started.id});
+   waiter.id=started.id;mark({id:started.id,status:'inProgress'});emit({type:'turn',phase:'started',threadId,turnId:started.id});
    const known=early.get(started.id);if(known){early.delete(started.id);waiter.done=true;waiter.resolve(known);}
    // Only the terminal notification ends a turn; the start answer does not, and a stream that ends first fails the turn.
    const turn=await terminal;
-   ctx.save({lastTurnStatus:turn.status});
+   mark({id:turn.id,status:turn.status});
    emit({type:'turn',phase:'ended',threadId,turnId:turn.id,status:turn.status,durationMs:turn.durationMs??null,usage:waiter.usage?'observed':'unknown',error:turn.error?{code:errorKind(turn.error.codexErrorInfo),message:clip(redactor.text(turn.error.message),500)}:null});
    if(rerouted)stop('codex_model_rerouted','waiting_configuration',`app-server 把 ${rerouted.from} 改路由到 ${rerouted.to}；不会在未配置的模型上继续。`);
    if(turn.status==='completed')return {text};

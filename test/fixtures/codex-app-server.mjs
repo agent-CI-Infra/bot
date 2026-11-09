@@ -113,6 +113,18 @@ createInterface({input:process.stdin}).on('line',async line=>{
   reply({data:[{name:'bot',runtimeStatus:'connected',tools,resources:[],resourceTemplates:[],authStatus:'unsupported'},...(flag('EXTRA_SERVER')?[{name:'github',runtimeStatus:'connected',tools:{},resources:[],resourceTemplates:[],authStatus:'unsupported'}]:[])],nextCursor:null});}
  else if(m.method==='turn/start'){
   if(flag('EXIT'))process.exit(7);
+  // START_UNANSWERED: the server begins the turn, sends its notifications and a 110-token usage report, but never answers the
+  // start and goes away. START_SILENT: the same turn begins without any notification.
+  if(flag('START_UNANSWERED')||flag('START_SILENT')){
+   const turnId=randomUUID(),t=load(thread.id),previous=t.turns.at(-1)?.id;t.turns.push({id:turnId,status:'inProgress'});log('unanswered.jsonl',{turnId});
+   // LATE_PREVIOUS: a late notification of the previous turn arrives while this start is unanswered.
+   if(flag('LATE_PREVIOUS')&&previous)notify('item/completed',{threadId:thread.id,turnId:previous,item:{type:'agentMessage',id:'late-'+previous,text:'late',phase:null},completedAtMs:2});
+   if(flag('START_UNANSWERED')){const u=t.usage??{inputTokens:0,cachedInputTokens:0,outputTokens:0,reasoningOutputTokens:0,totalTokens:0};
+    t.usage={inputTokens:u.inputTokens+100,cachedInputTokens:u.cachedInputTokens+20,outputTokens:u.outputTokens+10,reasoningOutputTokens:u.reasoningOutputTokens+5,totalTokens:u.totalTokens+110};store(t);
+    notify('turn/started',{threadId:thread.id,turn:turnView(turnId,'inProgress')});notify('thread/tokenUsage/updated',{threadId:thread.id,turnId,tokenUsage:{total:t.usage,last:t.usage}});}
+   else store(t);
+   await queue;process.exit(0);
+  }
   const turnId=randomUUID();
   // SAME_CHUNK: the answer and a sub-agent item arrive in one chunk, so the item is read before the answer is handled.
   if(flag('SAME_CHUNK')){const t=load(thread.id);t.turns.push({id:turnId,status:'inProgress'});store(t);
