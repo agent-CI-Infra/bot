@@ -1,6 +1,6 @@
 # Actions 失败分类与提报
 
-Actions 失败处理是工作类型 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`，默认关闭：在项目「角色」页的工作类型表里打开并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。每个失败的运行 attempt 是一个 `actions.run_failed` 事件，由项目 Manager 决定是否分析；Manager 决定不处理时这次失败记为 `ignored`，不重跑也不提报。失败原因由这类工作的模型分析，提示词是 Manager 提示词的「Actions 失败处理」章节；它和所有工作类型一样能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
+Actions 失败处理是工作类型 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`，默认关闭：在项目管理对话中请求启用并确认保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。每个失败的运行 attempt 是一个 `actions.run_failed` 事件，由项目 Manager 决定是否分析；Manager 决定不处理时这次失败记为 `ignored`，不重跑也不提报。失败原因由这类工作的模型分析，提示词是 Manager 提示词的「Actions 失败处理」章节；它和所有工作类型一样能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
 
 ## 配置前提
 

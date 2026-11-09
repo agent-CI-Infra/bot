@@ -140,7 +140,7 @@ const codeActions: Record<string,string> = {
   object_closed_or_draft:'Issue 或 PR 已关闭或转为草稿，任务已结束，无需处理。',
   task_claim_revoked:'任务已被取消或由其他执行接管，无需处理。',
   repository_policy_disabled:'仓库已停用这类任务，任务已结束；需要时在项目设置里重新开启。',
-  work_disabled:'项目配置里关闭了这类工作，任务已结束；需要时在「角色」页重新开启。',
+  work_disabled:'项目策略关闭了这类工作，任务已结束；请项目管理员在管理对话中调整策略后重新提交任务。',
   workflow_disabled:'这条工作流已关闭或删除，任务已结束。',
   workflow_not_found:'这条工作流已删除，任务已结束。',
   github_read_token_not_allowed:'启动这个子 agent 时关掉了 GitHub 读取；主 agent 仍可读取，需要时让它不带 github_read:false 再启动子 agent。',
