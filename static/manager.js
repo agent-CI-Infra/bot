@@ -60,14 +60,13 @@ function managerPromptCard(manager, refresh) {
   section.append(form); return section;
 }
 
-// A rule file saved on this page (its card below) writes a section of the prompt: the editor takes the new text unless the
-// person has started editing it, and later saves use the new revision.
+// Task rule edits advance the shared configuration revision. Refresh a pristine dispatch editor without replacing its draft object.
 async function managerChanged() {
   const id = current?.id; if (!id || current.section !== 'roles' || !current.manager) return;
   try {
     const { manager } = await api(`/api/repositories/${id}/manager`); if (current?.id !== id) return;
     current.manager = manager; const held = current.managerEditor;
-    if (held && held.editor.value === held.initial) { held.editor.value = manager.prompt.content; held.initial = manager.prompt.content; current.managerDraft = { value: manager.prompt.content, revision: manager.prompt.revision, dirty: false }; }
+    if (held && held.editor.value === held.initial) { held.editor.value = manager.prompt.content; held.initial = manager.prompt.content; Object.assign(current.managerDraft, { value: manager.prompt.content, revision: manager.prompt.revision, dirty: false }); }
   } catch { /* The next visit reads it again. */ }
 }
 function eventFiltersCard(manager, refresh) {
