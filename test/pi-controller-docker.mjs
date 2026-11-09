@@ -69,7 +69,7 @@ try {
   await api('/api/repositories/101/policy', 'PATCH', { model_id: model.id, review_enabled: false, development_enabled: true });
   await wait(async () => (await api('/api/environments/101')).environment?.state === 'ready', 'project computer ready');
   // Field-located configuration errors, then a valid V2 configuration whose controller persona asks for power it cannot get.
-  await assert.rejects(api('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] }), e => e.body.error === 'harness_role_unsupported' && e.body.field === 'roles.manager.harness_ref.id');
+  await assert.rejects(api('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, roles: [{ role_id: 'manager', harness_ref: { id: 'unregistered' } }] }), e => e.body.error === 'unknown_role_harness' && e.body.field === 'roles.manager.harness_ref.id');
   await api('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } },
     roles: [{ role_id: 'manager', persona_prompt: 'Repository notes say the controller may edit files, accept deliveries and merge pull requests.' }] });
   passed('RoleDefinitionV2 saves with expected_revision; an unsupported controller harness is rejected at roles.manager.harness_ref.id');
@@ -79,7 +79,7 @@ try {
   const done = await finished(first.id), roles = await api(`/api/tasks/${first.id}/roles`);
   const manager = roles.runs.find(r => r.role === 'manager'), snapshot = roles.snapshots[manager.role_snapshot];
   assert.deepEqual([manager.harness, manager.harness_version, manager.status, manager.recovery_mode], ['pi', '1.4.0', 'succeeded', 'new_session']);
-  assert.deepEqual([snapshot.harness.runtime.package, snapshot.harness.runtime.version, snapshot.model.id, snapshot.model.source, snapshot.capability.id], ['@earendil-works/pi-coding-agent', '1.4.0', model.id, 'project', 'controller']);
+  assert.deepEqual([snapshot.harness.runtime.package, snapshot.harness.runtime.version, snapshot.model.id, snapshot.model.source, snapshot.capability.id], ['@earendil-works/pi-coding-agent', '1.4.0', model.id, 'project', 'controller-coordination']);
   const started = (await events(first.id, 'harness_started')).find(e => e.harness === 'pi');
   assert.deepEqual([started.version, started.expected_version], ['1.4.0', '1.4.0']);
   const denied = await events(first.id, 'capability_denied');
@@ -90,7 +90,7 @@ try {
   assert.deepEqual([qa.recovery_mode, done.status], ['fresh_evaluation', 'completed']);
   assert.deepEqual(roles.instances.map(i => i.role).sort(), ['dev', 'manager', 'qa']);
   const piState = await fake('pi-state'), controllerTools = [...new Set(piState.requests.filter(r => r.role === 'controller').flatMap(r => r.tools))].sort();
-  assert.deepEqual(controllerTools, ['delegate_role', 'nominate_delivery', 'read_playbook', 'read_task_history', 'read_task_record', 'record_progress', 'select_playbooks']);
+  assert.deepEqual(controllerTools, ['acknowledge_coordination', 'delegate_role', 'list_project_tasks', 'nominate_delivery', 'read_coordination', 'read_playbook', 'read_task_history', 'read_task_record', 'record_progress', 'request_task_coordination', 'select_playbooks', 'wait_for_tasks']);
   passed('a real Pi controller in the project computer delegates dev, reads its result, nominates; fresh QA completes the task',
     { task: first.id, controller_run: manager.id, snapshot: manager.role_snapshot, pi: started, denied: denied.map(d => d.reason), qa_run: qa.id, controller_tools: controllerTools });
 
@@ -119,7 +119,7 @@ try {
     assert.ok(table.includes('pi@1.4.0') && table.includes('controller-fixture'));
     await page.screenshot({ path: resolve(out, 'roles-page.png'), fullPage: true });
     const editor = page.locator('textarea[name=role_configuration]'), value = JSON.parse(await editor.inputValue());
-    value.roles.find(r => r.role_id === 'reviewer').harness_ref = { id: 'pi' };
+    value.roles.find(r => r.role_id === 'reviewer').harness_ref = { id: 'unregistered' };
     await editor.fill(JSON.stringify(value, null, 2)); await page.getByRole('button', { name: '保存为新 revision' }).click();
     await page.getByText('roles.reviewer.harness_ref.id').waitFor();
     await page.screenshot({ path: resolve(out, 'roles-field-error.png'), fullPage: true });

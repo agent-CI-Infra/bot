@@ -216,6 +216,6 @@ test('management and the roles console share V2 configuration, revision errors a
   assert.equal((await query(admin,'get_effective_config',project)).value.roles.configuration.revision,current.revision);
   const stale=await admin('/api/repositories/101/roles','PUT',{expected_revision:initial.revision,enabled:true});
   assert.equal(stale.status,409);assert.equal(stale.value.error,'role_configuration_conflict');assert.equal(stale.value.field,'expected_revision');
-  const invalid=await admin('/api/repositories/101/roles','PUT',{expected_revision:current.revision,enabled:true,roles:[{role_id:'manager',harness_ref:{id:'native'}}]});
-  assert.equal(invalid.status,400);assert.equal(invalid.value.field,'roles.manager.harness_ref.id');
+  const invalid=await admin('/api/repositories/101/roles','PUT',{expected_revision:current.revision,enabled:true,roles:[{role_id:'manager',harness_ref:{id:'unregistered'}}]});
+  assert.equal(invalid.status,400);assert.equal(invalid.value.error,'unknown_role_harness');assert.equal(invalid.value.field,'roles.manager.harness_ref.id');
 });
