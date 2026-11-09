@@ -333,6 +333,33 @@ test('Only the turn named by the start answer ends the start; a late turn id or 
  });
 });
 
+test('A failure after the start answer named the turn keeps that turn for reconciliation',async t=>{
+ // Fault injection: recording the turn's started event fails after the answer was accepted and the binding saved.
+ const failStarted=f=>f.s.db.exec(`CREATE TRIGGER fail_started BEFORE INSERT ON task_history WHEN NEW.type='harness_event' AND json_extract(NEW.data,'$.phase')='started' BEGIN SELECT RAISE(ABORT,'injected started failure'); END;`);
+ const turns=f=>[f.state().lastTurnId,f.state().lastTurnStatus,f.state().knownTurnId];
+ const resumed=async(f,c)=>{f.s.db.exec('DROP TRIGGER fail_started');f.configure({});await runRole(f.spec,'dev');
+  assert.deepEqual(f.events().filter(e=>e.type==='session_bound').at(-1).reconciled,{turnId:c,recorded:'inProgress',observed:'interrupted'});};
+ await t.test('B was the hint and has a terminal, then the answer names C',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');await runRole(f.spec,'dev');
+  failStarted(f);f.configure({FIXTURE_STALE_BEFORE:'true',FIXTURE_WAIT:'true'});
+  await assert.rejects(runRole(f.spec,'dev'),{code:'acp_execution_failed'});
+  const c=f.lines('prompts.jsonl')[2].turnId;
+  assert.ok(f.events().some(e=>e.anomaly==='hint_not_started_turn'),'B was the hint when the answer named C');
+  assert.deepEqual(turns(f),[c,'inProgress',c],'C stays the unconfirmed turn, not B/completed');
+  assert.equal(f.events().filter(e=>e.phase==='start_unconfirmed').length,0);
+  await resumed(f,c);
+ });
+ await t.test('no hint at all',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');
+  failStarted(f);f.configure({FIXTURE_WAIT:'true'});
+  await assert.rejects(runRole(f.spec,'dev'),{code:'acp_execution_failed'});
+  const c=f.lines('prompts.jsonl')[1].turnId;
+  assert.deepEqual(turns(f),[c,'inProgress',c]);
+  assert.equal(f.events().filter(e=>e.phase==='start_unconfirmed').length,0,'the accepted C is not reported as a start without an answer');
+  await resumed(f,c);
+ });
+});
+
 test('A session refused before its binding counts a restated usage increment once, on the attempt that binds',async t=>{
  const f=fixture(t);const first=await runRole(f.spec,'dev',undefined,'codex');const before=f.state();
  assert.equal(before.usage.total,110);
