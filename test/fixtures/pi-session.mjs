@@ -5,13 +5,15 @@ import {environment} from '../../runner/command.mjs';
 Object.assign(environment,{HOME:process.env.BOT_RUNNER_TEST_ROOT,TMPDIR:process.env.BOT_RUNNER_TEST_ROOT});
 export const workspace=request=>run(request,process.env.BOT_RUNNER_TEST_ROOT,undefined,process.env.BOT_RUNNER_TEST_ROOT+'/project-notes');
 export const createExtensionRuntime=()=>({});
-export const ModelRuntime={create:async()=>({getModel:()=>({})})};
+// streamSimple only serializes: the runner's tool result guard reads the payload and stops before any request.
+export const ModelRuntime={create:async()=>({getModel:()=>({}),streamSimple(_model,context,options){try{options?.onPayload?.(context);}catch{}return {result:async()=>({})};}})};
 export const estimateTokens=message=>Math.ceil(JSON.stringify(message).length/4);
 export const SessionManager={inMemory:()=>({})};
 export const SettingsManager={inMemory:()=>({})};
 export async function createAgentSession({customTools}){
-  let subscriber;
+  let subscriber;const messages=[];
   return {session:{
+    messages,agent:{state:{model:{},tools:[]},convertToLlm:async value=>value},
     subscribe(callback){subscriber=callback;},abort(){},dispose(){},getLastAssistantText:()=>'{"summary":"Done"}',
     async prompt(input){
       for(const [index,call] of JSON.parse(input).entries()){

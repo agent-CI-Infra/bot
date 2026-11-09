@@ -29,6 +29,8 @@ Pi 在仓库工具内部串行使用邮箱，其他工具仍可并行执行。�
 
 2 MiB 是邮箱及观察循环的结果上限。Pi 还会在 `github_read`、`github_search`、`read_job_log` 的结果进入会话历史之前，使用同一 SDK 序列化包含当前历史与同轮已完成工具结果的下一次模型请求，并检查既有的 `estimateTokens({role:'user',content:raw,timestamp}) + 8192 > 128000` 条件。触及该上限的结果返回 `repository_result_too_large`，让模型缩小读取范围；放得下的结果原样返回，没有新增固定字节配额。序列化检查不会发起模型请求。
 
+其他工具（`run_command`、`read_file`、记忆与任务记录查询等）的结果也在进入会话历史前检查，但只拒绝压缩也救不回来的结果。Pi 压缩会总结较早的历史，却总是保留最近一次工具调用和这一批全部结果；因此检查的请求只包含系统提示、这次工具调用和同批结果，再为压缩摘要预留两份 8192 token 的输出（历史摘要加拆分轮次的前缀摘要）。超出时模型收到 `tool_result_too_large`：命令保留 `exit_code`、`signal`、`timed_out`、`truncated` 等状态并说明命令已经执行，提示用 head、tail、grep、wc 或重定向到临时文件后分段读取；其他工具提示改读较小的部分。放得下的结果原样返回，由 Pi 照常压缩。没有这项检查时，例如一次把整个 `../notes/` 拼接输出的命令会让后续每次请求都超过上限，任务以 `agent_context_too_large` 失败，重试也会重复同一条命令。
+
 仓库回复投递保留 runner 错误的 `detail`：只有直接返回的 `agent_request_changed`，或 `runner_operation_failed` 且 `detail` 恰为 `workspace_agent_repository_tool: agent_request_changed` 时，控制面才停止投递旧回复并继续轮询。分块偏移错误等其他投递故障仍中断任务；其他邮箱操作的中断条件保持不变。
 
 读取范围扩大不改变写入范围。CI 观察仍以触发 run/attempt 为分析目标，重跑或授权变化时停止，最终 job 结论仍核对触发快照；相关运行的日志只作为带来源的旁证。检视与开发可以检查其他相关对象，但实施目标、检视结果校验、GitHub 发布授权和受控 publisher 都保留原边界。新工具固定使用 GET，不接受自选仓库、任意 URL、路径逃逸或写入方法；搜索也不能改写仓库范围。自动 Actions 失败分类与单次重试仍是既有触发流程，不由这些读取工具执行。
