@@ -1,9 +1,9 @@
-import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../test/helpers.mjs';import{RuleService}from'../dist/rules/service.js';import{Onboarding}from'../dist/onboarding/service.js';
+import{test,expect}from'@playwright/test';import{mkdirSync,rmSync}from'node:fs';import{harness,setup,account,repository,testPassword}from'../test/helpers.mjs';import{RuleService}from'../dist/rules/service.js';import{TaskEngine}from'../dist/agent/engine.js';import{Onboarding}from'../dist/onboarding/service.js';
 
 test('项目保存、规则刷新、未启动仓库、任务过程及390px导航提供可核验反馈',async({page})=>{
  const computer={cpus:2,memory_mb:4096,pids:512,tmp_mb:128,egress:true,packages:[],env:{},setup_script:'',network_policy:'internet egress'};
  const manager={call:async()=>({repository_id:'101',generation:1,state:'ready',desired:'ready',revision:1,computer})};let onboard;
- const h=await harness(undefined,manager,store=>({onboarding:onboard=new Onboarding(store)})),{admin,password}=await setup(h),a=await account(admin),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const h=await harness(undefined,manager,store=>({engine:new TaskEngine(store,manager),onboarding:onboard=new Onboarding(store)})),{admin,password}=await setup(h),a=await account(admin),errors=[];page.on('pageerror',e=>errors.push(e.message));
  try{
   await repository(admin,a.id,'101');await repository(admin,a.id,'202');await admin('/api/repositories/202/policy','PATCH',{enabled:false});
   h.store.run('INSERT INTO installed_repositories(account_id,repository_id,full_name,owner_id,owner_login,private,installed,synced_at) VALUES(?,?,?,?,?,0,1,?)',a.id,'303','fixture/new-project','10','fixture',new Date().toISOString());
@@ -19,29 +19,26 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await h.hook(a.path,a.secret,'draft',{repository:{id:101},action:'opened',pull_request:{number:10,draft:true,head:{sha:'b'.repeat(40)}}},{'X-GitHub-Event':'pull_request'});
   await h.hook(a.path,a.secret,'label',{repository:{id:101},action:'labeled',issue:{number:9}});await h.hook(a.path,a.secret,'label',{repository:{id:101},action:'labeled',issue:{number:9}});
   await page.goto(h.admin);await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
-  // The Manager page shows where each rule section's text comes from; its prompt is the console layer of the rule files.
-  const section=id=>page.locator(`[data-manager-section="${id}"]`),prompt=page.getByLabel('Manager 提示词',{exact:true}),savePrompt=page.getByRole('button',{name:'保存提示词',exact:true});
-  await page.goto(h.admin+'/#/projects/101/roles');await expect(page.locator('#project-page')).not.toContainText('项目检视指引');
-  await page.getByText(/^章节与内置文本/).click();
-  await expect(section('review.pr')).toContainText('仓库文件');await expect(section('review.issue')).toContainText('项目已写');await expect(section('labels')).toContainText('项目已写');
-  await expect(prompt).toHaveValue(/Console-only directive/);await expect(prompt).toHaveValue(/review_label: console-label/);await expect(page.locator('#project-page')).not.toContainText('[object Object]');
+  const prompt=page.getByLabel('Manager 提示词',{exact:true}),savePrompt=page.getByRole('button',{name:'保存 Manager 提示词',exact:true});
+  await page.goto(h.admin+'/#/projects/101/roles/manager');
+  await expect(page.locator('#project-page')).not.toContainText('项目检视指引');
+  await expect(prompt).toHaveValue(/Console-only directive/);await expect(prompt).toHaveValue(/review_label: console-label/);
   await prompt.fill((await prompt.inputValue()).replace('Console-only directive','Edited console directive'));await savePrompt.click();
-  await expect(page.getByText('已保存 Manager 提示词，之后的分派和新任务使用新版本',{exact:true})).toBeVisible();
-  expect(JSON.parse(h.store.get("SELECT rule_overrides FROM policies WHERE repository_id='101'").rule_overrides)['.bot/rules/issue-review.md']).toBe('Edited console directive');
-  mkdirSync('.tmp/trial-ui',{recursive:true});await page.screenshot({path:'.tmp/trial-ui/review-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/trial-ui/review-mobile.png',fullPage:true});await page.setViewportSize({width:1365,height:900});
-  // The development settings sit with the work types; a refused save says why in place.
-  const saveWork=page.getByRole('button',{name:'保存工作类型',exact:true});
-  await page.getByLabel('测试命令',{exact:true}).fill('npm test');await saveWork.click();await expect(page.getByText('已保存工作类型',{exact:true})).toBeVisible();
-  expect((await admin('/api/repositories/101')).value.policy.test_command).toBe('npm test');
-  await page.route('**/api/repositories/101/policy',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({error:'invalid_test_command'})}));await page.getByLabel('测试命令',{exact:true}).fill('invalid');await saveWork.click();await expect(page.locator('[data-overview-anchor="work-types"] [role=alert]')).toContainText('invalid_test_command');await page.unroute('**/api/repositories/101/policy');
-
+  await expect(page.getByText('已保存 Manager 提示词',{exact:true})).toBeVisible();
+  expect(JSON.parse(h.store.get("SELECT rule_overrides FROM policies WHERE repository_id='101'").rule_overrides)['.bot/rules/issue-review.md']).toBe('Console-only directive');
+  await page.route('**/api/repositories/101/manager',route=>route.fulfill({status:400,contentType:'application/json',body:'{"error":"invalid_manager_prompt"}'}));
+  await prompt.fill('Keep this failed draft');await savePrompt.click();
+  await expect(page.locator('#project-page')).toContainText('invalid_manager_prompt');await page.unroute('**/api/repositories/101/manager');
+  await prompt.fill('A complete dispatch prompt.');await savePrompt.click();
+  await expect.poll(async()=>(await admin('/api/repositories/101/manager')).value.manager.prompt.content).toBe('A complete dispatch prompt.');
+  await expect(page.getByText('已保存 Manager 提示词',{exact:true})).toBeVisible();
   await page.getByRole('link',{name:'基本设置',exact:true}).click();await expect(page.locator('#project-page')).toContainText('Visible model name');await expect(page.locator('#project-page')).toContainText('1.5 CPU · 2048 MB');
   await page.getByRole('link',{name:'机器配置',exact:true}).click();await expect(page.getByText('这里保存的是控制台配置',{exact:false})).toBeVisible();await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveValue('1.5');await expect(page.locator('#project-page')).not.toContainText('单条命令最长时间');
   // Rule file sources: reading the default branch again happens once at a time, updates the sources in place and reports a failure.
-  await page.getByRole('link',{name:'Manager 与角色',exact:true}).click();
+  await page.getByRole('link',{name:'角色',exact:true}).click();await page.locator('.role-nav').getByRole('link',{name:'Manager',exact:true}).click();
   const fileSource=path=>page.locator(`[data-rule-file="${path}"] [data-rule-source]`),refresh=page.getByRole('button',{name:'刷新默认分支文件',exact:true}),releaseSkill='.agents/skills/release-notes/SKILL.md';
   await expect(fileSource('.bot/guide.md')).toHaveText('仓库文件');await expect(fileSource('.bot/rules/issue-review.md')).toHaveText('项目控制台');await expect(refresh).toBeEnabled();
-  await page.getByText(/^章节与内置文本/).click();await expect(section('release.notes')).toContainText('内置文本');
+  await expect(page.getByText(/^章节与内置文本/)).toHaveCount(0);
   await page.evaluate(()=>window.sameRuleDocument=true);
   let release,count=0;const blocked=new Promise(resolve=>release=resolve);
   await page.route('**/api/repositories/101/rules/refresh',async route=>{count++;await blocked;rules.cache('101','b'.repeat(40),{'.bot/computer.yaml':'cpus: 1.5\nmemory_mb: 2048',[releaseSkill]:'Refreshed release notes from verified sources.'});await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify((await admin('/api/repositories/101/rules')).value)});});
@@ -50,13 +47,13 @@ test('项目保存、规则刷新、未启动仓库、任务过程及390px导航
   await expect(fileSource('.bot/guide.md')).toHaveText('内置默认');expect(await page.evaluate(()=>window.sameRuleDocument)).toBe(true);
   await page.unroute('**/api/repositories/101/rules/refresh');await page.route('**/api/repositories/101/rules/refresh',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"github_unavailable"}'}));await refresh.click();await expect(page.locator('.rule-sync [role=status]')).toContainText('github_unavailable');await page.unroute('**/api/repositories/101/rules/refresh');
   // A repository release-notes skill replaces the release notes section; a failed read of the Manager shows an error instead of a guess.
-  await page.reload();await page.getByText(/^章节与内置文本/).click();await expect(section('release.notes')).toContainText('仓库文件');
+  await page.reload();await expect(fileSource(releaseSkill)).toHaveText('仓库文件');
   await page.route('**/api/repositories/101/manager',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"github_unavailable"}'}));await page.reload();
   await expect(page.locator('#project-page')).toContainText('503 · github_unavailable');await expect(prompt).toHaveCount(0);
   await page.unroute('**/api/repositories/101/manager');await page.reload();await expect(prompt).toBeVisible();
   mkdirSync('.tmp/trial-ui',{recursive:true});await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'.tmp/trial-ui/tasks-desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   await page.locator('[data-rule-file=".bot/guide.md"]').getByRole('button',{name:'展开规则',exact:true}).click();await expect(page.locator('#project-detail .rule-card')).toBeVisible();await page.screenshot({path:'.tmp/trial-ui/tasks-mobile.png',fullPage:true});
-  for(const caption of ['基本设置','机器配置','模型','发版本','项目笔记','Manager 与角色','外部执行','成员','运行状态']){const node=page.getByRole('link',{name:caption,exact:true});await expect(node).toBeVisible();const box=await node.boundingBox();expect(box.x+box.width).toBeLessThanOrEqual(391);}
+  for(const caption of ['基本设置','机器配置','模型','发版本','项目笔记','角色','外部执行','成员','运行状态']){const node=page.getByRole('link',{name:caption,exact:true});await expect(node).toBeVisible();const box=await node.boundingBox();expect(box.x+box.width).toBeLessThanOrEqual(391);}
   for(const caption of ['使用的模型','检视','开发','规则总览'])await expect(page.getByRole('link',{name:caption,exact:true})).toHaveCount(0);
   await page.getByRole('link',{name:'模型',exact:true}).click();await expect(page.locator('.model-address').first()).toBeVisible();await page.locator('.model-address').first().scrollIntoViewIfNeeded();expect(await page.locator('.model-address').first().evaluate(node=>node.scrollWidth<=node.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/trial-ui/model-mobile.png',fullPage:true});
   await page.getByRole('button',{name:'全局设置',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'接入向导',exact:true}).click();await page.getByRole('button',{name:'1. 公网 HTTPS',exact:true}).click();await expect(page.getByRole('button',{name:'自建 HTTPS 中转',exact:true})).toHaveAttribute('aria-pressed','true');await page.getByRole('button',{name:'Cloudflare Tunnel',exact:true}).click();await expect(page.getByRole('button',{name:'Cloudflare Tunnel',exact:true})).toHaveAttribute('aria-pressed','true');

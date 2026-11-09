@@ -122,7 +122,7 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.unrouteAll({ behavior: 'wait' });
     await scope.selectOption('project:101'); await expect(message).toHaveValue('101 的草稿'); await expect(feed).toContainText('environment_not_ready');
     // Opening the project entry again reuses the same chat and keeps the current settings page.
-    await page.locator('.project-nav').getByRole('link', { name: 'Manager 与角色', exact: true }).click();
+    await page.locator('.project-nav').getByRole('link', { name: '角色', exact: true }).click();
     await page.locator('.project-nav').getByRole('link', { name: '管理对话', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/); await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
     await scope.selectOption('project:102'); await expect(message).toHaveValue('102 的草稿');

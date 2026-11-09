@@ -145,12 +145,12 @@ export const workVersion = (store: Store, repositoryId: string, id: string) => N
 export interface EventFilters {
   'issue.opened': boolean; 'issue.updated': boolean; 'issue.mention': boolean; 'issue.labels': string[]; 'issue.development_label': boolean;
   'pull_request.opened': boolean; 'pull_request.synchronize': boolean; 'pull_request.updated': boolean; 'pull_request.mention': boolean; 'pull_request.labels': string[];
-  'review.published.issue': boolean; 'review.published.pr': boolean;
+  'review.published.issue': boolean; 'review.published.pr': boolean; 'actions.run_failed': boolean;
 }
 export const dispatchEventTypes = ['issue.opened', 'issue.updated', 'issue.mention', 'issue.labeled', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated',
   'pull_request.mention', 'pull_request.labeled', 'review.published', 'release.manual', 'actions.run_failed', 'gate.manual', 'schedule.due'];
 export const filterColumns: Record<string, string> = { 'issue.opened': 'review_issues', 'issue.updated': 'review_issue_updates', 'pull_request.opened': 'review_pull_requests',
-  'pull_request.synchronize': 'review_pr_updates', 'pull_request.updated': 'review_pr_discussion' };
+  'pull_request.synchronize': 'review_pr_updates', 'pull_request.updated': 'review_pr_discussion', 'actions.run_failed': 'actions_failures_enabled' };
 const filterFlags = ['issue.mention', 'issue.development_label', 'pull_request.mention', 'review.published.issue', 'review.published.pr'];
 /** The policy API's review switches keep moving an explicit update switch with them, as they kept a saved trigger list in step. */
 export function syncEventFilters(store: Store, repositoryId: string, changes: Record<string, unknown>) {
@@ -167,7 +167,7 @@ export function eventFilters(store: Store, repositoryId: string, policy = policy
   return { 'issue.opened': issues, 'issue.updated': flag('issue.updated', issues && !!policy?.review_issue_updates), 'issue.mention': flag('issue.mention', issues), 'issue.labels': labels('issue.labels'),
     'issue.development_label': flag('issue.development_label'), 'pull_request.opened': pulls, 'pull_request.synchronize': !!policy?.review_pr_updates,
     'pull_request.updated': flag('pull_request.updated', pulls && !!policy?.review_pr_discussion), 'pull_request.mention': flag('pull_request.mention', pulls), 'pull_request.labels': labels('pull_request.labels'),
-    'review.published.issue': flag('review.published.issue'), 'review.published.pr': flag('review.published.pr') };
+    'review.published.issue': flag('review.published.issue'), 'review.published.pr': flag('review.published.pr'), 'actions.run_failed': !!policy?.actions_failures_enabled };
 }
 /** A label a person added that this project dispatches (compared without case). */
 export const labelDispatched = (filters: EventFilters, object: 'issue' | 'pull_request', label: string) =>
@@ -240,6 +240,10 @@ export function saveManager(store: Store, repositoryId: string, change: ManagerC
     for (const type of workTypes) if ((before.get(type.section)?.body ?? null) !== (after.get(type.section)?.body ?? null)) work.changed.add(type.id);
     for (const id of work.changed) work.next[id] = { ...(work.next[id] ?? {}), version: Number(work.next[id]?.version ?? 0) + 1 };
     const filters = change.events === undefined ? undefined : checkFilters(change.events);
+    if (filters?.['actions.run_failed'] !== undefined) {
+      if (work.actions !== undefined && work.actions !== filters['actions.run_failed']) fail(400, 'invalid_event_filters', 'events.actions.run_failed');
+      work.actions = filters['actions.run_failed'];
+    }
     const saved = json(policy.event_filters || '{}', {});
     // A switch saved here stands on its own: updates keep their own value instead of following the opening switch.
     if (filters) for (const [key, value] of Object.entries(filters)) {

@@ -1,28 +1,28 @@
+import { TaskEngine } from '../dist/agent/engine.js';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
 test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独立配置错误', async ({ page }) => {
-  const h = await harness(), errors = [];
+  const h = await harness(undefined, undefined, store=>({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   mkdirSync('.tmp/actions-failures', { recursive: true });
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-    await page.goto(h.admin + '/#/projects/101/roles');
+    await page.goto(h.admin + '/#/projects/101/roles/manager');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    // Actions failure handling is one of the work types: its switch, writes and status are in the work type table.
-    const row = page.locator('[data-work-type="actions.failures"]'), toggle = row.getByLabel('开启', { exact: true }), save = page.getByRole('button', { name: '保存工作类型', exact: true });
-    await expect(row).toContainText('已关闭'); await expect(toggle).not.toBeChecked();
+    // Failed Actions runs are an event source, configured alongside the other Manager event filters.
+    const toggle=page.getByLabel('接收默认分支的 Actions 失败事件',{exact:true}), save=page.getByRole('button',{name:'保存事件开关',exact:true});
+    await expect(toggle).not.toBeChecked();
     const status = page.locator('[data-actions-status]');
     await expect(status).toHaveText('未开启。');
     await toggle.check(); await save.click();
-    await expect(page.getByText('已保存工作类型', { exact: true })).toBeVisible();
+    await expect(page.getByText('已保存事件开关', { exact: true })).toBeVisible();
     expect((await admin('/api/repositories/101')).value.policy.actions_failures_enabled).toBe(1);
     expect((await admin('/api/repositories/101')).value.policy.development_enabled).toBe(0);
-    await expect(toggle).toBeChecked(); await expect(row).toContainText('运行中');
+    await expect(toggle).toBeChecked();
     await expect(status).toContainText('配置检查通过后');
-    await expect(row.getByLabel('重跑失败的 Actions 运行', { exact: true })).toBeChecked(); await expect(row.getByLabel('提报 Issue', { exact: true })).toBeChecked();
     h.store.run("UPDATE actions_failure_scans SET error='actions_workflow_run_subscription_missing'");
     await expect(status).toContainText('此仓库使用的 App 安装未订阅 workflow_run', { timeout: 10000 }); await expect(status).toContainText('本功能已停止写入');
     await status.scrollIntoViewIfNeeded(); await page.screenshot({ path: '.tmp/actions-failures/desktop.png' });
@@ -32,10 +32,9 @@ test('项目默认关闭 Actions 失败处理，保存开关并清晰显示独�
     await page.setViewportSize({ width: 1440, height: 1000 });
     // Saving the Actions switch leaves the review work types alone.
     await toggle.uncheck(); await save.click();
-    await expect(page.getByText('已保存工作类型', { exact: true })).toBeVisible();
+    await expect(page.getByText('已保存事件开关', { exact: true })).toBeVisible();
     expect((await admin('/api/repositories/101')).value.policy.actions_failures_enabled).toBe(0);
     await expect(toggle).not.toBeChecked();
-    await expect(page.locator('[data-work-type="review.issue"]')).toContainText('项目的检视开关已关');
     await expect(page.getByText('此仓库使用的 App 安装未订阅 workflow_run', { exact: false })).not.toBeVisible();
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
