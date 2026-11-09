@@ -23,6 +23,7 @@ a.status-link:hover{text-decoration:underline}
 
 .github-login-callback { display: block; overflow-wrap: anywhere; white-space: normal; }
 /* Management chat is mounted once per login, outside the pages that navigation replaces. */
+body:has(#management-launcher) main{padding-bottom:calc(96px + env(safe-area-inset-bottom))}
 .management-launcher{position:fixed;right:24px;bottom:24px;z-index:45;display:flex;align-items:center;gap:10px;padding:11px 18px 11px 11px;border:1px solid #286b73;border-radius:30px;background:#163f50;color:#fff;box-shadow:0 6px 24px #123d4e30;text-align:left}
 .management-launcher-icon{display:grid;place-items:center;width:36px;height:36px;border-radius:50%;background:#ffffff18;color:#f4cc82;font-size:23px}.management-launcher-label{display:grid;gap:2px}.management-launcher-label strong{font-size:14px}.management-launcher-label small{font-size:11px;color:#c5dce1;font-weight:400}.management-launcher.has-update .management-launcher-icon{background:#f4cc82;color:#163f50}
 body:has(#workflow-assistant:not([hidden])) .management-launcher{right:auto;left:24px}
