@@ -4,7 +4,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { RuleService } from '../dist/rules/service.js';
 
-test('Manager 页按需编辑规则章节与工作类型，模型独立管理且项目不能修改共享模型', async ({ page }) => {
+test('角色详情查看规则来源，模型独立管理且项目不能修改共享模型', async ({ page }) => {
   test.setTimeout(60000);
   const h = await harness(undefined, undefined, store => ({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));

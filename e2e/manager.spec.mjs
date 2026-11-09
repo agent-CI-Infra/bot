@@ -6,8 +6,8 @@ import { RuleService } from '../dist/rules/service.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
 import { queueWebhook } from '../dist/review/queue.js';
 
-// The 「Manager 与角色」 page replaces the workflows page: the Manager prompt, the work types, the events and the decisions.
-test('the Manager page edits the prompt, work types and events, lists decisions and opens from old workflow addresses', async ({ page }) => {
+// The Manager role page edits a complete prompt and lists event filters and decisions.
+test('the Manager role edits its complete prompt and events, lists decisions and opens from old workflow addresses', async ({ page }) => {
   test.setTimeout(90000);
   const h = await harness(undefined, undefined, store => ({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));

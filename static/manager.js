@@ -8,7 +8,7 @@ const managerErrors = {
 };
 // api() reports "<status> · <code>"; a known code gets its explanation.
 const managerError = err => { const code = /· (\w+)$/.exec(err.message)?.[1] ?? err.message; return managerErrors[code] ? `${managerErrors[code]}（${code}）` : err.message; };
-const eventCaptions = [['issue.opened', 'Issue 打开'], ['issue.updated', 'Issue 修改或可信评论'], ['issue.mention', 'Issue 评论提到 bot'], ['issue.development_label', '有人加上开发标签'],
+const eventCaptions = [['actions.run_failed', '接收默认分支的 Actions 失败事件'], ['issue.opened', 'Issue 打开'], ['issue.updated', 'Issue 修改或可信评论'], ['issue.mention', 'Issue 评论提到 bot'], ['issue.development_label', '有人加上开发标签'],
   ['pull_request.opened', 'PR 打开或 Ready for review'], ['pull_request.synchronize', 'PR 推送新提交'], ['pull_request.updated', 'PR 修改、讨论或检视'], ['pull_request.mention', 'PR 评论提到 bot'],
   ['review.published.issue', 'Issue 检视发布（可能开始开发）'], ['review.published.pr', 'bot PR 检视发布（可能修订 PR）']];
 const dispatchEventNames = { 'issue.opened': 'Issue 打开', 'issue.updated': 'Issue 更新', 'issue.mention': 'Issue 提及', 'issue.labeled': 'Issue 加标签', 'pull_request.opened': 'PR 打开',
@@ -77,7 +77,9 @@ function eventFiltersCard(manager, refresh) {
   for (const [key, caption] of eventCaptions) boxes.append(checkbox('event:' + key, events[key], caption));
   const labels = (key, caption) => field(caption, input(key, events[key].join(', '), { placeholder: '逗号分隔；留空表示加标签不交给 Manager' }));
   const submit = element('button', '保存事件开关'), buttons = element('div', '', 'actions form-actions'); submit.type = 'submit'; buttons.append(submit);
-  form.append(boxes, labels('issue.labels', '有人给 Issue 加上这些标签时'), labels('pull_request.labels', '有人给 PR 加上这些标签时'), message, buttons);
+  const status = element('p', '', 'muted'); status.dataset.actionsStatus = '';
+  if (current.policy.actions_failures_enabled) showActionsFailureStatus(status, current.actionsFailures); else status.textContent = '未开启。';
+  form.append(boxes, status, labels('issue.labels', '有人给 Issue 加上这些标签时'), labels('pull_request.labels', '有人给 PR 加上这些标签时'), message, buttons);
   form.addEventListener('submit', async event => {
     event.preventDefault(); submit.disabled = true; message.textContent = '';
     const list = key => form.elements[key].value.split(',').map(label => label.trim()).filter(Boolean);
@@ -123,10 +125,10 @@ function dispatchEntry(event, reload) {
 // Where the rule sections' text comes from: repository files on the default branch replace the console layer.
 function managerRulesCard() {
   const section = card('规则文件来源');
-  // The known rule files first, then the repository's other files (its skills), except the release notes Skill of its own page.
-  const paths = [...ruleFiles.map(([rule]) => rule), ...(current.rules?.files || []).map(file => file.path).filter(path => !ruleFiles.some(([rule]) => rule === path) && path !== releaseNotesSkill)];
+  // Include repository skills here as well: the complete prompt editor has no separate per-section source list.
+  const paths = [...ruleFiles.map(([rule]) => rule), ...(current.rules?.files || []).map(file => file.path).filter(path => !ruleFiles.some(([rule]) => rule === path))];
   section.dataset.overviewAnchor = 'rule-sources';
-  section.append(note('优先级是内置文本 → Manager 提示词里的章节 → 默认分支仓库文件，每层整份替换。仓库 skill 和虚拟电脑配置也来自默认分支。'), ruleSync());
+  section.append(note('任务规则的优先级是内置默认 → 项目控制台覆盖 → 默认分支仓库文件，每层整份替换。仓库 skill 和虚拟电脑配置也来自默认分支。'), ruleSync());
   const { table, body } = projectTable(['文件', '作用', '规则来源', '操作'], '规则文件');
   for (const path of paths) {
     const row = document.createElement('tr'), [, purpose, task, target] = ruleInfo(path); row.dataset.ruleFile = path;
@@ -143,7 +145,7 @@ function migrationCard(migration) {
   const section = card('升级迁移记录'), report = migration.report || {};
   section.dataset.overviewAnchor = 'manager-migration';
   section.append(note(`升级时（${timestamp(migration.migrated_at)}）原来的工作流配置迁入了 Manager 提示词第 ${report.manager_revision || 1} 版和项目配置；原工作流记录保存在迁移档案里。`),
-    facts([['迁入的章节', (report.sections || []).join('、') || '无（全部使用内置文本）'], ['原自定义工作流', (report.custom_workflows || []).map(w => `${w.name}（${w.enabled ? '开' : '关'}）`).join('、') || '无']]));
+    facts([['保留的任务规则', (report.sections || []).join('、') || '无额外覆盖'], ['原自定义工作流', (report.custom_workflows || []).map(w => `${w.name}（${w.enabled ? '开' : '关'}）`).join('、') || '无']]));
   if (report.warnings?.length) { const list = element('ul', '', 'history'); for (const warning of report.warnings) list.append(element('li', warning)); section.append(element('h4', '需要留意'), list); }
   return section;
 }
