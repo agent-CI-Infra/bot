@@ -4,7 +4,7 @@
 
 ## 配置与权限
 
-在后台「消息渠道」配置项目所属 GitHub 组织、App ID、安装 tenant_key、允许的操作者 tenant_key 和机器人 open_id。组织配置需要当前租户的 `config.write`，项目群映射需要该项目的 `config.write`；项目权限仍由身份服务决定。凭据写入独立密封记录，连接只保存引用；后台不回显密钥。必须配置稳定的 `BOT_ADMIN_ORIGIN`，绑定链接和结果链接才有可信后台地址。
+在后台「消息渠道」配置项目所属 GitHub 组织、App ID、安装 tenant_key、允许的操作者 tenant_key 和机器人 open_id。组织配置需要当前租户的 `config.write`，项目群映射需要该项目的 `config.write`；项目权限仍由身份服务决定。凭据写入独立密封记录，连接只保存引用；后台不回显密钥。绑定和结果链接需要稳定的后台地址：优先使用「全局设置 → 接入向导」保存的控制台地址，未保存时使用部署的 `BOT_ADMIN_ORIGIN`。向导地址用于生成链接并作为额外合法 Origin，不会取消部署地址的写入许可。
 
 SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自建可选择官方 SDK 长连接。HTTP 原始请求体按飞书规则验签，校验五分钟时间窗、Verification Token、App ID 和安装 tenant_key，支持 Encrypt Key 的 AES-256-CBC 解密。长连接由服务端持有应用凭据认证，两种方式复用同一持久收件队列、来源检查和去重。
 

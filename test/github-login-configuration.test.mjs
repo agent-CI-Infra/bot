@@ -10,6 +10,28 @@ import { session } from '../dist/app/auth.js';
 import { authorize, listEffectiveScopes, resolveActor } from '../dist/identity/authorization.js';
 
 const path = '/api/onboarding/github-login';
+test('deployment origins remain writable and can log in after a wrong wizard origin, with login enabled or disabled', async t => {
+  for (const adminOrigin of [undefined, 'https://deployment.invalid']) {
+    const h = await harness(t, undefined, { adminOrigin }), { admin, password } = await setup(h);
+    const original = adminOrigin || h.admin, headers = { Origin: original };
+    for (const enabled of [false, true]) for (const wrong of ['https://typo.invalid', h.admin.replace('http:', 'https:')]) {
+      const config = { enabled, client_id: 'fixture', client_secret: testPassword(), admin_origin: wrong };
+      assert.equal((await admin(path, 'PUT', config, headers)).status, 200);
+      assert.equal((await admin(path, 'PUT', { enabled, admin_origin: h.admin }, headers)).status, 200);
+      assert.equal((await admin(path, 'PUT', config, headers)).status, 200);
+      const recovery = h.client(), login = await recovery('/api/auth/login', 'POST', { username: 'administrator', password }, headers);
+      assert.equal(login.status, 200);
+      assert.equal(login.headers.get('set-cookie').includes('; Secure'), !!adminOrigin);
+      assert.equal((await recovery(path, 'PUT', { enabled, admin_origin: 'https://new.invalid' }, headers)).status, 200);
+      assert.equal((await recovery('/api/settings', 'PATCH', { task_concurrency: 2 }, headers)).status, 200);
+      assert.equal((await recovery('/api/settings', 'PATCH', { task_concurrency: 3 }, { Origin: 'https://new.invalid', Host: 'new.invalid' })).status, 200);
+      assert.equal((await recovery('/api/settings', 'PATCH', { task_concurrency: 4 }, { Origin: 'https://other.invalid' })).value.error, 'origin_forbidden');
+      const aliasLogin = await h.client()('/api/auth/login', 'POST', { username: 'administrator', password }, { Origin: 'https://new.invalid', Host: 'new.invalid' });
+      assert.equal(aliasLogin.status, 200); assert.match(aliasLogin.headers.get('set-cookie'), /; Secure/);
+    }
+  }
+});
+
 test('super administrators configure login at runtime, preserve a write-only secret and retain configuration after restart', async t => {
   const h = await harness(t), { admin, password } = await setup(h), origin = h.admin, secret = testPassword();
   assert.equal((await admin('/api/auth/github/status')).value.enabled, false);
@@ -87,11 +109,18 @@ test('new App credentials are reused privately by the wizard and an explicit cle
     id: 123, slug: 'new-app', pem, webhook_secret: testPassword(), client_id: 'Iv1.new-app', client_secret: secret,
   })) }) }));
   const { admin } = await setup(h); onboarding.save('public', { origin: 'https://hooks.invalid' });
+  await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app', client_secret: testPassword(), admin_origin: h.admin });
   const manifest = await admin('/api/onboarding/manifest', 'POST', { organization: 'fixture', name: 'new-app' });
   const state = new URL(manifest.value.create_url).searchParams.get('state'); await onboarding.callback('manifest-code', state);
   const before = (await admin('/api/onboarding')).value.github_login;
   assert.equal(before.client_id, 'Iv1.new-app'); assert.equal(before.secret_configured, true); assert.equal(before.enabled, false);
+  assert.equal(before.source, 'app'); assert.equal(before.account_id, onboarding.saved('app').account_id);
+  const clientId = async () => new URL((await fetch(h.admin + '/auth/github/start', { redirect: 'manual' })).headers.get('location')).searchParams.get('client_id');
+  assert.equal(await clientId(), 'Iv1.old-app');
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app' })).value.error, 'github_login_app_changed');
   assert.equal((await admin(path, 'PUT', { enabled: true })).status, 200);
+  assert.equal(await clientId(), 'Iv1.new-app');
+  assert.equal(h.store.secrets.open(h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value, 'identity.github_login').client_secret, secret);
   const visible = JSON.stringify([(await admin('/api/onboarding')).value, (await admin('/api/accounts')).value]);
   assert.ok(!visible.includes(secret)); assert.ok(!visible.includes(pem));
   await admin(path, 'PUT', { enabled: false, revoke_secret: true });
@@ -99,6 +128,25 @@ test('new App credentials are reused privately by the wizard and an explicit cle
   const credentials = h.store.secrets.open(row.credentials, 'account:' + row.id);
   assert.equal(credentials.oauth_client_secret, undefined); assert.equal(credentials.private_key, pem);
   assert.equal((await admin('/api/onboarding')).value.github_login.secret_configured, false);
+});
+
+test('a new App without OAuth credentials requires its own Client ID and never reuses the old App secret', async t => {
+  const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+  let onboarding;
+  const h = await harness(t, undefined, store => ({ onboarding: onboarding = new Onboarding(store, { fetcher: async () => new Response(JSON.stringify({
+    id: 456, slug: 'unconfigured-app', pem, webhook_secret: testPassword(),
+  })) }) }));
+  const { admin } = await setup(h); onboarding.save('public', { origin: 'https://hooks.invalid' });
+  await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app', client_secret: testPassword(), admin_origin: h.admin });
+  const manifest = await admin('/api/onboarding/manifest', 'POST', { organization: 'fixture', name: 'unconfigured-app' });
+  await onboarding.callback('manifest-code', new URL(manifest.value.create_url).searchParams.get('state'));
+  const draft = (await admin('/api/onboarding')).value.github_login;
+  assert.equal(draft.client_id, ''); assert.equal(draft.secret_configured, false); assert.equal(draft.enabled, false);
+  assert.equal((await admin(path, 'PUT', { enabled: true })).value.error, 'github_client_id_required');
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app' })).value.error, 'github_login_secret_required');
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.new-app', client_secret: testPassword() })).status, 200);
+  const started = await fetch(h.admin + '/auth/github/start', { redirect: 'manual' });
+  assert.equal(new URL(started.headers.get('location')).searchParams.get('client_id'), 'Iv1.new-app');
 });
 
 test('disabling login during callback permission verification cannot issue a new session', async t => {

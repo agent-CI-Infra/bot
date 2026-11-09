@@ -91,16 +91,20 @@ function githubLoginForm(saved, app){
     enabled=checkbox('enabled',!!saved.enabled,'启用 GitHub 账号登录'),
     revoke=checkbox('revoke_secret',false,'清除已保存的 Client secret，并停用 GitHub 登录'),
     callback=element('code','','github-login-callback');
+  const loginEnabled=enabled.querySelector('input');
+  const requireClient=()=>{client.required=loginEnabled.checked;};loginEnabled.addEventListener('change',requireClient);requireClient();
   const preview=()=>{try{callback.textContent=new URL(origin.value).origin+'/auth/github/callback';}catch{callback.textContent='请先填写控制台地址';}};
   origin.addEventListener('input',preview);preview();
-  revoke.querySelector('input').addEventListener('change',e=>{if(e.target.checked)enabled.querySelector('input').checked=false;});
+  revoke.querySelector('input').addEventListener('change',e=>{if(e.target.checked)loginEnabled.checked=false;requireClient();});
   const section=wizardForm('GitHub 账号登录',[
-    note(app?`使用当前 App：${app.slug}（App ID ${app.app_id}）。Client ID 是该 App 的另一个字段。`:'可先配置用户登录；项目管理能力仍需有效的 App 安装和授权。'),
+    note(app?`所选 App：${app.slug}（App ID ${app.app_id}）。Client ID 是该 App 的另一个字段。`:'可先配置用户登录；项目管理能力仍需有效的 App 安装和授权。'),
+    ...(app&&saved.source==='app'?[note('所选 App 的登录配置尚未保存。保存并启用后才会切换；如已有生效的登录配置，它在保存前继续使用。'),
+      ...(!saved.client_id?[note('此 App 尚无可复用的 Client ID 和 Secret。请从这个新 App 的 General 页面复制 Client ID，并填写它的 Client secret；不能沿用旧 App 的值。')]:[])]:[]),
     note('保存后立即生效，重启后保留。已有环境变量配置可继续使用；在这里保存后，以向导配置为准。'),
     enabled,field('Client ID',client),field('Client secret（只保存，不回读）',secret),
     note(saved.secret_configured?'已保存登录凭据，留空可保留；新建 App 的返回凭据可以直接复用。':'在现有 GitHub App 的设置中获取 Client ID，并生成 Client secret。用户不需要自己创建 App。'),
     field('控制台访问地址',origin),
-    note('多人使用时准备独立的 HTTPS 管理域名，反向代理到管理服务 8792；Webhook 域名继续连接 8791。本机可用 http://127.0.0.1:8792。证书和反向代理由部署方配置；修改访问地址后，请从新地址重新登录。'),
+    note('多人使用时准备独立的 HTTPS 管理域名，反向代理到管理服务 8792；Webhook 域名继续连接 8791。本机可用 http://127.0.0.1:8792。证书和反向代理由部署方配置；填错或尚未就绪时，仍可在原部署地址修改和登录。'),
     element('p','把下面的用户授权 Callback URL 加到同一个 GitHub App，保留已有 Setup URL：'),callback,
     note('组织 owner 识别需要 Members 只读权限；新增权限须由安装目标批准。登录按钮会发起 OAuth，安装时自动请求授权可保持关闭。'),
     note('首次 GitHub 登录会创建独立账号；已有本地账号应先登录后绑定。项目与组织管理员不会获得系统超级管理员权限。'),revoke,
@@ -112,7 +116,7 @@ function githubLoginForm(saved, app){
       const code=err.message.replace(/^\d+\s*·\s*/,'');
       throw new Error(({github_client_id_required:'请填写同一个 GitHub App 的 Client ID。',github_login_secret_required:'启用前需要保存 Client secret。',
         github_login_https_required:'控制台地址需要 HTTPS；本机测试可使用 localhost 或 127.0.0.1。',invalid_admin_origin:'请填写完整的控制台 origin，不含路径、查询或账号密码。',
-        invalid_github_client_id:'Client ID 格式无效，请从 GitHub App 设置复制。'})[code]||err.message);
+        invalid_github_client_id:'Client ID 格式无效，请从 GitHub App 设置复制。',github_login_app_changed:'所选 App 已更换，请刷新后保存这个 App 的登录凭据。'})[code]||err.message);
     }
     secret.value='';await start();notice('message',payload.enabled?'GitHub 登录已启用，用户可从登录页授权登录。':'已保存；当前使用本地账号登录。');return false;
   });

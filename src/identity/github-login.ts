@@ -40,11 +40,16 @@ export class GitHubLogin {
     const credentials = row ? this.store.secrets.open(row.credentials, `account:${id}`) : {};
     return { id: row ? id : null, client_id: String(credentials.oauth_client_id || ''), client_secret: String(credentials.oauth_client_secret || '') };
   }
-  private defaults(origin = ''): Configuration {
-    const environment = this.environment(), app = this.selectedApp();
-    return { enabled: !!environment, client_id: environment?.clientId || app.client_id,
+  private configuration(origin = ''): { config: Configuration; previous: Configuration; source: string } {
+    const stored = this.stored(), environment = stored ? undefined : this.environment(), app = this.selectedApp();
+    const previous = stored?.config || { enabled: !!environment, client_id: environment?.clientId || app.client_id,
       client_secret: environment?.clientSecret || app.client_secret, account_id: app.id,
       admin_origin: environment ? new URL(environment.redirectUri).origin : this.options.defaultOrigin || origin };
+    // Selecting an App prepares a draft; the active login changes only when an administrator saves it.
+    if (app.id && (stored ? previous.account_id !== app.id : environment && environment.clientId !== app.client_id))
+      return { previous, source: 'app', config: { ...previous, enabled: false, account_id: app.id,
+        client_id: app.client_id, client_secret: app.client_secret } };
+    return { config: previous, previous, source: stored ? 'wizard' : environment ? 'deployment' : 'app' };
   }
   get adminOrigin(): string | undefined { return this.stored()?.config.admin_origin || this.options.defaultOrigin || (this.environment() ? new URL(this.environment()!.redirectUri).origin : undefined); }
   get identity(): GitHubIdentity | undefined {
@@ -71,22 +76,23 @@ export class GitHubLogin {
     return this.cached.identity;
   }
   view(origin: string): Json {
-    const stored = this.stored(), config = stored?.config || this.defaults(origin);
+    const { config, source } = this.configuration(origin);
     return { enabled: config.enabled, client_id: config.client_id, secret_configured: !!config.client_secret,
       admin_origin: config.admin_origin, callback_url: config.admin_origin ? config.admin_origin + '/auth/github/callback' : '',
-      account_id: config.account_id, source: stored ? 'wizard' : this.environment() ? 'deployment' : 'app' };
+      account_id: config.account_id, source };
   }
   update(user: Actor, input: Json, origin: string): Json {
     superAdmin(user);
     fields(input, ['enabled', 'client_id', 'client_secret', 'admin_origin', 'revoke_secret']);
     if (typeof input.enabled !== 'boolean' || input.revoke_secret !== undefined && typeof input.revoke_secret !== 'boolean') return fail(400, 'invalid_github_login_configuration');
-    const old = this.stored()?.config || this.defaults(origin), app = this.selectedApp();
-    const id = input.client_id === undefined ? old.client_id : typeof input.client_id === 'string' ? input.client_id.trim() : fail(400, 'invalid_github_client_id');
+    const { config: draft, previous: old } = this.configuration(origin), app = this.selectedApp();
+    const id = input.client_id === undefined ? draft.client_id : typeof input.client_id === 'string' ? input.client_id.trim() : fail(400, 'invalid_github_client_id');
     if (id && !/^[a-zA-Z0-9._-]{1,200}$/.test(id)) return fail(400, 'invalid_github_client_id');
+    if (draft.account_id !== old.account_id && draft.client_id && id !== draft.client_id) return fail(409, 'github_login_app_changed');
     if (input.client_secret !== undefined && (typeof input.client_secret !== 'string' || input.client_secret.length > 32768)) return fail(400, 'invalid_github_client_secret');
     const supplied = typeof input.client_secret === 'string' ? input.client_secret.trim() : '';
     if (input.revoke_secret && supplied) return fail(400, 'conflicting_credentials');
-    const secret = input.revoke_secret ? '' : supplied || (id === old.client_id ? old.client_secret : id === app.client_id ? app.client_secret : '');
+    const secret = input.revoke_secret ? '' : supplied || (id === draft.client_id ? draft.client_secret : id === app.client_id ? app.client_secret : '');
     const config: Configuration = { enabled: input.enabled, client_id: id, client_secret: secret, account_id: app.id,
       admin_origin: loginOrigin(input.admin_origin === undefined ? old.admin_origin || origin : input.admin_origin) };
     if (config.enabled && (!id || !secret)) return fail(400, !id ? 'github_client_id_required' : 'github_login_secret_required');
