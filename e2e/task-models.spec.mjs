@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { TaskEngine } from '../dist/agent/engine.js';
 import { mkdirSync, rmSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { RuleService } from '../dist/rules/service.js';
 
 test('Manager 页按需编辑规则章节与工作类型，模型独立管理且项目不能修改共享模型', async ({ page }) => {
   test.setTimeout(60000);
-  const h = await harness(), errors = [];
+  const h = await harness(undefined, undefined, store => ({engine:new TaskEngine(store,{call:async()=>null})})), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   mkdirSync('.tmp/task-overview', { recursive: true });
   try {
@@ -29,47 +30,14 @@ test('Manager 页按需编辑规则章节与工作类型，模型独立管理且
     await page.getByRole('button', { name: '登录', exact: true }).click();
     // The old task overview address opens the Manager page, which replaced the workflows page.
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
-    await expect(page.getByRole('link', { name: 'Manager 与角色', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('link', { name: '角色', exact: true })).toHaveAttribute('aria-current', 'page');
     for (const caption of ['使用的模型', '检视', '开发', '规则总览', '任务总览', '工作流']) await expect(page.getByRole('link', { name: caption, exact: true })).toHaveCount(0);
-    const work = id => page.locator(`[data-work-type="${id}"]`);
-    await expect(page.locator('[data-work-type]')).toHaveCount(10);
-    for (const [kind, title] of [['review.issue', '检视 Issue'], ['review.pr', '检视 PR'], ['development.issue', '开发 Issue'], ['development.pr', '跟进 bot PR'], ['release.observe', 'CI 观察'], ['release.notes', '发行说明'], ['actions.failures', 'Actions 失败处理']]) {
-      await expect(work(kind)).toContainText(title);
-    }
+    await expect(page.getByRole('heading',{name:'角色概览',exact:true})).toBeVisible();
+    await expect(page.locator('[data-work-type]')).toHaveCount(0);
+    await page.locator('.role-nav').getByRole('link',{name:'Manager',exact:true}).click();
     await expect(page.locator('[data-rule-file=".bot/guide.md"] [data-rule-source]')).toHaveText('仓库文件');
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    await page.screenshot({ path: '.tmp/task-overview/desktop.png', fullPage: true });
-    await page.setViewportSize({ width: 390, height: 844 });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: '.tmp/task-overview/mobile.png', fullPage: true });
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    // A work type's switch and the development test command are saved from the work type table; a rule section from the prompt.
-    const saveWork = async () => { await page.getByRole('button', { name: '保存工作类型', exact: true }).click(); await expect(page.getByText('已保存工作类型', { exact: true })).toBeVisible(); };
-    await expect(work('review.issue')).toContainText('项目的检视开关已关');
-    await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true }); await page.reload();
-    await expect(work('review.issue')).toContainText('运行中');
-    await work('review.issue').getByLabel('开启', { exact: true }).uncheck(); await saveWork();
-    await expect(work('review.issue')).toContainText('已关闭');
-    expect((await policy()).review_enabled).toBe(1);
-    await page.getByLabel('测试命令', { exact: true }).fill('npm test'); await saveWork();
-    expect((await policy()).test_command).toBe('npm test');
-    await page.getByText(/^章节与内置文本/).click();
-    const pr = page.locator('[data-manager-section="review.pr"]');
-    await expect(pr).toContainText('内置文本'); await expect(pr).toContainText('.bot/rules/pr-review.md');
-    const prompt = page.getByLabel('Manager 提示词', { exact: true });
-    await prompt.fill('## 检视 PR `review.pr`\n\nConsole PR review rule\n'); await page.getByRole('button', { name: '保存提示词', exact: true }).click();
-    await page.getByText(/^章节与内置文本/).click(); await expect(pr).toContainText('项目已写');
-    await page.screenshot({ path: '.tmp/task-overview/rules-desktop.png', fullPage: true });
-    await page.reload();
-    await expect(prompt).toHaveValue(/Console PR review rule/);
-    await page.getByText(/^章节与内置文本/).click();
-    await expect(page.locator('[data-manager-section="release.notes"]')).toContainText('.agents/skills/release-notes/SKILL.md');
-    for (const legacy of ['review', 'development', 'rules', 'tasks', 'workflows']) {
-      await page.goto(h.admin + '/#/projects/101/' + legacy);
-      await expect(page).toHaveURL(/#\/projects\/101\/roles$/);
-      if (legacy === 'rules') { await expect(page.getByRole('button', { name: '刷新默认分支文件', exact: true })).toBeVisible(); await expect(page.getByRole('dialog')).toHaveCount(0); }
-    }
-    await page.locator('[data-rule-file=".bot/guide.md"]').getByRole('button', { name: '展开规则', exact: true }).click();
+    await page.locator('[data-rule-file=".bot/guide.md"]').getByRole('button',{name:'展开规则',exact:true}).click();
     await expect(page.locator('[data-rule-path=".bot/guide.md"]')).toContainText('Repository behavior guide');
     await page.goto(h.admin + '/#/projects/101/model');
     await expect(page.getByRole('dialog')).toHaveCount(0);

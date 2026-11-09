@@ -116,14 +116,15 @@ try {
     await page.goto(base + '/#/projects/101/roles'); await page.getByText('角色解析结果').first().waitFor({ state: 'attached' }).catch(() => {});
     await page.getByRole('table', { name: '角色解析结果' }).waitFor();
     const table = await page.getByRole('table', { name: '角色解析结果' }).innerText();
-    assert.ok(table.includes('pi@1.4.0') && table.includes('controller-fixture'));
+    assert.ok(table.includes('Pi') && table.includes('controller-fixture'));
     await page.screenshot({ path: resolve(out, 'roles-page.png'), fullPage: true });
-    const editor = page.locator('textarea[name=role_configuration]'), value = JSON.parse(await editor.inputValue());
-    value.roles.find(r => r.role_id === 'reviewer').harness_ref = { id: 'unregistered' };
-    await editor.fill(JSON.stringify(value, null, 2)); await page.getByRole('button', { name: '保存为新 revision' }).click();
-    await page.getByText('roles.reviewer.harness_ref.id').waitFor();
-    await page.screenshot({ path: resolve(out, 'roles-field-error.png'), fullPage: true });
-    passed('the 角色 console page shows pi@1.4.0 for the controller and reports an invalid edit at roles.reviewer.harness_ref.id');
+    await page.locator('.role-nav').getByRole('link', {name:'Reviewer',exact:true}).click();
+    await page.getByLabel('预算方式',{exact:true}).selectOption('bounded');
+    await page.getByLabel('单次运行最多模型轮数',{exact:true}).fill('1');
+    await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
+    await page.getByText(/roles.reviewer.budget_policy_ref.max_turns/).waitFor();
+    await page.screenshot({path:resolve(out,'roles-field-error.png'),fullPage:true});
+    passed('the role forms show the resolved model and report invalid budget limits');
   } finally { await browser.close(); }
 } catch (error) {
   try {

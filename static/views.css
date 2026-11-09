@@ -284,3 +284,25 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
   .project-table[aria-label="工作类型"] tr{padding:8px 0;border-bottom:1px solid #d7e3e8}.project-table[aria-label="工作类型"] td{border:0;padding:4px 0}
   .project-table[aria-label="工作类型"] td:not(:first-child)::before{content:attr(data-label);display:block;font-size:12px;color:#637c89;margin-bottom:2px}}
 
+
+/* Role navigation stays readable beside wide editable tables and on narrow screens. */
+.role-nav { display:flex; flex-wrap:wrap; gap:.4rem; margin-bottom:1rem; }
+.role-nav a { padding:.5rem .8rem; border:1px solid var(--border, #d8dee9); border-radius:6px; text-decoration:none; }
+.role-nav a[aria-current="page"] { font-weight:700; background:var(--surface-alt, #edf2fa); }
+.roles-page .project-table td { min-width:150px; vertical-align:top; }
+.roles-page input:not([type="checkbox"]), .roles-page select, .roles-page textarea { box-sizing:border-box; max-width:100%; }
+.roles-page .side-card > label { display:flex; flex-direction:column; gap:.3rem; margin:.75rem 0; }
+.roles-page .side-card > label.check { flex-direction:row; }
+.role-capabilities { font-size:.85rem; overflow-wrap:anywhere; }
+.role-choices { display:flex; flex-wrap:wrap; gap:.7rem; margin:.8rem 0; }
+.role-stage, .role-skill { min-width:0; margin:.8rem 0; }
+.role-stage > label, .role-skill > label { display:flex; flex-direction:column; margin:.6rem 0; }
+.role-save { position:sticky; bottom:0; padding:.8rem 0; background:var(--surface, white); }
+
+@media(max-width:850px) {
+  .roles-page .project-table thead { display:none; }
+  .roles-page .project-table, .roles-page .project-table tbody, .roles-page .project-table tr, .roles-page .project-table td { display:block; width:auto; min-width:0; }
+  .roles-page .project-table tr { padding:.8rem 0; border-bottom:1px solid #d8dee9; }
+  .roles-page .project-table td { border:0; }
+  .roles-page .project-table td::before { content:attr(data-label); display:block; font-weight:600; margin-bottom:.3rem; }
+}

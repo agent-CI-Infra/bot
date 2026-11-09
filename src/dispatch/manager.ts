@@ -25,14 +25,16 @@ const tool = { type: 'function', function: { name: 'dispatch', description: 'Rec
     writes: { type: 'array', items: { type: 'string' }, description: 'Only with create, optional: keep only these of the offered writes for the created tasks' } } } } };
 const clip = (text: string, limit: number) => text.length > limit ? text.slice(0, limit) + '\n…（已截断）' : text;
 
-/** The Manager prompt as the dispatch call reads it: preamble and dispatch section first, then the project's other sections. */
+/** The complete editable dispatch prompt. Older projects retain their instructions until this text is first saved. */
 export function dispatchPrompt(store: Store, repositoryId: string) {
+  const saved = store.get('SELECT content FROM manager_dispatch_prompts WHERE repository_id=? ORDER BY revision DESC LIMIT 1', repositoryId);
+  if (saved) return String(saved.content);
   const parsed = parseSections(managerPrompt(store, repositoryId).content), parts: string[] = [];
   if (parsed.preamble) parts.push(parsed.preamble);
-  parts.push(`## ${parsed.sections.get('dispatch')?.title ?? section('dispatch')!.title} \`dispatch\`\n${parsed.sections.get('dispatch')?.body ?? section('dispatch')!.builtin()}`);
+  parts.push(parsed.sections.get('dispatch')?.body ?? section('dispatch')!.builtin());
   // The project's own chapters say what each kind of work needs; built-in chapters are summarized by the work type list.
   let room = 40000;
-  for (const [id, entry] of parsed.sections) if (id !== 'dispatch' && room > 0) { const text = clip(`## ${entry.title} \`${id}\`\n${entry.body}`, room); parts.push(text); room -= text.length; }
+  for (const [id, entry] of parsed.sections) if (id !== 'dispatch' && room > 0) { const text = clip(`## ${entry.title}\n${entry.body}`, room); parts.push(text); room -= text.length; }
   return parts.join('\n\n');
 }
 

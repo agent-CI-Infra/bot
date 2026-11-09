@@ -127,89 +127,31 @@ const roleData = (config, { workflow = 'development.issue', configured = true } 
 const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'acp'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
 const entries = { development: true, request: true, review: false, actions: false };
 function rolesPage(data) {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], () => [404, {}]);
-  page.run(`current = { id: '101', section: 'roles' }; window.roleView = roleCards(${JSON.stringify(data)}, element('p', ''));`);
-  const cards = [...page.run('roleView')], byTitle = title => cards.find(c => c.children[0].textContent === title);
-  return { page, cards, byTitle, tile: id => byTitle('主控怎样委派').querySelector(`[data-role=${id}]`) };
+  data.capability_policies = data.configuration.roles.map(role => ({id:role.capability_policy_ref.id,kind:role.kind,tools:null,authorities:{query_facts:true,publish:false}}));
+  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/roles.js'], () => [404, {}]);
+  const draft = {enabled:data.configuration.enabled,controller:data.configuration.controller,roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
+  page.run(`current={id:'101',section:'roles'}; window.roleState=${JSON.stringify({data,draft,dirty:false})}; window.roleView=roleOverviewCards(roleState,()=>{});`);
+  const cards=[...page.run('roleView')];return {page,cards,table:cards[0].querySelector('table')};
 }
-
-test('the 角色 page: without coordination every entry keeps its original executor and QA stays independent', () => {
-  const view = rolesPage(roleData({ schema: 2, revision: 3, enabled: false, controller: { role: 'manager', entries }, roles: team('pi'), skills: [] }));
-  assert.deepEqual(view.cards.map(c => c.children[0].textContent), ['角色协调', '主控怎样委派', '每个角色的解析结果', '修改配置']);
-  const state = text(view.byTitle('角色协调'));
-  assert.match(state, /未开启/); assert.match(state, /都走原来的执行器，也就是每类工作在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收/);
-  assert.doesNotMatch(state, /旧配置/);
+test('role overview edits backends, models and permissions without a JSON editor', () => {
+  const view=rolesPage(roleData({schema:2,revision:4,enabled:true,controller:{role:'manager',entries},roles:team('pi'),skills:[]}));
+  assert.equal(view.cards[0].children[0].textContent,'角色概览');
+  const picker=id=>view.table.querySelectorAll('select').find(select=>select.getAttribute('aria-label')===id+' Agent 后端');
+  assert.deepEqual(['manager','dev','reviewer'].map(id=>picker(id).value),['pi','native','acp']);
+  assert.ok(picker('manager').children.find(option=>option.value==='claude_code').disabled);
+  assert.ok(!picker('dev').children.find(option=>option.value==='claude_code').disabled);
+  assert.match(text(view.cards[0]),/允许：读取任务事实/);assert.match(text(view.cards[0]),/不允许：直接发布/);
+  assert.doesNotMatch(text(view.cards[0]),/policy@|配置（JSON）|修改配置/);
+  picker('dev').value='process';picker('dev').listeners.change[0]();
+  assert.equal(view.page.run("roleState.draft.roles.find(r=>r.role_id==='dev').harness_ref.id"),'process');
 });
-
-test('the 角色 page: the controller delegates Dev, Test, Reviewer and UX; each role names its executor and a new controller is Pi', () => {
-  const view = rolesPage(roleData({ schema: 2, revision: 4, enabled: true, controller: { role: 'manager', entries }, roles: team('pi'), skills: [] }));
-  const state = view.byTitle('角色协调');
-  assert.deepEqual(state.querySelectorAll('[data-entry]').map(item => item.dataset.entry + ':' + item.querySelector('.status').textContent),
-    ['development:主控委派', 'request:主控委派', 'review:原执行器', 'actions:原执行器']);
-  assert.equal(state.querySelector('[data-entry=development] .role-entry-workers').textContent, '可委派：Dev、Test、Reviewer、UX');
-  assert.match(text(view.byTitle('主控怎样委派')), /检视和 Actions 失败分析接入主控后只委派 Dev[\s\S]*独立 QA 不是被委派的角色，它在主控提名候选之后验收/);
-  const lanes = view.byTitle('主控怎样委派').querySelectorAll('.role-lane').map(lane => lane.children[0].textContent + '=' + lane.querySelectorAll('[data-role]').map(tile => tile.dataset.role).join(','));
-  assert.deepEqual(lanes, ['主控=manager', '按需委派=dev,test,reviewer,ux', '验收与发布=qa']);
-  assert.match(text(view.tile('manager')), /Manager\n.*\nPi\n项目电脑里的 Pi 会话/s); assert.doesNotMatch(text(view.tile('manager')), /旧配置沿用/);
-  assert.match(text(view.tile('reviewer')), /ACP\n外部智能体，用它自带的模型\n模型：后端自带模型/);
-  assert.match(text(view.byTitle('主控怎样委派')), /不是每个任务都要走一遍的流程，也不授予权限/);
-  // The resolution table keeps its name and the pinned harness reference.
-  const table = view.byTitle('每个角色的解析结果').querySelector('table');
-  assert.equal(table.getAttribute('aria-label'), '角色解析结果'); assert.match(text(table), /已保存：pi@1\.4\.0/);
-  // Every role has a backend picker; Claude Code cannot run the controller, a pending driver cannot be chosen.
-  const picker = role => table.querySelectorAll('select').find(select => select.getAttribute('aria-label') === role + ' Agent 后端');
-  assert.deepEqual(['manager', 'dev', 'reviewer'].map(role => picker(role).value), ['pi', 'native', 'acp']);
-  assert.deepEqual(picker('manager').children.filter(option => option.disabled).map(option => option.value), ['claude_code', 'codex']);
-  assert.deepEqual(picker('dev').children.filter(option => option.disabled).map(option => option.value), ['codex']);
-  assert.equal(picker('manager').children[0].textContent, 'Pi（推荐）');
-});
-
-test('the 角色 page: an old configuration still running a Native controller is marked as such, and saving keeps its stored backends', () => {
-  const view = rolesPage(roleData({ schema: 2, revision: 0, enabled: true, legacy: true, controller: { role: 'manager', entries }, roles: team('native'), skills: [] }));
-  assert.match(text(view.byTitle('角色协调')), /保存于 V2 之前，仍按旧配置运行：主控还是 Native。在「每个角色的解析结果」里为主控选好后端（推荐 Pi）后保存一次，就升级为 V2；保存时不改选，主控继续用 Native。/);
-  assert.match(text(view.tile('manager')), /Native\n控制面的工具循环\n旧配置沿用/);
-  // Workers on Native are a choice, not a leftover: only the old controller is marked.
-  assert.doesNotMatch(text(view.tile('dev')), /旧配置沿用/); assert.doesNotMatch(text(view.tile('coordinator')), /旧配置沿用/);
-  assert.match(text(view.byTitle('每个角色的解析结果').querySelector('table')), /已保存：native@1\n旧配置沿用/);
-  // Stored choices are not migrated by the page: the editor and the pickers start from what was saved.
-  const edited = JSON.parse(view.byTitle('修改配置').querySelector('textarea').value);
-  assert.deepEqual(edited.roles.map(r => r.role_id + ':' + r.harness_ref.id), ['manager:native', 'dev:native', 'test:native', 'reviewer:acp', 'ux:native', 'qa:native', 'coordinator:native']);
-  assert.equal(view.byTitle('每个角色的解析结果').querySelector('select').value, 'native');
-  assert.match(text(view.byTitle('修改配置')), /保存一次就升级为 V2，各角色按上面表格里选择的后端运行，不会自动改成 Pi/);
-  // A V2 configuration with a Native controller is a choice, not a leftover.
-  const chosen = rolesPage(roleData({ schema: 2, revision: 5, enabled: true, controller: { role: 'manager', entries }, roles: team('native'), skills: [] }));
-  assert.doesNotMatch(text(chosen.byTitle('角色协调')) + text(chosen.tile('manager')), /旧配置/);
-});
-
-test('the 角色 page: a project that never saved its roles shows the recommended Pi backend a save gives every role, not an old one in use', () => {
-  // GET /roles reports a never saved project as legacy with Native roles and configured: false; nothing runs on it.
-  const view = rolesPage(roleData({ schema: 2, revision: 0, enabled: false, legacy: true, controller: { role: 'manager', entries }, roles: team('native'), skills: [] }, { configured: false }));
-  const state = text(view.byTitle('角色协调'));
-  assert.match(state, /还没有保存过角色配置。下面显示的是保存后各角色的默认后端（推荐 Pi）；开启协调并保存后才会运行/); assert.doesNotMatch(state, /仍按旧配置运行/);
-  for (const id of ['manager', 'dev', 'reviewer', 'qa']) { assert.match(text(view.tile(id)), /Pi\n项目电脑里的 Pi 会话\n保存后生效/, id); assert.doesNotMatch(text(view.tile(id)), /Native|ACP|旧配置沿用/, id); }
-  assert.match(text(view.byTitle('每个角色的解析结果').querySelector('table')), /还没保存，保存后为 pi@1\.4\.0\n保存后生效/);
-  assert.deepEqual([...new Set(JSON.parse(view.byTitle('修改配置').querySelector('textarea').value).roles.map(r => r.harness_ref.id))], ['pi']);
-});
-
-test('each work type on the Manager page says what it may write and who executes it', () => {
-  const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/manager.js'], () => [404, {}]);
-  const work = id => ({ id, name: id, description: '', kinds: [id], section: id, enabled: true, active: true, project_switch: null, writes: ['code', 'pull_request'],
-    write_options: [{ id: 'code', title: '修改工作区代码', tool: 'write_file', detail: '', locked: true }, { id: 'pull_request', title: '开或更新 bot PR', tool: 'create_pull_request', detail: '', locked: true }, { id: 'issue', title: '提报 Issue', tool: 'create_issue', detail: '', locked: false }],
-    model: { id: null, default_id: null, inherited: true } });
-  const runs = (config, value) => page.run(`current = { id: '101', models: [], policy: {} }; workExecution(${JSON.stringify(value)}, { configuration: ${JSON.stringify(config)} })`);
-  const coordinated = { enabled: true, controller: { role: 'manager', entries }, roles: team('pi') };
-  assert.equal(runs(coordinated, work('development.issue')), '主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
-  assert.equal(runs(coordinated, work('review.issue')), '原来的执行器：项目电脑里的 Pi 进程（这个入口没有接入主控）。完成前由独立 QA 验收。');
-  assert.equal(runs({ ...coordinated, enabled: false }, work('reply')), '原来的执行器：项目电脑里的 Pi 进程。完成前由独立 QA 验收。');
-  assert.match(runs({ ...coordinated, legacy: true, roles: team('native') }, work('development.pr')), /主控 Manager（Native，旧配置沿用）/);
-  assert.equal(runs(null, work('reply')), '');
-  // The writes of a work type are its checkboxes, a fixed one cannot be unticked, and nothing else grants a write.
-  page.run(`current = { id: '101', models: [], policy: { review_language: 'auto', max_revisions: 1 }, actionsFailures: null, manager: { prompt: { revision: 0 } } };
-    window.workCard = workTypesCard({ work: [${JSON.stringify(work('development.issue'))}] }, null, async () => {});`);
-  const row = page.run('workCard').querySelectorAll('tr[data-work-type]').find(node => node.dataset.workType === 'development.issue');
-  assert.deepEqual(row.querySelectorAll('input').map(box => box.name + ':' + box.checked + ':' + !!box.disabled),
-    ['enabled:development.issue:true:false', 'write:development.issue:code:true:true', 'write:development.issue:pull_request:true:true', 'write:development.issue:issue:false:false']);
-  assert.match(text(page.run('workCard')), /不能扩大/);
+test('role overview preserves stored legacy backends and recommends Pi only for an unsaved project', () => {
+  const config={schema:2,revision:0,enabled:true,legacy:true,controller:{role:'manager',entries},roles:team('native'),skills:[]};
+  const saved=rolesPage(roleData(config));
+  assert.equal(saved.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'native');
+  const fresh=rolesPage(roleData(config,{configured:false}));
+  assert.equal(fresh.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'pi');
+  assert.match(text(fresh.cards[0]),/尚未保存/);
 });
 
 // ---- Against the real control plane: the page reads the same routes and fields the server returns. ----
@@ -359,28 +301,20 @@ test('review and Actions summaries offer only Dev on its backend in the entry; d
   const p = await realProject(t);
   const saved = await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: true, actions: true } }, roles: [{ role_id: 'ux', enabled: false }] });
   assert.equal(saved.status, 200);
-  const work = (await p.admin('/api/repositories/101/manager')).value.manager.work, config = saved.value.configuration;
-  const execution = (configuration, id) => p.page.run(`current = { id: '101', models: [], policy: {} }; workExecution(${JSON.stringify(work.find(w => w.id === id))}, { configuration: ${JSON.stringify(configuration)} })`);
-  const runs = id => execution(config, id);
-  assert.equal(runs('development.issue'), '主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer。候选由主控提名后交给独立 QA 验收。');
-  for (const id of ['review.issue', 'review.pr', 'actions.failures'])
-    assert.equal(runs(id), '主控 Manager（Pi）只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。', id);
-  // The 角色 page names the same per entry, and still shows all four roles in its division of work.
-  p.page.run(`current = { id: '101', section: 'roles' }; window.realRoles = roleCards(${JSON.stringify((await p.admin('/api/repositories/101/roles')).value)}, element('p', ''));`);
-  const cards = [...p.page.run('realRoles')], state = cards[0];
-  assert.deepEqual(state.querySelectorAll('[data-entry]').map(item => item.dataset.entry + '=' + item.querySelector('.role-entry-workers').textContent),
-    ['development=可委派：Dev、Test、Reviewer', 'request=可委派：Dev、Test、Reviewer', 'review=只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi', 'actions=只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi']);
-  assert.deepEqual(cards[1].querySelectorAll('.role-lane')[1].querySelectorAll('[data-role]').map(tile => tile.dataset.role), ['dev', 'test', 'reviewer', 'ux']);
+  const config=saved.value.configuration;
+  const execution=(configuration, id)=>p.page.run(`entryDevText(${JSON.stringify(configuration)})`);
+  assert.equal(p.page.run(`workerNames(entryWorkers(${JSON.stringify(config)},'development'))`),'Dev、Test、Reviewer');
+  assert.equal(execution(config,'review.issue'),'只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi');
   // Dev's own backend applies once chosen; an older V2 configuration keeps Pi in these entries until Dev's choice changes.
   const devTo = async (harness, revision) => (await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: true, actions: true } }, roles: [{ role_id: 'ux', enabled: false }, { role_id: 'dev', harness_ref: { id: harness } }] })).value.configuration;
   const processDev = await devTo('process', 1);
   assert.equal(execution(processDev, 'review.issue'),
-    '主控 Manager（Pi）只委派 Dev，Dev 用这个入口的工具和工作区，后端 Process；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
+    '只委派 Dev，Dev 用这个入口的工具和工作区，后端 Process');
   const older = JSON.parse(p.h.store.get("SELECT value FROM settings WHERE key='roles:101'").value), dev = older.roles.find(r => r.role_id === 'dev');
   delete dev.entry_harness_source; dev.harness_ref = { id: 'native', version: '1' }; p.h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(older));
   const kept = (await p.admin('/api/repositories/101/roles')).value.configuration;
   assert.equal(execution(kept, 'actions.failures'),
-    '主控 Manager（Pi）只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi（旧 V2 配置沿用 Pi，Dev 的后端选择改变后才换）；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
+    '只委派 Dev，Dev 用这个入口的工具和工作区，后端 Pi（旧 V2 配置沿用 Pi，Dev 的后端选择改变后才换）');
 });
 
 test('a custom role called constructor shows its own name and responsibility on the 角色 page and in a task', async t => {
@@ -391,9 +325,8 @@ test('a custom role called constructor shows its own name and responsibility on 
   const save = async (revision, responsibility) => (await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } },
     roles: [{ role_id: 'constructor', name: 'Construction inspector', responsibility }] }));
   assert.equal((await save(0, 'Inspect construction invariants only.')).status, 200);
-  p.page.run(`current = { id: '101', section: 'roles' }; window.realRoles = roleCards(${JSON.stringify((await p.admin('/api/repositories/101/roles')).value)}, element('p', ''));`);
-  const tile = [...p.page.run('realRoles')][1].querySelector('[data-role=constructor]');
-  assert.match(text(tile), /^Construction inspector\nInspect construction invariants only\.\nPi\n/); assert.doesNotMatch(text(tile), /function|native code/);
+  const configured=(await p.admin('/api/repositories/101/roles')).value.configuration.roles.find(r=>r.role_id==='constructor');
+  assert.equal(configured.name,'Construction inspector');assert.equal(configured.responsibility,'Inspect construction invariants only.');
   // In a task, name and responsibility come from the snapshot a delegation ran with, as the server stores it.
   const snapshot = async () => {
     const resolved = (await p.admin('/api/repositories/101/roles/resolve', 'POST', { role: 'constructor' })).value;

@@ -30,45 +30,17 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     const cardOf = title => page.locator('.side-card').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
-    const tile = id => cardOf('主控怎样委派').locator(`[data-role="${id}"]`);
-
-    // 1. A project that never saved roles: coordination is off, every entry keeps its executor, QA stays; the controller a
-    //    save would give is Pi, not an old Native one.
-    await expect(cardOf('角色协调')).toContainText('未开启');
-    await expect(cardOf('角色协调')).toContainText('都走原来的执行器，也就是每类工作在项目电脑里的 Pi 进程。交付前仍由独立 QA 在新的上下文里验收。');
-    await expect(tile('manager')).toContainText('Pi'); await expect(tile('manager')).toContainText('保存后生效'); await expect(tile('manager')).not.toContainText('Native');
-    await expect(cardOf('主控怎样委派').locator('.role-lane h4')).toHaveText(['主控', '按需委派', '验收与发布']);
-    await expect(cardOf('主控怎样委派').locator('.role-lane').nth(1).locator('[data-role]')).toHaveCount(4);
-    await page.screenshot({ path: `${out}/roles-off.png`, fullPage: true });
-
-    // 2. A configuration saved before V2 with coordination on: still running, so its Native controller is the old one in use.
-    h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify({ enabled: true, harnesses: {} }));
-    await page.reload();
-    await expect(cardOf('角色协调')).toContainText('已开启');
-    await expect(cardOf('角色协调')).toContainText('这份配置保存于 V2 之前，仍按旧配置运行：主控还是 Native');
-    await expect(cardOf('角色协调').locator('[data-entry]')).toHaveText([/开发.*主控委派/, /普通任务.*主控委派/, /检视.*原执行器/, /Actions 失败分析.*原执行器/]);
-    await expect(tile('manager')).toContainText('旧配置沿用'); await expect(tile('dev')).not.toContainText('旧配置沿用');
-    await expect(page.getByRole('table', { name: '角色解析结果' })).toContainText('native@1');
-    await page.screenshot({ path: `${out}/roles-legacy.png`, fullPage: true });
-
-    // 3. The page keeps the stored backend; choosing Pi for the controller and saving once upgrades it to V2.
-    const managerPicker = page.getByRole('combobox', { name: 'manager Agent 后端', exact: true });
-    await expect(managerPicker).toHaveValue('native'); await managerPicker.selectOption('pi');
-    await page.getByRole('button', { name: '保存为新 revision', exact: true }).click();
-    await expect(page.locator('.flash')).toHaveText('角色配置已保存为 revision 1。');
-    await expect(tile('manager')).toContainText('Pi'); await expect(tile('manager')).not.toContainText('旧配置沿用');
-    await expect(page.getByRole('table', { name: '角色解析结果' })).toContainText('pi@');
-    await expect(cardOf('角色协调')).not.toContainText('旧配置');
-    await page.screenshot({ path: `${out}/roles-v2.png`, fullPage: true });
-
-    // 4. The Manager page says, per work type, what it may write and who executes it; its prompt grants nothing.
-    await page.goto(h.admin + '/#/projects/101/roles');
-    const work = id => page.locator(`[data-work-type="${id}"]`);
-    await expect(work('development.issue')).toContainText('主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
-    await expect(work('review.issue')).toContainText('原来的执行器：项目电脑里的 Pi 进程（这个入口没有接入主控）');
-    await expect(cardOf('Manager 提示词')).toContainText('提示词只描述流程，不能授予写入');
-    await expect(cardOf('工作类型：开关、写入与设置')).toContainText('不能扩大');
-    await page.screenshot({ path: `${out}/manager-work-types.png`, fullPage: true });
+    await expect(cardOf('角色概览')).toBeVisible();
+    const managerPicker=page.getByRole('combobox',{name:'manager Agent 后端',exact:true});
+    await expect(managerPicker).toHaveValue('pi');
+    h.store.run("INSERT INTO settings(key,value) VALUES('roles:101',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",JSON.stringify({enabled:true,harnesses:{}}));
+    await page.reload();await expect(managerPicker).toHaveValue('native');
+    await managerPicker.selectOption('pi');
+    await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
+    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置');
+    await expect(managerPicker).toHaveValue('pi');
+    await expect(page.locator('[data-work-type]')).toHaveCount(0);
+    await expect(page.locator('textarea[name=role_configuration]')).toHaveCount(0);
 
     // 5. Tasks: one without the controller (the original executor, QA accepting now) and one under it (a Reviewer at work).
     const now = '2026-11-09T01:00:00Z', task = (id, kind, number, phase) => h.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,attempt,created_at,updated_at)
@@ -123,9 +95,9 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
 
     // 6. Narrow screens stack the delegation lanes.
     await page.setViewportSize({ width: 390, height: 900 });
-    await page.goto(h.admin + '/#/projects/101/roles'); await expect(tile('manager')).toBeVisible();
-    const [first, second] = await Promise.all([0, 1].map(index => cardOf('主控怎样委派').locator('.role-lane').nth(index).boundingBox()));
-    expect(second.y).toBeGreaterThan(first.y + first.height - 1);
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await expect(cardOf('角色概览')).toBeVisible();
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({ path: `${out}/roles-narrow.png`, fullPage: true });
 
     // 7. At 390px a task with a long timeline still opens with its next step in view, without horizontal overflow.
