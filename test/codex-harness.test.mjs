@@ -318,6 +318,19 @@ test('Only the turn named by the start answer ends the start; a late turn id or 
   assert.deepEqual(run.filter(e=>e.type==='turn'&&e.phase==='ended'),[],'C never ended');
   assert.equal(results(),before,'no role result');
  });
+ await t.test('answer C, the late item and terminal of B, and an item of C that stops the run, all in one chunk',async t=>{
+  const {f,b}=await setup(t),results=()=>f.s.get("SELECT count(*) n FROM task_history WHERE type='role_result'").n,before=results();
+  f.configure({FIXTURE_STALE_TERMINAL:'true',FIXTURE_STALE_STOP:'true',FIXTURE_WAIT:'true',FIXTURE_IGNORE_INTERRUPT:'true'});
+  await assert.rejects(runRole(f.spec,'dev'),{code:'codex_subagent_refused'});
+  const c=f.lines('prompts.jsonl')[2].turnId,rows=f.s.all("SELECT created_at,data FROM task_history WHERE type='harness_event' ORDER BY id").map(r=>({at:Date.parse(r.created_at),...JSON.parse(r.data)}));
+  const run=rows.slice(rows.findLastIndex(e=>e.type==='session_bound')),requested=run.filter(e=>e.phase==='interrupt_requested'),receipts=run.filter(e=>e.phase==='interrupt_receipt');
+  assert.notEqual(c,b);
+  assert.deepEqual(f.lines('interrupts.jsonl').map(i=>i.turnId),[c],'the stop interrupts C, not B');
+  assert.deepEqual([requested.map(e=>e.turnId),receipts.map(e=>[e.turnId,e.receipt])],[[c],[[c,'timeout']]],'the same turn id is interrupted and awaited');
+  assert.ok(receipts[0].at-requested[0].at>=380,'the grace period (400 ms) was waited for C');
+  assert.deepEqual(run.filter(e=>e.type==='turn'&&e.phase==='ended'),[],'C never ended');
+  assert.equal(results(),before,'no role result');
+ });
 });
 
 test('A session refused before its binding counts a restated usage increment once, on the attempt that binds',async t=>{

@@ -120,7 +120,9 @@ createInterface({input:process.stdin}).on('line',async line=>{
   // server goes away.
   if(flag('STALE_TERMINAL')||flag('STALE_HINT')){
    const turnId=randomUUID(),older=load(thread.id).turns.at(-2)?.id,late=JSON.stringify({method:'item/completed',params:{threadId:thread.id,turnId:older,item:{type:'agentMessage',id:'late-'+older,text:'late',phase:null},completedAtMs:2}})+'\n';
-   if(flag('STALE_TERMINAL')){write(JSON.stringify({id:m.id,result:{turn:turnView(turnId,'inProgress')}})+'\n'+late+JSON.stringify({method:'turn/completed',params:{threadId:thread.id,turn:turnView(older,'completed')}})+'\n');void runTurn(turnId,m.params.input[0].text);return;}
+   // STALE_STOP adds, last in the same chunk, an item of C that stops the run (a sub-agent).
+   const stop=flag('STALE_STOP')?JSON.stringify({method:'item/started',params:{threadId:thread.id,turnId,item:{type:'subAgentActivity',id:'s-'+turnId,agentPath:'/root/child',agentThreadId:randomUUID(),kind:'spawned'},startedAtMs:1}})+'\n':'';
+   if(flag('STALE_TERMINAL')){write(JSON.stringify({id:m.id,result:{turn:turnView(turnId,'inProgress')}})+'\n'+late+JSON.stringify({method:'turn/completed',params:{threadId:thread.id,turn:turnView(older,'completed')}})+'\n'+stop);void runTurn(turnId,m.params.input[0].text);return;}
    const t=load(thread.id);t.turns.push({id:turnId,status:'inProgress'});store(t);log('unanswered.jsonl',{turnId});
    write(late);notify('turn/started',{threadId:thread.id,turn:turnView(turnId,'inProgress')});await queue;process.exit(0);
   }
