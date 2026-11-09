@@ -32,6 +32,7 @@ class FakeElement {
   }
   replaceChildren(...nodes) { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
   createTHead() { const head = new FakeElement('thead'); this.prepend(head); return head; }
+  add(option) { this.append(option); }
   prepend(...nodes) { const previous=[...this.children]; this.replaceChildren(...nodes, ...previous); }
   replaceWith(...nodes) {
     const parent = this.parentElement; if (!parent) return;
@@ -83,7 +84,9 @@ export function loadConsole(files, respond) {
     const [status, value] = await respond(method, path, init.body && JSON.parse(init.body));
     return { ok: status < 400, status, json: async () => value };
   };
-  const context = vm.createContext({ document, Node: FakeElement, fetch, location: { hash: '', pathname: '/' }, history: { pushState() {} }, addEventListener() {},
+  // `new Option(text, value)` as a select's entry.
+  const Option = function (text, value) { return Object.assign(new FakeElement('option'), { textContent: text, value, disabled: false }); };
+  const context = vm.createContext({ document, Node: FakeElement, Option, fetch, location: { hash: '', pathname: '/' }, history: { pushState() {} }, addEventListener() {},
     matchMedia: media => ({ media, matches: false, addEventListener() {} }),
     setInterval: () => 0, clearInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams, console });
   context.window = context;

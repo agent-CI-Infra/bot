@@ -51,7 +51,9 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     await expect(page.getByRole('table', { name: '角色解析结果' })).toContainText('native@1');
     await page.screenshot({ path: `${out}/roles-legacy.png`, fullPage: true });
 
-    // 3. Saving once upgrades it: the editor already offers Pi for the controller, and the server accepts it.
+    // 3. The page keeps the stored backend; choosing Pi for the controller and saving once upgrades it to V2.
+    const managerPicker = page.getByRole('combobox', { name: 'manager Agent 后端', exact: true });
+    await expect(managerPicker).toHaveValue('native'); await managerPicker.selectOption('pi');
     await page.getByRole('button', { name: '保存为新 revision', exact: true }).click();
     await expect(page.locator('.flash')).toHaveText('角色配置已保存为 revision 1。');
     await expect(tile('manager')).toContainText('Pi'); await expect(tile('manager')).not.toContainText('旧配置沿用');
