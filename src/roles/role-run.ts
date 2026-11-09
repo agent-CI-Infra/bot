@@ -282,10 +282,10 @@ export function admitRun(s: Store, input: { task: Row; role: string; kind: strin
 
 // ---------------------------------------------------------------- checkpoint and recovery
 // Harness state fields that may be kept for native resume. Anything else stays out of checkpoints.
-// Codex bindings add the wire protocol, the model/provider the thread runs on, the last turn and its confirmed status (and the
-// turn known before an unanswered start), and
-// the thread's cumulative usage, so a resume can check ownership and version and a restated total is not counted twice.
-const retainedState = ['sessionId', 'previousSessionId', 'recoveryMode', 'agentInfo', 'version', 'configurationHash', 'cwd', 'scope', 'inputHash', 'run_id', 'lease_epoch', 'raw_cursor', 'protocol', 'model', 'modelProvider', 'cliVersion', 'lastTurnId', 'lastTurnStatus', 'previousTurnId', 'usage'];
+// Codex bindings add the wire protocol, the model/provider the thread runs on, the turn the binding follows and its confirmed
+// status, the last turn known to exist, and the thread's cumulative usage, so a resume can check ownership and version,
+// reconcile an unconfirmed turn and not count a restated total twice.
+const retainedState = ['sessionId', 'previousSessionId', 'recoveryMode', 'agentInfo', 'version', 'configurationHash', 'cwd', 'scope', 'inputHash', 'run_id', 'lease_epoch', 'raw_cursor', 'protocol', 'model', 'modelProvider', 'cliVersion', 'lastTurnId', 'lastTurnStatus', 'knownTurnId', 'usage'];
 export function sessionReference(s: Store, instanceId: string) {
   const row = s.get('SELECT session,harness_state,runtime FROM role_instances WHERE id=?', instanceId);
   if (!row) return null;
