@@ -23,6 +23,8 @@ export interface SkillBundleRef { id: string; revision: number; content_hash: st
 export interface RoleDefinitionV2 {
   role_id: string; revision: number; enabled: boolean; kind: RoleKind; name: string; responsibility: string; persona_prompt: string;
   model_profile_ref: ModelProfileRef | null; skill_bundle_ref: SkillBundleRef | null; harness_ref: Ref; capability_policy_ref: Ref;
+  /** Server-owned opt-in: old V2 review/Actions dev assignments used the entry's Pi executor. */
+  entry_harness_source?: 'role';
   environment_profile_ref: Ref; budget_policy_ref: Ref & { max_turns?: number; max_output_tokens?: number; max_total_tokens?: number; max_model_requests?: number; max_tool_calls?: number; max_wall_seconds?: number; max_cost?: { amount: number; currency: string } }; output_schema_ref: Ref;
 }
 export type Entry = 'development' | 'request' | 'review' | 'actions';
@@ -168,7 +170,8 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       const entry = list.find(e => e.id === ref.id)!; if (ref.version !== undefined && ref.version !== entry.version) invalid('reference_version_unavailable', `${field}.${key}.version`);
       return { id: entry.id, version: entry.version };
     };
-    const harnessInput = given.harness_ref ?? (!current.legacy ? current.roles.find(r => r.role_id === id)?.harness_ref : undefined) ?? { id: defaultHarness() };
+    const previous = current.roles.find(r => r.role_id === id);
+    const harnessInput = given.harness_ref ?? (!current.legacy ? previous?.harness_ref : undefined) ?? { id: defaultHarness() };
     if (!harnessInput || typeof harnessInput.id !== 'string') invalid('invalid_role_reference', `${field}.harness_ref`);
     const harness = harnesses.find(h => h.id === harnessInput.id); if (!harness) invalid(plannedBackend(harnessInput.id) ? 'agent_backend_unavailable' : 'unknown_role_harness', `${field}.harness_ref.id`);
     // A backend's declared capabilities, rather than a special Manager/Pi pairing, determine admission.
@@ -219,8 +222,10 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       capability_policy_ref: pick('capability_policy_ref', capabilityPolicies, allowed.capability, (given.role_id==='coordinator'?'coordinator':kind==='controller'?'controller-coordination':allowed.capability[0]!), 'capability_policy_not_allowed'),
       environment_profile_ref: environmentRef,
       budget_policy_ref: budget, output_schema_ref: pick('output_schema_ref', outputSchemas, allowed.output, (id==='coordinator'?'coordination-result':allowed.output[0]!), 'output_schema_not_allowed') };
+    // Echoing an old V2 id (as the console does on every save) is not a new backend choice.
+    if (id === 'dev' && (current.legacy || !previous?.harness_ref || previous.entry_harness_source === 'role' || harness!.id !== previous.harness_ref.id))
+      definition.entry_harness_source = 'role';
     // A role's revision moves only when its own definition changes.
-    const previous = current.roles.find(r => r.role_id === id);
     definition.revision = previous && !current.legacy && definitionHash(previous) === definitionHash(definition) ? previous.revision : (previous?.revision ?? 0) + 1;
     return definition;
   });
@@ -276,16 +281,18 @@ export function rolePrompt(definition: RoleDefinitionV2) {
  * the snapshot body under its own hash. Model order: the role's explicit profile, then the workflow's model, then the
  * project default; the actual result is part of the snapshot. Unsupported combinations stop here, before any run starts.
  */
-export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean;
+export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean; entryExecutor?: boolean;
   configuration?: RoleConfiguration; fallbackModel?:()=>{model:ReturnType<typeof openModel>;source:'workflow'|'project'} } = {}) {
   const config = options.configuration??roleConfiguration(s, repositoryId);
   if (options.expectedRevision !== undefined && options.expectedRevision !== config.revision) stop('role_configuration_changed', 'retry_wait', `角色配置已更新到 revision ${config.revision}，请求的是 ${options.expectedRevision}。`);
   const definition = config.roles.find(r => r.role_id === roleId), field = `roles.${roleId}`;
   if (!definition) return stop('unknown_role', 'waiting_configuration', `${field}：项目没有这个角色。`);
   if (!definition.enabled) return stop('role_disabled', 'waiting_configuration', `${field}.enabled：角色已停用。`);
-  const harnessId = options.harness ?? definition.harness_ref.id, harness = harnesses.find(h => h.id === harnessId);
+  const entryHarness = options.entryExecutor && roleId === 'dev' && definition.entry_harness_source !== 'role' ? 'pi' : undefined;
+  const harnessOverride = options.harness ?? entryHarness;
+  const harnessId = harnessOverride ?? definition.harness_ref.id, harness = harnesses.find(h => h.id === harnessId);
   if (!harness) return stop('unknown_role_harness', 'waiting_configuration', `${field}.harness_ref.id：没有注册 ${harnessId}。`);
-  if (!options.harness && harness.version !== definition.harness_ref.version) return stop('harness_version_unavailable', 'waiting_configuration', `${field}.harness_ref.version：固定的是 ${definition.harness_ref.version}，当前注册的是 ${harness.version}。`);
+  if (!harnessOverride && harness.version !== definition.harness_ref.version) return stop('harness_version_unavailable', 'waiting_configuration', `${field}.harness_ref.version：固定的是 ${definition.harness_ref.version}，当前注册的是 ${harness.version}。`);
   // Resolve the model in order, and keep the precise reason when a configured one is not usable.
   let model: ReturnType<typeof openModel>, source: RoleSnapshot['model']['source'], profile: { api: string | null; tool_calls: boolean | null; structured_output: string | null } = { api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' }, profileHash: string | null;
   if (harness.externalModel) {
@@ -306,7 +313,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     profileHash = modelProfileHash({ api_url: model.url, model_name: model.model });
   }
   if (!harness.externalModel) checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => { throw new TaskError(code, 'waiting_configuration', `${at}：${harness.id} 不支持这个模型配置。`); });
-  if (!harness.kinds.includes(definition.kind) && !options.harness && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
+  if (!harness.kinds.includes(definition.kind) && !harnessOverride && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
   const policy = capabilityPolicy(definition.capability_policy_ref.id);
   if (!policy || policy.version !== definition.capability_policy_ref.version) return stop('capability_policy_unavailable', 'waiting_configuration', `${field}.capability_policy_ref：策略版本已不存在。`);
   const environment = environmentProfiles.find(e => e.id === definition.environment_profile_ref.id)!, schema = outputSchemas.find(o => o.id === definition.output_schema_ref.id)!;
@@ -318,7 +325,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     prompt: { framework_hash: sha256(rolePool.find(r => r.id === roleId)?.prompt ?? sharedInstructions), persona_hash: sha256(definition.persona_prompt), system_hash: sha256(system) },
     model: { source, workflow, requested: definition.model_profile_ref, id: model.id, version: model.version, name: model.model, profile_hash: profileHash, ...profile },
     skills: bundle ? { id: bundle.id, revision: bundle.revision, content_hash: bundle.content_hash, source: bundle.source, files: bundle.files } : null,
-    harness: { id: harness.id, version: harness.version, session: harness.session, events: harness.events, environment: harness.environment, runtime: harness.runtime, source: options.harness ? (options.pinned ? 'legacy' : 'entry_executor') : config.legacy ? 'legacy' : 'role' },
+    harness: { id: harness.id, version: harness.version, session: harness.session, events: harness.events, environment: harness.environment, runtime: harness.runtime, source: harnessOverride ? (options.pinned ? 'legacy' : 'entry_executor') : config.legacy ? 'legacy' : 'role' },
     capability: { id: policy.id, version: policy.version, tools: policy.tools, authorities: policy.authorities },
     environment: { id: environment.id, version: environment.version, workspace: environment.workspace, repository: environment.repository, ...('isolation' in environment ? { isolation: environment.isolation } : {}) },
     budget: definition.budget_policy_ref, output_schema: { id: schema.id, version: schema.version, tool: schema.tool } };

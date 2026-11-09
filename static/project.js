@@ -321,6 +321,8 @@ function rolesSection() {
         } catch { message.textContent = '请先修正配置 JSON，再选择后端。'; }
       });
       tableCell(row, '执行后端', picker, note(`已保存：${roleRefText(role.harness_ref)}`));
+      if (data.configured && role.role_id === 'dev' && role.entry_harness_source !== 'role' && role.harness_ref.id !== 'pi')
+        row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更'));
       tableCell(row, '模型（来源）', preview?.error ? element('span', `${preview.error}${preview.detail ? '：' + preview.detail : ''}`, 'view-error') : element('span', preview ? `${preview.model.name}（${{ role: '角色', workflow: '工作流', project: '项目默认', external_harness: '后端自带' }[preview.model.source]}）` : '—'));
       tableCell(row, '技能包', element('span', role.skill_bundle_ref ? `${role.skill_bundle_ref.id}@${role.skill_bundle_ref.revision} · ${role.skill_bundle_ref.content_hash.slice(0, 12)}` : '—'));
       tableCell(row, '能力策略', element('span', roleRefText(role.capability_policy_ref)));

@@ -12,7 +12,7 @@ import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
 import { workspaceProfile } from './profiles.js';
 import { runAgent, type AgentSpec } from './runtime.js';
-import { type Redactor, stop, blobSha } from './common.js';
+import { type Redactor, stop, blobSha, TaskError } from './common.js';
 import { piAdapter, type PiSession } from './pi.js';
 import { validateReview, validateReply } from '../review/findings.js';
 import { taskWorkflow, workflowPermissions, savedWorkflow } from '../workflows/resolve.js';
@@ -78,7 +78,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       return publication;
     } };
   // Review and Actions analysis retain their task/tools/completion as the dev assignment. Both the controller and
-  // that assignment use their configured backend; Pi retains the entry's native workspace session when selected.
+  // that assignment use their selected backend; old V2 entries retain Pi until the dev backend changes.
   const entry = String(task.kind).startsWith('review.') ? 'review' : task.kind === 'actions.failures' ? 'actions' : null;
   if (entry && controlled(store, task, entry)) {
     const { repository, token, complete } = session, round = randomId();
@@ -98,6 +98,8 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         const note = typeof args?.path === 'string' && args.path.startsWith('../notes/');
         if (note ? !profile.capabilities.workspace.notes : !profile.capabilities.workspace.write)
           return { error: note ? 'notes_write_not_allowed' : 'review_repository_write_forbidden' };
+        if (note) return workspace.call(key, { type: 'workspace_write', path: args.path,
+          base64: Buffer.from(args?.content ?? '').toString('base64'), offset: 0, final: true, mode: '100644' });
         await workspace.write(key, args?.path, Buffer.from(args?.content ?? '')); return { written: true };
       }
       if (name === 'run_command') return workspace.call(key, { type: 'workspace_command', command: args?.command,
@@ -107,7 +109,10 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     };
     const finish = profile.finishTools[0];
     return runTeam({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model,
-      execute, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
+      execute: async (name, args) => {
+        try { return await execute(name, args); }
+        catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
+      }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
       { entry, prepare: async () => {}, controller: roleWorkspaces(workspace).controller, workers: ['dev'],
         executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)

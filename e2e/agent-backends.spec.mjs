@@ -41,6 +41,26 @@ test('所有角色可选择并列 Agent 后端，默认推荐 Pi，未接入驱�
     await expect(page.getByRole('combobox', { name: 'qa Agent 后端', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/agent-backends/mobile.png', fullPage: true });
+    // Load an unmarked old V2 definition: the UI always resubmits its saved harness id.
+    const old = JSON.parse(h.store.get("SELECT value FROM settings WHERE key='roles:101'").value);
+    const dev = old.roles.find(r => r.role_id === 'dev');
+    delete dev.entry_harness_source; dev.harness_ref = { id: 'native', version: '1' };
+    h.store.run("UPDATE settings SET value=? WHERE key='roles:101'", JSON.stringify(old));
+    await page.reload();
+    const warning = page.getByText('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更', { exact: true });
+    await expect(warning).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('native');
+    await page.getByRole('button', { name: '保存为新 revision', exact: true }).click();
+    await expect(page.locator('#project-page .flash')).toContainText('revision 2');
+    await expect(warning).toBeVisible();
+    expect((await admin('/api/repositories/101/roles')).value.configuration.roles.find(r => r.role_id === 'dev').entry_harness_source).toBeUndefined();
+    await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('process');
+    await page.getByRole('button', { name: '保存为新 revision', exact: true }).click();
+    await expect(page.locator('#project-page .flash')).toContainText('revision 3');
+    await expect(warning).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('process');
+    await expect(warning).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
