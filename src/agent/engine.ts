@@ -1,3 +1,4 @@
+import { sourceRef } from '../roles/role-run.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {requestIntegration,integratedPublication} from '../tasks/integration.js';
@@ -302,7 +303,7 @@ export class TaskEngine {
         if(before.contract.completeness==='unspecified'||before.contract.completeness==='legacy_unknown')records.contract(id,contract);
         const version=artifact.tree_sha||sha(JSON.stringify(artifact));
         const compact=(value:any)=>({...value,...(value.files?{files:value.files.map(({base64,...file}:any)=>file)}:{})});
-        if(artifact.status==='no_changes')artifact={...artifact,source_ref:'commit:'+(inputNow.snapshot_sha||task.head_sha)};
+        if(artifact.status==='no_changes')artifact={...artifact,source_ref:sourceRef(this.store,task)};
         const artifacts=[{kind:artifact.tree_sha?'code':'report',reference:`task:${id}:candidate`,version,content:redactor.clean(compact(artifact))}];
         // A workflow's final report delivers its intermediate PR too. Do not drop the code or its residual findings.
         if(!artifact.tree_sha){

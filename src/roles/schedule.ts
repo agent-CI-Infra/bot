@@ -71,10 +71,34 @@ export function deliveryCandidate(candidate: any,taskKind=''): CandidateRef | nu
 const currentPlan = (s: Store, id: string) => s.get('SELECT * FROM task_stage_plans WHERE task_id=? ORDER BY revision DESC LIMIT 1', id);
 function assertActive(s: Store, taskId: string) {
   const f = facts(s, taskId);
-  if (['cancelled','superseded','paused'].includes(f.task.status)) stop('task_claim_revoked', 'cancelled');
-  if (!f.policy?.enabled || !f.live.enabled) stop('role_authority_revoked', 'waiting_configuration');
-  if (f.authorityChanged || contentHash(f.config.required_stages ?? []) !== contentHash(f.live.required_stages ?? [])) stop('stage_policy_changed', 'waiting_configuration', '阶段策略已变化，请在安全检查点采用新配置。');
+  if (['cancelled','superseded','paused'].includes(f.task.status)) stop('task_claim_revoked', f.task.status==='paused'?'paused':'cancelled',f.task.status);
+  if (!f.policy?.enabled) stop('repository_policy_disabled','cancelled');
+  if (!f.live.enabled) stop('role_authority_revoked','paused');
+  if (f.authorityChanged || contentHash(f.config.required_stages ?? []) !== contentHash(f.live.required_stages ?? [])) stop('stage_policy_changed', 'paused', '阶段策略已变化，请在安全检查点采用新配置。');
   return f;
+}
+function stageDefinitions(value:unknown) {
+  const display=new Set(['status','waiting_reason','waiting_for','attempts','assignments','results']);
+  return Array.isArray(value)?value.map(stage=>stage&&typeof stage==='object'&&!Array.isArray(stage)?Object.fromEntries(Object.entries(stage).filter(([key])=>!display.has(key))):stage):value;
+}
+export function stageReplanContext(s:Store,taskId:string) {
+  const plan=currentPlan(s,taskId);if(!plan)return undefined;
+  const f=facts(s,taskId);return {plan_revision:plan.revision,contract_revision:f.record.revision,policy_hash:f.policyHash};
+}
+function explicitReplan(s:Store,taskId:string) {
+  const context=stageReplanContext(s,taskId)!;
+  // A previous human retry cannot authorize a later, unrelated policy or contract change.
+  return !!s.get("SELECT 1 FROM task_history WHERE task_id=? AND type='intervention' AND actor LIKE 'user:%' AND json_extract(data,'$.action') IN ('retry','contract_revision','adopt-config') AND json_extract(data,'$.stage_plan.plan_revision')=? AND json_extract(data,'$.stage_plan.contract_revision')=? AND json_extract(data,'$.stage_plan.policy_hash')=? LIMIT 1",taskId,context.plan_revision,context.contract_revision,context.policy_hash);
+}
+/** Permanent stage waits use the existing manual pause, which the task engine never polls. */
+export function assertStageWaits(s:Store,taskId:string,waiting:{stage_id:string;reason:string|null}[]) {
+  const task=s.get('SELECT status FROM tasks WHERE id=?',taskId);
+  if(task&&['paused','cancelled','superseded'].includes(task.status))stop('task_claim_revoked',task.status==='paused'?'paused':'cancelled',task.status);
+  const hard=waiting.find(wait=>['stage_policy_changed','stage_plan_stale','stage_retry_exhausted','stage_budget_exhausted','project_disabled','task_inactive'].includes(wait.reason??''));
+  if(!hard)return;
+  if(hard.reason==='project_disabled')stop('repository_policy_disabled','cancelled');
+  if(hard.reason==='task_inactive')stop('task_claim_revoked','cancelled');
+  stop(hard.reason!,'paused',JSON.stringify(waiting));
 }
 /** Immutable plan revisions extend the task contract/configuration; this is never a queue. */
 export function planTask(s: Store, taskId: string, expectedRevision: number, proposed?: unknown, expectedPlanRevision?: number) {
@@ -84,15 +108,21 @@ export function planTask(s: Store, taskId: string, expectedRevision: number, pro
     if(proposed!==undefined&&(!Number.isSafeInteger(expectedPlanRevision)||Number(expectedPlanRevision)<0))throw new Error('stage_plan_revision_required');
     if (expectedPlanRevision !== undefined && Number(previous?.revision ?? 0) !== expectedPlanRevision) throw new Error('stage_plan_revision_changed');
     const configured = f.config.enabled ? f.config.required_stages ?? [] : [];
-    if (!configured.length && proposed === undefined && !previous) return null;
+    if (!configured.length && proposed === undefined && !previous) {
+      const gate=evaluateRequiredStages(s,taskId,latestRoleCandidate(s,taskId));
+      if(gate.waiting.length)assertActive(s,taskId);
+      assertStageWaits(s,taskId,gate.waiting);
+      return null;
+    }
     assertActive(s, taskId);
+    if(previous&&(previous.contract_revision!==expectedRevision||previous.policy_hash!==f.policyHash)&&!explicitReplan(s,taskId))stop(previous.contract_revision!==expectedRevision?'stage_plan_stale':'stage_policy_changed','paused');
     if(proposed===undefined&&previous?.contract_revision===expectedRevision&&previous.policy_hash===f.policyHash)return previous;
-    const stages = validateStages(proposed ?? configured, f.config.roles, 'stages');
+    const stages = validateStages(stageDefinitions(proposed ?? configured), f.config.roles, 'stages');
     for (const required of configured.filter(stage => stage.required)) {
       if (contentHash(stages.find(stage => stage.stage_id === required.stage_id)) !== contentHash(required)) throw new Error('required_stage_immutable');
     }
     if (stages.some(stage => stage.required && !configured.some(c => c.required && c.stage_id === stage.stage_id))) throw new Error('stage_authority_invalid');
-    if (previous?.contract_revision === expectedRevision && previous.policy_hash === f.policyHash && previous.stages === JSON.stringify(stages)) return previous;
+    if (previous?.contract_revision === expectedRevision && previous.policy_hash === f.policyHash && contentHash(JSON.parse(previous.stages)) === contentHash(stages)) return previous;
     if (s.get("SELECT 1 FROM task_runs WHERE task_id=? AND assignment_id IN (SELECT assignment_id FROM task_stage_assignments WHERE task_id=?) AND status='running'", taskId, taskId)) throw new Error('stage_plan_running');
     const revision = Number(previous?.revision ?? 0) + 1;
     s.run('INSERT INTO task_stage_plans VALUES(?,?,?,?,?,?)', taskId, revision, expectedRevision, f.policyHash, JSON.stringify(stages), new Date().toISOString());
@@ -111,8 +141,8 @@ function currentResults(s: Store, taskId: string, plan: Row, candidate: Candidat
 /** Rebuild runnable/waiting stages from durable assignments/runs, under the existing task claim. */
 export function reconcileAssignments(s: Store, taskId: string, candidate = latestRoleCandidate(s, taskId)) {
   const f = facts(s, taskId), plan = currentPlan(s, taskId);
-  if (!plan) return { task_id:taskId, task_status:f.task.status,task_waiting_reason:f.task.error_code??null, plan_revision:0, stages:[], next:[], waiting:[] };
-  const stale = f.authorityChanged || plan.contract_revision !== f.record.revision || plan.policy_hash !== f.policyHash || contentHash(f.config.required_stages ?? []) !== contentHash(f.live.required_stages ?? []);
+  const policyChanged=f.authorityChanged || contentHash(f.config.required_stages ?? []) !== contentHash(f.live.required_stages ?? []);
+  if (!plan) return { task_id:taskId, task_status:f.task.status,task_waiting_reason:f.task.error_code??null, plan_revision:0, stages:[], next:[], waiting:policyChanged&&(f.live.required_stages??[]).some(stage=>stage.required&&stage.delivery_types.includes(deliveryType(s,taskId,candidate)))?[{stage_id:'policy',reason:'stage_policy_changed',dependencies:[]}]:[] };
   const results = currentResults(s, taskId, plan, candidate), applicable = (JSON.parse(plan.stages) as StageDefinition[]).filter(stage => stage.delivery_types.includes(deliveryType(s, taskId, candidate)));
   const latest=new Map(results.map((r:any)=>[r.stage_id,r]));
   const passed = new Set([...latest.values()].filter((r:any)=>r.passed).map((r:any)=>r.stage_id));
@@ -121,9 +151,10 @@ export function reconcileAssignments(s: Store, taskId: string, candidate = lates
     const active = assignments.some(a => a.status === 'running');
     const attempts = stageRuns(s,taskId,plan,stage.stage_id).length;
     const deps = stage.depends_on.filter(id => !passed.has(id));
-    const reason = stale ? 'stage_plan_stale' : !f.policy?.enabled || !f.live.enabled ? 'project_disabled' : ['cancelled','superseded','paused'].includes(f.task.status) ? 'task_inactive'
+    const reason = ['cancelled','superseded','paused'].includes(f.task.status) ? 'task_inactive' : !f.policy?.enabled || !f.live.enabled ? 'project_disabled'
+      : policyChanged || plan.policy_hash !== f.policyHash ? 'stage_policy_changed' : plan.contract_revision !== f.record.revision ? 'stage_plan_stale'
       : passed.has(stage.stage_id) ? null : active ? 'running' : deps.length ? 'dependencies' : attempts >= stage.retry.max_attempts ? 'stage_retry_exhausted' : stage.role_constraints.kinds.includes('observer') && !candidate ? 'candidate_required' : null;
-    return {...stage,status:passed.has(stage.stage_id) && !stale ? 'passed' : reason ? 'waiting' : 'ready',waiting_reason:reason,waiting_for:deps,attempts,assignments,results:results.filter((r: any) => r.stage_id === stage.stage_id)};
+    return {...stage,status:reason ? 'waiting' : passed.has(stage.stage_id) ? 'passed' : 'ready',waiting_reason:reason,waiting_for:deps,attempts,assignments,results:results.filter((r: any) => r.stage_id === stage.stage_id)};
   });
   return {task_id:taskId,task_status:f.task.status,task_waiting_reason:f.task.error_code??null,plan_revision:Number(plan.revision),contract_revision:plan.contract_revision,policy_hash:plan.policy_hash,candidate_ref:candidate,stages,next:stages.filter(stage => stage.status === 'ready').map(stage => stage.stage_id),waiting:stages.filter(stage => stage.waiting_reason).map(stage => ({stage_id:stage.stage_id,reason:stage.waiting_reason,dependencies:stage.waiting_for}))};
 }
@@ -136,10 +167,10 @@ export function bindStageAssignment(s: Store, taskId: string, assignment: string
   const definition = f.config.roles.find(r => r.role_id === role);
   const choices = view.stages.filter(stage => definition && stageAllows(stage, definition));
   if (!stageId && !choices.length) return;
-  const stage = stageId ? choices.find(stage => stage.stage_id === stageId) : choices.find(stage => stage.status === 'ready');
-  if(stage?.waiting_reason==='stage_retry_exhausted')stop('stage_retry_exhausted','waiting_configuration');
+  const stage = stageId ? choices.find(stage => stage.stage_id === stageId) : choices.find(stage => stage.status === 'ready')??choices.find(stage=>stage.status==='passed'&&stage.role_constraints.kinds.includes('writer'))??choices.find(stage=>stage.waiting_reason==='stage_retry_exhausted');
+  if(stage?.waiting_reason==='stage_retry_exhausted')stop('stage_retry_exhausted','paused');
   if (!stage || !['ready','passed'].includes(stage.status) || stage.status === 'passed' && !stage.role_constraints.kinds.includes('writer')) throw new Error('stage_not_runnable');
-  if (stage.attempts >= stage.retry.max_attempts) stop('stage_retry_exhausted', 'waiting_configuration');
+  if (stage.attempts >= stage.retry.max_attempts) stop('stage_retry_exhausted', 'paused');
   const old = s.get('SELECT * FROM task_stage_assignments WHERE assignment_id=?', assignment);
   if (old && (old.plan_revision !== plan.revision || old.stage_id !== stage.stage_id || definition?.kind==='observer'&&old.candidate_key !== candidateKey(latestRoleCandidate(s, taskId)))) throw new Error('stage_assignment_stale');
   s.run('INSERT OR IGNORE INTO task_stage_assignments VALUES(?,?,?,?,?)', assignment, taskId, plan.revision, stage.stage_id, candidateKey(latestRoleCandidate(s, taskId)));
@@ -149,7 +180,7 @@ export function assertStageRun(s: Store, taskId: string, assignment: string | un
   const stage = stageForAssignment(s, assignment);
   if (!stage) return;
   const f = assertActive(s, taskId), plan = currentPlan(s, taskId), row = s.get('SELECT * FROM task_stage_assignments WHERE assignment_id=?', assignment!);
-  if (!plan || row?.plan_revision !== plan.revision || plan.contract_revision !== f.record.revision || plan.policy_hash !== f.policyHash) stop('stage_plan_stale', 'waiting_configuration');
+  if (!plan || row?.plan_revision !== plan.revision || plan.contract_revision !== f.record.revision || plan.policy_hash !== f.policyHash) stop('stage_plan_stale', 'paused');
   if (kind === 'observer' && row!.candidate_key !== candidateKey(latestRoleCandidate(s, taskId))) stop('candidate_changed','retry_wait');
 }
 export function stageBudgetUsage(s: Store, assignment?: string) {
@@ -169,7 +200,7 @@ export function assertStageStart(s:Store,taskId:string,assignment:string|undefin
   assertStageRun(s,taskId,assignment,kind);
   const stage=stageForAssignment(s,assignment);if(!stage)return;
   const plan=currentPlan(s,taskId)!;
-  if(stageRuns(s,taskId,plan,stage.stage_id).length>=stage.retry.max_attempts)stop('stage_retry_exhausted','waiting_configuration');
+  if(stageRuns(s,taskId,plan,stage.stage_id).length>=stage.retry.max_attempts)stop('stage_retry_exhausted','paused');
 }
 export function stagePolicyHash(s:Store,taskId:string) {const f=facts(s,taskId);return f.config.enabled&&f.config.required_stages?.length?f.policyHash:undefined;}
 export function stageRunBinding(s:Store,assignment?:string) {
@@ -221,7 +252,7 @@ export function recordStageResult(s: Store, assignment: string, runId: string, e
     const result = {task_id:binding.task_id,plan_revision:binding.plan_revision,stage_id:stage.stage_id,definition_hash:contentHash(stage),contract_revision:ctx.contract_revision,candidate_ref:candidate,policy_hash:currentPlan(s,binding.task_id)!.policy_hash,
       policy_revision:ctx.policy_revision,workflow_revision:{id:snapshot.model.workflow,hash:currentPlan(s,binding.task_id)!.policy_hash},role_revision:ctx.role_revision,harness_revision:ctx.harness_revision,skill_revisions:ctx.skill_revisions,model_revision:ctx.model_revision,snapshot_ref:ctx.configuration_snapshot_ref,role_instance_id:run.role_instance_id,assignment_id:assignment,run_id:runId,lease_epoch:epoch,result_ref:refs.result_ref,evidence,passed,reason:passed?null:evidence.length < stage.completion.min_evidence?'insufficient_evidence':'findings_or_budget'};
     const existing = s.get('SELECT result FROM task_stage_results WHERE run_id=?',runId);
-    if (existing) { if (existing.result !== JSON.stringify(result)) throw new Error('stage_result_conflict'); return JSON.parse(existing.result); }
+    if (existing) { if (contentHash(JSON.parse(existing.result)) !== contentHash(result)) throw new Error('stage_result_conflict'); return JSON.parse(existing.result); }
     s.run('INSERT INTO task_stage_results VALUES(?,?,?,?,?,?,?,?)',runId,assignment,binding.task_id,binding.plan_revision,stage.stage_id,candidateKey(candidate),JSON.stringify(result),new Date().toISOString());
     traceEvent(s,binding.task_id,'stage_result',result,runId,'framework',evidence.map(e => e.ref));
     return result;
@@ -239,7 +270,10 @@ export function evaluateRequiredStages(s: Store, taskId: string, candidate: Cand
 }
 export function assertRequiredStages(s: Store, taskId: string, candidate: CandidateRef | null) {
   const evaluation = evaluateRequiredStages(s,taskId,candidate);
-  if (!evaluation.satisfied) stop('required_stages_incomplete','waiting_configuration',JSON.stringify(evaluation.waiting));
+  if (!evaluation.satisfied) {
+    assertStageWaits(s,taskId,evaluation.waiting);
+    stop('required_stages_incomplete','waiting_configuration',JSON.stringify(evaluation.waiting));
+  }
 }
 /** Configured stages supplement fresh QA; even a complete stage plan cannot sign its own acceptance. */
 export function assertStageAcceptance(s: Store, taskId: string, candidate: any, verdict: any) {

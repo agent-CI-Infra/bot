@@ -102,7 +102,7 @@ test('real Pi schedules configured parallel observers from durable task facts, w
   roleApi(store,{id:'owner',role:'project_admin',repositories:['101']},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:true,roles:[{role_id:'manager',persona_prompt:'Delegate the artifact, then inspect and test the same version in parallel. Nominate after both stages pass.'}],required_stages});
   const task=store.get("SELECT * FROM tasks WHERE id='t'"),redactor=new Redactor(),guard=async()=>{},workspace=new Workspace(store,manager,task,redactor,guard,()=>{});
   const result=await runTeam({store,task,redactor,guard,system:'Artifact delivery',prompt:'{}',tools:[{type:'function',function:{name:'finish',description:'Submit artifact',parameters:{type:'object',properties:{summary:{type:'string'}},required:['summary']}}}],finish:{name:'finish',validate:v=>v}},
-    {prepare:async()=>{},withRole:async(_role,work)=>work(),controller:controllerWorkspace(workspace)});
+    {prepare:async()=>{},withRole:async(_role,work)=>work(),controller:controllerWorkspace(workspace),worker:controllerWorkspace(workspace)});
   assert.equal(result.summary,'retained bounded artifact');assert.equal(readers,2);
   assert.equal(store.get("SELECT count(*) n FROM task_stage_results WHERE json_extract(result,'$.passed')=1").n,2);
   assert.equal(store.get('SELECT count(*) n FROM task_stage_plans').n,1);assert.equal(store.get('SELECT count(*) n FROM tasks').n,1);assert.equal(store.get("SELECT status FROM tasks WHERE id='t'").status,'running');

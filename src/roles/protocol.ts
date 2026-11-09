@@ -143,4 +143,4 @@ export function validateEvent(value: any): RunEvent {
   return value as RunEvent;
 }
 /** Canonical JSON hash, used for record and content hashes in references. */
-export const contentHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex');
+export const contentHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value ?? null,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item)).digest('hex');
