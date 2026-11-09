@@ -113,7 +113,10 @@ function workTypesCard(manager, roles, refresh) {
     const row = document.createElement('tr'); row.dataset.workType = work.id;
     const state = work.active ? badge('运行中', 'success') : !work.enabled ? badge('已关闭', 'warning') : badge(work.project_switch && !work.project_switch.on ? work.project_switch.title + '已关' : '项目已禁用', 'warning');
     tableCell(row, '工作类型', element('strong', work.name), element('code', work.id), state, element('p', work.description, 'muted'));
-    tableCell(row, '开关', checkbox('enabled:' + work.id, work.enabled, '开启'));
+    const switches = element('div', '', 'manager-writes'); switches.append(checkbox('enabled:' + work.id, work.enabled, '开启'));
+    // A restriction the upgrade kept from the old trigger lists: lifting it offers this work on every event that reaches the Manager.
+    if (work.events) switches.append(checkbox('events:' + work.id, true, '只在这些事件上提供：' + work.events.map(type => dispatchEventNames[type] || type).join('、')));
+    tableCell(row, '开关', switches);
     const writes = element('div', '', 'manager-writes');
     if (!work.write_options.length) writes.append(element('span', '不写 GitHub', 'muted'));
     for (const option of work.write_options) {
@@ -154,6 +157,7 @@ function workTypesCard(manager, roles, refresh) {
         const delta = {};
         if (enabled !== type.enabled) delta.enabled = enabled;
         if ([...writes].sort().join() !== [...type.writes].sort().join()) delta.writes = writes;
+        if (type.events && !form.elements['events:' + type.id].checked) delta.events = null;
         if (Object.keys(delta).length) work[type.id] = delta;
       }
       if (Object.keys(work).length) await saveManagerChange({ work });

@@ -39,7 +39,7 @@ export async function managerView(store: Store, rules: RuleService, repositoryId
       enabled: workEnabled(store, repositoryId, type.id, policy), active: workActive(store, repositoryId, type.id, policy),
       project_switch: type.family === 'review' ? { key: 'review_enabled', title: '项目的检视开关', on: !!policy.review_enabled }
         : type.family === 'development' ? { key: 'development_enabled', title: '项目的开发开关', on: !!policy.development_enabled } : null,
-      writes: workPermissions(store, repositoryId, type.id, policy).writes, write_options: writeOptions(type.id), model: model(policy, type.id),
+      writes: workPermissions(store, repositoryId, type.id, policy).writes, write_options: writeOptions(type.id), model: model(policy, type.id), events: settings[type.id]?.events ?? null,
       version: Number(settings[type.id]?.version ?? 0) })),
     dispatch_model: model(policy, 'manager'),
     events: eventFilters(store, repositoryId, policy),

@@ -74,9 +74,17 @@ export function ruleOverrides(content: string, previous: Record<string, unknown>
   for (const entry of sections) if (entry.rule) { if (parsed.has(entry.id)) overrides[entry.rule] = parsed.get(entry.id)!.body; else delete overrides[entry.rule]; }
   return overrides;
 }
+// A line of text that would read as a section heading. Text the control plane writes into a section (a migrated prompt, a
+// rule file saved through the rules API) is escaped so it stays inside its section and can never fail to parse.
+const headingLike = /^##[ \t]+.*`[a-z][a-z0-9._-]*`[ \t]*$/;
+export function escapeSectionBody(body: string): string {
+  const lines = body.replace(/\r\n/g, '\n').split('\n').map(line => headingLike.test(line) ? '\\' + line : line);
+  // An unclosed fence would turn every later heading into text; close it at the end of the section.
+  return (lines.filter(line => /^\s*(```|~~~)/.test(line)).length % 2 ? [...lines, '```'] : lines).join('\n');
+}
 /** A prompt whose rule sections are given text: used by the rules API and the migration to write one section. */
-export function withSection(content: string, id: string, body: string | null): string {
-  const parsed = parseSections(content), entry = section(id)!;
+export function withSection(content: string, id: string, raw: string | null): string {
+  const parsed = parseSections(content), entry = section(id)!, body = raw === null ? null : escapeSectionBody(raw);
   const lines = content.replace(/\r\n/g, '\n').split('\n'), out: string[] = [];
   let skipping = false, written = false, fence = false;
   for (const line of lines) {
@@ -91,7 +99,8 @@ export function withSection(content: string, id: string, body: string | null): s
 
 // ---- Work types: switch and writes ----
 
-export interface WorkSetting { enabled?: boolean; writes?: string[]; version?: number }
+/** `events`, when set, lists the event types a work type is offered on (written by the migration from old trigger lists). */
+export interface WorkSetting { enabled?: boolean; writes?: string[]; events?: string[]; version?: number }
 export const workSettings = (store: Store, repositoryId: string, policy = policyOf(store, repositoryId)): Record<string, WorkSetting> => {
   const value = json(policy?.work_settings ?? '{}', {}); return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 };
@@ -109,6 +118,12 @@ export function workActive(store: Store, repositoryId: string, id: string, polic
   if (work.family === 'review') return !!policy.review_enabled;
   if (work.family === 'development') return !!policy.development_enabled;
   return true;
+}
+/** Whether the Manager may be offered this work type for an event of this type: active, and the event is one it runs on. */
+export function workOffered(store: Store, repositoryId: string, id: string, eventType: string, policy = policyOf(store, repositoryId)): boolean {
+  if (!workActive(store, repositoryId, id, policy)) return false;
+  const events = workSettings(store, repositoryId, policy)[id]?.events;
+  return !Array.isArray(events) || events.includes(eventType);
 }
 /** What a task of this work type may do, read from trusted storage: reading is open, writing is the saved writes. */
 export function workPermissions(store: Store, repositoryId: string, id: string, policy = policyOf(store, repositoryId)): WorkPermissions {
@@ -131,6 +146,8 @@ export interface EventFilters {
   'pull_request.opened': boolean; 'pull_request.synchronize': boolean; 'pull_request.updated': boolean; 'pull_request.mention': boolean; 'pull_request.labels': string[];
   'review.published.issue': boolean; 'review.published.pr': boolean;
 }
+export const dispatchEventTypes = ['issue.opened', 'issue.updated', 'issue.mention', 'issue.labeled', 'pull_request.opened', 'pull_request.synchronize', 'pull_request.updated',
+  'pull_request.mention', 'pull_request.labeled', 'review.published', 'release.manual', 'actions.run_failed', 'gate.manual', 'schedule.due'];
 export const filterColumns: Record<string, string> = { 'issue.opened': 'review_issues', 'issue.updated': 'review_issue_updates', 'pull_request.opened': 'review_pull_requests',
   'pull_request.synchronize': 'review_pr_updates', 'pull_request.updated': 'review_pr_discussion' };
 const filterFlags = ['issue.mention', 'issue.development_label', 'pull_request.mention', 'review.published.issue', 'review.published.pr'];
@@ -176,11 +193,17 @@ function checkWork(value: unknown, current: Record<string, WorkSetting>) {
   let actions: boolean | undefined;
   for (const [id, entry] of Object.entries(value as Record<string, any>)) {
     if (!workType(id)) fail(400, 'unknown_work_type', 'work.' + id);
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).some(key => !['enabled', 'writes'].includes(key))) fail(400, 'invalid_work_settings', 'work.' + id);
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).some(key => !['enabled', 'writes', 'events'].includes(key))) fail(400, 'invalid_work_settings', 'work.' + id);
     const setting = { ...(next[id] ?? {}) };
     if (entry.enabled !== undefined) {
       if (typeof entry.enabled !== 'boolean') fail(400, 'invalid_work_settings', `work.${id}.enabled`);
       if (id === 'actions.failures') actions = entry.enabled; else if (setting.enabled !== entry.enabled) { setting.enabled = entry.enabled; changed.add(id); }
+    }
+    // The events a work type is offered on; null offers it on every event again.
+    if (entry.events !== undefined) {
+      if (entry.events !== null && (!Array.isArray(entry.events) || entry.events.some((event: unknown) => typeof event !== 'string' || !dispatchEventTypes.includes(event)))) fail(400, 'invalid_work_settings', `work.${id}.events`);
+      if (JSON.stringify(setting.events ?? null) !== JSON.stringify(entry.events)) changed.add(id);
+      if (entry.events === null) delete setting.events; else setting.events = [...new Set(entry.events as string[])];
     }
     if (entry.writes !== undefined) {
       const writes = validateWrites(entry.writes, id, `work.${id}.writes`);

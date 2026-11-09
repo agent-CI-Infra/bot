@@ -1,6 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import { savedWrites, writeCatalog, writeOptions, workType } from './catalog.js';
-import { parseSections, ruleOverrides, withSection, eventFilters, type WorkSetting } from './settings.js';
+import { parseSections, ruleOverrides, withSection, escapeSectionBody, eventFilters, type WorkSetting } from './settings.js';
 import { section } from './catalog.js';
 
 /**
@@ -49,6 +49,9 @@ function legacyTriggers(id: string, row: Row | undefined, policy: Row): Trigger[
 }
 const legacyEnabled = (id: string, row: Row | undefined, policy: Row) => id === 'actions.failures' ? !!policy.actions_failures_enabled : id.startsWith('custom.') ? !!row?.enabled : row ? !!row.enabled : true;
 const legacyWrites = (row: Row | undefined, id: string) => { let value: any = null; try { value = JSON.parse(String(row?.permissions ?? 'null')); } catch { value = null; } return savedWrites(value?.writes, id); };
+// The event types a trigger stands for; a mention is the Issue's or the pull request's, after what the workflow handled.
+const eventsOf = (trigger: string, side: 'issue' | 'pr' | 'any') => trigger === 'comment.mention'
+  ? side === 'issue' ? ['issue.mention'] : side === 'pr' ? ['pull_request.mention'] : ['issue.mention', 'pull_request.mention'] : [trigger];
 const writeTitles = (writes: string[]) => writes.map(id => writeCatalog.find(write => write.id === id)?.title ?? id).join('、') || '无';
 
 export function migrateWorkflows(store: Store) {
@@ -81,10 +84,15 @@ export function migrateWorkflows(store: Store) {
         work[id] = { ...(id === 'actions.failures' ? {} : { enabled: !!saved.enabled }), ...(saved.permissions != null ? { writes: legacyWrites(saved, id) } : {}), version: 0 };
         if (saved.name && saved.name !== builtinNames[id]) warnings.push(`内置工作流 ${id} 曾改名为「${saved.name}」；工作类型名称固定为「${workType(id)?.name}」。`);
       }
+      // In a customized project each object work type is offered only on the events that used to start it, so the
+      // Manager is never offered a review (or a reply) on an event that did not run one before.
+      const customized = customs.length > 0 || rows.some(entry => !String(entry.id).startsWith('custom.') && (entry.trigger_list != null || !legacyEnabled(String(entry.id), entry, policy)));
+      if (customized) for (const [id, side] of [['review.issue', 'issue'], ['review.pr', 'pr']] as const) if (ran.has(id))
+        work[id] = { ...(work[id] ?? {}), events: [...new Set(ran.get(id)!.flatMap(trigger => eventsOf(trigger.id, side)))], version: 0 };
       if (customs.length) {
         const enabled = customs.filter(entry => entry.enabled), source = enabled.length ? enabled : customs;
         const union = [...new Set(source.flatMap(entry => legacyWrites(entry, 'reply')))], writes = writeOptions('reply').map(write => write.id).filter(write => union.includes(write));
-        work.reply = { enabled: enabled.length > 0, writes, version: 0 };
+        work.reply = { enabled: enabled.length > 0, writes, events: [...new Set(enabled.flatMap(custom => legacyTriggers(String(custom.id), custom, policy).flatMap(trigger => eventsOf(trigger.id, 'any'))))], version: 0 };
         if (source.some(entry => JSON.stringify(legacyWrites(entry, 'reply')) !== JSON.stringify(writes)))
           warnings.push(`自定义工作流的写入不完全相同，「通用回复」取它们的并集：${writeTitles(writes)}。需要更窄时在项目配置里收窄。`);
         const models = [...new Set(source.map(entry => entry.model_id).filter(Boolean).map(String))];
@@ -93,8 +101,8 @@ export function migrateWorkflows(store: Store) {
       }
       // The Manager prompt: rule overrides and console prompts as sections, custom workflows in the reply section.
       let content = '';
+      const escaped = (text: string, where: string) => { if (escapeSectionBody(text) !== text.replace(/\r\n/g, '\n')) warnings.push(`${where} 里有像章节标题的行或未闭合的代码块，迁移时已转义，请检查。`); return text; };
       // A dispatch section only when the old triggers differ from the default flow: then it says which event started what.
-      const customized = customs.length > 0 || rows.some(entry => !String(entry.id).startsWith('custom.') && (entry.trigger_list != null || !legacyEnabled(String(entry.id), entry, policy)));
       if (customized) {
         const name = (id: string) => id.startsWith('custom.') ? `通用回复「${customs.find(c => c.id === id)?.name ?? id}」` : builtinNames[id] ?? id;
         const table = Object.keys(triggerTitles).map(trigger => {
@@ -102,19 +110,19 @@ export function migrateWorkflows(store: Store) {
           return `| ${triggerTitles[trigger]} | ${who.join('；') || '不运行'} |`;
         });
         content = withSection(content, 'dispatch', [section('dispatch')!.builtin().replace(/^# .*\n+/, '').trim(), '', `### 本项目升级前的触发配置`, '',
-          '升级前，下列事件分别启动这些工作流。默认流程与这张表不一致时，以这张表为准：事件只交给表里列出的工作，「不运行」的事件选择不处理。', '',
+          '升级前，下列事件分别启动这些工作流。默认流程与这张表不一致时，以这张表为准：事件只交给表里列出的工作，「不运行」的事件选择不处理。新建「通用回复」任务时，用 writes 收窄到对应小节写明的迁移前写入。', '',
           '| 事件 | 迁移前运行的工作 |', '| --- | --- |', ...table].join('\n'));
       }
       for (const entry of ['review.issue', 'review.pr', 'development', 'labels', 'guide']) {
-        const rule = section(entry)!.rule!; if (Object.hasOwn(overrides, rule)) content = withSection(content, entry, String(overrides[rule]));
+        const rule = section(entry)!.rule!; if (Object.hasOwn(overrides, rule)) content = withSection(content, entry, escaped(String(overrides[rule]), rule));
       }
-      for (const id of ['release.observe', 'release.notes', 'actions.failures', 'gate.onboarding']) if (row(id)?.prompt != null) content = withSection(content, id, String(row(id)!.prompt));
+      for (const id of ['release.observe', 'release.notes', 'actions.failures', 'gate.onboarding']) if (row(id)?.prompt != null) content = withSection(content, id, escaped(String(row(id)!.prompt), id));
       if (customs.length) content = withSection(content, 'reply', ['升级前的自定义工作流迁移到这里。Manager 新建「通用回复」任务时，任务按下面对应的小节执行；理由和简要说明写明是哪一节。', '',
         ...customs.flatMap(custom => {
           const triggers = legacyTriggers(String(custom.id), custom, policy).map(trigger => (triggerTitles[trigger.id] ?? trigger.id) + (trigger.label ? `「${trigger.label}」` : '')).join('、') || '无';
           return [`### ${custom.name}（原自定义工作流 \`${custom.id}\`${custom.enabled ? '' : '，迁移时已关闭，不要为它新建任务'}）`, '',
             ...(custom.description ? [`说明：${custom.description}`, ''] : []), `迁移前的触发源：${triggers}。`, `迁移前允许的写入：${writeTitles(legacyWrites(custom, 'reply'))}。`, '',
-            String(custom.prompt ?? '').trim(), ''];
+            escaped(String(custom.prompt ?? '').trim(), String(custom.name)), ''];
         })].join('\n'));
       const now = new Date().toISOString(), saved = JSON.parse(String(policy.event_filters || '{}'));
       for (const key of ['issue.labels', 'issue.development_label', 'pull_request.labels', 'review.published.issue', 'review.published.pr']) saved[key] = (filters as any)[key];

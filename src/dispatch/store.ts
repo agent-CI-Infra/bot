@@ -4,7 +4,7 @@ import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { TaskRecords } from '../tasks/service.js';
 import { enqueue } from '../review/queue.js';
 import { enqueueEventTask } from '../work/events.js';
-import { workActive, workPermissions } from '../work/settings.js';
+import { workOffered, workPermissions } from '../work/settings.js';
 import { narrowWrites, workType } from '../work/catalog.js';
 
 /**
@@ -53,7 +53,9 @@ export interface EventInput {
   merge?: { key: string; data: Json; trigger: Json; head?: string | null; kinds: string[] } | null;
 }
 export interface ContinueOption { id: string; task_id: string; kind: string; status: string; summary: string; created_at: string }
-export interface Decision { decision: 'create' | 'continue' | 'ignore'; option_ids: string[]; reason: string; brief?: { goal: string; criteria: string[] } | null; writes?: string[] | null; model?: string | null }
+export interface Decision { decision: 'create' | 'continue' | 'ignore'; option_ids: string[]; reason: string; brief?: { goal: string; criteria: string[] } | null; writes?: string[] | null; model?: string | null;
+  /** The continue options the decision was made with; a running task that appeared since means deciding again. */
+  seen?: string[] }
 export interface DispatchContext { event: Row; facts: Json; options: CreateOption[]; continuations: ContinueOption[]; related: Json[] }
 
 /** Module hooks: told in the deciding transaction what became of their option. */
@@ -77,7 +79,7 @@ const activeStates = ['queued', 'retry_wait', 'waiting_configuration', 'waiting_
  * and 0 for one already written. An event with nothing to offer never reaches the Manager.
  */
 export function recordEvent(store: Store, input: EventInput): number {
-  const options = input.options.filter(option => workActive(store, input.repositoryId, option.work));
+  const options = input.options.filter(option => workOffered(store, input.repositoryId, option.work, input.type));
   if (!options.length && !(input.merge && continuations(store, { repository_id: input.repositoryId, object_number: input.object?.number ?? null, merge: JSON.stringify(input.merge) }).length)) {
     // Modules still hear that nothing will run for their event.
     for (const option of input.options) if (option.hook) hooks.get(option.hook)?.declined(store, { repository_id: input.repositoryId, type: input.type }, 'work_inactive', option.ref ?? null);
@@ -116,7 +118,7 @@ export function continuations(store: Store, event: Record<string, any>): Continu
 }
 /** What the Manager reads: the event, the offered options and the tasks already on the same object. */
 export function dispatchContext(store: Store, event: Row): DispatchContext {
-  const options = (JSON.parse(event.options) as CreateOption[]).filter(option => workActive(store, event.repository_id, option.work));
+  const options = (JSON.parse(event.options) as CreateOption[]).filter(option => workOffered(store, event.repository_id, option.work, event.type));
   const related = event.object_number ? store.all(`SELECT id,kind,status,summary,error_code,created_at,updated_at,result FROM tasks WHERE repository_id=? AND object_number=?
     AND kind NOT IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request') ORDER BY created_at DESC,rowid DESC LIMIT 8`, event.repository_id, event.object_number).map(task => {
     let outcome: unknown = null; try { const result = JSON.parse(task.result || 'null'); outcome = result?.summary ? String(result.summary).slice(0, 300) : result?.pr_url ?? null; } catch { outcome = null; }
@@ -174,8 +176,10 @@ function create(store: Store, event: Row, option: CreateOption, decision: Decisi
     // Requests a bot pull request revision carries are done once it is queued; otherwise later reviews list them again.
     if (spec.kind === 'development.pr' && spec.requests?.length) {
       const now = new Date().toISOString();
+      // A request another revision already carried stays done.
       for (const r of spec.requests as any[]) store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
-        DO UPDATE SET state=excluded.state,task_id=excluded.task_id`, repo, spec.number, r.type, r.id, r.author, r.author_id, r.author_type, r.url, id ? 'done' : 'pending', id, now);
+        DO UPDATE SET state=CASE WHEN bot_pr_requests.state='done' THEN 'done' ELSE excluded.state END,task_id=CASE WHEN bot_pr_requests.state='done' THEN bot_pr_requests.task_id ELSE excluded.task_id END`,
+        repo, spec.number, r.type, r.id, r.author, r.author_id, r.author_type, r.url, id ? 'done' : 'pending', id, now);
       if (!id && spec.source_task) log(store, spec.source_task, { type: 'revision_deferred', detail: `PR #${spec.number} 已有排队或执行中的修订；这次的修改请求先记下，之后对这个 PR 的检视会再列出它们。` });
     }
     return id;
@@ -225,6 +229,8 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
     const current = store.get('SELECT * FROM dispatch_events WHERE id=?', event.id);
     if (!current || (lease ? current.state !== 'dispatching' || current.lease !== lease : current.state !== 'pending')) throw new InvalidDecision('dispatch_lease_lost', 'The event was decided or claimed elsewhere.');
     const context = dispatchContext(store, current), checked = checkDecision(store, context, decision);
+    // A review that started meanwhile (another event of the object) changes the choice: create may now duplicate it.
+    if (decision.seen && context.continuations.some(option => !decision.seen!.includes(option.id))) throw new InvalidDecision('dispatch_context_changed', 'A task the event could join appeared after the decision.');
     const options = JSON.parse(current.options) as CreateOption[], created: string[] = [], continued: string[] = [], declined: string[] = [], now = new Date().toISOString();
     if (checked.decision === 'create') for (const id of checked.option_ids) {
       const option = options.find(entry => entry.id === id)!, task = create(store, current, option, checked);

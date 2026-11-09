@@ -232,6 +232,9 @@ export function queueWebhook(store: Store, repositoryId: string, event: string, 
   if (object && (action === 'closed' || action === 'converted_to_draft')) {
     store.run("UPDATE tasks SET status='cancelled',error_code='object_closed_or_draft',retry_cycle_started_at=NULL,retry_error_code=NULL,retry_count=0 WHERE repository_id=? AND object_number=? AND kind LIKE ? AND status NOT IN ('succeeded','pr_opened','completed')",
       repositoryId, number, event === 'issues' ? '%.issue' : '%.pr');
+    // Events of the object that the Manager has not decided yet would only start work on a closed object.
+    store.run("UPDATE dispatch_events SET state='decided',decision='ignore',reason=?,lease=NULL,lease_until=NULL,decided_at=? WHERE repository_id=? AND object_type=? AND object_number=? AND state IN ('pending','failed')",
+      '对象已关闭或转为草稿，事件不再分派。', new Date().toISOString(), repositoryId, event === 'issues' ? 'issue' : 'pr', number);
   }
   if (!policy?.enabled) return 0;
   if (event === 'issues' && !policy.actions_failures_enabled && store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', repositoryId, number)) return 0;
