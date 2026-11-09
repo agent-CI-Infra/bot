@@ -52,7 +52,7 @@ test('a real Pi controller session delegates a role, reads its result by referen
   const workspace = new Workspace(store, manager, task, redactor, guard, value => logs.push(value));
   const tool = { type: 'function', function: { name: 'finish', description: 'Submit the result', parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], additionalProperties: false } } };
   const result = await runTeam({ store, task, redactor, guard, system: 'Task execution', prompt: '{}', tools: [tool], finish: { name: 'finish', validate: v => v }, maxTurns: 8 },
-    { prepare: async () => {}, controller: controllerWorkspace(workspace) });
+    { prepare: async () => {}, controller: controllerWorkspace(workspace), worker: controllerWorkspace(workspace) });
   assert.equal(result.summary, 'implemented by dev');
 
   // The trace names the actual Pi runtime and the pinned configuration of the controller run.

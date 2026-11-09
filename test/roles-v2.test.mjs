@@ -43,7 +43,12 @@ async function fixture(t, handler) {
   s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,review_enabled) VALUES('r','m',1,1,1)");
   t.after(() => new Promise(resolve => { s.close(); server.close(resolve); server.closeAllConnections(); }));
   const task = s.get("SELECT * FROM tasks WHERE id='t'");
-  const put = body => roleApi(s, admin, 'PUT', rolesUrl, { expected_revision: roleApi(s, admin, 'GET', rolesUrl, {}).revision, enabled: true, ...body }).configuration;
+  // These existing scenarios explicitly exercise Native workers; new-backend defaults have separate coverage.
+  const put = body => {
+    const given = body.roles ?? [], ids = ['coordinator', 'dev', 'test', 'reviewer', 'ux', 'qa'];
+    const roles = [...ids.map(role_id => ({ role_id, harness_ref: { id: 'native' }, ...given.find(r => r.role_id === role_id) })), ...given.filter(r => !ids.includes(r.role_id))];
+    return roleApi(s, admin, 'PUT', rolesUrl, { expected_revision: roleApi(s, admin, 'GET', rolesUrl, {}).revision, enabled: true, ...body, roles }).configuration;
+  };
   return { s, records, task, requests, put, spec: { store: s, task, redactor: new Redactor(), guard: async () => {}, system: 'Task execution', prompt: '{}', tools: [tool('finish')], finish: { name: 'finish', validate: v => v }, maxTurns: 8 } };
 }
 const rejects = (fn, code, field) => assert.throws(fn, e => { assert.equal(e.code, code); if (field) assert.equal(e.field, field); return true; });
@@ -53,8 +58,6 @@ test('saving RoleDefinitionV2 checks expected_revision, project scope and the ha
   const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, ...body });
   rejects(() => put({}), 'expected_revision_required', 'expected_revision');
   rejects(() => put({ expected_revision: 3 }), 'role_configuration_conflict', 'expected_revision');
-  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] }), 'harness_role_unsupported', 'roles.manager.harness_ref.id');
-  rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'pi' } }] }), 'harness_role_unsupported', 'roles.reviewer.harness_ref.id');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'process', version: '9' } }] }), 'harness_version_unavailable', 'roles.reviewer.harness_ref.version');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'manager', model_profile_ref: { model_id: 'm2', structured_output: 'json_schema' } }] }), 'harness_structured_output_unsupported', 'roles.manager.model_profile_ref.structured_output');
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', model_profile_ref: { model_id: 'm2', tool_calls: false } }] }), 'harness_tool_calls_required', 'roles.reviewer.model_profile_ref.tool_calls');
@@ -272,7 +275,7 @@ test('review under the controller keeps its task, executor, tools and completion
   const review = () => f.s.get("SELECT * FROM tasks WHERE id='rv'");
   const run = async () => { const runner = fakeRunner(), task = { ...review(), workspace_id: 'b'.repeat(48) }; const workspace = new Workspace(f.s, runner.manager, task, f.spec.redactor, async () => {}, () => {});
     return { runner, result: await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [{ path: 'a.js', content: 'code' }] }) }; };
-  f.put({ controller: { entries: { development: true, request: true, review: true, actions: false } } });
+  f.put({ controller: { entries: { development: true, request: true, review: true, actions: false } }, roles: [{ role_id: 'dev', harness_ref: { id: 'pi' } }] });
   const controlled = await run();
   assert.equal(controlled.result.summary, 'Short summary.');
   const executor = controlled.runner.spaces.get('b'.repeat(48)).parsed;
@@ -280,7 +283,7 @@ test('review under the controller keeps its task, executor, tools and completion
   assert.deepEqual(executor.finish_tools, ['finish_review']);
   assert.ok(executor.control_tools.includes('read_task_record') && !executor.control_tools.includes('finish_review'));
   const dev = f.s.get("SELECT * FROM task_runs WHERE task_id='rv' AND role='dev'"), devSnapshot = JSON.parse(f.s.get('SELECT snapshot FROM role_snapshots WHERE id=?', dev.role_snapshot).snapshot);
-  assert.deepEqual([dev.harness, devSnapshot.harness.source], ['pi', 'entry_executor']);
+  assert.deepEqual([dev.harness, devSnapshot.harness.source], ['pi', 'role']);
   assert.equal(JSON.parse(f.s.get("SELECT data FROM task_history WHERE task_id='rv' AND type='controller_entry'").data).entry, 'review');
   // Turning the entry off returns to the direct executor for the same task id.
   f.put({ controller: { entries: { development: true, request: true, review: false, actions: false } } });
@@ -290,18 +293,32 @@ test('review under the controller keeps its task, executor, tools and completion
   assert.equal(f.s.get("SELECT count(*) n FROM task_runs WHERE task_id='rv' AND role='manager'").n, 1);
 });
 
-test('the matrix holds both drivers: ACP runs worker roles with its own model, Pi runs only the controller', async t => {
+test('a review entry honors Native worker and Manager selections instead of forcing Pi', async t => {
+  const finish = { summary: 'Native review.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
+  const script = controllerScript();
+  const f = await fixture(t, body => isController(body) ? script(body)
+    : body.messages.some(m => m.tool_calls?.some(c => c.function.name === 'write_file')) ? call('finish_review', finish)
+    : call('write_file', { path: 'source.ts', content: 'unapproved edit' }));
+  f.put({ controller: { entries: { review: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }, { role_id: 'dev', harness_ref: { id: 'native' } }] });
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,input,attempt,generation) VALUES('native-review','r','review.pr','running','review',4,'{}',1,1)");
+  const task = { ...f.s.get("SELECT * FROM tasks WHERE id='native-review'"), workspace_id: 'b'.repeat(48) };
+  const workspace = new Workspace(f.s, { call: async () => { throw new Error('Native review must not start a Pi session'); } }, task, f.spec.redactor, async () => {}, () => {});
+  assert.equal((await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, 'Native review.');
+  assert.deepEqual(f.s.all("SELECT role,harness FROM task_runs WHERE task_id='native-review' ORDER BY rowid").map(r => [r.role, r.harness]), [['manager', 'native'], ['dev', 'native']]);
+  assert.ok(f.requests.some(body => JSON.stringify(body.messages).includes('review_repository_write_forbidden')));
+});
+
+test('backend selection is independent of role; ACP keeps its own model and new roles default to Pi', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const put = body => roleApi(f.s, admin, 'PUT', rolesUrl, { enabled: true, ...body });
   const view = roleApi(f.s, admin, 'GET', rolesUrl, {});
   const acp = view.harnesses.find(h => h.id === 'acp'), pi = view.harnesses.find(h => h.id === 'pi');
-  assert.deepEqual([acp.kinds, acp.session, acp.externalModel, acp.model_api], [['writer', 'observer', 'evaluator'], 'external_session', true, []]);
-  assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller'], 'native_resume', false]);
-  for (const id of ['acp', 'native', 'process']) rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'manager', harness_ref: { id } }] }), 'harness_role_unsupported', 'roles.manager.harness_ref.id');
+  assert.deepEqual([acp.kinds, acp.session, acp.externalModel, acp.model_api], [['controller', 'writer', 'observer', 'evaluator'], 'external_session', true, []]);
+  assert.deepEqual([pi.kinds, pi.session, pi.externalModel], [['controller', 'writer', 'observer', 'evaluator'], 'native_resume', false]);
   rejects(() => put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' }, model_profile_ref: { model_id: 'm2' } }] }), 'harness_model_profile_unsupported', 'roles.reviewer.model_profile_ref');
   const saved = put({ expected_revision: 0, roles: [{ role_id: 'reviewer', harness_ref: { id: 'acp' } }] }).configuration;
   assert.equal(saved.roles.find(r => r.role_id === 'reviewer').harness_ref.id, 'acp');
-  assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'native']);
+  assert.deepEqual([saved.roles.find(r => r.role_id === 'manager').harness_ref.id, saved.roles.find(r => r.role_id === 'dev').harness_ref.id], ['pi', 'pi']);
   // An external-model driver resolves no project model and records where the model comes from, without any key.
   const { snapshot, model } = resolveRole(f.s, 'r', 'reviewer', 'development.issue');
   assert.deepEqual([snapshot.model.source, snapshot.model.id, snapshot.model.profile_hash, snapshot.harness.id, model.key], ['external_harness', 'acp', null, 'acp', '']);

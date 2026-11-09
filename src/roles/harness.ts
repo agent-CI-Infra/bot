@@ -64,15 +64,15 @@ const openai=['openai-chat-completions'];
 // registration therefore never claims run isolation; admission refuses them for profiles that require it.
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 export const harnesses:Required<RoleHarnessMetadata>[]=[
- // A generic ACP agent with its own model; worker roles only. It declares no project model API. Only the Bot task tools
+ // A generic ACP agent with its own model; role authority stays with the control plane. It declares no project model API. Only the Bot task tools
  // are observed by the control plane; the agent's own terminal and tools are not.
- {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true,
+ {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
- {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
+ {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
- {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
+ {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
  // The real Pi SDK in a project computer workspace (runner/pi-entry.mjs), reached through the task mailbox.
- {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
+ {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
 const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',acpHarness],['pi',piHarness]]);

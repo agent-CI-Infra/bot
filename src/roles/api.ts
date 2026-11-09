@@ -1,4 +1,5 @@
 import {harnesses} from './harness.js';
+import {agentBackends,recommendedBackend} from './backends.js';
 import type {Store} from '../storage/database.js';
 import {repository,scope,type Actor} from '../app/auth.js';
 import {fields,fail,type Json} from '../core/security.js';
@@ -30,7 +31,7 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
    // The editable sources of the current bundles, so a console edit can resave them unchanged.
    const skill_inputs=current.skills.map(b=>{const row=s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?',repo,b.id,b.revision),source=JSON.parse(row?.source??'{}'),files=JSON.parse(row?.files??'[]');
     return {id:b.id,source:source.type==='inline'?{type:'inline',files:files.map((f:any)=>({path:f.path,content:f.content}))}:source.type==='builtin'?{type:'builtin',playbooks:source.playbooks}:{type:'repository',commit:source.commit,paths:source.paths}};});
-   return {configuration:current,revision:current.revision,workflow,preview,harnesses,...catalog(),models,skill_inputs,
+   return {configuration:current,configured:!!s.get('SELECT value FROM settings WHERE key=?','roles:'+repo),revision:current.revision,workflow,preview,harnesses,backends:agentBackends(),recommended_backend:recommendedBackend,...catalog(),models,skill_inputs,
     skill_sources:{repository:source?{commit:source.sha,paths:Object.keys(JSON.parse(source.files)).filter(p=>p.startsWith('.agents/skills/'))}:null},
     revisions:s.all('SELECT revision,hash,actor,created_at FROM role_config_revisions WHERE repository_id=? ORDER BY revision DESC LIMIT 20',repo)};
   }

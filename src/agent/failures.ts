@@ -39,7 +39,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
     'lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
-  role_configuration: { label:'角色配置', codes:['role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','harness_version_unavailable','harness_role_unsupported',
+  role_configuration: { label:'角色配置', codes:['role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','agent_backend_unavailable','harness_version_unavailable','harness_role_unsupported',
     'role_model_not_available','role_model_profile_changed','capability_policy_unavailable','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
     'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported',
     // RoleRun admission, budgets and recovery (#169): fail closed instead of downgrading or switching silently.

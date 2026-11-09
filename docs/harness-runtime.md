@@ -37,7 +37,7 @@ Role 服务选择执行器并组装角色说明、assignment 和任务事实引�
 {"expected_revision":3,"enabled":true,"roles":[{"role_id":"dev","harness_ref":{"id":"acp"}},{"role_id":"test","harness_ref":{"id":"acp"}},{"role_id":"reviewer","harness_ref":{"id":"acp"}},{"role_id":"ux","harness_ref":{"id":"acp"}}]}
 ```
 
-ACP 只运行工作角色（writer、observer、evaluator）。项目主控（manager）在 Pi 上运行，不能选 ACP；QA 和其他工作角色默认 Native。ACP 使用执行器自带的模型，角色上不能再写 `model_profile_ref`，运行快照里模型来源记为 `external_harness`。第一版只配置一个外部 ACP 启动 profile；将来多个厂商/profile 可复用客户端扩展，不作为本期验收前提。API 可选择已注册执行器，但不修改可信启动文件。V2 配置下新的委派按当前 revision 解析；V2 之前保存的旧格式配置下，已有 role instance 保持最初 Harness 绑定。
+Native、Pi、Process、ACP 作为并列 Agent 后端，均可为主控、工作角色和 QA 配置。新配置对所有角色默认推荐 Pi；显式保存的选择继续保留。ACP 使用相同的受控任务工具和角色结果校验，选择它作为主控不会获得产品执行或发布权限。ACP 使用执行器自带的模型，角色上不能再写 `model_profile_ref`，运行快照里模型来源记为 `external_harness`。第一版只配置一个外部 ACP 启动 profile；将来多个厂商/profile 可复用客户端扩展，不作为本期验收前提。API 可选择已注册执行器，但不修改可信启动文件。V2 配置下新的委派按当前 revision 解析；V2 之前保存的旧格式配置下，已有 role instance 保持最初 Harness 绑定。
 
 ## 恢复与查询
 
@@ -52,3 +52,9 @@ ACP 只运行工作角色（writer、observer、evaluator）。项目主控（ma
 第一版不提供完整隔离、权限代理、精确计费、跨 Harness 会话转换、执行中追加输入或自动故障接管；其后的 [RoleRun 协议](role-run.md) 在同一会话之上补充了版本化输入、租约 epoch、运行令牌、任务工具网关、准入、每运行容器、预算和恢复模式，内置驱动仍不声明隔离。ACP permission request 对既有执行授权允许一次（无此选项则取消）；这是现有授权下的轻量运行方式，不是细粒度权限防线。远端 Agent 自有工具也不保证经 Bot 代理；验收以公共任务工具留下的实际证据为准。运行主机必须适合执行受信任的 Agent；不把部署共享 HOME 或管理员凭据作为默认配置。
 
 真实 ACP 最小复核（会实际调用已认证 Agent，不属于默认测试）：先构建并配置 `BOT_ACP_CONFIG`，连续运行两次 `node scripts/acp-smoke.mjs .tmp/acp-smoke`。两个独立驱动进程使用同一数据库，实际经 MCP 读取随机任务事实并校验提交；proof 文件保留 session ID、恢复方式、run 与事实读取次数。恢复还是重建以实际 Agent 能力为准，不预设成功结论。该 probe 不访问 GitHub、不修改产品仓库，不代替 OpenToday 开发 E2E。
+
+## 后端目录与兼容
+
+角色 API 返回统一 `backends` 目录、是否已接入及推荐默认值，角色页可以逐角色选择。原 `harness_ref` 和运行快照字段保留兼容。Native/Process 的消息检查点、ACP 的外部会话绑定及 Pi 的活会话重接分别记录，不把切换后端描述为跨协议恢复原会话。Pi 的 QA 和 Coordinator 直接从本轮固定候选或持久化事实开始，不接回旧评价对话。
+
+Codex App Server、Claude Code、OpenCode 的原生驱动仍由 #171/#170/#172 实现；目录中的待接入状态不是可执行适配器。缺少驱动时配置明确报错，不会换成 Native、Pi 或 ACP 冒充执行。已部署的通用 Codex ACP 可继续选择 ACP 使用。

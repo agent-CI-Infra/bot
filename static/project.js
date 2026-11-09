@@ -289,14 +289,16 @@ const roleRefText = ref => ref ? `${ref.id}@${ref.version}` : '—';
 const editableRole = r => ({ role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
   model_profile_ref: r.model_profile_ref ? { model_id: r.model_profile_ref.model_id, api: r.model_profile_ref.api, tool_calls: r.model_profile_ref.tool_calls, structured_output: r.model_profile_ref.structured_output } : null,
   skill_bundle_ref: r.skill_bundle_ref ? { id: r.skill_bundle_ref.id } : null, harness_ref: { id: r.harness_ref.id }, capability_policy_ref: { id: r.capability_policy_ref.id },
-  environment_profile_ref: { id: r.environment_profile_ref.id }, budget_policy_ref: r.budget_policy_ref.id === 'bounded' ? { id: 'bounded', max_turns: r.budget_policy_ref.max_turns, max_output_tokens: r.budget_policy_ref.max_output_tokens } : { id: r.budget_policy_ref.id },
+  environment_profile_ref: { id: r.environment_profile_ref.id }, budget_policy_ref: Object.fromEntries(Object.entries(r.budget_policy_ref).filter(([key]) => key !== 'version')),
   output_schema_ref: { id: r.output_schema_ref.id } });
 function rolesSection() {
   const id = current.id, endpoint = `/api/repositories/${id}/roles`, section = card('角色'), body = element('div'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert');
-  section.append(note('项目主控（manager）在 Pi 上运行，只查询任务事实、委派、协调和送验；正式交付仍经过独立 QA。人设提示词只是资料，工具和权限只来自能力策略。保存要带当前 revision；正在运行的角色保留启动时的快照。'), body, message);
+  section.append(note('每个角色都可以选择 Agent 后端，默认推荐 Pi。角色职责和权限由能力策略决定：主控只查询、委派和提名，正式交付仍经过独立 QA。保存后创建新 revision；正在运行的角色保留启动时的快照。'), body, message);
   const render = data => {
-    const config = data.configuration, entries = config.controller.entries;
+    const config = data.configuration, entries = config.controller.entries, backends = data.backends || data.harnesses.map(h => ({ ...h, name: h.id, available: true }));
+    const draft = { enabled: config.enabled, controller: config.controller, roles: config.roles.map(r => ({ ...editableRole(r), ...(!data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })), skills: data.skill_inputs };
+    const editor = textarea('role_configuration', JSON.stringify(draft, null, 2), { rows: 18, spellcheck: false, className: 'code' });
     const summary = facts([['配置 revision', String(config.revision) + (config.legacy ? '（旧格式，保存后升级为 V2）' : '')], ['角色协作', config.enabled ? '已开启' : '未开启'], ['主控角色', config.controller.role],
       ['接入主控的入口', ['development', 'request', 'review', 'actions'].filter(e => entries[e]).map(e => ({ development: '开发', request: '普通任务', review: '检视', actions: 'Actions 分析' })[e]).join('、') || '无'],
       ['预览工作流', data.workflow]]);
@@ -304,22 +306,36 @@ function rolesSection() {
     for (const role of config.roles) {
       const preview = data.preview.find(p => p.role === role.role_id), row = document.createElement('tr');
       tableCell(row, '角色', element('strong', role.name), note(`${role.role_id} · ${role.kind}${role.enabled ? '' : ' · 已停用'}`));
-      tableCell(row, '执行后端', element('span', roleRefText(role.harness_ref)));
-      tableCell(row, '模型（来源）', preview?.error ? element('span', `${preview.error}${preview.detail ? '：' + preview.detail : ''}`, 'view-error') : element('span', preview ? `${preview.model.name}（${{ role: '角色', workflow: '工作流', project: '项目默认' }[preview.model.source]}）` : '—'));
+      const picker = document.createElement('select'); picker.setAttribute('aria-label', `${role.role_id} Agent 后端`);
+      for (const backend of backends) {
+        const option = new Option(`${backend.name}${backend.recommended ? '（推荐）' : ''}${backend.available ? '' : '（驱动待接入）'}`, backend.id);
+        option.disabled = !backend.available || !backend.kinds.includes(role.kind); picker.add(option);
+      }
+      picker.value = draft.roles.find(r => r.role_id === role.role_id).harness_ref.id;
+      picker.addEventListener('change', () => {
+        try {
+          const value = JSON.parse(editor.value), entry = value.roles.find(r => r.role_id === role.role_id);
+          if (!entry) throw new Error('配置中缺少该角色');
+          entry.harness_ref = { id: picker.value };
+          editor.value = JSON.stringify(value, null, 2); message.textContent = '';
+        } catch { message.textContent = '请先修正配置 JSON，再选择后端。'; }
+      });
+      tableCell(row, '执行后端', picker, note(`已保存：${roleRefText(role.harness_ref)}`));
+      tableCell(row, '模型（来源）', preview?.error ? element('span', `${preview.error}${preview.detail ? '：' + preview.detail : ''}`, 'view-error') : element('span', preview ? `${preview.model.name}（${{ role: '角色', workflow: '工作流', project: '项目默认', external_harness: '后端自带' }[preview.model.source]}）` : '—'));
       tableCell(row, '技能包', element('span', role.skill_bundle_ref ? `${role.skill_bundle_ref.id}@${role.skill_bundle_ref.revision} · ${role.skill_bundle_ref.content_hash.slice(0, 12)}` : '—'));
       tableCell(row, '能力策略', element('span', roleRefText(role.capability_policy_ref)));
       tableCell(row, 'revision', element('span', String(role.revision)));
       rows.append(row);
     }
-    const editor = textarea('role_configuration', JSON.stringify({ enabled: config.enabled, controller: config.controller, roles: config.roles.map(editableRole), skills: data.skill_inputs }, null, 2), { rows: 18, spellcheck: false, className: 'code' });
     const save = button('保存为新 revision', async () => {
-      message.textContent = '';
+      message.textContent = ''; message.className = 'view-error'; message.setAttribute('role', 'alert');
       let value; try { value = JSON.parse(editor.value); } catch { message.textContent = '配置不是合法 JSON。'; return; }
-      try { const saved = await api(endpoint, 'PUT', { ...value, expected_revision: config.revision }); current.flash = `角色配置已保存为 revision ${saved.configuration.revision}。`; await refresh(); }
+      try { const saved = await api(endpoint, 'PUT', { ...value, expected_revision: config.revision }); await refresh();
+        message.className = 'view-success flash'; message.setAttribute('role', 'status'); message.textContent = `角色配置已保存为 revision ${saved.configuration.revision}。`; }
       catch (err) { message.textContent = err.field ? `${err.message}（字段 ${err.field}）` : err.message; }
     });
     const models = note('可引用的模型：' + (data.models.map(m => `${m.id}（${m.name}${m.shared ? '，共享' : ''}）`).join('、') || '无'));
-    const harnessList = note('执行后端能力：' + data.harnesses.map(h => `${h.id}@${h.version}（${h.kinds.join('/')}${h.runtime ? '，' + h.runtime.package : ''}）`).join('；'));
+    const harnessList = note('Agent 后端：' + backends.map(h => `${h.name}（${h.available ? h.id + '@' + h.version : '驱动待接入，#' + h.integration_issue}）`).join('；'));
     const history = note('最近的 revision：' + (data.revisions.map(r => `${r.revision}（${r.created_at}）`).join('、') || '无'));
     const actions = element('div', '', 'actions'); actions.append(save);
     body.replaceChildren(summary, table, field('配置（JSON）', editor), models, harnessList, actions, history);

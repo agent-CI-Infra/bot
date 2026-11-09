@@ -7,6 +7,7 @@ import { playbooks } from '../tasks/playbooks.js';
 import { rolePool, sharedInstructions, configuredRoles } from './pool.js';
 import { roleKind, capabilityPolicy, capabilityPolicies, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
 import { harnesses } from './harness.js';
+import { recommendedBackend, plannedBackend } from './backends.js';
 
 /**
  * RoleDefinitionV2: one project's versioned role configuration. Every reference names a fixed version: model profiles pin
@@ -48,7 +49,7 @@ const builtinNames: Record<string, [string, string]> = {
 // Own properties only: a custom role may be called "constructor".
 const names = (id: string): [string, string] => Object.hasOwn(builtinNames, id) ? builtinNames[id]! : [id, 'Project observer role: inspects the fixed candidate and reports findings.'];
 const catalogRef = (list: { id: string; version: string }[], id: string) => { const entry = list.find(e => e.id === id)!; return { id: entry.id, version: entry.version }; };
-const defaultHarness = (kind: RoleKind) => kind === 'controller' ? 'pi' : 'native';
+const defaultHarness = () => recommendedBackend;
 const harnessRef = (id: string) => ({ id, version: harnesses.find(h => h.id === id)?.version ?? 'unregistered' });
 const definitionHash = ({ revision, ...rest }: RoleDefinitionV2) => short(rest);
 
@@ -167,11 +168,11 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
       const entry = list.find(e => e.id === ref.id)!; if (ref.version !== undefined && ref.version !== entry.version) invalid('reference_version_unavailable', `${field}.${key}.version`);
       return { id: entry.id, version: entry.version };
     };
-    const harnessInput = given.harness_ref ?? { id: given.role_id==='coordinator'?'native':defaultHarness(kind) };
+    const harnessInput = given.harness_ref ?? (!current.legacy ? current.roles.find(r => r.role_id === id)?.harness_ref : undefined) ?? { id: defaultHarness() };
     if (!harnessInput || typeof harnessInput.id !== 'string') invalid('invalid_role_reference', `${field}.harness_ref`);
-    const harness = harnesses.find(h => h.id === harnessInput.id); if (!harness) invalid('unknown_role_harness', `${field}.harness_ref.id`);
-    // The project controller runs on the real Pi harness; a worker kind cannot be moved onto a driver that cannot run it.
-    if (!(id==='coordinator'?harness!.environment==='control_plane':harness!.kinds.includes(kind))) invalid('harness_role_unsupported', `${field}.harness_ref.id`);
+    const harness = harnesses.find(h => h.id === harnessInput.id); if (!harness) invalid(plannedBackend(harnessInput.id) ? 'agent_backend_unavailable' : 'unknown_role_harness', `${field}.harness_ref.id`);
+    // A backend's declared capabilities, rather than a special Manager/Pi pairing, determine admission.
+    if (!harness!.kinds.includes(kind)) invalid('harness_role_unsupported', `${field}.harness_ref.id`);
     if (harnessInput.version !== undefined && harnessInput.version !== harness!.version) invalid('harness_version_unavailable', `${field}.harness_ref.version`);
     let model: ModelProfileRef | null = null;
     if (given.model_profile_ref !== undefined && given.model_profile_ref !== null) {
@@ -305,7 +306,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     profileHash = modelProfileHash({ api_url: model.url, model_name: model.model });
   }
   if (!harness.externalModel) checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => { throw new TaskError(code, 'waiting_configuration', `${at}：${harness.id} 不支持这个模型配置。`); });
-  if (!(roleId==='coordinator'?harness.environment==='control_plane':harness.kinds.includes(definition.kind)) && !options.harness && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
+  if (!harness.kinds.includes(definition.kind) && !options.harness && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
   const policy = capabilityPolicy(definition.capability_policy_ref.id);
   if (!policy || policy.version !== definition.capability_policy_ref.version) return stop('capability_policy_unavailable', 'waiting_configuration', `${field}.capability_policy_ref：策略版本已不存在。`);
   const environment = environmentProfiles.find(e => e.id === definition.environment_profile_ref.id)!, schema = outputSchemas.find(o => o.id === definition.output_schema_ref.id)!;
