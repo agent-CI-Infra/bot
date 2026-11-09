@@ -15,6 +15,14 @@ export interface AgentServices {
 }
 export interface AgentSpec<T> {
   store: Store;
+  /** Trusted preparation and run binding for external protocol drivers; never supplied by model output. */
+  harnessPreparation?: unknown;
+  harnessBinding?: { model_revision: string; harness_revision: string };
+  runContext?: () => import('../roles/protocol.js').RunContext | undefined;
+  runUsage?: () => { unknown_requests: number };
+  /** Control-plane snapshot of the active workspace. Never populated from a CLI report. */
+  candidateSnapshot?: () => Promise<{ tree_sha: string; local_sha: string } | null>;
+  onExternalUsage?: (usage: { model_requests: number; input_tokens: number; output_tokens: number; unknown_requests: number; semantics: string; cost: string }) => void;
   harnessState?: { value:Record<string,any>; save:(value:Record<string,any>)=>void };
   modelTrace?: Record<string,unknown>;
   executionSignal?: AbortSignal;

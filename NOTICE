@@ -11,6 +11,10 @@ The headless project agent uses Pi (@earendil-works/pi-coding-agent 1.4.0),
 https://github.com/badlogic/pi-mono, under the MIT License.
 The upstream notice is retained in runner/licenses/pi-MIT.txt and the project image.
 
+The optional Claude Code harness executes @anthropic-ai/claude-code 2.1.319,
+https://github.com/anthropics/claude-code. Its upstream license and terms are
+retained in the installed npm packages; it is not covered by this project's Apache license.
+
 The public dashboard and single-repository exporter are vendored from
 https://github.com/agent-CI-Infra/dashboard, revision
 9e57dfaf11fa44606517da454c5732a59d1f7996.

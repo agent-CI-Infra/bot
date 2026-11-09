@@ -4,6 +4,9 @@ import { createInterface } from 'node:readline';
 import { runTools } from '../agent/runtime.js';
 import { managedSession } from '../harness/session.js';
 import { acpHarness } from './acp.js';
+import { claudeCodeHarness } from './claude-code.js';
+import { prepareClaudeCode } from '../harness/claude-code.js';
+import { claudeCodeRuntime } from '../harness/claude-code-protocol.js';
 import type { AgentSpec,AgentServices } from '../agent/runtime.js';
 import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
@@ -64,6 +67,8 @@ const openai=['openai-chat-completions'];
 // registration therefore never claims run isolation; admission refuses them for profiles that require it.
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 export const harnesses:Required<RoleHarnessMetadata>[]=[
+ {id:'claude_code',version:claudeCodeRuntime.version,session:'external_session',events:claudeCodeRuntime.protocol,kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:{package:claudeCodeRuntime.package,version:claudeCodeRuntime.version},externalModel:true,
+  capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  // A generic ACP agent with its own model; role authority stays with the control plane. It declares no project model API. Only the Bot task tools
  // are observed by the control plane; the agent's own terminal and tools are not.
  {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true,
@@ -75,7 +80,7 @@ export const harnesses:Required<RoleHarnessMetadata>[]=[
  {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
-const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',acpHarness],['pi',piHarness]]);
+const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',acpHarness],['claude_code',claudeCodeHarness],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');
@@ -128,7 +133,7 @@ export function roleHarness(id:string){
   const external=spec.cancelSignal;if(external){const cancel=()=>void session.cancel();if(external.aborted)cancel();else external.addEventListener('abort',cancel,{once:true});}
   return session;
  };
- return {...harnesses.find(h=>h.id===id)!,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
+ return {...harnesses.find(h=>h.id===id)!,prepare:id==='claude_code'?prepareClaudeCode:undefined,createSession,adapter:<T>(spec:AgentSpec<T>)=>async(services:AgentServices)=>{
   const session=createSession(spec,services);
   try{return await session.run();}finally{await session.close();}
  }};

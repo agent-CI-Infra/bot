@@ -30,6 +30,8 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 `test/pi-controller.test.mjs` 用本机 runner 和真实 Pi SDK 运行项目主控会话，需要先安装 runner 依赖：`npm ci --prefix runner --omit=dev --ignore-scripts`。没有安装时这一项在本地跳过；CI 安装依赖并设置 `BOT_REQUIRE_PI=1`，缺少 SDK 会失败而不是跳过。
 
+`test/claude-code.test.mjs` 启动 lockfile 固定的真实 Claude Code 二进制，以合成 provider 验证 MCP、受控代码修改、实际测试和精确恢复；另有明确标注的协议 fixture。它们不需要个人登录态，也不代替真实模型验收，部署和 opt-in probe 见 [Claude Code harness](claude-code.md)。在 `node:test` 内启动子进程 `node --test` 时要显式构造环境，避免继承 `NODE_TEST_CONTEXT` 导致子测试静默跳过，并断言实际执行项数和失败/成功状态。
+
 `npm test` 覆盖并发初始化只成功一次、重启、权限收回、跨项目列表／详情／日志／模型隔离、凭据加密及不回显、验签、事务回滚重试、重复投递、先落库再确认和空配置不执行。SQLite 使用 Node 内置 `node:sqlite`，Node 22 会显示实验特性提示。
 
 浏览器验收使用固定在 lockfile 的 Playwright，先运行 `npx playwright install chromium --only-shell`，再执行 `npm run test:e2e`；测试在自己的临时 SQLite 和随机端口上启动服务，覆盖初始化、登录、登记账号、查看签名投递、项目权限以及宽屏／窄屏页面，不占用部署数据或固定试用端口。输出放在忽略提交的 `.tmp/`。
