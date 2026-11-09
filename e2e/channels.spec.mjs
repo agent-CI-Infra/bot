@@ -19,9 +19,11 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await until(() => wire.sent.some(s => JSON.stringify(s.content).includes(operation.id)));
     await page.getByRole('button', { name: '管理对话', exact: true }).click();
     await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await page.getByText('会话记录', { exact: true }).click();
     await page.getByLabel('持久会话').selectOption(result.conversation_id);
     const feed = page.getByRole('log', { name: '管理会话记录' });
     await expect(feed).toContainText(operation.id); await expect(feed).toContainText('操作 workflow.update · succeeded');
+    await page.getByRole('button', { name: '快捷操作', exact: true }).click();
     await expect(page.getByLabel('默认提示词', { exact: true })).toHaveValue('Inspect evidence and cite the original logs.');
     await page.screenshot({ path: '.tmp/channels-165/shared-operation-desktop.png', fullPage: true });
     const grantsBefore = h.store.get('SELECT count(*) n FROM scoped_grants').n;

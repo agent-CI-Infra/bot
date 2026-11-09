@@ -16,6 +16,7 @@ async function login(page, f, username = 'administrator', password = f.password)
   await page.getByLabel('用户名', { exact: true }).fill(username); await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
   await page.getByLabel('当前管理作用域').selectOption('project:101');
+  await page.getByRole('button', { name: '快捷操作', exact: true }).click();
   await expect(page.getByRole('button', { name: '预览日报计划', exact: true })).toBeVisible();
 }
 const read = async (f, operation) => (await f.admin('/api/management/query', 'POST', { operation, target: { project_id: '101' }, arguments: {} })).value;

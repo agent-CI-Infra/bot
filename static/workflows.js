@@ -493,6 +493,7 @@ const assistantKey = (repo, item) => `workflow-assistant:${repo}:${item}`;
 // shows the agent's work as it streams: its text, its reasoning, each tool call with its result, and the drafts it proposes.
 const assistant = { repo: null, item: null, history: null, controller: null };
 function openWorkflowAssistant(item, repo = current.id) {
+  if (typeof minimizeManagementChat === 'function') minimizeManagementChat(false);
   assistant.repo = repo; assistant.item = item;
   assistant.history = browserStore(assistantKey(repo, item)) || { messages: [], turns: [] };
   const window = assistantWindow(); window.hidden = false;

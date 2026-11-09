@@ -8,8 +8,8 @@ const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs
   external: '#/external', settings: '#/settings', channels: '#/channels', identity: '#/identity', management: '#/management' }, superTabs = ['settings'];
 const retryableStates = ['paused', 'failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
-async function api(path, method = 'GET', body) {
-  const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function api(path, method = 'GET', body, { signal } = {}) {
+  const response = await fetch(path, { method, signal, headers: { 'Content-Type': 'application/json', ...(me ? { 'X-CSRF-Token': me.csrf_token } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const value = await response.json();
   // authorization_changed has its own guidance; field names the configuration path a validation error concerns
   // (for example roles.reviewer.harness_ref.id).
@@ -51,6 +51,7 @@ function options(select, rows, label) { const selected = select.value; while (se
 async function start() {
   setup = !(await api('/api/setup')).initialized;
   try { me = await api('/api/auth/me'); } catch { me = null; }
+  if (typeof syncManagementChat === 'function') syncManagementChat();
   $('access').hidden = !!me; $('workspace').hidden = !me; $('identity').hidden = !me; $('tabs').hidden = !me;
   if (!me) document.body.classList.remove('board-mode');
   $('access-title').textContent = setup ? '创建第一名超级管理员' : '登录';
@@ -87,6 +88,10 @@ function addressTab(hash) {
 }
 async function route() {
   renderVersion++;
+  // Old chat links now wake the shared window beside the project, rather than replacing the page.
+  const chatProject = /^#\/projects\/([^/]+)\/management$/.exec(location.hash)?.[1];
+  const wakeChat = location.hash === '#/management' || !!chatProject;
+  if (wakeChat) history.replaceState(null, '', chatProject ? `#/projects/${chatProject}/basic` : '#/projects');
   const legacy = legacyOnboardingAddress.exec(location.hash);
   if (legacy) history.replaceState(null, '', '#/settings/onboarding/' + ([0, 1, 3, 4, 5, 6][Number(legacy[1] || 0)] ?? 0));
   // Accounts and users were tabs of their own; their old addresses open the matching settings section.
@@ -102,6 +107,7 @@ async function route() {
   document.body.classList.toggle('board-mode', !target && tab === 'board');
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   if (target) await renderProject(target); else await render();
+  if (wakeChat) void openManagementChat(chatProject || null).catch(error);
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });
 // `quiet` is the periodic refresh: the list stays on screen while loading, and only rows whose data changed are replaced
@@ -122,13 +128,12 @@ async function render(quiet = false) {
   $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=['external','board','costs','settings','identity','management','channels'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=tab!=='identity';$('channels-panel').hidden=tab!=='channels';$('management-panel').hidden=tab!=='management';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
+  $('rows').hidden=['external','board','costs','settings','identity','channels'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=tab!=='identity';$('channels-panel').hidden=tab!=='channels';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
   $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren();listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
   if(tab==='board'){try{await renderBoard(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='costs'){try{await renderCosts(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
-  if(tab==='management'){try{await renderManagement($('management-panel'));}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='channels'){try{await renderChannels();}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='identity'){try{await renderIdentity();}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='settings'){try{await renderSettings(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
@@ -362,6 +367,7 @@ $('logout').addEventListener('click', async () => { try { await api('/api/auth/l
 // The address is written without waiting for hashchange, so the page switches in the same click; back and forward still
 // fire hashchange and draw the page they return to.
 $('tabs').addEventListener('click', event => { const name = event.target.dataset.tab; if (!name) return;
+  if (name === 'management') { void openManagementChat(projectRoute()?.id || null).catch(error); return; }
   if (location.hash !== tabAddresses[name]) history.pushState(null, '', tabAddresses[name]); offset = 0; route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));
 // The onboarding dialog calls this once a run reaches a terminal state.
