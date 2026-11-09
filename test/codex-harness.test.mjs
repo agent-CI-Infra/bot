@@ -304,6 +304,20 @@ test('Only the turn named by the start answer ends the start; a late turn id or 
   f.configure({});await runRole(f.spec,'dev');
   assert.deepEqual(f.events().filter(e=>e.type==='session_bound').at(-1).reconciled,{turnId:c,recorded:'inProgress',observed:'interrupted'});
  });
+ await t.test('cancel after a stale terminal waits for the answered turn itself',async t=>{
+  // C starts after the answer and the stale terminal of B; C ignores the interrupt.
+  const {f}=await setup(t),results=()=>f.s.get("SELECT count(*) n FROM task_history WHERE type='role_result'").n,before=results();
+  f.configure({FIXTURE_STALE_TERMINAL:'true',FIXTURE_WAIT:'true',FIXTURE_IGNORE_INTERRUPT:'true'});
+  let cancelAt=0;const poll=setInterval(()=>{if(!cancelAt&&f.lines('prompts.jsonl').length===3)cancelAt=Date.now();},20);
+  await assert.rejects(runRole({...f.spec,guard:async()=>{if(cancelAt)throw new TaskError('task_cancelled','cancelled');}},'dev'),{code:'task_cancelled'});clearInterval(poll);
+  const c=f.lines('prompts.jsonl')[2].turnId,events=f.events(),run=events.slice(events.findLastIndex(e=>e.type==='session_bound'));
+  assert.deepEqual(f.lines('interrupts.jsonl').map(i=>i.turnId),[c]);
+  assert.deepEqual(run.filter(e=>e.phase==='interrupt_receipt').map(e=>[e.turnId,e.receipt]),[[c,'timeout']],'the terminal of B is no receipt for C');
+  const at=phase=>Date.parse(f.s.all("SELECT created_at,data FROM task_history WHERE type='harness_event' ORDER BY id").filter(r=>JSON.parse(r.data).phase===phase).at(-1).created_at);
+  assert.ok(at('interrupt_receipt')-at('interrupt_requested')>=380,'the grace period (400 ms) was waited for C');
+  assert.deepEqual(run.filter(e=>e.type==='turn'&&e.phase==='ended'),[],'C never ended');
+  assert.equal(results(),before,'no role result');
+ });
 });
 
 test('A session refused before its binding counts a restated usage increment once, on the attempt that binds',async t=>{
