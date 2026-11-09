@@ -81,7 +81,7 @@ test('when a page cursor stops moving the records are marked unread, and the con
   page.run("scroller = node => node; taskMetricsCard = () => element('section','');"); t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
   await page.run('openTask("t4")'); page.run('clearTimeout(taskTimer)');
   assert.equal(page.$('task-next-text').textContent, '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
-  assert.match(text(page.$('task-side')), /委派记录没有读完：服务端的分页游标没有前进，这里只列出已读到的 100 条。/);
+  assert.match(text(page.$('task-side')), /委派记录没有读完：服务端的分页游标没有前进，下面只列出已读到的 100 条，看不出现在是谁在处理。/);
   assert.doesNotMatch(text(page.$('task-side')), /主控还没有委派工作/);
   assert.equal(page.requests.filter(request => request.includes('/roles?')).length, 2);
 });
@@ -196,10 +196,10 @@ test('the workflow summary answers when, which prompt, which model, which writes
 
 // A project with an idle task engine (it serves the role and task routes but never runs tasks) and a console page whose
 // requests go to that server with the administrator's session.
-async function realProject(t, files = ['static/app.js', 'static/views.js', 'static/project.js', 'static/workflows.js']) {
+async function realProject(t, files = ['static/app.js', 'static/views.js', 'static/project.js', 'static/workflows.js'], rewrite = null) {
   const manager = { call: async (_method, path) => ({ repository_id: path.split('/')[3], generation: 1, state: 'ready', desired: 'ready', revision: 1, computer: {} }) };
   const h = await harness(t, manager, store => ({ engine: new TaskEngine(store, manager) })), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
-  const page = loadConsole(files, async (method, path, body) => { const response = await admin(path, method, body); return [response.status, response.value]; });
+  const page = loadConsole(files, async (method, path, body) => { const response = await admin(path, method, body); return rewrite?.(path, response) || [response.status, response.value]; });
   page.run("scroller = node => node; taskMetricsCard = () => element('section','');"); t.after(() => page.run('taskView.close(); clearTimeout(taskTimer);'));
   const now = new Date().toISOString();
   const task = (id, kind, phase = 'model') => h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,attempt,created_at,updated_at) VALUES(?,'101',?,'running','Fixture task',7,?,1,?,?)", id, kind, phase, now, now);
@@ -277,6 +277,32 @@ test('delegations are read to the last page: the 1001st, running, is the one the
   assert.equal(handoffs.length, 1); assert.doesNotMatch(handoffs[0], /after=0$/); assert.equal(p.next(), 'Test（Process）正在做主控交给它的工作：Purpose 1002');
 });
 
+test('with a delegation running on the pages read and records left unread, the next step names nobody', async t => {
+  // Real pages from the server; only the page after the first is replaced by a stalled cursor (empty, same cursor).
+  let stall = false;
+  const p = await realProject(t, undefined, (path, response) => stall && /\/roles\?limit=100&after=100$/.test(path) ? [200, { ...response.value, assignments: [], next_after: 100 }] : null);
+  p.task('mixed', 'task.request'); p.instance('m-manager', 'mixed', 'manager', 'pi'); p.instance('m-test', 'mixed', 'test', 'process'); p.instance('m-reviewer', 'mixed', 'reviewer', 'acp');
+  p.h.store.db.exec('BEGIN');
+  for (let n = 1; n <= 101; n++) {
+    const [owner, status, purpose] = n === 1 ? ['m-test', 'running', 'Earlier running test'] : n === 101 ? ['m-reviewer', 'running', 'Latest running review'] : ['m-test', 'completed', 'Finished check ' + n];
+    p.h.store.run('INSERT INTO role_assignments VALUES(?,?,?,?,?,?,?,NULL)', 'm-' + n, 'mixed', owner, 1, null, status, 'input-' + n);
+    p.h.store.run("INSERT INTO task_history(task_id,type,data,created_at,actor) VALUES('mixed','role_handoff',?,?,'role:manager')", JSON.stringify({ assignment_id: 'm-' + n, role: owner.slice(2), purpose, refs: [], revision: 1 }), p.now);
+  }
+  p.h.store.db.exec('COMMIT');
+  // Read to the end, the newest running delegation is the one at work.
+  await p.open('mixed'); assert.equal(p.next(), 'Reviewer（ACP）正在做主控交给它的工作：Latest running review');
+  p.page.run('taskView.close()'); stall = true; await p.open('mixed');
+  const next = p.next();
+  assert.equal(next, '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
+  assert.doesNotMatch(next, /Test|Reviewer|主控|执行器/);
+  // What was read is still listed, under the warning that says it is not all.
+  const card = p.page.$('task-side').querySelector('.task-execution'), parts = card.children.map(child => child.className || child.tagName);
+  assert.ok(parts.indexOf('endpoint-warning') >= 0 && parts.indexOf('endpoint-warning') < parts.indexOf('role-work'), JSON.stringify(parts));
+  assert.match(text(card), /委派记录没有读完：服务端的分页游标没有前进，下面只列出已读到的 100 条，看不出现在是谁在处理。/);
+  const items = card.querySelectorAll('.role-work > li');
+  assert.equal(items.length, 100); assert.match(text(items[0]), /^Test\nProcess\n进行中\nEarlier running test$/);
+});
+
 test('a past delegation shows the harness its runs used, not the one its role instance was rebound to later', async t => {
   const p = await realProject(t);
   p.task('historical', 'task.request'); p.instance('h-manager', 'historical', 'manager', 'pi'); p.instance('h-reviewer', 'historical', 'reviewer', 'acp');
@@ -317,18 +343,33 @@ test('a custom role called constructor shows its own name and responsibility on 
   // Resolving a role needs a usable project model; it is never asked anything here.
   const fixture = (await p.admin('/api/models', 'POST', { repository_id: '101', model_name: 'resolve-fixture', api_url: 'http://127.0.0.1:9/v1', api_key: 'fixture-key' })).value.model;
   await p.admin('/api/repositories/101/policy', 'PATCH', { model_id: fixture.id });
-  const saved = await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } },
-    roles: [{ role_id: 'constructor', name: 'Constructor checker', responsibility: 'Checks object construction paths.' }] });
-  assert.equal(saved.status, 200);
+  const save = async (revision, responsibility) => (await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } },
+    roles: [{ role_id: 'constructor', name: 'Construction inspector', responsibility }] }));
+  assert.equal((await save(0, 'Inspect construction invariants only.')).status, 200);
   p.page.run(`current = { id: '101', section: 'roles' }; window.realRoles = roleCards(${JSON.stringify((await p.admin('/api/repositories/101/roles')).value)}, element('p', ''));`);
   const tile = [...p.page.run('realRoles')][1].querySelector('[data-role=constructor]');
-  assert.match(text(tile), /^Constructor checker\nChecks object construction paths\.\nNative\n/); assert.doesNotMatch(text(tile), /function|native code/);
-  // In a task the name comes from the snapshot the role instance runs with.
-  const resolved = (await p.admin('/api/repositories/101/roles/resolve', 'POST', { role: 'constructor' })).value;
-  assert.equal(resolved.snapshot?.name, 'Constructor checker', JSON.stringify(resolved));
-  p.h.store.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)', resolved.snapshot_id, '101', 'constructor', resolved.snapshot.config_revision, resolved.snapshot.role_revision, JSON.stringify(resolved.snapshot), p.now);
-  p.task('custom', 'task.request'); p.instance('c-manager', 'custom', 'manager', 'pi'); p.instance('c-constructor', 'custom', 'constructor', 'native', resolved.snapshot_id);
-  p.h.store.run("INSERT INTO role_assignments VALUES('c-1','custom','c-constructor',1,NULL,'running','c-input',NULL)");
+  assert.match(text(tile), /^Construction inspector\nInspect construction invariants only\.\nNative\n/); assert.doesNotMatch(text(tile), /function|native code/);
+  // In a task, name and responsibility come from the snapshot a delegation ran with, as the server stores it.
+  const snapshot = async () => {
+    const resolved = (await p.admin('/api/repositories/101/roles/resolve', 'POST', { role: 'constructor' })).value;
+    p.h.store.run('INSERT INTO role_snapshots VALUES(?,?,?,?,?,?,?)', resolved.snapshot_id, '101', 'constructor', resolved.snapshot.config_revision, resolved.snapshot.role_revision, JSON.stringify(resolved.snapshot), p.now);
+    return resolved;
+  };
+  const first = await snapshot(); assert.equal(first.snapshot.responsibility, 'Inspect construction invariants only.');
+  p.task('custom', 'task.request'); p.instance('c-manager', 'custom', 'manager', 'pi'); p.instance('c-constructor', 'custom', 'constructor', 'native', first.snapshot_id);
+  p.h.store.run("INSERT INTO role_assignments VALUES('c-1','custom','c-constructor',1,NULL,'running','c-input-1',NULL)");
   await p.open('custom');
-  assert.equal(p.next(), 'Constructor checker（Native）正在做主控交给它的工作。'); assert.doesNotMatch(p.side(), /function|native code/);
+  assert.equal(p.next(), 'Construction inspector（Native）正在做主控交给它的工作。');
+  let items = p.page.$('task-side').querySelectorAll('.role-work > li').map(text);
+  assert.equal(items[0], 'Construction inspector\nNative\n进行中\n职责：Inspect construction invariants only.');
+  // The definition changes later and the instance is rebound; the earlier delegation keeps what it ran with.
+  p.h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,role_instance_id,assignment_id,role_snapshot,harness) VALUES('c-run-1','custom','role',1,1,?,'succeeded','{}','{}','constructor','c-constructor','c-1',?,'native')", p.now, first.snapshot_id);
+  p.h.store.run("UPDATE role_assignments SET status='completed' WHERE id='c-1'");
+  assert.equal((await save(1, 'Inspect only the new construction paths.')).status, 200);
+  const second = await snapshot(); p.h.store.run("UPDATE role_instances SET snapshot_id=? WHERE id='c-constructor'", second.snapshot_id);
+  p.h.store.run("INSERT INTO role_assignments VALUES('c-2','custom','c-constructor',1,NULL,'running','c-input-2',NULL)");
+  p.page.run('taskView.close()'); await p.open('custom');
+  items = p.page.$('task-side').querySelectorAll('.role-work > li').map(text);
+  assert.deepEqual(items, ['Construction inspector\nNative\n已交回\n职责：Inspect construction invariants only.', 'Construction inspector\nNative\n进行中\n职责：Inspect only the new construction paths.']);
+  assert.doesNotMatch(p.side(), /function|native code/);
 });
