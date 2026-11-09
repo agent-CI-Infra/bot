@@ -34,7 +34,7 @@ App 已经创建好了，不需要自己再建。安装地址只用这一个：
 
 ## 部署和管理
 
-部署、接入向导、项目管理和升级都在[部署这套 bot 和管理员面板](docs/admin.md)。每个仓库运行的检视、开发和发行任务都是可在网页上编辑和新增的[工作流](docs/workflows.md)。
+部署、接入向导、项目管理和升级都在[部署这套 bot 和管理员面板](docs/admin.md)。每个仓库只配置项目 Manager 的提示词和角色：通过过滤的事件由 Manager 决定新建任务、续接已有任务还是不处理，检视、开发、发行等工作的开关、写入和模型是项目配置，见[项目 Manager 与工作类型](docs/workflows.md)。
 
 角色池可按角色选择 Native、Process、通用 ACP 或 Codex app-server 执行器；后两者是同一个外部执行器客户端的两种协议，会话与任务记录持续关联，交付仍经独立 QA；启用方式与边界见 [Harness Runtime](docs/harness-runtime.md)。每次角色运行经版本化的 RoleRun 协议准入、留痕和恢复：租约 epoch、短时运行令牌、受控任务工具网关、可选的每运行独立容器以及跨恢复累计的预算，见 [RoleRun 协议](docs/role-run.md)。
 

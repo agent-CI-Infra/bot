@@ -9,7 +9,7 @@ import { ReleaseService } from '../dist/releases/service.js';
 import { testPassword } from './helpers.mjs';
 import { runEventTasks } from './event-tasks.mjs';
 import { workspaceProfile } from '../dist/agent/profiles.js';
-import { workflowPermissions } from '../dist/workflows/resolve.js';
+import { workPermissions as workflowPermissions } from '../dist/work/settings.js';
 import { selectedModel } from '../dist/agent/model.js';
 import { GitHub } from '../dist/github/client.js';
 import { Redactor } from '../dist/agent/common.js';

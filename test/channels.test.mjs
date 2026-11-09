@@ -6,6 +6,7 @@ import { session } from '../dist/app/auth.js';
 import { resolveActor, authorize, invalidate } from '../dist/identity/authorization.js';
 import { ChannelConnections } from '../dist/channels/connections.js';
 import { channelFixture, transport, connector, envelope, post, until, finished, bindFixture, directQuery, group, inGroup, cardEvent, cardToken, digest, credentials } from './channel-fixture.mjs';
+import { managerSection } from './helpers.mjs';
 
 test('Feishu verifies raw signatures, decryption, app/tenant, freshness and limited bot addressing before durable acknowledgement', async t => {
   const { h, id, wire } = await channelFixture(t);
@@ -279,7 +280,7 @@ test('IM approval and revision conflicts retain the shared business outcome; mem
   const pending = await submit('workflow.update'), op = h.store.get("SELECT * FROM management_commands WHERE channel='im'");
   assert.equal(op.state, 'awaiting_approval');
   assert.equal((await admin('/api/management/commands/' + op.id)).value.state, 'awaiting_approval');
-  assert.notEqual((await admin('/api/repositories/101/workflows/review.issue')).value.workflow.prompt.effective, 'Approved future prompt.');
+  assert.notEqual((await managerSection(admin,'101','review.issue')), 'Approved future prompt.');
   const approved = await admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
   assert.equal(approved.value.state, 'succeeded');
   assert.equal((await admin('/api/management/commands/' + op.id)).value.source_conversation, pending.conversation_id);
@@ -342,7 +343,7 @@ test('Web approval cannot resume an IM operation after its group scope is revoke
   await group(admin, id, { expected_revision: 1, enabled: false, audience_verified_until: 0 });
   const approved = await admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
   assert.equal(approved.value.state, 'failed'); assert.equal(approved.value.result.error, 'channel_group_scope_required');
-  assert.notEqual((await admin('/api/repositories/101/workflows/review.issue')).value.workflow.prompt.effective, 'Must remain unapplied.');
+  assert.notEqual((await managerSection(admin,'101','review.issue')), 'Must remain unapplied.');
 });
 
 test('the send fence rechecks group authorization after asynchronous token exchange', async t => {

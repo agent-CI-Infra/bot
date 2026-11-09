@@ -2,7 +2,9 @@ import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
-import { builtinWorkflow, customWorkflowId } from '../workflows/catalog.js';
+import { workType } from '../work/catalog.js';
+// Saved views and links from before #207 may name a custom workflow; its cards are reply cards now.
+const customWorkflowId = /^custom\.[a-f0-9]{12}$/;
 
 // `pr` overrides the wording on the PR board: development of a PR is the bot revising its own PR after a review.
 export const boardStages = [
@@ -25,12 +27,13 @@ export const boardExecutionStatuses = [
   { id: 'completed', name: '已完成' }, { id: 'waiting', name: '等待处理' }, { id: 'other', name: '其他 / 未开始' },
 ];
 const standardGroups = ['bot_stage','repository','execution_status','category'];
-// A card is one workflow's work on one object: the built-in Issue and PR workflows, each custom workflow, and the release
-// process (whose cards come from the release page). The `category` filter and grouping name these workflow ids.
+// A card is one work type's work on one object: reviews and development of Issues and PRs, reply tasks, and the release
+// process (whose cards come from the release page). The `category` filter and grouping name these work type ids.
 const objectWorkflows = ['review.issue','review.pr','development.issue','development.pr'];
-// Views saved before the board listed workflows filter a family: every review, or every development, workflow.
+// Views saved before the board listed work types filter a family: every review, or every development.
 const families = ['review','development'];
-const knownCategory = (value: string) => objectWorkflows.includes(value) || families.includes(value) || value === 'release' || customWorkflowId.test(value);
+const categoryOf = (value: string) => customWorkflowId.test(value) ? 'reply' : value;
+const knownCategory = (value: string) => objectWorkflows.includes(value) || families.includes(value) || ['release', 'reply'].includes(value) || customWorkflowId.test(value);
 const execution = (status: string) => `CASE
   WHEN ${status} IN ('running','preparing','implementing','validating','publishing') THEN 'running'
   WHEN ${status}='queued' THEN 'queued'
@@ -92,23 +95,11 @@ function viewFor(store: Store, user: Actor, id: string): Json {
   const row = store.get('SELECT * FROM board_views WHERE id=? AND user_id=?', id, user.id);
   return row ? viewData(row) : fail(404, 'board_view_not_found');
 }
-// The workflows of the repositories this person can see, named as each repository names them: its saved name, else the
-// built-in one. A built-in workflow renamed differently across repositories lists every name.
-function boardWorkflows(store: Store, user: Actor) {
-  const access = scope(user,'w.repository_id'), visible = scope(user,'id');
-  const repositories = Number(store.get(`SELECT count(*) n FROM repositories WHERE ${visible.sql}`,...visible.args)!.n);
-  const rows = store.all(`SELECT w.repository_id,w.id,w.name,repos.full_name FROM workflows w JOIN repositories repos ON repos.id=w.repository_id
-    WHERE ${access.sql} ORDER BY w.created_at,w.id`,...access.args);
-  const saved = new Map(rows.map(row => [`${row.repository_id}/${row.id}`, String(row.name || '')]));
-  const builtins = objectWorkflows.map(id => {
-    const renamed = rows.filter(row => row.id === id && row.name).map(row => String(row.name));
-    const names = [...new Set([...(renamed.length < repositories ? [builtinWorkflow(id)!.name] : []), ...renamed])];
-    return { id, name: names.join(' / ') };
-  });
-  const customs = rows.filter(row => customWorkflowId.test(String(row.id))).map(row => ({ id: String(row.id), name: String(row.name), repository: String(row.full_name) }));
-  const name = (repository: string, id: string) => id === 'release' ? '发版本'
-    : saved.get(`${repository}/${id}`) || builtinWorkflow(id)?.name || '已删除的工作流';
-  return { list: [...builtins, ...customs, { id: 'release', name: '发版本' }], name };
+// The work types with cards, under their fixed names; `workflows` keeps its name in the API for older clients.
+function boardWorkflows(_store: Store, _user: Actor) {
+  const list = [...objectWorkflows, 'reply'].map(id => ({ id, name: workType(id)!.name }));
+  const name = (_repository: string, id: string) => id === 'release' ? '发版本' : workType(categoryOf(id))?.name ?? '已删除的工作类型';
+  return { list: [...list, { id: 'release', name: '发版本' }], name };
 }
 function pagination(url: URL) {
   const limit = Number(url.searchParams.get('limit') || 100), offset = Number(url.searchParams.get('offset') || 0);
@@ -127,7 +118,7 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
   if (method === 'GET' && path === '/api/board/cards') {
     const view = viewFor(store, user, url.searchParams.get('view_id') || 'default');
     const conditions = url.searchParams.has('filters') ? filters(parse(url.searchParams.get('filters')!),store,user) : view.filters as Filter[];
-    const category = String(conditions.find(f => f.field === 'category')?.value || 'all');
+    const category = categoryOf(String(conditions.find(f => f.field === 'category')?.value || 'all'));
     const { limit, offset } = pagination(url);
     const group = grouping(store,user,url.searchParams.get('group_by') || view.group_by);
     // Each branch projects the work of one workflow on an object. Grouping never changes its status or task identity.
@@ -146,18 +137,18 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
         FROM board_objects o JOIN repositories repos ON repos.id=o.repository_id ${taskJoin('r','review')} ${taskJoin('d','development')}
         WHERE ${family === 'review' ? '(r.id IS NOT NULL OR d.id IS NULL)' : 'd.id IS NOT NULL'}`;
     };
-    // A custom workflow replies on its object like a review, so its card moves through the review stages.
-    const customSql = `SELECT 'object' AS card_type,c.workflow_id AS card_category,o.repository_id,o.object_type,o.object_number,
+    // A reply task answers on its object like a review, so its card moves through the review stages.
+    const customSql = `SELECT 'object' AS card_type,'reply' AS card_category,o.repository_id,o.object_type,o.object_number,
         o.title,o.github_state,o.draft,coalesce(${taskTime('c')},o.last_seen) AS last_seen,repos.full_name,
         CASE WHEN c.status IN ${attention} THEN 'attention' WHEN c.status IN ${successes} THEN 'reviewed'
           WHEN c.status<>'superseded' THEN 'reviewing' ELSE 'unreviewed' END AS bot_stage,${execution('c.status')} AS execution_status,
         c.id AS task_id,c.status AS task_status,NULL AS review_task_id,NULL AS review_status,NULL AS development_task_id,NULL AS development_status,
         NULL AS development_pr_number,${fieldValue},NULL AS release_id,NULL AS version,NULL AS release_stage,NULL AS release_url
-        FROM (SELECT DISTINCT repository_id,object_number,kind,workflow_id FROM tasks WHERE kind IN ('workflow.issue','workflow.pr') AND workflow_id IS NOT NULL) runs
+        FROM (SELECT DISTINCT repository_id,object_number,kind FROM tasks WHERE kind IN ('workflow.issue','workflow.pr')) runs
         JOIN board_objects o ON o.repository_id=runs.repository_id AND o.object_number=runs.object_number AND runs.kind='workflow.'||o.object_type
         JOIN repositories repos ON repos.id=o.repository_id
         JOIN tasks c ON c.id=(SELECT t.id FROM tasks t WHERE t.repository_id=runs.repository_id AND t.object_number=runs.object_number
-          AND t.kind=runs.kind AND t.workflow_id=runs.workflow_id ORDER BY ${taskTime('t')} DESC,t.created_at DESC,t.rowid DESC LIMIT 1)`;
+          AND t.kind=runs.kind ORDER BY ${taskTime('t')} DESC,t.created_at DESC,t.rowid DESC LIMIT 1)`;
     const releaseSql = `SELECT 'release' AS card_type,'release' AS card_category,p.repository_id,'release' AS object_type,
       NULL AS object_number,p.version AS title,NULL AS github_state,0 AS draft,p.updated_at AS last_seen,repos.full_name,
       ${releaseStage} AS bot_stage,${releaseExecution} AS execution_status,NULL AS task_id,NULL AS task_status,
@@ -173,7 +164,7 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     if (!conditions.some(f => f.field === 'include_closed' && f.value === true)) clauses.push({sql:"coalesce(w.github_state,'open')<>'closed'",args:[]});
     for (const f of conditions) {
       if (f.field === 'repository_id') clauses.push({sql:'w.repository_id=?',args:[String(f.value)]});
-      if (f.field === 'category') clauses.push(families.includes(String(f.value)) ? {sql:'w.card_category LIKE ?',args:[f.value+'.%']} : {sql:'w.card_category=?',args:[String(f.value)]});
+      if (f.field === 'category') clauses.push(families.includes(String(f.value)) ? {sql:'w.card_category LIKE ?',args:[f.value+'.%']} : {sql:'w.card_category=?',args:[categoryOf(String(f.value))]});
       // A release-only or single-workflow view keeps the previous object choice for when the person returns to all work.
       if (f.field === 'object_type' && f.value !== 'all' && typed) clauses.push({sql:'w.object_type=?',args:[String(f.value)],type:true});
       if (f.field === 'bot_stage' || f.field === 'execution_status') clauses.push({sql:`w.${f.field}=?`,args:[String(f.value)]});
@@ -215,7 +206,7 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
         const value = String(f.value);
         if (f.field === 'category' && families.includes(value)) { clauses.push('kind LIKE ?'); args.push(value + '.%'); }
         if (f.field === 'category' && objectWorkflows.includes(value)) { clauses.push('kind=?'); args.push(value); }
-        if (f.field === 'category' && customWorkflowId.test(value)) { clauses.push('workflow_id=?'); args.push(value); }
+        if (f.field === 'category' && categoryOf(value) === 'reply') { clauses.push("kind LIKE 'workflow.%'"); }
         if (f.field === 'execution_status') { clauses.push(`(${execution('status')})=?`); args.push(String(f.value)); }
       }
       const rows = store.all(`SELECT id,kind,status,summary,created_at,updated_at FROM tasks

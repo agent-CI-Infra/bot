@@ -9,6 +9,7 @@ import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {generateKeyPairSync} from 'node:crypto';
 import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
+import {saveManager} from './helpers.mjs';
 import {queueWebhook} from '../dist/review/queue.js';
 import {workspace} from '../runner/workspace.mjs';
 import {pruneTasks} from '../runner/store.mjs';
@@ -387,8 +388,8 @@ test('real Pi forwards a write tool to the control plane: create_issue files one
   const filed=[];
   const d=await live(t,{model:async(request,n)=>n===1?{body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('create_issue',{title:'Follow-up for @alice',body:'Track the docs; ping @alice.'})]}}]}}:undefined,
     github:async(path,send,_res,body)=>{if(path.endsWith('/issues')&&body?.title){filed.push(body);send({number:77,html_url:'https://github.invalid/issues/77',user:{id:999}},201);return true;}return false;}});
-  // The review workflow may file Issues once an administrator gives it the issue write.
-  assert.equal((await d.h.admin('/api/repositories/101/workflows/review.issue','PUT',{writes:['reply','labels','issue']})).status,200);
+  // Issue reviews may file Issues once an administrator gives the work type the issue write in the project configuration.
+  assert.equal((await saveManager(d.h.admin,'101',{work:{'review.issue':{writes:['reply','labels','issue']}}})).status,200);
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(filed.length,1);assert.match(filed[0].body,/ping &#64;alice/);assert.doesNotMatch(filed[0].title,/@/);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parse } from 'yaml';
-import { testPassword } from './helpers.mjs';
+import { testPassword, saveManager } from './helpers.mjs';
 import { gatePermissions } from '../dist/projects/gate-onboarding.js';
 import { normalizePlan, gateFiles, gateEvents, emptyPlan, PlanError } from '../dist/projects/gate-plan.js';
 import { boardLocation } from '../dist/public-board/state.js';
@@ -10,7 +10,7 @@ import { ReadTokens } from '../dist/agent/read-token.js';
 import { Redactor } from '../dist/agent/common.js';
 import { releaseWorkflow } from '../dist/releases/workflow.js';
 import { workspaceProfile } from '../dist/agent/profiles.js';
-import { workflowAccess, builtinWorkflow, writeOptions } from '../dist/workflows/catalog.js';
+import { workAccess as workflowAccess, section, workType, writeOptions } from '../dist/work/catalog.js';
 import { loadConsole } from './console-page.mjs';
 import { gateFixture as fixture, writes, branchOf } from './gate-onboarding-fixtures.mjs';
 
@@ -20,7 +20,7 @@ test('the board location helper still names the verified webhook origin and a lo
   assert.deepEqual(boardLocation('https://bot.example/', 'My-Org/Hello'), { key: 'my-org/hello', url: 'https://bot.example/boards/my-org/hello/' });
 });
 
-test('gate onboarding needs a started project with a ready computer, the workflow on and a model, like every workflow', async t => {
+test('gate onboarding needs a started project with a ready computer, its work type on and a model, like every task', async t => {
   const { h, admin, startProject, open } = await fixture(t, { ready: false });
   const ready = async () => (await admin('/api/projects/101/gate-onboarding')).value.ready;
   assert.deepEqual([(await ready()).ok, (await ready()).code], [false, 'gate_project_not_started']);
@@ -30,9 +30,9 @@ test('gate onboarding needs a started project with a ready computer, the workflo
   assert.equal((await ready()).code, 'gate_environment_not_ready');
   assert.match((await ready()).reason, /虚拟电脑还没有就绪（当前：provisioning）/);
   h.store.run("UPDATE project_environments SET state='ready' WHERE repository_id='101'");
-  assert.equal((await admin('/api/repositories/101/workflows/gate.onboarding', 'PUT', { enabled: false })).status, 200);
-  assert.equal((await ready()).code, 'workflow_disabled');
-  assert.equal((await admin('/api/repositories/101/workflows/gate.onboarding', 'PUT', { enabled: true })).status, 200);
+  assert.equal((await saveManager(admin, '101', { work: { 'gate.onboarding': { enabled: false } } })).status, 200);
+  assert.equal((await ready()).code, 'work_disabled');
+  assert.equal((await saveManager(admin, '101', { work: { 'gate.onboarding': { enabled: true } } })).status, 200);
   h.store.run("UPDATE policies SET model_id=NULL WHERE repository_id='101'");
   assert.equal((await ready()).code, 'model_not_configured');
   h.store.run("UPDATE policies SET model_id=(SELECT id FROM models LIMIT 1) WHERE repository_id='101'");
@@ -40,12 +40,12 @@ test('gate onboarding needs a started project with a ready computer, the workflo
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 0);
 });
 
-test('gate onboarding is a built-in workflow whose agent works in the project computer and only submits a plan', () => {
-  const workflow = builtinWorkflow('gate.onboarding');
-  assert.deepEqual([workflow.name, workflow.base, workflow.triggers], ['接入门禁', 'gate', ['gate.manual']]);
-  assert.match(workflow.prompt.builtin, /flowchart LR/);
+test('gate onboarding is a work type whose agent works in the project computer and only submits a plan', () => {
+  const work = workType('gate.onboarding'), prompt = section(work.section).builtin();
+  assert.deepEqual([work.name, work.base, work.kinds], ['接入门禁', 'gate', ['gate.onboarding']]);
+  assert.match(prompt, /flowchart LR/);
   assert.deepEqual(writeOptions('gate.onboarding').map(write => [write.id, write.tool, write.locked]), [['gate_plan', 'submit_gate_plan', true]]);
-  const profile = workspaceProfile('gate.onboarding', { workflow_prompt: workflow.prompt.builtin }, workflowAccess('gate.onboarding'));
+  const profile = workspaceProfile('gate.onboarding', { work_prompt: prompt }, workflowAccess('gate.onboarding'));
   const names = profile.tools.map(tool => tool.function.name);
   for (const name of ['read_file', 'run_command', 'github_read_token', 'github_read', 'start_agent', 'submit_gate_plan']) assert.ok(names.includes(name), name);
   for (const name of ['create_pull_request', 'create_issue', 'finish_review']) assert.ok(!names.includes(name), name);
@@ -70,7 +70,7 @@ test('each turn is a task on a checkout of the default branch; the control plane
   const { target, gate, conversation, plan } = seen[0];
   assert.equal(target.sha, 'a'.repeat(40));
   assert.deepEqual(target.contextFiles.map(file => file.path), ['../context/conversation.json', '../context/plan.json', '../context/gate.json']);
-  assert.match(target.context.workflow_prompt, /# Gate onboarding/);
+  assert.match(target.context.work_prompt, /# Gate onboarding/);
   assert.deepEqual(plan, emptyPlan());
   assert.equal(conversation.length, 1); // The facts summary.
   assert.deepEqual(gate.targets, [{ path: '.github/workflows/ci.yml', mode: 'create' }, { path: '.github/workflows/ci-gates.yml', mode: 'create' }]);

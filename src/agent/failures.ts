@@ -12,7 +12,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
   model: { label:'模型服务或模型配置', codes:['role_nomination_stages_incomplete','role_submission_required','acp_submission_required','codex_authentication_failed','codex_model_unavailable','codex_model_mismatch','codex_model_rerouted','codex_resume_incompatible','codex_turn_failed','codex_subagent_refused','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',
-    'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid',
+    'release_notes_model_failed','release_notes_invalid','release_notes_dispatch_failed','manager_dispatch_failed','dispatch_decision_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid',
     'claude_submission_required','claude_authentication_failed','claude_model_unavailable','claude_execution_failed','claude_budget_exhausted','claude_output_limit','claude_provider_credential_unavailable'] },
   environment: { label:'项目电脑或运行环境', codes:['integration_unavailable','pi_runtime_unavailable','controller_workspace_unavailable','acp_not_configured','acp_configuration_invalid','acp_protocol_unsupported','acp_mcp_http_unsupported','harness_timeout','acp_turn_incomplete','acp_execution_failed',
     'codex_version_unsupported','codex_home_unexpected','codex_unauthorized_tool_servers','codex_task_tools_unavailable','codex_task_tools_mismatch','codex_protocol_invalid','codex_connection_lost','codex_connection_closed','acp_output_limit','codex_builtin_tools_enabled','codex_builtin_tool_refused','codex_resume_failed','codex_turn_interrupted','codex_thread_ownership_mismatch','role_snapshot_unavailable','checkpoint_unavailable','acceptance_snapshot_unavailable','environment_not_ready','environment_generation_changed','execution_interrupted','workspace_init_failed',
@@ -34,8 +34,8 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'release_lease_lost','release_tag_conflict','release_run_ambiguous','release_run_missing','release_rerun_unavailable','release_tag_missing','release_ci_evidence_changed',
     'actions_failures_disabled','actions_lease_lost','actions_run_identity_changed','actions_rerun_identity_changed','actions_attempt_identity_changed',
     'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved','pr_release_label_conflict',
-    // A custom workflow switched off or deleted while its task waited or ran.
-    'workflow_disabled','workflow_not_found',
+    // A work type switched off while its task waited or ran (workflow_* before #207).
+    'work_disabled','workflow_disabled','workflow_not_found',
     // A newer gate onboarding conversation, or a repository stopped while the agent was answering.
     'gate_session_superseded','gate_repository_stopped',
     // The workflow assistant's run was stopped by the person who started it.
@@ -140,7 +140,8 @@ const codeActions: Record<string,string> = {
   object_closed_or_draft:'Issue 或 PR 已关闭或转为草稿，任务已结束，无需处理。',
   task_claim_revoked:'任务已被取消或由其他执行接管，无需处理。',
   repository_policy_disabled:'仓库已停用这类任务，任务已结束；需要时在项目设置里重新开启。',
-  workflow_disabled:'这条工作流已关闭或删除，任务已结束；需要时在「工作流」页重新开启。',
+  work_disabled:'项目配置里关闭了这类工作，任务已结束；需要时在「Manager 与角色」页重新开启。',
+  workflow_disabled:'这条工作流已关闭或删除，任务已结束。',
   workflow_not_found:'这条工作流已删除，任务已结束。',
   github_read_token_not_allowed:'启动这个子 agent 时关掉了 GitHub 读取；主 agent 仍可读取，需要时让它不带 github_read:false 再启动子 agent。',
   pull_request_head_changed:'PR 有了新的提交，这个任务已被取代，无需处理。',

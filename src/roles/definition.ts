@@ -279,8 +279,8 @@ export function rolePrompt(definition: RoleDefinitionV2) {
 }
 
 /**
- * Resolves one role for one workflow into an auditable run snapshot and its run-time model. Read-only apart from storing
- * the snapshot body under its own hash. Model order: the role's explicit profile, then the workflow's model, then the
+ * Resolves one role for one work type into an auditable run snapshot and its run-time model. Read-only apart from storing
+ * the snapshot body under its own hash. Model order: the role's explicit profile, then the work type's model, then the
  * project default; the actual result is part of the snapshot. Unsupported combinations stop here, before any run starts.
  */
 export function resolveRole(s: Store, repositoryId: string, roleId: string, workflow: string, options: { expectedRevision?: number; harness?: string; pinned?: boolean; persist?: boolean; entryExecutor?: boolean;
@@ -312,8 +312,8 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
     const fallback=options.fallbackModel?.();
     model = fallback?.model??selectedModel(s, repositoryId, workflow);
     const policy = s.get('SELECT model_id,task_models FROM policies WHERE repository_id=?', repositoryId), overrides = JSON.parse(policy?.task_models || '{}');
-    const custom = workflow.startsWith('custom.') ? s.get('SELECT model_id FROM workflows WHERE repository_id=? AND id=?', repositoryId, workflow)?.model_id : undefined;
-    source = fallback?.source??(custom || Object.hasOwn(overrides, workflow) ? 'workflow' : 'project');
+    // 'workflow' is the work type's own model in task_models (the name role snapshots have always used).
+    source = fallback?.source??(Object.hasOwn(overrides, workflow) ? 'workflow' : 'project');
     profileHash = modelProfileHash({ api_url: model.url, model_name: model.model });
   }
   if (!harness.externalModel) checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => { throw new TaskError(code, 'waiting_configuration', `${at}：${harness.id} 不支持这个模型配置。`); });

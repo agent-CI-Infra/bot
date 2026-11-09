@@ -3,7 +3,7 @@ import { beginRun, endRun, traceEvent, traceSnapshot } from '../tasks/trace.js';
 import type { Store, Row } from '../storage/database.js';
 import { type Redactor, stop, TaskError } from './common.js';
 import { randomId } from '../core/security.js';
-import { taskWorkflow } from '../workflows/resolve.js';
+import { workOf } from '../work/catalog.js';
 import { requestModel, type AgentModel } from './gateway.js';
 import type { ModelDelta } from './model-stream.js';
 import type { PiRoleEnvironment } from './pi.js';
@@ -108,7 +108,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
     return stop('agent_tools_invalid', 'waiting_configuration', 'Agent 工具配置无效或重复。');
   const allowed = new Map(tools.map(tool => [tool.function.name, tool]));
   if(spec.finish&&!allowed.has(spec.finish.name))return stop('agent_tools_invalid','waiting_configuration','提交工具未在本次执行中提供。');
-  const model = spec.model ?? executionModel(spec.store, spec.task, taskWorkflow(spec.task as any));
+  const model = spec.model ?? executionModel(spec.store, spec.task, workOf(spec.task as any));
   spec.redactor.add(model.key);
   const previousRun=spec.task.trace_run_id;
   const run=beginRun(spec.store,spec.task,spec.roleRun?.role==='qa'||spec.requestPrefix?.startsWith('acceptance:')?'acceptance':'execution',{requestPrefix:spec.requestPrefix??null,system:spec.redactor.text(spec.system),prompt:spec.redactor.text(spec.prompt),model:spec.modelTrace??{id:model.id,name:model.model,version:model.version,url:model.url},tools,maxTurns:spec.maxTurns??16,maxOutputTokens:spec.maxOutputTokens??8192,modelAttempts:attempts,bot_version:process.env.BOT_VERSION||'unknown',policy:taskConfiguration(spec.store,spec.task)?.policy??spec.store.get('SELECT * FROM policies WHERE repository_id=?',spec.task.repository_id)});

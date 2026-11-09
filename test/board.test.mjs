@@ -221,32 +221,24 @@ test('saved views restore object scope and filters, column totals cover all page
   assert.equal(keys.size,9);
 });
 
-test('custom workflows get cards of their own, named as their repository names them, and the board lists every workflow',async t=>{
+test('reply tasks get cards of their own, and the board lists the work types; views that named a custom workflow keep working',async t=>{
   const {h,admin}=await fixture(t);boardFixtures(h.store);
-  const created=(await admin('/api/repositories/101/workflows','POST',{name:'文档检查',prompt:'Check the docs.',triggers:[{id:'issue.opened'}]})).value.workflow;
-  const custom=(id,number,status,time)=>{boardTask(h.store,id,number,'workflow.issue',status,{time});h.store.run('UPDATE tasks SET workflow_id=? WHERE id=?',created.id,id);};
-  custom('docs-old',3,'failed','2026-10-01T10:00:00.000Z');custom('docs-new',3,'running','2026-10-01T11:00:00.000Z');custom('docs-done',5,'succeeded');
-  // A renamed built-in workflow shows its new name; custom ones carry their repository.
-  await admin('/api/repositories/101/workflows/review.issue','PUT',{name:'Issue 初审'});
+  // Reply tasks of a former custom workflow and of the Manager count as one kind of work on their object.
+  const reply=(id,number,status,time,workflow=null)=>{boardTask(h.store,id,number,'workflow.issue',status,{time});h.store.run('UPDATE tasks SET workflow_id=? WHERE id=?',workflow,id);};
+  reply('docs-old',3,'failed','2026-10-01T10:00:00.000Z','custom.0123456789ab');reply('docs-new',3,'running','2026-10-01T11:00:00.000Z');reply('docs-done',5,'succeeded');
   const board=(await admin('/api/board')).value;
-  assert.deepEqual(board.workflows.map(w=>w.id),['review.issue','review.pr','development.issue','development.pr',created.id,'release']);
-  // Repository 202 still uses the built-in name, so both names are listed.
-  assert.equal(board.workflows[0].name,'检视 Issue / Issue 初审');assert.deepEqual(board.workflows[4],{id:created.id,name:'文档检查',repository:'fixture/project-101'});
+  assert.deepEqual(board.workflows.map(w=>[w.id,w.name]),[['review.issue','检视 Issue'],['review.pr','检视 PR'],['development.issue','开发 Issue'],['development.pr','跟进 bot PR'],['reply','通用回复'],['release','发版本']]);
   const cards=(await admin('/api/board/cards')).value.cards,card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category&&c.repository_id==='101');
-  // The custom card follows its own latest task; the object's review card is unchanged.
-  assert.deepEqual([card(3,created.id).task_id,card(3,created.id).bot_stage,card(3,created.id).card_category_name],['docs-new','reviewing','文档检查']);
-  assert.deepEqual([card(5,created.id).bot_stage,card(5,'review.issue').bot_stage,card(5,'review.issue').card_category_name],['reviewed','attention','Issue 初审']);
-  assert.equal(cards.find(c=>c.repository_id==='202').card_category_name,'检视 Issue');
-  const only=(await admin(query([{field:'category',value:created.id}]))).value;
+  // The reply card follows its own latest task; the object's review card is unchanged.
+  assert.deepEqual([card(3,'reply').task_id,card(3,'reply').bot_stage,card(3,'reply').card_category_name],['docs-new','reviewing','通用回复']);
+  assert.deepEqual([card(5,'reply').bot_stage,card(5,'review.issue').bot_stage,card(5,'review.issue').card_category_name],['reviewed','attention','检视 Issue']);
+  const only=(await admin(query([{field:'category',value:'reply'}]))).value;
   assert.deepEqual(only.cards.map(c=>c.task_id).sort(),['docs-done','docs-new']);
-  assert.deepEqual((await admin('/api/board/cards?group_by=category&filters='+encodeURIComponent('[]'))).value.column_counts[created.id],2);
-  // Opening a custom card lists that workflow's tasks only.
-  const tasks=(await admin('/api/board/cards/101/issue/3/tasks?filters='+encodeURIComponent(JSON.stringify([{field:'category',value:created.id}])))).value.tasks;
+  assert.deepEqual((await admin('/api/board/cards?group_by=category&filters='+encodeURIComponent('[]'))).value.column_counts.reply,2);
+  // A view saved with a custom workflow id shows the reply cards.
+  assert.deepEqual((await admin(query([{field:'category',value:'custom.0123456789ab'}]))).value.cards.map(c=>c.task_id).sort(),['docs-done','docs-new']);
+  // Opening a reply card lists its reply tasks only.
+  const tasks=(await admin('/api/board/cards/101/issue/3/tasks?filters='+encodeURIComponent(JSON.stringify([{field:'category',value:'reply'}])))).value.tasks;
   assert.deepEqual(tasks.map(t=>t.id),['docs-new','docs-old']);
   assert.equal((await admin('/api/board/cards/101/issue/3/tasks')).value.tasks.length,4);
-  // A deleted workflow keeps its cards under a name that says so.
-  await admin('/api/repositories/101/workflows/'+created.id,'DELETE',{});
-  const left=(await admin(query([{field:'category',value:created.id}]))).value.cards;
-  assert.ok(left.length>0);assert.ok(left.every(c=>c.card_category_name==='已删除的工作流'));
-  assert.ok(!(await admin('/api/board')).value.workflows.some(w=>w.id===created.id));
 });

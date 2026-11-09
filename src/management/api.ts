@@ -6,6 +6,8 @@ import { assertCurrent } from '../identity/authorization.js';
 import { fail, fields, randomId, type Json } from '../core/security.js';
 import { ManagementService } from './service.js';
 import { ManagementAgent } from './agent.js';
+import { managerPrompt } from '../work/settings.js';
+import { managerView } from '../work/api.js';
 
 export class ManagementApi {
   readonly agent:ManagementAgent;
@@ -49,20 +51,19 @@ export class ManagementApi {
       await new Promise(resolve=>setTimeout(resolve,200));
     }res.end();
   }
-  /** The existing workflow editor uses exactly the same command handler and audit as the conversation. */
-  async workflow(actor:ActorContext,method:string,url:URL,input:Json):Promise<Json|undefined>{
-    const match=/^\/api\/repositories\/([^/]+)\/workflows\/([^/]+)$/.exec(url.pathname);
-    if(!match||method!=='PUT'||match[2]==='assistant')return;
-    const project=match[1]!,workflow=decodeURIComponent(match[2]!);
+  /** The Manager editor on the roles page uses exactly the same command handler and audit as the conversation. */
+  async manager(actor:ActorContext,method:string,url:URL,input:Json):Promise<Json|undefined>{
+    const match=/^\/api\/repositories\/([^/]+)\/manager$/.exec(url.pathname);
+    if(!match||method!=='PUT')return;
+    const project=match[1]!;
     this.service.scope(actor,project,'config.write');
-    const {version,...args}=input;
-    const current=this.service.store.get('SELECT version FROM workflows WHERE repository_id=? AND id=?',project,workflow)?.version??0;
-    if(version!==undefined&&Number(version)!==Number(current))fail(409,'workflow_version_conflict');
-    const receipt=await this.service.submit(actor,{operation:'workflow.update',target:{project_id:project,workflow_id:workflow},arguments:args,
-      expected_revision:this.service.revision({project_id:project}),idempotency_key:'console:'+randomId(),source_conversation:'console:workflow',source_message:actor.request_id});
+    if(!Number.isSafeInteger(input.expected_revision))fail(400,'expected_revision_required','expected_revision');
+    if(Number(input.expected_revision)!==managerPrompt(this.service.store,project).revision)fail(409,'manager_revision_conflict','expected_revision');
+    const receipt=await this.service.submit(actor,{operation:'manager.update',target:{project_id:project},arguments:input,
+      expected_revision:this.service.revision({project_id:project}),idempotency_key:'console:'+randomId(),source_conversation:'console:manager',source_message:actor.request_id});
     if(receipt.state==='awaiting_approval')fail(409,'management_approval_required');
     if(receipt.state!=='succeeded')fail(Number((receipt.result as Json)?.http_status??409),String((receipt.result as Json)?.error??'management_command_failed'),(receipt.result as {field?:string})?.field);
-    return {workflow:(await this.service.workflows.list(project)).workflows.find(w=>w.id===workflow),management:receipt};
+    return {manager:await managerView(this.service.store,this.service.rules,project),management:receipt};
   }
   async task(actor:ActorContext,method:string,url:URL,input:Json):Promise<Json|undefined>{
     const create=url.pathname==='/api/tasks'&&method==='POST';
@@ -86,7 +87,7 @@ export class ManagementApi {
     const receipt=await this.service.submit(actor,{operation,target,arguments:args,expected_revision:this.service.revision(target),idempotency_key:'console:'+randomId(),source_conversation:'console:'+operation,source_message:actor.request_id});
     if(receipt.state==='awaiting_approval')fail(409,'management_approval_required');
     if(receipt.state!=='succeeded')fail(Number((receipt.result as Json)?.http_status??409),String((receipt.result as Json)?.error??'management_command_failed'),(receipt.result as {field?:string})?.field);
-    if(rules)return {rules:await this.service.workflows.rules.view(project),management:receipt};
+    if(rules)return {rules:await this.service.rules.view(project),management:receipt};
     return {...receipt.result as Json,management:receipt};
   }
 }

@@ -5,7 +5,6 @@ import { Store } from '../dist/storage/database.js';
 import { resolveActor, invalidate, authorize } from '../dist/identity/authorization.js';
 import { ManagementService } from '../dist/management/service.js';
 import { ManagementAgent } from '../dist/management/agent.js';
-import { WorkflowService } from '../dist/workflows/service.js';
 import { RuleService } from '../dist/rules/service.js';
 import { TaskCommands } from '../dist/tasks/commands.js';
 import { ChannelService } from '../dist/channels/service.js';
@@ -42,7 +41,7 @@ async function fixture(t) {
   return f;
 }
 function otherWorker(f, t, transport) {
-  const store = new Store(f.h.database, f.h.key), management = new ManagementService(store, new WorkflowService(store, new RuleService(store)), new TaskCommands(store));
+  const store = new Store(f.h.database, f.h.key), management = new ManagementService(store, new RuleService(store), new TaskCommands(store));
   const channels = new ChannelService(store, new ManagementAgent(store, management), { origin: 'https://console.example.test', fetch: f.wire.fetch });
   const service = new ScheduleService(store, management, channels, f.now), worker = new Scheduler(service, transport);
   t.after(async () => { await worker.close(); store.close(); }); return worker;
@@ -259,7 +258,6 @@ test('subscription aggregates a failure incident, links recovery, respects quiet
 test('controlled workflow contract dispatches a fake business handler once, preserves its run and enforces tool/model budgets', async t => {
   const f = await fixture(t); let dispatched = 0;
   for (const [scope, id] of [['project', '101'], ['tenant', 'github.com:10']]) f.h.store.run('INSERT INTO schedule_budgets VALUES(?,?,\'development\',?)', scope, id, JSON.stringify({ ...defaultLimits, model_calls: 1, cost_micros: 20 }));
-  f.h.store.run("INSERT INTO workflows(repository_id,id,name,triggers,created_at,updated_at) VALUES('101','custom.fixture','Fixture','[]',?,?)", new Date().toISOString(), new Date().toISOString());
   f.worker.service.register('custom.fixture', { capability: 'tasks.write', dispatch: (trigger, actor, guard) => {
     guard(); authorize(actor, 'tasks.write', { project_id: trigger.project_id }); dispatched++;
     f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,created_at,updated_at) VALUES(?,'101','task.request','queued','Controlled fixture',?,?,?)", trigger.run_id, trigger.occurrence_id, new Date().toISOString(), new Date().toISOString());
@@ -330,14 +328,13 @@ test('a real worker process exits after its committed claim; replacement process
     import {Store} from './dist/storage/database.js';
     import {ManagementService} from './dist/management/service.js';
     import {ManagementAgent} from './dist/management/agent.js';
-    import {WorkflowService} from './dist/workflows/service.js';
     import {RuleService} from './dist/rules/service.js';
     import {TaskCommands} from './dist/tasks/commands.js';
     import {ChannelService} from './dist/channels/service.js';
     import {ScheduleService} from './dist/schedules/service.js';
     import {Scheduler} from './dist/schedules/worker.js';
     const input=JSON.parse(readFileSync(0,'utf8')),store=new Store(input.path,Buffer.from(input.key,'hex'));
-    const management=new ManagementService(store,new WorkflowService(store,new RuleService(store)),new TaskCommands(store));
+    const management=new ManagementService(store,new RuleService(store),new TaskCommands(store));
     const channels=new ChannelService(store,new ManagementAgent(store,management));
     const worker=new Scheduler(new ScheduleService(store,management,channels,()=>input.now));
     worker.produce();const claim=worker.claimOccurrence();

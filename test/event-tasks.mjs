@@ -1,5 +1,5 @@
-import { eventWorkflow } from '../dist/workflows/events.js';
-import { workflowPermissions } from '../dist/workflows/resolve.js';
+import { eventWork as eventWorkflow } from '../dist/work/events.js';
+import { workPermissions as workflowPermissions } from '../dist/work/settings.js';
 import { selectedModel } from '../dist/agent/model.js';
 import { Redactor } from '../dist/agent/common.js';
 import { runAgent } from '../dist/agent/runtime.js';

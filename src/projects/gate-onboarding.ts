@@ -4,16 +4,17 @@ import { appJwt, missingPermissions, revokeInstallationToken } from '../github/c
 import { installationExecutionDenied } from '../installations/archive.js';
 import { selectedModel } from '../agent/model.js';
 import { stop, TaskError } from '../agent/common.js';
-import { registerEventWorkflow, enqueueEventTask, eventTaskActive } from '../workflows/events.js';
-import { activeTrigger, savedWorkflow } from '../workflows/resolve.js';
-import { builtinWorkflow } from '../workflows/catalog.js';
+import { registerEventWork, eventTaskActive } from '../work/events.js';
+import { sectionText, workActive } from '../work/settings.js';
+import { recordEvent, registerDispatchHook } from '../dispatch/store.js';
 import { collectFacts, baselinePlan, type GateFacts } from './gate-facts.js';
 import { gateFiles, gateEvents, normalizePlan, PlanError, gateLanes, laneTimes, laneEvents, releasePath, tokenPattern, type GateFile, type GatePlan, type GateTarget } from './gate-plan.js';
 import { unifiedDiff } from './text-diff.js';
 
 /**
- * Gate onboarding as a conversation with the gate.onboarding workflow. Every turn is a task of that workflow in the
- * project's queue: it runs in the project computer on a checkout of the default branch, like every other workflow, reads
+ * Gate onboarding as a conversation with the gate onboarding work type. Every message is an event the Manager decides on,
+ * and every turn it starts is a task in the project's queue: it runs in the project computer on a checkout of the default
+ * branch, like every other task, reads
  * the code and runs its commands there, and hands back a reply and a plan with submit_gate_plan. Nothing is written to the
  * repository until a person confirms a plan revision after seeing the files; only then does the control plane open the PR.
  */
@@ -112,7 +113,7 @@ function boundSession(store: Store, task: Row, input: any): Row {
   return row;
 }
 
-registerEventWorkflow(workflowId, {
+registerEventWork(workflowId, {
   async prepare(store, github, task, input, redactor) {
     const row = boundSession(store, task, input);
     // The control plane reads only what it needs to render and check the gate files; the agent studies the checkout itself.
@@ -145,8 +146,7 @@ registerEventWorkflow(workflowId, {
       contextFiles: [{ path: '../context/conversation.json', content: 'The conversation so far; answer its last message' },
         { path: '../context/plan.json', content: 'The current gate plan; lanes you leave out of your plan keep these commands' },
         { path: '../context/gate.json', content: 'What the control plane read from GitHub: merge queue, required checks, existing gate and release files, where the gate job can go, when each lane runs and what the gate PR always changes' }],
-      context: { merge_queue: mergeQueue, workflow_name: savedWorkflow(store, task.repository_id, workflowId)?.name || '接入门禁',
-        workflow_prompt: savedWorkflow(store, task.repository_id, workflowId)?.prompt ?? builtinWorkflow(workflowId)!.prompt.builtin } };
+      context: { merge_queue: mergeQueue, work_name: '接入门禁', work_prompt: sectionText(store, task.repository_id, workflowId) } };
   },
   validate(store, task, input) { boundSession(store, task, input); },
   finish(store, task, input, result) {
@@ -174,6 +174,20 @@ registerEventWorkflow(workflowId, {
     if (!row || row.task_id !== task.id) return;
     say(store, row.id, 'system', `agent 这一轮没有完成：${detail || errorCode}。可以再发一次，或直接修改右侧方案。`);
     updateSession(store, row.id, { state: row.facts ? 'ready' : 'failed', task_id: null, error: errorCode, detail: detail || null });
+  }
+});
+
+// The Manager's decision on a turn: the task the session waits for, or why this turn will not run.
+registerDispatchHook(workflowId, {
+  created(store, task, ref: any) {
+    const row = sessionRow(store, String(ref.session_id));
+    if (row && row.state === 'thinking' && !row.task_id) updateSession(store, row.id, { task_id: String(task.id) });
+  },
+  declined(store, _event, reason, ref: any) {
+    const row = sessionRow(store, String(ref.session_id));
+    if (!row || row.state !== 'thinking' || row.task_id) return;
+    say(store, row.id, 'system', `Manager 没有安排这一轮：${reason}。可以再发一次，或直接修改右侧方案。`);
+    updateSession(store, row.id, { state: row.facts ? 'ready' : 'failed', error: 'manager_declined', detail: reason });
   }
 });
 
@@ -284,7 +298,7 @@ export class GateOnboarding {
     if (!policy?.enabled) return no('gate_project_disabled', '项目已禁用：启用后再接入门禁。');
     const account = this.store.get('SELECT a.type FROM accounts a JOIN repositories r ON r.account_id=a.id WHERE r.id=?', repositoryId);
     if (account?.type !== 'github_app') return no('github_app_required', '门禁接入只使用 GitHub App 安装令牌；这个仓库挂在机器人账号上，需要改为安装 GitHub App。');
-    if (!activeTrigger(this.store, repositoryId, workflowId, 'gate.manual')) return no('workflow_disabled', '工作流「接入门禁」已关闭，或去掉了「接入门禁对话」触发源：在项目的工作流页打开它。');
+    if (!workActive(this.store, repositoryId, workflowId)) return no('work_disabled', '项目配置里关闭了「接入门禁」：在项目的「Manager 与角色」页打开它。');
     const environment = this.store.get('SELECT state FROM project_environments WHERE repository_id=?', repositoryId);
     if (!['ready', 'busy'].includes(String(environment?.state))) return no('gate_environment_not_ready', `项目的虚拟电脑还没有就绪（当前：${environment?.state || '未创建'}），就绪后再接入门禁。`);
     try { return { ok: true, model: selectedModel(this.store, repositoryId, workflowId).model }; }
@@ -322,11 +336,15 @@ export class GateOnboarding {
   }
   get(id: string): Json | null { const row = sessionRow(this.store, id); return row ? this.view(row) : null; }
 
-  /** Queues the next turn of a conversation as a task of the gate.onboarding workflow. */
+  /** Asks the Manager for the next turn of a conversation; the turn's task binds to the session once it is created. */
   private ask(id: string): void {
-    const row = sessionRow(this.store, id)!, turn = JSON.parse(String(row.messages)).filter((message: GateMessage) => message.role === 'user').length + 1;
-    const task = enqueueEventTask(this.store, String(row.repository_id), workflowId, `${id}:${turn}`, '', { session_id: id, turn }, `接入门禁 第 ${turn} 轮`);
-    updateSession(this.store, id, { state: 'thinking', task_id: String(task.id), error: null, detail: null });
+    const row = sessionRow(this.store, id)!, messages = JSON.parse(String(row.messages)) as GateMessage[], turn = messages.filter(message => message.role === 'user').length + 1;
+    updateSession(this.store, id, { state: 'thinking', task_id: null, error: null, detail: null });
+    const last = [...messages].reverse().find(message => message.role === 'user');
+    recordEvent(this.store, { repositoryId: String(row.repository_id), key: `${row.repository_id}:gate.manual:${id}:${turn}`, type: 'gate.manual', source: 'gate',
+      summary: `接入门禁对话第 ${turn} 轮`, facts: { session_id: id, turn, message: last ? String(last.content).slice(0, 2000) : null, plan_revision: Number(row.revision) },
+      options: [{ id: 'turn', work: workflowId, title: `接入门禁 第 ${turn} 轮`, default: true, hook: workflowId, ref: { session_id: id, turn },
+        spec: { type: 'event', kind: workflowId, key: `${id}:${turn}`, sha: '', input: { session_id: id, turn }, summary: `接入门禁 第 ${turn} 轮` } }] });
   }
 
   /** Starts a new conversation; an unfinished one of the same repository is superseded and its turn stops. */

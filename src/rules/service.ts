@@ -8,6 +8,8 @@ import { GitHub, repositoryTree } from '../github/client.js';
 import { type Mirror } from '../agent/git-cache.js';
 import { Redactor } from '../agent/common.js';
 import type { Manager } from '../projects/service.js';
+import { managerPrompt, saveManager, withSection } from '../work/settings.js';
+import { sections } from '../work/catalog.js';
 
 // The scenario rules are the Markdown files in docs/prompts, read once at startup so the documented text and the
 // text the model receives cannot drift apart. The runtime image copies that directory next to dist.
@@ -158,14 +160,14 @@ export class RuleService {
     const env = await this.manager?.call('GET', '/v1/projects/' + id).catch(() => null);
     return { ...resolveRules(policy, saved ? JSON.parse(saved.files) : {}, this.consoleComputer(id,env?.computer)), sha: saved?.sha || null, updated_at: saved?.updated_at || null, needs_refresh: !saved };
   }
+  // The console layer of a rule file is its section of the Manager prompt (#207): saving one edits that section.
   save(user:Actor,id:string,input:Json):void{
     repository(this.store,user,id);
     fields(input,['path','content']);if(!Object.hasOwn(defaults,String(input.path))||input.path==='.bot/computer.yaml')fail(400,'invalid_rule_path');
     validateRuleContent(input.content);
-    const row=this.store.get('SELECT * FROM policies WHERE repository_id=?',id)!,values=JSON.parse(row.rule_overrides||'{}');
-    if(input.content===null)delete values[String(input.path)];else values[String(input.path)]=input.content;
-    resolveRules({...row,rule_overrides:JSON.stringify(values)},{});
-    this.store.run('UPDATE policies SET rule_overrides=? WHERE repository_id=?',JSON.stringify(values),id);this.store.audit(user.id,'rules.updated',String(input.path),id);
+    const section=sections.find(entry=>entry.rule===input.path)!,current=managerPrompt(this.store,id);
+    saveManager(this.store,id,{expected_revision:current.revision,content:withSection(current.content,section.id,input.content as string|null)},user.id,'rules');
+    this.store.audit(user.id,'rules.updated',String(input.path),id);
   }
   async api(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     const match = /^\/api\/repositories\/([^/]+)\/rules(?:\/(refresh|apply-computer))?$/.exec(url.pathname); if (!match) return undefined;

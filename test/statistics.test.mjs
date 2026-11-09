@@ -74,17 +74,16 @@ test('undated and missing clocks stay incomplete, live clocks accumulate, and ev
   assert.deepEqual((await admin(query+'&currency=CNY')).value.tasks,result.tasks);
 });
 
-test('every workflow that runs tasks is counted: built-ins by their names, custom workflows by their saved names',async t=>{
-  const {h,admin}=await fixture(t),now=new Date().toISOString();
-  h.store.run(`INSERT INTO workflows(repository_id,id,name,created_at,updated_at) VALUES('101','custom.0123456789ab','Docs check',?,?)`,now,now);
+test('every work type that runs tasks is counted by its name; reply tasks of former custom workflows count as reply work',async t=>{
+  const {h,admin}=await fixture(t);
   const tasks=[['review.issue',null],['actions.failures',null],['actions.failures',null],['release.observe',null],['workflow.pr','custom.0123456789ab'],['workflow.issue','custom.ba9876543210']];
   for(const [index,[kind,workflow]] of tasks.entries()){
     metricTask(h.store,'task-'+index,'101',kind);
     h.store.run('UPDATE tasks SET created_at=?,workflow_id=? WHERE id=?','2026-11-04T08:00:00.000Z',workflow,'task-'+index);
   }
   const result=(await admin('/api/costs?from=2026-11-04&to=2026-11-04&timezone=UTC')).value;
-  assert.deepEqual(result.tasks.summary.map(row=>[row.workflow,row.name,row.count]),[['review.issue','检视 Issue',1],['release.observe','CI 观察',1],
-    ['actions.failures','Actions 失败处理',2],['custom.0123456789ab','Docs check',1],['custom.ba9876543210','已删除的工作流',1]]);
+  assert.deepEqual(result.tasks.summary.map(row=>[row.workflow,row.name,row.count]),[['review.issue','检视 Issue',1],['reply','通用回复',2],['release.observe','CI 观察',1],
+    ['actions.failures','Actions 失败处理',2]]);
   assert.ok(result.tasks.days.every(row=>typeof row.name==='string'&&row.workflow));
 });
 

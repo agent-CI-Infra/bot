@@ -3,7 +3,7 @@ import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {requestIntegration,integratedPublication} from '../tasks/integration.js';
 import { checkManagementBudget } from '../management/budget.js';
-import { executionModel, taskConfiguration, executionRuleFiles } from '../tasks/configuration.js';
+import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { recoverRoleCheckpoint } from '../roles/recovery.js';
@@ -27,7 +27,7 @@ import { installationExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
-import { enqueue, developmentReady, reviewRequestsCode, sameLabel } from '../review/queue.js';
+import { developmentReady, reviewRequestsCode, sameLabel, reviewNewHead } from '../review/queue.js';
 import { actionsDevelopmentAllowed, actionsSourceIssue, publicText } from '../actions/safety.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
@@ -39,9 +39,12 @@ import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, 
 import { repositoryConcurrency } from '../app/settings.js';
 import { ReviewUpdated, latestReviewSession, saveReviewSession, pendingReviewUpdates, pruneReviewSessions, reviewObjectState } from '../review/sessions.js';
 import { type GitCache } from './git-cache.js';
-import { taskWorkflow, workflowPermissions, workflowEnabled, activeTrigger } from '../workflows/resolve.js';
-import { eventWorkflow } from '../workflows/events.js';
-// The modules that own event workflows register them when loaded.
+import { workOf } from '../work/catalog.js';
+import { workEnabled, workActive, eventFilters } from '../work/settings.js';
+import { eventWork } from '../work/events.js';
+import { recordEvent } from '../dispatch/store.js';
+import { Dispatcher } from '../dispatch/worker.js';
+// The modules that own event work register it when loaded.
 import '../releases/observe.js';
 import '../releases/notes.js';
 import '../actions/analysis.js';
@@ -49,7 +52,7 @@ import '../actions/analysis.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const automaticRetry=new Set(['retry_wait','waiting_configuration','waiting_environment','waiting_pr_head']);
 const retryCycleMs=8*60*60*1000;
-// Reviews and custom workflows reply on the object; development publishes a branch and PR.
+// Reviews and reply tasks answer on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request'))";
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
@@ -68,7 +71,9 @@ export class TaskEngine {
   private readonly granted=new Map<string,number>();
   private timer:ReturnType<typeof setInterval>|undefined;private closing=false;private readonly merging=new Map<string,Promise<unknown>>();
   readonly rules:RuleService;readonly coordinator:CoordinationWorker;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.coordinator=new CoordinationWorker(store,manager);}
+  // Decides the Manager events in the background; a decided event's new tasks start on the next tick.
+  readonly dispatcher:Dispatcher;
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,undefined,()=>queueMicrotask(()=>this.tick()));}
   // The running tasks of one repository, for callers that must wait until they have stopped.
   working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
@@ -77,7 +82,7 @@ export class TaskEngine {
     this.store.run('DELETE FROM task_claims');interruptRuns(this.store);this.coordinator.recover();
     this.store.run(`UPDATE tasks SET status='queued',claim_token=NULL WHERE ${engineKinds} AND status IN ('running','preparing','implementing','validating','publishing','result_ready')`);
     this.store.run("UPDATE tasks SET status='waiting_pr_head',error_code='pr_head_pending',next_run_at=0 WHERE status='waiting_permission' AND error_code='bot_pr_ownership_changed' AND phase='publish' AND kind='development.pr'");
-    this.timer=setInterval(()=>this.tick(),1000);this.tick();
+    this.timer=setInterval(()=>this.tick(),1000);this.tick();this.dispatcher.start();
   }
   tick(){
     if(this.closing)return;
@@ -157,9 +162,9 @@ export class TaskEngine {
     if(idle)this.clearing.add(repo);
     try{await workspace.release(idle);}finally{if(idle)this.clearing.delete(repo);}
   }
-  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.coordinator.close();}
+  async close(){this.closing=true;if(this.timer)clearInterval(this.timer);await this.dispatcher.close();await Promise.allSettled([...this.active.values(),...this.merging.values()]);await this.coordinator.close();}
   async run(id:string,token:string){
-    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor(),event=eventWorkflow(task.kind);
+    const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;const records=new TaskRecords(this.store);const redactor=new Redactor(),event=eventWork(task.kind);
     const policyHashFor=(artifacts:any[])=>sha(artifacts.some(a=>a.kind==='code')?String(this.store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||''):'');
     const log=(value:any)=>{
       const clean=redactor.clean(value);
@@ -195,8 +200,8 @@ export class TaskEngine {
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
-      // A workflow that was switched off (or a custom one deleted) stops its tasks the same way.
-      if(task.kind!=='task.request'&&!workflowEnabled(this.store,task.repository_id,taskWorkflow(task as any)))stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
+      // A work type that was switched off in the project configuration stops its tasks the same way.
+      if(task.kind!=='task.request'&&!workEnabled(this.store,task.repository_id,workOf(task as any)))stop('work_disabled','cancelled',`项目已关闭 ${workOf(task as any)} 这类工作。`);
       const delivery=records.get(id);
       if(current?.phase==='publish'&&(delivery.pending||delivery.acceptance))assertRequiredStages(this.store,id,deliveryCandidate(delivery.candidate,task.kind));
       // An event that moved on (another run attempt, a release no longer waiting) ends its task at once.
@@ -223,7 +228,7 @@ export class TaskEngine {
     try{
       await guard();
       const entry=task.kind.startsWith('development.')?'development':task.kind.startsWith('review.')?'review':task.kind==='actions.failures'?'actions':task.kind==='task.request'?'request':null;
-      const config=entry&&controlled(this.store,task,entry)?roleExecutionModel(this.store,task,roleConfig(this.store,task).controller.role):executionModel(this.store,task,taskWorkflow(task as any));
+      const config=entry&&controlled(this.store,task,entry)?roleExecutionModel(this.store,task,roleConfig(this.store,task).controller.role):executionModel(this.store,task,workOf(task as any));
       redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
@@ -236,14 +241,14 @@ export class TaskEngine {
         if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`准备工作区时项目电脑尚未就绪，当前状态=${environment.state}。`);
       }
       if(task.kind==='task.request'){await runRequest(this.store,this.manager,task,redactor,guard,log,this.githubUrl,this.gitCache);return;}
-      // The writes this workflow may ask for decide the platform tools; a workflow that may open a PR needs contents write.
-      const writes=workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any)).writes,eventState:Record<string,any>={};
-      // An event workflow reads Actions runs and logs; it writes only through its own tools.
+      // The writes this task may ask for decide the platform tools; a task that may open a PR needs contents write.
+      const writes=taskPermissions(this.store,task).writes,eventState:Record<string,any>={};
+      // Event work reads Actions runs and logs; it writes only through its own tools.
       const github=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await github.connect(task.kind.startsWith('development.')||writes.includes('pull_request'),undefined,
         event?{contents:'read',actions:'read',checks:'read',statuses:'read',issues:'write',pull_requests:'read'}:undefined);
       let input=JSON.parse(task.input),result=task.result?JSON.parse(task.result):null;
       const development=task.kind.startsWith('development.'),review=task.kind.startsWith('review.');
-      // Only the built-in reviews continue an earlier conversation; a custom workflow starts fresh every time.
+      // Only reviews continue an earlier conversation; a reply task starts fresh every time.
       const prior=review&&task.attempt===1?latestReviewSession(this.store,task):undefined;
       if(development&&input.review?.clarification_required)stop('review_requires_human_decision','needs_replan','检视结果要求先由人确认需求，开发任务等待重新规划。');
       // validate(object) checks an object just read instead of reading it again; seen is the last object it checked.
@@ -257,10 +262,11 @@ export class TaskEngine {
         if(task.kind.endsWith('.pr')){
           if(development)this.owned(github,task,current);
           const candidateRow=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),candidate=candidateRow?JSON.parse(candidateRow.data):null;
-          // This task's own push (development, or any workflow that updated the bot's PR) moved the head on purpose.
+          // This task's own push (development, or any task that updated the bot's PR) moved the head on purpose.
           if(current.head?.sha!==task.head_sha&&!(candidate?.remote_sha===current.head?.sha)){
             // A stale comment or update review must not turn into a head-triggered review that could start a bot PR revision.
-            if(task.kind==='review.pr'&&!input.comment&&!input.trigger)this.store.transaction(()=>enqueue(this.store,task.repository_id,'review.pr',task.object_number,current.head.sha,{pull_request:current,number:task.object_number}));
+            // The new head reaches the Manager as the push it is (one event with the push's own webhook).
+            if(task.kind==='review.pr'&&!input.comment&&!input.trigger)this.store.transaction(()=>reviewNewHead(this.store,task.repository_id,current));
             stop('pull_request_head_changed','superseded',`PR #${task.object_number} 的 head 已变化：预期 ${task.head_sha}，当前 ${current.head?.sha}。`);
           }
         }else if(development&&input.object_hash&&sha(JSON.stringify([current.title,current.body]))!==input.object_hash)stop('issue_needs_replan','needs_replan',`Issue #${task.object_number} 的标题或正文已变化，需要重新规划。`);
@@ -305,7 +311,7 @@ export class TaskEngine {
         const compact=(value:any)=>({...value,...(value.files?{files:value.files.map(({base64,...file}:any)=>file)}:{})});
         if(artifact.status==='no_changes')artifact={...artifact,source_ref:sourceRef(this.store,task)};
         const artifacts=[{kind:artifact.tree_sha?'code':'report',reference:`task:${id}:candidate`,version,content:redactor.clean(compact(artifact))}];
-        // A workflow's final report delivers its intermediate PR too. Do not drop the code or its residual findings.
+        // A task's final report delivers its intermediate PR too. Do not drop the code or its residual findings.
         if(!artifact.tree_sha){
           const saved=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),code=saved?JSON.parse(saved.data):null;
           if(code?.published){artifacts.push({kind:'code',reference:code.published.html_url,version:code.published_tree_sha||code.tree_sha,content:redactor.clean(compact(code))});
@@ -315,7 +321,7 @@ export class TaskEngine {
         const policyHash=policyHashFor(artifacts);
         const savedDecision=records.get(id);const existing=savedDecision.pending||savedDecision.acceptance;
         if(existing?.policy_hash===policyHash&&existing?.candidate_id===candidate.id&&['pass','pass_with_issues'].includes(existing.outcome))return {ok:true};
-        const access=workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any));
+        const access=taskPermissions(this.store,task);
         const verdict=await this.evaluate(this.store,task,workspace!,redactor,guard,access.workspace.shell);
         await validate();
         if(policyHash!==policyHashFor(artifacts))stop('acceptance_context_changed','retry_wait','验收期间必需验证策略变化，将重新验收。');
@@ -336,7 +342,7 @@ export class TaskEngine {
         }
       };
 
-      // Another workflow's pull request: published like development's, recorded on its candidate, and the task carries on.
+      // Another task's pull request: published like development's, recorded on its candidate, and the task carries on.
       const publishPullRequest=async()=>{
         log({type:'phase',phase:'pull_request',target:'pull_request',detail:'正在发布到 GitHub：创建或更新 PR…'});
         const publisher=new Publisher(this.store,github,task,validate,undefined,log);
@@ -362,7 +368,7 @@ export class TaskEngine {
         update({result:JSON.stringify({summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation}),phase:'done',status:pr.number===candidate.pr_number?'completed':'pr_opened',error_code:null});
         return {pr:{number:pr.number,html_url:pr.html_url,sha:commit}};
       };
-      // An event workflow works on a checkout of the commit its event concerns, with the event as context files.
+      // Event work runs on a checkout of the commit its event concerns, with the event as context files.
       if(task.phase==='prepare'&&event){
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
         await validate();
@@ -390,7 +396,7 @@ export class TaskEngine {
         await workspace.context({...target.files,...Object.fromEntries(skills.map(skill=>[skill.file,skill.content]))});
         input={...input,snapshot_sha:target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
           context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
-            effective_rules:effectiveRules,computer:computerSummary(environment.computer),...target.context}};
+            effective_rules:effectiveRules,computer:computerSummary(environment.computer),...managerContext(input),...target.context}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:target.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:target.sha});
       }
       if(task.phase==='prepare'){
@@ -512,7 +518,7 @@ export class TaskEngine {
               ?{discussion_requests:discussionRequests(this.store,task,input)}:{}),...(input.merged_updates?.length?{merged_updates:input.merged_updates}:{}),coverage:snapshot.coverage,required_test_command:policy.test_command||null,
             review_rules:{language:policy.review_language},...(labeling?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
-            computer:computerSummary(environment.computer)}};
+            computer:computerSummary(environment.computer),...managerContext(input)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
         if(development&&input.integration)await restoreCheckpoint(this.store,task,workspace,ref.object.sha);
         if(development&&input.integration&&!input.integration.conflicts?.length){
@@ -567,7 +573,7 @@ export class TaskEngine {
       const initial=records.get(id);
       if(['unspecified','legacy_unknown'].includes(initial.contract.completeness||'')) {
         const goal=development?input.context?.implementation_goal||input.object?.body||task.summary
-          :event?input.context?.workflow_prompt||`${task.kind}: ${task.summary}`:`${task.kind}: ${input.object?.title||task.summary}. Requested result: ${input.object?.body||task.summary}`;
+          :event?input.context?.work_prompt||input.context?.workflow_prompt||`${task.kind}: ${task.summary}`:`${task.kind}: ${input.object?.title||task.summary}. Requested result: ${input.object?.body||task.summary}`;
         records.contract(id,input.contract||{goal,scope:[development?goal:task.kind],criteria:[development?'Implement the recorded goal and approved actionable findings; mandatory project verification must pass.':'Deliver a factual requested report, inspect relevant artifacts, distinguish findings from suggestions, and support conclusions with evidence.'],endpoint:development?'reviewable_pull_request':'report',source:{kind:task.kind,object_number:task.object_number,delivery_id:task.source_delivery_id},completeness:'derived_from_source'});
       }
       for(;;){
@@ -576,8 +582,8 @@ export class TaskEngine {
         if(validatedPhase!=='model')await validate();
         validatedPhase=undefined;
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
-        // create_issue: a new Issue the workflow files, once per tool call, with mentions escaped and secrets removed.
-        // An event workflow's own write tools (Actions rerun and report) come from its module; it reports through them.
+        // create_issue: a new Issue the task files, once per tool call, with mentions escaped and secrets removed.
+        // Event work's own write tools (Actions rerun and report) come from its module; it reports through them.
         input.context={...input.context,acceptance_feedback:records.get(id).acceptance};
         const platform:PlatformTools={...(event?.tools?.(this.store,task,input,writes,eventState)??{})};
         if(writes.includes('issue')&&task.kind!=='actions.failures')platform.create_issue=async(callId,args)=>{
@@ -587,8 +593,8 @@ export class TaskEngine {
           log({type:'published',outputs:[{html_url:issue.html_url,issue:issue.number}]});
           return {number:issue.number,html_url:issue.html_url};
         };
-        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,workflowPermissions(this.store,task.repository_id,taskWorkflow(task as any)).github),writes.includes('pull_request')?async(requestId,args)=>{
-          // Any workflow other than development may publish one PR per task, while the project's development switch is on,
+        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,taskPermissions(this.store,task).github),writes.includes('pull_request')?async(requestId,args)=>{
+          // Any task other than development may publish one PR, while the project's development switch is on,
           // from an Issue or onto the bot's own PR.
           if(!development){
             if(!this.store.get('SELECT development_enabled FROM policies WHERE repository_id=?',task.repository_id)?.development_enabled)
@@ -644,7 +650,7 @@ export class TaskEngine {
         }else if(!development){
           // Files that change the bot's own behavior are a person's decision; the summary comment lists them with the others.
           if(review&&input.behavior_changes?.length){result.behavior_changes=input.behavior_changes;result.clarification_required=true;}
-          // A pull request this workflow published on the way is part of its result.
+          // A pull request this task published on the way is part of its result.
           const candidate=this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id),published=candidate?JSON.parse(candidate.data).published:null;
           result={...result,findings:result.findings.map((finding:any,index:number)=>({...finding,id:operationId(id+':finding:'+index)})),reviewed_sha:task.head_sha,coverage:input.coverage,object_hash:input.object_hash,...(published?{pull_request:published}:{})};
           await acceptReport(result);
@@ -662,10 +668,10 @@ export class TaskEngine {
           update({publication_started:1});
         });
         if(!development&&!review){
-          // A custom workflow publishes what its writes allow and stops: no development, no conversation to keep.
+          // A reply task publishes what its writes allow and stops: no development, no conversation to keep.
           const outputs:any[]=[];
           if(writes.includes('reply')){
-            log({type:'phase',phase:'publish',target:'workflow',detail:'正在发布到 GitHub：发送工作流回复…'});
+            log({type:'phase',phase:'publish',target:'reply',detail:'正在发布到 GitHub：发送回复…'});
             outputs.push(...await publisher.reply(result,input.files));
           }
           if(writes.includes('labels')&&result.labels?.length){
@@ -760,7 +766,7 @@ export class TaskEngine {
       const delay=limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
         :counted&&cycle!=null?cycle+(Math.floor(Math.max(0,now-cycle)/retryCycleMs)+1)*retryCycleMs-now
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
-      // An event workflow's module hears that its task ended without a result (a waiting or retried task has not ended).
+      // The module of event work hears that its task ended without a result (a waiting or retried task has not ended).
       if(event&&current?.claim_token===token&&['failed','cancelled','superseded','needs_replan'].includes(state))event.ended?.(this.store,task,failure.code,redactor.text(String(failure.detail||'')));
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
         retry_error_code:counted?failure.code:retrying?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
@@ -839,10 +845,11 @@ export class TaskEngine {
   }
   // Why development of an Issue this review found ready will not start yet: no development label, someone assigned, or the
   // label added by an app. Null when development may start, or when it is not this review's to start (development or its
-  // triggers off, no explicit code request, an Actions report not cleared for development).
+  // events off, no explicit code request, an Actions report not cleared for development).
   async developmentWait(github:GitHub,task:Row,input:any,result:any):Promise<DevelopmentWait|null>{
-    if(task.kind!=='review.issue'||!this.store.get('SELECT 1 FROM policies WHERE repository_id=? AND enabled=1 AND development_enabled=1',task.repository_id))return null;
-    if(!activeTrigger(this.store,task.repository_id,'development.issue','review.published')&&!activeTrigger(this.store,task.repository_id,'development.issue','issue.labeled'))return null;
+    if(task.kind!=='review.issue'||!workActive(this.store,task.repository_id,'development.issue'))return null;
+    const filters=eventFilters(this.store,task.repository_id);
+    if(!filters['review.published.issue']&&!filters['issue.development_label'])return null;
     if(!reviewRequestsCode(input.object,result)||!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,input.object,result))return null;
     const label=this.label(task),issue=await github.object(task.kind,task.object_number);
     const assignees=[...(Array.isArray(issue.assignees)?issue.assignees:[]),...(issue.assignee&&!issue.assignees?.length?[issue.assignee]:[])].map((a:any)=>String(a?.login||'')).filter(Boolean);
@@ -851,22 +858,35 @@ export class TaskEngine {
     const events=await github.pages(github.path(`/issues/${task.object_number}/events`));
     return events.filter((e:any)=>e.event==='labeled'&&sameLabel(e.label?.name,label)).at(-1)?.actor?.type==='User'?null:{reason:'app',label,assignees:[]};
   }
+  /**
+   * A published review is an event for the Manager when it may lead to development: the Issue review found the code change
+   * the Issue asks for and the go-ahead is there, or a review of the bot's own pull request took on change requests or found
+   * actionable problems. The control plane's conditions (development switch, label, assignees, Actions clearance, budgets,
+   * one revision at a time) decide whether development is offered at all; the Manager decides whether to start it.
+   */
   queueDevelopment(github:GitHub,task:Row,input:any,result:any,approved=false,requests:RevisionRequest[]=[]){
     const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
     if(!policy?.enabled||!policy.development_enabled||result.clarification_required)return;
+    const filters=eventFilters(this.store,task.repository_id,policy),number=task.object_number;
+    const facts={review_task:task.id,object:{number,title:String(input.object?.title||'').slice(0,300),url:input.object?.html_url??null},
+      review:{summary:String(result.summary||'').slice(0,1500),requires_code_change:!!result.requires_code_change,implementation_goal:String(result.implementation_goal||'').slice(0,1500),
+        actionable_findings:(result.findings||[]).filter(actionableFinding).length}};
+    // A review publishes once, in the transaction that ends it, so each call is one publication of its own.
+    const published=randomId().slice(0,16);
+    const event=(type:'issue'|'pr',title:string,option:any)=>recordEvent(this.store,{repositoryId:task.repository_id,key:`${task.repository_id}:review.published:${task.id}:${published}`,type:'review.published',source:'review',
+      summary:title,facts,object:{type,number},delivery:task.source_delivery_id,options:[option]});
     if(task.kind==='review.issue'){
-      if(!result.requires_code_change)return;
-      // The development workflow starts from a published review only while that trigger is on; its conditions stay.
-      if(!activeTrigger(this.store,task.repository_id,'development.issue','review.published'))return;
-      if(!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,input.object,result))return;
+      if(!result.requires_code_change||!filters['review.published.issue'])return;
+      if(!actionsDevelopmentAllowed(this.store,task.repository_id,number,input.object,result))return;
       if(!approved||!reviewRequestsCode(input.object,result))return;
       // Development that continues the bot's PR for this Issue revises that PR, so it counts against the same budget.
       const owned=this.store.get(`SELECT p.revisions FROM bot_pull_requests p JOIN tasks t ON t.id=p.source_task_id
-        WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? ORDER BY t.created_at LIMIT 1`,task.repository_id,task.object_number);
+        WHERE p.repository_id=? AND t.kind='development.issue' AND t.object_number=? ORDER BY t.created_at LIMIT 1`,task.repository_id,number);
       if(owned&&owned.revisions>=policy.max_revisions)return;
-      enqueue(this.store,task.repository_id,'development.issue',task.object_number,null,{review:result,object_hash:input.object_hash},task.source_delivery_id,task.id);
+      event('issue',`Issue 检视已发布，要求改代码：#${number}`,{id:'development',work:'development.issue',title:`开发 Issue #${number}`,default:true,
+        spec:{type:'object',kind:'development.issue',number,head:null,input:{review:result,object_hash:input.object_hash},delivery:task.source_delivery_id,source_task:task.id}});
     }else{
-      if(!activeTrigger(this.store,task.repository_id,'development.pr','review.published'))return;
+      if(!filters['review.published.pr'])return;
       let owned:Row;try{owned=this.owned(github,task,input.object);}catch{return;}
       const source=this.store.get('SELECT * FROM tasks WHERE id=?',owned.source_task_id);
       if(source&&source.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,source.object_number))return;
@@ -874,8 +894,8 @@ export class TaskEngine {
       if(!goal)return;
       // A person's request is acted on whenever it comes, with no budget; each comment only once. Another bot's review is
       // acted on once per bot and pull request, so two bots cannot keep each other busy.
-      const done=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND source_type=? AND source_id=? AND state='done'",task.repository_id,task.object_number,r.type,r.id);
-      const botDone=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND author_id=? AND author_type='Bot' AND state='done'",task.repository_id,task.object_number,r.author_id);
+      const done=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND source_type=? AND source_id=? AND state='done'",task.repository_id,number,r.type,r.id);
+      const botDone=(r:RevisionRequest)=>!!this.store.get("SELECT 1 FROM bot_pr_requests WHERE repository_id=? AND number=? AND author_id=? AND author_type='Bot' AND state='done'",task.repository_id,number,r.author_id);
       const accepted=requests.filter(r=>!done(r)&&(r.author_type!=='Bot'||!botDone(r)));
       // The bot's own findings revise the pull request after a review of a new head, within the revision budget; a review that
       // revises for a request anyway takes them along. A mention or a discussion alone never starts a revision of them.
@@ -884,15 +904,15 @@ export class TaskEngine {
       const ownAllowed=accepted.length>0||!input.comment&&!input.trigger&&!!result.requires_code_change&&owned.revisions<policy.max_revisions;
       const findings=[...new Set(accepted.flatMap(r=>r.findings)),...(ownAllowed?own:[])];
       if(!findings.length)return;
-      const revision=accepted.length?{source:'request',requests:accepted.map(({findings,...request})=>request)}:{source:'review'};
-      const created=enqueue(this.store,task.repository_id,'development.pr',task.object_number,task.head_sha,{review:{...result,implementation_goal:goal,findings},revision},task.source_delivery_id,task.id);
-      // Requests the queued revision carries are done; with another revision already queued or running they wait, and later
-      // reviews of this pull request list them again (discussion_requests).
+      const plain=accepted.map(({findings,...request})=>request);
+      // The requests stay pending until a revision that carries them is queued; later reviews of this pull request list
+      // pending requests again (discussion_requests), also when the Manager decides not to revise now.
       const now=new Date().toISOString();
-      for(const r of accepted)this.store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
-        DO UPDATE SET state=excluded.state,task_id=excluded.task_id`,task.repository_id,task.object_number,r.type,r.id,r.author,r.author_id,r.author_type,r.url,created?'done':'pending',created||null,now);
-      if(!created&&accepted.length)this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),task.id,
-        JSON.stringify({type:'revision_deferred',detail:`PR #${task.object_number} 已有排队或执行中的修订；这次的修改请求先记下，之后对这个 PR 的检视会再列出它们。`}),now);
+      for(const r of plain)this.store.run(`INSERT INTO bot_pr_requests VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,number,source_type,source_id)
+        DO UPDATE SET state=CASE WHEN bot_pr_requests.state='done' THEN 'done' ELSE excluded.state END`,task.repository_id,number,r.type,r.id,r.author,r.author_id,r.author_type,r.url,'pending',null,now);
+      const revision=accepted.length?{source:'request',requests:plain}:{source:'review'};
+      event('pr',`bot PR 检视已发布，${accepted.length?`采纳了 ${accepted.length} 条修改要求`:'发现可执行问题'}：#${number}`,{id:'development',work:'development.pr',title:`跟进 bot PR #${number}`,default:true,
+        spec:{type:'object',kind:'development.pr',number,head:task.head_sha,input:{review:{...result,implementation_goal:goal,findings},revision},delivery:task.source_delivery_id,source_task:task.id,requests:plain}});
     }
   }
   async api(user:Actor,method:string,url:URL,input:Json):Promise<Json|undefined>{
@@ -906,6 +926,8 @@ export class TaskEngine {
   }
 }
 
+// Why the Manager created this task, and its brief: shown to the agent as an explanation, never as scope or authority.
+const managerContext=(input:any)=>input?.manager?{manager:{reason:String(input.manager.reason||''),brief:input.manager.brief??null}}:{};
 export const actionableFinding=(finding:any)=>finding.actionable===true&&finding.within_goal===true&&finding.requires_human_decision===false;
 /**
  * What a review of a bot pull request answers: the comments, reviews and inline comments that triggered it or joined it while it

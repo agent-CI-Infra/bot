@@ -7,9 +7,10 @@ import { actionPages } from '../releases/actions.js';
 import { queueWebhook } from '../review/queue.js';
 import { activateActions, recordActionsRun, actionsWorkflowOn } from './storage.js';
 import { classifyFailure, normalizeSignature, type Evidence, type FailureKind } from './classifier.js';
-import { analysisTask, classifiedEvidence, failedStepOutput, requestAnalysis, taskVerdicts } from './analysis.js';
-import { eventTaskActive } from '../workflows/events.js';
-import { workflowPermissions } from '../workflows/resolve.js';
+import { analysisDecision, analysisTask, classifiedEvidence, failedStepOutput, requestAnalysis, taskVerdicts } from './analysis.js';
+import { eventTaskActive } from '../work/events.js';
+import { workPermissions } from '../work/settings.js';
+import { taskPermissions } from '../tasks/configuration.js';
 import { actionsRedactor, publicText } from './safety.js';
 
 export const scanInterval = 60_000, scanPageSize = 50;
@@ -153,8 +154,9 @@ export class ActionsFailures {
     let budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
     if (budget.head_sha && (budget.head_sha !== live.head_sha || budget.head_branch !== live.head_branch)) stop('actions_rerun_identity_changed');
     const activated = this.store.get('SELECT enabled_at FROM actions_failure_scans WHERE repository_id=?', id)!.enabled_at;
-    // The workflow's writes: without actions_rerun nothing is rerun, without issue nothing is reported.
-    const writes = workflowPermissions(this.store, id, 'actions.failures').writes;
+    // The work type's writes: without actions_rerun nothing is rerun, without issue nothing is reported. A task the Manager
+    // created with fewer writes keeps to those.
+    const projectWrites = workPermissions(this.store, id, 'actions.failures').writes;
     let analyzing = false;
     for (const attempt of this.store.all("SELECT * FROM actions_failure_attempts WHERE repository_id=? AND run_id=? AND state='pending' ORDER BY attempt", id, runId)) {
       const run = attempt.attempt === live.run_attempt ? live : await github.request('GET', github.path(`/actions/runs/${runId}/attempts/${attempt.attempt}`));
@@ -164,10 +166,20 @@ export class ActionsFailures {
       if (!Number.isFinite(Date.parse(run.updated_at))) stop('actions_completion_time_missing');
       if (run.conclusion !== 'failure' || budget.retry_state === 'none' && Date.parse(run.updated_at) < Date.parse(activated) || !await this.eligible(github, run)) { finish(); continue; }
       let data: { kind: FailureKind; evidence: Evidence[] };
+      const task = analysisTask(this.store, id, runId, run.run_attempt), writes = task ? taskPermissions(this.store, task).writes : projectWrites;
       if (attempt.data) data = JSON.parse(attempt.data);
       else {
         // The analysis runs as a task in the project computer; until it ends, the attempt waits and nothing is written.
-        const task = analysisTask(this.store, id, runId, run.run_attempt);
+        const decision = task ? null : analysisDecision(this.store, id, runId, run.run_attempt);
+        if (decision?.state === 'pending') { analyzing = true; continue; }
+        // A decision that will not come (the dispatch failed) keeps the run waiting, like a model that cannot be reached.
+        if (decision?.state === 'failed') stop('manager_dispatch_failed', 'retry_wait', 'Manager 没能分派这次失败分析，请在项目的事件记录里重试。');
+        // The Manager decided this failure needs nothing: record that, rerun nothing and report nothing.
+        if (decision?.state === 'declined') {
+          this.store.run('UPDATE actions_failure_attempts SET classification=?,data=? WHERE repository_id=? AND run_id=? AND attempt=?', 'ignored',
+            JSON.stringify({ kind: 'ignored', evidence: [], reason: decision.reason }), id, runId, run.run_attempt);
+          finish(); continue;
+        }
         if (task && eventTaskActive(task)) {
           analyzing = true;
           // A model that cannot be reached keeps the run waiting, as the failure status of the whole workflow.
@@ -205,7 +217,7 @@ export class ActionsFailures {
       }
       budget = this.store.get('SELECT * FROM actions_failure_runs WHERE repository_id=? AND run_id=?', id, runId)!;
       let reason = '';
-      if (data.kind === 'external' && !writes.includes('actions_rerun')) reason = 'This workflow does not rerun runs automatically.';
+      if (data.kind === 'external' && !writes.includes('actions_rerun')) reason = 'This project does not rerun runs automatically.';
       else if (data.kind === 'external') {
         if (budget.retry_state === 'none') {
           // A human may have rerun while we read logs. Never rerun a newer/incomplete attempt on this evidence.

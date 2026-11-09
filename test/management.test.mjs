@@ -1,17 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { managementFixture, query, command, settled } from './management-fixture.mjs';
+import { managerSection } from './helpers.mjs';
 import { resolveActor, resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { ManagementService } from '../dist/management/service.js';
 import { ManagementAgent } from '../dist/management/agent.js';
-import { WorkflowService } from '../dist/workflows/service.js';
 import { RuleService } from '../dist/rules/service.js';
 import { TaskCommands } from '../dist/tasks/commands.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { executionModel, taskConfiguration } from '../dist/tasks/configuration.js';
 import { roleApi } from '../dist/roles/api.js';
 const project={project_id:'101'},workflow={...project,workflow_id:'review.issue'},task={...project,task_id:'blocked'};
-const service=h=>new ManagementService(h.store,new WorkflowService(h.store,new RuleService(h.store)),new TaskCommands(h.store));
+const service=h=>new ManagementService(h.store,new RuleService(h.store),new TaskCommands(h.store));
 
 test('scoped facts, original logs and revisions agree with legacy API; forged actors and unknown fields never confer authority',async t=>{
   const {h,admin,member}=await managementFixture(t),single=await member('single',{repository_ids:['101']}),whole=await member('whole',{organization_ids:['10']}),ordinary=await member('ordinary',{});
@@ -38,7 +38,7 @@ test('configuration commands execute normally, conflict without overwrite, repla
   assert.equal(result.status,201);assert.equal(result.value.state,'succeeded');assert.equal(result.value.channel,'api');assert.equal(result.value.result.diff.after.prompt,'New default');assert.equal(result.value.result.effect,'future_tasks');
   assert.deepEqual((await command(admin,'workflow.update',workflow,{prompt:'New default'},'save-one',before.revision)).value,result.value);
   const conflicting=await command(admin,'workflow.update',workflow,{prompt:'Stale value'},'stale',before.revision);assert.equal(conflicting.status,409);assert.equal(conflicting.value.error,'management_revision_conflict');
-  assert.equal((await admin('/api/repositories/101/workflows/review.issue')).value.workflow.prompt.effective,'New default');
+  assert.equal((await managerSection(admin,'101','review.issue')),'New default');
   assert.equal((await command(admin,'workflow.update',workflow,{prompt:'Different payload'},'save-one',before.revision)).value.error,'idempotency_conflict');
   h.store.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)','101','a'.repeat(40),JSON.stringify({'.bot/rules/issue-review.md':'Repository rule'}),'now');
   const overridden=await command(admin,'workflow.update',workflow,{prompt:'Console shadow'});
@@ -123,7 +123,7 @@ test('organization approval binds exact parameters/revision and never bypasses t
   assert.equal((await approve(pending.value)).value.state,'succeeded');
   const revoked=await command(single.client,'workflow.update',workflow,{prompt:'Must not save'},'revoke');
   await admin('/api/users/'+single.id,'PATCH',{active:false});
-  const denied=await approve(revoked.value);assert.ok(denied.status>=400||denied.value.state==='failed');assert.notEqual((await admin('/api/repositories/101/workflows/review.issue')).value.workflow.prompt.effective,'Must not save');
+  const denied=await approve(revoked.value);assert.ok(denied.status>=400||denied.value.state==='failed');assert.notEqual((await managerSection(admin,'101','review.issue')),'Must not save');
 });
 
 test('pending commands stop on project, installation, credentials, budget or authorization changes; unknown effects reconcile without repeating creation',async t=>{
