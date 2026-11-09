@@ -172,9 +172,13 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  //   so a late notification of that turn is never taken for the turn a new start began.
  let lastTurn:{id:string|null;status:string|null}={id:null,status:null},knownTurn:string|null=null;
  const persist=(turn:typeof lastTurn,known:string|null=knownTurn)=>{lastTurn=turn;knownTurn=known;ctx.save({lastTurnId:turn.id,lastTurnStatus:turn.status,knownTurnId:known});};
- // hint: the turn id carried by notifications that arrive before the turn/start answer is processed (same chunk, or an
- // answer that never comes); previous: the turn known before this start, whose late notifications must not set the hint.
- type Waiter={id:string|null;hint:string|null;previous:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;settled:Promise<void>;usage:boolean};
+ // id: the turn named by the start answer; only its terminal ends this start. hint: a turn id seen before the answer is
+ // handled (same chunk, or an answer that never comes), only a guess: hintStarted when a turn/started named it.
+ // previous: the turn known before this start, whose late notifications must not set the hint. received: the cancel
+ // receipt, resolved by the terminal of the answered turn, by that of the hinted turn while no answer exists, or by the end
+ // of the connection; it never makes the turn a success.
+ type Waiter={id:string|null;hint:string|null;hintStarted:boolean;previous:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;
+  receipt:(kind:string)=>void;received:Promise<string>;usage:boolean};
  let current:Waiter|null=null,rerouted:{from:string;to:string}|null=null;
  const early=new Map<string,any>(),seen=new Set<string>(),reported=new Set<string>(),servers=new Map<string,{status:string;error:string|null}>();
  let serverChange:(()=>void)|null=null,committed=false;
@@ -184,12 +188,13 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  // An anomaly is recorded once per kind and method; the stream continues.
  const anomaly=(kind:string,detail:Record<string,unknown>={})=>{const key=kind+':'+String(detail.method??'');if(reported.has(key))return;reported.add(key);emit({type:'configuration',stage:'protocol_anomaly',anomaly:kind,...detail});};
  // Before the thread is bound nothing belongs to this run yet (e.g. a usage total restated while resuming); that is no anomaly.
- const ours=(params:any,at:string)=>{if(!threadId)return false;if(params?.threadId===threadId){learn(params.turnId);return true;}anomaly('foreign_thread',{method:at});return false;};
- // A turn id seen while a start is still unanswered names the turn that start began, unless it is the turn known before:
- // it is persisted at once as an unconfirmed turn, so a cancel can interrupt it and the next run can reconcile it.
- const learn=(turnId:unknown)=>{
-  if(!current||current.id||current.hint||!id(turnId)||turnId===current.previous)return;
-  current.hint=turnId as string;persist({id:current.hint,status:'inProgress'},current.hint);
+ const ours=(params:any,at:string)=>{if(!threadId)return false;if(params?.threadId===threadId){learn(params.turnId,false);return true;}anomaly('foreign_thread',{method:at});return false;};
+ // A turn id seen while a start is still unanswered names the turn that start probably began, unless it is the turn known
+ // before: it is persisted at once as an unconfirmed turn, so a cancel can interrupt it and the next run can reconcile it.
+ // Any notification may carry a late turn's id; a turn/started is direct evidence of a new turn and replaces such a guess.
+ const learn=(turnId:unknown,started:boolean)=>{
+  if(!current||current.id||!id(turnId)||turnId===current.previous||current.hint&&(current.hintStarted||!started||current.hint===turnId))return;
+  current.hint=turnId as string;current.hintStarted=started;persist({id:current.hint,status:'inProgress'},current.hint);
  };
  // A built-in tool acted although it was not granted: recorded as a denial, then the whole run stops through the shared path
  // (task tools refused, turn/interrupt, bounded wait, process group reclaimed). Sub-agents are refused the same way: their
@@ -203,14 +208,13 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  const notification=(method:string,params:any)=>{
   // Only its turn id matters (params.turn.id in the locked schema): it identifies a turn whose start answer may still be
   // pending, or never come.
-  if(method==='turn/started'){if(ours(params,method))learn(check.turn(params?.turn,'turn/started.turn').id);return;}
+  if(method==='turn/started'){if(ours(params,method))learn(check.turn(params?.turn,'turn/started.turn').id,true);return;}
   if(method==='turn/completed'){
    if(!ours(params,method))return;const turn=check.turn(params?.turn,'turn/completed.turn');
-   // The terminal of the turn the current start began ends it, also while the start answer is still missing (a cancel
-   // waiting for its receipt).
-   if(current&&(current.id===turn.id||!current.id&&current.hint===turn.id)){if(current.done){anomaly('duplicate_terminal',{method});return;}current.done=true;
-    if(!current.id)persist({id:turn.id,status:turn.status},turn.id);current.resolve(turn);}
-   else if(current&&current.id===null)early.set(turn.id,turn);
+   // Only the turn the start answer named ends this start. Before the answer is handled every terminal waits in early and
+   // the answer picks its own; the terminal of the hinted turn is then only a cancel receipt, never this start's result.
+   if(current&&current.id===turn.id){if(current.done){anomaly('duplicate_terminal',{method});return;}current.done=true;current.resolve(turn);}
+   else if(current&&current.id===null){early.set(turn.id,turn);if(current.hint===turn.id)current.receipt('terminal');}
    else anomaly('unknown_turn',{method});
   }else if(method==='item/started'||method==='item/completed'){
    const p=check.item(params,method);if(!ours(p,method))return;
@@ -366,10 +370,10 @@ export function appServerDialect(ctx:DialectContext):Dialect{
     bound:{threadId,model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,approvalPolicy:redactor.clean(thread.approvalPolicy??null),sandbox:redactor.clean(thread.sandbox??null),disabledBuiltins:builtins,instructionSources:redactor.clean(thread.instructionSources??[]),tools,reconciled}};
   },
   async turn(prompt){
-   text='';let resolveSettled!:()=>void;
-   const settled=new Promise<void>(r=>{resolveSettled=r;});
-   const waiter:Waiter={id:null,hint:null,previous:knownTurn,done:false,usage:false,resolve:()=>{},reject:()=>{},settled};
-   const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=turn=>{resolveSettled();ok(turn);};waiter.reject=error=>{resolveSettled();fail(error);};});
+   text='';let receipt!:(kind:string)=>void;
+   const received=new Promise<string>(r=>{receipt=r;});
+   const waiter:Waiter={id:null,hint:null,hintStarted:false,previous:knownTurn,done:false,usage:false,resolve:()=>{},reject:()=>{},receipt,received};
+   const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=turn=>{receipt('terminal');ok(turn);};waiter.reject=error=>{receipt('connection_closed');fail(error);};});
    terminal.catch(()=>{});current=waiter;
    let answer:any;
    const before={turn:lastTurn,known:knownTurn};
@@ -381,10 +385,16 @@ export function appServerDialect(ctx:DialectContext):Dialect{
     // id its notifications carried is already persisted as an unconfirmed turn, and without one the binding keeps "start
     // requested". Its usage counts once: as the reports already received, or as one unknown request when there were none.
     if(error instanceof RpcError)persist(before.turn,before.known);
-    else emit({type:'turn',phase:'start_unconfirmed',threadId,turnId:waiter.hint,usage:waiter.usage?'observed':'unknown'});
+    else{
+     // Without an answer the hinted turn is the best knowledge; a terminal it already reported is kept with it.
+     const ended=waiter.hint?early.get(waiter.hint):undefined;if(ended)persist({id:waiter.hint,status:ended.status},waiter.hint);
+     emit({type:'turn',phase:'start_unconfirmed',threadId,turnId:waiter.hint,usage:waiter.usage?'observed':'unknown'});
+    }
     throw error;
    }
    const started=check.turn(answer?.turn,'turn/start.result.turn');
+   // The answer settles which turn this start began; a different hint was a late turn and is dropped from the binding.
+   if(waiter.hint&&waiter.hint!==started.id)anomaly('hint_not_started_turn',{method:'turn/start'});
    waiter.id=started.id;persist({id:started.id,status:'inProgress'},started.id);emit({type:'turn',phase:'started',threadId,turnId:started.id});
    const known=early.get(started.id);if(known){early.delete(started.id);waiter.done=true;waiter.resolve(known);}
    // Only the terminal notification ends a turn; the start answer does not, and a stream that ends first fails the turn.
@@ -404,7 +414,7 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    const turnId=waiter.id??waiter.hint;
    if(turnId){emit({type:'turn',phase:'interrupt_requested',threadId,turnId});rpc.request('turn/interrupt',{threadId,turnId}).catch(()=>{});}
    let timer:NodeJS.Timeout|undefined;
-   const receipt=await Promise.race([waiter.settled.then(()=>waiter.done?'terminal':'connection_closed'),new Promise<string>(r=>{timer=setTimeout(()=>r('timeout'),grace);})]);clearTimeout(timer);
+   const receipt=await Promise.race([waiter.received,new Promise<string>(r=>{timer=setTimeout(()=>r('timeout'),grace);})]);clearTimeout(timer);
    emit({type:'turn',phase:'interrupt_receipt',threadId,turnId,receipt});
   },
   bound(){committed=true;for(const event of pendingUsage.splice(0))emit(event);},
