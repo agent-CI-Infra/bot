@@ -6,7 +6,8 @@ import { managerDecision } from './manager.js';
 
 export type Decider = (store: Store, context: DispatchContext) => Promise<Decision>;
 const leaseMs = 5 * 60000, maxAttempts = 8;
-// A failed attempt waits 5 s, 15 s, 45 s … up to 10 minutes; after eight attempts the event is marked failed for a person.
+// A failed attempt waits 5 s, 15 s, 45 s … up to 10 minutes. A model that cannot be reached or is not configured is retried
+// until it can; other failures (an invalid decision, a runtime fault) are marked failed for a person after eight attempts.
 const backoff = (attempts: number) => Math.min(5000 * 3 ** Math.max(0, attempts - 1), 10 * 60000);
 
 /**
@@ -26,19 +27,28 @@ export class Dispatcher {
   async close() { this.closing = true; if (this.timer) clearInterval(this.timer); onDispatchEvent(null); await Promise.allSettled([...this.running.values()]); }
   /** Waits for the events being decided now (tests and shutdown). */
   idle() { return Promise.allSettled([...this.running.values()]); }
+  // Events of one Issue or pull request are decided one at a time, in order: a decision must see the task the previous
+  // one created, or two updates arriving together would each create a review.
+  private readonly busy = new Set<string>();
   tick() {
     if (this.closing) return;
-    const now = Date.now();
+    const now = Date.now(), objectKey = (event: Row) => event.object_number == null ? 'event:' + event.id : `${event.repository_id}:${event.object_type}:${event.object_number}`;
     // An expired lease (a stuck call) is taken over; the old call's apply then finds its lease gone.
-    const due = this.store.all(`SELECT * FROM dispatch_events WHERE (state='pending' AND next_run_at<=?) OR (state='dispatching' AND lease_until<?) ORDER BY created_at,id LIMIT ?`,
-      now, now, this.concurrency);
+    const due = this.store.all(`SELECT * FROM dispatch_events WHERE (state='pending' AND next_run_at<=?) OR (state='dispatching' AND lease_until<?) ORDER BY created_at,rowid LIMIT 200`, now, now);
+    const waiting = new Set<string>();
     for (const event of due) {
-      if (this.running.size >= this.concurrency || this.running.has(event.id)) continue;
+      const key = objectKey(event);
+      // Only the oldest due event of an object may start, and only when no event of it is being decided.
+      if (waiting.has(key)) continue; waiting.add(key);
+      if (this.running.size >= this.concurrency || this.running.has(event.id) || this.busy.has(key)) continue;
+      if (event.object_number != null && this.store.get(`SELECT 1 FROM dispatch_events WHERE repository_id=? AND object_type=? AND object_number=? AND state IN ('pending','dispatching')
+        AND (created_at<? OR (created_at=? AND rowid<(SELECT rowid FROM dispatch_events WHERE id=?)))`, event.repository_id, event.object_type, event.object_number, event.created_at, event.created_at, event.id)) continue;
       const lease = randomId();
       const claimed = this.store.run(`UPDATE dispatch_events SET state='dispatching',lease=?,lease_until=?,attempts=attempts+1 WHERE id=? AND (state='pending' OR (state='dispatching' AND lease_until<?))`,
         lease, now + leaseMs, event.id, now);
       if (!claimed.changes) continue;
-      const work = this.run(this.store.get('SELECT * FROM dispatch_events WHERE id=?', event.id)!, lease).finally(() => this.running.delete(event.id));
+      this.busy.add(key);
+      const work = this.run(this.store.get('SELECT * FROM dispatch_events WHERE id=?', event.id)!, lease).finally(() => { this.running.delete(event.id); this.busy.delete(key); queueMicrotask(() => this.tick()); });
       this.running.set(event.id, work);
     }
   }
@@ -48,17 +58,23 @@ export class Dispatcher {
       // Everything it could lead to was switched off or ended meanwhile: nothing to ask.
       const decision: Decision = context.options.length || context.continuations.length ? await this.decide(this.store, context)
         : { decision: 'ignore', option_ids: [], reason: '没有可选的处理方式：相关工作已关闭，或可续接的任务已经结束。', model: null };
-      applyDecision(this.store, event, decision, lease);
+      applyDecision(this.store, event, { ...decision, seen: context.continuations.map(option => option.id) }, lease);
       this.onApplied();
     } catch (error) {
       if (error instanceof InvalidDecision && error.code === 'dispatch_lease_lost') return;
+      // The situation changed while the Manager thought: decide again at once, without counting it as a failure.
+      if (error instanceof InvalidDecision && error.code === 'dispatch_context_changed') {
+        this.store.run("UPDATE dispatch_events SET state='pending',lease=NULL,lease_until=NULL,next_run_at=0,attempts=max(0,attempts-1) WHERE id=? AND lease=?", event.id, lease); return;
+      }
       const code = error instanceof TaskError || error instanceof InvalidDecision ? error.code : 'dispatch_runtime_failure';
       const detail = error instanceof TaskError ? String(error.detail ?? '') : String((error as Error)?.message ?? '');
       if (!(error instanceof TaskError || error instanceof InvalidDecision)) console.error(`[dispatch] event ${event.id}: ${detail}`);
       this.store.transaction(() => {
         const current = this.store.get('SELECT * FROM dispatch_events WHERE id=? AND lease=? AND state=?', event.id, lease, 'dispatching');
         if (!current) return;
-        const failed = Number(current.attempts) >= maxAttempts;
+        // A model that is down or not configured is waited out, like a task waits for it; only real failures run out.
+        const waiting = error instanceof TaskError && ['retry_wait', 'waiting_configuration', 'waiting_environment'].includes(String(error.state));
+        const failed = !waiting && Number(current.attempts) >= maxAttempts;
         this.store.run('UPDATE dispatch_events SET state=?,lease=NULL,lease_until=NULL,next_run_at=?,error=? WHERE id=?', failed ? 'failed' : 'pending',
           Date.now() + backoff(Number(current.attempts)), JSON.stringify({ code, detail: detail.slice(0, 600) }), event.id);
         // A module waiting for the outcome (a release observation, a gate turn) stops waiting when no decision will come.

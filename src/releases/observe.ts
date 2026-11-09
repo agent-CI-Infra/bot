@@ -40,7 +40,11 @@ export function requestObservation(store: Store, row: Row): void {
 }
 // The Manager's decision on an observation request: the task the release waits for, or why there is none.
 registerDispatchHook('release.observe', {
-  created(store, task, ref: any) { patch(store, ref.release_id, { observation_task: task.id, observation_event: null, observation_error: null }); },
+  created(store, task, ref: any) {
+    // A late decision on an older request (retried by hand) does not take over a newer one.
+    const row = store.get('SELECT data FROM project_releases WHERE id=?', ref.release_id);
+    if (row && JSON.parse(row.data).observation_event === ref.key) patch(store, ref.release_id, { observation_task: task.id, observation_event: null, observation_error: null });
+  },
   declined(store, _event, reason, ref: any) {
     const row = store.get('SELECT data FROM project_releases WHERE id=?', ref.release_id);
     if (!row || JSON.parse(row.data).observation_event !== ref.key) return;

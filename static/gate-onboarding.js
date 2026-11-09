@@ -147,7 +147,8 @@ function gateOnboardingRender() {
     list.append(item);
   }
   const task = session.task, waiting = task && gateOnboardingTaskStates[task.status];
-  if (busy) list.append(element('li', (session.state === 'thinking' && waiting ? `agent ${waiting}` : gateOnboardingStates[session.state]) + '…', 'gate-message gate-message-pending'));
+  // A turn the Manager has not started yet has no task: the conversation says so instead of an agent at work.
+  if (busy) list.append(element('li', (session.state === 'thinking' && waiting ? `agent ${waiting}` : session.state === 'thinking' && !task ? '等 Manager 安排这一轮' : gateOnboardingStates[session.state]) + '…', 'gate-message gate-message-pending'));
   // A turn is a task in the project computer; its process (commands, files read, model output) opens like any task's.
   const turn = $('gate-onboarding-turn'); turn.replaceChildren(); turn.hidden = !task;
   if (task) turn.append(`本轮任务：${waiting || task.status}${task.error ? `（${task.error}）` : ''} `, button('查看执行过程', () => openTask(task.id), 'quiet'));

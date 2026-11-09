@@ -140,21 +140,44 @@ test('neither the Manager prompt nor its decision can widen what a task may writ
   assert.deepEqual(taskPermissions(f.h.store, task).writes, ['reply']);
 });
 
-test('a Manager that cannot be reached keeps the event pending, then failed for a person to retry', async t => {
+test('a Manager that cannot be reached is waited out; a decision that stays invalid fails for a person to retry', async t => {
   const f = await fixture(t);
   f.state.status = 503;
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'opened');
   await f.run();
   let [event] = events(f.h);
   assert.equal(event.state, 'pending'); assert.equal(event.attempts, 1); assert.equal(JSON.parse(event.error).code, 'model_http_503'); assert.ok(event.next_run_at > Date.now());
+  // An outage is not counted down: events wait for the model like tasks do.
+  f.h.store.run('UPDATE dispatch_events SET attempts=20,next_run_at=0');
+  await f.run();
+  assert.equal(events(f.h)[0].state, 'pending');
+  // A model that keeps choosing what was not offered runs out of attempts.
+  f.state.status = 200; f.state.decide = () => ({ decision: 'continue', option_ids: ['continue:nothing'], reason: '续接' });
   f.h.store.run('UPDATE dispatch_events SET attempts=7,next_run_at=0');
   await f.run();
   [event] = events(f.h);
-  assert.equal(event.state, 'failed'); assert.equal(tasks(f.h).length, 0);
-  f.state.status = 200; f.state.decide = input => ({ decision: 'create', option_ids: [input.options.create[0].id], reason: '恢复后检视' });
+  assert.equal(event.state, 'failed'); assert.equal(JSON.parse(event.error).code, 'dispatch_option_not_offered'); assert.equal(tasks(f.h).length, 0);
+  f.state.decide = input => ({ decision: 'create', option_ids: [input.options.create[0].id], reason: '恢复后检视' });
   assert.equal((await f.admin(`/api/repositories/101/dispatch/${event.id}/retry`, 'POST', {})).status, 201);
   await f.run();
   assert.equal(events(f.h)[0].state, 'decided'); assert.equal(tasks(f.h).length, 1);
+});
+
+test('events of one object are decided one at a time, so updates that arrive together join one review', async t => {
+  const f = await fixture(t);
+  f.state.decide = input => input.options.continue.length ? { decision: 'continue', option_ids: [input.options.continue[0].id], reason: '并入正在等的检视' }
+    : { decision: 'create', option_ids: [input.options.create.find(o => o.work === 'review.issue').id], reason: '检视这次更新' };
+  // A review with three inline comments arrives as several deliveries at once.
+  for (const id of [51, 52, 53]) queueWebhook(f.h.store, '101', 'issue_comment', { action: 'created', issue, sender: alice, comment: { id, body: 'Note ' + id, author_association: 'MEMBER' } }, 'comment-' + id);
+  for (let i = 0; i < 4; i++) await f.run();
+  assert.deepEqual(events(f.h).map(e => e.decision), ['create', 'continue', 'continue']);
+  assert.equal(tasks(f.h).length, 1); assert.equal(JSON.parse(tasks(f.h)[0].input).merged_updates.length, 2);
+  // Closing the Issue ends what the Manager has not decided yet.
+  f.state.decide = () => assert.fail('a closed object is not dispatched');
+  queueWebhook(f.h.store, '101', 'issue_comment', { action: 'created', issue, sender: alice, comment: { id: 54, body: 'Late', author_association: 'MEMBER' } }, 'comment-54');
+  queueWebhook(f.h.store, '101', 'issues', { action: 'closed', issue: { ...issue, state: 'closed' }, sender: alice }, 'closed');
+  await f.run();
+  assert.deepEqual([events(f.h).at(-1).decision, events(f.h).at(-1).reason], ['ignore', '对象已关闭或转为草稿，事件不再分派。']);
 });
 
 test('upgrading moves workflows into the Manager and project configuration once, with a record', async t => {
@@ -166,7 +189,7 @@ test('upgrading moves workflows into the Manager and project configuration once,
     triggers TEXT NOT NULL DEFAULT '[]',prompt TEXT,permissions TEXT,model_id TEXT,version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,trigger_list TEXT,PRIMARY KEY(repository_id,id))`);
   const insert = db.prepare('INSERT INTO workflows(repository_id,id,name,description,enabled,triggers,prompt,permissions,trigger_list,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
   insert.run('101', 'review.pr', '', '', 1, '[]', null, JSON.stringify({ writes: ['reply', 'labels', 'issue'] }), JSON.stringify([{ id: 'pull_request.opened' }, { id: 'comment.mention' }]), now, now);
-  insert.run('101', 'custom.0123456789ab', 'Docs check', 'Checks documentation changes', 1, JSON.stringify([{ id: 'pull_request.labeled', label: 'docs' }]), 'Read the changed docs and reply.', JSON.stringify({ writes: ['reply'] }), null, now, now);
+  insert.run('101', 'custom.0123456789ab', 'Docs check', 'Checks documentation changes', 1, JSON.stringify([{ id: 'pull_request.labeled', label: 'docs' }]), 'Read the changed docs and reply.\n\n## 输出 `json`\n\nOne JSON object.', JSON.stringify({ writes: ['reply'] }), null, now, now);
   insert.run('101', 'release.observe', '', '', 1, '[]', 'Observe the release run carefully.', null, null, now, now);
   db.prepare("UPDATE policies SET rule_overrides=? WHERE repository_id='101'").run(JSON.stringify({ '.bot/rules/issue-review.md': 'Review issues briefly.' }));
   db.close();
@@ -184,7 +207,14 @@ test('upgrading moves workflows into the Manager and project configuration once,
   assert.deepEqual(JSON.parse(policy.event_filters)['pull_request.labels'], ['docs']);
   assert.deepEqual(JSON.parse(policy.rule_overrides), { '.bot/rules/issue-review.md': 'Review issues briefly.' });
   const work = JSON.parse(policy.work_settings);
-  assert.deepEqual(work['review.pr'].writes, ['reply', 'labels', 'issue']); assert.deepEqual(work.reply, { enabled: true, writes: ['reply'], version: 0 });
+  assert.deepEqual(work['review.pr'].writes, ['reply', 'labels', 'issue']); assert.deepEqual(work.reply, { enabled: true, writes: ['reply'], events: ['pull_request.labeled'], version: 0 });
+  // Each object work type is offered only on the events that used to start it.
+  assert.deepEqual(work['review.pr'].events, ['pull_request.opened', 'pull_request.mention']);
+  assert.deepEqual(work['review.issue'].events, ['issue.opened', 'issue.mention', 'issue.updated']);
+  // A heading-like line in a migrated prompt stays text in its section, and the report says it was escaped.
+  assert.ok(revision.content.includes('\\## 输出 `json`'));
+  assert.deepEqual([...(await import('../dist/work/settings.js')).parseSections(revision.content).sections.keys()], ['dispatch', 'review.issue', 'release.observe', 'reply']);
+  assert.ok(report.warnings.some(warning => warning.includes('Docs check')));
   const view = (await admin('/api/repositories/101/manager')).value.manager;
   assert.equal(view.migration.report.manager_revision, 1); assert.equal(view.work.find(w => w.id === 'reply').active, true);
   assert.equal(view.sections.find(s => s.id === 'review.issue').effective_source, 'console');
