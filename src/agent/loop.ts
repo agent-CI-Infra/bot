@@ -77,15 +77,41 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       if (!publication) stop('create_pull_request_required', undefined, '开发执行已结束，但没有通过 create_pull_request 创建或更新 PR。');
       return publication;
     } };
-  // Under the project controller, review and Actions analysis keep this executor as the dev assignment: the same task,
-  // tools, workspace and completion, with a Pi controller session in front that delegates it and nominates its result.
+  // Review and Actions analysis retain their task/tools/completion as the dev assignment. Both the controller and
+  // that assignment use their configured backend; Pi retains the entry's native workspace session when selected.
   const entry = String(task.kind).startsWith('review.') ? 'review' : task.kind === 'actions.failures' ? 'actions' : null;
   if (entry && controlled(store, task, entry)) {
     const { repository, token, complete } = session, round = randomId();
+    const execute = async (name: string, args: any) => {
+      if (Object.hasOwn(platform, name)) return platform[name]!(randomId(), args);
+      if (repositoryTools.some(t => t.function.name === name)) return repository!(name, args);
+      if (name === 'github_read_token') {
+        // Native backends use structured repository tools; a provider credential must never become tool output.
+        const access = await token!();
+        return { repository: access.repository, permissions: access.permissions, expires_at: access.expires_at,
+          instruction: 'Use github_read, github_search and read_job_log for repository access.' };
+      }
+      const key = 'entry-tool:' + randomId();
+      if (name === 'read_file') return workspace.call(key, { type: 'workspace_read', path: args?.path });
+      if (name === 'write_file') {
+        // Review may offer write_file for project notes without permitting repository edits.
+        const note = typeof args?.path === 'string' && args.path.startsWith('../notes/');
+        if (note ? !profile.capabilities.workspace.notes : !profile.capabilities.workspace.write)
+          return { error: note ? 'notes_write_not_allowed' : 'review_repository_write_forbidden' };
+        await workspace.write(key, args?.path, Buffer.from(args?.content ?? '')); return { written: true };
+      }
+      if (name === 'run_command') return workspace.call(key, { type: 'workspace_command', command: args?.command,
+        timeout_ms: args?.timeout_seconds > 0 ? args.timeout_seconds * 1000 : null, keep_background: args?.keep_background === true });
+      if (name === 'create_pull_request' && createPullRequest) return createPullRequest(randomId(), args);
+      return { error: 'tool_not_allowed' };
+    };
+    const finish = profile.finishTools[0];
     return runTeam({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model,
-      execute: async (name, args) => Object.hasOwn(platform, name) ? platform[name]!(randomId(), args) : { error: 'tool_not_allowed' } },
+      execute, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
       { entry, prepare: async () => {}, controller: roleWorkspaces(workspace).controller, workers: ['dev'],
-        executor: { harness: 'pi', round, prepare: executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round) } });
+        executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
+          ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
+          : undefined } });
   }
   return runAgent({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: piAdapter(session) });
 }

@@ -31,6 +31,8 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
  return resolveRole(s,task.repository_id,role,taskWorkflow(task as any),{harness,pinned,configuration:config,
   fallbackModel:fixed?()=>({model:model??executionModel(s,task,taskWorkflow(task as any)),source:fixed.workflow?.model_id||Object.hasOwn(JSON.parse(fixed.policy.task_models||'{}'),taskWorkflow(task as any))?'workflow':'project'}):undefined});
 }
+/** Entry points must resolve the selected role before requiring a project model; external backends own their model. */
+export const roleExecutionModel = (s:Store,task:Row,role:string) => taskRole(s,task,role).model;
 
 /** A per-run environment provisioned for this run, with the manager's inspection of it (run_isolation profiles). */
 export interface RunEnvironmentBinding { facts:EnvironmentFacts; handle:unknown; snapshot?:()=>Promise<{tree_sha:string;local_sha:string}|null> }

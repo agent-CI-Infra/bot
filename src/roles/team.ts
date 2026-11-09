@@ -14,11 +14,13 @@ export interface TeamEnvironment {
  prepare:(role:string)=>Promise<(()=>Promise<void>)|void>;
  /** The restricted workspace of the controller's Pi session (a fresh one per run, or the live one to resume). */
  controller?:RoleRunOptions['prepare'];
+ /** Backend session preparation; product tools retain the workspace selected by prepare(role). */
+ worker?:RoleRunOptions['prepare'];
  /** The roles this entry can delegate to; by default every enabled worker role. */
  workers?:string[];
  /** The entry's own executor runs the dev assignment once per call, keeping the entry's harness and tools. round
   * identifies the call: a review that continues after new discussion runs its executor again instead of reusing a result. */
- executor?:{harness:string;round:string;prepare:RoleRunOptions['prepare']};
+ executor?:{harness?:string;round:string;prepare:RoleRunOptions['prepare']};
  /** The entry point recorded with this coordination (development, request, review, actions). */
  entry?:string;
  /** A container of its own per run for roles whose environment profile requires run isolation. */
@@ -35,7 +37,7 @@ export async function runTeam<T>(spec:AgentSpec<T>,environment:TeamEnvironment):
   :!workers.includes(args.role)?['delegation_not_allowed',{requested_role:typeof args.role==='string'?args.role.slice(0,64):null}]:null;
  let executed:string|undefined;
  // Which entry point ran under which configuration revision: the task keeps its id, contract, candidate and history.
- traceEvent(s,task.id,'controller_entry',{entry:environment.entry??(task.kind==='task.request'?'request':'development'),controller,config_revision:config.revision,legacy:!!config.legacy,workers,executor:environment.executor?{role:'dev',harness:environment.executor.harness}:null,attempt:task.attempt},task.trace_run_id,'framework');
+ traceEvent(s,task.id,'controller_entry',{entry:environment.entry??(task.kind==='task.request'?'request':'development'),controller,config_revision:config.revision,legacy:!!config.legacy,workers,executor:environment.executor?{role:'dev',harness:environment.executor.harness??pool.find(r=>r.role_id==='dev')?.harness_ref.id}:null,attempt:task.attempt},task.trace_run_id,'framework');
  const resolve=(ref:string)=>traceSource(s,task.id,ref,taskTraceAccess(s,task));
  const read=async(args:any)=>{if(!Number.isSafeInteger(args.offset??0)||(args.offset??0)<0)return {error:'invalid_offset'};let source;try{source=resolve(String(args.ref));}catch{return {error:'task_record_not_found',ref:args.ref,instruction:'Use an offered task_history source, task:'+task.id+' or contract:revision:'+records.get(task.id).revision};}const text=JSON.stringify(source),offset=args.offset??0;traceEvent(s,task.id,'role_record_read',{role:task.active_role,ref:args.ref,offset},task.trace_run_id,'role:'+task.active_role,[args.ref]);return {ref:args.ref,content:text.slice(offset,offset+16000),next_offset:offset+16000<text.length?offset+16000:null};};
  const commonExecute=async(name:string,args:any)=>{if(name==='wait_for_tasks'){const result=waitForCoordinatedTasks(s,task,args);if(result.waiting)stop('task_coordination_requested','waiting_coordination','Waiting for declared task dependencies; no execution slot held.');return result;}if(name==='list_project_tasks')return s.all("SELECT t.id,t.summary,t.status,r.revision FROM tasks t JOIN task_records r ON r.task_id=t.id WHERE t.repository_id=? ORDER BY t.created_at DESC,t.id LIMIT 100",task.repository_id);if(['read_coordination','acknowledge_coordination'].includes(name))return records.tool(task.id,name,args);if(name==='request_task_coordination'){let request;try{request=requestCoordination(s,task,args);}catch(e){return {error:(e as Error).message};}if(['queued','running'].includes(request.state))return stop('task_coordination_requested','waiting_coordination',request.coordination_id);return request;}if(name==='read_task_record')return read(args);return spec.execute?.(name,args);};
@@ -81,7 +83,7 @@ if(value.contract_revision!==records.get(task.id).revision)return stop('role_nom
    const executor=dev?environment.executor:undefined,instance=roleInstance(s,task,role,executor?.harness);
    if(!existing)s.run('INSERT INTO role_assignments VALUES(?,?,?,?,?,?,?,?)',assignment,task.id,instance.id,revision,sourceVersion,'running',inputKey,null);
    s.run("UPDATE role_assignments SET status='running' WHERE id=?",assignment);
-   try{const result=await runRole({...roleSpec,prompt:JSON.stringify({...JSON.parse(roleSpec.prompt),candidate_version:s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null})},role,assignment,executor?.harness,{prepare:executor?.prepare??(isolatedRole?environment.isolated:undefined)});
+   try{const result=await runRole({...roleSpec,prompt:JSON.stringify({...JSON.parse(roleSpec.prompt),candidate_version:s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null})},role,assignment,executor?.harness,{prepare:executor?.prepare??(isolatedRole?environment.isolated:environment.worker)});
    s.run("UPDATE role_assignments SET status='completed',result_ref=? WHERE id=?",result.reference,assignment);if(executor)executed=result.reference;
    return {result_ref:result.reference,instance_id:result.instance_id};}catch(error){
     // A run whose lease was taken over no longer owns the assignment: the current run decides its status.
