@@ -1,7 +1,7 @@
 import { type Store, type Row } from '../storage/database.js';
 import { type Manager } from '../projects/service.js';
 import { GitHub, repositoryTree } from '../github/client.js';
-import { blobSha, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha } from './common.js';
+import { blobSha, executionBaseline, clip, describeEntries, operationId, Redactor, safePath, stop, treeSha } from './common.js';
 import { randomId } from '../core/security.js';
 import { type Mirror } from './git-cache.js';
 import { open, rm } from 'node:fs/promises';
@@ -170,6 +170,17 @@ export class Workspace {
   async artifact(key:string){
     const result=await this.call(key,{type:'workspace_finalize'});
     if(result.error||!result.tree_sha||!Array.isArray(result.files))stop('candidate_unavailable','waiting_environment',`Could not finalize workspace: ${result.detail||result.error||'missing manifest'}`);
+    // Finalizing unchanged files can mint a different commit timestamp. Observers and Publisher must keep the exact
+    // collected writer commit while its tree and execution baseline are unchanged.
+    const pinned=this.store.get(`SELECT h.data,r.run_context FROM role_run_events e JOIN task_runs r ON r.id=e.run_id
+      JOIN task_history h ON 'task_history:'||h.id=e.history_ref
+      WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev'
+        AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id)
+        AND EXISTS(SELECT 1 FROM task_stage_plans p WHERE p.task_id=e.task_id AND p.contract_revision=r.revision)
+      ORDER BY h.id DESC LIMIT 1`,this.task.id);
+    if(pinned){const output=JSON.parse(pinned.data).data,candidate=output.candidate_ref?.kind==='code'?output.candidate_ref:output.source_snapshot,ctx=JSON.parse(pinned.run_context??'{}'),base=executionBaseline(this.task);
+      const source=base&&/^[a-f0-9]{40}$/.test(base)?'commit:'+base:'contract:revision:'+ctx.contract_revision;
+      if(candidate?.commit_sha&&candidate.tree_hash===result.tree_sha&&ctx.source_ref===source)return {...result,local_sha:candidate.commit_sha};}
     return result;
   }
   async contents(manifest:any[],upstream:any[]=[]){

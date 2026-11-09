@@ -1,3 +1,4 @@
+import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {scopeInstructions} from './scope.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { runRole,roleExecutionModel } from '../roles/run.js';
@@ -18,6 +19,7 @@ const tool=(name:string,description:string,properties:any,required:string[])=>({
 export async function evaluateDelivery(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard:()=>Promise<void>, shell=true): Promise<Verdict> {
   const records=new TaskRecords(store),record=records.get(task.id),candidate=record.candidate;
   if(!candidate)throw new Error('acceptance_candidate_required');
+  assertRequiredStages(store,task.id,deliveryCandidate(candidate,task.kind));
   const related=relatedDeliveries(store,task);
   const parentContext=related.find(r=>r.description.relationship==='parent');
   const tools=[tool('read_evidence','Read a paginated original observation by offered source or task_history:<id> belonging to this task; old observations retain their original version',{source:{type:'string'},offset:{type:'integer'},length:{type:'integer'}},['source']),tool('read_task_history','Read this task’s most recent factual observations and checkpoints; offset/next_offset page backward to older facts. Never executor conversation',{offset:{type:'integer'},limit:{type:'integer'}},[]),tool('read_file','Read raw artifact or repository text',{path:{type:'string'}},['path'])];

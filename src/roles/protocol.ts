@@ -29,6 +29,8 @@ export interface RunContext {
   task_id: string; assignment_id: string; run_id: string; tenant_id: string; project_id: string;
   principal_ref: string; source_ref: string; candidate_ref: CandidateRef | null; configuration_snapshot_ref: string;
   lease_epoch: number; resume_from_run_id?: string; contract_revision: number;
+  stage_policy_hash?:string;
+  stage?: {stage_id:string;plan_revision:number;policy_hash:string};
   policy_revision: string; role_revision: string; harness_revision: string; skill_revisions: string[]; model_revision: string; budget: Budget;
   /** Fields of the plan's ExecutionContext this view maps to, so the two stay translatable. */
   execution_context?: { role_instance_id: string; role: string; kind: string; environment_profile: string };
@@ -88,7 +90,7 @@ export function validateCandidateRef(value: any, field = 'candidate_ref'): Candi
   if (value.kind === 'no_changes') { ref(value.source_ref, field + '.source_ref'); if (!hex(64).test(value.record_hash ?? '')) invalid(field + '.record_hash'); }
   return value as CandidateRef;
 }
-const contextKeys = ['protocol', 'task_id', 'assignment_id', 'run_id', 'tenant_id', 'project_id', 'principal_ref', 'source_ref', 'candidate_ref', 'configuration_snapshot_ref', 'lease_epoch', 'resume_from_run_id', 'contract_revision', 'policy_revision', 'role_revision', 'harness_revision', 'skill_revisions', 'model_revision', 'budget', 'execution_context'];
+const contextKeys = ['protocol', 'task_id', 'assignment_id', 'run_id', 'tenant_id', 'project_id', 'principal_ref', 'source_ref', 'candidate_ref', 'configuration_snapshot_ref', 'lease_epoch', 'resume_from_run_id', 'contract_revision', 'policy_revision', 'role_revision', 'harness_revision', 'skill_revisions', 'model_revision', 'budget', 'execution_context','stage','stage_policy_hash'];
 const budgetKeys = ['policy_ref', 'accounting', 'max_turns', 'max_output_tokens', 'max_total_tokens', 'max_model_requests', 'max_tool_calls', 'max_wall_ms', 'max_concurrency', 'max_cost'];
 export function validateBudget(value: any, field = 'budget'): Budget {
   if (!value || typeof value !== 'object' || Object.keys(value).some(k => !budgetKeys.includes(k)) || budgetKeys.some(k => !Object.hasOwn(value, k))) return invalid(field);
@@ -111,6 +113,8 @@ export function validateRunContext(value: any): RunContext {
   if (!Number.isSafeInteger(value.contract_revision) || value.contract_revision < 0) invalid('contract_revision');
   for (const key of ['policy_revision', 'role_revision', 'harness_revision', 'model_revision']) if (typeof value[key] !== 'string' || !value[key] || value[key].length > 256 || mutable.test(value[key])) invalid(key);
   if (!Array.isArray(value.skill_revisions) || value.skill_revisions.some((s: unknown) => typeof s !== 'string' || !s)) invalid('skill_revisions');
+  if(value.stage_policy_hash!==undefined&&!hex(64).test(value.stage_policy_hash))invalid('stage_policy_hash');
+  if(value.stage!==undefined&&(!value.stage||Object.keys(value.stage).some(k=>!['stage_id','plan_revision','policy_hash'].includes(k))||typeof value.stage.stage_id!=='string'||!Number.isSafeInteger(value.stage.plan_revision)||value.stage.plan_revision<1||!hex(64).test(value.stage.policy_hash)))invalid('stage');
   validateBudget(value.budget);
   assertSecretFree(value);
   return value as RunContext;

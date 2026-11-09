@@ -1,3 +1,4 @@
+import { stageTimeline } from './schedule.js';
 import {harnesses} from './harness.js';
 import {agentBackends,recommendedBackend} from './backends.js';
 import type {Store} from '../storage/database.js';
@@ -57,5 +58,5 @@ export function roleApi(s:Store,user:Actor,method:string,url:URL,input:Json):Jso
   const runs=s.all("SELECT id,kind,status,stop_reason,role,role_instance_id,assignment_id,role_snapshot,role_version,harness,harness_version,recovery_mode,lease_scope,lease_epoch,resume_from_run_id,protocol_recovery,run_context,admission FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid",task[1]!).map(r=>({...r,run_context:r.run_context?JSON.parse(String(r.run_context)):null,admission:r.admission?JSON.parse(String(r.admission)):null}) as Record<string,any>);
   const ids=[...new Set([...instances.map(i=>i.snapshot_id),...runs.map(r=>r.role_snapshot)].filter(Boolean))];
   const snapshots=Object.fromEntries(ids.map(id=>[id,JSON.parse(s.get('SELECT snapshot FROM role_snapshots WHERE id=?',id)?.snapshot??'null')]));
-  return {instances,assignments,runs,snapshots,next_after:more?assignments.at(-1)!.sequence:null};}
+  return {instances,assignments,runs,snapshots,stage_schedule:stageTimeline(s,task[1]!),next_after:more?assignments.at(-1)!.sequence:null};}
 }

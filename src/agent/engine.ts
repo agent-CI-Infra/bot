@@ -1,3 +1,4 @@
+import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {requestIntegration,integratedPublication} from '../tasks/integration.js';
 import { checkManagementBudget } from '../management/budget.js';
@@ -195,6 +196,8 @@ export class TaskEngine {
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
       // A workflow that was switched off (or a custom one deleted) stops its tasks the same way.
       if(task.kind!=='task.request'&&!workflowEnabled(this.store,task.repository_id,taskWorkflow(task as any)))stop('workflow_disabled','cancelled',`工作流 ${taskWorkflow(task as any)} 已关闭或删除。`);
+      const delivery=records.get(id);
+      if(current?.phase==='publish'&&(delivery.pending||delivery.acceptance))assertRequiredStages(this.store,id,deliveryCandidate(delivery.candidate,task.kind));
       // An event that moved on (another run attempt, a release no longer waiting) ends its task at once.
       if(event)event.validate(this.store,current!,JSON.parse(current!.input||'{}'));
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
@@ -299,6 +302,7 @@ export class TaskEngine {
         if(before.contract.completeness==='unspecified'||before.contract.completeness==='legacy_unknown')records.contract(id,contract);
         const version=artifact.tree_sha||sha(JSON.stringify(artifact));
         const compact=(value:any)=>({...value,...(value.files?{files:value.files.map(({base64,...file}:any)=>file)}:{})});
+        if(artifact.status==='no_changes')artifact={...artifact,source_ref:'commit:'+(inputNow.snapshot_sha||task.head_sha)};
         const artifacts=[{kind:artifact.tree_sha?'code':'report',reference:`task:${id}:candidate`,version,content:redactor.clean(compact(artifact))}];
         // A workflow's final report delivers its intermediate PR too. Do not drop the code or its residual findings.
         if(!artifact.tree_sha){

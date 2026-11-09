@@ -1,3 +1,4 @@
+import { assertPublicationStages } from '../roles/schedule.js';
 import { type Store, type Row } from '../storage/database.js';
 import { GitHub } from './client.js';
 import { blobSha, operationId, stop, TaskError, treeSha } from '../agent/common.js';
@@ -30,7 +31,7 @@ export class Publisher {
     if(!replayable&&['unknown','inflight'].includes(row!.state))return stop('github_publication_unknown','waiting_publication',`GitHub 发布操作 ${key}（${kind}）上次请求没有得到确定结果（状态=${row!.state}），在 GitHub 上也没找到这次写入，已暂停以免重复发布。`);
     this.store.run("UPDATE github_effects SET state='inflight' WHERE id=?",id);
     const previous=this.github.beforeWrite;
-    try{await this.validate();if(this.beforeWrite)this.github.beforeWrite=this.beforeWrite;const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
+    try{await this.validate();assertPublicationStages(this.store,this.task.id);this.github.beforeWrite=()=>{assertPublicationStages(this.store,this.task.id);previous?.();this.beforeWrite?.();};const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
     catch(error){this.store.run('UPDATE github_effects SET state=? WHERE id=?',error instanceof TaskError&&error.code==='github_response_unknown'?'unknown':'pending',id);throw error;}
     finally{this.github.beforeWrite=previous;}
   }

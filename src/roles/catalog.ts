@@ -16,10 +16,10 @@ const reserved = { edit_candidate: false, finish_task: false, override_qa: false
 const observerTools = ['read_file', 'run_command', 'read_task_history', 'read_playbook', 'select_playbooks', 'search_project_memory', 'read_project_memory', 'read_related_artifact', 'read_task_record', 'submit_role_result', 'search_role_memory', 'read_skill'];
 const policies = [
   // The controller queries task facts, delegates, coordinates and nominates. It has no product, publication or acceptance tool.
-  { id: 'controller', kind: 'controller', tools: ['read_task_record', 'read_task_history', 'read_playbook', 'select_playbooks', 'record_progress', 'delegate_role', 'nominate_delivery', 'read_skill'],
+  { id: 'controller', kind: 'controller', tools: ['read_task_record', 'read_task_history', 'read_playbook', 'select_playbooks', 'record_progress', 'delegate_role', 'delegate_roles', 'plan_task', 'read_stage_schedule', 'nominate_delivery', 'read_skill'],
     authorities: { ...reserved, query_facts: true, delegate: true, coordinate: true, nominate: true } },
   // The writer keeps the entry's existing trusted tool profile (the workflow permissions); null means "the entry's tools".
-  { id:'controller-coordination',kind:'controller',tools:['read_task_record','read_task_history','read_playbook','select_playbooks','record_progress','delegate_role','nominate_delivery','read_skill','read_coordination','list_project_tasks','wait_for_tasks','request_task_coordination','acknowledge_coordination'],authorities:{...reserved,query_facts:true,delegate:true,coordinate:true,nominate:true}},
+  { id:'controller-coordination',kind:'controller',tools:['read_task_record','read_task_history','read_playbook','select_playbooks','record_progress','delegate_role','delegate_roles','plan_task','read_stage_schedule','nominate_delivery','read_skill','read_coordination','list_project_tasks','wait_for_tasks','request_task_coordination','acknowledge_coordination'],authorities:{...reserved,query_facts:true,delegate:true,coordinate:true,nominate:true}},
   { id:'coordinator',kind:'controller',tools:['read_project_task','submit_coordination'],authorities:{...reserved,query_facts:true,coordinate:true,delegate:false,nominate:false}},
   { id: 'writer', kind: 'writer', tools: null, authorities: { ...reserved, edit_candidate: true, query_facts: true, delegate: false, nominate: false } },
   { id: 'observer', kind: 'observer', tools: observerTools, authorities: { ...reserved, query_facts: true, delegate: false, nominate: false } },

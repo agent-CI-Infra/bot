@@ -1,3 +1,4 @@
+import { reconcileAssignments, assertStageAcceptance } from '../roles/schedule.js';
 import {requestCoordination,validCoordination,coordinationContext,coordinationVersion,assertCoordinationCurrent,acknowledgeCoordination,type CoordinationRequest} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
 import { visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
@@ -53,7 +54,7 @@ export class TaskRecords {
     const r=this.store.get('SELECT * FROM task_records WHERE task_id=?',id),t=this.store.get('SELECT * FROM tasks WHERE id=?',id);
     if (!r||!t) throw new Error('task_not_found');
     return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|needs_replan$|failed$)/.test(t.status)?t.error_code:null},
-      selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
+      stage_schedule:reconcileAssignments(this.store,id),selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
       coordination:coordinationContext(this.store,id),scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
   project(id: string) { const row=this.store.get('SELECT * FROM project_context WHERE repository_id=?',id);return row?{revision:row.revision,facts:JSON.parse(row.facts),updated_at:row.updated_at}:null; }
@@ -92,7 +93,7 @@ export class TaskRecords {
       const offset=args?.offset??0,limit=args?.limit??10;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page'};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      const filter="task_id=? AND type IN ('coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized')";
+      const filter="task_id=? AND type IN ('coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized','stage_plan','stage_result')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
       return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,JSON.parse(row.data),access))}))};
@@ -131,6 +132,7 @@ export class TaskRecords {
     this.assertClaim(id,token);validateVerdict(verdict);const current=this.get(id);
     assertCoordinationCurrent(this.store,id,current.candidate);
     if(current.candidate?.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
+    if(['pass','pass_with_issues'].includes(verdict.outcome))assertStageAcceptance(this.store,id,current.candidate,verdict);
     this.store.run('UPDATE task_records SET pending=? WHERE task_id=?',JSON.stringify({...verdict,...binding,candidate_id:candidateId,revision}),id);
     this.history(id,'acceptance_staged',{...verdict,candidate_id:candidateId,revision});
     });
@@ -143,7 +145,7 @@ export class TaskRecords {
       this.assertClaim(id,token);
       const current=this.get(id),task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
       if(!current.candidate||current.candidate.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
-      if(['pass','pass_with_issues'].includes(verdict.outcome))assertCoordinationCurrent(this.store,id,current.candidate);
+      if(['pass','pass_with_issues'].includes(verdict.outcome)){assertCoordinationCurrent(this.store,id,current.candidate);assertStageAcceptance(this.store,id,current.candidate,verdict);}
       if(['cancelled','superseded'].includes(task.status))throw new Error('task_cancelled');
       if(current.acceptance?.candidate_id===candidateId) {
         const {candidate_id:_,revision:_revision,followups:_followups,created_at:_time,exhausted:_exhausted,...previous}=current.acceptance;
