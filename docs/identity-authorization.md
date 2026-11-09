@@ -6,6 +6,8 @@
 
 `/auth/github/start` 和 `/auth/github/callback` 实现用户 authorization-code 登录；App manifest 注册 `/onboarding/github/callback` 和安装 `/onboarding/github/setup` 分别处理。OAuth state 与发起浏览器绑定，10 分钟过期，换 code 前事务消费，采用 S256 PKCE，固定回调地址。绑定既有账号由已登录会话通过 `POST /api/identity/github/bind` 发起，回调再次核对原会话。失败、重复、过期和冲突均显示确定错误，不能重新分配已绑定身份。用户 access/refresh token 和 PKCE verifier 使用 SecretBox 加密并绑定记录 AAD，读取接口不返回密文或明文凭据。
 
+系统超级管理员在「全局设置 → 接入向导 → GitHub 登录」配置同一 App 的 Client ID、Client secret 和管理 origin。配置与 secret 加密保存且不回读，保存立即生效；仅在没有向导配置时使用部署环境默认值。任何修改都会作废未完成的 OAuth state，并使派生授权等待重新验证；停用或更换 Client ID 还会清除用户 token 和 GitHub 身份会话。本地恢复账号、显式委派和原任务保留，停用配置在重启后仍有效。项目与组织管理员不能读取或修改此系统配置。具体操作见[接入向导](onboarding.md#github-用户登录)。
+
 控制台的「身份与权限」显示身份状态、组织选择、角色、能力和每条授权来源。组织选择保存在服务端会话，后续列表、资源详情和写入按当前范围检查。可以重新验证 GitHub 权限或解除绑定；解除绑定结束使用该身份建立的会话，并撤销 GitHub 派生授权。已有本地账号和独立显式委派保留。
 
 ## 权限来源和安装范围

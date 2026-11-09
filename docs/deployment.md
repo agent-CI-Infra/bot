@@ -60,12 +60,12 @@ GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令�
 | `BOT_IMAGE_TAG` | `latest` | 所有镜像的标签：版本（如 `v1.2.0`）或 `sha-<12 位提交>`；也传给控制面进程，「全局设置」显示它作为当前运行版本。叠加 `compose.build.yaml` 时不选择镜像，控制面收到空值，页面显示源码运行 |
 | `BOT_WEBHOOK_PORT` | `8791` | Webhook 的宿主端口，绑定 `0.0.0.0` |
 | `BOT_ADMIN_PORT` | `8792` | 管理页的宿主端口，只绑定 `127.0.0.1` |
-| `BOT_COOKIE_SECURE` | `false` | 管理页经 HTTPS 反向代理访问时设为 `true` |
+| `BOT_COOKIE_SECURE` | `false` | 管理页经 HTTPS 反向代理访问时设为 `true`；向导保存 HTTPS 控制台地址后也会自动使用 Secure Cookie |
 | `BOT_ADMIN_ORIGIN` | 空 | 管理站的 HTTPS origin；创建 GitHub App 后 GitHub 也回调到这里 |
 | `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 时虚拟电脑没有外网出口 |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
-| `BOT_GITHUB_OAUTH_CLIENT_ID` | 空 | GitHub App 的用户授权 Client ID；留空继续仅用本地登录 |
-| `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE` | `/run/secrets/github-oauth-client-secret`（Compose） | 只读挂载的 Client secret 文件；启用 OAuth 时必须存在 |
+| `BOT_GITHUB_OAUTH_CLIENT_ID` | 空 | GitHub App 用户授权 Client ID 的部署默认值；也可在全局设置的接入向导配置 |
+| `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE` | `/run/secrets/github-oauth-client-secret`（Compose） | 使用环境变量启用 OAuth 时读取的只读 Client secret 文件；向导配置不需要此文件 |
 | `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 评论中提到时一定再检视一次的 `@名字`，逗号分隔、忽略大小写；设置后替换默认值，`off` 关闭提到触发。不提到名字的评论是否触发，由项目「检视」里的更新开关决定 |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许转发到的内网主机名，逗号分隔，见[外部执行端](external-executors.md) |
 
@@ -84,8 +84,12 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 ## GitHub 用户登录
 
-GitHub App 添加用户授权 Callback URL `<BOT_ADMIN_ORIGIN>/auth/github/callback`。这与 manifest 注册和安装 Setup 回调不同，三者须分别保留。启用时设置 `BOT_GITHUB_OAUTH_CLIENT_ID`、明确的 HTTPS `BOT_ADMIN_ORIGIN`，并以只读文件挂载 Client secret 到 `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE`；本地测试可用 loopback HTTP。生产环境设置 `BOT_COOKIE_SECURE=true`。secret 不写进镜像、仓库或浏览器配置，Compose 基础配置不会在未启用 OAuth 时要求该文件。
+推荐由系统超级管理员进入「全局设置 → 接入向导 → GitHub 登录」，保存 Client ID、Client secret、控制台访问地址并启用。配置立即生效，使用 SecretBox 加密保存在数据库，不修改部署文件；Secret 不回读，留空保留，明确清除会同时停用。向导配置优先于环境默认值，明确停用后重启也不会重新启用。
 
-例如用私有 Compose 覆盖文件给 bot 服务增加 `volumes: ["./secrets/github-oauth-client-secret:/run/secrets/github-oauth-client-secret:ro"]`，文件按运行 UID 10001 设置最小读取权限。Client ID 与 App ID 不同，不能互换。组织 owner 识别需要组织 Members 只读权限，不申请成员写权限。SSO 组织需要用户先建立组织 SAML 会话再重新授权；无法证明当前权限时显示待验证。
+管理域名需独立 HTTPS 反向代理到 8792，Webhook 域名继续连接 8791；DNS、证书和代理由部署方配置。GitHub App 添加向导显示的用户授权 Callback URL `<控制台 origin>/auth/github/callback`。这与 manifest 注册和安装 Setup 回调不同，三者须分别保留。
+
+未保存向导配置时，也可使用部署默认值：设置 `BOT_GITHUB_OAUTH_CLIENT_ID`、明确的 HTTPS `BOT_ADMIN_ORIGIN`，并以只读文件挂载 Client secret 到 `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE`；本地测试可用 loopback HTTP。生产环境设置 `BOT_COOKIE_SECURE=true`。secret 不写进镜像、仓库或浏览器配置，Compose 基础配置不会在未启用 OAuth 时要求该文件。
+
+选择部署默认值时，例如用私有 Compose 覆盖文件给 bot 服务增加 `volumes: ["./secrets/github-oauth-client-secret:/run/secrets/github-oauth-client-secret:ro"]`，文件按运行 UID 10001 设置最小读取权限。Client ID 与 App ID 不同，不能互换。组织 owner 识别需要组织 Members 只读权限，不申请成员写权限。SSO 组织需要用户先建立组织 SAML 会话再重新授权；无法证明当前权限时显示待验证。
 
 先完成原有本地超级管理员初始化，再允许用户 GitHub 登录；升级后本地恢复账号不变。备份仍须同时保护数据库与原 master key，新增用户 token 也由 SecretBox 加密。迁移报告、未知归属处理、权限来源和撤销说明见 [GitHub 登录与统一授权](identity-authorization.md)。

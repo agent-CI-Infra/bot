@@ -5,7 +5,7 @@ let grants = { assignments: [], organization_assignments: [], organizations: [] 
 const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
-  external: '#/external', onboarding: '#onboarding', settings: '#/settings', channels: '#/channels', identity: '#/identity', management: '#/management' }, superTabs = ['onboarding', 'settings'];
+  external: '#/external', settings: '#/settings', channels: '#/channels', identity: '#/identity', management: '#/management' }, superTabs = ['settings'];
 const retryableStates = ['paused', 'failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
 async function api(path, method = 'GET', body) {
@@ -66,26 +66,29 @@ async function start() {
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
   options($('repository-filter'), repositories, r => r.full_name); options($('account-filter'), accounts, a => a.name);
-  if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'',tabAddresses.onboarding);
+  if(me.role==='super_admin'&&!accounts.length&&!location.hash)history.replaceState(null,'','#/settings/onboarding/0');
   await route();
   if (authError) notice('message', identityError(authError));
 }
 // The generic list renderer still understands task rows; their old top-level addresses now select a board category.
-const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external','onboarding'];
-// The wizard's address may name a step by index (#onboarding/2), so GitHub's return and a reload open that step.
-const onboardingAddress = /^#onboarding(?:\/([0-5]))?$/;
+const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external'];
+// Wizard steps live inside global settings; old top-level addresses are normalized by route().
+const onboardingAddress = /^#\/settings\/onboarding(?:\/([0-6]))?$/;
+const legacyOnboardingAddress = /^#onboarding(?:\/(\d+))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 // The tab an address names: #/<tab>, a project page, a wizard step, or an older address (#external, #/accounts, #/users).
 function addressTab(hash) {
   if (projectRoute() || hash === '#/projects') return 'projects';
   if (['#/reviews', '#/developments'].includes(hash)) return 'board';
-  if (onboardingAddress.test(hash)) return 'onboarding';
+  if (onboardingAddress.test(hash)) return 'settings';
   if (hash === '#external') return 'external';
   const name = /^#\/([a-z]+)(?:\/|$)/.exec(hash)?.[1];
   return ['accounts', 'users'].includes(name) ? 'settings' : tabAddresses[name] ? name : null;
 }
 async function route() {
   renderVersion++;
+  const legacy = legacyOnboardingAddress.exec(location.hash);
+  if (legacy) history.replaceState(null, '', '#/settings/onboarding/' + ([0, 1, 3, 4, 5, 6][Number(legacy[1] || 0)] ?? 0));
   // Accounts and users were tabs of their own; their old addresses open the matching settings section.
   const moved = /^#\/(accounts|users)$/.exec(location.hash); if (moved) history.replaceState(null, '', '#/settings/' + moved[1]);
   // An address the console does not know keeps the current page (on a fresh load that is the projects page).
@@ -119,7 +122,7 @@ async function render(quiet = false) {
   $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
   $('filters').hidden = !listTabs.includes(tab); $('account-filter-label').hidden = me.role !== 'super_admin' || tab==='external'; $('owner-filter').parentElement.hidden=tab==='external'; $('paging').hidden = tab==='external' || !listTabs.includes(tab);
-  $('rows').hidden=['external','onboarding','board','costs','settings','identity','management','channels'].includes(tab);$('external-panel').hidden=tab!=='external';$('onboarding-panel').hidden=tab!=='onboarding';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=tab!=='identity';$('channels-panel').hidden=tab!=='channels';$('management-panel').hidden=tab!=='management';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
+  $('rows').hidden=['external','board','costs','settings','identity','management','channels'].includes(tab);$('external-panel').hidden=tab!=='external';$('board-panel').hidden=tab!=='board';$('costs-panel').hidden=tab!=='costs';$('settings-panel').hidden=tab!=='settings';$('identity-panel').hidden=tab!=='identity';$('channels-panel').hidden=tab!=='channels';$('management-panel').hidden=tab!=='management';$('sync').hidden=true;$('hidden-filter-label').hidden=true;
   $('filters').classList.toggle('project-filters',me.role !== 'super_admin');
   const params = listParams();
   $('rows').dataset.view=tab;if(!quiet){$('rows').replaceChildren();listSignature='';$('count').textContent='正在加载…';$('rows').setAttribute('aria-busy','true');}
@@ -129,7 +132,6 @@ async function render(quiet = false) {
   if(tab==='channels'){try{await renderChannels();}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='identity'){try{await renderIdentity();}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='settings'){try{await renderSettings(request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
-  if(tab==='onboarding'){$('filters').hidden=true;$('paging').hidden=true;try{await renderOnboarding(request);}finally{$('rows').removeAttribute('aria-busy');}return;}
   if(tab==='external'){params.delete('account_id');params.delete('owner_id');try{await renderExternal(params,request);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}return;}
   if (taskTab) params.set('kind', taskKinds[tab]);
   // Super administrators see every installed repository; project administrators see their registered ones.

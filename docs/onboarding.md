@@ -1,8 +1,8 @@
 # 自助接入与项目规则
 
-本部署继续只使用 Docker Compose。超级管理员进入「接入向导」；项目管理员在自己项目的「模型」页配置权限范围内的任务模型，在「工作流」页查看和编辑各工作流的触发源、提示词、权限和模型。账号、模型、安装、项目电脑与数据卷复用原控制面，不创建另一套资源系统。
+本部署继续只使用 Docker Compose。系统超级管理员进入「全局设置 → 接入向导」；项目管理员在自己项目的「模型」页配置权限范围内的任务模型，在「工作流」页查看和编辑各工作流的触发源、提示词、权限和模型。账号、模型、安装、项目电脑与数据卷复用原控制面，不创建另一套资源系统。
 
-向导地址记录当前步骤（`#onboarding/<0-5>`），刷新后仍停在该步；退出登录后从第 1 步开始。打开第 1 步时，已保存 tunnel token 则默认选中 Cloudflare Tunnel，否则默认自建 HTTPS 中转。
+向导共七步，地址记录当前步骤（`#/settings/onboarding/<0-6>`），刷新后仍停在该步；旧的 `#onboarding/<0-5>` 链接会跳转到对应步骤。退出登录后从第 1 步开始。项目和组织管理员看不到入口，直接访问向导 API 也会被拒绝。打开第 1 步时，已保存 tunnel token 则默认选中 Cloudflare Tunnel，否则默认自建 HTTPS 中转。
 
 ![接入向导（桌面）](images/onboarding-desktop.png)
 
@@ -20,19 +20,33 @@ Cloudflare 自带的无主机名 `http_status:404` 兜底规则表示：未匹�
 
 优先使用已有 GitHub App。选择「使用此 App」会检查 App 和安装，并将 webhook 更新到验证过的域名及该账号已登记的 webhook 路径。凭据不会返回浏览器。
 
-没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 3 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 读（之前创建的 App 在「全局设置 → 机器人账号」或本步「使用已登记的 App」下点「检查权限和事件订阅」：页面只列出 App 定义缺少的权限和未订阅的事件，保留 App 的 Permissions & events 链接；安装未接受的权限和事件在项目列表对应仓库行显示，悬浮徽章可查看缺项；GitHub 不提供修改 App 权限和事件订阅的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 为 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment。已有 App 的所有者还需在 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存，代码更新不会自动修改已有订阅。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
+没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 4 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 与 Members 读（之前创建的 App 在「全局设置 → 机器人账号」或本步「使用已登记的 App」下点「检查权限和事件订阅」：页面只列出 App 定义缺少的权限和未订阅的事件，保留 App 的 Permissions & events 链接；安装未接受的权限和事件在项目列表对应仓库行显示，悬浮徽章可查看缺项；GitHub 不提供修改 App 权限和事件订阅的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 为 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment、organization。已有 App 的所有者还需在 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存，代码更新不会自动修改已有订阅。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
 
-GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥与 webhook secret 只在控制面加密保存，client secret 不需要则丢弃。回调成功后，浏览器打开向导第 3 步「安装」，显示刚创建的 App 和安装入口。
+GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥、webhook secret，以及返回的用户授权 Client ID／Client secret 只在控制面加密保存，不回读到浏览器。回调成功后，浏览器打开向导第 3 步「GitHub 登录」，可复用刚创建的 App 凭据；保存并启用前仍仅使用本地登录。
 
-第 3 步的「安装账号」支持个人账号名、组织名、`owner/repo`、GitHub 个人主页、组织或仓库链接（包括 Issue、PR、代码目录链接），以及 `git@github.com:owner/repo.git`、`ssh://git@github.com/owner/repo.git`。点击「解析账号」，控制面从链接提取 owner，再通过 GitHub 核对并显示规范名称和账号类型（组织或个人账号）；无效链接、不存在的账号和不能安装的账号类型会显示原因。解析时不连接粘贴的网址，不读取仓库内容，也不会安装 App 或启用仓库。
+第 4 步的「安装账号」支持个人账号名、组织名、`owner/repo`、GitHub 个人主页、组织或仓库链接（包括 Issue、PR、代码目录链接），以及 `git@github.com:owner/repo.git`、`ssh://git@github.com/owner/repo.git`。点击「解析账号」，控制面从链接提取 owner，再通过 GitHub 核对并显示规范名称和账号类型（组织或个人账号）；无效链接、不存在的账号和不能安装的账号类型会显示原因。解析时不连接粘贴的网址，不读取仓库内容，也不会安装 App 或启用仓库。
 
 确认账号后，点击「前往 <账号> 安装」，打开 GitHub 定向安装页。使用 GitHub [文档支持的 `suggested_target_id`](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/migrating-oauth-apps-to-github-apps) 预选个人或组织账号 ID，仓库范围及安装权限由 GitHub 页面确认。如果此 App 已安装到该账号，入口改为现有的安装设置：组织使用组织设置页，个人账号使用个人设置页。安装到其他组织或个人账号仍要求公开 App 和相应的 GitHub 权限；个人安装需在 GitHub 登录该个人账号，向导不会绕过授权或替其他用户确认。控制面用 App JWT 查询对应的 `/orgs/{org}/installation` 或 [`/users/{username}/installation`](https://docs.github.com/en/rest/apps/apps#get-a-user-installation-for-the-authenticated-app)，不需要用户 PAT。
 
-安装页也保留「在 GitHub 选择账号」和「重新检查安装」。安装后点「重新检查安装」，再到第 6 步同步并启动目标仓库。也可以跳过并继续配置模型和规则；页面标明尚未安装，向导不启用检视。已有安装不会被删除或重新创建。确认安装、选择模型后，最后一步仅对用户明确选择的项目启用检视，自动开发保持关闭。
+安装页也保留「在 GitHub 选择账号」和「重新检查安装」。安装后点「重新检查安装」，再到第 7 步同步并启动目标仓库。也可以跳过并继续配置模型和规则；页面标明尚未安装，向导不启用检视。已有安装不会被删除或重新创建。确认安装、选择模型后，最后一步仅对用户明确选择的项目启用检视，自动开发保持关闭。
 
 ![指定 GitHub 安装账号（桌面）](images/account-install-desktop.png)
 
 ![指定 GitHub 安装账号（390px）](images/account-install-mobile.png)
+
+## GitHub 用户登录
+
+第 3 步配置用户直接用 GitHub 账号登录控制台。可以复用同一个 GitHub App，无需每名用户另建 App，也无需单独创建 OAuth App。已有 App 从其 General 页面复制 Client ID（不是 App ID），生成 Client secret，在向导填写；manifest 新建的 App 可直接复用加密保存的返回凭据。Secret 输入框始终为空，留空保存保留原值，勾选「清除已保存的 Client secret，并停用 GitHub 登录」才撤销。
+
+填写「控制台访问地址」，复制页面显示的 `<控制台 origin>/auth/github/callback` 到 GitHub App 的用户授权 Callback URL，保留已有注册回调和 Setup URL。多人访问需部署独立的 HTTPS 管理域名，反向代理至 8792；证书、DNS 和反向代理仍由部署方配置。Webhook 域名继续只转发至 8791，向导中的 Cloudflare Tunnel 不开放管理服务。本机测试可用 `http://127.0.0.1:8792` 或 localhost。域名不能包含路径、查询参数或账号密码。修改地址后，应使用新地址重新打开控制台。
+
+组织 owner 识别还需要 App 的 Members 只读权限和 organization 事件订阅。向导新建 App 已包含；已有 App 需所有者检查补齐，再由安装方接受新增权限。安装时自动请求用户授权可以保持关闭，用户点击登录按钮时才发起 OAuth。勾选启用并保存后立即生效，无需改 `.env` 或重启服务；未保存向导配置时继续兼容部署环境变量和 secret 文件，向导明确停用后不会因重启恢复环境默认值。
+
+修改配置会作废尚未完成的 OAuth 回调并使派生权限等待重新验证；停用或更换 Client ID 还会清除已保存的 GitHub 用户 token 并结束 GitHub 身份会话。已有本地会话、独立显式委派与项目任务保留。本地恢复账号继续可用。首次 GitHub 登录创建独立账号，同名或同邮箱不会自动合并，也不获得系统超级管理员；已有本地账号应先登录，在「身份与权限」绑定 GitHub。详见[身份与授权](identity-authorization.md)。
+
+![全局设置内配置 GitHub 登录（桌面）](images/github-login-settings-desktop.png)
+
+![全局设置内配置 GitHub 登录（390px）](images/github-login-settings-mobile.png)
 
 ## 项目列表的快捷设置
 

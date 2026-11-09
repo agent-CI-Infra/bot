@@ -30,7 +30,8 @@ import { HttpError, digest, fail, fields, hashPassword, object, password, random
 
 import { PublicBoards } from './public-board/service.js';
 import { InstallationSetup } from './installations/setup.js';
-import { GitHubIdentity, type GitHubOAuthConfig } from './identity/github.js';
+import { type GitHubIdentity, type GitHubOAuthConfig } from './identity/github.js';
+import { GitHubLogin } from './identity/github-login.js';
 import { identityApi } from './identity/api.js';
 import { assertCurrent, assertSessionWrite, authorize, refreshSessionRevision } from './identity/authorization.js';
 import { resolveActor } from './identity/authorization.js';
@@ -48,7 +49,7 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
-  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity;
+  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
   schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -66,9 +67,15 @@ function respond(res: ServerResponse, status: number, value: Json): void {
 export function createControlPlane(options: Options) {
   const { store } = options;
   const external = options.external || new ExternalService(store);
+  const githubLogin = options.githubLogin || new GitHubLogin(store, {
+    identity: options.githubIdentity, environment: () => options.githubOAuth, defaultOrigin: options.adminOrigin,
+    apiUrl: options.githubUrl || options.githubOAuth?.apiUrl, webUrl: options.githubOAuth?.webUrl,
+  });
   const onboarding = options.onboarding || new Onboarding(store);
-  const githubIdentity = options.githubIdentity || (options.githubOAuth ? new GitHubIdentity(store, options.githubOAuth) : undefined);
-  const installationSetup = options.installationSetup || new InstallationSetup(store, githubIdentity);
+  onboarding.options.githubLogin = githubLogin;
+  const installationSetup = options.installationSetup || new InstallationSetup(store, {
+    verifyInstallation: (session, installation) => githubLogin.identity?.verifyInstallation(session, installation) || Promise.resolve(null),
+  });
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const workflows = new WorkflowService(store, rules, options.githubUrl);
   const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
@@ -76,7 +83,7 @@ export function createControlPlane(options: Options) {
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
-  const channels = new ChannelService(store, managementApi.agent, { origin: options.adminOrigin, ...options.channels });
+  const channels = new ChannelService(store, managementApi.agent, { ...options.channels, get origin() { return options.channels?.origin || githubLogin.adminOrigin || options.adminOrigin; } });
   const channelApi = new ChannelApi(channels), channelConnections = new ChannelConnections(channels);
   options.onChannels?.(channels);
   const schedules = new ScheduleService(store, sharedManagement, channels, options.schedules?.clock);
@@ -84,8 +91,8 @@ export function createControlPlane(options: Options) {
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
-  const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}${options.secureCookies ? '; Secure' : ''}`;
-  const browserCookie = (token: string) => `bot_oauth=${token}; HttpOnly; SameSite=Lax; Path=/auth/github; Max-Age=600${options.secureCookies ? '; Secure' : ''}`;
+  const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}${options.secureCookies || githubLogin.adminOrigin?.startsWith('https:') ? '; Secure' : ''}`;
+  const browserCookie = (token: string) => `bot_oauth=${token}; HttpOnly; SameSite=Lax; Path=/auth/github; Max-Age=600${options.secureCookies || githubLogin.adminOrigin?.startsWith('https:') ? '; Secure' : ''}`;
   const browserToken = (req: IncomingMessage) => req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('bot_oauth='))?.slice(10) || '';
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
   // Errors contain stable codes only: never echo a request, credential, SQL statement or stack.
@@ -137,6 +144,7 @@ export function createControlPlane(options: Options) {
   }));
   const admin = createServer(wrap(async (req, res) => {
     const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
+    const githubIdentity = githubLogin.identity;
     if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'admin')); return; }
     if (method === 'GET' && path === '/api/auth/github/status') { respond(res, 200, { enabled: !!githubIdentity }); return; }
     if (method === 'GET' && path === '/auth/channels/start') {
@@ -159,7 +167,10 @@ export function createControlPlane(options: Options) {
       res.setHeader('Referrer-Policy', 'no-referrer');
       try {
         const result = await githubIdentity.callback(browserToken(req), url.searchParams.get('state') || '', url.searchParams.get('code') || '', sessionToken(req));
-        const credentials = store.transaction(() => session(store, result.principal_id, result.identity_id));
+        const credentials = store.transaction(() => {
+          if (githubLogin.identity !== githubIdentity) return fail(409, 'github_login_configuration_changed');
+          return session(store, result.principal_id, result.identity_id);
+        });
         const channelBinding = await channels.bindings.githubAuthenticated(url.searchParams.get('state') || '', credentials.token);
         if (result.setup_state) installationSetup.bindIdentity(result.setup_state, githubIdentity.sessionReference(credentials.token));
         res.setHeader('Set-Cookie', [cookie(credentials.token), browserCookie('')]); res.writeHead(303, { Location: channelBinding ? '/#/channels' : '/#/identity' }); res.end();
@@ -170,8 +181,8 @@ export function createControlPlane(options: Options) {
     }
     if (method === 'GET' && path === '/onboarding/github/callback') {
       await onboarding.callback(url.searchParams.get('code') || '', url.searchParams.get('state') || '');
-      // The App now exists, so the wizard reopens at its install step (index 2) rather than the first step.
-      res.writeHead(303, { Location: '/#onboarding/2' }); res.end(); return;
+      // The App now exists; continue with user-login configuration inside global settings.
+      res.writeHead(303, { Location: '/#/settings/onboarding/2' }); res.end(); return;
     }
     if (method === 'GET' && path === '/onboarding/github/setup') {
       res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
@@ -190,7 +201,7 @@ export function createControlPlane(options: Options) {
     if (path === '/api/setup' && method === 'GET') { respond(res, 200, { initialized: initialized() }); return; }
     const mutation = !['GET', 'HEAD'].includes(method);
     if (mutation && req.headers.origin) {
-      const origin = options.adminOrigin || `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
+      const origin = githubLogin.adminOrigin || options.adminOrigin || `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
       if (req.headers.origin !== origin) fail(403, 'origin_forbidden');
     }
     if (path === '/api/setup' && method === 'POST' && initialized()) fail(409, 'already_initialized');
@@ -295,7 +306,7 @@ export function createControlPlane(options: Options) {
       const closed = new AbortController(); res.on('close', () => { if (!res.writableFinished) closed.abort(); });
       await store.withAuthorizationGuard(guard, () => workflows.assistantStream(current, url, input, res, closed.signal)); return;
     }
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await managementApi.workflow(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, githubLogin.adminOrigin || options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await managementApi.workflow(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.

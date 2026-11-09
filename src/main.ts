@@ -14,21 +14,26 @@ import { GitCache } from './agent/git-cache.js';
 import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
 import { ActionsFailures } from './actions/service.js';
-import { GitHubIdentity } from './identity/github.js';
+import { GitHubLogin } from './identity/github-login.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
 if (!keyFile) throw new Error('BOT_MASTER_KEY_FILE is required');
 const databasePath = process.env.BOT_DATABASE_PATH || '/data/control.sqlite';
 const store = new Store(databasePath, readFileSync(keyFile));
-const githubIdentity = process.env.BOT_GITHUB_OAUTH_CLIENT_ID ? new GitHubIdentity(store, {
-  clientId: process.env.BOT_GITHUB_OAUTH_CLIENT_ID,
-  clientSecret: readFileSync(process.env.BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE || '', 'utf8').trim(),
-  redirectUri: (process.env.BOT_ADMIN_ORIGIN || '') + '/auth/github/callback', apiUrl: process.env.BOT_GITHUB_API_URL,
-}) : undefined;
+const githubLogin = new GitHubLogin(store, {
+  defaultOrigin: process.env.BOT_ADMIN_ORIGIN, apiUrl: process.env.BOT_GITHUB_API_URL,
+  environment: () => process.env.BOT_GITHUB_OAUTH_CLIENT_ID ? {
+    clientId: process.env.BOT_GITHUB_OAUTH_CLIENT_ID,
+    clientSecret: readFileSync(process.env.BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE || '', 'utf8').trim(),
+    redirectUri: (process.env.BOT_ADMIN_ORIGIN || '') + '/auth/github/callback', apiUrl: process.env.BOT_GITHUB_API_URL,
+  } : undefined,
+});
+// Validate deployment defaults at startup; a saved wizard configuration takes precedence.
+githubLogin.identity;
 const identityTimer = setInterval(() => {
   for (const row of store.all("SELECT DISTINCT principal_id FROM external_identities WHERE provider='github' AND status IN ('active','pending_verification')"))
-    void githubIdentity?.reverify(row.principal_id).catch(() => {});
+    void githubLogin.identity?.reverify(row.principal_id).catch(() => {});
 }, 60_000); identityTimer.unref();
 const tokenFile = process.env.BOT_MANAGER_TOKEN_FILE;
 if (!tokenFile) throw new Error('BOT_MANAGER_TOKEN_FILE is required');
@@ -57,7 +62,7 @@ const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); rele
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
 const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
-  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubIdentity });
+  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin });
 for (const [name, port] of [['webhook', 8791], ['admin', 8792]] as const) {
   const server = servers[name];
   server.on('error', () => { console.error(`${name} listener failed`); process.exit(1); });
