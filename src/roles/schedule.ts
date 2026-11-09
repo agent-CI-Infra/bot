@@ -7,6 +7,12 @@ import { contentHash, validateCandidateRef, type CandidateRef, type RunContext }
 import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
 
+// Stage fingerprints ignore object key order without changing persisted backend session hashes.
+function stageHash(value:unknown) {
+  const canonical=(item:any):any=>Array.isArray(item)?item.map(canonical):item&&typeof item==='object'?Object.fromEntries(Object.keys(item).sort().map(key=>[key,canonical(item[key])])):item;
+  return contentHash(canonical(value));
+}
+
 export function stageStorage(s: Store) {
   s.db.exec(`
     CREATE TABLE IF NOT EXISTS task_stage_plans(task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -32,13 +38,13 @@ function facts(s: Store, taskId: string) {
   const workflow = s.get('SELECT * FROM workflows WHERE repository_id=? AND id=?', task.repository_id, fixed?.workflow?.id ?? task.kind);
   // Only relevant gate policy changes invalidate results; changing a persona alone is handled by role revisions.
   const authority=(configuration:typeof live)=>configuration.roles.filter(role=>(configuration.required_stages??[]).some(stage=>stageAllows(stage,{...role,enabled:true}))).map(({role_id,enabled,capability_policy_ref,environment_profile_ref,harness_ref})=>({role_id,enabled,capability_policy_ref,environment_profile_ref,harness_ref}));
-  const policyHash = contentHash({ stages: live.required_stages ?? [], authority:authority(live), test_command: policy?.test_command ?? '', workflow });
-  return { task, record, config, live, policy, policyHash, authorityChanged:contentHash(authority(config))!==contentHash(authority(live)) };
+  const policyHash = stageHash({ stages: live.required_stages ?? [], authority:authority(live), test_command: policy?.test_command ?? '', workflow });
+  return { task, record, config, live, policy, policyHash, authorityChanged:stageHash(authority(config))!==stageHash(authority(live)) };
 }
 export function candidateKey(candidate: CandidateRef | null) {
   if (!candidate) return 'source';
   const { ref, ...version } = validateCandidateRef(candidate);
-  return contentHash(version);
+  return stageHash(version);
 }
 export function latestRoleCandidate(s: Store, taskId: string): CandidateRef | null {
   const row = s.get(`SELECT h.data FROM role_run_events e JOIN task_runs r ON r.id=e.run_id JOIN task_history h ON 'task_history:'||h.id=e.history_ref
@@ -74,7 +80,7 @@ function assertActive(s: Store, taskId: string) {
   if (['cancelled','superseded','paused'].includes(f.task.status)) stop('task_claim_revoked', f.task.status==='paused'?'paused':'cancelled',f.task.status);
   if (!f.policy?.enabled) stop('repository_policy_disabled','cancelled');
   if (!f.live.enabled) stop('role_authority_revoked','paused');
-  if (f.authorityChanged || contentHash(f.config.required_stages ?? []) !== contentHash(f.live.required_stages ?? [])) stop('stage_policy_changed', 'paused', '阶段策略已变化，请在安全检查点采用新配置。');
+  if (f.authorityChanged || stageHash(f.config.required_stages ?? []) !== stageHash(f.live.required_stages ?? [])) stop('stage_policy_changed', 'paused', '阶段策略已变化，请在安全检查点采用新配置。');
   return f;
 }
 function stageDefinitions(value:unknown) {
@@ -94,9 +100,10 @@ function explicitReplan(s:Store,taskId:string) {
 export function assertStageWaits(s:Store,taskId:string,waiting:{stage_id:string;reason:string|null}[]) {
   const task=s.get('SELECT status FROM tasks WHERE id=?',taskId);
   if(task&&['paused','cancelled','superseded'].includes(task.status))stop('task_claim_revoked',task.status==='paused'?'paused':'cancelled',task.status);
-  const hard=waiting.find(wait=>['stage_policy_changed','stage_plan_stale','stage_retry_exhausted','stage_budget_exhausted','project_disabled','task_inactive'].includes(wait.reason??''));
+  const hard=waiting.find(wait=>['stage_policy_changed','stage_plan_stale','stage_retry_exhausted','stage_budget_exhausted','project_disabled','role_coordination_disabled','task_inactive'].includes(wait.reason??''));
   if(!hard)return;
   if(hard.reason==='project_disabled')stop('repository_policy_disabled','cancelled');
+  if(hard.reason==='role_coordination_disabled')stop('role_authority_revoked','paused');
   if(hard.reason==='task_inactive')stop('task_claim_revoked','cancelled');
   stop(hard.reason!,'paused',JSON.stringify(waiting));
 }
@@ -119,10 +126,10 @@ export function planTask(s: Store, taskId: string, expectedRevision: number, pro
     if(proposed===undefined&&previous?.contract_revision===expectedRevision&&previous.policy_hash===f.policyHash)return previous;
     const stages = validateStages(stageDefinitions(proposed ?? configured), f.config.roles, 'stages');
     for (const required of configured.filter(stage => stage.required)) {
-      if (contentHash(stages.find(stage => stage.stage_id === required.stage_id)) !== contentHash(required)) throw new Error('required_stage_immutable');
+      if (stageHash(stages.find(stage => stage.stage_id === required.stage_id)) !== stageHash(required)) throw new Error('required_stage_immutable');
     }
     if (stages.some(stage => stage.required && !configured.some(c => c.required && c.stage_id === stage.stage_id))) throw new Error('stage_authority_invalid');
-    if (previous?.contract_revision === expectedRevision && previous.policy_hash === f.policyHash && contentHash(JSON.parse(previous.stages)) === contentHash(stages)) return previous;
+    if (previous?.contract_revision === expectedRevision && previous.policy_hash === f.policyHash && stageHash(JSON.parse(previous.stages)) === stageHash(stages)) return previous;
     if (s.get("SELECT 1 FROM task_runs WHERE task_id=? AND assignment_id IN (SELECT assignment_id FROM task_stage_assignments WHERE task_id=?) AND status='running'", taskId, taskId)) throw new Error('stage_plan_running');
     const revision = Number(previous?.revision ?? 0) + 1;
     s.run('INSERT INTO task_stage_plans VALUES(?,?,?,?,?,?)', taskId, revision, expectedRevision, f.policyHash, JSON.stringify(stages), new Date().toISOString());
@@ -136,12 +143,12 @@ export function stageForAssignment(s: Store, assignment?: string): StageDefiniti
   return row ? JSON.parse(row.stages).find((stage: StageDefinition) => stage.stage_id === row.stage_id) ?? null : null;
 }
 function currentResults(s: Store, taskId: string, plan: Row, candidate: CandidateRef | null) {
-  return s.all('SELECT r.* FROM task_stage_results r JOIN task_stage_plans p ON p.task_id=r.task_id AND p.revision=r.plan_revision WHERE r.task_id=? AND p.contract_revision=? AND p.policy_hash=? AND r.candidate_key=? ORDER BY r.rowid', taskId, plan.contract_revision, plan.policy_hash, candidateKey(candidate)).map(row => JSON.parse(row.result)).filter(result=>JSON.parse(plan.stages).some((stage:StageDefinition)=>stage.stage_id===result.stage_id&&contentHash(stage)===result.definition_hash));
+  return s.all('SELECT r.* FROM task_stage_results r JOIN task_stage_plans p ON p.task_id=r.task_id AND p.revision=r.plan_revision WHERE r.task_id=? AND p.contract_revision=? AND p.policy_hash=? AND r.candidate_key=? ORDER BY r.rowid', taskId, plan.contract_revision, plan.policy_hash, candidateKey(candidate)).map(row => JSON.parse(row.result)).filter(result=>JSON.parse(plan.stages).some((stage:StageDefinition)=>stage.stage_id===result.stage_id&&stageHash(stage)===result.definition_hash));
 }
 /** Rebuild runnable/waiting stages from durable assignments/runs, under the existing task claim. */
 export function reconcileAssignments(s: Store, taskId: string, candidate = latestRoleCandidate(s, taskId)) {
   const f = facts(s, taskId), plan = currentPlan(s, taskId);
-  const policyChanged=f.authorityChanged || contentHash(f.config.required_stages ?? []) !== contentHash(f.live.required_stages ?? []);
+  const policyChanged=f.authorityChanged || stageHash(f.config.required_stages ?? []) !== stageHash(f.live.required_stages ?? []);
   if (!plan) return { task_id:taskId, task_status:f.task.status,task_waiting_reason:f.task.error_code??null, plan_revision:0, stages:[], next:[], waiting:policyChanged&&(f.live.required_stages??[]).some(stage=>stage.required&&stage.delivery_types.includes(deliveryType(s,taskId,candidate)))?[{stage_id:'policy',reason:'stage_policy_changed',dependencies:[]}]:[] };
   const results = currentResults(s, taskId, plan, candidate), applicable = (JSON.parse(plan.stages) as StageDefinition[]).filter(stage => stage.delivery_types.includes(deliveryType(s, taskId, candidate)));
   const latest=new Map(results.map((r:any)=>[r.stage_id,r]));
@@ -151,7 +158,7 @@ export function reconcileAssignments(s: Store, taskId: string, candidate = lates
     const active = assignments.some(a => a.status === 'running');
     const attempts = stageRuns(s,taskId,plan,stage.stage_id).length;
     const deps = stage.depends_on.filter(id => !passed.has(id));
-    const reason = ['cancelled','superseded','paused'].includes(f.task.status) ? 'task_inactive' : !f.policy?.enabled || !f.live.enabled ? 'project_disabled'
+    const reason = ['cancelled','superseded','paused'].includes(f.task.status) ? 'task_inactive' : !f.policy?.enabled ? 'project_disabled' : !f.live.enabled ? 'role_coordination_disabled'
       : policyChanged || plan.policy_hash !== f.policyHash ? 'stage_policy_changed' : plan.contract_revision !== f.record.revision ? 'stage_plan_stale'
       : passed.has(stage.stage_id) ? null : active ? 'running' : deps.length ? 'dependencies' : attempts >= stage.retry.max_attempts ? 'stage_retry_exhausted' : stage.role_constraints.kinds.includes('observer') && !candidate ? 'candidate_required' : null;
     return {...stage,status:reason ? 'waiting' : passed.has(stage.stage_id) ? 'passed' : 'ready',waiting_reason:reason,waiting_for:deps,attempts,assignments,results:results.filter((r: any) => r.stage_id === stage.stage_id)};
@@ -249,10 +256,10 @@ export function recordStageResult(s: Store, assignment: string, runId: string, e
       return (!stage.completion.tools||stage.completion.tools.includes(data.name))&&observation&&typeof observation==='object'&&!observation.error&&!observation.isError&&!observation.timed_out&&!observation.truncated&&(observation.exit_code===undefined||observation.exit_code===0);
     }).map(r => ({ref:'task_history:'+r.id,type:r.type}));
     const passed = evidence.length >= stage.completion.min_evidence && (!stage.completion.no_findings || Array.isArray(raw.findings) && raw.findings.length === 0 && Array.isArray(raw.unknowns) && raw.unknowns.length === 0) && !stageBudgetExceeded(s,assignment);
-    const result = {task_id:binding.task_id,plan_revision:binding.plan_revision,stage_id:stage.stage_id,definition_hash:contentHash(stage),contract_revision:ctx.contract_revision,candidate_ref:candidate,policy_hash:currentPlan(s,binding.task_id)!.policy_hash,
+    const result = {task_id:binding.task_id,plan_revision:binding.plan_revision,stage_id:stage.stage_id,definition_hash:stageHash(stage),contract_revision:ctx.contract_revision,candidate_ref:candidate,policy_hash:currentPlan(s,binding.task_id)!.policy_hash,
       policy_revision:ctx.policy_revision,workflow_revision:{id:snapshot.model.workflow,hash:currentPlan(s,binding.task_id)!.policy_hash},role_revision:ctx.role_revision,harness_revision:ctx.harness_revision,skill_revisions:ctx.skill_revisions,model_revision:ctx.model_revision,snapshot_ref:ctx.configuration_snapshot_ref,role_instance_id:run.role_instance_id,assignment_id:assignment,run_id:runId,lease_epoch:epoch,result_ref:refs.result_ref,evidence,passed,reason:passed?null:evidence.length < stage.completion.min_evidence?'insufficient_evidence':'findings_or_budget'};
     const existing = s.get('SELECT result FROM task_stage_results WHERE run_id=?',runId);
-    if (existing) { if (contentHash(JSON.parse(existing.result)) !== contentHash(result)) throw new Error('stage_result_conflict'); return JSON.parse(existing.result); }
+    if (existing) { if (stageHash(JSON.parse(existing.result)) !== stageHash(result)) throw new Error('stage_result_conflict'); return JSON.parse(existing.result); }
     s.run('INSERT INTO task_stage_results VALUES(?,?,?,?,?,?,?,?)',runId,assignment,binding.task_id,binding.plan_revision,stage.stage_id,candidateKey(candidate),JSON.stringify(result),new Date().toISOString());
     traceEvent(s,binding.task_id,'stage_result',result,runId,'framework',evidence.map(e => e.ref));
     return result;
@@ -261,7 +268,7 @@ export function recordStageResult(s: Store, assignment: string, runId: string, e
 export function evaluateRequiredStages(s: Store, taskId: string, candidate: CandidateRef | null) {
   const f = facts(s,taskId), required = f.config.enabled ? (f.config.required_stages ?? []).filter(stage => stage.required && stage.delivery_types.includes(deliveryType(s,taskId,candidate))) : [];
   if (!required.length) {
-    const changed=f.config.enabled&&(f.live.required_stages??[]).some(stage=>stage.required&&stage.delivery_types.includes(deliveryType(s,taskId,candidate)))&&contentHash(f.config.required_stages??[])!==contentHash(f.live.required_stages??[]);
+    const changed=f.config.enabled&&(f.live.required_stages??[]).some(stage=>stage.required&&stage.delivery_types.includes(deliveryType(s,taskId,candidate)))&&stageHash(f.config.required_stages??[])!==stageHash(f.live.required_stages??[]);
     return {satisfied:!changed,waiting:changed?[{stage_id:'policy',reason:'stage_policy_changed'}]:[]};
   }
   const view = reconcileAssignments(s,taskId,candidate);
@@ -284,6 +291,6 @@ export function assertStageAcceptance(s: Store, taskId: string, candidate: any, 
   const runs=s.all(`SELECT r.run_context,r.admission,h.data FROM task_runs r JOIN task_history h ON h.run_id=r.id
     WHERE r.task_id=? AND r.role='qa' AND r.status='succeeded' AND h.type='role_result' ORDER BY h.id DESC`,taskId);
   const valid=runs.some(run=>{const ctx=JSON.parse(run.run_context??'{}'),admission=JSON.parse(run.admission??'{}'),result=JSON.parse(run.data).result;
-    return ctx.stage_policy_hash===f.policyHash && ctx.contract_revision===f.record.revision && ctx.candidate_ref?.ref==='candidate:'+candidate.id && admission.admitted && admission.provided?.fresh_context?.ok && fields.every(key=>contentHash(result[key])===contentHash(verdict[key]));});
+    return ctx.stage_policy_hash===f.policyHash && ctx.contract_revision===f.record.revision && ctx.candidate_ref?.ref==='candidate:'+candidate.id && admission.admitted && admission.provided?.fresh_context?.ok && fields.every(key=>stageHash(result[key])===stageHash(verdict[key]));});
   if(!valid)stop('acceptance_required','retry_wait','必需阶段齐备仍须由 fresh QA 验收当前候选。');
 }

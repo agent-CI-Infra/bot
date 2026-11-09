@@ -142,5 +142,5 @@ export function validateEvent(value: any): RunEvent {
   if (!value.data || typeof value.data !== 'object' || Array.isArray(value.data) || Buffer.byteLength(JSON.stringify(value.data)) > 64 * 1024) invalid('event.data');
   return value as RunEvent;
 }
-/** Canonical JSON hash, used for record and content hashes in references. */
-export const contentHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value ?? null,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item)).digest('hex');
+/** JSON hash, used for record and content hashes in references. */
+export const contentHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex');

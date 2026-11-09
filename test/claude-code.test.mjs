@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Store } from '../dist/storage/database.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { Redactor, TaskError } from '../dist/agent/common.js';
@@ -57,6 +57,11 @@ test('Claude Code protocol fixture: seven RoleRun operations, gateway receipts, 
   const page = roleRuns.events(f.s, handle.run_id); assert.ok(page.ended); assert.ok(page.events.some(e => e.type === 'session_bound'));
   assert.equal(page.events.at(-1).data.candidate_ref.kind, 'artifact');
   const first = f.s.get('SELECT * FROM task_runs ORDER BY rowid DESC LIMIT 1');
+  // Session paths and persisted fingerprints must keep the pre-stage-scheduler JSON hashing contract.
+  const legacyHash=value=>createHash('sha256').update(JSON.stringify(value??null)).digest('hex'),ctx=JSON.parse(first.run_context);
+  assert.equal(dirname(state.directory),join(f.config.stateDirectory,legacyHash(state.scope)));
+  assert.equal(state.configurationHash,legacyHash({...prepared.wrapped.harnessPreparation.config,command:prepared.wrapped.harnessPreparation.command,protocol:claudeCodeRuntime.protocol}));
+  assert.equal(state.inputHash,legacyHash({source:ctx.source_ref,contract:ctx.contract_revision,candidate:ctx.candidate_ref,role:ctx.role_revision,policy:ctx.policy_revision,skills:ctx.skill_revisions,model:ctx.model_revision}));
   const recovered = await roleRuns.recover(f.spec, 'dev', undefined, first.id, null, 'claude_code');
   await roleRuns.collect(recovered.handle); assert.equal(f.state().sessionId, state.sessionId); assert.equal(f.state().recoveryMode, 'native_resume');
   assert.notEqual(recovered.handle.run_id, first.id); assert.ok(recovered.handle.lease_epoch > first.lease_epoch);

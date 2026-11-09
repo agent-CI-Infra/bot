@@ -48,11 +48,15 @@
 
 阶段重试数、工具调用和墙钟预算累计包含恢复运行；主控修改可选计划不能重开必需阶段的额度。重试或预算耗尽、阶段策略变化及计划过期使用 `paused` 并保留原错误码，直到人显式重试或采用新配置，引擎不会自动轮询主控。项目停用、任务取消或暂停沿用原撤销机制；缺候选、证据不足及依赖未完成仍由主控安排补齐。已经启动但没有阶段的旧快照也会阻止后来新增的适用必需门禁。采用新合同/策略会创建新计划，保留旧计划和证据作为历史；旧通过结果不会认证新合同或相关门禁策略。
 
+只关闭角色协调（角色配置 `enabled:false`）不会取消任务：持有阶段的任务以 `role_authority_revoked` 暂停，阶段等待原因是 `role_coordination_disabled`。重新开启角色协调后点「重试」继续，不会自动恢复。仓库策略 `policies.enabled=0` 仍按 `repository_policy_disabled` 取消，两者不能混用。
+
 ## 恢复与验收
 
 复用原任务 claim 和 RoleRun 协议。lease_epoch 仅由控制面启动 run 时分配；恢复创建新的 task_runs.id，保留 role_instance、assignment 和 resume_from_run_id。工具、事件、检查点、结果继续受 epoch/令牌约束。RunContext 额外记录 stage_id、plan_revision 和 policy_hash；独立 QA 另外绑定 stage_policy_hash，门禁策略变化后旧 QA 判决也不能放行。
 
 进程重启先结束原运行，然后从持久事实继续；已确认结果复用，不根据 CLI 退出或主控文字认定完成。已确认副作用和未确认调用仍使用原回执与恢复对账机制；网络上的未知发布结果仍先查证，不承诺绝对 exactly-once。
+
+发布已开始（存在非 `pending` 的 `github_effects`）后，`adopt-config` 仍拒绝并返回 `task_config_after_publication`。如果此时修改必需阶段导致 `stage_policy_changed` 暂停，应把项目角色配置恢复到任务启动快照对应的阶段定义和角色能力约束，再点「重试」；版本号可以前进，但阶段定义和角色能力约束必须匹配原快照，不能只再次保存已改变的策略。在其他门禁条件未变时，原计划、候选和有效的 fresh QA 证据得以复用，已发送的副作用不会重发，尚未发送的步骤可继续。若还修改了测试命令或工作流，需要另外核对这些门禁条件，本操作不会绕过它们。不要放宽发布后采用配置的限制。
 
 提名、独立验收、记录通过和 Publisher 推进发布的实际写入均检查当前候选的必需阶段。撤回 GitHub 合并队列不受交付门禁阻止，仍需原有权限。阶段齐备不能跳过 fresh QA；主控不能代签 QA。`return` 仍返回原开发实例修复，修复轮可省略已通过写者的 `stage_id`；`insufficient_evidence` 补证，`needs_human` 只处理必要决定或授权。余项生成和发布不确定性沿用原 TaskRecords/Publisher 事务与 outbox 语义。
 

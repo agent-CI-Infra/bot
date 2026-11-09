@@ -150,7 +150,7 @@ const codeActions: Record<string,string> = {
   bot_rule_too_large:'规则文件和 skill 已不再限制大小，点「重试」即可继续。',
   too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
-  role_authority_revoked:'角色的权限、角色本身或角色协作在运行中被收回，后续能力调用已停止。恢复配置后任务自动继续，或改用不需要该角色的方式重试。',
+  role_authority_revoked:'角色的权限、角色本身或角色协作在运行中被收回，后续能力调用已停止。恢复角色协调或相应权限配置后点「重试」继续。',
   role_revision_checkpoint:'角色在安全检查点结束本次运行，同一任务和角色实例会带新 revision 自动续接。',
   unsupported_capability:'角色选用的执行后端或运行环境缺少这个阶段要求的能力（例如隔离、原始证据、取消或固定候选），运行没有启动，也不会换用其他后端。到「角色」页改用满足要求的执行后端或环境，保存后任务自动继续。',
   role_budget_exhausted:'这个角色在本任务中的累计预算已用尽，运行已取消，已有产物和检查点保留。确认用量后在「角色」页提高该角色的预算策略并保存；已开始的任务固定了启动时的配置，用 POST /api/tasks/:id/roles/apply 把新 revision 应用到这个角色后再重试。不会换模型重开预算。',
