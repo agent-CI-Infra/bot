@@ -396,6 +396,10 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    };
    try{await rpc.request('turn/start',{threadId,input:[{type:'text',text:prompt}]},accept);}
    catch(error){
+    // Once the answer named the turn, a later failure (saving it, recording its start) fails this run only: that turn stays
+    // the binding's unconfirmed turn for the next run to reconcile, never replaced by a hint and never reported as a start
+    // without an answer. Usage it consumed is counted when the thread total it raised is next reported.
+    if(waiter.id){if(lastTurn.id!==waiter.id)try{persist({id:waiter.id,status:'inProgress'},waiter.id);}catch{}throw error;}
     // An explicit refusal started nothing: the binding is exactly what it was before. Otherwise the turn may have run: a turn
     // id its notifications carried is already persisted as an unconfirmed turn, and without one the binding keeps "start
     // requested". Its usage counts once: as the reports already received, or as one unknown request when there were none.
