@@ -108,8 +108,10 @@ function leaveManagementPage() {
 }
 async function floatManagementPage() {
   const chat = managementChat; if (!chat) return;
-  setManagementPresentation(chat, 'floating'); history.replaceState(null, '', chat.returnAddress); await route();
-  if (managementChat === chat) await openManagementChat();
+  // The chat is already open: keep it and focus synchronously. Loading the underlying page must not take focus back
+  // from a resize handle or another control the person has started using in the meantime.
+  chat.openVersion++; setManagementPresentation(chat, 'floating'); chat.client?.focus();
+  history.replaceState(null, '', chat.returnAddress); await route();
 }
 function minimizeManagementChat(focus = true) {
   const chat = managementChat; if (!chat || chat.window.hidden) return;
@@ -123,6 +125,7 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
   const version = ++chat.openVersion;
   setManagementPresentation(chat, mode);
   chat.window.hidden = false; chat.launcher.hidden = true; chat.launcher.setAttribute('aria-expanded', 'true'); chat.unread = false;
+  const focusAtOpen = document.activeElement;
   const activity = (active, received = false) => {
     if (managementChat !== chat) return;
     chat.active = active; if (received && chat.window.hidden) chat.unread = true;
@@ -142,7 +145,7 @@ async function openManagementChat(projectId = null, { mode = 'floating' } = {}) 
   await chat.loading;
   if (managementChat !== chat || version !== chat.openVersion || !chat.client) return;
   if (projectId) await chat.client.setScope('project:' + projectId);
-  if (!chat.window.hidden) chat.client.focus();
+  if (!chat.window.hidden && document.activeElement === focusAtOpen) chat.client.focus();
   activity(chat.active);
 }
 
