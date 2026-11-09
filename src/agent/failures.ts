@@ -10,7 +10,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'github_app_required','github_read_token_unavailable','github_read_token_not_read_only','github_read_token_not_allowed','branch_not_owned','release_uninstalled','release_app_required',
     'actions_app_required','actions_workflow_run_subscription_missing','gate_repository_unreadable'] },
   github_rejected: { label:'GitHub 拒绝了请求', codes:[] },
-  model: { label:'模型服务或模型配置', codes:['role_submission_required','acp_submission_required','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
+  model: { label:'模型服务或模型配置', codes:['role_nomination_stages_incomplete','role_submission_required','acp_submission_required','role_delivery_invalid','role_result_invalid','role_nomination_invalid','role_nomination_required','acceptance_unavailable','acceptance_output_invalid','acceptance_budget_exhausted','model_not_configured','task_models_invalid','model_not_available','model_configuration_changed','model_key_missing','model_authentication_failed','model_response_invalid',
     'model_response_too_large','model_finding_invalid','model_review_invalid','create_pull_request_required','create_pull_request_not_allowed',
     'release_notes_model_failed','release_notes_invalid','release_observation_failed','release_observation_invalid','actions_classification_invalid','agent_tool_not_allowed','agent_output_invalid','agent_output_budget_exhausted','agent_tool_calls_invalid','agent_turn_limit','gate_agent_output_invalid',
     'claude_submission_required','claude_authentication_failed','claude_model_unavailable','claude_execution_failed','claude_budget_exhausted','claude_output_limit','claude_provider_credential_unavailable'] },
@@ -40,9 +40,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // The workflow assistant's run was stopped by the person who started it.
     'assistant_cancelled',
     // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
-    'lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired'] },
+    'candidate_writer_busy','required_stages_incomplete','lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
-  role_configuration: { label:'角色配置', codes:['role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','agent_backend_unavailable','harness_version_unavailable','harness_role_unsupported',
+  role_configuration: { label:'角色配置', codes:['stage_budget_exhausted','stage_policy_changed','stage_retry_exhausted','stage_plan_stale','role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','agent_backend_unavailable','harness_version_unavailable','harness_role_unsupported',
     'role_model_not_available','role_model_profile_changed','capability_policy_unavailable','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
     'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported',
     // RoleRun admission, budgets and recovery (#169): fail closed instead of downgrading or switching silently.
@@ -81,6 +81,13 @@ export function isAttemptFailure(code: string|null|undefined, state: string) {
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
+  stage_policy_changed:'阶段策略已变化。暂停任务并等到安全检查点后采用新配置，旧 run 和证据保留为历史。',
+  stage_plan_stale:'阶段计划的合同或策略版本已过期。采用当前配置并重新规划后继续。',
+  required_stages_incomplete:'必需阶段缺少当前候选的合格证据。读取阶段等待原因，安排原角色修复或补证后再提名；阶段齐备仍需独立 QA。',
+  stage_retry_exhausted:'这个阶段已达到有限重试上限。检查失败记录，修正阶段策略或运行环境后采用新配置继续。',
+  stage_budget_exhausted:'这个阶段的累计预算已用尽，恢复运行不会重开预算。保留产物和证据，调整策略并采用新配置后继续。',
+  candidate_writer_busy:'同一候选已有写者或只读检视运行。等待当前运行收集结束后继续，不同时修改被检视内容。',
+  role_nomination_stages_incomplete:'主控需先读取阶段计划并委派尚未完成的必需阶段；提名不能替代阶段证据或 QA。',
   task_coordination_requested:'协调请求或显式任务依赖已持久化，框架会在结果可用后自动续接；不占用执行名额。',
   task_coordination_pending:'协调上下文已变化，读取通知并记录处理意见后重新提交给独立 QA；旧验收不会认证新上下文。',
   acp_not_configured:'请部署操作人配置 BOT_ACP_CONFIG 并安装、认证对应 ACP 执行器。',

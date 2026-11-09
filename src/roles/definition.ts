@@ -8,6 +8,7 @@ import { rolePool, sharedInstructions, configuredRoles } from './pool.js';
 import { roleKind, capabilityPolicy, capabilityPolicies, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
 import { harnesses } from './harness.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
+import { validateStages, type StageDefinition } from './stage-policy.js';
 
 /**
  * RoleDefinitionV2: one project's versioned role configuration. Every reference names a fixed version: model profiles pin
@@ -31,6 +32,7 @@ export type Entry = 'development' | 'request' | 'review' | 'actions';
 export interface RoleConfiguration {
   schema: 2; revision: number; enabled: boolean; legacy?: boolean;
   controller: { role: string; entries: Record<Entry, boolean> };
+  required_stages?: StageDefinition[];
   roles: RoleDefinitionV2[];
   skills: (SkillBundleRef & { source: any; files: { path: string; sha256: string; bytes: number }[] })[];
   updated_at?: string; updated_by?: string;
@@ -133,7 +135,7 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number) {
  * revisions it adds. Nothing is written here.
  */
 export function normalizeConfiguration(s: Store, repositoryId: string, input: any, current: RoleConfiguration) {
-  if (Object.keys(input).some(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills'].includes(k))) invalid('unknown_field', Object.keys(input).find(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills'].includes(k))!);
+  if (Object.keys(input).some(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'required_stages'].includes(k))) invalid('unknown_field', Object.keys(input).find(k => !['expected_revision', 'enabled', 'controller', 'roles', 'skills', 'required_stages'].includes(k))!);
   if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0) invalid('expected_revision_required', 'expected_revision');
   if (input.expected_revision !== current.revision) fail(409, 'role_configuration_conflict', 'expected_revision');
   if (typeof input.enabled !== 'boolean') invalid('invalid_role_configuration', 'enabled');
@@ -236,7 +238,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   if (controllerRole==='coordinator'||roles.find(r => r.role_id === controllerRole)?.kind !== 'controller') invalid('invalid_controller', 'controller.role');
   const entryInput = controllerInput.entries ?? current.controller.entries;
   if (!entryInput || typeof entryInput !== 'object' || Object.keys(entryInput).some(k => !entries.includes(k as Entry)) || Object.values(entryInput).some(v => typeof v !== 'boolean')) invalid('invalid_controller_entries', 'controller.entries');
-  const config: RoleConfiguration = { schema: 2, revision: current.revision + 1, enabled: input.enabled, controller: { role: controllerRole, entries: Object.fromEntries(entries.map(e => [e, entryInput[e] ?? false])) as Record<Entry, boolean> }, roles, skills };
+  const config: RoleConfiguration = { schema: 2, revision: current.revision + 1, enabled: input.enabled, controller: { role: controllerRole, entries: Object.fromEntries(entries.map(e => [e, entryInput[e] ?? false])) as Record<Entry, boolean> }, roles, skills, required_stages: validateStages(input.required_stages ?? current.required_stages ?? [], roles) };
   if (Buffer.byteLength(JSON.stringify(config)) > 512 * 1024) invalid('role_configuration_too_large', 'roles');
   return { config, added };
 }

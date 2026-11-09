@@ -81,8 +81,10 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   // that assignment use their selected backend; old V2 entries retain Pi until the dev backend changes.
   const entry = String(task.kind).startsWith('review.') ? 'review' : task.kind === 'actions.failures' ? 'actions' : null;
   if (entry && controlled(store, task, entry)) {
-    const { repository, token, complete } = session, round = randomId();
+    const { repository, token, complete } = session, round = randomId(), spaces=roleWorkspaces(workspace);
+    const staged=!!records.get(task.id).stage_schedule.plan_revision||!!(taskConfiguration(store,task)?.roles?.required_stages?.length);
     const execute = async (name: string, args: any) => {
+      if(staged&&spaces.role!=='dev'&&['read_file','run_command'].includes(name))return spaces.current.call('stage-observation:'+randomId(),name==='read_file'?{type:'workspace_read',path:args?.path}:{type:'workspace_command',command:args?.command,timeout_ms:120000});
       if (Object.hasOwn(platform, name)) return platform[name]!(randomId(), args);
       if (repositoryTools.some(t => t.function.name === name)) return repository!(name, args);
       if (name === 'github_read_token') {
@@ -113,7 +115,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         try { return await execute(name, args); }
         catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
       }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
-      { entry, prepare: async () => {}, controller: roleWorkspaces(workspace).controller, workers: ['dev'],
+      { entry, prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated}:{workers:['dev']}),
         executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
           : undefined } });

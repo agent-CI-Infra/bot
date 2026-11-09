@@ -248,7 +248,7 @@ export function requiredCapabilities(kind: string, environment: { isolation?: st
  * run_isolation and fixed_candidate_read are never satisfied by a declaration alone.
  */
 export function admitRun(s: Store, input: { task: Row; role: string; kind: string; harness: { id: string; version: string; capabilities?: HarnessCapabilities }; environment: { id: string; isolation?: string } | null;
-  environmentFacts?: EnvironmentFacts | null; candidate: { ref: CandidateRef | null; evidence: string | null }; source_ref: string; fresh: boolean; validated: boolean; snapshot_id: string; record?: boolean }) {
+  environmentFacts?: EnvironmentFacts | null; candidate: { ref: CandidateRef | null; evidence: string | null }; source_ref: string; fresh: boolean; validated: boolean; snapshot_id: string; record?: boolean; required?: CapabilityName[] }) {
   const c = input.harness.capabilities ?? {}, provided: Record<string, { ok: boolean; basis: string; evidence?: string | null }> = {};
   provided.cancel = { ok: c.cancel === 'abort_signal' || c.cancel === 'protocol_then_kill', basis: `harness:${c.cancel ?? 'undeclared'}` };
   provided.version_binding = { ok: c.version_binding === true && /^[a-f0-9]{64}$/.test(input.snapshot_id), basis: 'role_snapshots:' + input.snapshot_id };
@@ -260,7 +260,7 @@ export function admitRun(s: Store, input: { task: Row; role: string; kind: strin
   provided.fixed_candidate_read = ref?.kind === 'code' ? { ok: !!input.candidate.evidence, basis: 'checkout_tree:' + ref.tree_hash, evidence: input.candidate.evidence } : { ok: true, basis: ref ? `${ref.kind}:${ref.ref}` : input.source_ref };
   const facts = input.environmentFacts;
   provided.run_isolation = { ok: c.isolation === 'run_environment' && !!facts?.verified && facts.isolation === 'run_container', basis: `harness:${c.isolation ?? 'undeclared'};environment:${facts ? (facts.verified ? 'verified' : 'unverified') : 'none'}`, evidence: facts?.evidence ?? null };
-  const required = requiredCapabilities(input.kind, input.environment), missing = required.filter(name => !provided[name]?.ok);
+  const required = [...new Set([...requiredCapabilities(input.kind, input.environment), ...(input.required ?? [])])], missing = required.filter(name => !provided[name]?.ok);
   const admission = { protocol: roleRunProtocol.id, role: input.role, kind: input.kind, harness: `${input.harness.id}@${input.harness.version}`, environment: input.environment?.id ?? null, required, missing, provided: Object.fromEntries(required.map(name => [name, provided[name]])), admitted: !missing.length };
   if (input.record !== false) traceEvent(s, String(input.task.id), 'role_run_admission', admission, input.task.trace_run_id, 'framework');
   if (missing.length) stop('unsupported_capability', 'waiting_configuration', `${input.role}（${input.harness.id}）缺少能力：${missing.join('、')}；未启动运行，也不会换用其他执行后端。`);

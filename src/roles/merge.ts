@@ -1,3 +1,4 @@
+import { assertRequiredStages, deliveryCandidate } from './schedule.js';
 import {assertCoordinationCurrent} from '../tasks/coordination.js';
 import type { Store } from '../storage/database.js';
 import { scope,type Actor } from '../app/auth.js';
@@ -64,6 +65,7 @@ async function mergeRequest(s:Store,user:Actor,method:string,url:URL,input:Json,
  if(!['pr_opened','completed'].includes(task!.status)||!accepted||!['pass','pass_with_issues'].includes(accepted.outcome)||accepted.candidate_id!==record.candidate?.id||accepted.revision!==record.revision||!result?.pr_number||result.sha!==head)fail(409,'merge_requires_accepted_delivery');
  assertCoordinationCurrent(s,task!.id,record.candidate);
  const policy=s.get('SELECT * FROM policies WHERE repository_id=?',task!.repository_id);
+ assertRequiredStages(s,task!.id,deliveryCandidate(new TaskRecords(s).get(task!.id).candidate,task!.kind));
  if(!policy?.enabled||!policy.development_enabled||accepted.policy_hash!==sha(String(policy.test_command||'')))fail(409,'merge_policy_changed');
  const owned=s.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task!.repository_id,result.pr_number);if(!owned||owned.sha!==head)fail(409,'merge_requires_owned_head');
  const github=new GitHub(s,s.get('SELECT * FROM repositories WHERE id=?',task!.repository_id)!,new Redactor(),async()=>{},githubUrl);await github.connect(true,undefined,{contents:'write',pull_requests:'write',checks:'read',statuses:'read'},false);

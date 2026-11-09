@@ -1,3 +1,5 @@
+import { latestRoleCandidate } from './schedule.js';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import {Workspace} from '../agent/workspace.js';
 import {randomId} from '../core/security.js';
 import {traceEvent} from '../tasks/trace.js';
@@ -22,7 +24,7 @@ export function isolatedRunEnvironment(workspace:Workspace,given?:RunEnvironment
   traceEvent(workspace.store,workspace.task.id,'role_run_environment',{role:instance.role,instance_id:instance.id,environment_id:id,verified:env.facts.verified,violations:(env.facts.detail as any)?.violations??[],container:(env.facts.detail as any)?.container??null,limits:(env.facts.detail as any)?.limits??null},workspace.task.trace_run_id);
   if(!env.facts.verified)return {environment:{facts:env.facts,handle:null}};
   try{
-   const snapshot=await workspace.artifact('role-source:'+randomId());
+   const snapshot=kind==='writer'?await workspace.artifact('role-source:'+randomId()):await observerSnapshot(workspace);
    const seeded=await copyCommit({call:request=>workspace.deliver(request)},client,id,snapshot.local_sha,snapshot.tree_sha);
    traceEvent(workspace.store,workspace.task.id,'role_candidate',{role:instance.role,version:seeded.tree_hash,sha:seeded.commit_sha,workspace_id:id,environment:'run:'+id},workspace.task.trace_run_id);
   }catch(error){await env.release();throw error;}
@@ -31,8 +33,17 @@ export function isolatedRunEnvironment(workspace:Workspace,given?:RunEnvironment
   return {environment:{facts:env.facts,handle:{client,run_id:id},...(snapshot?{snapshot}:{})},release:env.release};
  };
 }
+async function observerSnapshot(workspace:Workspace) {
+ const pinned=latestRoleCandidate(workspace.store,workspace.task.id);
+ if(workspace.store.get('SELECT 1 FROM task_stage_plans WHERE task_id=?',workspace.task.id)){
+  if(pinned?.kind==='code')return {local_sha:pinned.commit_sha,tree_sha:pinned.tree_hash};
+  const row=workspace.store.get("SELECT h.data FROM role_run_events e JOIN task_runs r ON r.id=e.run_id JOIN task_history h ON 'task_history:'||h.id=e.history_ref WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev' AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id) ORDER BY h.id DESC LIMIT 1",workspace.task.id);
+  const snapshot=row?JSON.parse(row.data).data.source_snapshot:null;if(snapshot)return {local_sha:snapshot.commit_sha,tree_sha:snapshot.tree_hash};
+ }
+ return workspace.artifact('role-source:'+randomId());
+}
 /** One writer; observers get disposable checkouts bound to the writer's snapshot. */
-export function roleWorkspaces(workspace:Workspace){let active=workspace;return {get current(){return active;},async prepare(role:string){active=workspace;const snapshot=await workspace.artifact('role-source:'+randomId());if(role==='dev'){traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:workspace.task.workspace_id},workspace.task.trace_run_id);return;}const isolated=new Workspace(workspace.store,workspace.manager,{...workspace.task,workspace_id:randomId()},workspace.redactor,workspace.guard,workspace.log);const ready=await isolated.call('role-checkout:'+randomId(),{type:'workspace_acceptance',source_workspace_id:workspace.task.workspace_id,sha:snapshot.local_sha,tree_sha:snapshot.tree_sha});if(ready.error)stop('role_snapshot_unavailable','waiting_environment');traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:isolated.task.workspace_id},workspace.task.trace_run_id);active=isolated;return async()=>{active=workspace;await isolated.release(false);};},
+export function roleWorkspaces(workspace:Workspace){const context=new AsyncLocalStorage<{space:Workspace;role:string;run_id?:string}>();let fallback=workspace;const setActive=(space:Workspace)=>{const current=context.getStore();if(current)current.space=space;else fallback=space;};return {get runId(){return context.getStore()?.run_id??workspace.task.trace_run_id;},bindRun:(id:string)=>{const current=context.getStore();if(current)current.run_id=id;},get current(){return context.getStore()?.space??fallback;},get role(){return context.getStore()?.role??workspace.task.active_role;},withRole:<R>(role:string,work:()=>Promise<R>)=>context.run({space:workspace,role},work),snapshot:async()=>workspace.artifact('role-output:'+randomId()),async prepare(role:string){setActive(workspace);const snapshot=role==='dev'?await workspace.artifact('role-source:'+randomId()):await observerSnapshot(workspace);if(role==='dev'){traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:workspace.task.workspace_id},workspace.task.trace_run_id);return;}const isolated=new Workspace(workspace.store,workspace.manager,{...workspace.task,workspace_id:randomId()},workspace.redactor,workspace.guard,workspace.log);const ready=await isolated.call('role-checkout:'+randomId(),{type:'workspace_acceptance',source_workspace_id:workspace.task.workspace_id,sha:snapshot.local_sha,tree_sha:snapshot.tree_sha});if(ready.error)stop('role_snapshot_unavailable','waiting_environment');traceEvent(workspace.store,workspace.task.id,'role_candidate',{role,version:snapshot.tree_sha,sha:snapshot.local_sha,workspace_id:isolated.task.workspace_id},workspace.task.trace_run_id);setActive(isolated);return async()=>{setActive(workspace);await isolated.release(false);};},
  controller:roleBackendWorkspace(workspace),worker:roleBackendWorkspace(workspace),isolated:isolatedRunEnvironment(workspace)};}
 
 /** The runner's view of a Pi session in one workspace; null when that workspace or session no longer exists. */
