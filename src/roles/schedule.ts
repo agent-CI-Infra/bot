@@ -6,6 +6,8 @@ import { assertLease } from './role-run.js';
 import { contentHash, validateCandidateRef, type CandidateRef, type RunContext } from './protocol.js';
 import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
+import { legacyWorkflowRow, workVersion } from '../work/settings.js';
+import { workOf } from '../work/catalog.js';
 
 // Stage fingerprints ignore object key order without changing persisted backend session hashes.
 function stageHash(value:unknown) {
@@ -35,10 +37,13 @@ function facts(s: Store, taskId: string) {
   const config = roleConfiguration(s, task.repository_id, fixed?.roles);
   const live = roleConfiguration(s, task.repository_id);
   const policy = s.get('SELECT enabled,test_command FROM policies WHERE repository_id=?', task.repository_id);
-  const workflow = s.get('SELECT * FROM workflows WHERE repository_id=? AND id=?', task.repository_id, fixed?.workflow?.id ?? task.kind);
+  // Before #207 the gate hashed the task's workflow row; that row lives on in the migration archive, so older plans keep
+  // their hash. A later change of the work type's settings or Manager section moves its version and invalidates results,
+  // as editing the workflow did.
+  const workflow = legacyWorkflowRow(s, task.repository_id, fixed?.workflow?.id ?? task.kind), version = workVersion(s, task.repository_id, workOf(task as any));
   // Only relevant gate policy changes invalidate results; changing a persona alone is handled by role revisions.
   const authority=(configuration:typeof live)=>configuration.roles.filter(role=>(configuration.required_stages??[]).some(stage=>stageAllows(stage,{...role,enabled:true}))).map(({role_id,enabled,capability_policy_ref,environment_profile_ref,harness_ref})=>({role_id,enabled,capability_policy_ref,environment_profile_ref,harness_ref}));
-  const policyHash = stageHash({ stages: live.required_stages ?? [], authority:authority(live), test_command: policy?.test_command ?? '', workflow });
+  const policyHash = stageHash({ stages: live.required_stages ?? [], authority:authority(live), test_command: policy?.test_command ?? '', workflow, ...(version ? { work: version } : {}) });
   return { task, record, config, live, policy, policyHash, authorityChanged:stageHash(authority(config))!==stageHash(authority(live)) };
 }
 export function candidateKey(candidate: CandidateRef | null) {

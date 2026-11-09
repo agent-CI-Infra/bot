@@ -1,11 +1,14 @@
 import { visibleMemorySnapshot } from '../memory/access.js';
-import { builtinWorkflow } from '../workflows/catalog.js';
 import { checkManagementBudget } from './budget.js';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, effectiveRepositories, listEffectiveScopes, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
 import type { Actor } from '../app/auth.js';
-import { WorkflowService } from '../workflows/service.js';
+import type { RuleService } from '../rules/service.js';
+import { managerPrompt } from '../work/settings.js';
+import { applyManagerChange, managerView, workCompatibility, workflowUpdate } from '../work/api.js';
+import { parseSections } from '../work/settings.js';
+const parseSectionBody=(content:string,id:string)=>parseSections(content).sections.get(id)?.body??null;
 import { TaskCommands } from '../tasks/commands.js';
 import { TaskRecords } from '../tasks/service.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
@@ -36,7 +39,7 @@ export class ManagementService {
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
   knowledgeRead?: (actor:ActorContext,project:string,id:string,revision?:number,versions?:boolean,baseline?:string)=>Promise<Json>;
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
-  constructor(readonly store: Store, readonly workflows: WorkflowService, readonly tasks: TaskCommands) {}
+  constructor(readonly store: Store, readonly rules: RuleService, readonly tasks: TaskCommands) {}
   register(operation: string, extension: ManagementExtension): void {
     if(!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation))throw new Error('invalid_management_registration');
     this.extensions.set(operation,extension);
@@ -66,7 +69,7 @@ export class ManagementService {
     return parameterHash({policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',target.project_id),
       schedules:this.store.all('SELECT id,revision FROM schedules WHERE project_id=? ORDER BY id',target.project_id),
       subscriptions:this.store.all('SELECT id,revision FROM notification_subscriptions WHERE project_id=? ORDER BY id',target.project_id),
-      workflows:this.store.all('SELECT * FROM workflows WHERE repository_id=? ORDER BY id',target.project_id),
+      manager:managerPrompt(this.store,target.project_id).revision,
       roles:this.store.get('SELECT value FROM settings WHERE key=?','roles:'+target.project_id),
       sources:this.store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?',target.project_id),
       models:this.store.all(`SELECT id,version,model_name,api_url,api_key FROM models WHERE repository_id=? OR (repository_id IS NULL AND EXISTS
@@ -86,6 +89,7 @@ export class ManagementService {
     const project=this.scope(actor,target.project_id,entry.capability);
     if(target.task_id&&!this.store.get('SELECT 1 FROM tasks WHERE id=? AND repository_id=?',target.task_id!,target.project_id))fail(404,'task_not_found');
     if(operation.startsWith('task.')&&operation!=='task.create'&&!target.task_id!)fail(400,'task_target_required');
+    // workflow.update is the pre-#207 name for editing one work type's defaults (its Manager section, switch and writes).
     if(operation==='workflow.update'&&!target.workflow_id)fail(400,'workflow_target_required');
     if(!operation.startsWith('task.')&&operation!=='workflow.update'&&(target.task_id||target.workflow_id))fail(400,'invalid_management_target');
     if((operation==='workflow.update'&&target.task_id!)||(operation.startsWith('task.')&&target.workflow_id)||operation==='task.create'&&target.task_id!)fail(400,'invalid_management_target');
@@ -108,15 +112,18 @@ export class ManagementService {
 
   async effective(actor:ActorContext,project:string):Promise<Json>{
     this.scope(actor,project);
-    const list=await this.workflows.list(project),rules=await this.workflows.rules.view(project);
+    const rules=await this.rules.view(project),work=await workCompatibility(this.store,this.rules,project),manager=await managerView(this.store,this.rules,project);
+    const sources={sha:rules.sha,updated_at:rules.updated_at,needs_refresh:rules.needs_refresh};
     this.scope(actor,project);
     const roles=roleApi(this.store,this.user(actor),'GET',new URL('http://local/api/repositories/'+project+'/roles'),{}) as {configuration:any;preview:{error?:string}[]};
-    return traceClean({project_id:project,revision:this.revision({project_id:project}),workflows:list.workflows.map(w=>({...w,
-      prompt:{...w.prompt,version:w.prompt.source==='repository'?list.rules.sha:parameterHash(w.prompt.effective),layers:w.prompt.layers.map((l:any)=>({...l,version:l.source==='repository'?list.rules.sha:parameterHash(l.content)}))},
+    // manager is the project's flow definition; workflows lists the work types in the shape older clients read.
+    return traceClean({project_id:project,revision:this.revision({project_id:project}),manager:{prompt:manager.prompt,work:manager.work,events:manager.events,migration:manager.migration},
+      workflows:work.map(w=>({...w,
+      prompt:{...w.prompt,version:w.prompt.source==='repository'?sources.sha:parameterHash(w.prompt.effective),layers:w.prompt.layers.map((l:any)=>({...l,version:l.source==='repository'?sources.sha:parameterHash(l.content)}))},
       model:{...w.model,source:w.model.id||w.model.default_id?'console':'builtin',version:this.store.get('SELECT version FROM models WHERE id=?',w.model.id||w.model.default_id)?.version??null}})),
       roles:{...roles,version:parameterHash(roles.configuration),roles:roles.configuration.roles.map((r:any)=>({...r,source:!roles.configuration.legacy||r.persona_prompt?'console':'builtin'}))},
-      skills:rules.files.filter(f=>f.path.startsWith('.agents/skills/')).map(f=>({path:f.path,source:f.source,version:list.rules.sha,content:f.effective})),
-      sources:list.rules,capability_gaps:[...new Set(roles.preview.filter(r=>r.error).map(r=>r.error))],semantics:{defaults:'只影响之后新建的任务。',instructions:'追加记录，不改写旧 run 快照；后续步骤读取。',contract:'增加合同 revision，清除旧候选和验收。',adopt_config:'先暂停并等待旧执行结束，再显式采用新配置 revision。'}});
+      skills:rules.files.filter((f:any)=>f.path.startsWith('.agents/skills/')).map((f:any)=>({path:f.path,source:f.source,version:sources.sha,content:f.effective})),
+      sources,capability_gaps:[...new Set(roles.preview.filter(r=>r.error).map(r=>r.error))],semantics:{defaults:'只影响之后新建的任务。',instructions:'追加记录，不改写旧 run 快照；后续步骤读取。',contract:'增加合同 revision，清除旧候选和验收。',adopt_config:'先暂停并等待旧执行结束，再显式采用新配置 revision。'}});
   }
   private nextSteps(actor:ActorContext,target:ManagementCommand['target']):string[]{
     try{authorize(actor,'tasks.write',{project_id:target.project_id});}catch{return [];}
@@ -197,7 +204,9 @@ export class ManagementService {
       this.check(actor,command);const current=this.revision(command.target);
       if(current!==command.expected_revision)fail(409,'management_revision_conflict');
       const policy=this.policy(actor,command.target.project_id),required=JSON.parse(policy?.approval_operations??'[]');
-      const affected=[command.operation,...(command.operation==='rules.update'||command.operation==='project.update'&&Object.keys(command.arguments).some(k=>['task_models','model_id','review_enabled','development_enabled','review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion'].includes(k))?['workflow.update']:[])];
+      // Default-behavior changes count as Manager changes for approval, under both their names.
+      const defaults=['manager.update','workflow.update','rules.update'].includes(command.operation)||command.operation==='project.update'&&Object.keys(command.arguments).some(k=>['task_models','model_id','review_enabled','development_enabled','review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion'].includes(k));
+      const affected=[command.operation,...(defaults?['manager.update','workflow.update']:[])];
       const id=randomId(),time=now(),approval=affected.some(op=>required.includes(op))||required.includes(entry.capability);
       this.store.run(`INSERT INTO management_commands(id,principal_id,tenant_id,project_id,channel,operation,target,arguments,expected_revision,idempotency_key,parameter_hash,authorization_revision,execution_fence,source_conversation,source_message,state,before_revision,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,id,actor.principal_id,this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id,command.target.project_id,actor.channel,command.operation,JSON.stringify(command.target),JSON.stringify(traceClean(command.arguments)),command.expected_revision,command.idempotency_key,hash,actor.authorization_revision,this.fence(actor,command.target.project_id),command.source_conversation,command.source_message,approval?'awaiting_approval':'pending',current,time,time);
@@ -268,22 +277,25 @@ export class ManagementService {
         if(operation==='rules.update'){
           const policy=this.store.get('SELECT rule_overrides FROM policies WHERE repository_id=?',target.project_id)!;
           const before=JSON.parse(policy.rule_overrides||'{}')[String(args.path)]??null;
-          this.workflows.rules.save(user,target.project_id,args);
+          this.rules.save(user,target.project_id,args);
           const source=this.store.get('SELECT files FROM repository_rule_sources WHERE repository_id=?',target.project_id);
           const overridden=!!(source&&Object.hasOwn(JSON.parse(source.files),String(args.path)));
           result={saved:true,effect:overridden?'console_overridden':'future_tasks',effective:!overridden,diff:{before:{content:before},after:args},notice:overridden?'控制台层已保存；仓库文件覆盖它，实际行为尚未改变。':'共享规则已保存，只影响之后的新任务。'};
         }else if(operation==='project.update'){
           result=updatePolicy(this.store,user,target.project_id,args);
         }else if(operation==='workflow.update'){
-          const builtin=builtinWorkflow(target.workflow_id!),row=this.store.get('SELECT prompt FROM workflows WHERE repository_id=? AND id=?',target.project_id,target.workflow_id!);
-          const rule=builtin?.prompt.rule??builtin?.prompt.repository;
-          const oldPolicy=this.store.get('SELECT rule_overrides FROM policies WHERE repository_id=?',target.project_id)!;
-          const oldPrompt=rule?JSON.parse(oldPolicy.rule_overrides||'{}')[rule]??null:row?.prompt??null;
-          this.workflows.save(user,target.project_id,target.workflow_id!,args);
+          // A work type's Manager section, switch and writes, under the command name clients used before #207.
+          const id=target.workflow_id!,sectionId=(id.startsWith('development.')?'development':id),rule=({'review.issue':'.bot/rules/issue-review.md','review.pr':'.bot/rules/pr-review.md',development:'.bot/rules/issue-development.md'} as Record<string,string>)[sectionId];
+          const before=managerPrompt(this.store,target.project_id),oldPrompt=parseSectionBody(before.content,sectionId);
+          const saved=workflowUpdate(this.store,target.project_id,id,args,user.id);
           const source=this.store.get('SELECT files,sha FROM repository_rule_sources WHERE repository_id=?',target.project_id);
           // The exact effective prompt is returned by get_effective_config; repository ownership is never guessed.
           const overridden=!!(rule&&source&&Object.hasOwn(JSON.parse(source.files),rule)&&Object.hasOwn(args,'prompt'));
-          result={saved:true,effect:overridden?'console_overridden':'future_tasks',effective:!overridden,source:overridden?'repository':'console',diff:{before:{prompt:oldPrompt},after:args},rollback:{operation:'workflow.update',target,arguments:{prompt:oldPrompt},expected_revision:this.revision(target)},configuration_url:'#/projects/'+target.project_id+'/workflows/'+target.workflow_id,repository_sources:source?.sha??null,notice:overridden?'控制台层已保存，但仓库 .bot 文件优先，实际行为尚未改变。可创建配置 PR，待合入生效。':'默认行为已保存，只影响之后新建任务；已有 run 保留原配置。'};
+          result={saved:true,manager_revision:saved.revision,effect:overridden?'console_overridden':'future_tasks',effective:!overridden,source:overridden?'repository':'console',diff:{before:{prompt:oldPrompt},after:args},rollback:{operation:'workflow.update',target,arguments:{prompt:oldPrompt},expected_revision:this.revision(target)},configuration_url:'#/projects/'+target.project_id+'/roles',repository_sources:source?.sha??null,notice:overridden?'Manager 章节已保存，但仓库 .bot 文件优先，实际行为尚未改变。可创建配置 PR，待合入生效。':'Manager 章节已保存，只影响之后新建任务；已有 run 保留原配置。'};
+        }else if(operation==='manager.update'){
+          const before=managerPrompt(this.store,target.project_id),saved=applyManagerChange(this.store,target.project_id,args,user.id);
+          result={saved:true,manager_revision:saved.revision,effect:'future_tasks',diff:{before:{revision:before.revision},after:{revision:saved.revision}},configuration_url:'#/projects/'+target.project_id+'/roles',
+            notice:'Manager 配置已保存为第 '+saved.revision+' 版，只影响之后的分派和新建任务；已有 run 保留原配置。'};
         }else if(operation==='roles.update'){
           const allowed=JSON.parse(this.policy(actor,target.project_id)?.role_fields??'["enabled","controller","roles","skills"]');
           if(Object.keys(args).some(k=>k!=='expected_revision'&&!allowed.includes(k)))fail(403,'role_setting_forbidden');

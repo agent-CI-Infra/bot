@@ -1,7 +1,7 @@
 import type { Row } from '../storage/database.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { fail, HttpError, randomId, type Json } from '../core/security.js';
-import { workflowActive } from '../workflows/resolve.js';
+import { scheduleGateOpen } from '../dispatch/schedule.js';
 import { ChannelRateLimitError } from '../channels/feishu.js';
 import { parameterHash } from '../management/service.js';
 import { ScheduleService, reasonOf } from './service.js';
@@ -103,7 +103,7 @@ export class Scheduler {
         } else {
           const handler = this.service.handlers.get(plan.workflow);
           if (!handler) { this.finishOccurrence(row, 'unsupported', 'trigger_handler_not_registered'); return; }
-          if (!workflowActive(this.store, row.project_id, plan.workflow)) fail(403, 'schedule_workflow_gate_closed');
+          if (!scheduleGateOpen(this.store, row.project_id, plan.workflow)) fail(403, 'schedule_workflow_gate_closed');
           authorize(actor, handler.capability, { project_id: row.project_id });
           reserve(this.store, row, plan, this.service.clock(), 'runs');
           const trigger: ControlledTrigger = { occurrence_id: row.id, run_id: row.run_id, project_id: row.project_id, tenant_id: row.tenant_id,

@@ -9,10 +9,10 @@ import { enabled, releaseRedactor, withGitHub } from './github.js';
 import { validVersion } from './version.js';
 import { ReleaseWorker } from './worker.js';
 import { requestObservation } from './observe.js';
-import { savedWorkflow, activeTrigger } from '../workflows/resolve.js';
+import { managerSection, workActive } from '../work/settings.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
-// The release.notes workflow's console prompt; a repository skill still replaces it at preflight.
-const releaseNotesPrompt = (store: Store, id: string) => savedWorkflow(store, id, 'release.notes')?.prompt ?? null;
+// The Manager's release notes section; a repository skill still replaces it at preflight.
+const releaseNotesPrompt = (store: Store, id: string) => managerSection(store, id, 'release.notes') ?? null;
 
 export class ReleaseService {
   readonly worker: ReleaseWorker;
@@ -133,9 +133,9 @@ export class ReleaseService {
     if (observation && method === 'POST') {
       fields(input, ['revision']); this.find(id, observation[1]!); enabled(this.store, id);
       if (!Number.isSafeInteger(input.revision)) return fail(400, 'release_revision_required');
-      // The CI observation workflow can be switched off, or lose its trigger, on the Workflows page.
-      if (!activeTrigger(this.store, id, 'release.observe', 'release.manual')) return fail(409, 'workflow_disabled');
-      // The analysis is a task of the CI observation workflow; the release page shows it once it is done.
+      // CI observation can be switched off in the project configuration.
+      if (!workActive(this.store, id, 'release.observe')) return fail(409, 'work_disabled');
+      // The Manager decides on the request; the release page shows the analysis once its task is done.
       const row = this.find(id, observation[1]!);
       if (row.revision !== input.revision) return fail(409, 'release_revision_conflict');
       if (!JSON.parse(row.data).run_id) return fail(409, 'release_no_bound_run');

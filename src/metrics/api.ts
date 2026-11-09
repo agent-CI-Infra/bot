@@ -1,7 +1,7 @@
 import type { Store, Row } from '../storage/database.js';
 import { type Actor, repository, scope } from '../app/auth.js';
 import { fail, type Json } from '../core/security.js';
-import { builtinWorkflow, builtinWorkflows } from '../workflows/catalog.js';
+import { workType, workTypes } from '../work/catalog.js';
 
 function date(value: string): string {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(Date.parse(value+'T00:00:00Z'))||new Date(value+'T00:00:00Z').toISOString().slice(0,10)!==value)fail(400,'invalid_cost_date');
@@ -52,17 +52,16 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
   const taskArgs=[...taskAccess.args,start,end];
   if(repo){taskClauses.push('t.repository_id=?');taskArgs.push(repo);}
   const taskRows=store.all(`SELECT statistics_date(t.created_at) date,t.repository_id,r.full_name,t.kind,
-    CASE WHEN t.kind IN ('workflow.issue','workflow.pr') AND t.workflow_id IS NOT NULL THEN t.workflow_id ELSE t.kind END workflow,count(*) count,
+    CASE WHEN t.kind IN ('workflow.issue','workflow.pr') THEN 'reply' ELSE t.kind END workflow,count(*) count,
     sum(CASE WHEN m.task_id IS NULL OR (m.complete=0 AND m.runtime_ms=0 AND m.active_since IS NULL) THEN NULL
       ELSE m.runtime_ms+CASE WHEN m.active_since IS NOT NULL THEN max(0,?-m.active_since) ELSE 0 END END) runtime_ms,
     sum(CASE WHEN m.task_id IS NULL OR m.complete=0 THEN 1 ELSE 0 END) incomplete_tasks,
     sum(CASE WHEN m.active_since IS NOT NULL THEN 1 ELSE 0 END) running_tasks
     FROM tasks t JOIN repositories r ON r.id=t.repository_id LEFT JOIN task_metrics m ON m.task_id=t.id
     WHERE ${taskClauses.join(' AND ')} GROUP BY date,t.repository_id,t.kind,workflow ORDER BY date,t.repository_id,t.kind,workflow`,Date.now(),...taskArgs);
-  // Built-in workflows go by their built-in names, custom ones by the name their repository saved.
-  const customNames=new Map(store.all("SELECT id,name FROM workflows WHERE id LIKE 'custom.%'").map(row=>[String(row.id),String(row.name||'')]));
-  const workflowName=(row:Row)=>builtinWorkflow(String(row.workflow))?.name
-    ??(row.workflow!==row.kind?customNames.get(String(row.workflow))||'已删除的工作流':String(row.kind));
+  // Tasks are counted per work type (`workflow` keeps its name in the response): reply tasks of former custom workflows
+  // count as reply work.
+  const workflowName=(row:Row)=>workType(String(row.workflow))?.name??String(row.kind);
   for(const row of taskRows)row.name=workflowName(row);
   const taskDays=taskRows.filter(r=>r.date!==null),undated=taskRows.filter(r=>r.date===null);
   const taskSummary=new Map<string,Row>();
@@ -72,8 +71,8 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
     if(row.runtime_ms!==null)total.runtime_ms=(total.runtime_ms??0)+row.runtime_ms;
     taskSummary.set(row.workflow,total);
   }
-  // Built-in workflows first, in the catalog's order, then the others by name.
-  const order=(row:Row)=>{const at=builtinWorkflows.findIndex(w=>w.id===row.workflow);return at<0?builtinWorkflows.length:at;};
+  // Work types first, in the catalog's order, then the others by name.
+  const order=(row:Row)=>{const at=workTypes.findIndex(w=>w.id===row.workflow);return at<0?workTypes.length:at;};
   const summaryRows=[...taskSummary.values()].sort((a,b)=>order(a)-order(b)||String(a.name).localeCompare(String(b.name)));
   return {from:start,to:end,currency,timezone,days:rows,tasks:{days:taskDays,summary:summaryRows,undated},
     prices,

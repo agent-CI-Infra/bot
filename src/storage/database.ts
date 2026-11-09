@@ -13,7 +13,9 @@ import { boardStorage } from '../board/storage.js';
 import { metricsStorage } from '../metrics/storage.js';
 import { rateLimitStorage } from '../github/rate-limits.js';
 import { actionsStorage } from '../actions/storage.js';
-import { workflowStorage } from '../workflows/storage.js';
+import { workStorage } from '../work/settings.js';
+import { migrateWorkflows } from '../work/migration.js';
+import { dispatchStorage } from '../dispatch/store.js';
 import { gateOnboardingStorage } from '../projects/gate-storage.js';
 import { installationStorage } from '../installations/storage.js';
 import { identityStorage } from '../identity/storage.js';
@@ -174,7 +176,8 @@ export class Store {
     externalStorage(this);
     boardStorage(this);
     metricsStorage(this);
-    workflowStorage(this);
+    workStorage(this);
+    dispatchStorage(this);
     gateOnboardingStorage(this);
     taskStorage(this);
     traceStorage(this);
@@ -186,6 +189,8 @@ export class Store {
     managementStorage(this);
     channelStorage(this);
     scheduleStorage(this);
+    // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
+    migrateWorkflows(this);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...args); }
   all(sql: string, ...args: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...args); }

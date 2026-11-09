@@ -6,10 +6,10 @@ import type { PlatformTools } from '../agent/loop.js';
 import { randomId } from '../core/security.js';
 
 /**
- * A workflow that runs on an event rather than an Issue or PR: a release run to explain, release notes to draft, an
- * Actions run that failed. Its task runs like every other in the project computer, on a checkout of the commit concerned;
- * the module that owns the event prepares the context, checks the binding still holds, offers its own write tools and
- * takes the finished result back.
+ * Work that runs on an event rather than an Issue or PR: a release run to explain, release notes to draft, an Actions run
+ * that failed, a gate onboarding turn. Its task runs like every other in the project computer, on a checkout of the commit
+ * concerned; the module that owns the event prepares the context, checks the binding still holds, offers its own write
+ * tools and takes the finished result back.
  */
 export interface EventTarget {
   /** The commit to check out. */
@@ -17,10 +17,10 @@ export interface EventTarget {
   /** Context files written next to the checkout (name under ../context/ → content) and their descriptions for the agent. */
   files: Record<string, string>;
   contextFiles: { path: string; content: string }[];
-  /** Added to the agent's context: what the event is, the workflow prompt and its name. */
+  /** Added to the agent's context: what the event is, the Manager section for this work (work_prompt) and its name. */
   context: Record<string, unknown>;
 }
-export interface EventWorkflow {
+export interface EventWork {
   prepare(store: Store, github: GitHub, task: Row, input: any, redactor: Redactor): Promise<EventTarget>;
   /** Stops the task when the event it works on has moved on (another attempt, a removed release). */
   validate(store: Store, task: Row, input: any): void;
@@ -31,15 +31,15 @@ export interface EventWorkflow {
   /** The task ended without a result (failed or cancelled); the module may record why. */
   ended?(store: Store, task: Row, code: string, detail?: string): void;
 }
-const registry = new Map<string, EventWorkflow>();
-export const registerEventWorkflow = (kind: string, workflow: EventWorkflow) => { registry.set(kind, workflow); };
-export const eventWorkflow = (kind: string) => registry.get(kind);
+const registry = new Map<string, EventWork>();
+export const registerEventWork = (kind: string, work: EventWork) => { registry.set(kind, work); };
+export const eventWork = (kind: string) => registry.get(kind);
 
 const active = ['queued', 'running', 'preparing', 'retry_wait', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'publishing'];
 /** Still to run or running: the module waits for it. */
 export const eventTaskActive = (task: Row | undefined) => !!task && active.includes(String(task.status));
 
-/** Queues an event task once per key; returns the task (an existing one for the same key). */
+/** Queues an event task once per key; returns the task (an existing one for the same key). Only dispatch calls this. */
 export function enqueueEventTask(store: Store, repositoryId: string, kind: string, key: string, sha: string, input: Record<string, unknown>, summary: string): Row {
   const unique = `${repositoryId}:${kind}:${key}`, existing = store.get('SELECT * FROM tasks WHERE unique_key=?', unique);
   if (existing) return existing;

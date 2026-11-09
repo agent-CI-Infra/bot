@@ -6,6 +6,11 @@ import { randomBytes, createHmac } from 'node:crypto';
 import { Store } from '../dist/storage/database.js';
 import { createControlPlane } from '../dist/server.js';
 import { ProjectService } from '../dist/projects/service.js';
+import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
+
+// Tests that exercise what happens after dispatch decide events at once, with the control plane's pre-#207 rules; the
+// Manager's own model call is tested in test/dispatch.test.mjs, which turns this off.
+configureDispatch(ruleDecider);
 
 export const testPassword = () => randomBytes(20).toString('hex');
 // A workspace that runs real host processes (LocalManager, runner modules) tags them with its id, and a reap ends every
@@ -72,3 +77,11 @@ export async function repository(admin, accountId, id) {
   if (policy.status !== 200) throw new Error(JSON.stringify(policy));
   return (await admin('/api/repositories/' + id)).value.repository;
 }
+// Saves part of a project's Manager configuration (prompt `content`, `work` settings or `events` filters) at its current revision.
+export async function saveManager(admin, id, change) {
+  const current = await admin(`/api/repositories/${id}/manager`);
+  if (current.status !== 200) throw new Error(JSON.stringify(current));
+  return admin(`/api/repositories/${id}/manager`, 'PUT', { expected_revision: current.value.manager.prompt.revision, ...change });
+}
+// The text a Manager section takes effect with (a repository file, the project's section, or the built-in text).
+export const managerSection = async (admin, id, section) => (await admin(`/api/repositories/${id}/manager`)).value.manager.sections.find(entry => entry.id === section).effective;

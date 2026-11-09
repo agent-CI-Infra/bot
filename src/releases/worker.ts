@@ -5,8 +5,8 @@ import { stop, type Redactor } from '../agent/common.js';
 import { tag, releases, releaseRedactor, withGitHub } from './github.js';
 import { actionPages, ambiguousBranch, matchesRun, runSnapshot } from './actions.js';
 import { sources } from './range.js';
-import { builtinGroups, checkGroups, notesUseModel, renderNotes, requestNotes } from './notes.js';
-import { eventTaskActive } from '../workflows/events.js';
+import { builtinGroups, checkGroups, notesUseModel, notesDecision, notesEventKey, renderNotes, requestNotes } from './notes.js';
+import { eventTaskActive } from '../work/events.js';
 import { prerelease } from './version.js';
 
 export class ReleaseWorker {
@@ -53,6 +53,8 @@ export class ReleaseWorker {
   // The release.notes task this release waits for, while it still runs: nothing is asked of GitHub meanwhile.
   private notesRunning(row: any) {
     const data = JSON.parse(row.data), task = data.notes_task ? this.service.store.get('SELECT * FROM tasks WHERE id=?', data.notes_task) : undefined;
+    // While the Manager decides on the notes request, the release waits the same way.
+    if (row.stage === 'preparing_notes' && !task && data.notes_event && notesDecision(this.service.store, data.notes_event).state === 'pending') return true;
     // Provider downtime fails the step at once instead of keeping the release waiting: the release has explicit retry controls.
     if (task && ['retry_wait', 'waiting_configuration'].includes(task.status) && /^model_/.test(String(task.error_code || ''))) return false;
     return row.stage === 'preparing_notes' && eventTaskActive(task);
@@ -81,7 +83,7 @@ export class ReleaseWorker {
     const stage = retryRead ? row.stage : error.state === 'waiting_permission' ? 'waiting_permission' : error.state === 'write_unknown' ? 'write_unknown' : 'failed';
     // A failed notes step asks for a new release.notes task when it is resumed.
     this.service.save(row, { failure_step: failureStep, error: error.code || 'release_failed', detail: redactor.text(error.detail || '发布步骤失败，请检查接入和 GitHub 状态。'),
-      ...(row.stage === 'preparing_notes' && !retryRead ? { notes_task: null } : {}) }, stage);
+      ...(row.stage === 'preparing_notes' && !retryRead ? { notes_task: null, notes_event: null } : {}) }, stage);
     if (retryRead) this.pollLater(row, error.retryAfterMs);
   }
   async tagging(github: GitHub, row: any, redactor: Redactor) {
@@ -193,14 +195,28 @@ export class ReleaseWorker {
     const sensitive = data.input_sensitive || redactor.contains(Buffer.from(JSON.stringify(input)));
     this.service.save(row, { sources: redactor.clean(input), input_sensitive: !!sensitive });
     if (sensitive) return stop('release_sensitive_body', 'failed', '发行说明来源包含已登记的密钥，已拒绝写入。');
-    // The release.notes workflow groups the sources in the project computer; the release waits for its task.
+    // A release notes task groups the sources in the project computer when the Manager starts one; the release waits for it.
     let groups = builtinGroups(input);
-    if (notesUseModel(this.service.store, row, input)) {
-      const store = this.service.store, task = data.notes_task ? store.get('SELECT * FROM tasks WHERE id=?', data.notes_task) : undefined;
+    const store = this.service.store, later = () => store.run('UPDATE project_releases SET next_poll=? WHERE id=? AND lease=?', Date.now() + 5000, row.id, row.lease);
+    let task = data.notes_task ? store.get('SELECT * FROM tasks WHERE id=?', data.notes_task) : undefined, declined = false;
+    if (!task && data.notes_event) {
+      const decision = notesDecision(store, data.notes_event);
+      if (decision.state === 'pending') { later(); return; }
+      if (decision.state === 'failed') return stop('release_notes_dispatch_failed', 'failed', `Manager 没能分派发行说明整理（${decision.reason}），可人工重试发行说明步骤。`);
+      if (decision.state === 'task') {
+        task = store.get('SELECT * FROM tasks WHERE id=?', decision.task_id); this.service.save(row, { notes_task: decision.task_id });
+        // The release waits for the task the Manager started, as it waits for any notes task (notesRunning).
+        if (eventTaskActive(task) && !/^model_/.test(String(task?.error_code || ''))) { later(); return; }
+      }
+      // The Manager decided against organizing the notes: the built-in rule lists the verified sources as they are.
+      else declined = true;
+    }
+    if (!declined && notesUseModel(store, row, input)) {
       if (!task) {
-        const queued = requestNotes(store, row, input, (data.notes_attempts || 0) + 1);
-        this.service.save(row, { notes_task: queued.id, notes_attempts: (data.notes_attempts || 0) + 1 });
-        store.run('UPDATE project_releases SET next_poll=? WHERE id=? AND lease=?', Date.now() + 5000, row.id, row.lease); return;
+        const attempt = (data.notes_attempts || 0) + 1;
+        this.service.save(row, { notes_event: notesEventKey(row, input, attempt), notes_attempts: attempt });
+        requestNotes(store, row, input, attempt);
+        later(); return;
       }
       if (eventTaskActive(task) && /^model_/.test(String(task.error_code || ''))) {
         store.run("UPDATE tasks SET status='cancelled',error_code='release_notes_model_failed' WHERE id=?", task.id);

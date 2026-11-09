@@ -195,7 +195,7 @@ export class ScheduleService {
     const id = 'occ_' + parameterHash([row.id, key]), plan = JSON.parse(row.spec) as Plan, run = 'run_' + parameterHash(id);
     const currentActor = this.actor(row, plan);
     const authorization = { actor_id: row.actor_id, initiator: initiator ?? row.creator_id, authorization_revision: currentActor.authorization_revision, grant_snapshot: JSON.parse(row.grant_snapshot), source };
-    const config = { policy: this.store.get('SELECT * FROM policies WHERE repository_id=?', row.project_id), workflow: this.store.get('SELECT * FROM workflows WHERE repository_id=? AND id=?', row.project_id, plan.workflow),
+    const config = { policy: this.store.get('SELECT * FROM policies WHERE repository_id=?', row.project_id), work: plan.workflow, work_settings: this.store.get('SELECT work_settings FROM policies WHERE repository_id=?', row.project_id)?.work_settings ?? null,
       rules: this.store.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?', row.project_id), management_revision: this.management.revision({ project_id: row.project_id }) };
     // Snapshots contain configuration and references, never account or model credentials.
     this.store.run(`INSERT INTO schedule_occurrences(id,schedule_id,tenant_id,project_id,revision,logical_key,logical_at,scheduled_at,source,snapshot,authorization,run_id,state,reason)

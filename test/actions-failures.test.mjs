@@ -10,7 +10,7 @@ import { failedStepOutput, verifiedEvidence, classifyFailure, normalizeSignature
 import { actionsModel } from './actions-model.mjs';
 import { runEventTasks } from './event-tasks.mjs';
 import { workspaceProfile } from '../dist/agent/profiles.js';
-import { workflowAccess } from '../dist/workflows/catalog.js';
+import { workAccess as workflowAccess } from '../dist/work/catalog.js';
 import { actionsDevelopmentAllowed, publicText } from '../dist/actions/safety.js';
 import { recordActionsRun } from '../dist/actions/storage.js';
 import { TaskEngine } from '../dist/agent/engine.js';

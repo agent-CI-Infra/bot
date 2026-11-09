@@ -22,7 +22,7 @@ import { type GateOnboarding } from './projects/gate-onboarding.js';
 import { integrationsApi } from './app/integrations.js';
 import { gateOnboardingApi } from './app/gate-onboarding.js';
 import { RuleService } from './rules/service.js';
-import { WorkflowService } from './workflows/service.js';
+import { managerApi } from './work/api.js';
 import { settingsApi } from './app/settings.js';
 import { ProjectRemoval } from './projects/removal.js';
 import { ReleaseService } from './releases/service.js';
@@ -44,6 +44,7 @@ import { ChannelApi } from './channels/api.js';
 import { ChannelConnections } from './channels/connections.js';
 import { ScheduleService } from './schedules/service.js';
 import { Scheduler } from './schedules/worker.js';
+import { registerScheduledChecks } from './dispatch/schedule.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
@@ -77,9 +78,8 @@ export function createControlPlane(options: Options) {
     verifyInstallation: (session, installation) => githubLogin.identity?.verifyInstallation(session, installation) || Promise.resolve(null),
   });
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
-  const workflows = new WorkflowService(store, rules, options.githubUrl);
   const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
-  const sharedManagement = new ManagementService(store,workflows,taskCommands);
+  const sharedManagement = new ManagementService(store,rules,taskCommands);
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
@@ -87,6 +87,7 @@ export function createControlPlane(options: Options) {
   const channelApi = new ChannelApi(channels), channelConnections = new ChannelConnections(channels);
   options.onChannels?.(channels);
   const schedules = new ScheduleService(store, sharedManagement, channels, options.schedules?.clock);
+  registerScheduledChecks(schedules);
   const scheduler = new Scheduler(schedules); options.onSchedules?.(scheduler);
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
@@ -219,8 +220,8 @@ export function createControlPlane(options: Options) {
     let input: Json = {};
     if (mutation) {
       if (!req.headers['content-type']?.startsWith('application/json')) fail(415, 'json_required');
-      // Notes and workflow configuration are written as administrators write them, without a size limit of their own.
-      const noteWrite = method === 'PUT' && /^\/api\/repositories\/[^/]+\/notes\/[^/]+$/.test(path) || /^\/api\/repositories\/[^/]+\/workflows(?:\/[^/]+)?$/.test(path);
+      // Notes and the Manager prompt are written as administrators write them, without a size limit of their own.
+      const noteWrite = method === 'PUT' && (/^\/api\/repositories\/[^/]+\/notes\/[^/]+$/.test(path) || /^\/api\/repositories\/[^/]+\/manager$/.test(path));
       const raw = await body(req, noteWrite ? Infinity : 1024 * 1024);
       if (!raw.complete) fail(413, 'payload_too_large');
       try { input = object(JSON.parse(raw.bytes.toString('utf8'))); }
@@ -309,12 +310,7 @@ export function createControlPlane(options: Options) {
       }
     };
     guard();
-    // The workflow assistant answers as it works: text, tool calls and drafts are streamed as JSON lines.
-    if (method === 'POST' && url.searchParams.get('stream') === '1' && /^\/api\/repositories\/[^/]+\/workflows\/assistant$/.test(path)) {
-      const closed = new AbortController(); res.on('close', () => { if (!res.writableFinished) closed.abort(); });
-      await store.withAuthorizationGuard(guard, () => workflows.assistantStream(current, url, input, res, closed.signal)); return;
-    }
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, githubLogin.adminOrigin || options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await managementApi.workflow(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await workflows.api(user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, githubLogin.adminOrigin || options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.

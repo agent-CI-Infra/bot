@@ -1,8 +1,8 @@
 import type { Store, Row } from '../storage/database.js';
 import { selectedModel } from '../agent/model.js';
-import { taskWorkflow, workflowPermissions } from '../workflows/resolve.js';
 import { stop, TaskError } from '../agent/common.js';
-import { builtinWorkflow } from '../workflows/catalog.js';
+import { workOf, workType, narrowWrites, type WorkPermissions } from '../work/catalog.js';
+import { workPermissions } from '../work/settings.js';
 import { resolveRules } from '../rules/service.js';
 import { roleConfiguration } from '../roles/definition.js';
 
@@ -17,14 +17,14 @@ export function captureTaskConfiguration(store:Store,id:string):void{
   }
 }
 /** Capture once per explicitly adopted execution revision. Credentials are sealed, and omitted from public snapshots. */
-export function executionModel(store:Store,task:Row,kind=taskWorkflow(task as any)){
+export function executionModel(store:Store,task:Row,kind=workOf(task as any)){
   if(!task.id||!store.get('SELECT 1 FROM tasks WHERE id=?',task.id))return selectedModel(store,task.repository_id,kind);
   let config=taskConfiguration(store,task);
   if(!config){
     const model=selectedModel(store,task.repository_id,kind),{key,...metadata}=model;
     config={policy:store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id),
-      workflow:store.get('SELECT * FROM workflows WHERE repository_id=? AND id=?',task.repository_id,kind)??null,
-      permissions:builtinWorkflow(kind)||store.get('SELECT 1 FROM workflows WHERE repository_id=? AND id=?',task.repository_id,kind)?workflowPermissions(store,task.repository_id,kind):null,roles:roleConfiguration(store,task.repository_id),
+      // Tasks created before #207 also kept their workflow row here; new tasks keep their work type's permissions.
+      work:kind,permissions:workType(kind)?taskPermissions(store,task):null,roles:roleConfiguration(store,task.repository_id),
       model:metadata,credentials:store.secrets.seal({value:key},'task-model:'+task.id)};
     store.run('INSERT OR IGNORE INTO task_execution_configs VALUES(?,?,?,?)',task.id,JSON.parse(task.input||'{}').configuration_revision??1,JSON.stringify(config),new Date().toISOString());
     config=taskConfiguration(store,task);
@@ -49,4 +49,15 @@ export function executionRuleFiles(store:Store,task:Row,files:Record<string,stri
   config.rule_files=files;config.rule_sha=sha;
   store.run('UPDATE task_execution_configs SET snapshot=? WHERE task_id=?',JSON.stringify(config),task.id);
   return files;
+}
+/**
+ * What a task may do now: its work type's writes in the project configuration, never more than its snapshot started with,
+ * and narrowed further when the Manager created it with fewer writes. Neither event content nor the Manager can add one.
+ */
+export function taskPermissions(store:Store,task:Row):WorkPermissions{
+  const work=workOf(task as any),live=workPermissions(store,task.repository_id,work);
+  const fixed=taskConfiguration(store,task)?.permissions?.writes,manager=JSON.parse(task.input||'{}').manager?.writes;
+  let writes=Array.isArray(fixed)?live.writes.filter(write=>fixed.includes(write)):live.writes;
+  if(Array.isArray(manager))writes=narrowWrites(writes,manager,work);
+  return {...live,workspace:{...live.workspace,write:writes.includes('code')},writes};
 }

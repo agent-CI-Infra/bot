@@ -2,7 +2,7 @@ import { assertStageRun, assertStageStart, stageRunBinding, stagePolicyHash, art
 import {executionBaseline} from '../agent/common.js';
 import { executionModel, taskConfiguration } from '../tasks/configuration.js';
 import { cleanRoleMessages } from './storage.js';
-import { taskWorkflow } from '../workflows/resolve.js';
+import { workOf } from '../work/catalog.js';
 import { runAgent,type AgentSpec } from '../agent/runtime.js';
 import { environmentProfiles } from './catalog.js';
 import { TaskToolGateway,gatewayToolNames,gatewayCapabilities } from './gateway.js';
@@ -29,8 +29,9 @@ function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,over
  let config=override??(fixed?roleConfig(s,task):undefined);
  if(!override&&config&&instance){const revision=Math.max(Number(instance.config_revision??0),Number(instance.pending_revision??0));
   if(revision>config.revision)config=configurationRevision(s,task.repository_id,revision)??config;}
- return resolveRole(s,task.repository_id,role,taskWorkflow(task as any),{harness,pinned,configuration:config,entryExecutor,
-  fallbackModel:fixed?()=>({model:model??executionModel(s,task,taskWorkflow(task as any)),source:fixed.workflow?.model_id||Object.hasOwn(JSON.parse(fixed.policy.task_models||'{}'),taskWorkflow(task as any))?'workflow':'project'}):undefined});
+ return resolveRole(s,task.repository_id,role,workOf(task as any),{harness,pinned,configuration:config,entryExecutor,
+  // 'workflow' names a work type's own model (task_models), as role snapshots always called it.
+  fallbackModel:fixed?()=>({model:model??executionModel(s,task,workOf(task as any)),source:fixed.workflow?.model_id||Object.hasOwn(JSON.parse(fixed.policy.task_models||'{}'),workOf(task as any))?'workflow':'project'}):undefined});
 }
 /** Entry points must resolve the selected role before requiring a project model; external backends own their model. */
 export const roleExecutionModel = (s:Store,task:Row,role:string) => taskRole(s,task,role).model;
@@ -99,7 +100,7 @@ function assignmentScope(s:Store,task:Row,instance:Row,assignment?:string){
 const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={session_bound:['session_bound','progress'],message:['message','progress'],tool:['tool_call','observation'],artifact:['artifact','artifact'],permission:['permission','denied'],configuration:['configuration','progress']};
 
 async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
- const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=taskWorkflow(task as any),{resolved,continuation}=state;let instance=state.instance;
+ const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=workOf(task as any),{resolved,continuation}=state;let instance=state.instance;
  if(stage&&s.get('SELECT instance_id FROM role_assignments WHERE id=? AND task_id=?',assignment!,task.id)?.instance_id!==instance.id)stop('role_recovery_scope_mismatch','failed','阶段委派必须属于当前任务与角色实例。');
  const knowledgeFence=memoryViewFence(s,{...task,active_role:role});
  if(instance.knowledge_fence!==knowledgeFence){

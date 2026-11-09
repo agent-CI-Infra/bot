@@ -10,10 +10,9 @@ export function selectedModel(store: Store, repositoryId: string, taskKind?: str
     overrides = JSON.parse(policy?.task_models || '{}');
     if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) throw new Error();
   } catch { return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。'); }
-  // A custom workflow keeps its model on its own row; built-in workflows are task kinds in task_models.
-  const custom = taskKind?.startsWith('custom.') ? store.get('SELECT model_id FROM workflows WHERE repository_id=? AND id=?', repositoryId, taskKind) : undefined;
-  const overridden = custom ? !!custom.model_id : !!taskKind && Object.hasOwn(overrides, taskKind);
-  const modelId = custom ? custom.model_id || policy?.model_id : overridden ? overrides[taskKind!] : policy?.model_id;
+  // Work types (and 'manager', the dispatch call) name their model in task_models; anything else uses the project default.
+  const overridden = !!taskKind && Object.hasOwn(overrides, taskKind);
+  const modelId = overridden ? overrides[taskKind!] : policy?.model_id;
   if (overridden && (typeof modelId !== 'string' || !modelId)) return stop('task_models_invalid', 'waiting_configuration', '任务模型配置无效，请重新保存项目模型设置。');
   const row = modelId ? visibleModel(store, repositoryId, modelId) : undefined;
   if (!row?.api_key) return stop('model_not_configured','waiting_configuration',`仓库 ${repositoryId}${overridden ? ' 的任务 ' + taskKind : ''} 未配置可用模型或模型凭据；不会自动切换到其他模型。`);
@@ -37,7 +36,7 @@ export function modelEndpoints(url:string){
 }
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};
-// The tools a workspace agent gets follow its trusted capabilities: a tool the workflow does not allow is not offered.
+// The tools a workspace agent gets follow its trusted capabilities: a tool its work type does not allow is not offered.
 // Each configured write is a platform tool; the control plane performs it (see writeCatalog).
 export function tools(profile: { workspaceWrite: boolean; completion: 'review' | 'publication' | 'reply' | 'event'; read?: boolean; shell?: boolean; notes?: boolean; github?: boolean; writes?: string[] }){
   const development = profile.completion === 'publication', allow = (flag?: boolean) => flag !== false;

@@ -1,5 +1,5 @@
 import { taskTraceAccess } from '../memory/access.js';
-import { taskConfiguration } from '../tasks/configuration.js';
+import { taskConfiguration, taskPermissions } from '../tasks/configuration.js';
 import { developmentTeam } from '../roles/development.js';
 import { controlled } from '../roles/run.js';
 import { runTeam } from '../roles/team.js';
@@ -15,7 +15,8 @@ import { runAgent, type AgentSpec } from './runtime.js';
 import { type Redactor, stop, blobSha, TaskError } from './common.js';
 import { piAdapter, type PiSession } from './pi.js';
 import { validateReview, validateReply } from '../review/findings.js';
-import { taskWorkflow, workflowPermissions, savedWorkflow } from '../workflows/resolve.js';
+import { workType } from '../work/catalog.js';
+import { sectionText } from '../work/settings.js';
 import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
 import type { AgentModel } from './gateway.js';
@@ -31,10 +32,12 @@ export async function agentLoop(store: Store, task: Row, workspace: Workspace, r
   finally { await tokens?.revoke(); }
 }
 async function run(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard: () => Promise<void>, context: any, tokens?: ReadTokens, createPullRequest?: (id: string, result: any) => Promise<any>, conversation?: ReviewConversation, platform: PlatformTools = {}, limits: Pick<AgentSpec<unknown>, 'modelAttempts'> = {}) {
-  // Permissions and a custom workflow's prompt are read from trusted storage here, for every caller and every attempt.
-  const workflowId = taskWorkflow(task as any), saved = String(task.kind).startsWith('workflow.') ? (taskConfiguration(store,task)?.workflow??savedWorkflow(store, task.repository_id, workflowId)) : undefined;
-  if (String(task.kind).startsWith('workflow.') && !saved) stop('workflow_not_found', 'cancelled', `工作流 ${workflowId} 已删除。`);
-  const profile = workspaceProfile(String(task.kind), context, (taskConfiguration(store,task)?.permissions??workflowPermissions(store, task.repository_id, workflowId)), saved ? { id: workflowId, name: String(saved.name), prompt: String(saved.prompt ?? '') } : undefined);
+  // Permissions and a reply task's prompt are read from trusted storage here, for every caller and every attempt. A task of a
+  // former custom workflow keeps the prompt its snapshot captured; new reply tasks follow the Manager's reply section.
+  const reply = String(task.kind).startsWith('workflow.'), legacy = reply && task.workflow_id ? taskConfiguration(store,task)?.workflow : undefined;
+  const prompt = !reply ? undefined : legacy ? { id: String(legacy.id), name: String(legacy.name), prompt: String(legacy.prompt ?? '') }
+    : { id: 'reply', name: workType('reply')!.name, prompt: sectionText(store, task.repository_id, 'reply') };
+  const profile = workspaceProfile(String(task.kind), context, taskPermissions(store, task), prompt);
   const explorer = tokens && Object.keys(profile.capabilities.github.permissions).length ? new RepositoryExplorer(tokens, redactor, guard) : null;
   const records = new TaskRecords(store);
   for(const tool of taskTools) {
@@ -48,12 +51,12 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   for(const tool of memoryTools){if(tool.function.name==='remember_project_memory'&&!profile.capabilities.workspace.notes&&!profile.capabilities.workspace.write)continue;profile.tools.push(tool as any);platform[tool.function.name]=async(_id,args)=>{await guard();return memoryTool(store,task,tool.function.name,redactor.clean(args),async doc=>{const raw=await workspace.call('memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});};}
   const system = profile.system + '\n' + playbookInstructions;
   context={...context,project_memory:new ProjectMemory(store).context(task),playbook_request:JSON.parse(task.input||'{}').playbook_request||null,playbook_catalog:playbooks.map(({content,...p})=>p),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.get(task.id):null};
-  // Only development ends with its pull request; any other workflow that may open one carries on to its own finish.
+  // Only development ends with its pull request; any other work that may open one carries on to its own finish.
   const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
   if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace);
-  // The workflow's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
+  // The work type's own executor: one Pi session in the task workspace (the formal Pi harness, src/agent/pi.ts).
   const session: PiSession<any> = { store, taskId: task.id, guard, workspace, redactor, config, conversation, platform, createPullRequest,
     offered: name => profile.tools.some(tool => tool.function.name === name), publication: profile.capabilities.github.publication,
     repository: async (name, args) => {

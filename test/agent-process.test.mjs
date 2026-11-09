@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import childProcess from 'node:child_process';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { harness, setup, account, repository } from './helpers.mjs';
+import { harness, setup, account, repository, saveManager } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { resolveRules } from '../dist/rules/service.js';
@@ -251,7 +251,7 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 
 // Run the control-plane publication path against real Git objects and a local GitHub fixture.
 // The manager substitutes for the project computer; no deployment or external API is used.
-// custom: run a custom workflow with these writes instead of development; it files an Issue, opens the PR and replies.
+// custom: run a reply task with these writes instead of development; it files an Issue, opens the PR and replies.
 async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
@@ -321,8 +321,9 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
   await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.id, development_enabled: custom?.development ?? true, test_command: policy });
   const taskId = randomBytes(24).toString('hex'), input = custom ? {} : { review: { implementation_goal: 'Fix requested addition' } };
-  const workflow = custom && (await admin('/api/repositories/101/workflows', 'POST', { name: 'Fix it', prompt: 'Fix what the Issue asks.', triggers: [{ id: 'issue.opened' }], writes: custom.writes })).value.workflow;
-  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at,workflow_id) VALUES(?,'101',?,'running','dev',1,'claim',?,?,?)", taskId, custom ? 'workflow.issue' : 'development.issue', JSON.stringify(input), new Date().toISOString(), workflow?.id ?? null);
+  // A reply task (the work type of former custom workflows) follows the Manager's reply section with the project's writes.
+  if (custom) assert.equal((await saveManager(admin, '101', { content: '## 通用回复 `reply`\n\nFix what the Issue asks.\n', work: { reply: { enabled: true, writes: custom.writes } } })).status, 200);
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,input,created_at) VALUES(?,'101',?,'running','dev',1,'claim',?,?)", taskId, custom ? 'workflow.issue' : 'development.issue', JSON.stringify(input), new Date().toISOString());
   h.store.run("INSERT INTO task_claims VALUES(?,'101','claim',?)", taskId, new Date().toISOString());
   const engine = new TaskEngine(h.store, manager, endpoint + '/github', undefined, acceptor);
   await engine.run(taskId, 'claim');
@@ -355,7 +356,7 @@ test('create_pull_request with empty policy never reruns agent evidence and retu
   assert.deepEqual(state.trees.at(-1), { repository_id: 101, base_tree: d.candidate.source_tree, entries: 1 });
 });
 
-test('a custom workflow with the Issue and PR writes files an Issue, opens a bot PR and still finishes with its reply', async t => {
+test('a reply task with the Issue and PR writes files an Issue, opens a bot PR and still finishes with its reply', async t => {
   const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request', 'issue'] } });
   assert.equal(d.task.status, 'succeeded', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), result = JSON.parse(d.task.result);
@@ -371,7 +372,7 @@ test('a custom workflow with the Issue and PR writes files an Issue, opens a bot
   assert.equal(d.h.store.get("SELECT count(*) n FROM tasks WHERE kind LIKE 'development.%'").n, 0);
 });
 
-test('a custom workflow cannot open a PR while the project development switch is off, and keeps going', async t => {
+test('a reply task cannot open a PR while the project development switch is off, and keeps going', async t => {
   const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request'], development: false }, repair: false });
   assert.equal(d.replies[0].error, 'development_disabled');
   // The fixture GitHub is shared by this file's tests, so the absence of writes is read from this task's own outbox.
@@ -601,7 +602,7 @@ test('a policy change during evaluation invalidates the verdict before any GitHu
  assert.equal(d.task.status,'retry_wait');assert.equal(d.task.error_code,'acceptance_context_changed');assert.equal(d.h.store.get('SELECT count(*) n FROM github_effects').n,0);
 });
 
-for (const outcome of ['return','insufficient_evidence']) test('a rejected workflow report reaps the old workspace before clearing its identity: '+outcome, async t => {
+for (const outcome of ['return','insufficient_evidence']) test('a rejected reply report reaps the old workspace before clearing its identity: '+outcome, async t => {
   let oldWorkspace;
   const d = await developmentHarness(t, { custom: { writes: ['reply','code','pull_request'] }, acceptor: async (store,task) => {
     const record = JSON.parse(store.get('SELECT candidate FROM task_records WHERE task_id=?',task.id).candidate);
