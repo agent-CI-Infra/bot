@@ -10,13 +10,17 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { TaskCommands } from '../dist/tasks/commands.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { runTeam } from '../dist/roles/team.js';
+import { evaluateDelivery } from '../dist/tasks/acceptance.js';
+import { Publisher } from '../dist/github/publisher.js';
+import { mergeApi } from '../dist/roles/merge.js';
+import { explainFailure } from '../dist/agent/failures.js';
 import { captureTaskConfiguration } from '../dist/tasks/configuration.js';
 import { runRole, roleInstance, roleRuns } from '../dist/roles/run.js';
 import { roleApi } from '../dist/roles/api.js';
 import { saveConfiguration } from '../dist/roles/definition.js';
 import { Redactor } from '../dist/agent/common.js';
 import { traceEvent } from '../dist/tasks/trace.js';
-import { planTask, reconcileAssignments, bindStageAssignment, recordStageResult, latestRoleCandidate, evaluateRequiredStages, candidateKey, deliveryCandidate } from '../dist/roles/schedule.js';
+import { planTask, reconcileAssignments, bindStageAssignment, recordStageResult, latestRoleCandidate, evaluateRequiredStages, assertRequiredStages, candidateKey, deliveryCandidate } from '../dist/roles/schedule.js';
 
 const tool = name => ({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
 const call = (name,args) => ({role:'assistant',content:null,tool_calls:[{id:randomBytes(4).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
@@ -144,6 +148,67 @@ test('a past explicit retry does not authorize a later policy change',async t=>{
   const f=await fixture(t,{stages:[stage('dev',{writer:true})]});f.plan();f.retry();f.plan();
   f.s.run("UPDATE policies SET test_command='later change' WHERE repository_id='r'");
   assert.throws(()=>f.plan(),{code:'stage_policy_changed',state:'paused'});f.retry();assert.equal(f.plan().revision,2);
+});
+
+test('disabling only coordination after a stage passes pauses every delivery gate and can be retried',async t=>{
+  const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required});const plan=f.plan();await f.writer();
+  const candidate=f.records.submit('t',[{kind:'code',reference:'source',version:tree('b'),content:{local_sha:tree('a')}}],[],{}),verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
+  traceEvent(f.s,'t','acceptance_started',{candidate_id:candidate.id,source_tree:tree('b'),context:'fresh'});await runRole({...f.spec(),system:'QA verified'},'qa');f.records.decide('t',candidate.id,candidate.revision,verdict,'pr_opened');
+  f.s.run("UPDATE tasks SET phase='publish',result=? WHERE id='t'",JSON.stringify({pr_number:1,sha:tree('a')}));
+  saveConfiguration(f.s,'r',{expected_revision:1,enabled:false,roles:[],required_stages:required},'owner');
+  const expected={code:'role_authority_revoked',state:'paused'},current=()=>latestRoleCandidate(f.s,'t');
+  assert.equal(f.s.get("SELECT enabled FROM policies WHERE repository_id='r'").enabled,1);
+  assert.deepEqual(evaluateRequiredStages(f.s,'t',current()).waiting,[{stage_id:'dev',reason:'role_coordination_disabled'}]);
+  assert.throws(()=>assertRequiredStages(f.s,'t',current()),expected);assert.throws(()=>f.plan(),expected);
+  assert.throws(()=>f.records.stage('t',candidate.id,candidate.revision,verdict),expected);
+  await assert.rejects(evaluateDelivery(f.s,f.spec().task,{},new Redactor(),async()=>{}),expected);
+  const github={};let sends=0;const publisher=new Publisher(f.s,github,f.spec().task,async()=>{}),send=async()=>{github.beforeWrite?.();sends++;return {ok:true};};
+  await assert.rejects(publisher.effect('resume','fixture',{},send,async()=>null),expected);
+  await assert.rejects(mergeApi(f.s,{id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:tree('a'),merge_method:'squash'}),expected);
+  const engine=new TaskEngine(f.s,{call:async()=>null});t.after(()=>engine.close());
+  f.s.run("UPDATE tasks SET status='running',claim_token='claim' WHERE id='t'");f.s.run("INSERT INTO task_claims VALUES('t','r','claim','now')");
+  await engine.run('t','claim');assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'paused');
+  assert.equal(f.s.get("SELECT error_code FROM tasks WHERE id='t'").error_code,'role_authority_revoked');
+  const message=explainFailure('role_authority_revoked','paused');assert.equal(message.automatic,false);assert.match(message.action,/恢复角色协调.*重试/);assert.doesNotMatch(message.action,/自动继续/);
+  saveConfiguration(f.s,'r',{expected_revision:2,enabled:true,roles:[],required_stages:required},'owner');
+  new TaskCommands(f.s).api({id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/retry'),{});
+  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'queued');assert.equal(f.plan().revision,plan.revision);
+  assert.equal(evaluateRequiredStages(f.s,'t',current()).satisfied,true);await publisher.effect('resume','fixture',{},send,async()=>null);assert.equal(sends,1);
+  f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'");assert.throws(()=>assertRequiredStages(f.s,'t',current()),{code:'repository_policy_disabled',state:'cancelled'});
+});
+
+test('a running manager preserves role_authority_revoked when coordination is disabled after preflight',async t=>{
+  let written;const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required,handler:body=>{
+    if(body.tools.some(tool=>tool.function.name==='nominate_delivery')){saveConfiguration(f.s,'r',{expected_revision:1,enabled:false,roles:[],required_stages:required},'owner');return call('nominate_delivery',{result_ref:written.reference});}
+    return call('finish',{summary:'implemented'});
+  }});f.plan();written=await f.writer();
+  await assert.rejects(runTeam(f.spec(),{prepare:async()=>{}}),{code:'role_authority_revoked',state:'paused'});
+  assert.equal(f.s.get("SELECT stop_reason FROM task_runs WHERE role='manager'").stop_reason,'role_authority_revoked');
+  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
+});
+
+test('restoring the pinned stage policy and retrying resumes publication without adopting after a sent effect',async t=>{
+  const required=[stage('dev',{writer:true})],f=await fixture(t,{stages:required});const plan=f.plan();await f.writer();
+  const candidate=f.records.submit('t',[{kind:'code',reference:'source',version:tree('b'),content:{local_sha:tree('a')}}],[],{}),verdict={outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
+  traceEvent(f.s,'t','acceptance_started',{candidate_id:candidate.id,source_tree:tree('b'),context:'fresh'});await runRole({...f.spec(),system:'QA verified'},'qa');f.records.stage('t',candidate.id,candidate.revision,verdict);
+  const snapshot=f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot;
+  f.s.run("UPDATE tasks SET phase='publish' WHERE id='t'");
+  const github={};let sends=0;const publisher=new Publisher(f.s,github,f.spec().task,async()=>{}),send=async()=>{github.beforeWrite?.();return {sequence:++sends};};
+  await publisher.effect('first','fixture',{},send,async()=>null);assert.equal(sends,1);
+  saveConfiguration(f.s,'r',{expected_revision:1,enabled:true,roles:[],required_stages:[...required,stage('reviewer',{deps:['dev']})]},'owner');
+  await assert.rejects(publisher.effect('next','fixture',{},send,async()=>null),{code:'stage_policy_changed',state:'paused'});assert.equal(sends,1);
+  f.s.run("UPDATE tasks SET status='paused',error_code='stage_policy_changed' WHERE id='t'");
+  const commands=new TaskCommands(f.s),user={id:'owner',role:'project_admin',repositories:['r']};
+  assert.throws(()=>commands.api(user,'POST',new URL('http://local/api/tasks/t/adopt-config'),{}),{code:'task_config_after_publication'});
+  saveConfiguration(f.s,'r',{expected_revision:2,enabled:true,roles:[],required_stages:required},'owner');
+  commands.api(user,'POST',new URL('http://local/api/tasks/t/retry'),{});
+  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'queued');assert.equal(f.plan().revision,plan.revision);
+  assert.equal(f.s.get("SELECT phase FROM tasks WHERE id='t'").phase,'publish');
+  assert.equal(f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot,snapshot);
+  assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,true);
+  await publisher.effect('first','fixture',{},send,async()=>null);assert.equal(sends,1,'a sent effect must not be repeated');
+  await publisher.effect('next','fixture',{},send,async()=>null);assert.equal(sends,2);
+  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='configuration_adopted'").n,0);
 });
 
 test('serial dev → reviewer → test binds evidence to exact candidate and still requires framework QA',async t=>{
