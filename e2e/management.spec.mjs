@@ -212,7 +212,7 @@ test('loading a scope disables composing until its draft is restored, and abando
 
 test('management tab opens a full page, and resizing or maximizing the floating view preserves its conversation and draft', async ({ page }) => {
   test.setTimeout(60000);
-  const f = await managementFixture(), errors = [];
+  const f = await managementFixture(), errors = []; let releaseReturn;
   page.on('pageerror', error => errors.push(error.message)); mkdirSync('.tmp/management-display', { recursive: true });
   try {
     await page.setViewportSize({ width: 1440, height: 1000 }); await page.goto(f.h.admin + '/#/projects');
@@ -264,7 +264,12 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     const mobileFull = await chat.boundingBox(); expect([mobileFull.x, mobileFull.y, mobileFull.width, mobileFull.height]).toEqual([0, 0, 390, 844]);
     await expect(send).toBeInViewport(); await message.focus(); await page.keyboard.press('Escape');
     await expect(chat).toHaveAttribute('role', 'region'); await expect(message).toHaveValue('窄屏整页中的草稿');
-    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await grip.focus();
+    let returnArrived; const returning = new Promise(resolve => { returnArrived = resolve; }), returnGate = new Promise(resolve => { releaseReturn = resolve; });
+    await page.route('**/api/installations?**', async route => { const response = await route.fetch(); returnArrived(); await returnGate; await route.fulfill({ response }); });
+    await page.getByRole('button', { name: '切换为悬浮窗口', exact: true }).click(); await returning; await grip.focus();
+    const returned = page.waitForResponse(response => response.url().includes('/api/installations?'));
+    releaseReturn(); await (await returned).finished(); await expect(page.locator('#rows .row')).toHaveCount(3); await expect(grip).toBeFocused();
+    await page.unrouteAll({ behavior: 'wait' });
     for (let n = 0; n < 12; n++) { await page.keyboard.press('Shift+ArrowRight'); await page.keyboard.press('Shift+ArrowDown'); }
     const small = await chat.boundingBox(); expect(small.width).toBe(360); expect(small.height).toBe(460); expect(small.x).toBeGreaterThanOrEqual(0); expect(small.y).toBeGreaterThanOrEqual(0);
     await expect(send).toBeInViewport(); await expect(message).toHaveValue('窄屏整页中的草稿');
@@ -275,5 +280,5 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await page.getByRole('button', { name: '收起管理助手', exact: true }).click(); await launcher.click();
     expect((await chat.boundingBox()).width).toBe(360); expect((await chat.boundingBox()).height).toBe(460);
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1); expect(errors).toEqual([]);
-  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+  } finally { releaseReturn?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
