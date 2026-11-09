@@ -6,10 +6,13 @@ const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'developme
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', acceptance: '独立验收', publish: '发布', done: '完成' };
 // Role coordination words shared by the task view, the 角色 page and the workflow summary. A harness is how a role runs;
 // the built-in roles keep their short names (Manager delegates Dev, Test, Reviewer and UX; QA stays independent).
+// Role ids are chosen by the project (a custom observer may be called "constructor"), so lookups by id read own
+// properties only and fall back to the role's own name.
+const own = (map, key) => Object.hasOwn(map, key) ? map[key] : undefined;
 const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP' };
-const harnessName = id => harnessNames[id] || id || '—';
+const harnessName = id => own(harnessNames, id) || id || '—';
 const builtinRoleNames = { manager: 'Manager', dev: 'Dev', test: 'Test', reviewer: 'Reviewer', ux: 'UX', qa: '独立 QA', coordinator: '跨任务协调' };
-const roleLabel = id => builtinRoleNames[id] || id;
+const roleLabel = (id, name) => own(builtinRoleNames, id) || name || id;
 const acceptanceLabels = { pass: '通过', pass_with_issues: '带问题通过', return: '退回修改', insufficient_evidence: '证据不足', needs_human: '需要人决定' };
 const shortId = value => value ? String(value).slice(0, 12) : '—';
 const mutedLine = text => element('p', text, 'muted');
@@ -145,6 +148,7 @@ confirmView.addEventListener('cancel', event => { if (confirmBusy) event.prevent
 confirmView.addEventListener('close', () => { if (!confirmView.open) settleConfirm?.(null); });
 const taskView = dialog('task-view', `<div class="view-head"><div class="title-group"><h2 id="task-title"></h2><span id="task-badges" class="actions"></span></div><div id="task-actions" class="actions"></div></div>
 <p id="task-error" class="view-error" role="alert"></p>
+<section id="task-next" class="task-next" aria-labelledby="task-next-heading" hidden><h3 id="task-next-heading">下一步</h3><p id="task-next-text" class="task-next-text"></p></section>
 <div id="task-picker" class="task-picker" hidden></div>
 <div id="task-layout" class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
 taskView.setAttribute('aria-labelledby', 'task-title');
@@ -152,7 +156,7 @@ taskView.setAttribute('aria-labelledby', 'task-title');
 let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null;
 async function openTask(id) {
   openTaskId = id; renderedLogs = new Set(); liveCommand = null; snapshotProgress = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
-  $('task-picker').hidden = true; $('task-layout').hidden = false;
+  $('task-picker').hidden = true; $('task-layout').hidden = false; $('task-next').hidden = true; $('task-next-text').textContent = '';
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
   if (!taskView.open) taskView.showModal();
@@ -162,7 +166,7 @@ function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   openTaskId = null; clearTimeout(taskTimer); $('timeline-command').hidden = true; $('timeline-live').hidden = true; notice('task-error');
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = `${label} · 选择任务`; $('task-actions').append(button('关闭', () => taskView.close()));
-  $('task-layout').hidden = true;
+  $('task-layout').hidden = true; $('task-next').hidden = true;
   const picker = $('task-picker'), list = element('div', '', 'task-choice-list'); picker.hidden = false; picker.replaceChildren();
   picker.append(element('p', tasks.length ? `当前筛选下有 ${tasks.length}${hasMore ? '+' : ''} 个关联任务，选择一个查看完整过程。` : '当前筛选下没有关联任务。', 'muted'));
   if (tasks.length) picker.append(list);
@@ -186,7 +190,7 @@ async function refreshTask() {
     const environment = await api('/api/environments/' + detail.task.repository_id).catch(() => null);
     const roles = roleRecords(roleView), purposes = await rolePurposes(id, roles);
     if (openTaskId !== id || !taskView.open) return;
-    renderTaskHeader(detail.task); renderTimeline(detail.task, logs); await refreshLive(detail.task); keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
+    renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes); renderTimeline(detail.task, logs); await refreshLive(detail.task); keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
   } catch (err) { if(openTaskId!==id||!taskView.open)return;if(!$('task-error').childElementCount)notice('task-error',err.message);taskTimer = setTimeout(refreshTask, 5000); }
 }
@@ -374,39 +378,59 @@ function step(log) {
   else { title.textContent = value.type === 'tool' ? '工具 ' + value.name : '记录'; add(element('pre', log.content, 'output')); }
   return item;
 }
-// Pages through a task route that returns `next_after` (oldest first), so the newest records are not cut off. A long
-// task stops at `pages` pages; whatever was read is still shown.
-async function pagedTaskRecords(path, key, pages = 10) {
-  let after = 0, first = null, rows = [];
-  for (let page = 0; page < pages; page++) {
-    const value = await api(`${path}${path.includes('?') ? '&' : '?'}limit=100&after=${after}`); first ||= value; rows = rows.concat(value[key] || []);
-    if (value.next_after == null) break; after = value.next_after;
+// Reads a task route that pages with `next_after` (oldest first) until the server says there is no more, so the newest
+// records (the delegation running now) are never cut off. If the cursor stops moving forward, reading stops and the
+// result is marked incomplete; callers must then not claim to know what is happening now.
+async function pagedTaskRecords(path, key, after = 0) {
+  let first = null, rows = [], complete = true;
+  for (;;) {
+    const value = await api(`${path}${path.includes('?') ? '&' : '?'}limit=100&after=${after}`), page = Array.isArray(value[key]) ? value[key] : [];
+    first ||= value; rows = rows.concat(page);
+    if (value.next_after == null) break;
+    if (!page.length || !(Number(value.next_after) > after)) { complete = false; break; }
+    after = Number(value.next_after);
   }
-  return first && { ...first, [key]: rows };
+  return first && { ...first, [key]: rows, complete };
 }
 const taskRoleView = id => pagedTaskRecords(`/api/tasks/${encodeURIComponent(id)}/roles`, 'assignments').catch(() => null);
-// A task's role records (GET /api/tasks/:id/roles), with each delegation's role read from its instance. Null when the
-// records cannot be read, so the page says so instead of guessing how the task ran.
+const runCaptions = { running: '进行中', completed: '已结束', succeeded: '已结束', fault: '中止', failed: '失败', interrupted: '中断', stopped: '已停止', cancelled: '已取消' };
+const stopReasons = { role_revision_checkpoint: '换到新 revision', engine_restart: '控制面重启', cancel_timeout: '取消超时' };
+const recoveryModes = { new_session: '新会话', checkpoint_transcript: '从检查点续接', native_resume: '原会话恢复', rebuilt_from_task_records: '按任务记录重建', fresh_evaluation: '全新验收' };
+// A task's role records (GET /api/tasks/:id/roles). Each delegation keeps the runs that actually executed it, with the
+// harness each run used: a role instance may be rebound to another harness later, which must not rewrite the past.
+// Null when the records cannot be read, so the page says so instead of guessing how the task ran.
 function roleRecords(value) {
   if (!value || !Array.isArray(value.instances)) return null;
-  const byInstance = new Map(value.instances.map(instance => [instance.id, instance]));
-  return { instances: value.instances, runs: Array.isArray(value.runs) ? value.runs : [], snapshots: value.snapshots || {},
-    assignments: (Array.isArray(value.assignments) ? value.assignments : []).map(a => ({ ...a, role: byInstance.get(a.instance_id)?.role, harness: byInstance.get(a.instance_id)?.harness })) };
+  const byInstance = new Map(value.instances.map(instance => [instance.id, instance])), runs = Array.isArray(value.runs) ? value.runs : [];
+  const snapshots = value.snapshots && typeof value.snapshots === 'object' ? value.snapshots : {}, snapshot = id => id && Object.hasOwn(snapshots, id) ? snapshots[id] : null;
+  return { instances: value.instances, runs, snapshot, complete: value.complete !== false,
+    assignments: (Array.isArray(value.assignments) ? value.assignments : []).map(a => {
+      const instance = byInstance.get(a.instance_id), mine = runs.filter(run => run.assignment_id === a.id);
+      // Before its first run a delegation can only name the harness its instance is bound to now.
+      const harnesses = mine.length ? mine.map(run => run.harness).filter(Boolean).filter((id, at, list) => id !== list[at - 1]) : [instance?.harness].filter(Boolean);
+      return { ...a, role: instance?.role, name: snapshot(instance?.snapshot_id)?.name || snapshot(mine.at(-1)?.role_snapshot)?.name, runs: mine, harnesses, harness: harnesses.at(-1) };
+    }) };
 }
-// The purpose the controller wrote for each delegation lives in its handoff event; it is read again only when the number
-// of delegations changes, not on every refresh of a running task.
-let handoffPurposes = { task: null, count: -1, purposes: {} };
+// The purpose the controller wrote for each delegation lives in its handoff event. Handoff events only accumulate, so
+// later refreshes read only the events after the last one read, and only while some delegation has not been matched.
+let handoffPurposes = { task: null, after: 0, purposes: {} };
 async function rolePurposes(id, roles) {
-  const count = roles?.assignments.length || 0;
-  if (!count) return {};
-  if (handoffPurposes.task === id && handoffPurposes.count === count) return handoffPurposes.purposes;
-  const page = await pagedTaskRecords(`/api/tasks/${encodeURIComponent(id)}/events?type=role_handoff&include_data=1`, 'events').catch(() => null);
-  const purposes = Object.fromEntries((page?.events || []).filter(event => event.data?.assignment_id && typeof event.data.purpose === 'string').map(event => [event.data.assignment_id, event.data.purpose]));
-  handoffPurposes = { task: id, count, purposes }; return purposes;
+  if (!roles?.assignments.length) return {};
+  if (handoffPurposes.task !== id) handoffPurposes = { task: id, after: 0, purposes: {} };
+  const cache = handoffPurposes;
+  if (roles.assignments.every(a => Object.hasOwn(cache.purposes, a.id))) return cache.purposes;
+  const page = await pagedTaskRecords(`/api/tasks/${encodeURIComponent(id)}/events?type=role_handoff&include_data=1`, 'events', cache.after).catch(() => null);
+  for (const event of page?.events || []) {
+    if (event.data?.assignment_id) cache.purposes[event.data.assignment_id] = typeof event.data.purpose === 'string' ? event.data.purpose : null;
+    if (Number(event.id) > cache.after) cache.after = Number(event.id);
+  }
+  return cache.purposes;
 }
 const controllerOf = roles => roles?.instances.find(instance => instance.role === 'manager') || null;
 // One sentence: who is doing what right now. Only recorded facts are used: the task's status and phase, its fault
-// cause, the delegation still running (with the purpose the controller handed over) and the next action it recorded.
+// cause, the runs and delegations still running (with the purpose the controller handed over) and the next action it
+// recorded. Independent QA counts as running when its run is: development and review start QA from inside their
+// executor without changing the task's phase.
 function taskNextStep(task, record, roles, purposes = {}) {
   const caption = (states[task.status] || [task.status])[0], cause = task.error_cause, next = record?.progress?.next_action;
   if (['succeeded', 'completed', 'pr_opened'].includes(task.status)) return `${caption}：独立 QA 验收通过后按原规则交付，没有下一步。`;
@@ -417,13 +441,22 @@ function taskNextStep(task, record, roles, purposes = {}) {
   if (task.status.startsWith('waiting_') || ['retry_wait', 'needs_replan', 'paused'].includes(task.status))
     return `已暂停（${caption}）` + (cause ? `：${cause.label}。${cause.action}` : task.error_code ? `：${task.error_code}。` : '。');
   if (task.status === 'publishing' || task.phase === 'publish') return '控制面正在把验收通过的结果发布到 GitHub。';
-  if (task.phase === 'acceptance') return `独立 QA 正在新的上下文里验收候选 ${shortId(record?.candidate?.id)}。`;
+  if (task.phase === 'acceptance' || roles?.runs.some(run => run.role === 'qa' && run.status === 'running')) return `独立 QA 正在新的上下文里验收候选 ${shortId(record?.candidate?.id)}。`;
   const working = roles?.assignments.filter(a => a.status === 'running' && !['manager', 'qa'].includes(a.role)).at(-1);
-  if (working) return `${roleLabel(working.role)}（${harnessName(working.harness)}）正在做主控交给它的工作` + (purposes[working.id] ? `：${purposes[working.id]}` : '。');
-  if (controllerOf(roles)) return '主控 Manager 正在读任务记录，决定下一步委派谁' + (next ? `；它记下的下一步：${next}` : '。');
+  if (working) return `${roleLabel(working.role, working.name)}（${harnessName(working.harness)}）正在做主控交给它的工作` + (purposes[working.id] ? `：${clipText(purposes[working.id], 160)}` : '。');
   if (task.phase === 'prepare') return '控制面正在准备工作区：拉取固定提交，写入项目电脑。';
   if (task.phase === 'validate') return '控制面正在项目电脑里运行仓库测试。';
+  // Without every record, or without any, the page cannot tell who is at work, and does not pretend to.
+  if (!roles) return `正在执行（${phaseLabels[task.phase] || task.phase || '阶段未知'}）；读不到角色记录，说不清是原来的执行器还是主控在处理。`;
+  if (!roles.complete) return `委派记录没有读完（已读 ${roles.assignments.length} 条），现在说不清是谁在处理。`;
+  if (controllerOf(roles)) return '主控 Manager 正在读任务记录，决定下一步委派谁' + (next ? `；它记下的下一步：${next}` : '。');
   return '执行器（项目电脑里的 Pi 进程）正在处理' + (next ? `：${next}` : '。');
+}
+// The next step is the first thing under the title, above the timeline and the side panel on every screen width.
+function renderTaskNext(task, roles, purposes) {
+  const text = taskNextStep(task, task.structured, roles, purposes), line = $('task-next-text');
+  if (line.textContent !== text) line.textContent = text;
+  $('task-next').hidden = false;
 }
 const evidenceSource = source => source === 'policy_validation' ? '项目测试命令' : /^task_history:\d+$/.test(source) ? '任务记录 #' + source.slice(13) : source;
 // Goal, candidate, evidence, acceptance and publication, each read from the task's own record. A part that has not
@@ -449,7 +482,7 @@ function taskFactsCard(task, record, publications) {
   const verdict = record.pending || record.acceptance;
   if (!verdict) part('验收', badge(candidate ? '等待验收' : '还没有'), mutedLine(candidate ? '独立 QA 会在新的上下文里验收这个候选，执行方和主控都不能代替它。' : '有候选后，由独立 QA 在新的上下文里验收。'));
   else {
-    const outcome = acceptanceLabels[verdict.outcome] || verdict.outcome, passing = ['pass', 'pass_with_issues'].includes(verdict.outcome);
+    const outcome = own(acceptanceLabels, verdict.outcome) || verdict.outcome, passing = ['pass', 'pass_with_issues'].includes(verdict.outcome);
     part('验收', badge(record.pending ? outcome + '（待发布确认）' : outcome, passing ? 'success' : 'warning'),
       facts([['验收的候选', shortId(verdict.candidate_id) + (candidate && verdict.candidate_id !== candidate.id ? '（不是当前候选）' : '')], ['结论', verdict.reason],
         ['还缺', verdict.gaps?.length ? list(verdict.gaps) : null], ['遗留项', verdict.residuals?.length ? list(verdict.residuals.map(r => `${r.key} · ${r.description}`)) : null]]));
@@ -472,32 +505,35 @@ function taskExecutionCard(record, roles, purposes) {
   section.classList.add('task-execution');
   if (!roles) section.append(mutedLine('读不到这个任务的角色记录。'));
   else if (controller) {
-    const legacy = roles.snapshots[controller.snapshot_id]?.legacy;
+    const legacy = roles.snapshot(controller.snapshot_id)?.legacy;
     section.append(element('p', `角色协调：主控 Manager（${harnessName(controller.harness)}${legacy ? '，旧配置沿用' : ''}）按需委派工作，候选由它提名后交给独立 QA。`));
   } else section.append(element('p', '原来的执行器：这个任务没有经过主控，由工作流在项目电脑里的 Pi 进程直接执行。'));
   if (roles) section.append(facts([['独立 QA', qaRuns ? `运行过 ${qaRuns} 次，每次都是新的上下文` : record?.candidate ? '等待验收' : '有候选后验收']]));
-  // The delegations in the order they were recorded. A stage timeline, once the server keeps one per task, belongs in
-  // this list too; until then nothing here is inferred from the workflow's flowchart or the role configuration.
+  // The delegations in the order they were recorded, each with the harness of every run that executed it. A stage
+  // timeline, once the server keeps one per task, belongs in this list too; until then nothing here is inferred from the
+  // workflow's flowchart or the role configuration.
   const work = (roles?.assignments || []).filter(a => !['manager', 'qa'].includes(a.role));
   if (work.length) {
     const list = element('ol', '', 'role-work');
     for (const a of work) {
-      const item = element('li', ''), head = element('div', '', 'role-work-head'), [caption, tone] = { running: ['进行中', 'info'], completed: ['已交回', 'success'], failed: ['失败', 'danger'] }[a.status] || [a.status, ''];
-      head.append(element('strong', roleLabel(a.role)), element('span', harnessName(a.harness), 'muted'), badge(caption, tone));
+      const item = element('li', ''), head = element('div', '', 'role-work-head'), [caption, tone] = own({ running: ['进行中', 'info'], completed: ['已交回', 'success'], failed: ['失败', 'danger'] }, a.status) || [a.status, ''];
+      head.append(element('strong', roleLabel(a.role, a.name)), element('span', a.harnesses.map(harnessName).join(' → ') || '—', 'muted'), badge(caption, tone));
       item.append(head); if (purposes[a.id]) item.append(element('p', purposes[a.id]));
       if (a.candidate_version) item.append(element('p', '看的是候选版本 ' + shortId(a.candidate_version), 'muted'));
+      // A delegation that ran more than once (recovery, a new revision) shows each run, oldest first.
+      if (a.runs.length > 1) item.append(mutedLine(`执行了 ${a.runs.length} 次：` + a.runs.map((run, at) => `第 ${at + 1} 次 ${harnessName(run.harness)}`
+        + (at && own(recoveryModes, run.recovery_mode) ? '，' + own(recoveryModes, run.recovery_mode) : '') + '，' + (own(runCaptions, run.status) || run.status)
+        + (run.stop_reason ? `（${own(stopReasons, run.stop_reason) || run.stop_reason}）` : '')).join('；') + '。'));
       list.append(item);
     }
     section.append(element('h4', '委派记录'), list, mutedLine('按实际记录的先后列出。这不是预设流程，也不授予权限：委派谁由主控按任务决定，写入只来自工作流设置。'));
-  } else if (controller) section.append(mutedLine('主控还没有委派工作。'));
+  } else if (controller && roles.complete) section.append(mutedLine('主控还没有委派工作。'));
+  if (roles && !roles.complete) section.append(element('p', `委派记录没有读完：服务端的分页游标没有前进，这里只列出已读到的 ${roles.assignments.length} 条。`, 'endpoint-warning'));
   return section;
 }
 function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
-  // The sentence a reader looks for first: who is doing what now.
-  const next = element('section', '', 'side-card task-next'); next.setAttribute('aria-label', '下一步');
-  next.append(element('h3', '下一步'), element('p', taskNextStep(task, record, roles, purposes), 'task-next-text')); side.append(next);
   if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(record, roles, purposes));
   const info = card('任务');
   info.append(facts([['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
