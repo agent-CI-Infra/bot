@@ -20,10 +20,13 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
       const picker = page.getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');
       for (const backend of ['pi', 'native', 'process', 'acp']) await expect(picker.locator(`option[value="${backend}"]`)).toBeEnabled();
-      const claude = picker.locator('option[value="claude_code"]');
-      if (['coordinator', 'manager'].includes(role)) await expect(claude).toBeDisabled();
-      else await expect(claude).toBeEnabled();
-      for (const backend of ['codex', 'opencode']) await expect(picker.locator(`option[value="${backend}"]`)).toBeDisabled();
+      // Claude Code and Codex App Server are worker-only backends.
+      for (const backend of ['claude_code', 'codex']) {
+        const worker = picker.locator(`option[value="${backend}"]`);
+        if (['coordinator', 'manager'].includes(role)) await expect(worker).toBeDisabled();
+        else await expect(worker).toBeEnabled();
+      }
+      await expect(picker.locator('option[value="opencode"]')).toBeDisabled();
     }
     await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('native');
     await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('acp');
@@ -42,7 +45,7 @@ test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，�
     const catalog = page.getByText('Agent 后端：', { exact: false });
     await expect(catalog).toContainText('Claude Code（claude_code@2.1.319）');
     await expect(catalog).not.toContainText('Claude Code（驱动待接入');
-    await expect(catalog).toContainText('Codex（驱动待接入，#171）');
+    await expect(catalog).toContainText('Codex（codex@1）');
     await expect(catalog).toContainText('OpenCode（驱动待接入，#172）');
     mkdirSync('.tmp/agent-backends', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 });

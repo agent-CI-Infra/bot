@@ -96,7 +96,7 @@ function assignmentScope(s:Store,task:Row,instance:Row,assignment?:string){
  const candidate=s.get('SELECT candidate FROM task_records WHERE task_id=?',task.id)?.candidate,id=candidate?String(JSON.parse(String(candidate)).id??'none').slice(0,16):'none';
  return `entry:${instance.id}:${Number(task.attempt??1)}:${id}`;
 }
-const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={session_bound:['session_bound','progress'],message:['message','progress'],tool:['tool_call','observation'],artifact:['artifact','artifact'],permission:['permission','denied'],configuration:['configuration','progress']};
+const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={session_bound:['session_bound','progress'],message:['message','progress'],tool:['tool_call','observation'],artifact:['artifact','artifact'],permission:['permission','denied'],configuration:['configuration','progress'],turn:['turn','progress'],usage:['usage','budget']};
 
 async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
  const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=taskWorkflow(task as any),{resolved,continuation}=state;let instance=state.instance;
@@ -199,7 +199,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // Public harness events also enter the run's normalized stream; session_bound settles a pending recovery mode.
   wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=harnessEventType[event.type];if(!b||!mapped)return;
    if(event.type==='session_bound'&&b.ctx.resume_from_run_id){const mode=protocolRecovery(String(event.recoveryMode))??(['new_session','fresh_evaluation'].includes(String(event.recoveryMode))?'rebuilt_from_task_records':null);if(mode)s.run('UPDATE task_runs SET protocol_recovery=? WHERE id=?',mode,b.run_id);}
-   appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:mapped[0],category:mapped[1],data:{harness_event:event.type,...Object.fromEntries(Object.entries(event).filter(([k])=>k!=='type'))}});};
+   // A permission the agent was granted is progress; only refused ones are denials.
+   appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:mapped[0],category:event.type==='permission'&&event.allowed===true?'progress':mapped[1],data:{harness_event:event.type,...Object.fromEntries(Object.entries(event).filter(([k])=>k!=='type'))}});};
   // Binding a new task_runs row: the scheduler's lease epoch, the RunContext, the recovery plan and a capability token.
   const bind=(runId:string)=>{
    // prepare/start may overlap before either run binds. Recheck after this run row exists, with no await before lease allocation.

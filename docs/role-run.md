@@ -32,11 +32,11 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 - 同一 scope 的新 run 接管租约，旧 run 的令牌立即撤销；旧 run 之后的工具调用、事件、检查点和结果都以 `lease_epoch_stale` 拒绝，它的失败也不会改动 assignment 状态。
 - 网络断开后用 `events(handle, cursor)` 续读仍是原 run；重新执行或恢复才新建 run 和 epoch。
 - 运行令牌 `rrt_…` 只存哈希，绑定 tenant、project、task、run、epoch 和能力列表（`gateway:<tool>` 等）。默认 15 分钟有效，控制面持有该 run 时每分钟续期，崩溃后自然过期；结束、取消、预算耗尽或被接管时撤销。跨项目/任务/运行复用、过期、撤销、旧租约和伪造均被拒绝。令牌进入运行的脱敏器，trace 再按形状脱敏。
-- Process worker 在每次工具 RPC 上出示令牌；ACP 的 MCP loopback 地址路径就是该令牌，每个请求都复核，失效返回 401；运行自身的 guard 发现令牌失效即以 `run_token_revoked` 停止。
+- Process worker 在每次工具 RPC 上出示令牌；ACP 与 Codex 的 MCP loopback 地址路径就是该令牌，每个请求都复核，失效返回 401；运行自身的 guard 发现令牌失效即以 `run_token_revoked` 停止。
 
 ### 事件
 
-`role_run_events` 是每个 run 的序号索引，事件正文在 `task_history`（`role_run_event`）。事件含 `run_id`、`seq`、`lease_epoch`、`type`、`category`、`operation_id`、`source_version`。内置事件有 `run_started`、`tool_call`/`tool_result`（同一 operation id）、Harness 公共事件的映射（`session_bound`、`message`、`artifact`、`permission`、`configuration`）、`checkpoint`、`budget`、`cancel_requested`、`ended`。相同序号且内容相同记为重复确认；序号回退、跳号、同号不同内容、同一操作重复、结束后迟到、旧 epoch 均拒绝，并记录 `role_run_event_rejected`。
+`role_run_events` 是每个 run 的序号索引，事件正文在 `task_history`（`role_run_event`）。事件含 `run_id`、`seq`、`lease_epoch`、`type`、`category`、`operation_id`、`source_version`。内置事件有 `run_started`、`tool_call`/`tool_result`（同一 operation id）、Harness 公共事件的映射（`session_bound`、`message`、`artifact`、`permission`、`configuration`，以及外部执行器上报的 `turn` 生命周期和 `usage`）、`checkpoint`、`budget`、`cancel_requested`、`ended`。相同序号且内容相同记为重复确认；序号回退、跳号、同号不同内容、同一操作重复、结束后迟到、旧 epoch 均拒绝，并记录 `role_run_event_rejected`。
 
 ## TaskToolGateway
 
@@ -49,7 +49,7 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 | `search_knowledge` / `read_knowledge` | `search_project_memory` / `read_project_memory` | 复用 ProjectMemory；其他角色的作用域记忆读作不存在 |
 | `propose_experience` | `remember_project_memory` | 带本角色可见的证据引用，写入未验证经验；同一 `request_id` 在整个委派内不重复写入 |
 
-引用不是读取全部内容的通行证：其他任务、其他 role instance 的模型交换（`model_requests:`）、run 快照（`task_runs:`）和角色输入、其他角色的作用域记忆，与猜测的 ID 一样返回 `task_record_not_found`/`knowledge_not_found`，不泄露是否存在。网关没有 SQL、shell、发布、合并或配置工具；调用、拒绝（`capability_denied`，`transport: gateway`）和实际读取版本进入 trace（`gateway_call`）。现有驱动都通过网关展开 `read_task_record`：Native 在进程内调用，Process 经 JSON-line RPC，ACP 经 MCP，Pi 经项目电脑 mailbox；`gateway.mcp(token, message)` 提供同一组工具的 MCP JSON-RPC 处理，供后续 CLI 适配器使用。GitHub 写入仍只由控制面 Publisher 执行。
+引用不是读取全部内容的通行证：其他任务、其他 role instance 的模型交换（`model_requests:`）、run 快照（`task_runs:`）和角色输入、其他角色的作用域记忆，与猜测的 ID 一样返回 `task_record_not_found`/`knowledge_not_found`，不泄露是否存在。网关没有 SQL、shell、发布、合并或配置工具；调用、拒绝（`capability_denied`，`transport: gateway`）和实际读取版本进入 trace（`gateway_call`）。现有驱动都通过网关展开 `read_task_record`：Native 在进程内调用，Process 经 JSON-line RPC，ACP 与 Codex 经 MCP，Pi 经项目电脑 mailbox；`gateway.mcp(token, message)` 提供同一组工具的 MCP JSON-RPC 处理，供后续 CLI 适配器使用。GitHub 写入仍只由控制面 Publisher 执行。
 
 ## 准入
 
@@ -63,7 +63,7 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 | `fresh_context` | QA | 驱动声明，且本次没有会话与外部状态 |
 | `run_isolation` | 选了隔离环境 profile 的角色 | 驱动声明 `isolation: run_environment`，且控制面复核了这个容器的检查结果 |
 
-内置驱动的声明见 `src/roles/harness.ts`：Native/Pi/Process/Claude Code 为 `control_plane_tools`，ACP 为 `task_tools`；全部 `isolation: none`。它们是兼容后端，注册成功不代表满足隔离；选隔离 profile 时在创建任何环境之前就被拒绝。`registerRoleHarness` 只接受协议词汇的 `capabilities`，未声明即不支持，因此未声明的扩展驱动不能用于任何正式阶段。
+内置驱动的声明见 `src/roles/harness.ts`：Native/Pi/Process/Claude Code 为 `control_plane_tools`，ACP 与 Codex 为 `task_tools`；全部 `isolation: none`。它们是兼容后端，注册成功不代表满足隔离；选隔离 profile 时在创建任何环境之前就被拒绝。`registerRoleHarness` 只接受协议词汇的 `capabilities`，未声明即不支持，因此未声明的扩展驱动不能用于任何正式阶段。
 
 ## 每次运行的隔离环境
 
@@ -88,7 +88,7 @@ recover 只返回四种模式：`native_resume`、`checkpoint_restore`（Native/
 `entry-default` 保持入口自身的单次运行上限；`bounded` 沿用 #167 的语义，只压低每次运行的上限。新的 `metered` 按角色实例（任务里的这个角色）累计它的全部运行：恢复、检查点续接、引擎自动重启的新尝试、人工「重试」、后续委派和子代理都算，所以自动重启和重试都不会重开预算。RunContext 的 `budget.accounting` 写明 `per_run` 或 `role_instance`。预算只作用于角色运行，主控不接管的入口仍按入口自身上限执行：
 
 - `metered` 可设 `max_turns`、`max_output_tokens`、`max_total_tokens`、`max_model_requests`、`max_tool_calls`、`max_wall_seconds`、`max_cost`（`{amount, currency}`）。
-- 用量来自模型请求账本：缺少 token 数的请求计入 `unknown_requests`，此时已知用量只是下限（`semantics: lower_bound`），不记为 0；缓存输入是输入的一部分，不重复相加；金额是价格快照的估算，不是供应商账单，存在测量延迟与有限超额。
+- 用量来自模型请求账本，加上 Codex 这类自带模型的执行器上报的用量（每条 `usage` 增量算一次未定价请求，没有任何上报的 turn 算 unknown）：缺少 token 数的请求计入 `unknown_requests`，此时已知用量只是下限（`semantics: lower_bound`），不记为 0；缓存输入是输入的一部分，不重复相加；金额是价格快照的估算，不是供应商账单，存在测量延迟与有限超额。
 - 请求数、工具调用数和墙钟时间由控制面确定执行；墙钟计时器即使在工具调用中也会中断会话。
 - 耗尽时记录预算事件和检查点、撤销令牌、取消运行（`role_budget_exhausted`，等待配置），已有产物保留；该角色之后的运行在启动前即被拒绝，直到提高预算，不换模型重开预算。已开始的任务固定了启动时的角色配置：提高预算后用 `POST /api/tasks/:id/roles/apply` 把新 revision 应用到该角色，任务随引擎的等待配置轮询继续，也可以重试。
 

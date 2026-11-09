@@ -13,6 +13,7 @@ import { traceEvent } from '../tasks/trace.js';
 import { piAdapter,piRuntime } from '../agent/pi.js';
 import type { RoleKind } from './catalog.js';
 import type { HarnessCapabilities } from './protocol.js';
+import { codexAppServer } from '../harness/app-server.js';
 /** The worker cannot access provider credentials or obtain arbitrary tools. */
 export function processHarness<T>(spec:AgentSpec<T>){return async(services:AgentServices):Promise<T>=>new Promise((resolve,reject)=>{
  const runId=spec.task.trace_run_id;
@@ -63,7 +64,7 @@ export interface RoleHarnessMetadata {id:string;version:string;session:string;ev
  capabilities?:HarnessCapabilities}
 const openai=['openai-chat-completions'];
 // None of the built-in drivers runs its agent inside a per-run environment: Native and Pi loops and the Process worker
-// run on the control plane or the shared project computer, and an ACP agent runs on the control-plane host. Their
+// run on the control plane or the shared project computer, and an ACP or Codex agent runs on the control-plane host. Their
 // registration therefore never claims run isolation; admission refuses them for profiles that require it.
 const inProcess:HarnessCapabilities={raw_evidence:'control_plane_tools',cancel:'abort_signal',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['checkpoint_restore','rebuilt_from_task_records']};
 export const harnesses:Required<RoleHarnessMetadata>[]=[
@@ -73,6 +74,10 @@ export const harnesses:Required<RoleHarnessMetadata>[]=[
  // are observed by the control plane; the agent's own terminal and tools are not.
  {id:'acp',version:'1',session:'external_session',events:'acp_events_and_task_tools',kinds:['controller','writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:null,externalModel:true,
   capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
+ // The same client speaking `codex app-server` (BOT_CODEX_CONFIG), locked to one CLI version. Its thread events, permission
+ // answers and usage are structured; the agent still runs on the control-plane host with its own sandbox, so no isolation.
+ {id:'codex',version:'1',session:'external_session',events:'codex_app_server_events_and_task_tools',kinds:['writer','observer','evaluator'],model_api:[],tool_calls:true,structured_output:['tool_call'],environment:'control_plane',runtime:{package:'@openai/codex',version:codexAppServer.cli},externalModel:true,
+  capabilities:{raw_evidence:'task_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}},
  {id:'native',version:'1',session:'checkpoint_transcript',events:'tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:inProcess},
  // A Node child process without an OS sandbox; its tool calls carry the run token over JSON-line RPC.
  {id:'process',version:'1',session:'checkpoint_transcript',events:'rpc_tool_observations',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call','text_json'],environment:'control_plane',runtime:null,externalModel:false,capabilities:{...inProcess,cancel:'protocol_then_kill'}},
@@ -80,7 +85,7 @@ export const harnesses:Required<RoleHarnessMetadata>[]=[
  {id:'pi',version:piRuntime.version,session:'native_resume',events:'pi_session_events',kinds:['controller','writer','observer','evaluator'],model_api:openai,tool_calls:true,structured_output:['tool_call'],environment:'workspace',runtime:{package:piRuntime.package,version:piRuntime.version},externalModel:false,
   capabilities:{raw_evidence:'control_plane_tools',cancel:'protocol_then_kill',isolation:'none',version_binding:true,output_validation:true,fresh_context:true,recovery:['native_resume','rebuilt_from_task_records']}}];
 type AdapterFactory=<T>(spec:AgentSpec<T>)=>NonNullable<AgentSpec<T>['adapter']>;
-const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',acpHarness],['claude_code',claudeCodeHarness],['pi',piHarness]]);
+const adapters=new Map<string,AdapterFactory|undefined>([['native',undefined],['process',processHarness],['acp',spec=>acpHarness(spec)],['codex',spec=>acpHarness(spec,'codex-app-server')],['claude_code',claudeCodeHarness],['pi',piHarness]]);
 /** Extensions are registered by trusted integration code, never by task text or a model tool. */
 export function registerRoleHarness(metadata:RoleHarnessMetadata,factory:AdapterFactory){
  if(!/^[a-z][a-z0-9_-]{0,31}$/.test(metadata.id)||!metadata.version||!['checkpoint_transcript','task_records','native_resume','external_session'].includes(metadata.session)||!metadata.events||adapters.has(metadata.id)||typeof factory!=='function')throw new Error('invalid_or_duplicate_role_harness');

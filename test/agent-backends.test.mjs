@@ -72,7 +72,12 @@ test('new roles default to Pi; general backends preserve role authority and Clau
   const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
   assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
   for (const role of ['coordinator', 'manager']) assert.throws(() => f.put({ roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }), { code: 'harness_role_unsupported' });
-  for (const backend of ['codex', 'opencode']) {
+  // Codex App Server (#171) is a registered worker backend like Claude Code.
+  const codex = f.view().backends.find(b => b.id === 'codex');
+  assert.deepEqual([codex.available, codex.kinds, codex.model_source, codex.integration_issue], [true, ['writer', 'observer', 'evaluator'], 'external_harness', 171]);
+  assert.equal(f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'codex' } }] }).roles.find(r => r.role_id === 'dev').harness_ref.id, 'codex');
+  for (const role of ['coordinator', 'manager']) assert.throws(() => f.put({ roles: [{ role_id: role, harness_ref: { id: 'codex' } }] }), { code: 'harness_role_unsupported' });
+  for (const backend of ['opencode']) {
     const view = f.view(), entry = view.backends.find(b => b.id === backend);
     assert.equal(entry.available, false); assert.ok(entry.integration_issue);
     assert.throws(() => f.put({ roles: [{ role_id: 'dev', harness_ref: { id: backend } }] }), e => e.code === 'agent_backend_unavailable' && e.field === 'roles.dev.harness_ref.id');
