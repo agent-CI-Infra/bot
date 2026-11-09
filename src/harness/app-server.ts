@@ -72,7 +72,7 @@ const usageOf=(b:any):Usage=>({input:b.inputTokens,cached:b.cachedInputTokens,ou
  * chunk boundary, including inside a multi-byte character. Requests are correlated by numeric id; an answer to an unknown or
  * already answered id is an anomaly, not a result. A broken line or a closed stream fails every pending request. */
 export class LineRpc{
- private pending=new Map<number,{method:string;resolve:(v:any)=>void;reject:(e:unknown)=>void}>();private next=1;private buffer='';private decoder=new StringDecoder('utf8');
+ private pending=new Map<number,{method:string;resolve:(v:any)=>void;reject:(e:unknown)=>void;accept?:(result:any)=>any}>();private next=1;private buffer='';private decoder=new StringDecoder('utf8');
  failure:Error|null=null;
  constructor(private write:(line:string)=>void,private handlers:{notification:(method:string,params:any)=>void;request:(id:number|string,method:string,params:any)=>void;anomaly:(kind:string,detail:Record<string,unknown>)=>void;failed:(error:Error)=>void},private maxLine=16*1024*1024){}
  feed(chunk:Buffer|string){
@@ -90,14 +90,18 @@ export class LineRpc{
     const p=typeof m.id==='number'?this.pending.get(m.id):undefined;
     if(!p){this.handlers.anomaly('unexpected_response',{id:String(m.id)});return;}
     this.pending.delete(m.id);
-    if(m.error)p.reject(new RpcError(p.method,Number(m.error?.code??0),String(m.error?.message??'error')));else p.resolve(m.result);return;
+    if(m.error){p.reject(new RpcError(p.method,Number(m.error?.code??0),String(m.error?.message??'error')));return;}
+    // accept runs now, before the following lines of the same chunk; the awaiting caller only resumes after this feed.
+    let value:any;try{value=p.accept?p.accept(m.result):m.result;}catch(error){p.reject(error);throw error;}
+    p.resolve(value);return;
    }
    this.handlers.anomaly('unclassified_message',{});
   }catch(error){this.fail(error as Error);}
  }
- request(method:string,params:unknown):Promise<any>{
+ /** accept, when given, handles the result synchronously at the moment its line is read and its value resolves the request. */
+ request(method:string,params:unknown,accept?:(result:any)=>any):Promise<any>{
   if(this.failure)return Promise.reject(this.failure);
-  const n=this.next++;return new Promise((resolve,reject)=>{this.pending.set(n,{method,resolve,reject});this.write(JSON.stringify({id:n,method,params}));});
+  const n=this.next++;return new Promise((resolve,reject)=>{this.pending.set(n,{method,resolve,reject,accept});this.write(JSON.stringify({id:n,method,params}));});
  }
  notify(method:string,params?:unknown){if(!this.failure)this.write(JSON.stringify(params===undefined?{method}:{method,params}));}
  respond(n:number|string,result:unknown){if(!this.failure)this.write(JSON.stringify({id:n,result}));}
@@ -172,8 +176,8 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  //   so a late notification of that turn is never taken for the turn a new start began.
  let lastTurn:{id:string|null;status:string|null}={id:null,status:null},knownTurn:string|null=null;
  const persist=(turn:typeof lastTurn,known:string|null=knownTurn)=>{lastTurn=turn;knownTurn=known;ctx.save({lastTurnId:turn.id,lastTurnStatus:turn.status,knownTurnId:known});};
- // id: the turn named by the start answer; only its terminal ends this start. hint: a turn id seen before the answer is
- // handled (same chunk, or an answer that never comes), only a guess: hintStarted when a turn/started named it.
+ // id: the turn named by the start answer, bound the moment that answer is read; only its terminal ends this start. hint: a
+ // turn id seen before any answer arrived (it may never come), only a guess: hintStarted when a turn/started named it.
  // previous: the turn known before this start, whose late notifications must not set the hint.
  type Waiter={id:string|null;hint:string|null;hintStarted:boolean;previous:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;usage:boolean};
  let current:Waiter|null=null,rerouted:{from:string;to:string}|null=null;
@@ -377,11 +381,20 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    const waiter:Waiter={id:null,hint:null,hintStarted:false,previous:knownTurn,done:false,usage:false,resolve:()=>{},reject:()=>{}};
    const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=ok;waiter.reject=fail;});
    terminal.catch(()=>{});current=waiter;
-   let answer:any;
    const before={turn:lastTurn,known:knownTurn};
    // Before asking, the binding records that a turn may begin: the server can start it and never answer.
    persist({id:null,status:'startRequested'});
-   try{answer=await rpc.request('turn/start',{threadId,input:[{type:'text',text:prompt}]});}
+   // The answer is taken the moment its line is read: later lines of the same chunk (late notifications of older turns, an
+   // item that stops the run) already see this start bound to its turn, and a cancel they trigger interrupts that turn.
+   const accept=(result:any)=>{
+    const started=check.turn(result?.turn,'turn/start.result.turn');
+    // The answer settles which turn this start began; a different hint was a late turn and is dropped from the binding.
+    if(waiter.hint&&waiter.hint!==started.id)anomaly('hint_not_started_turn',{method:'turn/start'});
+    waiter.id=started.id;persist({id:started.id,status:'inProgress'},started.id);emit({type:'turn',phase:'started',threadId,turnId:started.id});
+    const known=early.get(started.id);if(known){early.delete(started.id);waiter.done=true;waiter.resolve(known);}
+    return started;
+   };
+   try{await rpc.request('turn/start',{threadId,input:[{type:'text',text:prompt}]},accept);}
    catch(error){
     // An explicit refusal started nothing: the binding is exactly what it was before. Otherwise the turn may have run: a turn
     // id its notifications carried is already persisted as an unconfirmed turn, and without one the binding keeps "start
@@ -394,11 +407,6 @@ export function appServerDialect(ctx:DialectContext):Dialect{
     }
     throw error;
    }
-   const started=check.turn(answer?.turn,'turn/start.result.turn');
-   // The answer settles which turn this start began; a different hint was a late turn and is dropped from the binding.
-   if(waiter.hint&&waiter.hint!==started.id)anomaly('hint_not_started_turn',{method:'turn/start'});
-   waiter.id=started.id;persist({id:started.id,status:'inProgress'},started.id);emit({type:'turn',phase:'started',threadId,turnId:started.id});
-   const known=early.get(started.id);if(known){early.delete(started.id);waiter.done=true;waiter.resolve(known);}
    // Only the terminal notification ends a turn; the start answer does not, and a stream that ends first fails the turn.
    const turn=await terminal;
    persist({id:turn.id,status:turn.status},turn.id);
