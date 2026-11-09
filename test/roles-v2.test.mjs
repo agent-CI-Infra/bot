@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { workspace as runnerWorkspace } from '../runner/workspace.mjs';
 import { Store } from '../dist/storage/database.js';
 import { TaskRecords } from '../dist/tasks/service.js';
-import { runRole } from '../dist/roles/run.js';
+import { runRole, roleInstance } from '../dist/roles/run.js';
 import { runTeam } from '../dist/roles/team.js';
 import { roleApi } from '../dist/roles/api.js';
 import { resolveRole } from '../dist/roles/definition.js';
@@ -306,6 +309,112 @@ test('a review entry honors Native worker and Manager selections instead of forc
   assert.equal((await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, 'Native review.');
   assert.deepEqual(f.s.all("SELECT role,harness FROM task_runs WHERE task_id='native-review' ORDER BY rowid").map(r => [r.role, r.harness]), [['manager', 'native'], ['dev', 'native']]);
   assert.ok(f.requests.some(body => JSON.stringify(body.messages).includes('review_repository_write_forbidden')));
+});
+
+for (const kind of ['review.pr', 'actions.failures']) test(`Native ${kind} writes notes through the runner and returns tool errors without faulting`, async t => {
+  const finish = { summary: 'Notes saved safely.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
+  const steps = [
+    ['write_file', { path: '../notes/review-notes.md', content: 'Review notes.' }],
+    ['write_file', { path: '../notes/../src/x', content: 'escape' }],
+    ['write_file', { path: 'source.ts', content: 'unapproved edit' }],
+    // Missing token service throws TaskError inside the entry callback, rather than returning a runner error.
+    ['github_read_token', {}]
+  ], script = controllerScript();
+  const f = await fixture(t, body => {
+    if (isController(body)) return script(body);
+    const step = steps[results(body.messages).length];
+    return step ? call(...step) : call(kind === 'review.pr' ? 'finish_review' : 'finish_analysis', finish);
+  });
+  f.put({ controller: { entries: { review: true, actions: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] });
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('notes','r',?,'running','notes','{}',1,1)", kind);
+  await mkdir('.tmp', { recursive: true }); const root = await mkdtemp(resolve('.tmp/native-entry-notes-')), requests = [];
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = { async call(_method, _path, input) {
+    requests.push(input.request);
+    try { return { ok: true, result: await runnerWorkspace(input.request, join(root, 'tasks'), join(root, 'git'), join(root, 'notes')) }; }
+    catch (error) { return { ok: false, error: error.message }; }
+  } };
+  const task = { ...f.s.get("SELECT * FROM tasks WHERE id='notes'"), workspace_id: 'b'.repeat(48) };
+  await runnerWorkspace({ type: 'workspace_init', workspace_id: task.workspace_id }, join(root, 'tasks'), join(root, 'git'), join(root, 'notes'));
+  const workspace = new Workspace(f.s, manager, task, f.spec.redactor, async () => {}, () => {});
+  assert.equal((await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, finish.summary);
+  const observed = results(f.requests.filter(body => !isController(body)).at(-1).messages);
+  assert.deepEqual(observed, [{ written: true }, { error: 'invalid_note_name' }, { error: 'review_repository_write_forbidden' }, { error: 'github_read_token_unavailable' }]);
+  assert.equal(await readFile(join(root, 'notes/review-notes.md'), 'utf8'), 'Review notes.');
+  assert.deepEqual(requests.map(({ type, path, offset, final, mode }) => ({ type, path, offset, final, mode })), [
+    { type: 'workspace_write', path: '../notes/review-notes.md', offset: 0, final: true, mode: '100644' },
+    { type: 'workspace_write', path: '../notes/../src/x', offset: 0, final: true, mode: '100644' }
+  ]);
+  assert.deepEqual(f.s.all("SELECT role,harness,status FROM task_runs WHERE task_id='notes' ORDER BY rowid").map(r => [r.role, r.harness, r.status]), [['manager', 'native', 'succeeded'], ['dev', 'native', 'succeeded']]);
+  await assert.rejects(readFile(join(root, 'src/x')), { code: 'ENOENT' });
+});
+
+/** Install the pre-#199 V2 shape directly, without saving it through the new normalizer. */
+function installOldV2(f) {
+  const config = roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration;
+  delete config.legacy;
+  config.revision = 1; config.enabled = true;
+  config.controller.entries = { development: true, request: true, review: true, actions: true };
+  for (const role of config.roles) {
+    role.revision = 1;
+    const harness = harnesses.find(h => h.id === (role.role_id === 'manager' ? 'pi' : 'native'));
+    role.harness_ref = { id: harness.id, version: harness.version };
+  }
+  const raw = JSON.stringify(config);
+  f.s.run('INSERT INTO settings VALUES(?,?)', 'roles:r', raw);
+  f.s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?)', 'r', 1, raw, 'old-v2-fixture', 'admin', 'now');
+  return raw;
+}
+function createEntryTask(f, id, kind = 'review.pr') {
+  f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES(?,'r',?,'running','entry','{}',1,1)", id, kind);
+  return { ...f.s.get('SELECT * FROM tasks WHERE id=?', id), workspace_id: randomBytes(24).toString('hex') };
+}
+async function runEntry(f, task) {
+  const runner = fakeRunner(), workspace = new Workspace(f.s, runner.manager, task, f.spec.redactor, async () => {}, () => {});
+  await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] });
+  const run = f.s.get("SELECT * FROM task_runs WHERE task_id=? AND role='dev' ORDER BY rowid DESC LIMIT 1", task.id);
+  return JSON.parse(f.s.get('SELECT snapshot FROM role_snapshots WHERE id=?', run.role_snapshot).snapshot);
+}
+
+test('old V2 review/Actions entries keep Pi through reads and identical saves; only a changed backend opts in permanently', async t => {
+  const finish = { summary: 'Compatible entry.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
+  const script = controllerScript(), f = await fixture(t, body => isController(body) ? script(body) : call(body.tools.some(t => t.function.name === 'finish_review') ? 'finish_review' : 'finish_analysis', finish));
+  const raw = installOldV2(f), harness = snapshot => [snapshot.harness.id, snapshot.harness.source];
+  // Neither a configuration read nor running either entry writes back a migration.
+  assert.equal(roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles.find(r => r.role_id === 'dev').harness_ref.id, 'native');
+  for (const kind of ['review.pr', 'actions.failures']) assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'old-' + kind, kind))), ['pi', 'entry_executor']);
+  assert.equal(f.s.get("SELECT value FROM settings WHERE key='roles:r'").value, raw);
+  assert.equal(f.s.get('SELECT count(*) n FROM role_config_revisions').n, 1);
+  // Development, ordinary RoleRun, QA and Coordinator resolution still use their own saved backend.
+  for (const role of ['dev', 'qa', 'coordinator']) assert.deepEqual(harness(resolveRole(f.s, 'r', role, 'development.issue').snapshot), ['native', 'role']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
+  assert.equal(roleApi(f.s, admin, 'GET', rolesUrl, {}).configuration.roles.find(r => r.role_id === 'dev').entry_harness_source, undefined);
+  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'echoed'))), ['pi', 'entry_executor']);
+  // Omitting harness_ref is also an unchanged choice.
+  roleApi(f.s, admin, 'PUT', rolesUrl, { expected_revision: 2, enabled: true, roles: [{ role_id: 'dev' }] });
+  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'omitted'))), ['pi', 'entry_executor']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
+  for (const kind of ['review.pr', 'actions.failures']) assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-' + kind, kind))), ['process', 'role']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
+  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'repeated'))), ['process', 'role']);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' } }] });
+  assert.deepEqual(harness(await runEntry(f, createEntryTask(f, 'chosen-native'))), ['native', 'role']);
+});
+
+test('a running old V2 review keeps its Pi binding on the next delegation; explicit role apply can adopt a changed backend', async t => {
+  const finish = { summary: 'Continued review.', requires_code_change: false, issue_requests_code: false, clarification_required: false, implementation_goal: '', request_quote: '', findings: [] };
+  const script = controllerScript(), f = await fixture(t, body => isController(body) ? script(body) : call('finish_review', finish));
+  installOldV2(f);
+  const task = createEntryTask(f, 'running-review'); captureTaskConfiguration(f.s, task.id);
+  // The instance and snapshot the old entry created before this release.
+  const before = roleInstance(f.s, task, 'dev', 'pi');
+  assert.equal((await runEntry(f, task)).harness.id, 'pi');
+  assert.equal(f.s.get('SELECT snapshot_id FROM role_instances WHERE id=?', before.id).snapshot_id, before.snapshot_id);
+  const selected = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'process' } }] });
+  assert.equal((await runEntry(f, task)).harness.id, 'pi', 'fixed task configuration is unchanged by a project save');
+  roleApi(f.s, admin, 'POST', new URL('http://local/api/tasks/running-review/roles/apply'), { role: 'dev', expected_revision: selected.revision });
+  const adopted = await runEntry(f, task);
+  assert.deepEqual([adopted.harness.id, adopted.harness.source, adopted.config_revision], ['process', 'role', selected.revision]);
 });
 
 test('backend selection is independent of role; ACP keeps its own model and new roles default to Pi', async t => {

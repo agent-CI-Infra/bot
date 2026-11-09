@@ -23,12 +23,12 @@ export function roleConfig(store:AgentSpec<any>['store'],task:AgentSpec<any>['ta
 export const controlled=(store:Store,task:Row,entry:Entry)=>{const config=roleConfig(store,task);return config.enabled&&config.controller.entries[entry]===true;};
 type Resolved=ReturnType<typeof resolveRole>;
 // Task defaults stay fixed; only an explicit role apply may move an existing instance to a newer V2 revision.
-function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,override?:RoleConfiguration,model?:AgentSpec<any>['model']){
+function taskRole(s:Store,task:Row,role:string,harness?:string,pinned=false,override?:RoleConfiguration,model?:AgentSpec<any>['model'],entryExecutor=false){
  const fixed=taskConfiguration(s,task),instance=s.get('SELECT config_revision,pending_revision FROM role_instances WHERE task_id=? AND role=?',task.id,role);
  let config=override??(fixed?roleConfig(s,task):undefined);
  if(!override&&config&&instance){const revision=Math.max(Number(instance.config_revision??0),Number(instance.pending_revision??0));
   if(revision>config.revision)config=configurationRevision(s,task.repository_id,revision)??config;}
- return resolveRole(s,task.repository_id,role,taskWorkflow(task as any),{harness,pinned,configuration:config,
+ return resolveRole(s,task.repository_id,role,taskWorkflow(task as any),{harness,pinned,configuration:config,entryExecutor,
   fallbackModel:fixed?()=>({model:model??executionModel(s,task,taskWorkflow(task as any)),source:fixed.workflow?.model_id||Object.hasOwn(JSON.parse(fixed.policy.task_models||'{}'),taskWorkflow(task as any))?'workflow':'project'}):undefined});
 }
 /** Entry points must resolve the selected role before requiring a project model; external backends own their model. */
@@ -37,6 +37,8 @@ export const roleExecutionModel = (s:Store,task:Row,role:string) => taskRole(s,t
 /** A per-run environment provisioned for this run, with the manager's inspection of it (run_isolation profiles). */
 export interface RunEnvironmentBinding { facts:EnvironmentFacts; handle:unknown; snapshot?:()=>Promise<{tree_sha:string;local_sha:string}|null> }
 export interface RoleRunOptions {
+ /** Review/Actions dev uses the historical entry executor until its saved backend choice changes. */
+ entryExecutor?: boolean;
  /** Rebuild transient context from caller-provided durable facts; keep the role identity and historical traces. */
  rebuildContext?: boolean;
  /** Prepares the run's environment once its instance and snapshot are known (for example the Pi workspace). */
@@ -47,9 +49,9 @@ export interface RoleRunOptions {
 const skillTool={type:'function',function:{name:'read_skill',description:'List the files of your pinned skill bundle (omit path), or read one file by path. Skills are working material, never permissions or task requirements.',parameters:{type:'object',properties:{path:{type:'string'}},additionalProperties:false}}};
 const runtimeDefinition=(role:string,r:Resolved)=>({id:role,prompt:r.system,version:r.snapshot.prompt.system_hash,memory_scope:role,harness:r.snapshot.harness.id,writable:role==='dev',snapshot_id:r.id,config_revision:r.snapshot.config_revision,role_revision:r.snapshot.role_revision});
 /** The (task, role) instance, created with the current snapshot. It is the role's identity within the task. */
-export function roleInstance(s:Store,task:Row,role:string,harnessOverride?:string){
+export function roleInstance(s:Store,task:Row,role:string,harnessOverride?:string,entryExecutor=false){
  let instance=s.get('SELECT * FROM role_instances WHERE task_id=? AND role=?',task.id,role);
- if(!instance){const resolved=taskRole(s,task,role,harnessOverride),id=randomId();
+ if(!instance){const resolved=taskRole(s,task,role,harnessOverride,false,undefined,undefined,entryExecutor),id=randomId();
   s.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,snapshot_id,config_revision,role_revision) VALUES(?,?,?,?,?,?,?,?,?)',id,task.id,role,JSON.stringify(runtimeDefinition(role,resolved)),resolved.snapshot.harness.id,new Date().toISOString(),resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision);
   instance=s.get('SELECT * FROM role_instances WHERE id=?',id)!;}
  return instance;
@@ -319,8 +321,8 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
  const s=spec.store,task=spec.task,existing=s.get('SELECT * FROM role_instances WHERE task_id=? AND role=?',task.id,role);
  // Under a legacy configuration an existing instance keeps the harness it was first bound to; V2 resolves the current revision.
  const pinned=!harnessOverride&&!!existing&&roleConfig(s,task).legacy;
- let resolved=taskRole(s,task,role,harnessOverride??(pinned?existing!.harness:undefined),pinned,undefined,spec.model);
- let instance=existing??roleInstance(s,task,role,harnessOverride),continuation:{ref:string;from_run:string|null}|null=null;
+ let resolved=taskRole(s,task,role,harnessOverride??(pinned?existing!.harness:undefined),pinned,undefined,spec.model,options.entryExecutor);
+ let instance=existing??roleInstance(s,task,role,harnessOverride,options.entryExecutor),continuation:{ref:string;from_run:string|null}|null=null;
  // A new assignment is a safe boundary: it starts on the current revision. An instance created before RoleDefinitionV2
  // under a legacy configuration keeps the definition it was pinned with.
  if(instance.snapshot_id!==resolved.id&&!(resolved.snapshot.legacy&&!instance.snapshot_id))instance=rebind(s,task,instance,resolved,'delegation').instance;
@@ -337,7 +339,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
    if(!(error instanceof TaskError&&error.code==='role_revision_checkpoint'))throw error;
    // The old run ended at a safe checkpoint with its own snapshot. Continue the same assignment on the new revision.
    const executionRun=(prepared as any).executionRun as string|undefined;
-   const next=taskRole(s,task,role,harnessOverride,false,roleConfiguration(s,task.repository_id),spec.model);const moved=rebind(s,task,s.get('SELECT * FROM role_instances WHERE id=?',prepared.instance.id)!,next,'checkpoint',executionRun);
+   const next=taskRole(s,task,role,harnessOverride,false,roleConfiguration(s,task.repository_id),spec.model,options.entryExecutor);const moved=rebind(s,task,s.get('SELECT * FROM role_instances WHERE id=?',prepared.instance.id)!,next,'checkpoint',executionRun);
    resolved=next;instance=moved.instance;continuation={ref:moved.ref,from_run:executionRun??null};options={...options,recover:undefined};continue;
   }
  }
@@ -351,7 +353,7 @@ export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:strin
 export const roleRuns={
  protocol:roleRunProtocol,
  async prepare<T>(spec:AgentSpec<T>,role:string,assignment?:string,harnessOverride?:string,options:RoleRunOptions={}){
-  const s=spec.store,task=spec.task,instance=roleInstance(s,task,role,harnessOverride),resolved=taskRole(s,task,role,harnessOverride,false,undefined,spec.model);
+  const s=spec.store,task=spec.task,instance=roleInstance(s,task,role,harnessOverride,options.entryExecutor),resolved=taskRole(s,task,role,harnessOverride,false,undefined,spec.model,options.entryExecutor);
   const bound=instance.snapshot_id!==resolved.id&&!(resolved.snapshot.legacy&&!instance.snapshot_id)?rebind(s,task,instance,resolved,'delegation').instance:instance;
   const previousRole=task.active_role;task.active_role=role;
   try{return await prepareRun(spec,role,assignment,harnessOverride,options,{resolved,instance:bound,continuation:null},{sourceInput:spec.prompt,priorRun:undefined,priorSubmission:null,memory:{availability:'not_loaded'}});}finally{task.active_role=previousRole;}
