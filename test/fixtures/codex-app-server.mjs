@@ -115,6 +115,12 @@ createInterface({input:process.stdin}).on('line',async line=>{
   if(flag('EXIT'))process.exit(7);
   // START_UNANSWERED: the server begins the turn, sends its notifications and a 110-token usage report, but never answers the
   // start and goes away. START_SILENT: the same turn begins without any notification.
+  // START_REFUSED: the server refuses the start explicitly; nothing begins.
+  if(flag('START_REFUSED')){error(-32600,'turn start refused');return;}
+  // START_HANG: the server begins the turn and sends only the standard turn/started ({threadId, turn}), no usage, and never
+  // answers the start; it stays connected and handles turn/interrupt.
+  if(flag('START_HANG')){const turnId=randomUUID(),t=load(thread.id);t.turns.push({id:turnId,status:'inProgress'});store(t);log('unanswered.jsonl',{turnId});
+   notify('turn/started',{threadId:thread.id,turn:turnView(turnId,'inProgress')});return;}
   if(flag('START_UNANSWERED')||flag('START_SILENT')){
    const turnId=randomUUID(),t=load(thread.id),previous=t.turns.at(-1)?.id;t.turns.push({id:turnId,status:'inProgress'});log('unanswered.jsonl',{turnId});
    // LATE_PREVIOUS: a late notification of the previous turn arrives while this start is unanswered.

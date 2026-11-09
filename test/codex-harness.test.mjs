@@ -240,11 +240,46 @@ test('A turn start the server never answered is kept for reconciliation and coun
   const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const previous=f.state().lastTurnId;
   f.configure({FIXTURE_START_SILENT:'true',FIXTURE_LATE_PREVIOUS:'true'});
   await assert.rejects(runRole(f.spec,'dev'),{code:'codex_connection_lost'});
-  assert.deepEqual([f.state().lastTurnId,f.state().lastTurnStatus,f.state().previousTurnId],[null,'startRequested',previous]);
+  assert.deepEqual([f.state().lastTurnId,f.state().lastTurnStatus,f.state().knownTurnId],[null,'startRequested',previous]);
   const [{turnId}]=f.lines('unanswered.jsonl');f.configure({});await runRole(f.spec,'dev');
   assert.deepEqual(f.events().filter(e=>e.type==='session_bound').at(-1).reconciled,{turnId,recorded:'startRequested',observed:'interrupted'});
   const u=instanceUsage(f.s,f.s.get("SELECT id FROM role_instances WHERE role='dev'").id);
   assert.deepEqual([u.model_requests,u.unknown_requests,u.semantics],[3,1,'lower_bound']);
+ });
+});
+
+test('The last known turn survives a reconciliation that found nothing, and a standard turn/started names an unanswered turn',async t=>{
+ const turns=f=>[f.state().lastTurnId,f.state().lastTurnStatus,f.state().knownTurnId],bound=f=>f.events().filter(e=>e.type==='session_bound').at(-1);
+ await t.test('a late notification after a not_started reconciliation does not pose as the new turn',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const a=f.state().lastTurnId;
+  // The server goes away before it creates the next turn: the binding only knows that a start was requested after A.
+  f.configure({FIXTURE_EXIT:'true'});await assert.rejects(runRole(f.spec,'dev'),{code:'codex_connection_lost'});
+  assert.deepEqual(turns(f).slice(0,2),[null,'startRequested']);const afterExit=f.state().knownTurnId;
+  // Resume finds nothing newer than A; the next start creates turn C, a late notification of A arrives, the stream ends.
+  f.configure({FIXTURE_START_SILENT:'true',FIXTURE_LATE_PREVIOUS:'true'});await assert.rejects(runRole(f.spec,'dev'),{code:'codex_connection_lost'});
+  assert.deepEqual(bound(f).reconciled,{turnId:null,recorded:'startRequested',observed:'not_started'});
+  assert.deepEqual(turns(f).slice(0,2),[null,'startRequested'],'the late notification of A does not name the new start');
+  assert.deepEqual([afterExit,f.state().knownTurnId],[a,a],'A stays the last known turn through both');
+  const [{turnId:c}]=f.lines('unanswered.jsonl');
+  f.configure({});await runRole(f.spec,'dev');
+  assert.deepEqual(bound(f).reconciled,{turnId:c,recorded:'startRequested',observed:'interrupted'});
+ });
+ await t.test('only a standard turn/started, no usage, then a cancel',async t=>{
+  const f=fixture(t,{FIXTURE_START_HANG:'true'});let cancel=false,seen=0;
+  const poll=setInterval(()=>{if(existsSync(join(f.home,'unanswered.jsonl'))&&++seen>5)cancel=true;},20);
+  await assert.rejects(runRole({...f.spec,guard:async()=>{if(cancel)throw new TaskError('task_cancelled','cancelled');}},'dev',undefined,'codex'),{code:'task_cancelled'});clearInterval(poll);
+  const [{turnId}]=f.lines('unanswered.jsonl');
+  assert.deepEqual(f.lines('interrupts.jsonl').map(i=>i.turnId),[turnId],'the cancel interrupts the turn named by turn/started');
+  assert.deepEqual(f.events().filter(e=>e.phase==='interrupt_receipt').map(e=>[e.turnId,e.receipt]),[[turnId,'terminal']]);
+  assert.deepEqual(turns(f),[turnId,'interrupted',turnId]);
+  const u=instanceUsage(f.s,f.s.get("SELECT id FROM role_instances WHERE role='dev'").id);
+  assert.deepEqual([u.model_requests,u.unknown_requests,u.total_tokens,u.semantics],[1,1,0,'lower_bound']);
+ });
+ await t.test('an explicitly refused start leaves the turn binding as it was',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const before=turns(f);
+  f.configure({FIXTURE_START_REFUSED:'true'});await assert.rejects(runRole(f.spec,'dev'),{code:'acp_execution_failed'});
+  assert.deepEqual(turns(f).slice(0,2),[before[0],'completed']);assert.ok(!Object.hasOwn(f.state(),'previousTurnId'),'no field is left behind by the refused start');
+  assert.deepEqual(turns(f),[before[0],'completed',before[0]]);
  });
 });
 
