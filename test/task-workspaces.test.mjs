@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, readFileSync, existsSync, symlinkSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { mkdtempSync, rmSync, readFileSync, existsSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { ownership, tasksRoot } from '../runner/ownership.mjs';
 import { command, environment } from '../runner/command.mjs';
@@ -34,14 +35,14 @@ test('cleanup attributes each process to its own task workspace, so ending one t
 });
 
 test('task commands carry their workspace id and run in their own repository directory', async t => {
-  mkdirSync(resolve('.tmp'), { recursive: true }); const root = mkdtempSync(resolve('.tmp/task-command-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), 'task-command-')); t.after(() => rmSync(root, { recursive: true, force: true }));
   const workspaceId = id(), result = await command('printf "%s %s" "$BOT_WORKSPACE_ID" "$PWD"', root, 5000, { workspaceId });
   assert.equal(result.output, `${workspaceId} ${root}`);
   assert.equal((await command('printf "[%s]" "$BOT_WORKSPACE_ID"', root, 5000, { workspaceId: '../escape' })).output, '[]');
 });
 
 test('one task writes only inside its own workspace, never into another task’s', async t => {
-  mkdirSync(resolve('.tmp'), { recursive: true }); const root = mkdtempSync(resolve('.tmp/task-workspaces-'));
+  const root = mkdtempSync(join(tmpdir(), 'task-workspaces-'));
   const previous = { HOME: environment.HOME, TMPDIR: environment.TMPDIR }; Object.assign(environment, { HOME: root, TMPDIR: root });
   t.after(() => { Object.assign(environment, previous); rmSync(root, { recursive: true, force: true }); });
   const first = id(), second = id(), run = (workspaceId, request) => runnerWorkspace({ ...request, workspace_id: workspaceId }, root);

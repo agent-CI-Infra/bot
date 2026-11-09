@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { roleApi } from '../dist/roles/api.js';
@@ -27,8 +28,7 @@ const skip = !sdk && process.env.BOT_REQUIRE_PI !== '1' ? 'Pi SDK is not install
 const verdict = { outcome: 'pass', reason: 'The fixed candidate contains the requested report.', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true };
 
 async function fixture(t, respond) {
-  mkdirSync(resolve('.tmp'), { recursive: true });
-  const root = mkdtempSync(resolve('.tmp/agent-backends-')), s = new Store(':memory:', randomBytes(32));
+  const root = mkdtempSync(join(tmpdir(), 'agent-backends-')), s = new Store(':memory:', randomBytes(32));
   const manager = new LocalManager('101', root), requests = [];
   const server = createServer(async (req, res) => {
     try {

@@ -1,8 +1,9 @@
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { harness, setup, account } from './helpers.mjs';
 import { PublicBoards } from '../dist/public-board/service.js';
 import { GateOnboarding } from '../dist/projects/gate-onboarding.js';
@@ -38,7 +39,7 @@ export async function publicBoardFixture(t, collector) {
   github.listen(0, '127.0.0.1'); await once(github, 'listening');
   t.after(() => new Promise(resolve => { github.close(resolve); github.closeAllConnections(); }));
   const api = `http://127.0.0.1:${github.address().port}`;
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/public-boards-'));
+  const directory = mkdtempSync(join(tmpdir(), 'public-boards-'));
   let boards, gateOnboarding;
   const h = await harness(t, undefined, store => ({ githubUrl: api,
     boards: boards = new PublicBoards(store, directory, api, collector), gateOnboarding: gateOnboarding = new GateOnboarding(store, api) }));

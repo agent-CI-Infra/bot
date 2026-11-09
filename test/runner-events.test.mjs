@@ -1,19 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,mkdtemp,readFile,writeFile,appendFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {agentOperation} from '../runner/agent.mjs';
 import {workspaceProfile} from '../dist/agent/profiles.js';
+import {randomWorkspaceId} from './helpers.mjs';
 
 async function until(read){
   for(const end=Date.now()+10000;Date.now()<end;await new Promise(resolve=>setTimeout(resolve,20))){const value=await read();if(value)return value;}
   assert.fail('Timed out waiting for runner event');
 }
 test('Pi writes ordered, redacted tool starts before a blocked command returns and retains results',async t=>{
-  await mkdir('.tmp',{recursive:true});const base=await mkdtemp(resolve('.tmp/pi-events-')),root=join(base,'a'.repeat(48)),dir=join(root,'agent');
+  const base=await mkdtemp(join(tmpdir(),'pi-events-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
   await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
   const token='runner-private-token',command=`printf '${token}'; while [ ! -f release ]; do sleep 0.05; done`;
   const calls=[{name:'github_read_token',args:{}},{name:'write_file',args:{path:'file.txt',content:'private body excluded from start'}},
@@ -21,7 +23,7 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
     {name:'write_file',args:{path:'../notes/secret.md',content:'secret '+token}},
     {name:'read_file',args:{path:'file.txt'}},{name:'run_command',args:{command}},
     {name:'create_pull_request',args:{summary:'Ready',test_command:'true'}},{name:'finish_review',args:{summary:'Done'}}];
-  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:'a'.repeat(48),system:'fixture',capabilities:workspaceProfile('development.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:calls.map(({name})=>({function:{name,parameters:{type:'object'}}}))}));
+  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'fixture',capabilities:workspaceProfile('development.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:calls.map(({name})=>({function:{name,parameters:{type:'object'}}}))}));
   const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href;
   const hook=join(base,'hooks.mjs');await writeFile(hook,`import {registerHooks} from 'node:module';\nregisterHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
   const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
@@ -58,7 +60,7 @@ test('Pi writes ordered, redacted tool starts before a blocked command returns a
 });
 
 test('poll exposes event pagination so completed and failed agents can drain all remaining logs',async t=>{
-  await mkdir('.tmp',{recursive:true});const root=await mkdtemp(resolve('.tmp/event-pages-')),dir=join(root,'agent');
+  const root=await mkdtemp(join(tmpdir(),'event-pages-')),dir=join(root,'agent');
   await mkdir(dir);t.after(()=>rm(root,{recursive:true,force:true}));
   const events=Array.from({length:45},(_,step)=>({type:'tool_start',name:'read_file',path:`src/${step}.js`}));
   await writeFile(join(dir,'events.jsonl'),events.map(event=>JSON.stringify(event)+'\n').join(''));
@@ -71,7 +73,7 @@ test('poll exposes event pagination so completed and failed agents can drain all
 });
 
 test('poll retains an incomplete event across pages until its newline is appended',async t=>{
-  await mkdir('.tmp',{recursive:true});const root=await mkdtemp(resolve('.tmp/event-tail-')),dir=join(root,'agent');
+  const root=await mkdtemp(join(tmpdir(),'event-tail-')),dir=join(root,'agent');
   await mkdir(dir);t.after(()=>rm(root,{recursive:true,force:true}));
   await writeFile(join(dir,'state.json'),JSON.stringify({state:'running'}));
   const prefix=Array.from({length:21},(_,step)=>({type:'tool_start',name:'read_file',path:`src/${step}.js`}));
@@ -90,11 +92,11 @@ test('poll retains an incomplete event across pages until its newline is appende
 });
 
 test('review file tools can update project notes but refuse repository writes',async t=>{
-  await mkdir('.tmp',{recursive:true});const base=await mkdtemp(resolve('.tmp/pi-notes-')),root=join(base,'a'.repeat(48)),dir=join(root,'agent');
+  const base=await mkdtemp(join(tmpdir(),'pi-notes-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
   await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
   const calls=[{name:'write_file',args:{path:'../notes/repository.md',content:'Review experience'}},
     {name:'write_file',args:{path:'tracked.md',content:'forbidden'}},{name:'finish_review',args:{summary:'Done'}}];
-  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:'a'.repeat(48),system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:['write_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
+  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),tools:['write_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
   const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
   await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
   const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');

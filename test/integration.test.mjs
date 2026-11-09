@@ -10,6 +10,7 @@ import {Store} from '../dist/storage/database.js';
 import {blobSha,treeSha,sha} from '../dist/agent/common.js';
 import {TaskRecords} from '../dist/tasks/service.js';
 import {requestIntegration,authorizeMerge,integratedPublication} from '../dist/tasks/integration.js';
+import {randomWorkspaceId} from './helpers.mjs';
 
 async function local(t){
  const root=mkdtempSync(join(tmpdir(),'bot-integration-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
@@ -21,7 +22,7 @@ async function local(t){
 }
 
 test('real Git integrates independent changes while retaining the original candidate and new main',async t=>{
- const h=await local(t),old='a'.repeat(48),next='b'.repeat(48),base=await h.init(old,{'keep.txt':'unchanged\n','one.txt':'before\n'});
+ const h=await local(t),old=randomWorkspaceId(),next=randomWorkspaceId(),base=await h.init(old,{'keep.txt':'unchanged\n','one.txt':'before\n'});
  await h.write(old,'one.txt','candidate\n');const candidate=await h.call(old,{type:'workspace_finalize'});
  await h.init(next,{'keep.txt':'unchanged\n','one.txt':'before\n','other.txt':'already merged\n'});
  const integrated=await h.call(next,{type:'workspace_integrate',source_workspace_id:old,sha:candidate.local_sha,tree_sha:candidate.tree_sha,base_tree:base.tree_sha});
@@ -33,7 +34,7 @@ test('real Git integrates independent changes while retaining the original candi
 });
 
 test('real textual conflict is retained for the same writer and cannot be submitted with markers',async t=>{
- const h=await local(t),old='c'.repeat(48),next='d'.repeat(48),base=await h.init(old,{'shared.txt':'old\n'});
+ const h=await local(t),old=randomWorkspaceId(),next=randomWorkspaceId(),base=await h.init(old,{'shared.txt':'old\n'});
  await h.write(old,'shared.txt','our change\n');const candidate=await h.call(old,{type:'workspace_finalize'});
  await h.init(next,{'shared.txt':'their change\n'});
  const value=await h.call(next,{type:'workspace_integrate',source_workspace_id:old,sha:candidate.local_sha,tree_sha:candidate.tree_sha,base_tree:base.tree_sha});
@@ -45,7 +46,7 @@ test('real textual conflict is retained for the same writer and cannot be submit
 });
 
 test('textually clean combination can fail behavior verification without losing either feature',async t=>{
- const h=await local(t),old='e'.repeat(48),next='f'.repeat(48),check="const fs=require('fs');if(Number(fs.readFileSync('a.txt'))*Number(fs.readFileSync('b.txt'))>2)process.exit(1);";
+ const h=await local(t),old=randomWorkspaceId(),next=randomWorkspaceId(),check="const fs=require('fs');if(Number(fs.readFileSync('a.txt'))*Number(fs.readFileSync('b.txt'))>2)process.exit(1);";
  const files={'a.txt':'1','b.txt':'1','check.cjs':check},base=await h.init(old,files);
  await h.write(old,'a.txt','2');const candidate=await h.call(old,{type:'workspace_finalize'});
  assert.equal((await h.call(old,{type:'workspace_command',command:'node check.cjs',timeout_ms:5000})).exit_code,0);

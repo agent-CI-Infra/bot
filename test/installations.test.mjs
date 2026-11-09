@@ -5,7 +5,8 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { InstallationSync, recordInstallationEvent } from '../dist/app/installations.js';
 import { commitInstallationProjection } from '../dist/installations/projection.js';
@@ -264,8 +265,7 @@ test('the console reads the output of the command a running task is executing', 
 });
 
 test('runner commands stream output while running and can keep background processes for the task', async t => {
-  mkdirSync('.tmp', { recursive: true });
-  const dir = mkdtempSync(resolve('.tmp/command-')), out = join(dir, 'op.out'); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = mkdtempSync(join(tmpdir(), 'command-')), out = join(dir, 'op.out'); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const running = command('echo first; sleep 1; echo second', dir, 10000, { outputFile: out });
   await new Promise(r => setTimeout(r, 500)); assert.equal(readFileSync(out, 'utf8'), 'first\n');
   assert.deepEqual(await running, { exit_code: 0, signal: null, output: 'first\nsecond\n', timed_out: false, truncated: false });
@@ -279,15 +279,13 @@ test('runner commands stream output while running and can keep background proces
 });
 
 test('runner commands without a timeout run until they end; an explicit timeout still stops them', async t => {
-  mkdirSync('.tmp', { recursive: true });
-  const dir = mkdtempSync(resolve('.tmp/command-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = mkdtempSync(join(tmpdir(), 'command-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   assert.deepEqual(await command('sleep 0.3; echo done', dir, null), { exit_code: 0, signal: null, output: 'done\n', timed_out: false, truncated: false });
   const stopped = await command('sleep 5; echo late', dir, 200); assert.equal(stopped.timed_out, true); assert.equal(stopped.output, '');
 });
 
 test('a task read token reaches runner commands only as GH_TOKEN and GITHUB_TOKEN and is masked in their output', async t => {
-  mkdirSync('.tmp', { recursive: true });
-  const dir = mkdtempSync(resolve('.tmp/token-')), out = join(dir, 'op.out'), token = 'ghs_' + 'x'.repeat(36); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dir = mkdtempSync(join(tmpdir(), 'token-')), out = join(dir, 'op.out'), token = 'ghs_' + 'x'.repeat(36); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const result = await command('echo "$GH_TOKEN|$GITHUB_TOKEN|$OTHER"', dir, 10000, { outputFile: out, secretEnv: { GH_TOKEN: token, GITHUB_TOKEN: token, OTHER: 'not-a-token-variable' } });
   assert.equal(result.output, '[REDACTED]|[REDACTED]|\n'); assert.equal(readFileSync(out, 'utf8'), '[REDACTED]|[REDACTED]|\n');
   assert.equal((await command('echo "$GH_TOKEN"', dir, 10000)).output, '\n');

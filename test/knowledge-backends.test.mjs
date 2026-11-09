@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
 import { ProjectMemory, memoryTools, memoryTool } from '../dist/memory/project.js';
@@ -24,7 +25,7 @@ const sdk=existsSync('runner/node_modules/@earendil-works/pi-coding-agent/packag
 const skip=!sdk&&process.env.BOT_REQUIRE_PI!=='1'?'Pi SDK not installed: npm ci --prefix runner --omit=dev --ignore-scripts':false;
 test('real Pi mailbox and external ACP/MCP use the same authorized memory tools and trace exact versions', {timeout:120000,skip}, async t=>{
   assert.ok(existsSync('runner/node_modules/@earendil-works/pi-coding-agent/package.json'),'install runner dependencies before backend acceptance');
-  mkdirSync('.tmp/knowledge-173',{recursive:true});const root=mkdtempSync(resolve('.tmp/knowledge-173/backend-')),s=new Store(join(root,'knowledge.sqlite'),randomBytes(32)),manager=new LocalManager('101',join(root,'workspace'));
+  const root=mkdtempSync(join(tmpdir(),'knowledge-backend-')),s=new Store(join(root,'knowledge.sqlite'),randomBytes(32)),manager=new LocalManager('101',join(root,'workspace'));
   t.after(async()=>{await manager.recover();s.close();rmSync(root,{recursive:true,force:true});});
   s.run("INSERT INTO accounts VALUES('a','fixture','github_app','1','{}','now')");s.run("INSERT INTO repositories VALUES('101','fixture/knowledge','10','a')");
   const env=await manager.call('PUT','/v1/projects/101');

@@ -11,11 +11,12 @@ import { runAgent } from '../dist/agent/runtime.js';
 import { Redactor } from '../dist/agent/common.js';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { randomWorkspaceId } from './helpers.mjs';
 
 test('local runner uses its project directory and scoped cleanup leaves unrelated host processes alive', async t => {
   const root = mkdtempSync(join(tmpdir(), 'bot-local-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const manager = new LocalManager('123', root), id = 'a'.repeat(48);
+  const manager = new LocalManager('123', root), id = randomWorkspaceId();
   await manager.call('PUT','/v1/projects/123');
   const execute = request => manager.call('POST','/v1/projects/123/execute',{generation:1,operation_id:randomBytes(24).toString('hex'),request});
   assert.equal((await execute({type:'health'})).result.ready,true);
@@ -62,7 +63,7 @@ test('local model transport retries preserve the same running agent adapter', as
 
 test('acceptance workspace uses the submitted Git object despite later executor edits and excludes executor session',async t=>{
  const root=mkdtempSync(join(tmpdir(),'bot-accept-snapshot-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
- const manager=new LocalManager('123',root),source='a'.repeat(48),target='b'.repeat(48);
+ const manager=new LocalManager('123',root),source=randomWorkspaceId(),target=randomWorkspaceId();
  await manager.call('PUT','/v1/projects/123');
  const execute=request=>manager.call('POST','/v1/projects/123/execute',{operation_id:randomBytes(24).toString('hex'),generation:1,request});
  await execute({type:'workspace_init',workspace_id:source});
@@ -80,7 +81,7 @@ test('acceptance workspace uses the submitted Git object despite later executor 
 
 test('explicit background foreground-server command returns promptly and leaves a usable task process',async t=>{
  const root=mkdtempSync(join(tmpdir(),'bot-background-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
- const manager=new LocalManager('123',root),id='c'.repeat(48);await manager.call('PUT','/v1/projects/123');
+ const manager=new LocalManager('123',root),id=randomWorkspaceId();await manager.call('PUT','/v1/projects/123');
  const execute=request=>manager.call('POST','/v1/projects/123/execute',{operation_id:randomBytes(24).toString('hex'),generation:1,request});
  await execute({type:'workspace_init',workspace_id:id});
  const start=Date.now(),result=await execute({type:'workspace_command',workspace_id:id,command:'node -e "setInterval(()=>{},1000)"',keep_background:true,timeout_ms:null});
@@ -90,7 +91,7 @@ test('explicit background foreground-server command returns promptly and leaves 
 
 test('restoring a checkpoint preserves an unpublished patch against the same base',async t=>{
  const root=mkdtempSync(join(tmpdir(),'bot-restore-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
- const manager=new LocalManager('123',root),source='d'.repeat(48),target='e'.repeat(48);await manager.call('PUT','/v1/projects/123');
+ const manager=new LocalManager('123',root),source=randomWorkspaceId(),target=randomWorkspaceId();await manager.call('PUT','/v1/projects/123');
  const execute=request=>manager.call('POST','/v1/projects/123/execute',{operation_id:randomBytes(24).toString('hex'),generation:1,request});
  for(const id of [source,target]){
   await execute({type:'workspace_init',workspace_id:id});await execute({type:'workspace_command',workspace_id:id,command:"git init -q && printf 'base' > file.txt && git add file.txt && git -c user.name=Test -c user.email=test@example.invalid commit -qm baseline"});
@@ -109,7 +110,7 @@ test('local parallel tasks keep writes and cleanup in their own workspaces', asy
  assert.equal((await new LocalManager('123',root).call('GET','/v1/projects/123')).parallel,4);
  await assert.rejects(manager.call('PUT','/v1/projects/123/parallel',{tasks:0}),/invalid_task_concurrency/);
  const execute=request=>manager.call('POST','/v1/projects/123/execute',{generation:1,operation_id:randomBytes(24).toString('hex'),request});
- const ids=['1'.repeat(48),'2'.repeat(48)];
+ const ids=[randomWorkspaceId(),randomWorkspaceId()];
  await Promise.all(ids.map(workspace_id=>execute({type:'workspace_init',workspace_id})));
  const results=await Promise.all(ids.map((workspace_id,i)=>execute({type:'workspace_command',workspace_id,command:`printf '${i}' > own.txt; sleep 1; cat own.txt`,timeout_ms:10000})));
  for(let i=0;i<results.length;i++){assert.equal(results[i].ok,true);assert.equal(results[i].result.exit_code,0);assert.equal(results[i].result.output,String(i));}
