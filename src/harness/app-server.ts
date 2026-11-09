@@ -2,6 +2,7 @@ import {StringDecoder} from 'node:string_decoder';
 import {resolve} from 'node:path';
 import {TaskError,stop,clip} from '../agent/common.js';
 import type {Dialect,DialectContext} from './acp.js';
+import type {HarnessEvent} from './session.js';
 
 /**
  * Codex app-server dialect of the generic external-agent client (src/harness/acp.ts). The client keeps one lifecycle for
@@ -15,12 +16,13 @@ import type {Dialect,DialectContext} from './acp.js';
  */
 export const codexAppServer={
  cli:'0.166.0',
- schemaDigest:'2f1269279072bbe401887eafd203b941521b3f33ab82d68d8efcc25add3712fb',
+ schemaDigest:'723ea781a3f0d5be4ddefb69e58f7c48fc8c77fa070234bf2f603088c38023ec',
  definitions:['InitializeParams','InitializeResponse','ThreadStartParams','ThreadStartResponse','ThreadResumeParams','ThreadResumeResponse','ThreadTurnsListParams','ThreadTurnsListResponse',
   'TurnStartParams','TurnStartResponse','TurnInterruptParams','Turn','TurnStatus','TurnError','CodexErrorInfo','ThreadItem','ItemStartedNotification','ItemCompletedNotification','TurnCompletedNotification',
   'ThreadTokenUsageUpdatedNotification','ThreadTokenUsage','TokenUsageBreakdown','ErrorNotification','ModelReroutedNotification','McpServerStatusUpdatedNotification','ListMcpServerStatusParams','ListMcpServerStatusResponse','McpServerStatus',
   'CommandExecutionRequestApprovalParams','CommandExecutionApprovalDecision','FileChangeRequestApprovalParams','FileChangeApprovalDecision','PermissionsRequestApprovalParams','PermissionsRequestApprovalResponse','GrantedPermissionProfile',
-  'McpServerElicitationRequestParams','McpServerElicitationRequestResponse','ToolRequestUserInputParams','ToolRequestUserInputResponse','DynamicToolCallParams','DynamicToolCallResponse'],
+  'McpServerElicitationRequestParams','McpServerElicitationRequestResponse','ToolRequestUserInputParams','ToolRequestUserInputResponse','DynamicToolCallParams','DynamicToolCallResponse',
+  'ExperimentalFeatureListParams','ExperimentalFeatureListResponse','ExperimentalFeature','AskForApproval','SandboxPolicy'],
  /** Server requests of the locked version; each one gets an explicit answer below. */
  serverRequests:['item/commandExecution/requestApproval','item/fileChange/requestApproval','item/tool/requestUserInput','mcpServer/elicitation/request','item/permissions/requestApproval','item/tool/call','account/chatgptAuthTokens/refresh','attestation/generate','applyPatchApproval','execCommandApproval'],
 } as const;
@@ -29,8 +31,25 @@ const optOut=['item/agentMessage/delta','item/reasoning/textDelta','item/reasoni
 const ignored=new Set(['thread/started','thread/status/changed','thread/readState/changed','thread/name/updated','thread/goal/updated','thread/goal/cleared','thread/settings/updated','thread/compacted','thread/closed','turn/started','turn/diff/updated','turn/plan/updated',
  'serverRequest/resolved','item/mcpToolCall/progress','item/commandExecution/terminalInteraction','item/fileChange/patchUpdated','item/autoApprovalReview/started','item/autoApprovalReview/completed','hook/started','hook/completed','skills/changed','account/updated','app/list/updated','mcpServer/event/stream/notification',...optOut]);
 const turnStatuses=['completed','interrupted','failed','inProgress'];
+/**
+ * Built-in tools a role is never granted. A role reaches the repository only through the offered task tools; Codex's own
+ * tools act on the control-plane host, and in the locked version a sandboxed command that is not judged dangerous runs
+ * without any approval request, so declining approvals alone cannot stop it. These feature flags remove the tools before
+ * the first turn (shell_tool also removes exec_command/write_stdin; the unified_exec flag is not honoured per thread),
+ * and experimentalFeature/list for the thread must report every one of them disabled.
+ */
+export const deniedFeatures=['shell_tool','view_image','multi_agent','apps','plugins','goals','sleep_tool'] as const;
+const threadPolicy={approvalPolicy:'on-request',sandbox:'read-only',features:Object.fromEntries(deniedFeatures.map(name=>[name,false])),web_search:'disabled'} as const;
+/**
+ * Items that must not appear once the tools above are gone. One that does means the restriction did not hold: the run is
+ * stopped at once (interrupt, then the process group is reclaimed) instead of continuing. A file change is refused only when
+ * it was applied; under the read-only sandbox an attempt waits for an approval this client declines.
+ */
+const refusedItems:Record<string,string>={commandExecution:'host_command',imageView:'host_file_read',webSearch:'web_search',collabAgentToolCall:'sub_agent',subAgentActivity:'sub_agent'};
 
 class RpcError extends Error{constructor(readonly method:string,readonly code:number,message:string){super(message);}}
+// The locked server's answer for a thread whose local rollout is gone (verified with the real CLI).
+const threadMissing=(error:RpcError)=>error.code===-32600&&/^no rollout found for thread id /.test(error.message);
 const invalid=(at:string):never=>stop('codex_protocol_invalid','retry_wait',at);
 const need=(ok:unknown,at:string)=>{if(!ok)invalid(at);};
 const id=(v:unknown)=>typeof v==='string'&&v.length>0&&v.length<=256;
@@ -146,14 +165,27 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  const {config,cwd,emit,redactor}=ctx;
  const home=resolve(String(config.env?.CODEX_HOME??''));
  let threadId='',cli:string|null=null,text='',usageBase:Usage|null=null;
- type Waiter={id:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;settled:Promise<void>;usage:boolean};
+ // hint: the turn id carried by notifications that arrive before the turn/start answer is processed (same chunk).
+ type Waiter={id:string|null;hint:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;settled:Promise<void>;usage:boolean};
  let current:Waiter|null=null,rerouted:{from:string;to:string}|null=null;
  const early=new Map<string,any>(),seen=new Set<string>(),reported=new Set<string>(),servers=new Map<string,{status:string;error:string|null}>();
- let serverChange:(()=>void)|null=null;
+ let serverChange:(()=>void)|null=null,committed=false;
+ // Usage seen before the client commits the new binding (e.g. a total restated while resuming) waits with it: if the session
+ // is refused, neither the increment nor the new cursor is recorded, so the next attempt counts it exactly once.
+ const pendingUsage:HarnessEvent[]=[];
  // An anomaly is recorded once per kind and method; the stream continues.
  const anomaly=(kind:string,detail:Record<string,unknown>={})=>{const key=kind+':'+String(detail.method??'');if(reported.has(key))return;reported.add(key);emit({type:'configuration',stage:'protocol_anomaly',anomaly:kind,...detail});};
  // Before the thread is bound nothing belongs to this run yet (e.g. a usage total restated while resuming); that is no anomaly.
- const ours=(params:any,at:string)=>{if(!threadId)return false;if(params?.threadId===threadId)return true;anomaly('foreign_thread',{method:at});return false;};
+ const ours=(params:any,at:string)=>{if(!threadId)return false;if(params?.threadId===threadId){if(current&&!current.id&&id(params.turnId))current.hint=params.turnId;return true;}anomaly('foreign_thread',{method:at});return false;};
+ // A built-in tool acted although it was not granted: recorded as a denial, then the whole run stops through the shared path
+ // (task tools refused, turn/interrupt, bounded wait, process group reclaimed). Sub-agents are refused the same way: their
+ // threads, usage and evidence are not part of this role's run.
+ const refuse=(itemType:string,reason:string,turnId:string,itemId:string)=>{
+  ctx.denied('codex:'+itemType,reason);
+  emit({type:'permission',requestId:null,method:'item/'+itemType,threadId,turnId,itemId,decision:'refused_after_start',allowed:false,reason});
+  ctx.stop(reason==='sub_agent'?new TaskError('codex_subagent_refused','retry_wait','Codex 派生了子 agent；角色运行不接受子 agent，本次运行已停止。')
+   :new TaskError('codex_builtin_tool_refused','waiting_configuration',`Codex 内建工具 ${itemType}（${reason}）不在角色授权内却已执行；本次运行已停止，请检查 Codex 版本与启动配置。`));
+ };
  const notification=(method:string,params:any)=>{
   if(method==='turn/completed'){
    if(!ours(params,method))return;const turn=check.turn(params?.turn,'turn/completed.turn');
@@ -164,6 +196,8 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    const p=check.item(params,method);if(!ours(p,method))return;
    const it=p.item,completed=method==='item/completed',key=(completed?'c:':'s:')+it.id;
    if(seen.has(key)){anomaly('duplicate_item',{method});return;}seen.add(key);
+   const refused=refusedItems[it.type]??(it.type==='fileChange'&&completed&&it.status==='completed'?'unapproved_file_change':it.type==='mcpToolCall'&&it.server!=='bot'?'tool_server_not_offered':null);
+   if(refused){emit({type:'tool',callId:it.id,threadId,turnId:p.turnId,itemType:it.type,phase:completed?'completed':'started',...redactor.clean(itemFields(it,completed))});refuse(it.type,refused,p.turnId,it.id);return;}
    // Private reasoning is never archived; user input is the client's own prompt.
    if(it.type==='reasoning'||it.type==='userMessage'||it.type==='hookPrompt')return;
    if(it.type==='agentMessage'){
@@ -180,14 +214,16 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    if(total.total===base.total)return;
    const delta={input_tokens:total.input-base.input,cached_input_tokens:total.cached-base.cached,output_tokens:total.output-base.output,reasoning_output_tokens:total.reasoning-base.reasoning,total_tokens:total.total-base.total};
    usageBase=total;ctx.save({usage:total});if(current&&(current.id===params.turnId||current.id===null))current.usage=true;
-   emit({type:'usage',source:'codex_app_server',threadId,turnId:String(params.turnId),delta,thread_total:total});
+   const event:HarnessEvent={type:'usage',source:'codex_app_server',threadId,turnId:String(params.turnId),delta,thread_total:total};
+   if(committed)emit(event);else pendingUsage.push(event);
   }else if(method==='error'){
    if(!ours(params,method))return;need(typeof params?.error?.message==='string'&&typeof params.willRetry==='boolean','error.params');
    emit({type:'configuration',stage:'turn_error',threadId,turnId:params.turnId??null,willRetry:params.willRetry,code:errorKind(params.error.codexErrorInfo),message:clip(redactor.text(params.error.message),500)});
   }else if(method==='model/rerouted'){
    if(!ours(params,method))return;need(typeof params?.fromModel==='string'&&typeof params?.toModel==='string','model/rerouted.params');
    // The server moved this turn to another model: recorded and stopped, never continued under a model nobody configured.
-   rerouted={from:params.fromModel,to:params.toModel};emit({type:'configuration',stage:'model_rerouted',threadId,turnId:params.turnId??null,fromModel:params.fromModel,toModel:params.toModel,reason:params.reason??null});void dialect.cancel();
+   rerouted={from:params.fromModel,to:params.toModel};emit({type:'configuration',stage:'model_rerouted',threadId,turnId:params.turnId??null,fromModel:params.fromModel,toModel:params.toModel,reason:params.reason??null});
+   ctx.stop(new TaskError('codex_model_rerouted','waiting_configuration',`app-server 把 ${rerouted.from} 改路由到 ${rerouted.to}；不会在未配置的模型上继续。`));
   }else if(method==='mcpServer/startupStatus/updated'){
    need(typeof params?.name==='string'&&typeof params?.status==='string','mcpServer/startupStatus/updated.params');
    if(params.threadId&&threadId&&params.threadId!==threadId)return;
@@ -214,6 +250,22 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  ctx.child.once('error',error=>rpc.fail(new TaskError('codex_connection_lost','retry_wait',String(error.message))));
  ctx.child.stdin.on('error',error=>rpc.fail(new TaskError('codex_connection_lost','retry_wait',String(error.message))));
 
+ // Before the first turn the thread must run read-only with on-request approvals, and the server's own feature state for
+ // this thread must report every denied built-in tool disabled. A flag the server did not apply refuses the session.
+ async function verifyBuiltins(thread:ReturnType<typeof check.thread>){
+  const sandbox=(thread.sandbox as any)?.type??thread.sandbox;
+  if(thread.approvalPolicy!==threadPolicy.approvalPolicy||!['readOnly','read-only'].includes(String(sandbox)))stop('codex_builtin_tools_enabled','waiting_configuration',`thread 的 sandbox ${JSON.stringify(thread.sandbox)}、审批策略 ${JSON.stringify(thread.approvalPolicy)} 不是 read-only / on-request。`);
+  const state=new Map<string,boolean>();let cursor:string|null=null;
+  for(let page=0;page<20;page++){
+   const listed=await rpc.request('experimentalFeature/list',{threadId,limit:500,...(cursor?{cursor}:{})});
+   need(Array.isArray(listed?.data)&&listed.data.every((f:any)=>typeof f?.name==='string'&&typeof f?.enabled==='boolean'),'experimentalFeature/list.result');
+   for(const f of listed.data)state.set(f.name,f.enabled);
+   cursor=typeof listed.nextCursor==='string'&&listed.nextCursor?listed.nextCursor:null;if(!cursor)break;
+  }
+  const enabled=deniedFeatures.filter(name=>state.get(name)!==false);
+  if(enabled.length)stop('codex_builtin_tools_enabled','waiting_configuration',`Codex 内建工具没有关闭：${enabled.join(', ')}`);
+  return [...deniedFeatures];
+ }
  // The task tools must be exactly the Bot MCP server with exactly the offered tools; servers or plugins from the Codex home
  // are not platform capabilities, so a session that would see them is refused before the first turn.
  async function verifyTools(){
@@ -239,16 +291,22 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    if(cli!==codexAppServer.cli||config.version!==codexAppServer.cli)stop('codex_version_unsupported','waiting_configuration',`codex app-server ${cli??'unknown'}，配置固定 ${config.version??'-'}，协议锁定 ${codexAppServer.cli}`);
    if(resolve(init.codexHome)!==home)stop('codex_home_unexpected','waiting_configuration','app-server 使用的 CODEX_HOME 不是启动配置指定的专用目录。');
    rpc.notify('initialized');
-   const overrides={cwd,approvalPolicy:'on-request',sandbox:config.sandbox??'read-only',developerInstructions:ctx.instructions,config:{mcp_servers:{bot:{url:ctx.mcpUrl}}},
+   const overrides={cwd,approvalPolicy:threadPolicy.approvalPolicy,sandbox:threadPolicy.sandbox,developerInstructions:ctx.instructions,
+    config:{mcp_servers:{bot:{url:ctx.mcpUrl}},features:threadPolicy.features,web_search:threadPolicy.web_search},
     ...(config.model?{model:config.model}:{}),...(config.modelProvider?{modelProvider:config.modelProvider}:{})};
    const prior=!fresh&&previous?.protocol==='codex-app-server'&&id(previous.sessionId)?previous:null;
    let recovery=fresh?'fresh_evaluation':previous?.sessionId?'rebuilt_from_task_records':'new_session',thread:ReturnType<typeof check.thread>|null=null,reconciled:Record<string,unknown>|null=null,notice='';
    const switched=(model:unknown,provider:unknown)=>prior&&(prior.model&&model!==prior.model||prior.modelProvider&&provider!==prior.modelProvider);
    if(prior){
     // A binding made under another model or provider is not resumed under the current one, and nothing switches silently.
-    if(switched(config.model??prior.model,config.modelProvider??prior.modelProvider))stop('codex_resume_incompatible','waiting_configuration',`thread ${prior.sessionId} 绑定 ${prior.modelProvider}/${prior.model}，当前配置 ${config.modelProvider??'-'}/${config.model??'-'}。可还原配置后重试，或对角色应用新 revision 以新 thread 重建。`);
+    if(switched(config.model??prior.model,config.modelProvider??prior.modelProvider))stop('codex_resume_incompatible','waiting_configuration',`thread ${prior.sessionId} 绑定 ${prior.modelProvider}/${prior.model}，当前配置 ${config.modelProvider??'-'}/${config.model??'-'}。可还原配置后重试；确需换模型时暂停任务并执行 adopt-config（POST /api/tasks/:id/adopt-config），按新配置重建角色会话。`);
     try{thread=check.thread(await rpc.request('thread/resume',{threadId:prior.sessionId,excludeTurns:true,...overrides}),'thread/resume.result');}
-    catch(error){if(!(error instanceof RpcError))throw error;emit({type:'configuration',recovery:'native_resume_failed',previousSessionId:prior.sessionId,reason:clip(redactor.text(error.message),300)});}
+    catch(error){
+     // Only a thread the server explicitly has no rollout for is lost; any other failure keeps the binding for a retry.
+     if(!(error instanceof RpcError))throw error;
+     if(!threadMissing(error))stop('codex_resume_failed','retry_wait',`thread/resume ${prior.sessionId}：${clip(redactor.text(error.message),300)}（${error.code}）；保留原 thread 绑定。`);
+     emit({type:'configuration',recovery:'native_resume_failed',previousSessionId:prior.sessionId,reason:clip(redactor.text(error.message),300)});
+    }
     if(thread){
      // Ownership: the same thread, created in this role instance's own session directory, on the same model and provider.
      if(thread.thread.id!==prior.sessionId||resolve(thread.cwd)!==resolve(cwd))stop('codex_thread_ownership_mismatch','failed','恢复的 thread 不属于这个角色实例。');
@@ -262,22 +320,29 @@ export function appServerDialect(ctx:DialectContext):Dialect{
      }
     }
    }
-   if(!thread)thread=check.thread(await rpc.request('thread/start',overrides),'thread/start.result');
+   if(!thread){
+    thread=check.thread(await rpc.request('thread/start',overrides),'thread/start.result');
+    // A rebuild keeps the binding's model and provider; a different default is a migration the operator makes explicitly.
+    if(switched(thread.model,thread.modelProvider))stop('codex_resume_incompatible','waiting_configuration',`thread ${prior!.sessionId} 已丢失，重建会从 ${prior!.modelProvider}/${prior!.model} 换成 ${thread.modelProvider}/${thread.model}。可在 BOT_CODEX_CONFIG 固定原 model/modelProvider 后重试；确需换模型时暂停任务并执行 adopt-config（POST /api/tasks/:id/adopt-config），按新配置重建角色会话。`);
+   }
    threadId=thread.thread.id;
    // The model and provider are what the server reports for this thread; a configured value it did not take is refused.
    if(config.model&&thread.model!==config.model||config.modelProvider&&thread.modelProvider!==config.modelProvider)stop('codex_model_mismatch','waiting_configuration',`配置 ${config.modelProvider??'-'}/${config.model??'-'}，app-server 实际为 ${thread.modelProvider}/${thread.model}。`);
-   const tools=await verifyTools();
+   const builtins=await verifyBuiltins(thread),tools=await verifyTools();
    return {sessionId:threadId,recovery,notice,agentInfo:{name:'codex-app-server',version:cli},
     state:{protocol:'codex-app-server',model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,...(prior&&recovery==='native_resume'?{lastTurnId:prior.lastTurnId??null,lastTurnStatus:reconciled?.observed??prior.lastTurnStatus??null}:{lastTurnId:null,lastTurnStatus:null}),usage:usageBase},
-    bound:{threadId,model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,approvalPolicy:redactor.clean(thread.approvalPolicy??null),sandbox:config.sandbox??'read-only',instructionSources:redactor.clean(thread.instructionSources??[]),tools,reconciled}};
+    bound:{threadId,model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,approvalPolicy:redactor.clean(thread.approvalPolicy??null),sandbox:redactor.clean(thread.sandbox??null),disabledBuiltins:builtins,instructionSources:redactor.clean(thread.instructionSources??[]),tools,reconciled}};
   },
   async turn(prompt){
    text='';let resolveSettled!:()=>void;
    const settled=new Promise<void>(r=>{resolveSettled=r;});
-   const waiter:Waiter={id:null,done:false,usage:false,resolve:()=>{},reject:()=>{},settled};
+   const waiter:Waiter={id:null,hint:null,done:false,usage:false,resolve:()=>{},reject:()=>{},settled};
    const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=turn=>{resolveSettled();ok(turn);};waiter.reject=error=>{resolveSettled();fail(error);};});
    terminal.catch(()=>{});current=waiter;
-   const started=check.turn((await rpc.request('turn/start',{threadId,input:[{type:'text',text:prompt}]}))?.turn,'turn/start.result.turn');
+   let answer:any;
+   // A start the server may have begun but never answered can have used the model; its usage is unknown, not zero.
+   try{answer=await rpc.request('turn/start',{threadId,input:[{type:'text',text:prompt}]});}catch(error){if(!(error instanceof RpcError))emit({type:'turn',phase:'start_unconfirmed',threadId,turnId:null,usage:'unknown'});throw error;}
+   const started=check.turn(answer?.turn,'turn/start.result.turn');
    waiter.id=started.id;ctx.save({lastTurnId:started.id,lastTurnStatus:'inProgress'});emit({type:'turn',phase:'started',threadId,turnId:started.id});
    const known=early.get(started.id);if(known){early.delete(started.id);waiter.done=true;waiter.resolve(known);}
    // Only the terminal notification ends a turn; the start answer does not, and a stream that ends first fails the turn.
@@ -294,11 +359,13 @@ export function appServerDialect(ctx:DialectContext):Dialect{
   async cancel(){
    const waiter=current;if(!threadId||!waiter||waiter.done||rpc.failure)return;
    const grace=config.cancelGraceMs??5000;
-   if(waiter.id){emit({type:'turn',phase:'interrupt_requested',threadId,turnId:waiter.id});rpc.request('turn/interrupt',{threadId,turnId:waiter.id}).catch(()=>{});}
+   const turnId=waiter.id??waiter.hint;
+   if(turnId){emit({type:'turn',phase:'interrupt_requested',threadId,turnId});rpc.request('turn/interrupt',{threadId,turnId}).catch(()=>{});}
    let timer:NodeJS.Timeout|undefined;
    const receipt=await Promise.race([waiter.settled.then(()=>waiter.done?'terminal':'connection_closed'),new Promise<string>(r=>{timer=setTimeout(()=>r('timeout'),grace);})]);clearTimeout(timer);
-   emit({type:'turn',phase:'interrupt_receipt',threadId,turnId:waiter.id,receipt});
+   emit({type:'turn',phase:'interrupt_receipt',threadId,turnId,receipt});
   },
+  bound(){committed=true;for(const event of pendingUsage.splice(0))emit(event);},
   close(){rpc.fail(new TaskError('codex_connection_closed','retry_wait'));},
  };
  return dialect;

@@ -88,7 +88,7 @@ recover 只返回四种模式：`native_resume`、`checkpoint_restore`（Native/
 `entry-default` 保持入口自身的单次运行上限；`bounded` 沿用 #167 的语义，只压低每次运行的上限。新的 `metered` 按角色实例（任务里的这个角色）累计它的全部运行：恢复、检查点续接、引擎自动重启的新尝试、人工「重试」、后续委派和子代理都算，所以自动重启和重试都不会重开预算。RunContext 的 `budget.accounting` 写明 `per_run` 或 `role_instance`。预算只作用于角色运行，主控不接管的入口仍按入口自身上限执行：
 
 - `metered` 可设 `max_turns`、`max_output_tokens`、`max_total_tokens`、`max_model_requests`、`max_tool_calls`、`max_wall_seconds`、`max_cost`（`{amount, currency}`）。
-- 用量来自模型请求账本，加上 Codex 这类自带模型的执行器上报的用量（每条 `usage` 增量算一次未定价请求，没有任何上报的 turn 算 unknown）：缺少 token 数的请求计入 `unknown_requests`，此时已知用量只是下限（`semantics: lower_bound`），不记为 0；缓存输入是输入的一部分，不重复相加；金额是价格快照的估算，不是供应商账单，存在测量延迟与有限超额。
+- 用量来自模型请求账本，加上 Codex 这类自带模型的执行器上报的用量（每条 `usage` 增量算一次未定价请求；已开始却没有任何上报的 turn，在它结束或所在运行结束后算 unknown）：缺少 token 数的请求计入 `unknown_requests`，此时已知用量只是下限（`semantics: lower_bound`），不记为 0；缓存输入是输入的一部分，不重复相加；金额是价格快照的估算，不是供应商账单，存在测量延迟与有限超额。
 - 请求数、工具调用数和墙钟时间由控制面确定执行；墙钟计时器即使在工具调用中也会中断会话。
 - 耗尽时记录预算事件和检查点、撤销令牌、取消运行（`role_budget_exhausted`，等待配置），已有产物保留；该角色之后的运行在启动前即被拒绝，直到提高预算，不换模型重开预算。已开始的任务固定了启动时的角色配置：提高预算后用 `POST /api/tasks/:id/roles/apply` 把新 revision 应用到该角色，任务随引擎的等待配置轮询继续，也可以重试。
 

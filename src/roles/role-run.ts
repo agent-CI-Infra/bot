@@ -213,9 +213,13 @@ function usageOf(s: Store, column: 'lease_scope' | 'role_instance_id', value: st
   const costs = s.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE run_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`, ...ids).map(r => ({ currency: String(r.currency), amount: Number(r.amount) }));
   const tools = Number(s.get(`SELECT count(*) n FROM task_history WHERE run_id IN (${marks}) AND type='tool_observation'`, ...ids)!.n);
   // An external agent with its own model (Codex) reports usage per model response as thread-total deltas; each report is one
-  // request, unpriced. A turn that ended without any report is an unknown request, never zero.
+  // request, unpriced. A turn without any report is an unknown request, never zero: once it ended, or once its run ended
+  // without its terminal status (the stream broke, the interrupt timed out). So is a start the server never confirmed.
   const reported = s.get(`SELECT count(*) n,coalesce(sum(json_extract(data,'$.delta.input_tokens')),0) i,coalesce(sum(json_extract(data,'$.delta.output_tokens')),0) o FROM task_history WHERE run_id IN (${marks}) AND type='harness_event' AND json_extract(data,'$.type')='usage'`, ...ids)!;
-  const unreported = Number(s.get(`SELECT count(*) n FROM task_history WHERE run_id IN (${marks}) AND type='harness_event' AND json_extract(data,'$.type')='turn' AND json_extract(data,'$.phase')='ended' AND json_extract(data,'$.usage')='unknown'`, ...ids)!.n);
+  const unreported = Number(s.get(`SELECT count(*) n FROM task_history t JOIN task_runs r ON r.id=t.run_id WHERE t.run_id IN (${marks}) AND t.type='harness_event' AND json_extract(t.data,'$.type')='turn' AND (
+      json_extract(t.data,'$.phase')='start_unconfirmed'
+      OR json_extract(t.data,'$.phase')='started' AND NOT EXISTS (SELECT 1 FROM task_history u WHERE u.run_id=t.run_id AND u.type='harness_event' AND json_extract(u.data,'$.type')='usage' AND json_extract(u.data,'$.turnId')=json_extract(t.data,'$.turnId'))
+        AND (r.ended_at IS NOT NULL OR EXISTS (SELECT 1 FROM task_history e WHERE e.run_id=t.run_id AND e.type='harness_event' AND json_extract(e.data,'$.type')='turn' AND json_extract(e.data,'$.phase')='ended' AND json_extract(e.data,'$.turnId')=json_extract(t.data,'$.turnId'))))`, ...ids)!.n);
   const wall = runs.reduce((sum, r) => sum + Math.max(0, (r.ended_at ? Date.parse(String(r.ended_at)) : at) - Date.parse(String(r.started_at))), 0);
   // External drivers report a monotonically updated per-run snapshot. Never invent native model_requests or count
   // every snapshot as another request; interrupted runs may retain only a lower bound, with unknown use explicit.
