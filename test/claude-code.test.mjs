@@ -11,6 +11,7 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { Redactor, TaskError } from '../dist/agent/common.js';
 import { runRole, roleRuns } from '../dist/roles/run.js';
 import { roleApi } from '../dist/roles/api.js';
+import { resolveRole, roleConfiguration } from '../dist/roles/definition.js';
 import { instanceUsage, revokeRunTokens } from '../dist/roles/role-run.js';
 import { claudeCodeRuntime, ClaudeJsonStream } from '../dist/harness/claude-code-protocol.js';
 import { claudeBinary } from '../dist/harness/claude-code.js';
@@ -290,6 +291,32 @@ test('Claude configuration refuses external gateway profiles and controller role
   const { runClaudeCode } = await import('../dist/harness/claude-code.js');
   await assert.rejects(runClaudeCode({ ...f.spec, harnessPreparation: { config: f.config }, runContext: () => ({ execution_context: { kind: 'controller' } }), runAccess: { token: 'unusable-capability', check() {} } }, {}, new AbortController().signal, () => {}), { code: 'harness_role_unsupported' });
   assert.equal(f.s.get('SELECT count(*) n FROM task_runs').n, 0);
+});
+
+test('Claude admission refuses legacy and stored V2 controllers, including explicit and pinned backend overrides', async t => {
+  const f = await claudeFixture(t), legacy = { enabled: true, harnesses: { coordinator: 'claude_code', manager: 'claude_code', dev: 'claude_code' } };
+  const v2 = { ...roleConfiguration(f.s, 'r', legacy), revision: 1 }; delete v2.legacy;
+  for (const config of [legacy, v2]) {
+    f.s.run("INSERT OR REPLACE INTO settings VALUES('roles:r',?)", JSON.stringify(config));
+    for (const role of ['coordinator', 'manager']) {
+      for (const options of [{}, { harness: 'claude_code' }, { harness: 'claude_code', pinned: true }])
+        assert.throws(() => resolveRole(f.s, 'r', role, 'task.request', { ...options, persist: false }), { code: 'harness_role_unsupported' });
+      await assert.rejects(runRole(f.spec, role), { code: 'harness_role_unsupported' });
+      await assert.rejects(runRole(f.spec, role, undefined, 'claude_code'), { code: 'harness_role_unsupported' });
+    }
+  }
+  assert.equal(f.s.get('SELECT count(*) n FROM task_runs').n, 0, 'no controller run is started');
+});
+
+test('Claude protocol fixture: an explicitly saved dev backend is retained by configurable entry executors', async t => {
+  const f = await claudeFixture(t), admin = { id: 'admin', role: 'project_admin', repositories: ['r'] }, url = new URL('http://local/api/repositories/r/roles');
+  const saved = roleApi(f.s, admin, 'PUT', url, { expected_revision: 0, enabled: true, roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] }).configuration;
+  assert.equal(saved.roles.find(r => r.role_id === 'dev').entry_harness_source, 'role');
+  const resolved = resolveRole(f.s, 'r', 'dev', 'task.request', { entryExecutor: true, persist: false });
+  assert.deepEqual([resolved.snapshot.kind, resolved.snapshot.harness.id, resolved.snapshot.model.source], ['writer', 'claude_code', 'external_harness']);
+  const result = await runRole(f.spec, 'dev', undefined, undefined, { entryExecutor: true });
+  assert.equal(result.result.summary, 'read through gateway');
+  assert.equal(f.s.get("SELECT harness FROM task_runs WHERE role='dev' ORDER BY rowid DESC LIMIT 1").harness, 'claude_code');
 });
 
 test('Claude smoke probe requires an explicit public launch profile', t => {
