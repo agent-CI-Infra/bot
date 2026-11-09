@@ -60,8 +60,8 @@ GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令�
 | `BOT_IMAGE_TAG` | `latest` | 所有镜像的标签：版本（如 `v1.2.0`）或 `sha-<12 位提交>`；也传给控制面进程，「全局设置」显示它作为当前运行版本。叠加 `compose.build.yaml` 时不选择镜像，控制面收到空值，页面显示源码运行 |
 | `BOT_WEBHOOK_PORT` | `8791` | Webhook 的宿主端口，绑定 `0.0.0.0` |
 | `BOT_ADMIN_PORT` | `8792` | 管理页的宿主端口，只绑定 `127.0.0.1` |
-| `BOT_COOKIE_SECURE` | `false` | 管理页经 HTTPS 反向代理访问时设为 `true`；向导保存 HTTPS 控制台地址后也会自动使用 Secure Cookie |
-| `BOT_ADMIN_ORIGIN` | 空 | 管理站的 HTTPS origin；创建 GitHub App 后 GitHub 也回调到这里 |
+| `BOT_COOKIE_SECURE` | `false` | 设为 `true` 时强制 Secure Cookie；通过配置的 HTTPS 部署地址或向导地址登录时也会自动使用 Secure，向导里的错误域名不改变原 HTTP 本地登录的 Cookie |
+| `BOT_ADMIN_ORIGIN` | 空 | 部署自身的管理 origin，始终作为写请求的合法 Origin；未设置时按请求 Host 和 `BOT_COOKIE_SECURE` 推导。向导地址作为额外合法 Origin，不会取消此部署地址 |
 | `BOT_PROJECT_EGRESS` | `true` | 设为 `false` 时虚拟电脑没有外网出口 |
 | `BOT_GITHUB_API_URL` | `https://api.github.com` | GitHub API 地址 |
 | `BOT_GITHUB_OAUTH_CLIENT_ID` | 空 | GitHub App 用户授权 Client ID 的部署默认值；也可在全局设置的接入向导配置 |
@@ -87,6 +87,8 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 推荐由系统超级管理员进入「全局设置 → 接入向导 → GitHub 登录」，保存 Client ID、Client secret、控制台访问地址并启用。配置立即生效，使用 SecretBox 加密保存在数据库，不修改部署文件；Secret 不回读，留空保留，明确清除会同时停用。向导配置优先于环境默认值，明确停用后重启也不会重新启用。
 
 管理域名需独立 HTTPS 反向代理到 8792，Webhook 域名继续连接 8791；DNS、证书和代理由部署方配置。GitHub App 添加向导显示的用户授权 Callback URL `<控制台 origin>/auth/github/callback`。这与 manifest 注册和安装 Setup 回调不同，三者须分别保留。
+
+写请求同时接受部署自身的管理地址和向导保存的控制台地址，登录停用时也一样。部署地址为 `BOT_ADMIN_ORIGIN`；未设置时按当前请求 Host 和 `BOT_COOKIE_SECURE` 推导。向导地址用于用户 OAuth 回调，以及新建 App 的回调和消息链接；它不会替换部署地址的 Origin 许可。地址暂未接通或拼错时，仍能在原部署地址登录、进入第三步改回，无需修改数据库或绕过 Origin 校验。HTTPS 反向代理应转发原始 Host；生产环境可显式设置 `BOT_COOKIE_SECURE=true` 强制 Secure Cookie。
 
 未保存向导配置时，也可使用部署默认值：设置 `BOT_GITHUB_OAUTH_CLIENT_ID`、明确的 HTTPS `BOT_ADMIN_ORIGIN`，并以只读文件挂载 Client secret 到 `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE`；本地测试可用 loopback HTTP。生产环境设置 `BOT_COOKIE_SECURE=true`。secret 不写进镜像、仓库或浏览器配置，Compose 基础配置不会在未启用 OAuth 时要求该文件。
 

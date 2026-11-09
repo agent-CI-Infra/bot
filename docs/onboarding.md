@@ -38,15 +38,13 @@ GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管
 
 第 3 步配置用户直接用 GitHub 账号登录控制台。可以复用同一个 GitHub App，无需每名用户另建 App，也无需单独创建 OAuth App。已有 App 从其 General 页面复制 Client ID（不是 App ID），生成 Client secret，在向导填写；manifest 新建的 App 可直接复用加密保存的返回凭据。Secret 输入框始终为空，留空保存保留原值，勾选「清除已保存的 Client secret，并停用 GitHub 登录」才撤销。
 
-填写「控制台访问地址」，复制页面显示的 `<控制台 origin>/auth/github/callback` 到 GitHub App 的用户授权 Callback URL，保留已有注册回调和 Setup URL。多人访问需部署独立的 HTTPS 管理域名，反向代理至 8792；证书、DNS 和反向代理仍由部署方配置。Webhook 域名继续只转发至 8791，向导中的 Cloudflare Tunnel 不开放管理服务。本机测试可用 `http://127.0.0.1:8792` 或 localhost。域名不能包含路径、查询参数或账号密码。修改地址后，应使用新地址重新打开控制台。
+已有登录配置后再新建或选择另一个 App，第三步先显示这个 App 的待保存草稿，并取消启用勾选。新 App 返回过 Client ID 和 Secret 时，页面预填它的 Client ID、保留只写 Secret；没有可复用凭据时清空旧值，明确要求填写这个新 App 的 Client ID 和 Secret。已有生效登录配置在保存前继续使用，只有保存启用后才切换，旧页面不能静默提交旧 Client ID 来启用新选中的 App。
+
+填写「控制台访问地址」，复制页面显示的 `<控制台 origin>/auth/github/callback` 到 GitHub App 的用户授权 Callback URL，保留已有注册回调和 Setup URL。多人访问需部署独立的 HTTPS 管理域名，反向代理至 8792；证书、DNS 和反向代理仍由部署方配置。Webhook 域名继续只转发至 8791，向导中的 Cloudflare Tunnel 不开放管理服务。本机测试可用 `http://127.0.0.1:8792` 或 localhost。域名不能包含路径、查询参数或账号密码。向导地址是 OAuth 回调和链接使用的地址，不会取消部署地址的写入许可。地址尚未接通或拼错时，仍可在原部署地址修改配置、退出后用本地账号重新登录；接通后的新地址也可执行写操作。
 
 组织 owner 识别还需要 App 的 Members 只读权限和 organization 事件订阅。向导新建 App 已包含；已有 App 需所有者检查补齐，再由安装方接受新增权限。安装时自动请求用户授权可以保持关闭，用户点击登录按钮时才发起 OAuth。勾选启用并保存后立即生效，无需改 `.env` 或重启服务；未保存向导配置时继续兼容部署环境变量和 secret 文件，向导明确停用后不会因重启恢复环境默认值。
 
 修改配置会作废尚未完成的 OAuth 回调并使派生权限等待重新验证；停用或更换 Client ID 还会清除已保存的 GitHub 用户 token 并结束 GitHub 身份会话。已有本地会话、独立显式委派与项目任务保留。本地恢复账号继续可用。首次 GitHub 登录创建独立账号，同名或同邮箱不会自动合并，也不获得系统超级管理员；已有本地账号应先登录，在「身份与权限」绑定 GitHub。详见[身份与授权](identity-authorization.md)。
-
-![全局设置内配置 GitHub 登录（桌面）](images/github-login-settings-desktop.png)
-
-![全局设置内配置 GitHub 登录（390px）](images/github-login-settings-mobile.png)
 
 ## 项目列表的快捷设置
 

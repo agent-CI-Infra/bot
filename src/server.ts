@@ -91,8 +91,17 @@ export function createControlPlane(options: Options) {
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
-  const cookie = (token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}${options.secureCookies || githubLogin.adminOrigin?.startsWith('https:') ? '; Secure' : ''}`;
-  const browserCookie = (token: string) => `bot_oauth=${token}; HttpOnly; SameSite=Lax; Path=/auth/github; Max-Age=600${options.secureCookies || githubLogin.adminOrigin?.startsWith('https:') ? '; Secure' : ''}`;
+  const deploymentOrigin = (req: IncomingMessage) => options.adminOrigin || `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
+  const secureCookie = (req: IncomingMessage) => {
+    if (options.secureCookies) return true;
+    // Login/logout POSTs have already passed the Origin fence; a new alias must not change local recovery cookies.
+    if (req.method === 'POST' && req.headers.origin) return req.headers.origin.startsWith('https:');
+    const origin = githubLogin.adminOrigin;
+    return options.adminOrigin?.startsWith('https:') ||
+      origin?.startsWith('https:') && new URL(origin).host === req.headers.host;
+  };
+  const cookie = (req: IncomingMessage, token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}${secureCookie(req) ? '; Secure' : ''}`;
+  const browserCookie = (req: IncomingMessage, token: string) => `bot_oauth=${token}; HttpOnly; SameSite=Lax; Path=/auth/github; Max-Age=600${secureCookie(req) ? '; Secure' : ''}`;
   const browserToken = (req: IncomingMessage) => req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('bot_oauth='))?.slice(10) || '';
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
   // Errors contain stable codes only: never echo a request, credential, SQL statement or stack.
@@ -153,14 +162,14 @@ export function createControlPlane(options: Options) {
       channels.bindings.request(challenge);
       const browser = randomId(), result = githubIdentity.begin(browser, 'login');
       channels.bindings.associateOAuth(challenge, new URL(result.url).searchParams.get('state')!);
-      res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Set-Cookie', browserCookie(browser));
+      res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Set-Cookie', browserCookie(req, browser));
       res.writeHead(303, { Location: result.url }); res.end(); return;
     }
     if (method === 'GET' && path === '/auth/github/start') {
       if (!initialized()) return fail(409, 'local_recovery_setup_required');
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
       const browser = randomId(), result = githubIdentity.begin(browser, 'login');
-      res.setHeader('Set-Cookie', browserCookie(browser)); res.writeHead(303, { Location: result.url }); res.end(); return;
+      res.setHeader('Set-Cookie', browserCookie(req, browser)); res.writeHead(303, { Location: result.url }); res.end(); return;
     }
     if (method === 'GET' && path === '/auth/github/callback') {
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
@@ -173,7 +182,7 @@ export function createControlPlane(options: Options) {
         });
         const channelBinding = await channels.bindings.githubAuthenticated(url.searchParams.get('state') || '', credentials.token);
         if (result.setup_state) installationSetup.bindIdentity(result.setup_state, githubIdentity.sessionReference(credentials.token));
-        res.setHeader('Set-Cookie', [cookie(credentials.token), browserCookie('')]); res.writeHead(303, { Location: channelBinding ? '/#/channels' : '/#/identity' }); res.end();
+        res.setHeader('Set-Cookie', [cookie(req, credentials.token), browserCookie(req, '')]); res.writeHead(303, { Location: channelBinding ? '/#/channels' : '/#/identity' }); res.end();
       } catch (error) {
         const code = error instanceof HttpError ? error.code : 'github_oauth_unavailable';
         res.writeHead(303, { Location: '/?auth_error=' + encodeURIComponent(code) + '#/identity' }); res.end();
@@ -201,8 +210,7 @@ export function createControlPlane(options: Options) {
     if (path === '/api/setup' && method === 'GET') { respond(res, 200, { initialized: initialized() }); return; }
     const mutation = !['GET', 'HEAD'].includes(method);
     if (mutation && req.headers.origin) {
-      const origin = githubLogin.adminOrigin || options.adminOrigin || `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
-      if (req.headers.origin !== origin) fail(403, 'origin_forbidden');
+      if (![deploymentOrigin(req), githubLogin.adminOrigin].includes(req.headers.origin)) fail(403, 'origin_forbidden');
     }
     if (path === '/api/setup' && method === 'POST' && initialized()) fail(409, 'already_initialized');
     const publicRequest = path === '/api/setup' && method === 'POST' || path === '/api/auth/login' && method === 'POST';
@@ -229,7 +237,7 @@ export function createControlPlane(options: Options) {
         store.audit(id, 'system.initialized', id);
         return session(store, id);
       });
-      res.setHeader('Set-Cookie', cookie(credentials.token)); respond(res, 201, { ok: true, csrf_token: credentials.csrf }); return;
+      res.setHeader('Set-Cookie', cookie(req, credentials.token)); respond(res, 201, { ok: true, csrf_token: credentials.csrf }); return;
     }
     if (path === '/api/auth/login' && method === 'POST') {
       fields(input, ['username', 'password']);
@@ -245,7 +253,7 @@ export function createControlPlane(options: Options) {
       // A concurrent administrator may have disabled this user during hashing.
       if (!store.get('SELECT id FROM users WHERE id=? AND active=1', row!.id)) fail(401, 'invalid_login');
       const credentials = store.transaction(() => session(store, row!.id)); loginAttempts.delete(key);
-      res.setHeader('Set-Cookie', cookie(credentials.token)); respond(res, 200, { ok: true, csrf_token: credentials.csrf }); return;
+      res.setHeader('Set-Cookie', cookie(req, credentials.token)); respond(res, 200, { ok: true, csrf_token: credentials.csrf }); return;
     }
     if (!user) return fail(401, 'login_required');
     if (path === '/api/auth/me' && method === 'GET') { refreshSessionRevision(store, sessionToken(req)); respond(res, 200, publicActor(user)); return; }
@@ -253,7 +261,7 @@ export function createControlPlane(options: Options) {
       fields(input, ['setup_state']);
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
       const browser = randomId(), result = githubIdentity.begin(browser, 'bind', sessionToken(req), input.setup_state === undefined ? null : text(input.setup_state));
-      res.setHeader('Set-Cookie', [cookie(sessionToken(req)), browserCookie(browser)]); respond(res, 201, result); return;
+      res.setHeader('Set-Cookie', [cookie(req, sessionToken(req)), browserCookie(req, browser)]); respond(res, 201, result); return;
     }
     if (path === '/api/identity/refresh' && method === 'POST') {
       fields(input, []); await githubIdentity?.reverify(user.id); refreshSessionRevision(store, sessionToken(req));
@@ -263,7 +271,7 @@ export function createControlPlane(options: Options) {
       fields(input, []);
       const token = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('bot_session='))?.slice(12) || '';
       store.run('DELETE FROM sessions WHERE token_hash=?', digest(token));
-      res.setHeader('Set-Cookie', cookie('', 0)); respond(res, 200, { ok: true }); return;
+      res.setHeader('Set-Cookie', cookie(req, '', 0)); respond(res, 200, { ok: true }); return;
     }
     if (path === '/api/status' && method === 'GET') {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;
