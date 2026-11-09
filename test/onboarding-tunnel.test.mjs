@@ -155,7 +155,7 @@ test('the wizard explains fallback rules once and still warns about named non-we
     if (path === '/api/models') return [200, { models: [] }];
     throw new Error('Unexpected request: ' + path);
   });
-  const draw = () => page.run('onboardingTunnel=true;renderOnboarding(renderVersion)');
+  const draw = () => page.run('onboardingTunnel=true;renderOnboarding(renderVersion,$("onboarding-panel"))');
   await draw();
   const tunnel = page.$('onboarding-panel').querySelector('#wizard-tunnel'), rows = tunnel.querySelectorAll('.row');
   assert.equal(rows.length, 3);

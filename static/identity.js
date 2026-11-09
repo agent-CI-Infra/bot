@@ -4,6 +4,7 @@ function identityError(code) {
     github_identity_already_bound: '当前账号已有 GitHub 绑定。请先解除原绑定，再关联新的 GitHub 身份。',
     invalid_oauth_state: '登录验证已过期、已使用或不属于当前浏览器。请重新发起 GitHub 登录。',
     oauth_session_mismatch: '绑定时的本地会话已变化。请重新登录并发起绑定。',
+    github_login_configuration_changed: 'GitHub 登录配置已更新，请重新发起登录。',
     github_oauth_failed: 'GitHub 授权失败，请重新授权。', github_oauth_denied: 'GitHub 授权已取消，请重新发起。',
     user_disabled: '账号已停用，请联系管理员。' })[code] || 'GitHub 身份暂时无法验证，请稍后重试或使用本地账号登录。';
 }
@@ -32,7 +33,7 @@ async function renderIdentity() {
     refresh.disabled = true; refresh.textContent = '正在验证…';
     try { await api('/api/identity/refresh', 'POST', {}); await start(); } catch (err) { error(err); refresh.disabled = false; }
   }); identities.append(bind, refresh);
-  if (!enabled) identities.append(note('GitHub 登录尚未配置。现有本地账号和显式委派继续可用。'));
+  if (!enabled) identities.append(note('GitHub 登录尚未启用。系统超级管理员可在「全局设置 → 接入向导」中配置；现有本地账号和显式委派继续可用。'));
   for (const identity of data.identities) {
     const row = element('div', '', 'row'), stateLabel = ({ active: '已验证', pending_verification: '待验证／需重新授权', revoked: '已撤销' })[identity.status] || identity.status;
     row.append(element('strong', identity.display_name), element('span', `${identity.provider} · ${stateLabel}`));

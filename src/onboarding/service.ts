@@ -10,8 +10,9 @@ import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
 import { InstallationSetup } from '../installations/setup.js';
 import { tunnelToken } from './tunnel-token.js';
+import type { GitHubLogin } from '../identity/github-login.js';
 
-interface Options { tunnelFile?: string; tunnelMetrics?: string; githubUrl?: string; fetcher?: typeof fetch; probe?: typeof probeGet; }
+interface Options { tunnelFile?: string; tunnelMetrics?: string; githubUrl?: string; fetcher?: typeof fetch; probe?: typeof probeGet; githubLogin?: GitHubLogin }
 export class Onboarding {
   readonly challenges = new Map<string, { proof: string; until: number }>();
   constructor(readonly store: Store, readonly options: Options = {}) {
@@ -88,7 +89,11 @@ export class Onboarding {
   }
   async api(user: Actor, method: string, url: URL, input: Json, adminOrigin: string): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/onboarding')) return undefined; superAdmin(user);
-    if (method === 'GET' && url.pathname === '/api/onboarding') return { public_address: this.saved('public'), tunnel: await this.tunnelStatus(), app: this.saved('app'), model_id: this.saved('model'), defaults, installation_skipped: !!this.saved('installation_skipped'), complete: !!this.saved('complete') };
+    if (method === 'GET' && url.pathname === '/api/onboarding') return { public_address: this.saved('public'), tunnel: await this.tunnelStatus(), app: this.saved('app'), model_id: this.saved('model'), defaults, installation_skipped: !!this.saved('installation_skipped'), complete: !!this.saved('complete'), github_login: this.options.githubLogin?.view(adminOrigin) };
+    if (url.pathname === '/api/onboarding/github-login' && method === 'PUT') {
+      if (!this.options.githubLogin) return fail(503, 'github_login_configuration_unavailable');
+      return { github_login: this.options.githubLogin.update(user, input, adminOrigin) };
+    }
     if(method==='POST'&&url.pathname==='/api/onboarding/installation-target'){fields(input,['target']);return this.installationTarget(input.target);}
     if (method === 'POST' && url.pathname === '/api/onboarding/model') {
       fields(input, ['model_id']); const model = this.store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL AND api_key IS NOT NULL', text(input.model_id));
@@ -111,6 +116,8 @@ export class Onboarding {
         }
       } catch { return fail(502, 'github_app_check_failed'); }
       const value = { account_id: account!.id, app_id: String(app.id), slug: app.slug, installations: installations.length, ...(webhookUrl?{webhook_url:webhookUrl}:{}), install_url: `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new` };
+      if (typeof app.client_id === 'string') this.store.run('UPDATE accounts SET credentials=? WHERE id=?',
+        this.store.secrets.seal({ ...secrets, oauth_client_id: app.client_id }, 'account:' + account!.id), account!.id);
       this.save('app', value); this.save('installation_skipped', false); return { app: value };
     }
     if (method === 'POST' && url.pathname === '/api/onboarding/address') {
@@ -155,7 +162,8 @@ export class Onboarding {
       if (!value.id || !value.slug || !value.webhook_secret || createPrivateKey(value.pem).asymmetricKeyType !== 'rsa') throw new Error();
     } catch { this.store.run("UPDATE app_manifest_states SET status='failed' WHERE state=?", state); return fail(502, 'manifest_conversion_failed'); }
     this.store.transaction(() => {
-      this.store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', pending!.account_id, value.name || value.slug, 'github_app', String(value.id), this.store.secrets.seal({ private_key: value.pem }, 'account:' + pending!.account_id), new Date().toISOString());
+      this.store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', pending!.account_id, value.name || value.slug, 'github_app', String(value.id), this.store.secrets.seal({ private_key: value.pem,
+        ...(typeof value.client_id === 'string' && typeof value.client_secret === 'string' ? { oauth_client_id: value.client_id, oauth_client_secret: value.client_secret } : {}) }, 'account:' + pending!.account_id), new Date().toISOString());
       this.store.run('INSERT INTO endpoints VALUES(?,?,?)', pending!.endpoint_id, pending!.account_id, this.store.secrets.seal({ value: value.webhook_secret }, 'endpoint:' + pending!.endpoint_id));
       this.save('app', { account_id: pending!.account_id, app_id: String(value.id), slug: value.slug, install_url: `https://github.com/apps/${encodeURIComponent(value.slug)}/installations/new` });
       this.store.run("UPDATE app_manifest_states SET status='completed' WHERE state=?", state); this.store.audit(pending!.user_id, 'onboarding.app_created', pending!.account_id);

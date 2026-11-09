@@ -9,12 +9,13 @@ export interface GitHubOAuthConfig { clientId: string; clientSecret: string; red
 export class GitHubIdentity implements InstallationIdentity {
   private refreshing = new Map<string, Promise<void>>();
   private tokens = new Map<string, Promise<string>>();
-  constructor(readonly store: Store, readonly config: GitHubOAuthConfig) {
+  constructor(readonly store: Store, readonly config: GitHubOAuthConfig, private readonly assertConfiguration: () => void = () => {}) {
     const redirect = new URL(config.redirectUri);
     if (redirect.pathname !== '/auth/github/callback' || redirect.search || redirect.hash ||
       redirect.protocol !== 'https:' && !(redirect.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(redirect.hostname))) throw new Error('invalid_oauth_redirect');
   }
   begin(browser: string, mode: 'login' | 'bind', sessionRef = '', setupState: string | null = null): { url: string } {
+    this.assertConfiguration();
     if (!browser) return fail(400, 'oauth_browser_required');
     const principal = mode === 'bind' ? resolveActor(this.store, sessionRef).principal_id : null;
     const state = randomId(), verifier = randomBytes(32).toString('base64url');
@@ -79,6 +80,7 @@ export class GitHubIdentity implements InstallationIdentity {
     if (!userId || typeof user.login !== 'string') return fail(502, 'github_invalid_user');
     const login = user.login;
     const result = this.store.transaction(() => {
+      this.assertConfiguration();
       if (row.mode === 'bind' && resolveActor(this.store, sessionRef).principal_id !== row.principal_id) return fail(403, 'oauth_session_mismatch');
       const previous = this.store.get("SELECT * FROM external_identities WHERE provider='github' AND host='github.com' AND external_actor=?", userId);
       if (previous && row.mode === 'bind' && previous.principal_id !== row.principal_id) return fail(409, 'external_identity_conflict');
@@ -95,7 +97,7 @@ export class GitHubIdentity implements InstallationIdentity {
       this.saveToken(id, token); invalidate(this.store, principal, 'github.authorized'); this.store.audit(principal, 'github.authorized', id);
       return { principal_id: principal, identity_id: id, setup_state: row.setup_state as string | null };
     });
-    await this.refresh(result.principal_id); return result;
+    await this.refresh(result.principal_id); this.assertConfiguration(); return result;
   }
   private token(identity: Row): Promise<string> {
     const existing = this.tokens.get(identity.id); if (existing) return existing;
@@ -104,6 +106,7 @@ export class GitHubIdentity implements InstallationIdentity {
       if (identity.expires_at !== null && identity.expires_at <= Date.now() + 60_000) {
         if (!secret.refresh_token || identity.refresh_expires_at && identity.refresh_expires_at <= Date.now()) return fail(401, 'github_reauthorization_required');
         const fresh = await this.exchange({ grant_type: 'refresh_token', refresh_token: String(secret.refresh_token) });
+        this.assertConfiguration();
         // Unlinking during the network request must not restore a revoked identity.
         if (!this.store.get("SELECT 1 FROM external_identities WHERE id=? AND status='active' AND credentials=?", identity.id, identity.credentials)) return fail(409, 'authorization_changed');
         this.saveToken(identity.id, fresh); return String(fresh.access_token);
@@ -158,6 +161,7 @@ export class GitHubIdentity implements InstallationIdentity {
         }
       }
       this.store.transaction(() => {
+        this.assertConfiguration();
         if (revision(this.store, principal) !== startRevision || !this.store.get("SELECT 1 FROM external_identities WHERE id=? AND status='active'", identity.id)) return fail(409, 'authorization_changed');
         for (const item of desired) if (this.store.get('SELECT revision FROM github_installations WHERE ref=?', item.installation.ref)?.revision !== item.installation.revision) return fail(409, 'authorization_changed');
         identityProjection(this.store);

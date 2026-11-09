@@ -1,0 +1,65 @@
+import { test, expect } from '@playwright/test';
+import { mkdirSync, rmSync } from 'node:fs';
+import { identityFixture } from '../test/identity-fixture.mjs';
+import { testPassword } from '../test/helpers.mjs';
+
+test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不回显，普通用户不能进入配置', async ({ page, browser }) => {
+  const f = await identityFixture(undefined, { wizardOnly: true }), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const password = f.password;
+    expect((await f.admin('/api/auth/github/status')).value.enabled).toBe(false);
+    await page.goto(f.h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.locator('#tabs').getByRole('button', { name: '接入向导', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '全局设置', exact: true }).click();
+    await page.locator('.project-nav').getByRole('link', { name: '接入向导', exact: true }).click();
+    await page.getByRole('button', { name: '3. GitHub 登录', exact: true }).click();
+    await expect(page).toHaveURL(/#\/settings\/onboarding\/2$/);
+    await expect(page.locator('.project-nav [aria-current=page]')).toHaveText('接入向导');
+    await page.getByLabel('启用 GitHub 账号登录', { exact: true }).check();
+    await page.getByLabel('Client ID', { exact: true }).fill('fixture-client');
+    await page.getByLabel('Client secret（只保存，不回读）', { exact: true }).fill('fixture-secret');
+    await page.getByLabel('控制台访问地址', { exact: true }).fill(f.h.admin);
+    await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
+    await expect(page.locator('#message')).toContainText('GitHub 登录已启用');
+    await expect(page.getByLabel('Client secret（只保存，不回读）', { exact: true })).toHaveValue('');
+    await expect(page.getByLabel('启用 GitHub 账号登录', { exact: true })).toBeChecked();
+    mkdirSync('.tmp/onboarding-settings', { recursive: true });
+    await page.screenshot({ path: '.tmp/onboarding-settings/github-login-desktop.png', fullPage: true });
+    await page.reload(); await expect(page.getByLabel('Client ID', { exact: true })).toHaveValue('fixture-client');
+    await expect(page.getByLabel('Client secret（只保存，不回读）', { exact: true })).toHaveValue('');
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await page.locator('.github-login-callback').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/onboarding-settings/github-login-mobile.png', fullPage: true });
+    await page.getByLabel('启用 GitHub 账号登录', { exact: true }).uncheck();
+    await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
+    await expect(page.locator('#message')).toContainText('当前使用本地账号登录');
+    expect((await f.admin('/api/auth/github/status')).value.enabled).toBe(false);
+    await page.getByLabel('启用 GitHub 账号登录', { exact: true }).check();
+    await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
+    await expect(page.locator('#message')).toContainText('GitHub 登录已启用');
+    await page.locator('#logout').click(); await page.getByRole('link', { name: '使用 GitHub 登录', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '当前角色与授权来源', exact: true })).toBeVisible();
+    await expect(page.locator('#tabs').getByRole('button', { name: '全局设置', exact: true })).toBeHidden();
+    await page.goto(f.h.admin + '/#/settings/onboarding/2');
+    await expect(page.locator('#settings-panel')).toBeHidden();
+    expect(await page.evaluate(async () => (await fetch('/api/onboarding')).status)).toBe(403);
+    // A separately delegated local project/organization administrator is equally unable to configure OAuth.
+    const memberPassword = testPassword(); await f.admin('/api/users', 'POST', { username: 'scoped-admin', password: memberPassword, organization_ids: ['10'] });
+    const context = await browser.newContext(), member = await context.newPage();
+    await member.goto(f.h.admin + '/#/settings/onboarding/2'); await member.getByLabel('用户名', { exact: true }).fill('scoped-admin');
+    await member.getByLabel('密码', { exact: true }).fill(memberPassword); await member.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(member.locator('#settings-panel')).toBeHidden(); await context.close();
+    await page.locator('#logout').click(); await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.goto(f.h.admin + '/#/settings/onboarding/2');
+    await page.getByLabel('清除已保存的 Client secret，并停用 GitHub 登录', { exact: true }).check();
+    await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
+    await expect(page.locator('#message')).toContainText('当前使用本地账号登录');
+    expect((await f.admin('/api/onboarding')).value.github_login.secret_configured).toBe(false);
+    await page.locator('#logout').click(); await expect(page.getByRole('link', { name: '使用 GitHub 登录', exact: true })).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});

@@ -24,6 +24,7 @@ a.status-link:hover{text-decoration:underline}
 .management-panel { min-width: 0; }
 .management-header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: end; }
 .management-header label { flex: 1; min-width: 12rem; }
+.github-login-callback { display: block; overflow-wrap: anywhere; white-space: normal; }
 .management-feed { max-height: 32rem; overflow: auto; padding: .75rem; border: 1px solid var(--border, #d1d5db); border-radius: .5rem; }
 .management-feed:empty { display: none; }
 .management-observation { margin-block: .75rem; }
