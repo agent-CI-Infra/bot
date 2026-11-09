@@ -10,7 +10,7 @@
 
 项目计划选择 #163 已有的项目 service principal；创建和修改始终要求操作者拥有 `grants.manage`，只有 `schedules.manage` 的维护人不能修改。新建时 owner 和维护人都必须是 active 且拥有该项目 `schedules.manage` 的人类。更新时 kind、服务身份、owner 和创建人保持不变，历史 owner 离职或失权不影响已有计划的更新和预览；新的维护人仍须 active 且有项目计划管理权限。预览已有计划需在 query arguments 中携带 `schedule_id`，服务端读取原记录并核对身份引用，未携带时按新建计划检查 owner。维护人下拉只表示可被指定的人，不授予保存权限。
 
-服务身份必须有 project 范围的显式委托，计划保存创建人、owner、维护人、批准人、授权修订及委托快照。执行 Actor 只保留该计划批准的最小能力；日报为 `tasks.read` 和 `schedules.manage`，工作流再增加处理器声明的能力。处理器需要的能力改变、委托撤销或改变、维护人失权、安装不可用都会暂停，不自动扩大能力。执行路径检查当前服务身份、显式委托、维护人及目的地，不依赖创建人或 owner 继续登录。拥有 `grants.manage` 的管理员可显式更换维护人；交接不改变服务身份的已批能力，原 owner 和创建人引用保留用于审计。新建 owner 不合格返回 `schedule_owner_required`，新维护人不合格返回 `schedule_maintainer_required`；历史 owner 已离职不会作为已有计划的拒绝原因。
+服务身份必须有 project 范围的显式委托，计划保存创建人、owner、维护人、批准人、授权修订及委托快照。执行 Actor 只保留该计划批准的最小能力；日报为 `tasks.read` 和 `schedules.manage`，其他计划（例如 Manager 定时检查 `manager.check`）再增加处理器声明的能力。处理器需要的能力改变、委托撤销或改变、维护人失权、安装不可用都会暂停，不自动扩大能力。执行路径检查当前服务身份、显式委托、维护人及目的地，不依赖创建人或 owner 继续登录。拥有 `grants.manage` 的管理员可显式更换维护人；交接不改变服务身份的已批能力，原 owner 和创建人引用保留用于审计。新建 owner 不合格返回 `schedule_owner_required`，新维护人不合格返回 `schedule_maintainer_required`；历史 owner 已离职不会作为已有计划的拒绝原因。
 
 ## 时间和版本
 
@@ -26,7 +26,9 @@
 
 `ScheduleService.register(workflow, handler)` 是 #168 统一触发接入点。处理器声明 capability，并在短同步事务中用 `ControlledTrigger.occurrence_id/run_id` 持久化唯一业务运行，返回同一个 run_id 和真实业务状态。不能在该事务里发网络请求、执行用户脚本或调用模型。业务运行 queued/running 时 occurrence 为 `dispatched`，只表示运行已被接受，不表示开发或发布完成；业务服务回报最终结果后才写成功及最近成功时间。测试中的假处理器只验证契约，生产没有安装假开发或假发布处理器。
 
-业务运行保存 occurrence_id，在每次工具或模型动作前调用 `ScheduleService.authorizeAction(occurrenceId, capability, usage)`；重启后也使用该入口检查原快照、当前授权、安装、维护归属、运行时长和累计预算。queued/running 业务运行持续占用计划、项目和租户并发名额，不能在 dispatch 返回时就释放；业务服务通过可信的 `settleRun` 回写最终事实。超时运行被标记为 budget_exhausted，之后的工具动作被拒绝。模型动作需要预留调用次数及已知价格的费用上界；不能把未知价格当作零。既有 workflow 开关仍在 dispatch 时检查，业务服务继续承担它自己的门禁、工具能力、安装权限、角色和成本限制。
+业务运行保存 occurrence_id，在每次工具或模型动作前调用 `ScheduleService.authorizeAction(occurrenceId, capability, usage)`；重启后也使用该入口检查原快照、当前授权、安装、维护归属、运行时长和累计预算。queued/running 业务运行持续占用计划、项目和租户并发名额，不能在 dispatch 返回时就释放；业务服务通过可信的 `settleRun` 回写最终事实。超时运行被标记为 budget_exhausted，之后的工具动作被拒绝。模型动作需要预留调用次数及已知价格的费用上界；不能把未知价格当作零。工作类型的开关仍在 dispatch 时检查，业务服务继续承担它自己的门禁、工具能力、安装权限、角色和成本限制。
+
+`manager.check` 是 Manager 定时检查：到期时成为一个 `schedule.due` 事件交给项目 Manager，`parameters.instruction` 写要检查什么。Manager 按提示词的「定时检查」章节决定是否发起一项只读的普通任务（`task.request`，执行身份是计划的服务主体，合同来自 Manager 的简要说明）；它关着或 Manager 决定不处理时不建任务。这次计划运行在事件交给 Manager 时即算完成，不占用计划的并发名额；分派调用和之后的任务按项目的模型用量计。见[项目 Manager 与工作类型](workflows.md)。
 
 `release.scheduled` 目前明确返回 `unsupported/trigger_handler_not_registered`。#146/#147 可以通过同一注册入口接入；本模块不选择版本、不打标签、不创建 Release，不改变无变更不发布、检查失败不发布、SemVer 升高、手动草稿和定时正式发布的既定边界。
 

@@ -2,9 +2,9 @@
 
 管理控制台的「管理助手」是登录后始终可唤起的悬浮聊天窗口。项目页顶部的「管理对话」和项目设置里的「管理对话」会选中该项目；右下角入口保持当前管理范围。窗口顶部始终显示管理范围，支持全部有权项目、组织和单项目作用域。切换页面不会重建窗口或悄悄切换范围，收起会保留会话、输入草稿及正在运行的请求，有新回复时入口会提示。退出登录会移除窗口并清理本次草稿。旧的 `#/management` 和项目 `/management` 链接仍可唤起窗口。
 
-窗口以对话为主，按消息列出用户请求、助手回复和可展开的事实与命令回执；「会话记录」可以切换或新建持久会话。「快捷操作」集中放置查询、工作流表单、任务管理及定时计划，执行配置或任务命令后返回对话查看结果。Ctrl / ⌘ + Enter 发送，Escape 收起；收起和重新连接不会重复提交命令。工作流助手保留独立的草稿对话，打开任一助手会收起另一窗口。工作流助手打开时隐藏右下角管理入口，避免遮挡页头或被拖动的助手；仍可通过顶部「管理对话」切回管理窗口，收起工作流助手后入口恢复。
+窗口以对话为主，按消息列出用户请求、助手回复和可展开的事实与命令回执；「会话记录」可以切换或新建持久会话。「快捷操作」集中放置查询、Manager 章节表单、任务管理及定时计划，执行配置或任务命令后返回对话查看结果。Ctrl / ⌘ + Enter 发送，Escape 收起；收起和重新连接不会重复提交命令。
 
-查询、显式表单和自然语言工具调用使用 `ManagementService`。已有工作流编辑、项目策略、角色配置与 Task 操作也进入相同命令服务。ActorContext 由服务端的 `resolveActor` 创建；可信 IM 适配器可使用身份模块解析后的 actor，不能反序列化客户端 actor 或自行授予权限。
+查询、显式表单和自然语言工具调用使用 `ManagementService`。「Manager 与角色」页的 Manager 配置、项目策略、角色配置与 Task 操作也进入相同命令服务。ActorContext 由服务端的 `resolveActor` 创建；可信 IM 适配器可使用身份模块解析后的 actor，不能反序列化客户端 actor 或自行授予权限。
 
 飞书应用机器人已接入相同服务，安装、双端身份证明、群范围和渠道回执的使用方式见 [消息渠道与飞书应用机器人](message-channels.md)。
 
@@ -19,13 +19,13 @@
 | 字段 | 含义 |
 | --- | --- |
 | `operation` | 目录中的确定性业务操作 |
-| `target` | `project_id`，以及适用的 `task_id` / `workflow_id` |
+| `target` | `project_id`，以及适用的 `task_id`；`workflow.update` 的 `workflow_id` 是工作类型 id |
 | `arguments` | 此操作的闭合 Schema 业务参数 |
 | `expected_revision` | 最近一次查询返回的版本摘要 |
 | `idempotency_key` | 操作者范围内唯一的请求标识 |
 | `source_conversation` / `source_message` | 原始会话与消息引用 |
 
-命令包括 `project.update`、`workflow.update`、`roles.update`、`task.create`、`task.pause`、`task.cancel`、`task.retry`、`task.instructions`、`task.contract`、`task.adopt-config` 和扩展注册入口。模型只有 query / command 工具，不能指定 actor、tenant、capabilities、SQL、后台地址或控制面 shell。模型调用的来源和幂等键由会话服务生成。
+命令包括 `project.update`、`manager.update`（Manager 提示词、工作类型的开关和写入、事件开关）、`workflow.update`（兼容旧名称：改一个工作类型的章节、开关或写入）、`roles.update`、`task.create`、`task.pause`、`task.cancel`、`task.retry`、`task.instructions`、`task.contract`、`task.adopt-config` 和扩展注册入口。模型只有 query / command 工具，不能指定 actor、tenant、capabilities、SQL、后台地址或控制面 shell。模型调用的来源和幂等键由会话服务生成。
 
 命令回执包含操作者、渠道、目标、参数、修改前后版本、状态和结果。`GET /api/management/commands/:id` 回读；重复键和相同参数返回原回执，参数变化返回 `idempotency_conflict`。版本冲突返回 `management_revision_conflict`，客户端必须重读并重新形成修改，不能覆盖新配置。配置回执提供 diff 和重新绑定当前版本后可提交的回滚参数。
 

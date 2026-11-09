@@ -29,7 +29,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 私聊与群内 @ 使用相同命令。每条请求显式指定项目，例如 `/project 101 查询任务为什么停止`、`/project 101 修改检视提示词`；不从自然语言猜测写入项目。项目 ID 只是用户选择，服务端仍检查该项目与连接所属租户以及当前操作者授权。
 
-结构化客户端可发送 `/project <id> /query <JSON>` 或 `/project <id> /command <JSON>`，JSON 沿用管理工具 Schema，不能指定 ActorContext、来源、幂等键或管理员身份。命令必须包含从当前查询得到的 `expected_revision`。自然语言使用原管理模型与相同工具；不在飞书 handler 内实现 SQL、工作流或 GitHub 写入。
+结构化客户端可发送 `/project <id> /query <JSON>` 或 `/project <id> /command <JSON>`，JSON 沿用管理工具 Schema，不能指定 ActorContext、来源、幂等键或管理员身份。命令必须包含从当前查询得到的 `expected_revision`。自然语言使用原管理模型与相同工具；不在飞书 handler 内实现 SQL、Manager 配置或 GitHub 写入。
 
 渠道会话由连接、安装租户、操作者租户、操作者、chat/thread、项目和 principal 共同隔离。群内不同发送者独立建会话。Web 可直接读取相同 `conversation_id`、管理消息、命令 `operation_id`、修改前后版本、状态、差异和审计。发送 `/project <id> /link <conversation_id>` 显式续接本人同一项目的 Web 会话，不自动关联或复制其他聊天。
 

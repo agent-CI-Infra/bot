@@ -6,8 +6,8 @@
 
 两种 transport 使用同一入口：
 
-- 工作区任务使用正式的 Pi harness（`src/agent/pi.ts` 的 `piAdapter`），在隔离项目电脑中读取文件、执行命令和产生修改；`loop.ts` 只组装工作流的配置和工具回调。`profiles.ts` 把固定的硬限制和工作流提示词组合成系统提示，并按工作流保存的权限生成工具和显式 capabilities。同一个 harness 也运行项目主控会话（见 [Role-Pool](role-pool.md)）：会话配置里的 `control_tools` 由 runner 经控制邮箱交给控制面执行，等待没有期限；控制面只执行本次会话提供过的工具，并在回复里用 `finish` 标出被接受的提交。
-- CI 观察（`release.observe`）、发行说明（`release.notes`）、Actions 失败处理（`actions.failures`）和接入门禁（`gate.onboarding`，对话的每一轮是一个任务）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 同时用于 Native 角色后端和控制面的工作流助手；角色可以选择 Pi、Native、Process 或 ACP，工具和结果校验继续由调用方提供。
+- 工作区任务使用正式的 Pi harness（`src/agent/pi.ts` 的 `piAdapter`），在隔离项目电脑中读取文件、执行命令和产生修改；`loop.ts` 只组装任务的配置和工具回调。`profiles.ts` 把固定的硬限制和这类工作的 Manager 章节组合成系统提示，并按项目配置给这类工作的写入生成工具和显式 capabilities。同一个 harness 也运行项目主控会话（见 [Role-Pool](role-pool.md)）：会话配置里的 `control_tools` 由 runner 经控制邮箱交给控制面执行，等待没有期限；控制面只执行本次会话提供过的工具，并在回复里用 `finish` 标出被接受的提交。
+- CI 观察（`release.observe`）、发行说明（`release.notes`）、Actions 失败处理（`actions.failures`）和接入门禁（`gate.onboarding`，对话的每一轮是一个任务）也是工作区任务：在项目电脑里检出相关提交，事件写在 `../context/`，用各自的结束工具交回结果，由所属模块核验后接手。运行时默认的 tool loop 用于 Native 角色后端；角色可以选择 Pi、Native、Process 或 ACP，工具和结果校验继续由调用方提供。
 
 发布确认、幂等 outbox、发布状态机、仓库授权和 claim 是控制面的职责，不交给提示词决定。统一 Agent 不等于移除这些安全边界。
 
@@ -55,11 +55,11 @@ const result = await runAgent({
 
 任务调度、触发与持久化仍由调用方负责。工具 schema、executor、guard 必须来自可信控制面配置，不能从 Issue/PR/模型结果直接生成权限。默认 tool loop 有轮数、输出和工具调用上限；它只执行已公布工具，且每次工具/模型调用前检查 guard。Pi adapter 保留原来的无总轮数限制行为。
 
-项目通过[工作流](workflows.md)配置任务：触发源、提示词（含流程图）和模型都保存在控制面，管理员在网页上新增的工作流不需要代码注册。读取对所有工作流开放，写入按工作流勾选。写入按工作流配置成平台工具。工具、执行器和 guard 仍由可信代码按保存的配置生成，不能从 Issue、PR、仓库文件或模型结果取得权限。`task_models` 管理 API 仍可按任意精确 task kind 选择模型，内置工作流的 id 就是 task kind，见[开发说明](development.md#按任务选择模型)。
+项目通过 [Manager 与工作类型](workflows.md)配置任务：事件由项目 Manager 分派，提示词、工作类型的开关、写入和模型都保存在控制面。读取对所有工作类型开放，写入按工作类型在项目配置里勾选，并配置成平台工具；Manager 只能为单个任务收窄写入。工具、执行器和 guard 仍由可信代码按保存的配置生成，不能从 Issue、PR、仓库文件、Manager 提示词或模型结果取得权限。`task_models` 按工作类型 id 选择模型，`manager` 是分派调用的模型，见[开发说明](development.md#按任务选择模型)。
 
 ## 权限与隔离
 
-显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，每次任务由控制面按工作流类型给出：读取、笔记、shell、全部 GitHub 只读范围和独立 agent 对所有工作流开放，修改工作区和每种写入只给勾选了它的工作流，远端写入只经受控 publisher；`create_issue`、`rerun_failed_run`、`report_failure` 经 runner 的仓库工具邮箱交给控制面执行。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
+显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，每次任务由控制面按工作类型给出：读取、笔记、shell、全部 GitHub 只读范围和独立 agent 对所有工作类型开放，修改工作区和每种写入只给项目配置里勾选了它的工作类型，远端写入只经受控 publisher；`create_issue`、`rerun_failed_run`、`report_failure` 经 runner 的仓库工具邮箱交给控制面执行。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
 
 `start_agent` 启动独立 agent：新会话的系统提示是固定说明加调用方写的角色说明，第一条消息是任务，不带调用方的消息；工具是调用方工具按收窄后的权限过滤出的子集，不含发布、结束任务和再启动 agent。Pi 在同一进程里另建会话，模型请求经同一个邮箱逐个转发；默认 tool loop 用 `AgentSpec.agents` 另起一组消息。检视的 GitHub token 只有读权限。开发也只向 shell 发放短期 GitHub 读 token；写 PR/推送由已有受控 publisher 执行。发布的写操作由既有状态机和授权控制，运行中的 Agent 不持有可任意写 GitHub 的凭据。
 
