@@ -283,6 +283,29 @@ test('The last known turn survives a reconciliation that found nothing, and a st
  });
 });
 
+test('Only the turn named by the start answer ends the start; a late turn id or terminal of an older turn does not',async t=>{
+ // Two finished runs: turn B, then turn A, the last known one. B is older and can still send late notifications.
+ const setup=async t=>{const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const b=f.state().lastTurnId;await runRole(f.spec,'dev');return {f,b,a:f.state().lastTurnId};};
+ await t.test('answer C, then a late item and the terminal of B, in one chunk',async t=>{
+  const {f,b}=await setup(t);
+  f.configure({FIXTURE_STALE_TERMINAL:'true'});const out=await runRole(f.spec,'dev');
+  const c=f.lines('prompts.jsonl')[2].turnId,events=f.events(),ended=events.slice(events.findLastIndex(e=>e.type==='session_bound')).filter(e=>e.type==='turn'&&e.phase==='ended');
+  assert.notEqual(c,b);
+  assert.deepEqual(ended.map(e=>[e.turnId,e.status]),[[c,'completed']],'one turn in this run, ended by C and not by the terminal of B');
+  assert.deepEqual([f.state().lastTurnId,f.state().lastTurnStatus,f.state().knownTurnId],[c,'completed',c]);
+  assert.equal(f.lines('prompts.jsonl').length,3,'no further turn started while C was still running');
+  assert.equal(out.result.summary,'actual fixture result');
+ });
+ await t.test('no answer: a late item of B, then the turn/started of C',async t=>{
+  const {f}=await setup(t);
+  f.configure({FIXTURE_STALE_HINT:'true'});await assert.rejects(runRole(f.spec,'dev'),{code:'codex_connection_lost'});
+  const [{turnId:c}]=f.lines('unanswered.jsonl');
+  assert.deepEqual([f.state().lastTurnId,f.state().lastTurnStatus,f.state().knownTurnId],[c,'inProgress',c],'turn/started replaces the guess from the late item');
+  f.configure({});await runRole(f.spec,'dev');
+  assert.deepEqual(f.events().filter(e=>e.type==='session_bound').at(-1).reconciled,{turnId:c,recorded:'inProgress',observed:'interrupted'});
+ });
+});
+
 test('A session refused before its binding counts a restated usage increment once, on the attempt that binds',async t=>{
  const f=fixture(t);const first=await runRole(f.spec,'dev',undefined,'codex');const before=f.state();
  assert.equal(before.usage.total,110);

@@ -115,6 +115,15 @@ createInterface({input:process.stdin}).on('line',async line=>{
   if(flag('EXIT'))process.exit(7);
   // START_UNANSWERED: the server begins the turn, sends its notifications and a 110-token usage report, but never answers the
   // start and goes away. START_SILENT: the same turn begins without any notification.
+  // STALE_TERMINAL: the answer names the new turn C, and in the same chunk a late item and the terminal of an older turn B
+  // follow; C then runs normally. STALE_HINT: no answer; a late item of B, then the standard turn/started of C, then the
+  // server goes away.
+  if(flag('STALE_TERMINAL')||flag('STALE_HINT')){
+   const turnId=randomUUID(),older=load(thread.id).turns.at(-2)?.id,late=JSON.stringify({method:'item/completed',params:{threadId:thread.id,turnId:older,item:{type:'agentMessage',id:'late-'+older,text:'late',phase:null},completedAtMs:2}})+'\n';
+   if(flag('STALE_TERMINAL')){write(JSON.stringify({id:m.id,result:{turn:turnView(turnId,'inProgress')}})+'\n'+late+JSON.stringify({method:'turn/completed',params:{threadId:thread.id,turn:turnView(older,'completed')}})+'\n');void runTurn(turnId,m.params.input[0].text);return;}
+   const t=load(thread.id);t.turns.push({id:turnId,status:'inProgress'});store(t);log('unanswered.jsonl',{turnId});
+   write(late);notify('turn/started',{threadId:thread.id,turn:turnView(turnId,'inProgress')});await queue;process.exit(0);
+  }
   // START_REFUSED: the server refuses the start explicitly; nothing begins.
   if(flag('START_REFUSED')){error(-32600,'turn start refused');return;}
   // START_HANG: the server begins the turn and sends only the standard turn/started ({threadId, turn}), no usage, and never
