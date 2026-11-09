@@ -124,6 +124,17 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.locator('.project-nav').getByRole('link', { name: '角色', exact: true }).click();
     await page.locator('.project-nav').getByRole('link', { name: '管理对话', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/); await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
+    await page.locator('.project-nav').getByRole('link', { name: '工作流', exact: true }).click();
+    await page.getByRole('button', { name: '用聊天新增', exact: true }).click();
+    const workflow = page.getByRole('dialog', { name: '工作流助手', exact: true });
+    await expect(workflow).toBeVisible(); await expect(page.getByRole('dialog', { name: '管理助手', exact: true })).toBeHidden();
+    // The global launcher must not cover the unmoved workflow assistant's Send button.
+    const send = workflow.getByRole('button', { name: '发送', exact: true });
+    const unobstructed = node => { const rect = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)); };
+    expect(await send.evaluate(unobstructed)).toBe(true);
+    await page.setViewportSize({ width: 390, height: 844 }); expect(await send.evaluate(unobstructed)).toBe(true);
+    await page.getByRole('button', { name: '打开管理助手', exact: true }).click();
+    await expect(workflow).toBeHidden(); await expect(message).toHaveValue('101 的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(errors).toEqual([]);
   } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
