@@ -16,6 +16,8 @@ import {GitHub} from '../dist/github/client.js';
 import {Redactor} from '../dist/agent/common.js';
 import {TaskRecords} from '../dist/tasks/service.js';
 import {roleInstance} from '../dist/roles/run.js';
+import {checkpoint} from '../dist/tasks/checkpoint.js';
+import {candidateKey,deliveryCandidate,latestRoleCandidate} from '../dist/roles/schedule.js';
 import {acceptanceFixture} from './acceptance-fixture.mjs';
 import {randomWorkspaceId} from './helpers.mjs';
 
@@ -38,7 +40,8 @@ async function fixture(t,mode='clean'){
     if(managerStep++===0)message=toolCall('delegate_role',{role:'dev',purpose:'Repair the retained integrated candidate using current failure/conflict evidence; preserve both features.',refs:['task:t']});
     else {const last=body.messages.at(-1);knownRef=JSON.parse(last.content).result_ref;message=toolCall('nominate_delivery',{result_ref:knownRef});}
    }else if(body.tools.some(t=>t.function.name==='submit_delivery')){
-    if(devStep++===0)message=mode==='conflict'?toolCall('write_file',{path:'a.txt',content:'2'}):toolCall('write_file',{path:'calc.cjs',content:"const fs=require('fs');module.exports=Math.min(2,Number(fs.readFileSync('a.txt'))*Number(fs.readFileSync('b.txt')));"});
+    if(mode==='unchanged')message=toolCall('submit_delivery',{summary:'The recovered tree already satisfies the goal',test_command:'node check.cjs'});
+    else if(devStep++===0)message=mode==='conflict'?toolCall('write_file',{path:'a.txt',content:'2'}):toolCall('write_file',{path:'calc.cjs',content:"const fs=require('fs');module.exports=Math.min(2,Number(fs.readFileSync('a.txt'))*Number(fs.readFileSync('b.txt')));"});
     else message=toolCall('submit_delivery',{summary:'Reconciled combined behavior',test_command:'node check.cjs'});
    }else throw Error('Unexpected model execution');
    return send({choices:[{message}]});
@@ -94,8 +97,23 @@ async function fixture(t,mode='clean'){
  const changes=mode==='clean'?{'other.txt':'independent feature'}:mode==='conflict'?{'a.txt':'3'}:{'b.txt':'2'};
  const treeB=makeTree(changes,treeA);main=git(['commit-tree',treeB,'-p',base],'other feature\n');git(['update-ref','refs/heads/main',main]);
  let qaCalls=0;const engine=new TaskEngine(s,manager,endpoint,undefined,async(...args)=>{qaCalls++;return acceptanceFixture(...args);});t.after(()=>engine.close());
- return {root,s,engine,key,manager,endpoint,pauseFacts(){let release;factsWait=new Promise(r=>release=r);return ()=>{factsWait=null;release();};},get factsEntered(){return factsEntered;},set stalePRBase(value){staleBase=value;},dev:instance.id,get main(){return main;},git,counts:()=>({puts,branchWrites,modelCalls,qaCalls})};
+ return {root,s,engine,key,manager,endpoint,space,pauseFacts(){let release;factsWait=new Promise(r=>release=r);return ()=>{factsWait=null;release();};},get factsEntered(){return factsEntered;},set stalePRBase(value){staleBase=value;},dev:instance.id,get main(){return main;},git,counts:()=>({puts,branchWrites,modelCalls,qaCalls})};
 }
+
+test('a model-phase restart with a pending integration uses one no_changes source identity',async t=>{
+ const h=await fixture(t,'unchanged'),task=h.s.get("SELECT * FROM tasks WHERE id='t'"),snapshot=await h.space.artifact('before-crash');
+ const input={...JSON.parse(task.input),snapshot_sha:h.main,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.tree_sha,integration:{id:'fixture',state:'applied',target_base:h.main}};
+ h.s.run("UPDATE tasks SET phase='model',input=? WHERE id='t'",JSON.stringify(input));
+ // A checkpoint changes the persisted integration to pending. A process restart retains phase=model.
+ await checkpoint(h.s,{...task,input:JSON.stringify(input)},h.space);
+ assert.equal(JSON.parse(h.s.get("SELECT input FROM tasks WHERE id='t'").input).integration.state,'pending');
+ assert.notEqual(task.head_sha,h.main);h.engine.tick();await Promise.all(h.engine.active.values());
+ const result=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(result.status,'completed',JSON.stringify(result));
+ const role=latestRoleCandidate(h.s,'t'),delivery=deliveryCandidate(new TaskRecords(h.s).get('t').candidate);
+ assert.equal(role.kind,'no_changes');assert.equal(role.source_ref,'commit:'+task.head_sha);
+ assert.equal(delivery.source_ref,role.source_ref);assert.equal(candidateKey(delivery),candidateKey(role));
+ assert.equal(h.counts().branchWrites,0);assert.equal(h.counts().qaCalls,1);
+});
 for(const mode of ['clean','conflict','semantic'])test(`full engine ${mode}: stale-base publication, integration, fresh QA and authorized merge`,async t=>{
  const h=await fixture(t,mode);h.engine.tick();await Promise.all(h.engine.active.values());
  let task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify(task));assert.equal(h.counts().puts,0);

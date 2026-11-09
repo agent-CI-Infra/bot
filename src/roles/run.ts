@@ -160,7 +160,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'budget',category:'budget',operation_id:'budget:'+limit,data:{limit,usage:instanceUsage(s,instance.id),budget}});revokeRunTokens(s,b.run_id,'budget_exhausted');}
    return stop('role_budget_exhausted','waiting_configuration',`${role}：本任务中这个角色的累计预算 ${limit} 已用尽；已取消本次运行并保留已有产物，不会换模型重开预算。`);
   };
-  const exhaustStage=(limit:string):never=>{live.stage_exhausted=limit;const b=live.bound;if(b&&leaseCurrent(s,b.run_id,b.epoch)){recordCheckpoint(s,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:instance.id,reason:'stage_budget_exhausted:'+limit});appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'budget',category:'budget',data:{stage_id:stage?.stage_id,limit}});revokeRunTokens(s,b.run_id,'stage_budget_exhausted');}return stop('stage_budget_exhausted','waiting_configuration',limit);};
+  const exhaustStage=(limit:string):never=>{live.stage_exhausted=limit;const b=live.bound;if(b&&leaseCurrent(s,b.run_id,b.epoch)){recordCheckpoint(s,{run_id:b.run_id,lease_epoch:b.epoch,instance_id:instance.id,reason:'stage_budget_exhausted:'+limit});appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'budget',category:'budget',data:{stage_id:stage?.stage_id,limit}});revokeRunTokens(s,b.run_id,'stage_budget_exhausted');}return stop('stage_budget_exhausted','paused',limit);};
   const budgetGuard=(pendingTools=0)=>{assertStageRun(s,task.id,assignment,snapshot.kind);const stageLimit=stageBudgetExceeded(s,assignment);if(stageLimit)exhaustStage(stageLimit);if(!cumulative||!live.bound)return;const reached=budgetExceeded(budget,instanceUsage(s,instance.id),{tool_calls:pendingTools});if(reached)exhaust(reached);};
   const access={get token(){return live.bound?.token??'';},check(presented:unknown){const b=live.bound;if(!b||presented!==b.token)throw new TaskError('run_token_invalid','failed');verifyRunToken(s,presented,{run_id:b.run_id,lease_epoch:b.epoch});}};
   let executionRun:string|undefined;
@@ -251,7 +251,7 @@ export async function startRoleRun<T>(prepared:PreparedRun<T>,operationId=prepar
  // After a restart the in-memory handle is gone: a recorded operation id gets a deterministic refusal, never a second run.
  if(s.get('SELECT 1 FROM task_runs WHERE operation_id=?',operationId)){await prepared.env.release?.();stop('role_run_operation_used','failed',`操作 ${operationId} 已经启动过运行，不会重复启动。`);}
  assertStageStart(s,prepared.spec.task.id,prepared.assignment,prepared.resolved.snapshot.kind);
- if(stageBudgetExceeded(s,prepared.assignment)){await prepared.env.release?.();stop('stage_budget_exhausted','waiting_configuration');}
+ if(stageBudgetExceeded(s,prepared.assignment)){await prepared.env.release?.();stop('stage_budget_exhausted','paused');}
  const kind=prepared.resolved.snapshot.kind;
  const conflict=(kind==='writer'||kind==='observer')&&s.get("SELECT r.id FROM task_runs r JOIN role_snapshots p ON p.id=r.role_snapshot WHERE r.task_id=? AND r.status='running' AND (json_extract(p.snapshot,'$.kind')='writer' OR (?='writer' AND json_extract(p.snapshot,'$.kind')='observer'))",prepared.spec.task.id,kind);
  if(conflict){await prepared.env.release?.();stop('candidate_writer_busy','retry_wait');}
@@ -316,7 +316,7 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
     appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'ended',category:code==='role_revision_checkpoint'?'checkpoint':h.cancelled||(error as any).state==='cancelled'?'cancelled':'failed',data:{status:code==='role_revision_checkpoint'?'checkpoint_continuation':h.cancelled?'cancelled':'failed',code,reason:h.cancelled}});
    }
    if(b)revokeRunTokens(s,b.run_id,'ended');
-   if(live.stage_exhausted)throw new TaskError('stage_budget_exhausted','waiting_configuration',live.stage_exhausted);
+   if(live.stage_exhausted)throw new TaskError('stage_budget_exhausted','paused',live.stage_exhausted);
    if(live.exhausted&&!(error instanceof TaskError&&error.code==='role_budget_exhausted'))throw new TaskError('role_budget_exhausted','waiting_configuration',`${p.role}：本任务中这个角色的累计预算 ${live.exhausted} 已用尽；已取消本次运行并保留已有产物。`);
    throw error;
   }

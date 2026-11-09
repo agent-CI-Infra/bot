@@ -81,8 +81,8 @@ export function isAttemptFailure(code: string|null|undefined, state: string) {
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
 const codeActions: Record<string,string> = {
-  stage_policy_changed:'阶段策略已变化。暂停任务并等到安全检查点后采用新配置，旧 run 和证据保留为历史。',
-  stage_plan_stale:'阶段计划的合同或策略版本已过期。采用当前配置并重新规划后继续。',
+  stage_policy_changed:'阶段策略已变化，任务已暂停。等到安全检查点后采用新配置，旧 run 和证据保留为历史。',
+  stage_plan_stale:'阶段计划的合同版本已过期，任务已暂停。显式重试或采用当前配置并重新规划后继续。',
   required_stages_incomplete:'必需阶段缺少当前候选的合格证据。读取阶段等待原因，安排原角色修复或补证后再提名；阶段齐备仍需独立 QA。',
   stage_retry_exhausted:'这个阶段已达到有限重试上限。检查失败记录，修正阶段策略或运行环境后采用新配置继续。',
   stage_budget_exhausted:'这个阶段的累计预算已用尽，恢复运行不会重开预算。保留产物和证据，调整策略并采用新配置后继续。',

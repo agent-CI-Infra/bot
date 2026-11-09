@@ -4,6 +4,7 @@ import { type Actor, scope, repository } from '../app/auth.js';
 import { TaskRecords } from './service.js';
 import { traceEvent } from './trace.js';
 import { captureTaskConfiguration } from './configuration.js';
+import { stageReplanContext } from '../roles/schedule.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 /** Shared task mutation boundary for the console, management tools and future message adapters. */
@@ -38,7 +39,7 @@ export class TaskCommands {
           this.store.run('UPDATE tasks SET status=?,claim_token=NULL,error_code=?,updated_at=? WHERE id=?',action==='pause'?'paused':'cancelled','user_'+action,new Date().toISOString(),task.id);
           this.store.run("UPDATE task_runs SET status='interrupted',ended_at=?,stop_reason=? WHERE task_id=? AND status='running'",new Date().toISOString(),'user_'+action,task.id);
         }
-        traceEvent(this.store,task.id,'intervention',{action,...input},null,'user:'+user.id);
+        traceEvent(this.store,task.id,'intervention',{action,...input,...(action==='adopt-config'?{stage_plan:stageReplanContext(this.store,task.id)}:{})},null,'user:'+user.id);
         this.store.audit(user.id,'task.'+action,task.id,task.repository_id);
       });
       if(action==='adopt-config')this.hooks.tick?.();
@@ -59,7 +60,7 @@ export class TaskCommands {
         this.store.run("UPDATE tasks SET input=?,status='queued',phase='prepare',workspace_id=NULL,generation=NULL,messages=NULL,result=NULL,model_started=0,publication_started=0,error_code=NULL,next_run_at=0,attempt=attempt+1 WHERE id=?",JSON.stringify({...saved,contract,request:task!.kind==='task.request'?contract.goal:saved.request}),task!.id);
         this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task!.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task!.id);
-        traceEvent(this.store,task!.id,'intervention',{action:'contract_revision',before:new TaskRecords(this.store).get(task!.id).revision-1,after:contract,reason:'explicit user contract revision'},null,'user:'+user.id);
+        traceEvent(this.store,task!.id,'intervention',{action:'contract_revision',before:new TaskRecords(this.store).get(task!.id).revision-1,after:contract,reason:'explicit user contract revision',stage_plan:stageReplanContext(this.store,task!.id)},null,'user:'+user.id);
         this.store.audit(user.id,'task.contract',task!.id,task!.repository_id);
       });this.hooks.tick?.();return {task:new TaskRecords(this.store).get(task!.id)};
     }
@@ -108,7 +109,9 @@ export class TaskCommands {
       // Pressing 重试 on 发布待确认 is the confirmation the pause waits for: the write is looked up once more and,
       // only if GitHub still has no trace of it, sent again.
       if(task.status==='waiting_publication')this.store.run("UPDATE github_effects SET state='recheck' WHERE task_id=? AND state IN ('unknown','inflight')",task.id);
-      this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL WHERE id=?",task.id);this.store.audit(user.id,'task.retry',task.id,task.repository_id);
+      this.store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,retry_count=0,wait_count=0,retry_error_code=NULL,retry_cycle_started_at=NULL WHERE id=?",task.id);
+      traceEvent(this.store,task.id,'intervention',{action:'retry',stage_plan:stageReplanContext(this.store,task.id)},null,'user:'+user.id);
+      this.store.audit(user.id,'task.retry',task.id,task.repository_id);
     });this.hooks.tick?.();return {ok:true};
   }
 }
