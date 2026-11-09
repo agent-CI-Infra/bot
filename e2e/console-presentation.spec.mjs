@@ -63,7 +63,7 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     await page.goto(h.admin + '/#/projects/101/workflows/development.issue');
     const detail = page.getByRole('region', { name: '工作流：开发 Issue', exact: true }), summary = detail.locator('.workflow-summary');
     await expect(summary.locator('dt')).toHaveText(['何时触发', '提示词', '模型', '允许的写入', '谁来执行']);
-    await expect(summary.locator('dd').nth(4)).toContainText('主控 Manager（Pi）按需委派 Dev、Test、Reviewer、UX。完成前由独立 QA 验收。');
+    await expect(summary.locator('dd').nth(4)).toContainText('主控 Manager（Pi）按需委派已启用的 Dev、Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。');
     await expect(detail).toContainText('流程图来自提示词，只说明 agent 按什么步骤做。它不会按节点创建角色，也不授予写入');
     const list = page.getByRole('complementary', { name: '工作流列表', exact: true });
     await expect(list.locator('.workflow-sidebar-head')).toContainText('不需要为单个任务新写工作流');
@@ -76,9 +76,11 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     const now = '2026-11-09T01:00:00Z', task = (id, kind, number, phase) => h.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,phase,attempt,created_at,updated_at)
       VALUES(?,?,?,'running',?,?,?,1,?,?)`, id, '101', kind, contract.goal, number, phase, now, now);
     const record = (id, values) => h.store.run('UPDATE task_records SET contract=?,candidate=?,acceptance=?,next_action=? WHERE task_id=?', JSON.stringify(contract), JSON.stringify(values.candidate ?? null), values.acceptance ? JSON.stringify(values.acceptance) : null, values.next ?? null, id);
-    const run = (id, task, role, status) => h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,harness) VALUES(?,?,'role',1,1,?,?,'{}','{}',?,?)", id, task, now, status, role, role === 'manager' ? 'pi' : 'native');
+    // Runs as /roles returns them: a QA run is kind acceptance; a delegated run names its assignment and actual harness.
+    const run = (id, task, role, status, harness = role === 'manager' ? 'pi' : 'native', assignment = null) => h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,harness,assignment_id) VALUES(?,?,?,1,1,?,?,'{}','{}',?,?,?)",
+      id, task, role === 'qa' ? 'acceptance' : 'role', now, status, role, harness, assignment);
     const instance = (id, task, role, harness, snapshot = null) => h.store.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,snapshot_id,config_revision,role_revision) VALUES(?,?,?,?,?,?,?,1,1)', id, task, role, '{}', harness, now, snapshot);
-    task('plain', 'review.issue', 11, 'acceptance'); record('plain', { candidate: { ...candidate, artifacts: [{ kind: 'report', reference: 'task:plain:candidate', version: 'report123456789' }] } });
+    task('plain', 'review.issue', 11, 'model'); record('plain', { candidate: { ...candidate, artifacts: [{ kind: 'report', reference: 'task:plain:candidate', version: 'report123456789' }] } });
     instance('plain-qa', 'plain', 'qa', 'native'); run('plain-qa-run', 'plain', 'qa', 'running');
     task('coordinated', 'development.issue', 12, 'model');
     record('coordinated', { candidate, next: 'Ask Reviewer to check the redirect', acceptance: { outcome: 'return', reason: 'The redirect drops the fragment', gaps: ['Keep #fragment as well'], residuals: [], candidate_id: candidate.id, revision: 1 } });
@@ -88,11 +90,13 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
       h.store.run('INSERT INTO role_assignments VALUES(?,?,?,1,?,?,?,NULL)', id, 'coordinated', owner, version, status, 'input-' + id);
     for (const [assignment, role, purpose] of [['a-dev', 'dev', 'Implement the redirect fix'], ['a-reviewer', 'reviewer', 'Check the redirect against both criteria']])
       h.store.run("INSERT INTO task_history(task_id,type,data,created_at,actor) VALUES('coordinated','role_handoff',?,?,'role:manager')", JSON.stringify({ assignment_id: assignment, role, purpose, refs: [], revision: 1 }), now);
-    run('c-manager-run', 'coordinated', 'manager', 'running'); run('c-qa-run', 'coordinated', 'qa', 'completed');
+    run('c-manager-run', 'coordinated', 'manager', 'running'); run('c-qa-run', 'coordinated', 'qa', 'succeeded');
+    run('c-dev-run', 'coordinated', 'dev', 'succeeded', 'native', 'a-dev'); run('c-reviewer-run', 'coordinated', 'reviewer', 'running', 'acp', 'a-reviewer');
 
     const side = page.locator('#task-side'), fact = name => side.locator(`.task-fact[data-fact="${name}"]`);
     await page.evaluate(() => openTask('plain'));
-    await expect(side.locator('.task-next-text')).toHaveText('独立 QA 正在新的上下文里验收候选 cand12345678。');
+    const next = page.locator('#task-next-text');
+    await expect(next).toHaveText('独立 QA 正在新的上下文里验收候选 cand12345678。');
     await expect(side.locator('.task-fact')).toHaveCount(5);
     await expect(side.locator('.task-fact h4')).toHaveText(['目标', '候选', '证据', '验收', '发布']);
     await expect(side.locator('.task-execution')).toContainText('原来的执行器：这个任务没有经过主控，由工作流在项目电脑里的 Pi 进程直接执行。');
@@ -102,7 +106,7 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);
 
     await page.evaluate(() => openTask('coordinated'));
-    await expect(side.locator('.task-next-text')).toHaveText('Reviewer（ACP）正在做主控交给它的工作：Check the redirect against both criteria');
+    await expect(next).toHaveText('Reviewer（ACP）正在做主控交给它的工作：Check the redirect against both criteria');
     await expect(fact('目标')).toContainText('The redirect keeps ?next='); await expect(fact('候选')).toContainText('cand12345678');
     await expect(fact('证据')).toContainText('项目测试命令'); await expect(fact('证据')).toContainText('1/1 已核验');
     await expect(fact('验收')).toContainText('退回修改'); await expect(fact('验收')).toContainText('Keep #fragment as well');
@@ -112,9 +116,12 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     await expect(execution.locator('.role-work > li')).toHaveCount(2);
     await expect(execution.locator('.role-work > li').nth(1)).toContainText('Check the redirect against both criteria');
     await expect(execution).toContainText('这不是预设流程，也不授予权限');
+    // Wide screens keep two columns under the next step: the timeline beside the side panel.
+    const [timelineBox, sideBox, nextBox] = await Promise.all([page.locator('.timeline-panel').boundingBox(), side.boundingBox(), page.locator('#task-next').boundingBox()]);
+    expect(sideBox.x).toBeGreaterThan(timelineBox.x + timelineBox.width - 2); expect(Math.abs(sideBox.y - timelineBox.y)).toBeLessThan(2); expect(nextBox.y + nextBox.height).toBeLessThanOrEqual(timelineBox.y + 1);
     await page.screenshot({ path: `${out}/task-coordinated.png` });
     await side.screenshot({ path: `${out}/task-coordinated-side.png` });
-    await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click();
+    await page.locator('#task-actions').getByRole('button', { name: '关闭', exact: true }).click(); await page.waitForFunction(() => openTaskId === null);
 
     // 6. Narrow screens stack the delegation lanes.
     await page.setViewportSize({ width: 390, height: 900 });
@@ -122,6 +129,18 @@ test('控制台按工作流、角色、任务三层展示：没开协调时走�
     const [first, second] = await Promise.all([0, 1].map(index => cardOf('主控怎样委派').locator('.role-lane').nth(index).boundingBox()));
     expect(second.y).toBeGreaterThan(first.y + first.height - 1);
     await page.screenshot({ path: `${out}/roles-narrow.png`, fullPage: true });
+
+    // 7. At 390px a task with a long timeline still opens with its next step in view, without horizontal overflow.
+    task('logged', 'review.issue', 13, 'model'); record('logged', { next: 'Compare the redirect handler with the issue and reply' });
+    for (let n = 1; n <= 30; n++) h.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', 'log-' + n, 'logged',
+      JSON.stringify({ type: 'model', step: n, content: `Step ${n}: read the redirect handler and the tests around it before deciding what to report.` }), now);
+    await page.evaluate(() => openTask('logged'));
+    await expect(page.locator('#timeline .step-model')).toHaveCount(30);
+    await expect(next).toHaveText('执行器（项目电脑里的 Pi 进程）正在处理：Compare the redirect handler with the issue and reply');
+    const banner = await page.locator('#task-next').boundingBox();
+    expect(banner.y).toBeGreaterThanOrEqual(0); expect(banner.y + banner.height).toBeLessThanOrEqual(900);
+    expect(await page.evaluate(() => [document.documentElement.scrollWidth, document.getElementById('task-next').scrollWidth <= document.getElementById('task-next').clientWidth])).toEqual([390, true]);
+    await page.screenshot({ path: `${out}/task-narrow-with-logs.png` });
     expect(errors).toEqual([]);
   } finally { await model.close(); await h.stop(); }
 });

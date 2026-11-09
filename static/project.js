@@ -310,6 +310,14 @@ function coordinationEntries(config) {
   return roleEntries.map(([id, title, covers]) => ({ id, title, covers, coordinated: !!config.enabled && config.controller.entries[id] === true }));
 }
 /**
+ * The roles the controller may delegate in one entry (src/roles/team.ts, src/agent/loop.ts). Development and ordinary
+ * requests offer every enabled writer and observer role; review and Actions analysis offer only Dev, whose work stays
+ * on the entry's own Pi executor. QA is never delegated: it accepts the candidate the controller nominates.
+ */
+const entryWorkers = (config, entry) => ['review', 'actions'].includes(entry) ? config.roles.filter(role => role.role_id === 'dev')
+  : config.roles.filter(role => role.enabled && ['writer', 'observer'].includes(role.kind));
+const workerNames = roles => roles.map(role => roleLabel(role.role_id, role.name)).join('、') || '无';
+/**
  * How a role runs. New configurations run the controller on Pi. A configuration saved before V2 with coordination on
  * keeps its old controller (Native) until it is saved again: that is the old configuration still in use (legacy), not a
  * second recommended choice. An old or never saved configuration with coordination off runs no controller at all; it
@@ -323,7 +331,7 @@ function roleExecutor(role, config, harnesses = []) {
 function roleModelText(preview) {
   if (!preview) return '—';
   if (preview.error) return `${preview.error}${preview.detail ? '：' + preview.detail : ''}`;
-  return preview.model.source === 'external_harness' ? '执行器自带模型' : `${preview.model.name}（${modelSources[preview.model.source] || preview.model.source}）`;
+  return preview.model.source === 'external_harness' ? '执行器自带模型' : `${preview.model.name}（${own(modelSources, preview.model.source) || preview.model.source}）`;
 }
 // The JSON the editor starts from. Saving an old configuration upgrades it to V2, where the controller runs on Pi; its
 // old controller would be refused at roles.manager.harness_ref.id, so the editor offers Pi for it.
@@ -363,6 +371,7 @@ function coordinationCard(config) {
     for (const entry of entries) {
       const item = element('li', ''); item.dataset.entry = entry.id;
       item.append(element('strong', entry.title), element('span', entry.covers, 'muted'), entry.coordinated ? badge('主控委派', 'info') : badge('原执行器'));
+      if (entry.coordinated) item.append(element('span', ['review', 'actions'].includes(entry.id) ? '只委派 Dev，用这个入口原来的 Pi 执行器' : '可委派：' + workerNames(entryWorkers(config, entry.id)), 'role-entry-workers'));
       list.append(item);
     }
     section.append(list, note('上面关着的入口和其他工作流（自定义工作流、CI 观察、发行说明、接入门禁）走原来的执行器。无论哪种方式，交付前都由独立 QA 验收。'));
@@ -375,11 +384,11 @@ function coordinationCard(config) {
 function roleTile(role, preview, executorOf) {
   const tile = element('article', '', 'role-tile' + (role.enabled ? '' : ' role-disabled')), executor = executorOf(role), head = element('div', '', 'role-tile-head');
   tile.dataset.role = role.role_id;
-  head.append(element('strong', roleLabel(role.role_id)), ...(role.enabled ? [] : [badge('已停用')]));
+  head.append(element('strong', roleLabel(role.role_id, role.name)), ...(role.enabled ? [] : [badge('已停用')]));
   const runs = element('p', '', 'role-executor');
-  runs.append(badge(executor.name, executor.legacy ? 'warning' : executor.id === 'pi' ? 'info' : ''), element('span', harnessDetails[executor.id] || executor.ref, 'muted'));
+  runs.append(badge(executor.name, executor.legacy ? 'warning' : executor.id === 'pi' ? 'info' : ''), element('span', own(harnessDetails, executor.id) || executor.ref, 'muted'));
   if (executor.legacy) runs.append(badge('旧配置沿用', 'warning')); else if (executor.pending) runs.append(badge('保存后生效'));
-  tile.append(head, element('p', roleDuties[role.role_id] || (role.kind === 'observer' ? '项目自定义的只读角色：看固定候选，只报告结果。' : role.responsibility)), runs, element('p', '模型：' + roleModelText(preview(role.role_id)), 'muted'));
+  tile.append(head, element('p', own(roleDuties, role.role_id) || role.responsibility || '项目自定义的角色。'), runs, element('p', '模型：' + roleModelText(preview(role.role_id)), 'muted'));
   return tile;
 }
 function delegationCard(config, byId, preview, executorOf) {
@@ -391,7 +400,7 @@ function delegationCard(config, byId, preview, executorOf) {
   const tile = role => roleTile(role, preview, executorOf);
   lanes.append(lane('主控', ...(controller ? [tile(controller)] : [])), arrow(), lane('按需委派', ...workers.map(tile)), arrow(), lane('验收与发布', ...(qa ? [tile(qa)] : []), publish));
   section.append(note('主控按任务决定要谁：可能只委派 Dev，也可能再请 Test、Reviewer、UX 看同一份固定候选；检视意见回到同一个 Dev。'), lanes,
-    note('这是分工说明，不是每个任务都要走一遍的流程，也不授予权限：工具只来自能力策略，写入只来自工作流设置。检视和 Actions 失败分析接入主控后，Dev 那一步仍由该入口原有的 Pi 执行器完成。'));
+    note('这是分工说明，不是每个任务都要走一遍的流程，也不授予权限：工具只来自能力策略，写入只来自工作流设置。开发和普通任务里，主控可以委派这里已启用的工作角色；检视和 Actions 失败分析接入主控后只委派 Dev，Dev 那一步仍由该入口原有的 Pi 执行器完成。独立 QA 不是被委派的角色，它在主控提名候选之后验收。'));
   const coordinator = byId.get('coordinator');
   if (coordinator) { const line = element('div', '', 'role-coordinator'); line.append(tile(coordinator)); section.append(element('h4', '不在单个任务里的角色'), line); }
   return section;
