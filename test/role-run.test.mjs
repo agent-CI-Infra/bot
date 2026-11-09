@@ -291,7 +291,7 @@ test('explicit recover takes a checkpoint of the same scope; a different scope i
 
 test('a metered budget spans recoveries, attempts and assignments of the role: exhaustion cancels, keeps a checkpoint and refuses to restart; unknown usage is never zero', async t => {
   const f = await fixture(t, () => call('read_task_record', { ref: 'task:t' }), { usage: turn => turn === 2 ? {} : { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } } });
-  f.put({ roles: [{ role_id: 'dev', budget_policy_ref: { id: 'metered', max_model_requests: 3, max_total_tokens: 100000 } }] });
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, budget_policy_ref: { id: 'metered', max_model_requests: 3, max_total_tokens: 100000 } }] });
   await assert.rejects(runRole(f.spec, 'dev', 'assign-b'), { code: 'role_budget_exhausted' });
   const run = f.s.get("SELECT * FROM task_runs WHERE role='dev'");
   assert.equal(run.stop_reason, 'role_budget_exhausted');
