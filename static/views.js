@@ -1,9 +1,18 @@
 // Task process and project computer views. Loaded after app.js and reuses its helpers ($, api, element, state, states, timestamp).
 const terminalStates = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
 const kindLabels = { 'gate.onboarding': '接入门禁', 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR', 'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败分析',
-  'workflow.issue': '自定义工作流 Issue', 'workflow.pr': '自定义工作流 PR' };
+  'workflow.issue': '自定义工作流 Issue', 'workflow.pr': '自定义工作流 PR', 'task.request': '普通任务' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
-const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', publish: '发布', done: '完成' };
+const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', acceptance: '独立验收', publish: '发布', done: '完成' };
+// Role coordination words shared by the task view, the 角色 page and the workflow summary. A harness is how a role runs;
+// the built-in roles keep their short names (Manager delegates Dev, Test, Reviewer and UX; QA stays independent).
+const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP' };
+const harnessName = id => harnessNames[id] || id || '—';
+const builtinRoleNames = { manager: 'Manager', dev: 'Dev', test: 'Test', reviewer: 'Reviewer', ux: 'UX', qa: '独立 QA', coordinator: '跨任务协调' };
+const roleLabel = id => builtinRoleNames[id] || id;
+const acceptanceLabels = { pass: '通过', pass_with_issues: '带问题通过', return: '退回修改', insufficient_evidence: '证据不足', needs_human: '需要人决定' };
+const shortId = value => value ? String(value).slice(0, 12) : '—';
+const mutedLine = text => element('p', text, 'muted');
 const publicationLabels = { comment: '总结评论', review: '行内检视（COMMENT）', label: '标签', branch: 'bot 分支', pull_request: 'PR' };
 const publicationStates = { sent: ['已发布', 'success'], pending: ['待发布', 'info'], inflight: ['发布中', 'info'], unknown: ['结果待确认', 'warning'], recheck: ['重试前再查一次', 'info'] };
 const emptyRepositoryMessage = '仓库还没有提交；默认分支出现提交后会自动继续。';
@@ -173,10 +182,11 @@ function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
 async function refreshTask() {
   clearTimeout(taskTimer); const id = openTaskId; if (!id || !taskView.open) return;
   try {
-    const [detail, { logs }] = await Promise.all([api('/api/tasks/' + id), api('/api/tasks/' + id + '/logs')]);
+    const [detail, { logs }, roleView] = await Promise.all([api('/api/tasks/' + id), api('/api/tasks/' + id + '/logs'), taskRoleView(id)]);
     const environment = await api('/api/environments/' + detail.task.repository_id).catch(() => null);
+    const roles = roleRecords(roleView), purposes = await rolePurposes(id, roles);
     if (openTaskId !== id || !taskView.open) return;
-    renderTaskHeader(detail.task); renderTimeline(detail.task, logs); await refreshLive(detail.task); keepOpen($('task-side'), () => renderTaskSide(detail, environment));
+    renderTaskHeader(detail.task); renderTimeline(detail.task, logs); await refreshLive(detail.task); keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
   } catch (err) { if(openTaskId!==id||!taskView.open)return;if(!$('task-error').childElementCount)notice('task-error',err.message);taskTimer = setTimeout(refreshTask, 5000); }
 }
@@ -364,26 +374,140 @@ function step(log) {
   else { title.textContent = value.type === 'tool' ? '工具 ' + value.name : '记录'; add(element('pre', log.content, 'output')); }
   return item;
 }
-function renderTaskSide(detail, environment) {
+// Pages through a task route that returns `next_after` (oldest first), so the newest records are not cut off. A long
+// task stops at `pages` pages; whatever was read is still shown.
+async function pagedTaskRecords(path, key, pages = 10) {
+  let after = 0, first = null, rows = [];
+  for (let page = 0; page < pages; page++) {
+    const value = await api(`${path}${path.includes('?') ? '&' : '?'}limit=100&after=${after}`); first ||= value; rows = rows.concat(value[key] || []);
+    if (value.next_after == null) break; after = value.next_after;
+  }
+  return first && { ...first, [key]: rows };
+}
+const taskRoleView = id => pagedTaskRecords(`/api/tasks/${encodeURIComponent(id)}/roles`, 'assignments').catch(() => null);
+// A task's role records (GET /api/tasks/:id/roles), with each delegation's role read from its instance. Null when the
+// records cannot be read, so the page says so instead of guessing how the task ran.
+function roleRecords(value) {
+  if (!value || !Array.isArray(value.instances)) return null;
+  const byInstance = new Map(value.instances.map(instance => [instance.id, instance]));
+  return { instances: value.instances, runs: Array.isArray(value.runs) ? value.runs : [], snapshots: value.snapshots || {},
+    assignments: (Array.isArray(value.assignments) ? value.assignments : []).map(a => ({ ...a, role: byInstance.get(a.instance_id)?.role, harness: byInstance.get(a.instance_id)?.harness })) };
+}
+// The purpose the controller wrote for each delegation lives in its handoff event; it is read again only when the number
+// of delegations changes, not on every refresh of a running task.
+let handoffPurposes = { task: null, count: -1, purposes: {} };
+async function rolePurposes(id, roles) {
+  const count = roles?.assignments.length || 0;
+  if (!count) return {};
+  if (handoffPurposes.task === id && handoffPurposes.count === count) return handoffPurposes.purposes;
+  const page = await pagedTaskRecords(`/api/tasks/${encodeURIComponent(id)}/events?type=role_handoff&include_data=1`, 'events').catch(() => null);
+  const purposes = Object.fromEntries((page?.events || []).filter(event => event.data?.assignment_id && typeof event.data.purpose === 'string').map(event => [event.data.assignment_id, event.data.purpose]));
+  handoffPurposes = { task: id, count, purposes }; return purposes;
+}
+const controllerOf = roles => roles?.instances.find(instance => instance.role === 'manager') || null;
+// One sentence: who is doing what right now. Only recorded facts are used: the task's status and phase, its fault
+// cause, the delegation still running (with the purpose the controller handed over) and the next action it recorded.
+function taskNextStep(task, record, roles, purposes = {}) {
+  const caption = (states[task.status] || [task.status])[0], cause = task.error_cause, next = record?.progress?.next_action;
+  if (['succeeded', 'completed', 'pr_opened'].includes(task.status)) return `${caption}：独立 QA 验收通过后按原规则交付，没有下一步。`;
+  if (task.status === 'cancelled') return '已取消，没有下一步。';
+  if (task.status === 'superseded') return '已过时：同一对象有更新的任务接手，这个任务不再继续。';
+  if (task.status === 'failed') return '已失败' + (cause ? `：${cause.label}。${cause.action}` : `（${task.error_code || '没有错误码'}）。`);
+  if (task.status === 'queued') return '排队中：等这个仓库的项目电脑空闲后开始。';
+  if (task.status.startsWith('waiting_') || ['retry_wait', 'needs_replan', 'paused'].includes(task.status))
+    return `已暂停（${caption}）` + (cause ? `：${cause.label}。${cause.action}` : task.error_code ? `：${task.error_code}。` : '。');
+  if (task.status === 'publishing' || task.phase === 'publish') return '控制面正在把验收通过的结果发布到 GitHub。';
+  if (task.phase === 'acceptance') return `独立 QA 正在新的上下文里验收候选 ${shortId(record?.candidate?.id)}。`;
+  const working = roles?.assignments.filter(a => a.status === 'running' && !['manager', 'qa'].includes(a.role)).at(-1);
+  if (working) return `${roleLabel(working.role)}（${harnessName(working.harness)}）正在做主控交给它的工作` + (purposes[working.id] ? `：${purposes[working.id]}` : '。');
+  if (controllerOf(roles)) return '主控 Manager 正在读任务记录，决定下一步委派谁' + (next ? `；它记下的下一步：${next}` : '。');
+  if (task.phase === 'prepare') return '控制面正在准备工作区：拉取固定提交，写入项目电脑。';
+  if (task.phase === 'validate') return '控制面正在项目电脑里运行仓库测试。';
+  return '执行器（项目电脑里的 Pi 进程）正在处理' + (next ? `：${next}` : '。');
+}
+const evidenceSource = source => source === 'policy_validation' ? '项目测试命令' : /^task_history:\d+$/.test(source) ? '任务记录 #' + source.slice(13) : source;
+// Goal, candidate, evidence, acceptance and publication, each read from the task's own record. A part that has not
+// happened yet says what produces it, so the card never looks like a plan the page made up.
+function taskFactsCard(task, record, publications) {
+  const section = card('任务事实'); section.classList.add('task-facts');
+  const part = (title, status, ...nodes) => {
+    const box = element('section', '', 'task-fact'), head = element('div', '', 'task-fact-head'); box.dataset.fact = title;
+    head.append(element('h4', title), ...(status ? [status] : [])); box.append(head, ...nodes); section.append(box);
+  };
+  const list = items => { const ul = element('ul', '', 'task-fact-list'); for (const item of items) ul.append(item instanceof Node ? item : element('li', item)); return ul; };
+  const contract = record.contract, candidate = record.candidate;
+  part('目标', badge('需求版本 ' + record.revision), element('p', contract.goal, 'say'),
+    facts([['验收条件', contract.criteria?.length ? list(contract.criteria) : '没有写明，按目标判断'], ['约束', contract.constraints?.length ? list(contract.constraints) : null],
+      ['交付终点', contract.endpoint || '尚未明确'], ['选用的指南', record.selections?.length ? list(record.selections.map(p => `${p.id} · ${shortId(p.version)} · ${p.purpose}`)) : null]]));
+  if (!candidate) part('候选', badge('还没有'), mutedLine('执行方提交成果后，候选固定在这里，之后的验收只认这一版。'));
+  else part('候选', candidate.revision === record.revision ? badge('当前', 'info') : badge('基于旧需求版本', 'warning'),
+    facts([['编号', shortId(candidate.id)], ['需求版本', candidate.revision], ['成果', candidate.artifacts.map(a => `${a.kind === 'code' ? '代码' : a.kind === 'report' ? '报告' : a.kind} ${shortId(a.version)}`).join('、')], ['提交时间', timestamp(candidate.created_at)]]));
+  const evidence = candidate?.evidence || [];
+  if (!evidence.length) part('证据', badge(candidate ? '没有附带' : '还没有'), mutedLine(candidate ? '这个候选没有附带证据；独立 QA 会自己检查，证据不足时退回。' : '随候选一起提交，例如测试命令的结果和任务记录。'));
+  else part('证据', badge(`${evidence.filter(e => e.verified).length}/${evidence.length} 已核验`, evidence.every(e => e.verified) ? 'success' : 'warning'),
+    list(evidence.map(e => { const li = element('li', ''); li.append(element('span', evidenceSource(e.source)), badge(e.verified ? '已核验' : '未核验', e.verified ? 'success' : 'warning'), element('code', shortId(e.version))); return li; })));
+  const verdict = record.pending || record.acceptance;
+  if (!verdict) part('验收', badge(candidate ? '等待验收' : '还没有'), mutedLine(candidate ? '独立 QA 会在新的上下文里验收这个候选，执行方和主控都不能代替它。' : '有候选后，由独立 QA 在新的上下文里验收。'));
+  else {
+    const outcome = acceptanceLabels[verdict.outcome] || verdict.outcome, passing = ['pass', 'pass_with_issues'].includes(verdict.outcome);
+    part('验收', badge(record.pending ? outcome + '（待发布确认）' : outcome, passing ? 'success' : 'warning'),
+      facts([['验收的候选', shortId(verdict.candidate_id) + (candidate && verdict.candidate_id !== candidate.id ? '（不是当前候选）' : '')], ['结论', verdict.reason],
+        ['还缺', verdict.gaps?.length ? list(verdict.gaps) : null], ['遗留项', verdict.residuals?.length ? list(verdict.residuals.map(r => `${r.key} · ${r.description}`)) : null]]));
+    for (const f of record.followups || []) section.lastElementChild.append(button('查看遗留任务 ' + f.issue_key, () => openTask(f.task_id)));
+  }
+  if (publications?.length) {
+    const rows = element('ul', '', 'history');
+    for (const p of publications) {
+      const row = element('li', ''), [caption, tone] = publicationStates[p.state] || [p.state, ''], name = publicationLabels[p.kind] || p.kind;
+      row.append(p.response?.html_url ? link(p.response.html_url, name) : element('span', p.kind === 'label' && Array.isArray(p.response) ? `${name} ${p.response.map(l => l.name).join('、')}` : name), badge(caption, tone));
+      rows.append(row);
+    }
+    part('发布', null, rows);
+  } else part('发布', badge(terminalStates.includes(task.status) ? '没有写到 GitHub' : '还没有'), mutedLine(terminalStates.includes(task.status) ? '这个任务没有写到 GitHub 的内容，结果只留在控制台。' : '验收通过后，由控制面按工作流允许的写入发布到 GitHub。'));
+  return section;
+}
+// How the task ran: under the project controller or on the workflow's own executor, and the delegations actually recorded.
+function taskExecutionCard(record, roles, purposes) {
+  const section = card('谁在执行'), controller = controllerOf(roles), qaRuns = roles?.runs.filter(run => run.role === 'qa').length || 0;
+  section.classList.add('task-execution');
+  if (!roles) section.append(mutedLine('读不到这个任务的角色记录。'));
+  else if (controller) {
+    const legacy = roles.snapshots[controller.snapshot_id]?.legacy;
+    section.append(element('p', `角色协调：主控 Manager（${harnessName(controller.harness)}${legacy ? '，旧配置沿用' : ''}）按需委派工作，候选由它提名后交给独立 QA。`));
+  } else section.append(element('p', '原来的执行器：这个任务没有经过主控，由工作流在项目电脑里的 Pi 进程直接执行。'));
+  if (roles) section.append(facts([['独立 QA', qaRuns ? `运行过 ${qaRuns} 次，每次都是新的上下文` : record?.candidate ? '等待验收' : '有候选后验收']]));
+  // The delegations in the order they were recorded. A stage timeline, once the server keeps one per task, belongs in
+  // this list too; until then nothing here is inferred from the workflow's flowchart or the role configuration.
+  const work = (roles?.assignments || []).filter(a => !['manager', 'qa'].includes(a.role));
+  if (work.length) {
+    const list = element('ol', '', 'role-work');
+    for (const a of work) {
+      const item = element('li', ''), head = element('div', '', 'role-work-head'), [caption, tone] = { running: ['进行中', 'info'], completed: ['已交回', 'success'], failed: ['失败', 'danger'] }[a.status] || [a.status, ''];
+      head.append(element('strong', roleLabel(a.role)), element('span', harnessName(a.harness), 'muted'), badge(caption, tone));
+      item.append(head); if (purposes[a.id]) item.append(element('p', purposes[a.id]));
+      if (a.candidate_version) item.append(element('p', '看的是候选版本 ' + shortId(a.candidate_version), 'muted'));
+      list.append(item);
+    }
+    section.append(element('h4', '委派记录'), list, mutedLine('按实际记录的先后列出。这不是预设流程，也不授予权限：委派谁由主控按任务决定，写入只来自工作流设置。'));
+  } else if (controller) section.append(mutedLine('主控还没有委派工作。'));
+  return section;
+}
+function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
+  const record = task.structured;
+  // The sentence a reader looks for first: who is doing what now.
+  const next = element('section', '', 'side-card task-next'); next.setAttribute('aria-label', '下一步');
+  next.append(element('h3', '下一步'), element('p', taskNextStep(task, record, roles, purposes), 'task-next-text')); side.append(next);
+  if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(record, roles, purposes));
   const info = card('任务');
   info.append(facts([['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],
     ['原因', task.error_code&&task.error_code!=='repository_has_no_commit'&&task.error_cause?faultSummary(task.error_code,task.error_cause):null], ['处理', task.error_code!=='repository_has_no_commit'?task.error_cause?.action:null], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));
   if (task.source_task_id) info.append(button('查看来源检视', () => openTask(task.source_task_id)));
-  side.append(info,taskMetricsCard(task), computerCard(task, environment));
   const result = resultCard(task); if (result) side.append(result);
-  if(task.structured) {
-    const record=task.structured, section=card('任务契约与交付验收');
-    const labels={pass:'通过',pass_with_issues:'带问题通过',return:'退回',insufficient_evidence:'证据不足',needs_human:'需要人决定'};
-    section.append(facts([['目标',record.contract.goal],['需求版本',record.revision],['交付终点',record.contract.endpoint||'尚未明确'],['下一步',record.progress.next_action],['验收',labels[record.acceptance?.outcome]||'尚未验收'],['结论',record.acceptance?.reason]]));
-    for(const criterion of record.contract.criteria||[])section.append(element('p',criterion));
-    for(const p of record.selections||[])section.append(element('p',`${p.id} · ${p.version.slice(0,12)} · ${p.purpose}`));
-    for(const f of record.followups||[])section.append(button('查看遗留任务 '+f.issue_key,()=>openTask(f.task_id)));
-    side.append(section);
-  }
-
-  if (publications?.length) {
+  side.append(info,taskMetricsCard(task), computerCard(task, environment));
+  // A task without a structured record still lists what was written to GitHub.
+  if (!record && publications?.length) {
     const section = card('GitHub 发布记录'), list = element('ul', '', 'history');
     for (const p of publications) {
       const row = element('li', ''), [caption, tone] = publicationStates[p.state] || [p.state, ''], name = publicationLabels[p.kind] || p.kind;
