@@ -1,7 +1,7 @@
 // Contract tests of the Codex app-server dialect against test/fixtures/codex-app-server.mjs (a protocol double, not Codex).
 import test from 'node:test';import assert from 'node:assert/strict';import {randomBytes} from 'node:crypto';import {mkdtempSync,writeFileSync,rmSync,readFileSync,existsSync} from 'node:fs';import {tmpdir} from 'node:os';import {join,resolve} from 'node:path';
 import {Store} from '../dist/storage/database.js';import {TaskRecords} from '../dist/tasks/service.js';import {runRole} from '../dist/roles/run.js';import {Redactor,TaskError} from '../dist/agent/common.js';
-import {LineRpc,codexAppServer} from '../dist/harness/app-server.js';import {acpConfiguration} from '../dist/harness/acp.js';import {instanceUsage} from '../dist/roles/role-run.js';import {roleHarness} from '../dist/roles/harness.js';
+import {LineRpc,codexAppServer,deniedFeatures} from '../dist/harness/app-server.js';import {acpConfiguration} from '../dist/harness/acp.js';import {instanceUsage} from '../dist/roles/role-run.js';import {roleHarness} from '../dist/roles/harness.js';
 const tool=name=>({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
 function fixture(t,env={},config={}){
  const root=mkdtempSync(join(tmpdir(),'bot-codex-')),key=randomBytes(32),file=join(root,'db'),home=join(root,'codex-home');let s=new Store(file,key);
@@ -32,16 +32,17 @@ test('Codex app-server: handshake, verified task tools, thread/turn binding, str
  const methods=f.lines('requests.jsonl').map(r=>r.method);
  assert.deepEqual(methods.slice(0,3),['initialize','initialized','thread/start']);
  assert.ok(methods.indexOf('mcpServerStatus/list')<methods.indexOf('turn/start'),'tools are verified before the first turn');
+ assert.ok(methods.lastIndexOf('experimentalFeature/list')<methods.indexOf('turn/start'),'built-in tools are verified before the first turn');
  const started=f.lines('requests.jsonl').find(r=>r.method==='thread/start');assert.ok(started.keys.includes('developerInstructions')&&started.keys.includes('config'));
  const events=f.events(),bound=events.find(e=>e.type==='session_bound');
- assert.deepEqual([bound.threadId,bound.protocol,bound.tools,bound.sandbox,bound.model],[state.sessionId,'codex-app-server',['finish','read_task_record'],'read-only','gpt-fixture']);
+ assert.deepEqual([bound.threadId,bound.protocol,bound.tools,bound.sandbox,bound.model,bound.disabledBuiltins],[state.sessionId,'codex-app-server',['finish','read_task_record'],{type:'readOnly'},'gpt-fixture',[...deniedFeatures]]);
  const turns=events.filter(e=>e.type==='turn');
  assert.deepEqual(turns.map(e=>[e.phase,e.status??null,e.usage??null]),[['started',null,null],['ended','completed','observed']]);
  assert.equal(state.lastTurnId,turns[0].turnId);
  const message=events.find(e=>e.type==='message');assert.match(message.text,/^公开输出 fixture public output/);assert.equal(message.turnId,turns[0].turnId);
- // The duplicate item/completed is dropped; command evidence keeps its exit status.
- const commands=events.filter(e=>e.type==='tool'&&e.itemType==='commandExecution');
- assert.deepEqual(commands.map(e=>[e.phase,e.status]),[['started','inProgress'],['completed','declined']]);
+ // The duplicate item/completed is dropped; a patch attempt under the read-only sandbox ends declined.
+ const patches=events.filter(e=>e.type==='tool'&&e.itemType==='fileChange');
+ assert.deepEqual(patches.map(e=>[e.phase,e.status]),[['started','inProgress'],['completed','declined']]);
  assert.ok(events.some(e=>e.type==='tool'&&e.itemType==='mcpToolCall'&&e.title==='bot.read_task_record'));
  const anomalies=events.filter(e=>e.stage==='protocol_anomaly').map(e=>e.anomaly).sort();
  assert.deepEqual(anomalies,['duplicate_item','unexpected_response','unknown_notification']);
@@ -68,8 +69,11 @@ test('Codex permission requests follow role authority and never wait for an admi
  assert.deepEqual(answers('item/tool/requestUserInput'),[{answers:{}}]);
  assert.equal(answers('item/tool/call')[0].success,false);
  assert.equal(answers('account/chatgptAuthTokens/refresh')[0].error.code,-32601);
+ assert.equal(answers('attestation/generate')[0].error.code,-32601);
+ assert.deepEqual([...answers('applyPatchApproval'),...answers('execCommandApproval')],[{decision:'abort'},{decision:'abort'}]);
  const permissions=f.events().filter(e=>e.type==='permission');
- assert.equal(permissions.length,10);
+ // All ten server request methods of the locked version, plus one for another thread.
+ assert.deepEqual([permissions.length,new Set(permissions.map(p=>p.method)).size],[13,codexAppServer.serverRequests.length]);
  assert.deepEqual(permissions.filter(p=>p.allowed).map(p=>p.serverName),['bot']);
  assert.equal(permissions.find(p=>p.threadId==='foreign-thread').reason,'foreign_thread');
  assert.equal(permissions.find(p=>p.method==='item/commandExecution/requestApproval').command,'curl https://example.invalid');
@@ -77,7 +81,7 @@ test('Codex permission requests follow role authority and never wait for an admi
  assert.ok(denied.some(d=>d.tool==='codex:item/commandExecution/requestApproval'&&d.reason==='host_command_outside_role_authority'));
  assert.ok(denied.some(d=>d.tool==='codex:item/permissions/requestApproval'&&d.reason==='sandbox_escalation_outside_role_authority'));
  const categories=f.runEvents().filter(e=>e.type==='permission').map(e=>e.category);
- assert.deepEqual([categories.filter(c=>c==='progress').length,categories.filter(c=>c==='denied').length],[1,9]);
+ assert.deepEqual([categories.filter(c=>c==='progress').length,categories.filter(c=>c==='denied').length],[1,12]);
 });
 
 test('Codex resume continues the own thread, counts usage once and rebuilds explicitly when local state is lost',async t=>{
@@ -122,11 +126,6 @@ test('Codex failures and version, model, tool or ownership mismatches are explic
   const f=fixture(t,{},{model:'gpt-fixture'});await runRole(f.spec,'dev',undefined,'codex');
   f.configure({},{model:'gpt-other'});await assert.rejects(runRole(f.spec,'dev'),{code:'codex_resume_incompatible'});
  });
- await t.test('a session refused before binding keeps the previous binding',async t=>{
-  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const before=f.state();
-  f.configure({FIXTURE_EXTRA_SERVER:'true',FIXTURE_EARLY_USAGE:'true'});await assert.rejects(runRole(f.spec,'dev'),{code:'codex_unauthorized_tool_servers'});
-  assert.deepEqual(f.state(),before);
- });
  await t.test('a resumed thread from another session directory is refused',async t=>{
   const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');
   f.configure({FIXTURE_FOREIGN_CWD:'true'});await assert.rejects(runRole(f.spec,'dev'),{code:'codex_thread_ownership_mismatch'});
@@ -134,7 +133,7 @@ test('Codex failures and version, model, tool or ownership mismatches are explic
 });
 
 test('Codex cancel interrupts the turn, waits for the terminal receipt, then reclaims the process; late results never complete',async t=>{
- for(const [env,receipt] of [[{FIXTURE_WAIT:'true'},'terminal'],[{FIXTURE_IGNORE_INTERRUPT:'true'},'timeout'],[{FIXTURE_LATE:'true'},'terminal']])await t.test(JSON.stringify(env),async t=>{
+ for(const [env,receipt] of [[{FIXTURE_WAIT:'true'},'terminal'],[{FIXTURE_WAIT:'true',FIXTURE_IGNORE_INTERRUPT:'true'},'timeout'],[{FIXTURE_LATE:'true'},'terminal']])await t.test(JSON.stringify(env),async t=>{
   const f=fixture(t,env);let cancel=false;
   const run=runRole({...f.spec,guard:async()=>{if(cancel)throw new TaskError('task_cancelled','cancelled');}},'dev',undefined,'codex');
   const poll=setInterval(()=>{if(existsSync(join(f.home,'prompts.jsonl')))cancel=true;},20);
@@ -145,6 +144,87 @@ test('Codex cancel interrupts the turn, waits for the terminal receipt, then rec
   assert.deepEqual(turns.filter(e=>e.phase==='interrupt_receipt').map(e=>e.receipt),[receipt]);
   assert.equal(results(f.s),0);assert.equal(f.s.get("SELECT status FROM task_runs ORDER BY rowid DESC LIMIT 1").status,'fault');
  });
+});
+
+// A stopped run's process group is gone and the tool call the agent tried after the stop was refused.
+async function stopped(f){
+ const pid=Number(readFileSync(join(f.home,'pid'),'utf8'));
+ for(let i=0;i<50;i++){try{process.kill(pid,0);}catch{break;}await new Promise(r=>setTimeout(r,20));}
+ assert.throws(()=>process.kill(pid,0),{code:'ESRCH'},'process reclaimed');
+ assert.deepEqual(f.lines('late-tools.jsonl').map(l=>l.accepted),[false],'tool call after the stop refused');
+ assert.equal(results(f.s),0);assert.equal(f.s.get("SELECT status FROM task_runs ORDER BY rowid DESC LIMIT 1").status,'fault');
+}
+
+test('Codex built-in host tools are removed and verified before the first turn; one that acts anyway stops the run',async t=>{
+ await t.test('thread policy and its verification',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');
+  assert.deepEqual(f.lines('thread-params.jsonl'),[{method:'thread/start',approvalPolicy:'on-request',sandbox:'read-only',features:Object.fromEntries(deniedFeatures.map(n=>[n,false])),web_search:'disabled'}]);
+  assert.equal(f.lines('requests.jsonl').filter(r=>r.method==='experimentalFeature/list').length,2,'every page of the feature state is read');
+ });
+ for(const env of [{FIXTURE_FEATURE_IGNORED:'true'},{FIXTURE_SANDBOX_IGNORED:'true'}])await t.test('server did not apply '+JSON.stringify(env),async t=>{
+  const f=fixture(t,env);await assert.rejects(runRole(f.spec,'dev',undefined,'codex'),{code:'codex_builtin_tools_enabled'});
+  assert.equal(f.lines('requests.jsonl').filter(r=>r.method==='turn/start').length,0,'no turn starts');
+ });
+ // The server runs a sandboxed command (or applies a patch, or spawns a sub-agent) without sending any approval request.
+ for(const [env,code,tool] of [[{FIXTURE_BUILTIN_EXEC:'true'},'codex_builtin_tool_refused','codex:commandExecution'],[{FIXTURE_UNAPPROVED_PATCH:'true'},'codex_builtin_tool_refused','codex:fileChange'],[{FIXTURE_SUBAGENT:'true'},'codex_subagent_refused','codex:subAgentActivity'],[{FIXTURE_SAME_CHUNK:'true'},'codex_subagent_refused','codex:subAgentActivity']])
+  await t.test(code+' '+tool+' '+Object.keys(env)[0],async t=>{
+   const f=fixture(t,{...env,FIXTURE_IGNORE_INTERRUPT:'true'}),begun=Date.now();
+   await assert.rejects(runRole(f.spec,'dev',undefined,'codex'),{code});
+   assert.ok(Date.now()-begun<4000,'stopped within the grace period, not at the run timeout');
+   const denied=f.s.all("SELECT data FROM task_history WHERE type='capability_denied'").map(r=>JSON.parse(r.data));
+   assert.ok(denied.some(d=>d.tool===tool),tool);
+   assert.equal(f.lines('responses.jsonl').length,0,'no approval request was involved');
+   assert.equal(f.lines('interrupts.jsonl').length,1);
+   await stopped(f);
+  });
+});
+
+test('Codex model reroute stops the run within the grace period even when the interrupt is ignored',async t=>{
+ const f=fixture(t,{FIXTURE_REROUTE:'true',FIXTURE_IGNORE_INTERRUPT:'true'}),begun=Date.now();
+ await assert.rejects(runRole(f.spec,'dev',undefined,'codex'),{code:'codex_model_rerouted'});
+ assert.ok(Date.now()-begun<4000,'not the run timeout');
+ assert.deepEqual(f.events().filter(e=>e.phase==='interrupt_receipt').map(e=>e.receipt),['timeout']);
+ await stopped(f);
+});
+
+test('Codex rebuilds only an explicitly missing thread, and never onto another model or provider',async t=>{
+ await t.test('another resume error keeps the binding and fails for retry',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const before=f.state();
+  f.configure({FIXTURE_RESUME_ERROR:'-32603:temporary database read failed; retry later',FIXTURE_MODEL:'different-default-model',FIXTURE_PROVIDER:'different-provider'});
+  await assert.rejects(runRole(f.spec,'dev'),{code:'codex_resume_failed'});
+  assert.deepEqual(f.state(),before);assert.equal(f.lines('requests.jsonl').filter(r=>r.method==='thread/start').length,1,'no new thread');
+ });
+ await t.test('a lost thread is not rebuilt on a different default model or provider',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const before=f.state();
+  rmSync(join(f.home,'threads'),{recursive:true});f.configure({FIXTURE_MODEL:'different-default-model',FIXTURE_PROVIDER:'different-provider'});
+  await assert.rejects(runRole(f.spec,'dev'),{code:'codex_resume_incompatible'});
+  assert.deepEqual(f.state(),before);
+ });
+});
+
+test('Codex turns without any usage report count as unknown requests, never as exact zero',async t=>{
+ for(const [env,code] of [[{FIXTURE_DISCONNECT:'true'},'codex_connection_lost'],[{FIXTURE_WAIT:'true',FIXTURE_IGNORE_INTERRUPT:'true'},'task_cancelled'],[{FIXTURE_EXIT:'true'},'codex_connection_lost']])await t.test(JSON.stringify(env),async t=>{
+  const f=fixture(t,env);let cancel=false;
+  const poll=setInterval(()=>{if(env.FIXTURE_WAIT&&existsSync(join(f.home,'prompts.jsonl')))cancel=true;},20);
+  await assert.rejects(runRole({...f.spec,guard:async()=>{if(cancel)throw new TaskError('task_cancelled','cancelled');}},'dev',undefined,'codex'),{code});clearInterval(poll);
+  const instance=f.s.get("SELECT id FROM role_instances WHERE role='dev'").id,usage=instanceUsage(f.s,instance);
+  assert.deepEqual([usage.model_requests,usage.unknown_requests,usage.total_tokens,usage.semantics],[1,1,0,'lower_bound']);
+ });
+});
+
+test('A session refused before its binding counts a restated usage increment once, on the attempt that binds',async t=>{
+ const f=fixture(t);const first=await runRole(f.spec,'dev',undefined,'codex');const before=f.state();
+ assert.equal(before.usage.total,110);
+ // The thread grew by 110 tokens the client never saw; every resume restates the total 220 before the extra server refuses it.
+ f.configure({FIXTURE_EXTRA_SERVER:'true',FIXTURE_EARLY_USAGE:'true'});
+ for(let i=0;i<2;i++)await assert.rejects(runRole(f.spec,'dev'),{code:'codex_unauthorized_tool_servers'});
+ assert.deepEqual(f.state(),before);
+ assert.equal(f.events().filter(e=>e.type==='usage').length,1,'the refused attempts recorded no usage');
+ let usage=instanceUsage(f.s,first.instance_id);assert.deepEqual([usage.model_requests,usage.total_tokens],[1,110]);
+ f.configure({FIXTURE_EARLY_USAGE:'true'});await runRole(f.spec,'dev');
+ usage=instanceUsage(f.s,first.instance_id);
+ assert.deepEqual([usage.model_requests,usage.total_tokens,usage.unknown_requests],[3,330,0],'110 + the restated 110 once + the new turn');
+ assert.equal(f.state().usage.total,330);
 });
 
 test('Codex roles keep separate threads; QA always starts a new one',async t=>{
@@ -175,7 +255,7 @@ test('Codex launch configuration refuses shared homes, daemons, unknown sandboxe
  const base={command:'codex',args:['app-server'],env:{CODEX_HOME:join(root,'home')},stateDirectory:join(root,'sessions'),version:'0.166.0'};
  const load=value=>{writeFileSync(path,JSON.stringify(value));return acpConfiguration('codex-app-server');};
  assert.equal(load(base).protocol,'codex-app-server');
- for(const bad of [{env:{}},{env:{CODEX_HOME:'relative'}},{env:{CODEX_HOME:join(process.env.HOME??'/root','.codex')}},{args:['app-server','proxy']},{args:['app-server','--listen','ws://127.0.0.1:1']},{args:['exec']},{sandbox:'danger-full-access'},{mode:'auto'},{protocol:'acp'},{version:undefined}])
+ for(const bad of [{env:{}},{env:{CODEX_HOME:'relative'}},{env:{CODEX_HOME:join(process.env.HOME??'/root','.codex')}},{args:['app-server','proxy']},{args:['app-server','--listen','ws://127.0.0.1:1']},{args:['exec']},{sandbox:'danger-full-access'},{sandbox:'workspace-write'},{mode:'auto'},{protocol:'acp'},{version:undefined}])
   assert.throws(()=>load({...base,...bad}),{code:'acp_configuration_invalid'},JSON.stringify(bad));
  // The ACP launch file cannot be reused for Codex and the other way round.
  writeFileSync(path,JSON.stringify({...base,protocol:'codex-app-server'}));const acp=process.env.BOT_ACP_CONFIG;process.env.BOT_ACP_CONFIG=path;

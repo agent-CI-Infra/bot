@@ -19,7 +19,7 @@ export type AcpProtocol='acp'|'codex-app-server';
 export interface AcpConfiguration {command:string;args?:string[];env?:Record<string,string>;stateDirectory:string;model?:string;mode?:string;timeoutMs?:number;version?:string;
  protocol:AcpProtocol;
  /** codex-app-server only. */
- modelProvider?:string;sandbox?:'read-only'|'workspace-write';toolStartupMs?:number;cancelGraceMs?:number}
+ modelProvider?:string;sandbox?:'read-only';toolStartupMs?:number;cancelGraceMs?:number}
 const launch:Record<AcpProtocol,{variable:string;label:string}>={acp:{variable:'BOT_ACP_CONFIG',label:'ACP'},'codex-app-server':{variable:'BOT_CODEX_CONFIG',label:'Codex app-server'}};
 const optionalString=(v:unknown)=>v===undefined||typeof v==='string'&&v.length>0&&v.length<=200;
 const optionalMs=(v:unknown,min:number)=>v===undefined||Number.isSafeInteger(v)&&(v as number)>=min;
@@ -42,7 +42,8 @@ function codexLaunch(c:any){
  if(typeof home!=='string'||!isAbsolute(home))bad('Codex launch needs env.CODEX_HOME: an absolute, dedicated Codex home.');
  if(process.env.HOME&&[join(process.env.HOME,'.codex'),resolve(process.env.HOME)].includes(resolve(home)))bad('CODEX_HOME must not be the host user\'s shared Codex home.');
  if(c.mode!==undefined)bad('mode is an ACP option; Codex uses sandbox.');
- if(c.sandbox!==undefined&&!['read-only','workspace-write'].includes(c.sandbox))bad('sandbox must be read-only or workspace-write.');
+ // workspace-write would let Codex's own tools write its session directory without any approval request.
+ if(c.sandbox!==undefined&&c.sandbox!=='read-only')bad('sandbox must be read-only: Codex tools never write without a declined approval.');
  if(!optionalString(c.model)||!optionalString(c.modelProvider)||!optionalMs(c.toolStartupMs,100)||!optionalMs(c.cancelGraceMs,100))bad('model, modelProvider, toolStartupMs or cancelGraceMs is invalid.');
  if(typeof c.version!=='string'||!c.version)bad('version must pin the installed Codex CLI version.');
 }
@@ -57,7 +58,8 @@ export interface AcpInput<T> {
  /** Names of the offered task tools; the Codex dialect verifies the session sees exactly these. */
  toolNames?:string[];
  state?:{value:Record<string,any>;save:(value:Record<string,any>)=>void};
- tools:{url:string;readonly submitted:boolean;readonly result:T};
+ /** halt refuses every further task tool call of this run at once. */
+ tools:{url:string;readonly submitted:boolean;readonly result:T;halt?:()=>void};
  guard:()=>Promise<void>;
  redactor:Redactor;
  validate?:(text:string)=>T|Promise<T>;
@@ -67,6 +69,8 @@ export interface AcpInput<T> {
 /** What a dialect gets from the shared lifecycle. */
 export interface DialectContext {config:AcpConfiguration;child:ChildProcessWithoutNullStreams;cwd:string;mcpUrl:string;tools:string[];instructions:string;redactor:Redactor;
  emit:(event:HarnessEvent)=>void;guard:()=>Promise<void>;denied:(name:string,reason:string)=>void;
+ /** End this run with the error: task tools are refused at once, then the shared cancel interrupts and reclaims the process. */
+ stop:(error:TaskError)=>void;
  /** Merge fields into the persisted session binding (the role instance's harness_state). */
  save:(patch:Record<string,unknown>)=>void}
 /** One wire protocol. open binds the external session; turn runs one prompt to its terminal state and throws unless it completed. */
@@ -75,6 +79,8 @@ export interface Dialect {
  turn(text:string):Promise<{text:string}>;
  /** Protocol interrupt, resolved when the agent confirmed it or the grace period ended. */
  cancel():Promise<void>;
+ /** Called once the new binding is persisted. */
+ bound?():void;
  close(reason?:unknown):void;
 }
 /** Protocol-only execution: role/task/storage/publication semantics are supplied by callers. */
@@ -98,12 +104,14 @@ export async function runAcp<T>(input:AcpInput<T>,signal:AbortSignal,emit:(event
  const save=(patch:Record<string,unknown>)=>{binding={...binding,...patch};if(bound)input.state?.save(binding);};
  const instructions=input.system;
  try{
-  const ctx:DialectContext={config,child,cwd,mcpUrl:bridge.url,tools:input.toolNames??[],instructions,redactor:input.redactor,emit,guard:input.guard,denied:(name,reason)=>input.onDenied?.(name,reason),save};
+  const ctx:DialectContext={config,child,cwd,mcpUrl:bridge.url,tools:input.toolNames??[],instructions,redactor:input.redactor,emit,guard:input.guard,denied:(name,reason)=>input.onDenied?.(name,reason),save,
+   stop:error=>{bridge.halt?.();void cancel(error);}};
   dialect=protocol==='codex-app-server'?appServerDialect(ctx):acpDialect(ctx,signal);
   const previous=input.state?.value;
   const opened=await dialect.open(previous,input.fresh);
   bound=true;save({...opened.state,sessionId:opened.sessionId,previousSessionId:previous?.sessionId??null,cwd,recoveryMode:opened.recovery,agentInfo:opened.agentInfo??null,version:config.version??null,configurationHash:sha(JSON.stringify(config))});
   emit({type:'session_bound',sessionRef:opened.sessionId,previousSessionRef:previous?.sessionId??null,recoveryMode:opened.recovery,agentInfo:opened.agentInfo??null,configuredModel:config.model??null,usage:protocol==='acp'?'unknown':'events',protocol,...opened.bound});
+  dialect.bound?.();
   for(let repair=0;repair<3;repair++){
    await input.guard();if(signal.aborted)throw signal.reason;
    // ACP carries the role instructions in every prompt; the app-server keeps them as the thread's developer instructions.

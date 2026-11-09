@@ -43,5 +43,7 @@ export async function taskToolServer<T>(spec:AgentSpec<T>){
    res.end(JSON.stringify({jsonrpc:'2.0',id,result:value}));
   }catch(error){res.end(JSON.stringify({jsonrpc:'2.0',id:requestId,error:{code:-32603,message:spec.redactor.text(String((error as any).code??'task_tool_error'))}}));}
  });server.listen(0,'127.0.0.1');await once(server,'listening');
- return {url:`http://127.0.0.1:${(server.address() as any).port}/${token}`,get submitted(){return submitted;},get result(){return result;},async close(){active=false;server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await tail;}};
+ return {url:`http://127.0.0.1:${(server.address() as any).port}/${token}`,get submitted(){return submitted;},get result(){return result;},
+  // A run that is being stopped refuses further calls at once; queued calls see the same flag before they execute.
+  halt(){active=false;},async close(){active=false;server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await tail;}};
 }
