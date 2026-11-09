@@ -88,10 +88,9 @@ function addressTab(hash) {
 }
 async function route() {
   renderVersion++;
-  // Old chat links now wake the shared window beside the project, rather than replacing the page.
+  // A project chat link keeps the project context; the top-level management address is a page of its own.
   const chatProject = /^#\/projects\/([^/]+)\/management$/.exec(location.hash)?.[1];
-  const wakeChat = location.hash === '#/management' || !!chatProject;
-  if (wakeChat) history.replaceState(null, '', chatProject ? `#/projects/${chatProject}/basic` : '#/projects');
+  if (chatProject) history.replaceState(null, '', `#/projects/${chatProject}/basic`);
   const legacy = legacyOnboardingAddress.exec(location.hash);
   if (legacy) history.replaceState(null, '', '#/settings/onboarding/' + ([0, 1, 3, 4, 5, 6][Number(legacy[1] || 0)] ?? 0));
   // Accounts and users were tabs of their own; their old addresses open the matching settings section.
@@ -102,12 +101,16 @@ async function route() {
   if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
-  page.hidden = !target; list.hidden = !!target;
+  page.hidden = !target; list.hidden = !!target || tab === 'management';
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  if (target) await renderProject(target); else await render();
-  if (wakeChat) void openManagementChat(chatProject || null).catch(error);
+  if (tab === 'management' && !target) await renderManagementPage();
+  else {
+    if (typeof leaveManagementPage === 'function') leaveManagementPage();
+    if (target) await renderProject(target); else await render();
+    if (chatProject) void openManagementChat(chatProject).catch(error);
+  }
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });
 // `quiet` is the periodic refresh: the list stays on screen while loading, and only rows whose data changed are replaced
@@ -367,7 +370,7 @@ $('logout').addEventListener('click', async () => { try { await api('/api/auth/l
 // The address is written without waiting for hashchange, so the page switches in the same click; back and forward still
 // fire hashchange and draw the page they return to.
 $('tabs').addEventListener('click', event => { const name = event.target.dataset.tab; if (!name) return;
-  if (name === 'management') { void openManagementChat(projectRoute()?.id || null).catch(error); return; }
+  if (name === 'management') { void openManagementPage(projectRoute()?.id || null).catch(error); return; }
   if (location.hash !== tabAddresses[name]) history.pushState(null, '', tabAddresses[name]); offset = 0; route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));
 // The onboarding dialog calls this once a run reaches a terminal state.

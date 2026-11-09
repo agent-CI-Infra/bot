@@ -13,7 +13,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // Accounts, users, review and development no longer have top-level tabs.
     for (const gone of ['机器人账号', '用户', '检视', '开发', '接入向导']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
     const tab = name => page.locator('#tabs').getByRole('button', { name, exact: true }), current = () => page.locator('#tabs [aria-current=page]');
-    for (const [name, address] of [['看板', '#/board'], ['统计', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['项目', '#/projects']]) {
+    for (const [name, address] of [['看板', '#/board'], ['统计', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['管理对话', '#/management'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
       await page.reload(); await expect(current()).toHaveText(name);
     }
