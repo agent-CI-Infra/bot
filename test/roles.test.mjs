@@ -1,5 +1,6 @@
 import { knowledgeActor, authorizeKnowledgeTask } from './knowledge-fixture.mjs';
-import test from 'node:test';import assert from 'node:assert/strict';import {createServer} from 'node:http';import {once} from 'node:events';import {randomBytes} from 'node:crypto';import {mkdtempSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
+import test from 'node:test';import assert from 'node:assert/strict';import {createServer} from 'node:http';import {once} from 'node:events';import {randomBytes} from 'node:crypto';import {mkdtempSync,rmSync,mkdirSync,writeFileSync,existsSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
+import {execFileSync} from 'node:child_process';
 import {Store} from '../dist/storage/database.js';import {TaskRecords} from '../dist/tasks/service.js';import {runRole,roleRuns} from '../dist/roles/run.js';import {runTeam} from '../dist/roles/team.js';import {Redactor} from '../dist/agent/common.js';import {traceSource} from '../dist/tasks/trace.js';import {roleApi} from '../dist/roles/api.js';import {ProjectMemory} from '../dist/memory/project.js';
 const tool=(name)=>({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
 const call=(name,args,id='c')=>({role:'assistant',content:null,tool_calls:[{id,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
@@ -113,4 +114,37 @@ test('RoleRun prepare filters restored knowledge and input, honors context rebui
  const changed=await roleRuns.prepare(f.spec,'dev');assert.deepEqual(changed.wrapped.session.messages,[]);
  const row=f.s.get('SELECT harness_state,runtime FROM role_instances WHERE id=?',run.instance_id);assert.deepEqual(JSON.parse(row.harness_state),{});assert.equal(row.runtime,null);
  assert.ok(f.s.get("SELECT id FROM task_history WHERE type='role_memory_view_changed'"));await changed.env.release?.();
+});
+
+test('Native reviewer on a fixed candidate may create unignored build output without finalizing it or the controller', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'review-build-output-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'hooks')); writeFileSync(join(root, 'gitconfig'), '');
+  const writer = join(root, 'writer'), reviewer = join(root, 'reviewer'); mkdirSync(writer); let active = writer;
+  const env = { LANG: 'C.UTF-8', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(root, 'gitconfig') };
+  const git = args => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=' + join(root, 'hooks'), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: active, env, encoding: 'utf8' }).trim();
+  git(['init', '-q']); writeFileSync(join(writer, 'source.txt'), 'fixed input'); git(['add', 'source.txt']); git(['commit', '-qm', 'Fixture input']);
+  const snapshot = { local_sha: git(['rev-parse', 'HEAD']), tree_sha: git(['rev-parse', 'HEAD^{tree}']) };
+  execFileSync('/usr/bin/git', ['clone', '-q', '--no-local', writer, reviewer], { cwd: root, env, stdio: 'pipe' });
+  let step = 0, devRef, f, finalized = [];
+  f = await fixture(t, body => {
+    const system = body.messages[0].content;
+    if (system.includes('Coordinate only.')) {
+      const last = body.messages.at(-1); if (last.role === 'tool' && JSON.parse(last.content).result_ref && !devRef) devRef = JSON.parse(last.content).result_ref;
+      if (step++ === 0) return call('delegate_role', { role: 'dev', purpose: 'Implement', refs: [] });
+      if (step === 2) return call('delegate_role', { role: 'reviewer', purpose: 'Build and inspect', refs: [devRef] });
+      return call('nominate_delivery', { result_ref: devRef });
+    }
+    if (system.includes('Inspect the fixed candidate independently')) {
+      if (!body.messages.some(m => m.role === 'tool')) return call('run_command', { command: 'build fixture' });
+      return call('submit_role_result', { summary: 'Fixed candidate inspected', findings: [], inspected_scope: ['source.txt'], unknowns: [] });
+    }
+    return call('finish', { summary: 'Writer result' });
+  });
+  const result = await runTeam({ ...f.spec, tools: [tool('finish'), tool('run_command')], candidateSnapshot: async () => { finalized.push(f.spec.task.active_role); git(['add', '--all']); return { local_sha: snapshot.local_sha, tree_sha: git(['write-tree']) }; }, execute: async name => {
+    assert.equal(name, 'run_command'); execFileSync(process.execPath, ['-e', 'require("node:fs").writeFileSync("build.out","generated")'], { cwd: active, env: { LANG: 'C.UTF-8' } }); return { exit_code: 0 };
+  } }, { prepare: async role => { active = role === 'reviewer' ? reviewer : writer; if (role === 'reviewer') { const { traceEvent } = await import('../dist/tasks/trace.js'); traceEvent(f.s, 't', 'role_candidate', { role, sha: snapshot.local_sha, version: snapshot.tree_sha }); } return async () => { active = writer; }; } });
+  assert.equal(result.summary, 'Writer result'); assert.equal(existsSync(join(reviewer, 'build.out')), true);
+  assert.equal(existsSync(join(writer, 'build.out')), false); active = reviewer;
+  assert.deepEqual(finalized, ['dev']); assert.match(git(['status', '--porcelain']), /\?\? build.out/);
+  assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='reviewer' ORDER BY rowid DESC LIMIT 1").status, 'succeeded');
 });

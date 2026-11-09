@@ -13,14 +13,10 @@ import { contentHash } from '../dist/roles/protocol.js';
 import { instanceUsage } from '../dist/roles/role-run.js';
 import { traceEvent } from '../dist/tasks/trace.js';
 
+assert.ok(process.env.BOT_CLAUDE_CODE_CONFIG, 'Set BOT_CLAUDE_CODE_CONFIG to an explicit operator-owned launch profile.');
 process.umask(0o077);
 const root = resolve(process.argv[2] ?? '.tmp/claude-code-smoke'); mkdirSync(root, { recursive: true });
 for (const name of ['home', 'tmp', 'hooks', 'candidate', 'reviewer', 'qa']) mkdirSync(join(root, name), { recursive: true });
-if (!process.env.BOT_CLAUDE_CODE_CONFIG) {
-  const credentialFile = process.env.MISSIONCREW_CREDENTIALS_DIR && join(process.env.MISSIONCREW_CREDENTIALS_DIR, 'CLAUDE_CODE_ANTHROPIC_API_KEY');
-  assert.ok(credentialFile && existsSync(credentialFile), 'Supply BOT_CLAUDE_CODE_CONFIG, or save the requested project service credential. Personal subscriptions are not used.');
-  const file = join(root, 'launch.json'); writeFileSync(file, JSON.stringify({ version: '2.1.319', stateDirectory: join(root, 'sessions'), model: process.env.BOT_CLAUDE_MODEL ?? 'claude-sonnet-4-5-20250929', provider: { baseUrl: 'https://api.anthropic.com', credentialFile }, timeoutMs: 180_000 })); process.env.BOT_CLAUDE_CODE_CONFIG = file;
-}
 const empty = join(root, 'gitconfig'); writeFileSync(empty, '');
 const env = { PATH: dirname(process.execPath) + ':/usr/bin:/bin', HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'), LANG: 'C.UTF-8', GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1' };
 const code = join(root, 'candidate');

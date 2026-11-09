@@ -13,16 +13,22 @@ export interface AgentServices {
   guard: () => Promise<void>;
   request: (body: Record<string, any>, requestId: string, onToken?: (delta?: ModelDelta) => Promise<void>) => ReturnType<typeof requestModel>;
 }
+/** Run-local measurements and the receipts needed to investigate an interrupted provider request. */
+export interface ExternalUsage {
+  model_requests: number; input_tokens: number; output_tokens: number; unknown_requests: number; semantics: string; cost: string;
+  accounting_source?: string;
+  unresolved_requests?: { request_ref: string; provider_request_id: string | null; started_at: string; reason: string }[];
+  reconciliation?: string;
+}
 export interface AgentSpec<T> {
   store: Store;
   /** Trusted preparation and run binding for external protocol drivers; never supplied by model output. */
   harnessPreparation?: unknown;
   harnessBinding?: { model_revision: string; harness_revision: string };
   runContext?: () => import('../roles/protocol.js').RunContext | undefined;
-  runUsage?: () => { unknown_requests: number };
   /** Control-plane snapshot of the active workspace. Never populated from a CLI report. */
   candidateSnapshot?: () => Promise<{ tree_sha: string; local_sha: string } | null>;
-  onExternalUsage?: (usage: { model_requests: number; input_tokens: number; output_tokens: number; unknown_requests: number; semantics: string; cost: string }) => void;
+  onExternalUsage?: (usage: ExternalUsage) => void;
   harnessState?: { value:Record<string,any>; save:(value:Record<string,any>)=>void };
   modelTrace?: Record<string,unknown>;
   executionSignal?: AbortSignal;

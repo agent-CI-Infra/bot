@@ -24,12 +24,16 @@ for await (const line of createInterface({ input: process.stdin })) {
   writeFileSync(join(process.env.HOME, 'launch.json'), JSON.stringify({ args: process.argv.slice(2), env_names: Object.keys(process.env), cwd: process.cwd(), resumed: process.argv.includes('--resume') }));
   send({ type: 'system', subtype: 'init', model: arg('--model'), tools: mode === 'extra_tool' ? [...tools, 'Bash'] : tools, mcp_servers: [{ name: 'bot', status: 'connected' }] });
   if (['auth_error', 'model_error', 'rate_error', 'transport_error'].includes(mode)) {
-    send({ type: 'assistant', error: 'api_error', message: { id: 'fault-1', content: [{ type: 'text', text: ({ auth_error: 'Authentication failed 401', model_error: 'Model not found 404', rate_error: 'Rate limit 429', transport_error: 'Server error 503' })[mode] }] } }); continue;
+    if (mode === 'rate_error') { const reply = await fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', { method: 'POST', headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'content-type': 'application/json' }, body: JSON.stringify({ model: arg('--model'), max_tokens: 256, messages: [{ role: 'user', content: 'fixture rate limit probe' }], tools: [] }) }); await reply.text(); }
+    const error = ({ auth_error: 'authentication_failed', model_error: 'invalid_request', rate_error: 'rate_limit', transport_error: 'server_error' })[mode];
+    send({ type: 'system', subtype: 'api_retry', attempt: 1, error });
+    send({ type: 'assistant', error, message: { id: 'fault-1', content: [{ type: 'text', text: 'Fixture provider failure' }] } });
+    send({ type: 'result', subtype: 'success', is_error: true, num_turns: 0 }); process.exitCode = 1; break;
   }
   if (mode === 'wait' || mode === 'late') { const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' }); writeFileSync(join(process.env.HOME, 'child.pid'), String(child.pid)); if (mode === 'wait') continue; await new Promise(r => setTimeout(r, 800)); }
   const call = async (name, args) => {
     const id = 'rpc-' + name + '-' + Math.random().toString(36).slice(2);
-    send({ type: 'assistant', message: { id: id, content: [{ type: 'thinking', thinking: 'PRIVATE_FIXTURE_REASONING' }, { type: 'tool_use', id, name: 'mcp__bot__' + name, input: args }], ...(mode === 'unknown_usage' ? {} : { usage: { input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 2 } }) } });
+    send({ type: 'assistant', message: { id: id, content: [{ type: 'thinking', thinking: 'PRIVATE_FIXTURE_REASONING' }, { type: 'tool_use', id, name: 'mcp__bot__' + name, input: args }], ...(mode === 'unknown_usage' ? {} : { usage: { input_tokens: 11, output_tokens: 0, cache_read_input_tokens: 2 } }) } });
     const response = await fetch(url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }) });
     const body = await response.json();
     send({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'PRIVATE_RAW_OBSERVATION' }] } });
@@ -46,7 +50,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   if (mode === 'long_text') send({ type: 'assistant', message: { id: 'long-1', content: [{ type: 'text', text: 'x'.repeat(70_000) }], usage: { input_tokens: 1, output_tokens: 3 } } });
   if (mode !== 'no_submit') await call('finish', { summary: mode === 'bad_report' ? '' : 'read through gateway', fact: record.task?.contract?.goal ?? record.contract?.goal ?? 'read' });
-  send({ type: 'result', subtype: mode === 'budget' ? 'error_max_turns' : 'success', is_error: mode === 'budget', num_turns: 2, usage: { input_tokens: 22, output_tokens: 14 } });
+  const result = { type: 'result', subtype: mode === 'budget' ? 'error_max_turns' : 'success', is_error: mode === 'budget', num_turns: 2, ...(mode === 'unknown_usage' ? {} : { usage: { input_tokens: 22, output_tokens: 14, cache_read_input_tokens: 4 } }) };
+  send(result); if (result.is_error) { process.exitCode = 1; break; }
   if (mode === 'after_result') send({ type: 'assistant', message: { id: 'late', content: [{ type: 'text', text: 'late' }] } });
   // The driver closes stdin after result; leave it open here to exercise that handshake.
 }
