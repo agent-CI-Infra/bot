@@ -42,7 +42,8 @@ async function live(t,options={}){
     res.writeHead(response?.status||200,{'Content-Type':'application/json'});
     res.end(JSON.stringify(response?.body||{choices:[{message:{role:'assistant',content:null,tool_calls:[call('finish_review',result('Done '+requests.length))]}}],usage:{prompt_tokens:options.inputTokens||100,completion_tokens:20}}));
   });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
-  h=await emptyRepositoryFixture(t,{files:[],github:async(path,send,res,body)=>{
+  // The task pins its model configuration when it is queued, so the fixture model must already point at this server.
+  h=await emptyRepositoryFixture(t,{files:[],modelUrl:`http://127.0.0.1:${server.address().port}/v1`,github:async(path,send,res,body)=>{
     if(options.pr&&/\/pulls\/1\/(files|reviews|comments)$/.test(path)){send([]);return true;}
     if(options.pr&&path.includes('/git/commits/')&&!path.endsWith('a'.repeat(40))){send({tree:{sha:'4b825dc642cb6eb9a060e54bf8d69288fbee4904'}});return true;}
     if(path.endsWith(options.pr?'/pulls/1':'/issues/1')){await options.objectRead?.({h,update,object});send(object);return true;}
@@ -140,6 +141,49 @@ for(const siblings of [false,true])test(`real Pi checks repository results again
   d.h.store.run("UPDATE accounts SET type='github_app',app_id='123',credentials=? WHERE id=?",d.h.store.secrets.seal({private_key:pem},'account:'+repo.account_id),repo.account_id);
   const [task]=await d.run();assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(d.requests.length,3);assert.ok(!d.requests.some(request=>JSON.stringify(request).includes('context-read-token')));
+});
+
+const fitsRequest=request=>estimateTokens({role:'user',content:JSON.stringify(request),timestamp:Date.now()})+8192<=128000;
+const toolReplies=request=>request.messages.filter(message=>message.role==='tool').map(message=>JSON.parse(text(message)));
+// A command printing one character size times, without newlines that JSON would escape.
+const printChars=(character,size)=>`head -c ${size} /dev/zero | tr '\\0' ${character}`;
+
+test('real Pi withholds a command output that no compaction can fit, keeps its status and continues the review',async t=>{
+  // Without the check, Pi compacts (a summary request) and the kept output still fails the task with agent_context_too_large.
+  let summaries=0;
+  const d=await live(t,{model:async(request,n)=>{
+    assert.ok(fitsRequest(request),'every actual provider request stays inside the existing context limit');
+    if(!request.tools?.length){summaries++;return {body:{choices:[{message:{role:'assistant',content:'Summary of the review so far.'}}]}};}
+    if(n===2){
+      const reply=toolReplies(request).at(-1);
+      assert.equal(reply.error,'tool_result_too_large');assert.equal(reply.exit_code,0);assert.equal(reply.timed_out,false);
+      assert.ok(reply.result_characters>600000);assert.match(reply.detail,/command ran.*head, tail, grep or wc/);
+      assert.ok(!JSON.stringify(request).includes('n'.repeat(1000)),'the output never reaches the provider');
+    }
+    const calls=n===1?[call('run_command',{command:printChars('n',600000)})]:[call('finish_review',result('Continued after narrowing the command output.'))];
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:calls}}]}};
+  }});
+  const [task]=await d.run();assert.equal(task.status,'succeeded',task.error_code);
+  assert.equal(summaries,0,'the withheld output leaves nothing to compact');assert.equal(d.requests.length,2);
+});
+
+test('real Pi keeps a large command output that fits after compaction and compacts the earlier output away',async t=>{
+  let summaries=0;
+  const d=await live(t,{model:async(request,n)=>{
+    assert.ok(fitsRequest(request),'every actual provider request stays inside the existing context limit');
+    if(!request.tools?.length){summaries++;return {body:{choices:[{message:{role:'assistant',content:'Summary: the first command printed a long run of a.'}}]}};}
+    const replies=toolReplies(request),raw=JSON.stringify(request),turn=n-summaries;
+    if(turn===2)assert.ok(raw.includes('a'.repeat(300000)),'the first output fits and is returned unchanged');
+    if(turn===3){
+      assert.ok(raw.includes('b'.repeat(300000)),'the second output fits alone, so it is kept although the whole history would not fit');
+      assert.ok(!raw.includes('a'.repeat(1000)),'compaction removed the first output');assert.ok(!replies.some(reply=>reply.error));
+    }
+    const calls=turn===1?[call('run_command',{command:printChars('a',300000)})]:turn===2?[call('run_command',{command:printChars('b',300000)})]
+      :[call('finish_review',result('Checked both outputs.'))];
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:calls}}]}};
+  }});
+  const [task]=await d.run();assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  assert.ok(summaries>0,'Pi compacted before the third turn');
 });
 
 test('real Pi starts a sub-agent as a new session that sees only its own instructions and a narrowed tool set',async t=>{

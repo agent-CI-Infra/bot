@@ -8,7 +8,7 @@ import {waitModelReply} from './model-reply.mjs';
 import {toolCapabilityError,platformWrites} from './capabilities.mjs';
 import {createRepositoryTool} from './repository-tool.mjs';
 import {createTokenExchange} from './token-exchange.mjs';
-import {createRepositoryResultGuard} from './repository-context.mjs';
+import {createToolResultGuard} from './repository-context.mjs';
 import {runSubagent} from './subagent.mjs';
 import {local} from './paths.mjs';
 
@@ -17,7 +17,8 @@ if(local)config.system+='\nLocal execution: this is a host process, not a contai
 const boot=(await readFile(dir+'/state.json','utf8').then(JSON.parse).catch(()=>({}))).boot;
 const save=async value=>{value={...value,pid:process.pid,boot};await writeFile(dir+'/state.tmp',JSON.stringify(value),{mode:0o600});await rename(dir+'/state.tmp',dir+'/state.json');};
 let steps=0,session,finished,grant=null,requestFailure;
-const modelRequestTooLarge=raw=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+8192>128000;
+// reserve: tokens a later request needs beyond raw, such as a compaction summary.
+const modelRequestTooLarge=(raw,reserve=0)=>estimateTokens({role:'user',content:raw,timestamp:Date.now()})+8192+reserve>128000;
 // Serialize model and tool events in execution order; mask every issued token before it reaches disk.
 const secrets=new Set();let events=Promise.resolve();
 const clean=value=>JSON.parse(JSON.stringify(value,(_key,item)=>typeof item==='string'?[...secrets].reduce((text,secret)=>text.replaceAll(secret,'[REDACTED]'),item):item));
@@ -129,7 +130,7 @@ try{
     for(const message of history)sessionManager.appendMessage(message);
     const {session:created}=await createAgentSession({cwd,agentDir:dir,modelRuntime:runtime,model:runtime.getModel('department-proxy','selected'),thinkingLevel:'off',resourceLoader:loader,
       tools:tools.map(tool=>tool.name),customTools:tools,sessionManager,settingsManager:SettingsManager.inMemory({compaction:{enabled:true,reserveTokens:24000,keepRecentTokens:16000},retry:{enabled:false}})});
-    guard.check=createRepositoryResultGuard({getMessages:()=>created.messages,tooLarge:modelRequestTooLarge,renderRequest:async messages=>{
+    guard.check=createToolResultGuard({getMessages:()=>created.messages,tooLarge:modelRequestTooLarge,renderRequest:async messages=>{
       // Let the same SDK serialize the projected request, then stop before any HTTP request or accounting.
       let raw;
       const stream=runtime.streamSimple(created.agent.state.model,{messages:await created.agent.convertToLlm(messages),tools:created.agent.state.tools},{
