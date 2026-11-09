@@ -9,7 +9,7 @@ const phaseLabels = { prepare: '准备工作区', model: '模型执行', validat
 // Role ids are chosen by the project (a custom observer may be called "constructor"), so lookups by id read own
 // properties only and fall back to the role's own name.
 const own = (map, key) => Object.hasOwn(map, key) ? map[key] : undefined;
-const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP' };
+const harnessNames = { pi: 'Pi', native: 'Native', process: 'Process', acp: 'ACP', claude_code: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
 const harnessName = id => own(harnessNames, id) || id || '—';
 const builtinRoleNames = { manager: 'Manager', dev: 'Dev', test: 'Test', reviewer: 'Reviewer', ux: 'UX', qa: '独立 QA', coordinator: '跨任务协调' };
 const roleLabel = (id, name) => own(builtinRoleNames, id) || name || id;

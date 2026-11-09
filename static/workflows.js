@@ -460,9 +460,10 @@ function workflowExecution(workflow) {
   if (!coordinated) return [`原来的执行器：项目电脑里的 Pi 进程${entry ? '（这个入口没有接入主控）' : ''}。完成前由独立 QA 验收。`, ' ', roles];
   const controller = config.roles.find(role => role.role_id === config.controller.role), executor = controller ? roleExecutor(controller, config) : null;
   const manager = `主控 Manager（${executor ? executor.name + (executor.legacy ? '，旧配置沿用' : '') : '未配置'}）`;
-  // Each entry offers its own workers: development the enabled writer and observer roles, review and Actions only Dev.
+  // Each entry offers its own workers: development the enabled writer and observer roles, review and Actions only Dev,
+  // which keeps this workflow's tools and workspace and runs on Dev's backend (Pi for older V2 configurations).
   return [entry === 'development' ? `${manager}按需委派已启用的 ${workerNames(entryWorkers(config, entry))}。候选由主控提名后交给独立 QA 验收。`
-    : `${manager}只委派 Dev，Dev 那一步仍是这条工作流原来的 Pi 执行器；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。`, ' ', roles];
+    : `${manager}${entryDevText(config)}；这个入口不委派 Test、Reviewer、UX。候选由主控提名后交给独立 QA 验收。`, ' ', roles];
 }
 function actionsStatusLine(workflow) {
   // A switched-off workflow reports nothing else: an old scan error no longer matters.

@@ -288,8 +288,9 @@ function releaseRecord(r, endpoint, refresh, message) {
 }
 
 // The 角色 page: which entries run under the project controller, how the controller (Manager) delegates Dev, Test,
-// Reviewer and UX, and which executor (harness) each role runs on. It explains a division of work and grants nothing:
-// tools come from capability policies, writes from the workflow, completion from independent QA.
+// Reviewer and UX, and which Agent backend (harness) each role runs on; every role picks its backend, Pi is recommended.
+// It explains a division of work and grants nothing: tools come from capability policies, writes from the workflow,
+// completion from independent QA.
 
 const roleRefText = ref => ref ? `${ref.id}@${ref.version}` : '—';
 // The entries a project may put under the controller (controller.entries); every other workflow keeps its executor.
@@ -302,7 +303,7 @@ const roleDuties = {
   ux: '检查交互、可见状态和无障碍，只报告结果。',
   qa: '每次正式验收都新开上下文，判断候选是否满足任务契约。主控不能委派或代替它。',
   coordinator: '只在出现明确的跨任务请求时运行，给相关任务的主控提建议；不执行、不验收。' };
-const harnessDetails = { pi: '项目电脑里的 Pi 会话', native: '控制面的工具循环', process: '控制面启动的独立 Node 进程', acp: '外部智能体，用它自带的模型' };
+const harnessDetails = { pi: '项目电脑里的 Pi 会话', native: '控制面的工具循环', process: '控制面启动的独立 Node 进程', acp: '外部智能体，用它自带的模型', claude_code: 'Claude Code CLI，用它自带的模型' };
 const modelSources = { role: '角色', workflow: '工作流', project: '项目默认' };
 
 /** Which entries run under the controller now: only when coordination is on and the entry is switched on. */
@@ -317,27 +318,38 @@ function coordinationEntries(config) {
 const entryWorkers = (config, entry) => ['review', 'actions'].includes(entry) ? config.roles.filter(role => role.role_id === 'dev')
   : config.roles.filter(role => role.enabled && ['writer', 'observer'].includes(role.kind));
 const workerNames = roles => roles.map(role => roleLabel(role.role_id, role.name)).join('、') || '无';
+const entryDevText = config => { const dev = entryDevBackend(config); return `只委派 Dev，Dev 用这个入口的工具和工作区，后端 ${harnessName(dev.id)}${dev.kept ? '（旧 V2 配置沿用 Pi，Dev 的后端选择改变后才换）' : ''}`; };
 /**
- * How a role runs. New configurations run the controller on Pi. A configuration saved before V2 with coordination on
- * keeps its old controller (Native) until it is saved again: that is the old configuration still in use (legacy), not a
- * second recommended choice. An old or never saved configuration with coordination off runs no controller at all; it
- * shows the Pi controller a save would give it (pending).
+ * How a role runs. A project that never saved its roles runs none of them; every role shows the recommended backend
+ * (Pi) a save gives it (pending). A saved choice is shown as saved and never switched by the page: Native, Process, ACP
+ * and Claude Code are peer backends. Only a configuration saved before V2 with coordination on, whose controller still
+ * runs on its old backend, is marked as the old configuration in use (legacy); a save upgrades it to V2 with the
+ * backends chosen in the table.
  */
-function roleExecutor(role, config, harnesses = []) {
-  const old = !!config.legacy && role.role_id === config.controller.role && role.harness_ref.id !== 'pi';
-  if (old && !config.enabled) { const pi = harnesses.find(h => h.id === 'pi'); return { id: 'pi', name: 'Pi', ref: pi ? `pi@${pi.version}` : 'pi', legacy: false, pending: true }; }
+function roleExecutor(role, config, { configured = true, recommended = 'pi', harnesses = [] } = {}) {
+  if (!configured) { const backend = harnesses.find(h => h.id === recommended); return { id: recommended, name: harnessName(recommended), ref: backend ? `${recommended}@${backend.version}` : recommended, legacy: false, pending: true }; }
+  const old = !!config.legacy && !!config.enabled && role.role_id === config.controller.role && role.harness_ref.id !== recommended;
   return { id: role.harness_ref.id, name: harnessName(role.harness_ref.id), ref: `${role.harness_ref.id}@${role.harness_ref.version}`, legacy: old, pending: false };
+}
+/**
+ * The backend Dev uses when the controller delegates it in review or Actions analysis (src/roles/definition.ts): Dev's
+ * own backend once its choice applies to these entries (entry_harness_source "role"); an older V2 configuration keeps
+ * Pi there until Dev's backend selection changes.
+ */
+function entryDevBackend(config) {
+  const dev = config.roles.find(role => role.role_id === 'dev');
+  const own = dev?.entry_harness_source === 'role';
+  return { id: own ? dev.harness_ref.id : 'pi', kept: !own && !!dev && dev.harness_ref.id !== 'pi' };
 }
 function roleModelText(preview) {
   if (!preview) return '—';
   if (preview.error) return `${preview.error}${preview.detail ? '：' + preview.detail : ''}`;
-  return preview.model.source === 'external_harness' ? '执行器自带模型' : `${preview.model.name}（${own(modelSources, preview.model.source) || preview.model.source}）`;
+  return preview.model.source === 'external_harness' ? '后端自带模型' : `${preview.model.name}（${own(modelSources, preview.model.source) || preview.model.source}）`;
 }
-// The JSON the editor starts from. Saving an old configuration upgrades it to V2, where the controller runs on Pi; its
-// old controller would be refused at roles.manager.harness_ref.id, so the editor offers Pi for it.
-const editableRole = (r, config) => ({ role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
+// The JSON the editor starts from: every saved backend as saved (stored choices are not migrated by the page).
+const editableRole = r => ({ role_id: r.role_id, enabled: r.enabled, name: r.name, responsibility: r.responsibility, persona_prompt: r.persona_prompt,
   model_profile_ref: r.model_profile_ref ? { model_id: r.model_profile_ref.model_id, api: r.model_profile_ref.api, tool_calls: r.model_profile_ref.tool_calls, structured_output: r.model_profile_ref.structured_output } : null,
-  skill_bundle_ref: r.skill_bundle_ref ? { id: r.skill_bundle_ref.id } : null, harness_ref: { id: config.legacy && r.role_id === config.controller.role ? 'pi' : r.harness_ref.id }, capability_policy_ref: { id: r.capability_policy_ref.id },
+  skill_bundle_ref: r.skill_bundle_ref ? { id: r.skill_bundle_ref.id } : null, harness_ref: { id: r.harness_ref.id }, capability_policy_ref: { id: r.capability_policy_ref.id },
   environment_profile_ref: { id: r.environment_profile_ref.id }, budget_policy_ref: Object.fromEntries(Object.entries(r.budget_policy_ref).filter(([key]) => key !== 'version')),
   output_schema_ref: { id: r.output_schema_ref.id } });
 
@@ -352,15 +364,16 @@ function rolesSection() {
 }
 function roleCards(data, message) {
   const config = data.configuration, byId = new Map(config.roles.map(role => [role.role_id, role]));
-  const preview = roleId => data.preview.find(p => p.role === roleId), executorOf = role => roleExecutor(role, config, data.harnesses);
+  const recommended = data.recommended_backend || 'pi', configured = data.configured !== false;
+  const preview = roleId => data.preview.find(p => p.role === roleId), executorOf = role => roleExecutor(role, config, { configured, recommended, harnesses: data.harnesses });
   // Every role picks an Agent backend; a project that never saved its roles starts from the recommended one.
   const backends = data.backends || data.harnesses.map(h => ({ ...h, name: h.id, available: true }));
-  const draft = { enabled: config.enabled, controller: config.controller, roles: config.roles.map(r => ({ ...editableRole(r, config), ...(!data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })), skills: data.skill_inputs };
+  const draft = { enabled: config.enabled, controller: config.controller, roles: config.roles.map(r => ({ ...editableRole(r), ...(!configured ? { harness_ref: { id: recommended } } : {}) })), skills: data.skill_inputs };
   const editor = textarea('role_configuration', JSON.stringify(draft, null, 2), { rows: 18, spellcheck: false, className: 'code' });
-  return [coordinationCard(config), delegationCard(config, byId, preview, executorOf), roleTableCard(data, config, preview, executorOf, { backends, draft, editor, message }), roleEditorCard(data, config, message, { backends, editor })];
+  return [coordinationCard(config, configured), delegationCard(config, byId, preview, executorOf), roleTableCard(data, config, preview, executorOf, { backends, draft, editor, message, configured }), roleEditorCard(data, config, message, { backends, editor, configured })];
 }
 // Whether role coordination is on, and for which entries; without it every entry keeps its own executor.
-function coordinationCard(config) {
+function coordinationCard(config, configured = true) {
   const section = card('角色协调'), head = element('div', '', 'roles-state'), entries = coordinationEntries(config);
   section.classList.add('roles-coordination');
   head.append(config.enabled ? badge('已开启', 'success') : badge('未开启'), element('span', `配置 revision ${config.revision}`, 'muted'));
@@ -371,13 +384,15 @@ function coordinationCard(config) {
     for (const entry of entries) {
       const item = element('li', ''); item.dataset.entry = entry.id;
       item.append(element('strong', entry.title), element('span', entry.covers, 'muted'), entry.coordinated ? badge('主控委派', 'info') : badge('原执行器'));
-      if (entry.coordinated) item.append(element('span', ['review', 'actions'].includes(entry.id) ? '只委派 Dev，用这个入口原来的 Pi 执行器' : '可委派：' + workerNames(entryWorkers(config, entry.id)), 'role-entry-workers'));
+      if (entry.coordinated) item.append(element('span', ['review', 'actions'].includes(entry.id) ? entryDevText(config) : '可委派：' + workerNames(entryWorkers(config, entry.id)), 'role-entry-workers'));
       list.append(item);
     }
     section.append(list, note('上面关着的入口和其他工作流（自定义工作流、CI 观察、发行说明、接入门禁）走原来的执行器。无论哪种方式，交付前都由独立 QA 验收。'));
   }
-  if (config.legacy && config.enabled) section.append(element('p', `这份配置保存于 V2 之前，仍按旧配置运行：主控还是 ${harnessName(config.roles.find(role => role.role_id === config.controller.role)?.harness_ref.id)}。在下方「修改配置」里保存一次就升级为 V2，之后新开始的任务由 Pi 上的主控协调；正在运行的任务保留启动时的快照。`, 'endpoint-warning'));
-  else if (config.legacy) section.append(note('还没有保存过 V2 角色配置。开启协调并保存后，主控在 Pi 上运行。'));
+  const controller = config.roles.find(role => role.role_id === config.controller.role);
+  if (!configured) section.append(note('还没有保存过角色配置。下面显示的是保存后各角色的默认后端（推荐 Pi）；开启协调并保存后才会运行。'));
+  else if (config.legacy && config.enabled && controller?.harness_ref.id !== 'pi') section.append(element('p', `这份配置保存于 V2 之前，仍按旧配置运行：主控还是 ${harnessName(controller?.harness_ref.id)}。在「每个角色的解析结果」里为主控选好后端（推荐 Pi）后保存一次，就升级为 V2；保存时不改选，主控继续用 ${harnessName(controller?.harness_ref.id)}。正在运行的任务保留启动时的快照。`, 'endpoint-warning'));
+  else if (config.legacy) section.append(note('这份配置保存于 V2 之前。保存一次就升级为 V2，各角色按「每个角色的解析结果」里选择的后端运行，页面不会替你改成 Pi。'));
   return section;
 }
 // One tile per role: what it does, the executor it runs on and the model it resolves to.
@@ -400,13 +415,13 @@ function delegationCard(config, byId, preview, executorOf) {
   const tile = role => roleTile(role, preview, executorOf);
   lanes.append(lane('主控', ...(controller ? [tile(controller)] : [])), arrow(), lane('按需委派', ...workers.map(tile)), arrow(), lane('验收与发布', ...(qa ? [tile(qa)] : []), publish));
   section.append(note('主控按任务决定要谁：可能只委派 Dev，也可能再请 Test、Reviewer、UX 看同一份固定候选；检视意见回到同一个 Dev。'), lanes,
-    note('这是分工说明，不是每个任务都要走一遍的流程，也不授予权限：工具只来自能力策略，写入只来自工作流设置。开发和普通任务里，主控可以委派这里已启用的工作角色；检视和 Actions 失败分析接入主控后只委派 Dev，Dev 那一步仍由该入口原有的 Pi 执行器完成。独立 QA 不是被委派的角色，它在主控提名候选之后验收。'));
+    note('这是分工说明，不是每个任务都要走一遍的流程，也不授予权限：工具只来自能力策略，写入只来自工作流设置，换后端也不改变它们。开发和普通任务里，主控可以委派这里已启用的工作角色；检视和 Actions 失败分析接入主控后只委派 Dev，Dev 用这个入口自己的工具和工作区，后端按 Dev 的选择（旧 V2 配置在改选前仍用 Pi）。独立 QA 不是被委派的角色，它在主控提名候选之后验收。'));
   const coordinator = byId.get('coordinator');
   if (coordinator) { const line = element('div', '', 'role-coordinator'); line.append(tile(coordinator)); section.append(element('h4', '不在单个任务里的角色'), line); }
   return section;
 }
 // The exact resolution of every role, as a run would start now.
-function roleTableCard(data, config, preview, executorOf, { backends, draft, editor, message }) {
+function roleTableCard(data, config, preview, executorOf, { backends, draft, editor, message, configured }) {
   const section = card('每个角色的解析结果'), { table, body } = projectTable(['角色', '执行后端', '模型（来源）', '技能包', '能力策略', 'revision'], '角色解析结果');
   for (const role of config.roles) {
     const row = document.createElement('tr'), executor = executorOf(role), model = preview(role.role_id);
@@ -426,7 +441,7 @@ function roleTableCard(data, config, preview, executorOf, { backends, draft, edi
         editor.value = JSON.stringify(value, null, 2); message.textContent = '';
       } catch { message.textContent = '请先修正配置 JSON，再选择后端。'; }
     });
-    tableCell(row, '执行后端', picker, note(`已保存：${roleRefText(role.harness_ref)}`), ...(executor.legacy ? [badge('旧配置沿用', 'warning')] : executor.pending ? [badge('保存后生效')] : []), element('code', executor.ref));
+    tableCell(row, '执行后端', picker, note(configured ? `已保存：${roleRefText(role.harness_ref)}` : `还没保存，保存后为 ${executor.ref}`), ...(executor.legacy ? [badge('旧配置沿用', 'warning')] : executor.pending ? [badge('保存后生效')] : []));
     if (data.configured && role.role_id === 'dev' && role.entry_harness_source !== 'role' && role.harness_ref.id !== 'pi')
       row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更'));
     tableCell(row, '模型（来源）', element('span', roleModelText(model), model?.error ? 'view-error' : ''));
@@ -435,10 +450,11 @@ function roleTableCard(data, config, preview, executorOf, { backends, draft, edi
     tableCell(row, 'revision', element('span', String(role.revision)));
     body.append(row);
   }
-  section.append(note(`模型按工作流 ${data.workflow} 预览：角色自己的模型优先，其次是工作流的模型，最后是项目默认；ACP 用执行器自带的模型。`), table);
+  section.append(note('每个角色都可以选择 Agent 后端，默认推荐 Pi；换后端不改变它的工具和权限。在这里改选会同步到下方的配置，保存后才生效。'),
+    note(`模型按工作流 ${data.workflow} 预览：角色自己的模型优先，其次是工作流的模型，最后是项目默认；ACP 和 Claude Code 用后端自带的模型。`), table);
   return section;
 }
-function roleEditorCard(data, config, message, { backends, editor }) {
+function roleEditorCard(data, config, message, { backends, editor, configured }) {
   const section = card('修改配置'), endpoint = `/api/repositories/${current.id}/roles`;
   const save = button('保存为新 revision', async () => {
     message.textContent = '';
@@ -448,7 +464,7 @@ function roleEditorCard(data, config, message, { backends, editor }) {
   });
   const actions = element('div', '', 'actions'); actions.append(save);
   section.append(note('人设提示词只是资料，改它不会改变工具、权限或任务契约。保存要带当前 revision；正在运行的角色保留启动时的快照。'),
-    ...(config.legacy ? [note('这是旧格式的配置：编辑器里主控的执行器已换成 pi，保存后升级为 V2。')] : []),
+    ...(configured && config.legacy ? [note('这是 V2 以前格式的配置：保存一次就升级为 V2，各角色按上面表格里选择的后端运行，不会自动改成 Pi。')] : []),
     field('配置（JSON）', editor), actions, message,
     note('可引用的模型：' + (data.models.map(m => `${m.id}（${m.name}${m.shared ? '，共享' : ''}）`).join('、') || '无')),
     note('Agent 后端：' + backends.map(h => `${h.name}（${h.available ? h.id + '@' + h.version : '驱动待接入，#' + h.integration_issue}）`).join('；')),
