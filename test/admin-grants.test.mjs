@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Store } from '../dist/storage/database.js';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
@@ -103,7 +104,7 @@ test('a whole organization whose repositories all left the installation stays gr
 });
 
 test('an older database keeps its repository grants and stops requiring them to name a project', async t => {
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/grants-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
+  const directory = mkdtempSync(join(tmpdir(), 'grants-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   let store = new Store(path, key);
   store.db.exec(`DROP TABLE project_admin_assignments; CREATE TABLE project_admin_assignments(user_id TEXT NOT NULL REFERENCES users(id),

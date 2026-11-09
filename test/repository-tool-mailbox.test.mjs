@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,mkdtemp,readFile,rm,readdir} from 'node:fs/promises';
-import {resolve,join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import fsPromises from 'node:fs/promises';
 import {syncBuiltinESMExports} from 'node:module';
 import {createRepositoryTool} from '../runner/repository-tool.mjs';
@@ -9,7 +10,7 @@ import {createTokenExchange} from '../runner/token-exchange.mjs';
 import {agentOperation} from '../runner/agent.mjs';
 
 async function fixture(t){
-  await mkdir('.tmp',{recursive:true});const root=await mkdtemp(resolve('.tmp/repository-mailbox-')),dir=join(root,'agent');
+  const root=await mkdtemp(join(tmpdir(),'repository-mailbox-')),dir=join(root,'agent');
   await mkdir(dir);t.after(()=>rm(root,{recursive:true,force:true}));
   const request=()=>readFile(join(dir,'repository-request.json'),'utf8').then(JSON.parse).catch(()=>null);
   const deliver=async(id,value,final=true,offset=0)=>agentOperation({type:'workspace_agent_repository_tool',request_id:id,base64:Buffer.from(JSON.stringify(value)).toString('base64'),offset,final},root);

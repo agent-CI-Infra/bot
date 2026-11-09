@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { Projects } from '../manager/projects.mjs';
@@ -14,7 +15,7 @@ const id = () => randomBytes(24).toString('hex'), mib = 1024 * 1024;
 // The real manager project logic over a Docker stand-in with an 8-CPU, 32 GiB host; `call` stands in for its HTTP API and,
 // like ManagerClient, turns a manager error into an HTTP error with the manager's status.
 function fixture(t) {
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/defaults-')), docker = new FakeDocker();
+  const directory = mkdtempSync(join(tmpdir(), 'defaults-')), docker = new FakeDocker();
   docker.info = { NCPU: 8, MemTotal: 32768 * mib };
   const options = { database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
   let projects = new Projects(options);

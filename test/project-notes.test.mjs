@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, writeFile, rm, symlink, utimes } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { workspace } from '../runner/workspace.mjs';
@@ -21,7 +22,7 @@ import { loadConsole } from './console-page.mjs';
 
 const id = () => randomBytes(24).toString('hex');
 async function directory(t) {
-  await mkdir('.tmp', { recursive: true }); const root = await mkdtemp(resolve('.tmp/project-notes-'));
+  const root = await mkdtemp(join(tmpdir(), 'project-notes-'));
   t.after(() => rm(root, { recursive: true, force: true })); return root;
 }
 async function managerFixture(t) {

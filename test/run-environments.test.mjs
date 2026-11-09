@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Projects } from '../manager/projects.mjs';
 import { RunEnvironments } from '../manager/run-environments.mjs';
@@ -12,7 +13,7 @@ import { RunEnvironmentClient, provisionRunEnvironment, verifyRunEnvironment } f
 const id = () => randomBytes(24).toString('hex');
 
 async function fixture(t) {
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/run-env-unit-'));
+  const directory = mkdtempSync(join(tmpdir(), 'run-env-unit-'));
   const docker = new FakeDocker(), projects = new Projects({ database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
   // A configured project variable must never reach a run environment.
   await projects.register('101'); await projects.operate('101', 'configure', { operation_id: id(), generation: 1, request: { env: { NPM_TOKEN: 'project-secret-value' } } });

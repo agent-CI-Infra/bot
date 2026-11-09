@@ -32,6 +32,24 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 `npm test` 覆盖并发初始化只成功一次、重启、权限收回、跨项目列表／详情／日志／模型隔离、凭据加密及不回显、验签、事务回滚重试、重复投递、先落库再确认和空配置不执行。SQLite 使用 Node 内置 `node:sqlite`，Node 22 会显示实验特性提示。
 
+### 测试集与并行
+
+`npm test` 构建之后由 [`scripts/test-sets.mjs`](../scripts/test-sets.mjs) 把 `test/*.test.mjs` 分成测试集运行。每个测试文件默认自成一个集。一个集在自己的 `node --test` 进程里运行，集内的文件依次运行，文件内的用例也按 `node:test` 的默认方式依次运行；不同的集同时运行，同时运行的集数默认等于 CPU 数，可用 `npm test -- --jobs 4` 或环境变量 `BOT_TEST_JOBS` 调整，`npm test -- test/board.test.mjs` 只运行指定文件。上次各集的耗时记在 `.tmp/test-set-durations.json`，耗时长的集先启动。每个集结束时整段打印它的 TAP 输出，最后列出各集相对开始时刻的起止秒数和合计的 TAP 汇总；任何一个集失败，`npm test` 都以非零状态退出。
+
+运行器为每个集在 `.tmp/tests-*/<集名>/` 下准备独立资源：`TMPDIR` 指向其中的 `tmp/`，`HOME` 指向 `home/`（同时清除 `XDG_*` 目录变量，遵循 XDG 的程序回落到这个 HOME），`BOT_TEST_SET` 是集名，环境变量是这个集的进程自己的副本。集通过后删除它的目录，失败时保留并打印路径。集内的进程只能连接回环地址：[`scripts/test-network-guard.mjs`](../scripts/test-network-guard.mjs) 经 `NODE_OPTIONS` 加载到集内的每个 Node.js 进程，连接其他地址时按连接被拒绝处理，并让这个集失败，即使被测代码吞掉了这个错误。直接用 `node --test test/<文件>` 运行单个文件也可以，这时临时目录在系统临时目录下，也没有网络限制。
+
+新测试放进已有文件，或新建一个文件自成一个集，并自备独立资源：
+
+- 临时目录、SQLite 文件和其他产物放在 `mkdtempSync(join(tmpdir(), '<前缀>-'))` 建的目录里，在 `t.after` 中删除；数据库也可以用 `:memory:`。不要写死 `.tmp/` 或仓库里的其他路径，也不要删除不是自己建的目录。`test/helpers.mjs` 的 `harness` 已经这样准备数据库目录和端口。
+- 服务一律 `listen(0, '127.0.0.1')`，把实际端口传给被测代码；不写死端口，也不先占一个空闲端口、关闭后再复用。
+- 修改 `process.env` 只影响本文件的进程，用完恢复。
+- 通过 `LocalManager` 或 runner 模块在本机运行进程的工作区，id 用 `test/helpers.mjs` 的 `randomWorkspaceId()`。这些进程带着工作区 id，清理（reap）会结束本机上所有同 id 的进程，固定 id 会让同时运行的集、甚至另一个工作树里的测试互相结束对方的进程。
+- 不使用 Docker、全局 git 配置或其他本机共享状态；这些属于 `npm run test:docker` 等单独的验收。
+
+集内串行：同一个文件里的用例本来就依次运行。如果几个文件共用一份无法拆开的资源、不能同时运行，在每个文件里写一行 `// test-set: <集名> <原因>`，运行器把它们放进同一个集依次运行；这一行缺少原因时 `npm test` 拒绝运行。优先给每个文件准备独立资源，而不是合并成一个集；目前所有文件都各自成集。
+
+真实外部服务例外：会真实访问飞书开放平台、GitHub 或其他外部服务的测试放在 `test/<名字>.live.test.mjs`。`npm test` 不运行这类文件，运行器也拒绝把它们当作测试集；需要时带上所需凭据，用 `node --test test/<名字>.live.test.mjs` 单独运行。只在断言或夹具里出现 `api.github.com`、飞书字段，或者访问本地假服务器（`test/fixtures/`、`test/git-server.mjs` 等）的测试不属于例外，留在并行的测试集里。目前没有 `.live.test.mjs` 文件，现有单元测试都只连接本地假服务器。
+
 浏览器验收使用固定在 lockfile 的 Playwright，先运行 `npx playwright install chromium --only-shell`，再执行 `npm run test:e2e`；测试在自己的临时 SQLite 和随机端口上启动服务，覆盖初始化、登录、登记账号、查看签名投递、项目权限以及宽屏／窄屏页面，不占用部署数据或固定试用端口。输出放在忽略提交的 `.tmp/`。
 
 实际 Docker 验收运行 `npm run test:docker`，需要 Docker 和上述 Playwright 浏览器。它用 `compose.yaml` 加 [`compose.build.yaml`](../compose.build.yaml) 从当前源码构建镜像，标签是 `department-bot*:local`，和同一台机器上从源码构建的部署共用：运行中的容器不受影响，但那份部署下次 `up` 会用上测试构建的镜像；按 GHCR 镜像运行的部署不受影响。它使用独立 Compose 项目和 18881／18882／18883 测试端口，18883 仅在测试覆盖文件里映射 manager；生产 Compose 不发布该端口。测试会检查两个真实环境、串行与并行、文件／卷／网络隔离、无凭据、代次重置、重启和角色页面，并按本次部署标签清理容器、网络及卷。输出保存在 `.tmp/project-env/`。

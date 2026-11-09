@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json && npm run build --workspace=bot-public-dashboard",
     "check": "tsc -p tsconfig.json --noEmit && node scripts/check-runtime.mjs",
     "start": "node dist/main.js",
-    "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
+    "test": "npm run build && node scripts/test-sets.mjs",
     "test:e2e": "npm run build && playwright test",
     "test:docker": "npm run build && node test/docker-env.mjs",
     "test:review-session": "npm run build && node --test test/review-session-runner.mjs",

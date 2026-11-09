@@ -2,7 +2,8 @@ import { acceptanceFixture } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, symlinkSync, chmodSync, utimesSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { gitServer, git } from './git-server.mjs';
@@ -21,8 +22,7 @@ import { TaskEngine } from '../dist/agent/engine.js';
 const token = 'ghs_' + 'f'.repeat(36);
 // An upstream repository with a regular file, an executable, a symlink and a submodule entry, served over Git HTTP.
 async function upstream(t, options) {
-  mkdirSync(resolve('.tmp'), { recursive: true });
-  const root = mkdtempSync(resolve('.tmp/git-cache-')), work = join(root, 'work'), bare = join(root, 'server', 'fixture', 'project-101.git');
+  const root = mkdtempSync(join(tmpdir(), 'git-cache-')), work = join(root, 'work'), bare = join(root, 'server', 'fixture', 'project-101.git');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const previous = { HOME: environment.HOME, TMPDIR: environment.TMPDIR }; Object.assign(environment, { HOME: root, TMPDIR: root });
   t.after(() => Object.assign(environment, previous));
@@ -282,7 +282,7 @@ test('checkouts in two workspaces of one task attempt are separate operations, a
 });
 
 test('a pack left by an interrupted transfer is removed after a few hours', async t => {
-  mkdirSync(resolve('.tmp'), { recursive: true }); const root = mkdtempSync(resolve('.tmp/store-')); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), 'store-')); t.after(() => rmSync(root, { recursive: true, force: true }));
   const pack = 'a'.repeat(48);
   await storeOperation({ type: 'git_pack', pack_id: pack, base64: Buffer.from('PACK').toString('base64'), offset: 0 }, root);
   assert.deepEqual(readdirSync(join(root, 'incoming')), [pack + '.pack']);

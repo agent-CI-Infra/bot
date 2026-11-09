@@ -4,7 +4,8 @@ import {createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {mkdirSync,mkdtempSync,writeFileSync,readFileSync,rmSync,symlinkSync,renameSync} from 'node:fs';
-import {resolve,join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {Workspace} from '../dist/agent/workspace.js';
 import {blobSha,Redactor,TaskError,treeSha,describeEntries} from '../dist/agent/common.js';
@@ -12,6 +13,7 @@ import {GitHub} from '../dist/github/client.js';
 import {Publisher} from '../dist/github/publisher.js';
 import {treeHash} from './fixtures/agent-server.mjs';
 import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
+import {randomWorkspaceId} from './helpers.mjs';
 import {loadConsole} from './console-page.mjs';
 import {workspace as runnerWorkspace} from '../runner/workspace.mjs';
 import {environment} from '../runner/command.mjs';
@@ -152,7 +154,7 @@ test('snapshot blob downloads bypass the 48 MiB JSON cap while ordinary response
 });
 
 test('runner writes and reads a large file in chunks, finalizes over 2000 files and handles ls-tree output above 4 MiB',async t=>{
-  mkdirSync(resolve('.tmp'),{recursive:true});const root=mkdtempSync(resolve('.tmp/runner-snapshot-')),id='a'.repeat(48),repo=join(root,id,'repo');
+  const root=mkdtempSync(join(tmpdir(),'runner-snapshot-')),id=randomWorkspaceId(),repo=join(root,id,'repo');
   const previous={HOME:environment.HOME,TMPDIR:environment.TMPDIR};Object.assign(environment,{HOME:root,TMPDIR:root});
   t.after(()=>{Object.assign(environment,previous);rmSync(root,{recursive:true,force:true});});
   const run=request=>runnerWorkspace({...request,workspace_id:id},root);

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Projects } from '../manager/projects.mjs';
 import { ManagerError } from '../manager/docker.mjs';
@@ -13,7 +14,7 @@ import { fail } from '../dist/core/security.js';
 const id = () => randomBytes(24).toString('hex');
 
 function fixture(t) {
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/env-unit-'));
+  const directory = mkdtempSync(join(tmpdir(), 'env-unit-'));
   const docker = new FakeDocker(), options = { database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
   let projects = new Projects(options);
   t.after(() => { projects.db.close(); rmSync(directory, { recursive: true, force: true }); });

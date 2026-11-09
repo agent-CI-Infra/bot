@@ -1,4 +1,5 @@
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { once } from 'node:events';
 import { randomBytes, createHmac } from 'node:crypto';
@@ -7,9 +8,11 @@ import { createControlPlane } from '../dist/server.js';
 import { ProjectService } from '../dist/projects/service.js';
 
 export const testPassword = () => randomBytes(20).toString('hex');
+// A workspace that runs real host processes (LocalManager, runner modules) tags them with its id, and a reap ends every
+// host process with that id, also those of other test sets running at the same time; such workspaces need fresh ids.
+export const randomWorkspaceId = () => randomBytes(24).toString('hex');
 export async function harness(t, manager, options = {}) {
-  mkdirSync(resolve('.tmp'), { recursive: true });
-  const directory = mkdtempSync(resolve('.tmp/test-')), database = join(directory, 'control.sqlite'), key = randomBytes(32);
+  const directory = mkdtempSync(join(tmpdir(), 'test-')), database = join(directory, 'control.sqlite'), key = randomBytes(32);
   let store, servers;
   const h = { directory, database, key };
   h.start = async () => {

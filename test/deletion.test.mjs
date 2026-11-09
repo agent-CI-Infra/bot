@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { InstallationSync } from '../dist/app/installations.js';
 import { Store } from '../dist/storage/database.js';
@@ -50,7 +51,7 @@ async function appAccount(admin) {
 }
 // The real manager project logic over a Docker stand-in, called directly instead of over HTTP.
 function managerFixture(t) {
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/delete-manager-')), docker = new FakeDocker();
+  const directory = mkdtempSync(join(tmpdir(), 'delete-manager-')), docker = new FakeDocker();
   const projects = new Projects({ database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' });
   t.after(() => { projects.db.close(); rmSync(directory, { recursive: true, force: true }); });
   const call = async (method, path, input) => {
@@ -419,7 +420,7 @@ test('deleting an external client takes its grants, subscriptions, cursor and pe
 });
 
 test('an older audit with foreign keys is rebuilt without them and keeps its records', async t => {
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/audit-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
+  const directory = mkdtempSync(join(tmpdir(), 'audit-')), path = join(directory, 'control.sqlite'), key = randomBytes(32);
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   let store = new Store(path, key);
   store.db.exec(`DROP TABLE audit; CREATE TABLE audit(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), repository_id TEXT REFERENCES repositories(id),

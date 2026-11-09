@@ -17,6 +17,7 @@ import {Redactor} from '../dist/agent/common.js';
 import {TaskRecords} from '../dist/tasks/service.js';
 import {roleInstance} from '../dist/roles/run.js';
 import {acceptanceFixture} from './acceptance-fixture.mjs';
+import {randomWorkspaceId} from './helpers.mjs';
 
 const toolCall=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:randomBytes(8).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 async function fixture(t,mode='clean'){
@@ -81,7 +82,7 @@ async function fixture(t,mode='clean'){
  s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101',endpoint+'/v1','fixture',s.secrets.seal({value:'fixture-model-key'},'model:m'),'');
  s.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled,test_command) VALUES('101','m',1,1,'node check.cjs')");
  s.run("INSERT INTO settings VALUES('roles:101',?)",JSON.stringify({enabled:true,harnesses:{},roles:[]}));
- const workspaceId='a'.repeat(48),input={object_hash:null,base_branch:'main',snapshot_sha:base,snapshot_tree:treeA,source_tree:treeA,context:{implementation_goal:'Keep bounded totals and preserve all features.'}};
+ const workspaceId=randomWorkspaceId(),input={object_hash:null,base_branch:'main',snapshot_sha:base,snapshot_tree:treeA,source_tree:treeA,context:{implementation_goal:'Keep bounded totals and preserve all features.'}};
  s.run("INSERT INTO tasks(id,repository_id,kind,object_number,status,phase,summary,input,workspace_id,generation,head_sha,created_at) VALUES('t','101','development.issue',7,'queued','publish','fixture',?,?,1,?,?)",JSON.stringify(input),workspaceId,base,new Date().toISOString());
  const records=new TaskRecords(s);records.contract('t',{goal:'Keep bounded totals and preserve all features.',scope:['fixture'],criteria:['No feature lost; bounded total'],endpoint:'reviewable_pull_request'});
  const manager=new LocalManager('101',computer);await manager.call('PUT','/v1/projects/101');

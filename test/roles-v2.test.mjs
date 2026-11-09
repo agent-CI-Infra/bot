@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { workspace as runnerWorkspace } from '../runner/workspace.mjs';
 import { Store } from '../dist/storage/database.js';
 import { TaskRecords } from '../dist/tasks/service.js';
@@ -327,7 +328,7 @@ for (const kind of ['review.pr', 'actions.failures']) test(`Native ${kind} write
   });
   f.put({ controller: { entries: { review: true, actions: true } }, roles: [{ role_id: 'manager', harness_ref: { id: 'native' } }] });
   f.s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation) VALUES('notes','r',?,'running','notes','{}',1,1)", kind);
-  await mkdir('.tmp', { recursive: true }); const root = await mkdtemp(resolve('.tmp/native-entry-notes-')), requests = [];
+  const root = await mkdtemp(join(tmpdir(), 'native-entry-notes-')), requests = [];
   t.after(() => rm(root, { recursive: true, force: true }));
   const manager = { async call(_method, _path, input) {
     requests.push(input.request);

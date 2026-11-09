@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Projects } from '../manager/projects.mjs';
 import { createManagerServer } from '../manager/server.mjs';
 import { FakeDocker } from './fake-docker.mjs';
@@ -17,7 +18,7 @@ async function listen(t, server) {
 }
 
 test('the manager stays fenced until every saved project has recovered and uncertain work has stopped', async t => {
-  mkdirSync('.tmp', { recursive: true }); const directory = mkdtempSync(resolve('.tmp/readiness-'));
+  const directory = mkdtempSync(join(tmpdir(), 'readiness-'));
   const docker = new FakeDocker(), options = { database: join(directory, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
   let projects = new Projects(options);
   for (const repo of ['101', '202']) {
