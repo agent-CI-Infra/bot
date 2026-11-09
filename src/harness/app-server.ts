@@ -174,12 +174,14 @@ export function appServerDialect(ctx:DialectContext):Dialect{
  const persist=(turn:typeof lastTurn,known:string|null=knownTurn)=>{lastTurn=turn;knownTurn=known;ctx.save({lastTurnId:turn.id,lastTurnStatus:turn.status,knownTurnId:known});};
  // id: the turn named by the start answer; only its terminal ends this start. hint: a turn id seen before the answer is
  // handled (same chunk, or an answer that never comes), only a guess: hintStarted when a turn/started named it.
- // previous: the turn known before this start, whose late notifications must not set the hint. received: the cancel
- // receipt, resolved by the terminal of the answered turn, by that of the hinted turn while no answer exists, or by the end
- // of the connection; it never makes the turn a success.
- type Waiter={id:string|null;hint:string|null;hintStarted:boolean;previous:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;
-  receipt:(kind:string)=>void;received:Promise<string>;usage:boolean};
+ // previous: the turn known before this start, whose late notifications must not set the hint.
+ type Waiter={id:string|null;hint:string|null;hintStarted:boolean;previous:string|null;done:boolean;resolve:(turn:any)=>void;reject:(e:unknown)=>void;usage:boolean};
  let current:Waiter|null=null,rerouted:{from:string;to:string}|null=null;
+ // Cancel receipts are per turn id: the turns whose terminal arrived on this connection, and a cancel waiting for one turn.
+ // A terminal of any other turn (a late one, a wrong guess) never answers that cancel. The end of the connection does.
+ const ended=new Set<string>(),awaiting=new Map<string,()=>void>();let connectionEnded!:(kind:string)=>void;
+ const closed=new Promise<string>(r=>{connectionEnded=r;});
+ const terminalOf=(turnId:string)=>ended.has(turnId)?Promise.resolve('terminal'):new Promise<string>(r=>{awaiting.set(turnId,()=>r('terminal'));});
  const early=new Map<string,any>(),seen=new Set<string>(),reported=new Set<string>(),servers=new Map<string,{status:string;error:string|null}>();
  let serverChange:(()=>void)|null=null,committed=false;
  // Usage seen before the client commits the new binding (e.g. a total restated while resuming) waits with it: if the session
@@ -211,10 +213,11 @@ export function appServerDialect(ctx:DialectContext):Dialect{
   if(method==='turn/started'){if(ours(params,method))learn(check.turn(params?.turn,'turn/started.turn').id,true);return;}
   if(method==='turn/completed'){
    if(!ours(params,method))return;const turn=check.turn(params?.turn,'turn/completed.turn');
+   ended.add(turn.id);awaiting.get(turn.id)?.();awaiting.delete(turn.id);
    // Only the turn the start answer named ends this start. Before the answer is handled every terminal waits in early and
-   // the answer picks its own; the terminal of the hinted turn is then only a cancel receipt, never this start's result.
+   // the answer picks its own; the terminal of the hinted turn is then only a cancel receipt for that turn id.
    if(current&&current.id===turn.id){if(current.done){anomaly('duplicate_terminal',{method});return;}current.done=true;current.resolve(turn);}
-   else if(current&&current.id===null){early.set(turn.id,turn);if(current.hint===turn.id)current.receipt('terminal');}
+   else if(current&&current.id===null)early.set(turn.id,turn);
    else anomaly('unknown_turn',{method});
   }else if(method==='item/started'||method==='item/completed'){
    const p=check.item(params,method);if(!ours(p,method))return;
@@ -267,7 +270,7 @@ export function appServerDialect(ctx:DialectContext):Dialect{
   emit({type:'permission',requestId:String(n),method,threadId:params?.threadId??null,turnId:params?.turnId??null,itemId:params?.itemId??null,decision:reply.decision,allowed:reply.allowed,reason:reply.reason,
    ...redactor.clean({command:typeof params?.command==='string'?clip(params.command,1000):undefined,serverName:params?.serverName,requested:params?.permissions?Object.keys(params.permissions):undefined,justification:typeof params?.reason==='string'?clip(params.reason,500):undefined})});
  })();};
- const rpc=new LineRpc(line=>{ctx.child.stdin.write(line+'\n');},{notification,request,anomaly,failed:error=>{current?.reject(error);serverChange?.();}});
+ const rpc=new LineRpc(line=>{ctx.child.stdin.write(line+'\n');},{notification,request,anomaly,failed:error=>{current?.reject(error);connectionEnded('connection_closed');serverChange?.();}});
  ctx.child.stdout.on('data',chunk=>rpc.feed(chunk));
  ctx.child.stdout.once('end',()=>rpc.fail(new TaskError('codex_connection_lost','retry_wait','stdout_closed')));
  ctx.child.once('exit',(code,signal)=>rpc.fail(new TaskError('codex_connection_lost','retry_wait',`exit:${code??signal}`)));
@@ -370,10 +373,9 @@ export function appServerDialect(ctx:DialectContext):Dialect{
     bound:{threadId,model:thread.model,modelProvider:thread.modelProvider,cliVersion:cli,approvalPolicy:redactor.clean(thread.approvalPolicy??null),sandbox:redactor.clean(thread.sandbox??null),disabledBuiltins:builtins,instructionSources:redactor.clean(thread.instructionSources??[]),tools,reconciled}};
   },
   async turn(prompt){
-   text='';let receipt!:(kind:string)=>void;
-   const received=new Promise<string>(r=>{receipt=r;});
-   const waiter:Waiter={id:null,hint:null,hintStarted:false,previous:knownTurn,done:false,usage:false,resolve:()=>{},reject:()=>{},receipt,received};
-   const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=turn=>{receipt('terminal');ok(turn);};waiter.reject=error=>{receipt('connection_closed');fail(error);};});
+   text='';
+   const waiter:Waiter={id:null,hint:null,hintStarted:false,previous:knownTurn,done:false,usage:false,resolve:()=>{},reject:()=>{}};
+   const terminal=new Promise<any>((ok,fail)=>{waiter.resolve=ok;waiter.reject=fail;});
    terminal.catch(()=>{});current=waiter;
    let answer:any;
    const before={turn:lastTurn,known:knownTurn};
@@ -407,14 +409,16 @@ export function appServerDialect(ctx:DialectContext):Dialect{
    if(turn.status==='inProgress')invalid('turn/completed.turn.status');
    throw turnFailure(turn,s=>redactor.text(s));
   },
-  // turn/interrupt, then a bounded wait for the terminal receipt; the caller reclaims the process group afterwards.
+  // turn/interrupt, then a bounded wait for the terminal of that same turn (the answered one, or the guess while no answer
+  // exists); the caller reclaims the process group afterwards.
   async cancel(){
    const waiter=current;if(!threadId||!waiter||waiter.done||rpc.failure)return;
    const grace=config.cancelGraceMs??5000;
    const turnId=waiter.id??waiter.hint;
    if(turnId){emit({type:'turn',phase:'interrupt_requested',threadId,turnId});rpc.request('turn/interrupt',{threadId,turnId}).catch(()=>{});}
    let timer:NodeJS.Timeout|undefined;
-   const receipt=await Promise.race([waiter.received,new Promise<string>(r=>{timer=setTimeout(()=>r('timeout'),grace);})]);clearTimeout(timer);
+   const receipt=await Promise.race([turnId?terminalOf(turnId):closed,closed,new Promise<string>(r=>{timer=setTimeout(()=>r('timeout'),grace);})]);clearTimeout(timer);
+   if(turnId)awaiting.delete(turnId);
    emit({type:'turn',phase:'interrupt_receipt',threadId,turnId,receipt});
   },
   bound(){committed=true;for(const event of pendingUsage.splice(0))emit(event);},
