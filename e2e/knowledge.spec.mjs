@@ -1,32 +1,30 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
+import { managerFixture } from '../test/project-manager-fixture.mjs';
 
-test('管理员从项目知识页查别名、读历史、复核并观察并发冲突', async ({ page }) => {
-  const h=await harness(),errors=[];page.on('pageerror',e=>errors.push(e.message));
-  mkdirSync('.tmp/knowledge-173/screenshots',{recursive:true});
+test('项目知识统一自由文件，旧入口跳转，版本可恢复且不覆盖并发修改', async ({page})=>{
+  const cleanup=[],f=await managerFixture({after:fn=>cleanup.push(fn)}),h=await harness(undefined,f.manager),errors=[];
+  page.on('pageerror',e=>errors.push(e.message));await mkdir('.tmp/knowledge-files/screenshots',{recursive:true});
   try {
     const {admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-    await page.goto(h.admin+'/#/projects/101/knowledge');
-    await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
-    await page.getByRole('button',{name:'新建知识',exact:true}).click();
-    await page.getByLabel('条目标识',{exact:true}).fill('transport.retry');await page.getByLabel('标题',{exact:true}).fill('网络重试经验');
-    await page.getByLabel('正文',{exact:true}).fill('先确认重试次数与失败条件，再重试网络请求。');await page.getByLabel('别名（逗号分隔）',{exact:true}).fill('socket reset, ECONNRESET');
-    await page.getByLabel('目录／文件路径',{exact:true}).fill('src/net/client.ts');await page.getByLabel('适用模块',{exact:true}).last().fill('transport');
-    await page.getByLabel('来源与环境（JSON 列表）',{exact:true}).fill(JSON.stringify([{reference:'check:local-network-fixture',environment:{node:'22'}}]));await page.getByLabel('修改原因',{exact:true}).fill('记录可复现的失败条件');
-    await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByRole('heading',{name:'网络重试经验',exact:true})).toBeVisible();
-    await page.getByLabel('搜索',{exact:true}).fill('ECONNRESET');await page.getByRole('button',{name:'搜索知识',exact:true}).click();await expect(page.getByRole('button',{name:'网络重试经验',exact:true})).toBeVisible();
-    await page.getByRole('button',{name:'复核／改变状态',exact:true}).click();await page.getByLabel('证据引用（每行一条检查结果、运行产物或来源）',{exact:true}).fill('check:local-network-fixture/output#42');await page.getByLabel('原因',{exact:true}).fill('已独立复现失败并核对日志');await page.getByRole('button',{name:'保存',exact:true}).click();
-    await expect(page.getByText(/状态 active（当前 active） · observed/)).toBeVisible();
-    await page.getByLabel('查看历史版本',{exact:true}).selectOption('1');await expect(page.getByText(/human_asserted/).last()).toBeVisible();
-    await page.getByLabel('查看历史版本',{exact:true}).selectOption('2');await page.getByRole('button',{name:'编辑条目',exact:true}).click();
-    const current=(await admin('/api/repositories/101/memories')).value.items[0];await admin('/api/repositories/101/memories/'+current.id,'PATCH',{expected_revision:2,reason:'另一个管理员更新标题',catalog:{title:'新的网络重试经验'}});
-    await page.getByLabel('修改原因',{exact:true}).fill('过期页面上的修改');await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByText(/memory_revision_changed/)).toBeVisible();
-    await page.getByRole('button',{name:'搜索知识',exact:true}).click();await page.getByRole('button',{name:'新的网络重试经验',exact:true}).click();
-    await page.screenshot({path:'.tmp/knowledge-173/screenshots/desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});
-    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    expect((await page.locator('.knowledge-list li').first().getByRole('button').boundingBox()).height).toBeLessThan(60);await page.screenshot({path:'.tmp/knowledge-173/screenshots/mobile.png',fullPage:true});
-    const download=page.waitForEvent('download');await page.getByRole('button',{name:'导出当前视图',exact:true}).click();await expect((await download).suggestedFilename()).toBe('project-knowledge.json');
-    expect(errors).toEqual([]);
-  } finally { await h.stop();rmSync(h.directory,{recursive:true,force:true}); }
+    await admin('/api/repositories/101/notes/old.txt','PUT',{content:'old\r\nfree file\r\n'});
+    await admin('/api/repositories/101/memories','POST',{key:'legacy',kind:'experience',body:'old knowledge body',sources:[{reference:'legacy source'}],expected_revision:0,reason:'fixture',catalog:{title:'原有知识'}});
+    await page.goto(h.admin+'/#/projects/101/notes');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(password);await page.getByRole('button',{name:'登录',exact:true}).click();
+    await expect(page).toHaveURL(/\/knowledge$/);await expect(page.getByRole('link',{name:'项目笔记',exact:true})).toHaveCount(0);
+    await expect(page.getByRole('button',{name:'old.txt',exact:true})).toBeVisible();await page.getByRole('button',{name:'old.txt',exact:true}).click();await page.getByRole('button',{name:'保存',exact:true}).click();expect((await admin('/api/repositories/101/notes/old.txt')).value.content).toBe('old\r\nfree file\r\n');await page.getByRole('button',{name:/^原有知识--/}).click();await expect(page.getByLabel('内容',{exact:true})).toHaveValue('old knowledge body');
+    await expect(page.getByLabel('知识类型',{exact:true})).toHaveCount(0);await expect(page.getByRole('button',{name:'复核／改变状态',exact:true})).toHaveCount(0);
+    await page.getByRole('button',{name:'新建文件',exact:true}).click();await page.getByLabel('文件名',{exact:true}).fill('自由笔记.txt');const original='{\n  "自由格式": true\n}\n';await page.getByLabel('内容',{exact:true}).fill(original);await page.getByRole('button',{name:'保存',exact:true}).click();
+    await expect(page.getByRole('heading',{name:'自由笔记.txt',exact:true})).toBeVisible();await page.getByLabel('内容',{exact:true}).fill('second version');await page.getByRole('button',{name:'保存',exact:true}).click();
+    await expect(page.getByLabel('历史版本',{exact:true})).toHaveValue('2');await page.getByLabel('历史版本',{exact:true}).selectOption('1');await expect(page.getByLabel('内容',{exact:true})).toHaveValue(original);await expect(page.getByLabel('内容',{exact:true})).toHaveAttribute('readonly','');
+    await page.getByRole('button',{name:'恢复此版本',exact:true}).click();await expect(page.getByLabel('历史版本',{exact:true})).toHaveValue('3');await expect(page.getByLabel('内容',{exact:true})).toHaveValue(original);
+    const files=(await admin('/api/repositories/101/knowledge-files')).value.files,file=files.find(f=>f.name==='自由笔记.txt');
+    await admin('/api/repositories/101/knowledge-files/'+encodeURIComponent(file.id),'PUT',{content:'another writer',expected_revision:3});
+    await page.getByLabel('内容',{exact:true}).fill('stale editor');await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByText('文件已被其他操作更新，请刷新后再保存。',{exact:true})).toBeVisible();
+    await page.getByRole('button',{name:'自由笔记.txt',exact:true}).click();await expect(page.getByLabel('内容',{exact:true})).toHaveValue('another writer');
+    await page.getByRole('button',{name:'删除文件',exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'删除',exact:true}).click();await expect(page.getByText('文件已删除。选择删除前的版本即可恢复。',{exact:true})).toBeVisible();
+    await page.getByLabel('历史版本',{exact:true}).selectOption('4');await page.getByRole('button',{name:'恢复此版本',exact:true}).click();await expect(page.getByLabel('历史版本',{exact:true})).toHaveValue('6');
+    const download=page.waitForEvent('download');await page.getByRole('button',{name:'下载文件',exact:true}).click();expect((await download).suggestedFilename()).toBe('自由笔记.txt');
+    await page.screenshot({path:'.tmp/knowledge-files/screenshots/desktop.png',fullPage:true});await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:'.tmp/knowledge-files/screenshots/mobile.png',fullPage:true});expect(errors).toEqual([]);
+  } finally {await h.stop();await rm(h.directory,{recursive:true,force:true});for(const fn of cleanup.reverse())await fn();}
 });

@@ -1,3 +1,4 @@
+import { managerFixture } from './project-manager-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, writeFile, rm, symlink, utimes } from 'node:fs/promises';
@@ -12,32 +13,16 @@ import { Notes } from '../runner/notes.mjs';
 import { createManagerServer } from '../manager/server.mjs';
 import { ManagerClient } from '../dist/projects/service.js';
 import { Docker } from '../manager/docker.mjs';
-import { Projects } from '../manager/projects.mjs';
-import { FakeDocker } from './fake-docker.mjs';
 import { harness, setup, account, repository, testPassword } from './helpers.mjs';
 import { agentLoop } from '../dist/agent/loop.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { Redactor, treeSha } from '../dist/agent/common.js';
-import { loadConsole } from './console-page.mjs';
 
 const id = () => randomBytes(24).toString('hex');
 async function directory(t) {
   const root = await mkdtemp(join(tmpdir(), 'project-notes-'));
   t.after(() => rm(root, { recursive: true, force: true })); return root;
 }
-async function managerFixture(t) {
-  const root = await directory(t), docker = new FakeDocker(), options = { database: join(root, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
-  let projects = new Projects(options); t.after(() => projects.db.close());
-  const manager = { async call(method, path, input) {
-    const [, repo, action, name] = /^\/v1\/projects\/(\d+)(?:\/(\w+)(?:\/(.+))?)?$/.exec(path);
-    if (action === 'notes') return projects.notes(repo, method, name === undefined ? undefined : decodeURIComponent(name), input);
-    if (method === 'GET') return projects.describe(repo);
-    if (method === 'PUT') return projects.register(repo);
-    return projects.operate(repo, action, input);
-  } };
-  return { root, docker, manager, get projects() { return projects; }, restart() { projects.db.close(); projects = new Projects(options); } };
-}
-
 test('notes are shared by task workspaces, commands keep their checkout cwd, and both candidate trees exclude notes', async t => {
   const root = await directory(t), tasks = join(root, 'tasks'), notes = join(root, 'project-notes');
   const run = (workspace_id, request) => workspace({ ...request, workspace_id }, tasks, undefined, notes);
@@ -255,29 +240,4 @@ test('model responses preserve known credentials in note writes while other outp
   const reply=JSON.parse(Buffer.concat(replies));assert.ok(!('rejected_note_calls' in reply));
   assert.equal(JSON.parse(JSON.parse(reply.body).choices[0].message.tool_calls[0].function.arguments).content,key);
   assert.ok(!JSON.stringify(logs).includes(key));
-});
-
-test('the project notes page browses first, expands one editor, saves and returns to the list', async () => {
-  const files=new Map([['仓库 #?%.txt','Existing notes']]);
-  const page=loadConsole(['static/app.js','static/views.js','static/project.js'],async(method,path,body)=>{
-    const segment=path.split('/')[5],name=segment===undefined?undefined:decodeURIComponent(segment);
-    if(method==='PUT'){files.set(name,body.content);return [200,{written:true}];}
-    return [200,name?{content:files.get(name)}:{files:[...files].map(([name])=>({name,bytes:10}))}];
-  });
-  await page.run("current={id:'101'}; $('project-page').append(...notesSection())");
-  await new Promise(resolve=>setTimeout(resolve,0));
-  assert.ok(page.run("projectSections.some(([id,title])=>id==='notes'&&title==='项目笔记')"));
-  const root=page.$('project-page'); assert.equal(root.querySelectorAll('textarea').length,0);
-  const text=node=>node.textContent+node.children.map(text).join('');
-  assert.doesNotMatch(text(root),/32|64 KiB|512 KiB|最多 64|不要保存凭据|当前任务流水/);
-  const edit=root.querySelectorAll('button').find(b=>b.textContent==='查看／编辑');await edit.listeners.click[0]();
-  const editor=root.querySelector('textarea'); assert.equal(editor.value,'Existing notes');editor.value='Updated notes';
-  root.querySelector('input').checkValidity=()=>true;
-  await root.querySelector('form').listeners.submit[0]({preventDefault(){}});
-  assert.equal(files.get('仓库 #?%.txt'),'Updated notes');assert.equal(root.querySelectorAll('textarea').length,0);
-  await root.querySelectorAll('button').find(b=>b.textContent==='新建笔记').listeners.click[0]();
-  assert.equal(root.querySelector('textarea').value,'');
-  assert.equal(root.querySelector('input').pattern,undefined);assert.equal(root.querySelector('input').maxLength,undefined);
-  await root.querySelectorAll('button').find(b=>b.textContent==='取消').listeners.click[0]();
-  assert.equal(root.querySelectorAll('textarea').length,0);assert.equal(files.size,1);
 });

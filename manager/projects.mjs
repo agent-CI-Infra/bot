@@ -199,6 +199,30 @@ export class Projects {
       }
     });
   }
+  async files(repo, method, name, action, input = {}, query = {}) {
+    this.validate(repo); if (name !== undefined) noteName(name);
+    if (Object.keys(input).some(k => !['content','expected_revision','revision','actor'].includes(k))) throw new ManagerError('invalid_input', 400);
+    if (method !== 'GET' && (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0)) throw new ManagerError('invalid_note_revision', 400);
+    if (input.actor !== undefined && (typeof input.actor !== 'string' || input.actor.length > 240)) throw new ManagerError('invalid_input', 400);
+    return this.lock(repo, async () => {
+      if (!this.get(repo)) this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES(?,1,'stopped','stopped')").run(repo);
+      await this.notesVolume(repo); const notes = new Notes(this.notesRoot + '/' + repo);
+      try {
+        if (method === 'GET' && name === undefined) return await notes.files(query.include_deleted === '1');
+        if (method === 'GET' && action === 'versions') return await notes.versions(name);
+        if (method === 'GET' && !action) return await notes.file(name, query.revision === undefined ? undefined : Number(query.revision));
+        if (method === 'PUT' && name && !action) return await notes.saveFile(name, input.content, input.expected_revision, input.actor ?? 'console');
+        if (method === 'DELETE' && name && !action) return await notes.removeFile(name, input.expected_revision, input.actor ?? 'console');
+        if (method === 'POST' && name && action === 'restore' && Number.isSafeInteger(input.revision) && input.revision > 0) return await notes.restoreFile(name, input.revision, input.expected_revision, input.actor ?? 'console');
+        throw new ManagerError('invalid_notes_request', 400);
+      } catch (error) {
+        if (error.code === 'ENOENT') throw new ManagerError('note_not_found', 404);
+        if (error.message === 'note_revision_changed') throw new ManagerError(error.message, 409);
+        if (/^(invalid_note|notes_(?:lock_expired|busy))/.test(error.message)) throw new ManagerError(error.message, 400);
+        throw error;
+      }
+    });
+  }
   labels(repo, generation, kind) { return { 'department.bot.deployment': this.deployment, 'department.bot.repository': repo,
     'department.bot.generation': String(generation), 'department.bot.kind': kind }; }
   async inspect(repo, generation, kind) {
