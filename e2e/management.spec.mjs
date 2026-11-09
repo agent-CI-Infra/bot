@@ -96,6 +96,7 @@ test('project chat links select the project, and a delayed old read cannot repla
   const f = await managementFixture(), errors = []; let release;
   page.on('pageerror', error => errors.push(error.message));
   try {
+    await page.setViewportSize({ width: 1440, height: 900 });
     const conversation = (await f.admin('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
     const sent = (await f.admin('/api/management/conversations/' + conversation + '/messages', 'POST', { source_message: 'history-query', content: '任务为什么没有继续？' })).value;
     await settled(f.admin, conversation, sent.id);
@@ -124,18 +125,106 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.locator('.project-nav').getByRole('link', { name: '角色', exact: true }).click();
     await page.locator('.project-nav').getByRole('link', { name: '管理对话', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/); await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
+    await scope.selectOption('project:102'); await expect(message).toHaveValue('102 的草稿');
+    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
+    await page.getByRole('button', { name: '打开管理助手', exact: true }).click();
+    await expect(scope).toHaveValue('project:102'); await expect(message).toHaveValue('102 的草稿');
+    await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
+    await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
     await page.locator('.project-nav').getByRole('link', { name: '工作流', exact: true }).click();
     await page.getByRole('button', { name: '用聊天新增', exact: true }).click();
     const workflow = page.getByRole('dialog', { name: '工作流助手', exact: true });
     await expect(workflow).toBeVisible(); await expect(page.getByRole('dialog', { name: '管理助手', exact: true })).toBeHidden();
-    // The global launcher must not cover the unmoved workflow assistant's Send button.
+    // Hide the global launcher while the workflow assistant is open, including after dragging it.
     const send = workflow.getByRole('button', { name: '发送', exact: true });
     const unobstructed = node => { const rect = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)); };
+    await expect(page.locator('#management-launcher')).toBeHidden();
     expect(await send.evaluate(unobstructed)).toBe(true);
-    await page.setViewportSize({ width: 390, height: 844 }); expect(await send.evaluate(unobstructed)).toBe(true);
+    await page.setViewportSize({ width: 390, height: 844 }); await page.evaluate(() => scrollTo(0, 0));
+    for (const nav of await page.locator('#tabs button:visible').all()) { await nav.scrollIntoViewIfNeeded(); expect(await nav.evaluate(unobstructed)).toBe(true); }
+    expect(await send.evaluate(unobstructed)).toBe(true);
+    await page.locator('#tabs').getByRole('button', { name: '项目', exact: true }).click();
+    await expect(page).toHaveURL(/#\/projects$/); await expect(workflow).toBeVisible();
+    mkdirSync('.tmp/management-fixes', { recursive: true }); await page.screenshot({ path: '.tmp/management-fixes/narrow-header.png' });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const bounds = await workflow.boundingBox(), handle = await workflow.locator('.assistant-head').boundingBox();
+    await page.mouse.move(handle.x + 70, handle.y + 20); await page.mouse.down();
+    await page.mouse.move(handle.x + 70 + 16 - bounds.x, handle.y + 20 + 284 - bounds.y, { steps: 12 }); await page.mouse.up();
+    const dragged = await workflow.boundingBox(); expect(Math.abs(dragged.x - 16)).toBeLessThan(2); expect(Math.abs(dragged.y - 284)).toBeLessThan(2);
+    expect(await workflow.locator('textarea').evaluate(node => {
+      const rect = node.getBoundingClientRect();
+      return [[rect.left + 8, rect.top + 8], [rect.left + 8, rect.bottom - 8], [rect.right - 8, rect.bottom - 8]].every(([x, y]) => node.contains(document.elementFromPoint(x, y)));
+    })).toBe(true);
+    expect(await send.evaluate(unobstructed)).toBe(true);
+    await page.screenshot({ path: '.tmp/management-fixes/dragged-desktop.png' });
+    await workflow.getByRole('button', { name: '收起', exact: true }).click(); await expect(page.locator('#management-launcher')).toBeVisible();
     await page.getByRole('button', { name: '打开管理助手', exact: true }).click();
     await expect(workflow).toBeHidden(); await expect(message).toHaveValue('101 的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(errors).toEqual([]);
+  } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('a delayed send receipt clears only the submitted draft even when its conversation is no longer selected', async ({ page }) => {
+  test.setTimeout(60000);
+  const f = await managementFixture(), errors = []; let release;
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const scope = page.getByLabel('当前管理作用域'), message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
+    await scope.selectOption('project:101'); await expect(send).toBeEnabled();
+    async function delayedSend(text, newerDraft = null) {
+      let accepted; const arrived = new Promise(resolve => { accepted = resolve; }), gate = new Promise(resolve => { release = resolve; });
+      const pattern = '**/api/management/conversations/*/messages';
+      await page.route(pattern, async route => { const response = await route.fetch(); accepted(); await gate; await route.fulfill({ response }); });
+      await message.fill(text); await send.click(); await arrived;
+      if (newerDraft !== null) await message.fill(newerDraft);
+      await scope.selectOption('project:102'); await expect(send).toBeEnabled(); await message.fill('102 的新草稿');
+      const received = page.waitForResponse(response => response.request().method() === 'POST' && /\/conversations\/[^/]+\/messages$/.test(new URL(response.url()).pathname));
+      release(); await (await received).finished(); await page.unroute(pattern);
+      await expect(message).toHaveValue('102 的新草稿');
+      await scope.selectOption('project:101'); await expect(message).toHaveValue(newerDraft ?? ''); await expect(send).toBeEnabled();
+    }
+    await delayedSend('send this only once');
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
+    // New text typed before leaving is another draft, not the text covered by the old receipt.
+    await delayedSend('send this second message once', '下一条尚未发送的草稿');
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(2);
+    // A rejected POST must leave the unsent draft available after changing scope.
+    await page.route('**/api/management/conversations/*/messages', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'fixture_unavailable' }) }));
+    await message.fill('发送失败的草稿'); await send.click(); await expect(page.locator('.management-status')).toContainText('fixture_unavailable');
+    await scope.selectOption('project:102'); await expect(send).toBeEnabled(); await scope.selectOption('project:101'); await expect(message).toHaveValue('发送失败的草稿');
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(2); expect(errors).toEqual([]);
+  } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('loading a scope disables composing until its draft is restored, and abandoning that load cannot replace newer input', async ({ page }) => {
+  test.setTimeout(60000);
+  const f = await managementFixture(), errors = []; let release;
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const scope = page.getByLabel('当前管理作用域'), message = page.getByLabel('管理消息', { exact: true }), send = page.getByRole('button', { name: '发送', exact: true });
+    await scope.selectOption('project:101'); await expect(send).toBeEnabled(); await message.fill('101 保留的草稿');
+    let arrived, finished, held = false;
+    const blocked = new Promise(resolve => { arrived = resolve; }), done = new Promise(resolve => { finished = resolve; }), gate = new Promise(resolve => { release = resolve; });
+    await page.route('**/api/management/conversations', async route => {
+      if (route.request().method() !== 'GET' || held) return route.continue();
+      held = true; const response = await route.fetch(); arrived(); await gate; await route.fulfill({ response }); finished();
+    });
+    await scope.selectOption('project:102'); await blocked;
+    await expect(message).toBeDisabled(); await expect(send).toBeDisabled();
+    await expect(page.getByRole('button', { name: '有哪些任务需要处理？', exact: true })).toBeDisabled();
+    await scope.selectOption('project:201'); await expect(message).toBeEnabled(); await message.fill('201 载入后的新草稿');
+    release(); await done; await expect(scope).toHaveValue('project:201'); await expect(message).toHaveValue('201 载入后的新草稿');
+    await page.unrouteAll({ behavior: 'wait' });
+    await scope.selectOption('project:101'); await expect(message).toHaveValue('101 保留的草稿');
+    await scope.selectOption('project:102'); await expect(message).toBeEnabled(); await message.fill('102 载入后的新草稿');
+    await scope.selectOption('project:201'); await expect(message).toHaveValue('201 载入后的新草稿');
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(0); expect(errors).toEqual([]);
   } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

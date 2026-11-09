@@ -106,7 +106,11 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
   const showError = err => { if (!disposed) { status.textContent = err.message; status.classList.add('view-error'); } };
-  const updateBusy = () => { send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active; onActivity(!!active); };
+  const updateBusy = () => {
+    message.disabled = opening || !conversation;
+    for (const suggestion of welcome.querySelectorAll('button')) suggestion.disabled = message.disabled;
+    send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active; onActivity(!!active);
+  };
   function showTools(open) {
     toolsOpen = open; tools.hidden = !open; feed.hidden = open; input.hidden = open;
     toolsButton.textContent = open ? '返回对话' : '快捷操作'; toolsButton.setAttribute('aria-expanded', String(open));
@@ -277,7 +281,11 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   }
   input.onsubmit = async event => {
     event.preventDefault(); const value = message.value, id = conversation;
-    if (value.trim() && await submit({ content: value }) && conversation === id && message.value === value) { message.value = ''; drafts.delete(id); }
+    if (!value.trim() || !await submit({ content: value })) return;
+    // The receipt belongs to the sending conversation even if another one is now visible. Drop the sent draft,
+    // but keep any newer text the person composed while waiting for it.
+    if (drafts.get(id) === value) drafts.delete(id);
+    if (conversation === id && message.value === value) message.value = '';
   };
   message.addEventListener('keydown', event => {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); input.requestSubmit(); }
