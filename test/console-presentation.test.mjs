@@ -98,11 +98,15 @@ test('the next step is one sentence for waiting, accepting, finished and unreada
   const next = (task, value = record(), roles = null) => page.run(`taskNextStep(${JSON.stringify(task)}, ${JSON.stringify(value)}, ${JSON.stringify(roles)})`);
   assert.equal(next({ status: 'queued', phase: 'prepare' }), '排队中：等这个仓库的项目电脑空闲后开始。');
   assert.equal(next({ status: 'waiting_configuration', error_code: 'model_unavailable', error_cause: { label: '模型配置', action: '在「模型」页选一个可用模型。' } }), '已暂停（配置待补）：模型配置。在「模型」页选一个可用模型。');
-  assert.equal(next({ status: 'running', phase: 'acceptance' }, record({ candidate })), '独立 QA 正在新的上下文里验收候选 cand12345678。');
+  // The acceptance phase alone is not a running QA run: without role records nobody is named.
+  assert.equal(next({ status: 'running', phase: 'acceptance' }, record({ candidate })), '正在执行（独立验收）；读不到角色记录，说不清现在是谁在处理。');
+  const none = { instances: [], assignments: [], runs: [{ role: 'qa', kind: 'acceptance', harness: 'native', status: 'succeeded' }], snapshots: {} };
+  assert.equal(page.run(`taskNextStep(${JSON.stringify({ status: 'running', phase: 'acceptance' })}, ${JSON.stringify(record({ candidate }))}, roleRecords(${JSON.stringify(none)}))`),
+    '任务处在独立验收阶段，但现在没有正在运行的 QA：控制面还没开始这次验收，或者正在处理验收结论。');
   assert.equal(next({ status: 'pr_opened', phase: 'done' }), '已创建 PR：独立 QA 验收通过后按原规则交付，没有下一步。');
   assert.equal(next({ status: 'running', phase: 'validate' }), '控制面正在项目电脑里运行仓库测试。');
   // Without role records the page cannot tell the original executor from the controller, and says so.
-  assert.equal(next({ status: 'running', phase: 'model' }, record({ progress: { next_action: null } })), '正在执行（模型执行）；读不到角色记录，说不清是原来的执行器还是主控在处理。');
+  assert.equal(next({ status: 'running', phase: 'model' }, record({ progress: { next_action: null } })), '正在执行（模型执行）；读不到角色记录，说不清现在是谁在处理。');
   // A running QA run decides the sentence whatever the phase, also when a controller and a running delegation exist.
   const qa = { instances: [{ id: 'm', role: 'manager', harness: 'pi' }, { id: 'd', role: 'dev', harness: 'pi' }], assignments: [{ id: 'a', instance_id: 'd', status: 'running' }],
     runs: [{ role: 'dev', assignment_id: 'a', harness: 'pi', status: 'running' }, { role: 'qa', kind: 'acceptance', harness: 'native', status: 'running' }], snapshots: {} };
@@ -246,6 +250,12 @@ test('independent QA started by development and review delivery is named in the 
       // A controller on the task does not take the sentence over while QA runs.
       p.instance(id + '-manager', id, 'manager', 'pi'); await p.open(id); assert.equal(p.next(), `独立 QA 正在新的上下文里验收候选 ${candidate.id.slice(0, 12)}。`, kind + ' under the controller');
     } finally { model.release(); await evaluation; }
+    // QA has returned (its run succeeded); even with the phase moved to acceptance, as ordinary requests do, nothing
+    // says QA is still accepting.
+    p.h.store.run("UPDATE tasks SET phase='acceptance' WHERE id=?", id);
+    const after = (await p.admin(`/api/tasks/${id}/roles?limit=100&after=0`)).value;
+    assert.deepEqual(after.runs.filter(run => run.role === 'qa').map(run => run.status), ['succeeded']);
+    await p.open(id); assert.equal(p.next(), '任务处在独立验收阶段，但现在没有正在运行的 QA：控制面还没开始这次验收，或者正在处理验收结论。', kind + ' after QA');
   }
 });
 
@@ -301,6 +311,14 @@ test('with a delegation running on the pages read and records left unread, the n
   assert.match(text(card), /委派记录没有读完：服务端的分页游标没有前进，下面只列出已读到的 100 条，看不出现在是谁在处理。/);
   const items = card.querySelectorAll('.role-work > li');
   assert.equal(items.length, 100); assert.match(text(items[0]), /^Test\nProcess\n进行中\nEarlier running test$/);
+  // In the acceptance phase with no QA run read, unread records still mean nobody is named, QA included.
+  p.h.store.run("UPDATE tasks SET phase='acceptance' WHERE id='mixed'");
+  assert.equal((await p.admin('/api/tasks/mixed/roles?limit=100&after=0')).value.runs.filter(run => run.role === 'qa' && run.status === 'running').length, 0);
+  p.page.run('taskView.close()'); await p.open('mixed');
+  assert.equal(p.next(), '委派记录没有读完（已读 100 条），现在说不清是谁在处理。');
+  // Read to the end, the running delegation is named, not QA.
+  p.page.run('taskView.close()'); stall = false; await p.open('mixed');
+  assert.equal(p.next(), 'Reviewer（ACP）正在做主控交给它的工作：Latest running review');
 });
 
 test('a past delegation shows the harness its runs used, not the one its role instance was rebound to later', async t => {
@@ -372,4 +390,22 @@ test('a custom role called constructor shows its own name and responsibility on 
   items = p.page.$('task-side').querySelectorAll('.role-work > li').map(text);
   assert.deepEqual(items, ['Construction inspector\nNative\n已交回\n职责：Inspect construction invariants only.', 'Construction inspector\nNative\n进行中\n职责：Inspect only the new construction paths.']);
   assert.doesNotMatch(p.side(), /function|native code/);
+  // A delegation that ran without a recorded snapshot (role_snapshot may be null) gets no definition from today's
+  // instance: the definition changes again and the instance moves to Process, and that delegation still says Native
+  // and that its historical definition is unavailable.
+  p.h.store.run("INSERT INTO role_assignments VALUES('c-0','custom','c-constructor',1,NULL,'completed','c-input-0',NULL)");
+  p.h.store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,role,role_instance_id,assignment_id,role_snapshot,harness) VALUES('c-run-0','custom','role',1,1,?,'succeeded','{}','{}','constructor','c-constructor','c-0',NULL,'native')", p.now);
+  const v2 = await p.admin('/api/repositories/101/roles', 'PUT', { expected_revision: 2, enabled: true, controller: { role: 'manager', entries: { development: true, request: true, review: false, actions: false } },
+    roles: [{ role_id: 'constructor', name: 'Construction inspector v2', responsibility: 'Inspect the changed construction paths.', harness_ref: { id: 'process' } }] });
+  assert.equal(v2.status, 200, JSON.stringify(v2.value));
+  const third = await snapshot(); p.h.store.run("UPDATE role_instances SET snapshot_id=?,harness='process' WHERE id='c-constructor'", third.snapshot_id);
+  const roles = (await p.admin('/api/tasks/custom/roles?limit=100&after=0')).value;
+  assert.deepEqual(roles.runs.filter(run => run.assignment_id === 'c-0').map(run => [run.role_snapshot, run.harness]), [[null, 'native']]);
+  p.page.run('taskView.close()'); await p.open('custom');
+  // Delegations are listed in the order they were recorded: c-1, c-2, then c-0.
+  const missing = p.page.$('task-side').querySelectorAll('.role-work > li').map(text)[2];
+  assert.equal(missing, 'constructor\nNative\n已交回\n历史定义不可用：这次运行没有留下可读的角色快照，名称和职责不按现在的定义补写。');
+  assert.doesNotMatch(missing, /Construction inspector v2|Inspect the changed construction paths/);
+  // The delegation that has not run yet takes today's definition and harness.
+  assert.match(p.side(), /Construction inspector v2\nProcess\n进行中\n职责：Inspect the changed construction paths\./);
 });

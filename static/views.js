@@ -398,7 +398,9 @@ const stopReasons = { role_revision_checkpoint: '换到新 revision', engine_res
 const recoveryModes = { new_session: '新会话', checkpoint_transcript: '从检查点续接', native_resume: '原会话恢复', rebuilt_from_task_records: '按任务记录重建', fresh_evaluation: '全新验收' };
 // A task's role records (GET /api/tasks/:id/roles). Each delegation keeps the runs that actually executed it, with the
 // harness each run used, and the role's name and responsibility from the snapshot its latest run started with: a role
-// instance may be rebound to another harness or definition later, which must not rewrite the past.
+// instance may be rebound to another harness or definition later, which must not rewrite the past. Only a delegation
+// that has not run yet takes the instance's current snapshot; one whose run has no readable snapshot (role_snapshot may
+// be null) is marked as having no historical definition rather than borrowing today's.
 // Null when the records cannot be read, so the page says so instead of guessing how the task ran.
 function roleRecords(value) {
   if (!value || !Array.isArray(value.instances)) return null;
@@ -409,8 +411,8 @@ function roleRecords(value) {
       const instance = byInstance.get(a.instance_id), mine = runs.filter(run => run.assignment_id === a.id);
       // Before its first run a delegation can only name the harness and definition its instance is bound to now.
       const harnesses = mine.length ? mine.map(run => run.harness).filter(Boolean).filter((id, at, list) => id !== list[at - 1]) : [instance?.harness].filter(Boolean);
-      const definition = snapshot(mine.at(-1)?.role_snapshot) || snapshot(instance?.snapshot_id);
-      return { ...a, role: instance?.role, name: definition?.name, responsibility: definition?.responsibility, runs: mine, harnesses, harness: harnesses.at(-1) };
+      const definition = mine.length ? snapshot(mine.at(-1).role_snapshot) : snapshot(instance?.snapshot_id);
+      return { ...a, role: instance?.role, name: definition?.name, responsibility: definition?.responsibility, definitionMissing: mine.length > 0 && !definition, runs: mine, harnesses, harness: harnesses.at(-1) };
     }) };
 }
 // The purpose the controller wrote for each delegation lives in its handoff event. Handoff events only accumulate, so
@@ -431,9 +433,10 @@ async function rolePurposes(id, roles) {
 const controllerOf = roles => roles?.instances.find(instance => instance.role === 'manager') || null;
 // One sentence: who is doing what right now. Only recorded facts are used: the task's status and phase, its fault
 // cause, the runs and delegations still running (with the purpose the controller handed over) and the next action it
-// recorded. Independent QA counts as running when its run is: development and review start QA from inside their
-// executor without changing the task's phase. Delegations are listed oldest first, so the one at work can only be told
-// once all of them are read; until then the sentence names nobody.
+// recorded. Independent QA is named only when a running QA run was read: development and review start QA from inside
+// their executor without changing the task's phase, and phase acceptance alone does not mean a QA run is going on.
+// Delegations are listed oldest first, so the one at work can only be told once all of them are read; until then the
+// sentence names nobody.
 function taskNextStep(task, record, roles, purposes = {}) {
   const caption = (states[task.status] || [task.status])[0], cause = task.error_cause, next = record?.progress?.next_action;
   if (['succeeded', 'completed', 'pr_opened'].includes(task.status)) return `${caption}：独立 QA 验收通过后按原规则交付，没有下一步。`;
@@ -444,14 +447,16 @@ function taskNextStep(task, record, roles, purposes = {}) {
   if (task.status.startsWith('waiting_') || ['retry_wait', 'needs_replan', 'paused'].includes(task.status))
     return `已暂停（${caption}）` + (cause ? `：${cause.label}。${cause.action}` : task.error_code ? `：${task.error_code}。` : '。');
   if (task.status === 'publishing' || task.phase === 'publish') return '控制面正在把验收通过的结果发布到 GitHub。';
-  if (task.phase === 'acceptance' || roles?.runs.some(run => run.role === 'qa' && run.status === 'running')) return `独立 QA 正在新的上下文里验收候选 ${shortId(record?.candidate?.id)}。`;
+  if (roles?.runs.some(run => run.role === 'qa' && run.status === 'running')) return `独立 QA 正在新的上下文里验收候选 ${shortId(record?.candidate?.id)}。`;
   if (roles && !roles.complete) return `委派记录没有读完（已读 ${roles.assignments.length} 条），现在说不清是谁在处理。`;
   const working = roles?.assignments.filter(a => a.status === 'running' && !['manager', 'qa'].includes(a.role)).at(-1);
   if (working) return `${roleLabel(working.role, working.name)}（${harnessName(working.harness)}）正在做主控交给它的工作` + (purposes[working.id] ? `：${clipText(purposes[working.id], 160)}` : '。');
   if (task.phase === 'prepare') return '控制面正在准备工作区：拉取固定提交，写入项目电脑。';
   if (task.phase === 'validate') return '控制面正在项目电脑里运行仓库测试。';
   // Without any role records the page cannot tell who is at work, and does not pretend to.
-  if (!roles) return `正在执行（${phaseLabels[task.phase] || task.phase || '阶段未知'}）；读不到角色记录，说不清是原来的执行器还是主控在处理。`;
+  if (!roles) return `正在执行（${phaseLabels[task.phase] || task.phase || '阶段未知'}）；读不到角色记录，说不清现在是谁在处理。`;
+  // All records read, the acceptance phase, and no QA run going on: QA has not started yet or has already returned.
+  if (task.phase === 'acceptance') return '任务处在独立验收阶段，但现在没有正在运行的 QA：控制面还没开始这次验收，或者正在处理验收结论。';
   if (controllerOf(roles)) return '主控 Manager 正在读任务记录，决定下一步委派谁' + (next ? `；它记下的下一步：${next}` : '。');
   return '执行器（项目电脑里的 Pi 进程）正在处理' + (next ? `：${next}` : '。');
 }
@@ -523,8 +528,10 @@ function taskExecutionCard(record, roles, purposes) {
       const item = element('li', ''), head = element('div', '', 'role-work-head'), [caption, tone] = own({ running: ['进行中', 'info'], completed: ['已交回', 'success'], failed: ['失败', 'danger'] }, a.status) || [a.status, ''];
       head.append(element('strong', roleLabel(a.role, a.name)), element('span', a.harnesses.map(harnessName).join(' → ') || '—', 'muted'), badge(caption, tone));
       item.append(head);
-      // A project's own role says what it is for; the built-in roles are explained on the 角色 page.
-      if (!own(builtinRoleNames, a.role) && a.responsibility) item.append(element('p', '职责：' + a.responsibility, 'muted role-work-duty'));
+      // A project's own role says what it is for; the built-in roles are explained on the 角色 page. Their names on this
+      // page never come from a snapshot, so only a project's own role can lose its historical definition.
+      if (!own(builtinRoleNames, a.role) && a.definitionMissing) item.append(element('p', '历史定义不可用：这次运行没有留下可读的角色快照，名称和职责不按现在的定义补写。', 'muted role-work-duty'));
+      else if (!own(builtinRoleNames, a.role) && a.responsibility) item.append(element('p', '职责：' + a.responsibility, 'muted role-work-duty'));
       if (purposes[a.id]) item.append(element('p', purposes[a.id]));
       if (a.candidate_version) item.append(element('p', '看的是候选版本 ' + shortId(a.candidate_version), 'muted'));
       // A delegation that ran more than once (recovery, a new revision) shows each run, oldest first.
