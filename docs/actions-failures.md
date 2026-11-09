@@ -1,6 +1,6 @@
 # Actions 失败分类与提报
 
-Actions 失败处理是内置工作流 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`，默认关闭：在项目「工作流」页选中「Actions 失败处理」打开并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。它的触发源是「默认分支的 Actions 运行失败」，去掉后和关闭一样不再扫描和处理。失败原因由这条工作流的模型分析，提示词和模型和其他工作流一样在页面上设置；它和所有工作流一样能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
+Actions 失败处理是工作类型 `actions.failures`。它的开关就是每个仓库的 `actions_failures_enabled`，默认关闭：在项目「Manager 与角色」页的工作类型表里打开并保存，或通过 `PATCH /api/repositories/:id/policy` 保存布尔值。每个失败的运行 attempt 是一个 `actions.run_failed` 事件，由项目 Manager 决定是否分析；Manager 决定不处理时这次失败记为 `ignored`，不重跑也不提报。失败原因由这类工作的模型分析，提示词是 Manager 提示词的「Actions 失败处理」章节；它和所有工作类型一样能读取仓库的全部 GitHub 内容、启动独立 agent，见下文「分析与分类」。关闭后不再为本功能重跑、提报或启动开发；`development_enabled` 单独关闭时仍处理分类、重跑和提报。
 
 ## 配置前提
 
@@ -22,11 +22,11 @@ GitHub 的 run 列表支持 `created` 范围，不支持完成时间范围。扫
 
 ## 分析与分类
 
-失败原因由这条工作流的模型分析（`src/actions/analysis.ts`），模型按工作流的模型设置选择，没有单独设置时用项目默认模型；提示词是 [`docs/prompts/actions-failures.md`](prompts/actions-failures.md)，可以在工作流页由控制台覆盖。
+失败原因由这类工作的模型分析（`src/actions/analysis.ts`），模型按 `task_models['actions.failures']` 选择，没有单独设置时用项目默认模型；提示词默认是 [`docs/prompts/actions-failures.md`](prompts/actions-failures.md)，可以由 Manager 提示词的同名章节覆盖。
 
 控制面先读取每个失败 job 的完整日志（不超过现有 GitHub 客户端 8 MiB 下载边界；超限不返回截断内容），取出失败 step 时间区间内的输出（`src/actions/classifier.ts`），然后为这个 attempt 排一个分析任务。任务和其他工作流一样在项目电脑里运行，检出失败运行的提交；run、job 和失败 step 的名字写在 `../context/run.json`，每个失败 job 的失败 step 输出写在 `../context/failed-steps/<job id>.log`（只放最后 400 行、4 万字符）。agent 需要更多时用 `read_job_log` 读完整日志，也可以在检出里运行命令、读工作流文件和代码、其他运行、Issue 和 PR，按提示词启动独立 agent。日志、job 名和 step 名都是不可信数据。
 
-agent 为每个失败 job 选一个类别、写理由，并引用判断所依据的日志行，通过这条工作流的写入工具登记：外部原因交给 `rerun_failed_run`（需要 `actions_rerun` 写入），其他交给 `report_failure`（需要 `issue` 写入），最后调用 `finish_analysis` 结束。登记时工具就告诉 agent 引用行有没有在失败 step 输出里找到；真正的重跑和提报在任务结束后由控制面执行：
+agent 为每个失败 job 选一个类别、写理由，并引用判断所依据的日志行，通过这类工作的写入工具登记：外部原因交给 `rerun_failed_run`（需要 `actions_rerun` 写入），其他交给 `report_failure`（需要 `issue` 写入），最后调用 `finish_analysis` 结束。登记时工具就告诉 agent 引用行有没有在失败 step 输出里找到；真正的重跑和提报在任务结束后由控制面执行：
 
 - `external`：仓库以外的原因，例如依赖服务的 429/502/503、网络超时或中断、DNS、磁盘耗尽、runner 断联或 Actions 队列故障，重跑同一提交很可能通过。
 - `code`：这个提交上仓库自己的问题，例如测试或断言失败、编译、类型或 lint 错误、仓库里的脚本或配置有误，重跑仍会失败。
