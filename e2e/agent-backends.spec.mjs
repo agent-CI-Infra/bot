@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { harness, setup, account, repository, testPassword } from '../test/helpers.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 
-test('所有角色可选择并列 Agent 后端，默认推荐 Pi，未接入驱动明确显示', async ({ page }) => {
+test('角色按能力选择 Agent 后端，Claude Code 仅用于工作角色，未接入驱动明确显示', async ({ page }) => {
   const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }), maxBodyBytes: 1024 * 1024 })), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
@@ -20,20 +20,30 @@ test('所有角色可选择并列 Agent 后端，默认推荐 Pi，未接入驱�
       const picker = page.getByRole('combobox', { name: `${role} Agent 后端`, exact: true });
       await expect(picker).toHaveValue('pi');
       for (const backend of ['pi', 'native', 'process', 'acp']) await expect(picker.locator(`option[value="${backend}"]`)).toBeEnabled();
-      for (const backend of ['codex', 'claude_code', 'opencode']) await expect(picker.locator(`option[value="${backend}"]`)).toBeDisabled();
+      const claude = picker.locator('option[value="claude_code"]');
+      if (['coordinator', 'manager'].includes(role)) await expect(claude).toBeDisabled();
+      else await expect(claude).toBeEnabled();
+      for (const backend of ['codex', 'opencode']) await expect(picker.locator(`option[value="${backend}"]`)).toBeDisabled();
     }
     await page.getByRole('combobox', { name: 'manager Agent 后端', exact: true }).selectOption('native');
     await page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true }).selectOption('acp');
+    await page.getByRole('combobox', { name: 'dev Agent 后端', exact: true }).selectOption('claude_code');
     await page.getByRole('button', { name: '保存为新 revision', exact: true }).click();
     await expect(page.locator('#project-page .flash')).toContainText('revision 1');
     const saved = (await admin('/api/repositories/101/roles')).value;
     expect(saved.configuration.roles.find(r => r.role_id === 'manager').harness_ref.id).toBe('native');
     expect(saved.configuration.roles.find(r => r.role_id === 'reviewer').harness_ref.id).toBe('acp');
+    expect(saved.configuration.roles.find(r => r.role_id === 'dev').harness_ref.id).toBe('claude_code');
     expect(saved.configuration.roles.find(r => r.role_id === 'qa').harness_ref.id).toBe('pi');
     await page.reload();
     await expect(page.getByRole('combobox', { name: 'manager Agent 后端', exact: true })).toHaveValue('native');
     await expect(page.getByRole('combobox', { name: 'reviewer Agent 后端', exact: true })).toHaveValue('acp');
-    await expect(page.getByText('Agent 后端：', { exact: false })).toContainText('Codex（驱动待接入，#171）');
+    await expect(page.getByRole('combobox', { name: 'dev Agent 后端', exact: true })).toHaveValue('claude_code');
+    const catalog = page.getByText('Agent 后端：', { exact: false });
+    await expect(catalog).toContainText('Claude Code（claude_code@2.1.319）');
+    await expect(catalog).not.toContainText('Claude Code（驱动待接入');
+    await expect(catalog).toContainText('Codex（驱动待接入，#171）');
+    await expect(catalog).toContainText('OpenCode（驱动待接入，#172）');
     mkdirSync('.tmp/agent-backends', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.screenshot({ path: '.tmp/agent-backends/desktop.png', fullPage: true });

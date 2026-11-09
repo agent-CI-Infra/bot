@@ -59,4 +59,4 @@ Native、Pi、Process、ACP 作为并列 Agent 后端，均可为主控、工作
 
 角色 API 返回统一 `backends` 目录、是否已接入及推荐默认值，角色页可以逐角色选择。原 `harness_ref` 和运行快照字段保留兼容。Native/Process 的消息检查点、ACP 的外部会话绑定及 Pi 的活会话重接分别记录，不把切换后端描述为跨协议恢复原会话。Pi 的 QA 和 Coordinator 直接从本轮固定候选或持久化事实开始，不接回旧评价对话。
 
-Codex App Server、Claude Code、OpenCode 的原生驱动仍由 #171/#170/#172 实现；目录中的待接入状态不是可执行适配器。缺少驱动时配置明确报错，不会换成 Native、Pi 或 ACP 冒充执行。已部署的通用 Codex ACP 可继续选择 ACP 使用。
+Claude Code 已注册为 `claude_code` 工作角色后端，支持 writer、observer、evaluator，不支持 controller，不能用于 manager/coordinator；版本、授权与限制见 [Claude Code harness](claude-code.md)。Codex App Server 和 OpenCode 的原生驱动仍待 #171/#172 接入；目录中的待接入状态不是可执行适配器。缺少驱动时配置明确报错，不会换成 Native、Pi 或 ACP 冒充执行。已部署的通用 Codex ACP 可继续选择 ACP 使用。
