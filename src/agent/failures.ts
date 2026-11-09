@@ -115,7 +115,7 @@ const codeActions: Record<string,string> = {
   codex_model_unavailable:'所选 Codex 模型不可用；在 BOT_CODEX_CONFIG 中改为实际支持的模型后重试。',
   codex_model_mismatch:'app-server 实际使用的模型/供应商与配置不同；修正配置，平台不会静默换模型。',
   codex_model_rerouted:'app-server 把本轮改路由到未配置的模型，已停止；确认模型策略后重试。',
-  codex_resume_incompatible:'恢复的 thread 绑定了另一模型或供应商；还原配置后重试，或对角色应用新 revision 以新 thread 重建。',
+  codex_resume_incompatible:'恢复或重建的 thread 会换成另一模型或供应商，已停止；还原 BOT_CODEX_CONFIG 的 model/modelProvider 后重试，确需换模型时暂停任务并执行 adopt-config，按新配置重建角色会话。',
   codex_builtin_tools_enabled:'Codex 没有按要求关闭内建命令/文件读取/子 agent 等工具，运行未开始；确认 CLI 为锁定版本并检查专用 CODEX_HOME 的配置后重试。',
   codex_builtin_tool_refused:'Codex 内建工具在未授权时执行了，运行已停止；确认 CLI 为锁定版本并检查专用 CODEX_HOME 的配置，再重试。',
   codex_subagent_refused:'Codex 派生了子 agent，运行已停止；角色运行不接受子 agent，可直接重试。',

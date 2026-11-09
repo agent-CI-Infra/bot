@@ -204,11 +204,47 @@ test('Codex rebuilds only an explicitly missing thread, and never onto another m
 
 test('Codex turns without any usage report count as unknown requests, never as exact zero',async t=>{
  for(const [env,code] of [[{FIXTURE_DISCONNECT:'true'},'codex_connection_lost'],[{FIXTURE_WAIT:'true',FIXTURE_IGNORE_INTERRUPT:'true'},'task_cancelled'],[{FIXTURE_EXIT:'true'},'codex_connection_lost']])await t.test(JSON.stringify(env),async t=>{
-  const f=fixture(t,env);let cancel=false;
-  const poll=setInterval(()=>{if(env.FIXTURE_WAIT&&existsSync(join(f.home,'prompts.jsonl')))cancel=true;},20);
+  const f=fixture(t,env);let cancel=false,running=null;
+  // A turn still in progress without usage is not counted yet; it counts once its run ended without a report.
+  const poll=setInterval(()=>{if(env.FIXTURE_WAIT&&!cancel&&f.s.get("SELECT 1 FROM task_history WHERE type='harness_event' AND json_extract(data,'$.type')='turn' AND json_extract(data,'$.phase')='started'")){
+   const u=instanceUsage(f.s,f.s.get("SELECT id FROM role_instances WHERE role='dev'").id);running=[u.model_requests,u.unknown_requests];cancel=true;}},20);
   await assert.rejects(runRole({...f.spec,guard:async()=>{if(cancel)throw new TaskError('task_cancelled','cancelled');}},'dev',undefined,'codex'),{code});clearInterval(poll);
+  if(env.FIXTURE_WAIT)assert.deepEqual(running,[0,0]);
   const instance=f.s.get("SELECT id FROM role_instances WHERE role='dev'").id,usage=instanceUsage(f.s,instance);
   assert.deepEqual([usage.model_requests,usage.unknown_requests,usage.total_tokens,usage.semantics],[1,1,0,'lower_bound']);
+ });
+});
+
+test('A turn start the server never answered is kept for reconciliation and counted once',async t=>{
+ const run=async(env,expected)=>{
+  const f=fixture(t,env);
+  await assert.rejects(runRole(f.spec,'dev',undefined,'codex'),{code:'codex_connection_lost'});
+  const [{turnId}]=f.lines('unanswered.jsonl'),instance=f.s.get("SELECT id FROM role_instances WHERE role='dev'").id,count=()=>{const u=instanceUsage(f.s,instance);return [u.model_requests,u.unknown_requests,u.total_tokens,u.semantics];};
+  assert.deepEqual(count(),expected.first);
+  assert.deepEqual([f.state().lastTurnId,f.state().lastTurnStatus],[expected.known?turnId:null,expected.known?'inProgress':'startRequested']);
+  // The next run resumes the thread and reads the turn back before its own turn, then asks to check side effects.
+  f.configure({});await runRole(f.spec,'dev');
+  const methods=f.lines('requests.jsonl').map(r=>r.method),resumed=methods.lastIndexOf('thread/resume'),listed=methods.indexOf('thread/turns/list');
+  assert.ok(resumed>=0&&listed>resumed&&listed<methods.lastIndexOf('turn/start'),'thread/turns/list after resume, before the turn');
+  const bound=f.events().filter(e=>e.type==='session_bound').at(-1);
+  assert.deepEqual(bound.reconciled,{turnId,recorded:expected.known?'inProgress':'startRequested',observed:'interrupted'});
+  assert.match(f.lines('prompts.jsonl').at(-1).prompt,new RegExp(`previous turn ${turnId} did not end with a confirmed completion \\(observed: interrupted\\)`));
+  assert.deepEqual(count(),expected.second);
+ };
+ // 110 tokens were reported for the turn before its start answer was lost: one request, exact.
+ await t.test('usage and turn id arrived first',()=>run({FIXTURE_START_UNANSWERED:'true'},{known:true,first:[1,0,110,'exact'],second:[2,0,220,'exact']}));
+ // Nothing ever named the turn: one unknown request, and resume finds the turn as the thread's newest.
+ await t.test('no turn id ever arrived',()=>run({FIXTURE_START_SILENT:'true'},{known:false,first:[1,1,0,'lower_bound'],second:[2,1,110,'lower_bound']}));
+ // A late notification of the turn known before the start does not name the unanswered turn.
+ await t.test('a late notification of the previous turn',async t=>{
+  const f=fixture(t);await runRole(f.spec,'dev',undefined,'codex');const previous=f.state().lastTurnId;
+  f.configure({FIXTURE_START_SILENT:'true',FIXTURE_LATE_PREVIOUS:'true'});
+  await assert.rejects(runRole(f.spec,'dev'),{code:'codex_connection_lost'});
+  assert.deepEqual([f.state().lastTurnId,f.state().lastTurnStatus,f.state().previousTurnId],[null,'startRequested',previous]);
+  const [{turnId}]=f.lines('unanswered.jsonl');f.configure({});await runRole(f.spec,'dev');
+  assert.deepEqual(f.events().filter(e=>e.type==='session_bound').at(-1).reconciled,{turnId,recorded:'startRequested',observed:'interrupted'});
+  const u=instanceUsage(f.s,f.s.get("SELECT id FROM role_instances WHERE role='dev'").id);
+  assert.deepEqual([u.model_requests,u.unknown_requests,u.semantics],[3,1,'lower_bound']);
  });
 });
 

@@ -9,7 +9,7 @@
 - 启动：`BOT_CODEX_CONFIG`，只接受自己的 stdio `app-server`、专用的绝对路径 CODEX_HOME（不能是宿主 `~/.codex`）、固定版本和 `read-only` sandbox。
 - 线协议：不带 `jsonrpc` 成员的 JSON-RPC 行，按字节分片重组（含多字节字符），请求按 id 关联，未知/重复应答与未知通知记为异常，格式不符或断流使所有待决请求失败。
 - 握手：`initialize` → `initialized`，核对 CLI 版本（配置、实际报告、协议锁定三者一致）和实际 CODEX_HOME。
-- thread：`thread/start`；已有绑定时先核对 model/provider，再显式 `thread/resume`，核对返回的 thread ID、会话目录和 model/provider。只有服务器明确回答 `no rollout found` 时才记 `native_resume_failed` 并以新 thread 重建，且重建的 model/provider 必须与绑定一致；其他恢复错误以 `codex_resume_failed` 失败并保留绑定。上次 turn 未确认完成时用 `thread/turns/list` 对账。
+- thread：`thread/start`；已有绑定时先核对 model/provider，再显式 `thread/resume`，核对返回的 thread ID、会话目录和 model/provider。只有服务器明确回答 `no rollout found` 时才记 `native_resume_failed` 并以新 thread 重建，且重建的 model/provider 必须与绑定一致；其他恢复错误以 `codex_resume_failed` 失败并保留绑定。发出 `turn/start` 前绑定先记为「可能已开始」，应答丢失时保存通知里已知的 turn id；上次 turn 未确认完成时用 `thread/turns/list` 对账，只知道「可能已开始」时按线程最新的 turn 对账。
 - 内建工具：thread 配置关闭 `shell_tool`、`view_image`、`multi_agent`、`apps`、`plugins`、`goals`、`sleep_tool` 并禁用网页搜索；首个 turn 前核对 sandbox/审批策略，并用带 threadId 的 `experimentalFeature/list` 读回开关，未关闭即拒绝。运行中出现命令执行、图片读取、网页搜索、未经批准已应用的补丁或子 agent 时，经公共停止路径立即结束运行（任务工具拒绝、中断、宽限期后回收进程组）。
 - 工具：thread 只配置本轮 loopback MCP `bot`；首个 turn 前用 `mcpServerStatus/list` 核对只有 `bot` 且工具恰为 offered tools。
 - turn：`turn/start` 后只以该 turn 的 `turn/completed` 为终结，`interrupted`/`failed` 不算完成；`model/rerouted` 走同一停止路径，宽限期内以 `codex_model_rerouted` 失败；取消用 `turn/interrupt` 并等待终结回执，超时后回收进程组。
@@ -20,14 +20,14 @@
 
 ## 合约测试（协议替身，不是 Codex）
 
-`test/codex-harness.test.mjs` 对 `test/fixtures/codex-app-server.mjs` 运行，41 项：
+`test/codex-harness.test.mjs` 对 `test/fixtures/codex-app-server.mjs` 运行，45 项：
 
 - 握手顺序、工具核对先于首个 turn、thread/turn 绑定、分片输出（按 7 字节切开行与中文字符）、重复 item/未知通知/未知应答只记异常、私有推理与配置密钥不进 trace、RoleRun 事件流与用量。
 - 权限：锁定版本全部 10 种服务器请求（另加一条其他 thread 的请求）分别得到的答复，以及 `capability_denied` 与事件分类。
 - 内建工具：thread 参数里的关闭项与 read-only/on-request、分两页读回的开关状态；服务器没应用开关或 sandbox 时不开始 turn；服务器不发审批请求就执行命令、应用补丁或派生子 agent 时（含应答与越权 item 同块到达），宽限期内停止、拒绝之后的工具调用并回收进程。
 - 改路由时忽略中断仍在宽限期内以 `codex_model_rerouted` 结束并回收进程。
-- 恢复：同一 thread 的 native_resume、恢复后重述的用量不重复计、本地 thread 丢失后的显式重建、`-32603` 等其他恢复错误保留绑定并失败、thread 丢失时不借重建换默认模型/provider、终结前断流失败且下一轮先对账。
-- 用量：断流、中断超时、turn/start 未应答时记为未知请求（`lower_bound`）；绑定前两次被拒后，重述的同一增量在成功绑定时只计一次（账本 110 → 330，而不是重复累计）。
+- 恢复：同一 thread 的 native_resume、恢复后重述的用量不重复计、本地 thread 丢失后的显式重建、`-32603` 等其他恢复错误保留绑定并失败、thread 丢失时不借重建换默认模型/provider、终结前断流失败且下一轮先对账；turn/start 未应答时，已知 turn id 写入绑定，没有 id 时绑定记为「可能已开始」，下一轮都先 `thread/turns/list` 对账并提示核对副作用；上一 turn 的迟到通知不会被当成这次开始的 turn。
+- 用量：断流、中断超时、turn/start 未应答且没有用量时记为未知请求（`lower_bound`），仍在进行的 turn 不提前计入；turn/start 未应答但先收到该 turn 的 110 token 用量时只计 1 次请求、0 次未知（`exact`）；绑定前两次被拒后，重述的同一增量在成功绑定时只计一次（账本 110 → 330，而不是重复累计）。
 - 失败：认证失败、未提交、CLI/配置版本不符、实际模型不符、额外 MCP 服务、模型改路由、任务工具启动失败、CODEX_HOME 不符、进程退出、恢复时模型改变、thread 归属不符；都不产生角色结果。会话在绑定前被拒时，原有 thread 绑定原样保留。
 - 取消：有终结回执、忽略中断（超时回收）、中断后迟到的 `completed` 都不能完成运行。
 - 角色隔离与 QA 新 thread；`LineRpc` 单元；启动配置限制。
