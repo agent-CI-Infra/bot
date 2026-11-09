@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { Store } from '../dist/storage/database.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { runTeam } from '../dist/roles/team.js';
+import { ProjectMemory } from '../dist/memory/project.js';
+import { authorizeKnowledgeTask } from './knowledge-fixture.mjs';
 import { developmentTeam } from '../dist/roles/development.js';
 import { roleApi } from '../dist/roles/api.js';
 import { controllerWorkspace } from '../dist/roles/workspace.js';
@@ -109,17 +111,18 @@ test('real Pi schedules configured parallel observers from durable task facts, w
 });
 
 test('configured code flow checks out the collected commit for both observers and retains it for QA submission', { skip, timeout:180000 }, async t => {
-  const root=mkdtempSync(join(tmpdir(),'bot-code-stages-')),store=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let step=0,devRef,readers=0,release;
+  const root=mkdtempSync(join(tmpdir(),'bot-code-stages-')),store=new Store(':memory:',randomBytes(32)),manager=new LocalManager('101',root);let step=0,devRef,readers=0,release,privateMemoryId;const workerBodies=[];
   const barrier=new Promise(r=>release=r);t.after(async()=>{await manager.recover();store.close();rmSync(root,{recursive:true,force:true});});
   const model=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw),tools=body.tools.map(t=>t.function.name);let message;
     if(tools.includes('nominate_delivery')){devRef??=results(body.messages).find(r=>r.result_ref)?.result_ref;message=[()=>call('delegate_role',{role:'dev',stage_id:'dev',purpose:'Implement',refs:[]}),()=>call('delegate_roles',{assignments:[{role:'reviewer',stage_id:'reviewer',purpose:'Inspect',refs:[devRef]},{role:'test',stage_id:'test',purpose:'Test',refs:[devRef]}]}),()=>call('nominate_delivery',{result_ref:devRef})][step++]();}
-    else if(tools.includes('submit_role_result')){if(body.messages.at(-1).role==='tool'){const receipt=results(body.messages).at(-1);assert.equal(receipt.content,'delivered\n');message=call('submit_role_result',{summary:'Read exact delivered files',findings:[],unknowns:[],inspected_scope:['result.txt']});}else{if(++readers===2)release();await barrier;message=call('read_file',{path:'result.txt'});}}
+    else if(tools.includes('submit_role_result')){workerBodies.push(body);const receipts=results(body.messages);if(!receipts.length){if(++readers===2)release();await barrier;message=call('read_project_memory',{id:privateMemoryId,revision:1});}else if(!receipts.some(r=>r.content==='delivered\n'))message=call('read_file',{path:'result.txt'});else message=call('submit_role_result',{summary:'Read exact delivered files',findings:[],unknowns:[],inspected_scope:['result.txt']});}
     else message=body.messages.at(-1).role==='tool'?call('submit_delivery',{summary:'implemented',test_command:'fixture check'}):call('write_file',{path:'result.txt',content:'delivered\n'});
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));
   });model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(r=>{model.close(r);model.closeAllConnections();}));
   store.run("INSERT INTO accounts VALUES('a','a','github_app','1','{}','now')");store.run("INSERT INTO repositories VALUES('101','fixture/pi','o','a')");store.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','101',`http://127.0.0.1:${model.address().port}/v1`,'fixture',store.secrets.seal({value:'pi-code-fixture'},'model:m'),'now');store.run("INSERT INTO policies(repository_id,model_id,enabled,development_enabled) VALUES('101','m',1,1)");
   const environment=await manager.call('PUT','/v1/projects/101');store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES('t','101','development.issue','running','code','{}',1,?,?)",environment.generation,randomBytes(24).toString('hex'));
   const records=new TaskRecords(store);records.contract('t',{goal:'Deliver code',scope:['result.txt'],criteria:['Inspected and tested'],endpoint:'code'});
+  const actor=authorizeKnowledgeTask(store);privateMemoryId=new ProjectMemory(store,{actor}).save('101','manager-only',{body:'MANAGER_ONLY_PRIVATE',kind:'experience',sources:[{reference:'fixture'}],catalog:{audience:'role:manager'}},0,'user:owner','private controller context').id;
   const required_stages=['dev','reviewer','test'].map(role=>({stage_id:role,depends_on:role==='dev'?[]:['dev'],delivery_types:['code'],role_constraints:{kinds:[role==='dev'?'writer':'observer'],role_ids:[role],capabilities:role==='dev'?['raw_evidence','output_validation']:['raw_evidence','fixed_candidate_read','fresh_context','output_validation'],independent:role!=='dev'},required:true,completion:{evidence_types:[role==='dev'?'role_result':'execution_evidence'],min_evidence:1,no_findings:role!=='dev'},retry:{max_attempts:3},budget:{max_tool_calls:8}}));
   roleApi(store,{id:'owner',role:'project_admin',repositories:['101']},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:0,enabled:true,roles:[],required_stages});
   const task=store.get("SELECT * FROM tasks WHERE id='t'"),redactor=new Redactor(),guard=async()=>{},workspace=new Workspace(store,manager,task,redactor,guard,()=>{});
@@ -127,6 +130,7 @@ test('configured code flow checks out the collected commit for both observers an
   const seed=await workspace.call('seed-commit',{type:'workspace_command',command:'git init -q && git add result.txt && git -c user.name=Fixture -c user.email=fixture@example.test commit -qm baseline',timeout_ms:10000});assert.equal(seed.exit_code,0);
   const result=await developmentTeam(workspace,'Implement code','{}',async()=>({pr:{number:1}}),{read:true,write:true,shell:true});
   assert.equal(result.summary,'implemented');assert.equal(readers,2);
+  assert.ok(workerBodies.flatMap(b=>results(b.messages)).filter(r=>r.error==='memory_not_found').length>=2);assert.ok(!JSON.stringify(workerBodies).includes('MANAGER_ONLY_PRIVATE'));
   const stageResults=store.all('SELECT result FROM task_stage_results').map(r=>JSON.parse(r.result));assert.equal(stageResults.length,3);assert.ok(stageResults.every(r=>r.passed));
   const snapshots=stageResults.map(r=>r.candidate_ref);assert.equal(new Set(snapshots.map(s=>s.commit_sha)).size,1);assert.equal(new Set(snapshots.map(s=>s.tree_hash)).size,1);
   const submitted=await workspace.artifact('later-qa-submission');assert.equal(submitted.local_sha,snapshots[0].commit_sha);assert.equal(submitted.tree_sha,snapshots[0].tree_hash);

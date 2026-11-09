@@ -85,6 +85,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
     const staged=!!records.get(task.id).stage_schedule.plan_revision||!!(taskConfiguration(store,task)?.roles?.required_stages?.length);
     const execute = async (name: string, args: any) => {
       if(staged&&spaces.role!=='dev'&&['read_file','run_command'].includes(name))return spaces.current.call('stage-observation:'+randomId(),name==='read_file'?{type:'workspace_read',path:args?.path}:{type:'workspace_command',command:args?.command,timeout_ms:120000});
+      if(staged&&spaces.role!=='dev'&&memoryTools.some(tool=>tool.function.name===name))return memoryTool(store,{...task,active_role:spaces.role,trace_run_id:spaces.runId},name,redactor.clean(args),async doc=>{const raw=await spaces.current.call('stage-memory:'+randomId(),{type:'workspace_read',path:doc.path});if(raw.error||typeof raw.content!=='string')throw new Error('memory_source_unavailable');return {content:raw.content,sha:blobSha(Buffer.from(raw.content))};});
       if (Object.hasOwn(platform, name)) return platform[name]!(randomId(), args);
       if (repositoryTools.some(t => t.function.name === name)) return repository!(name, args);
       if (name === 'github_read_token') {
