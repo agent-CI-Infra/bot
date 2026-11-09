@@ -101,6 +101,18 @@ export class ProjectMemory {
   }catch(error){memoryAuthorize(this.access,repo);m=this.get(repo,id,m.revision);return {...m,availability:'source_unavailable',instruction:'Try direct authorized repository reading; no cached body is asserted current.'};}
  }
  versions(repo:string,id:string){const m=this.get(repo,id);return this.store.all("SELECT revision,revision-1 AS previous_revision,json_extract(data,'$.supersedes') AS supersedes,json_extract(data,'$.sources') AS sources,actor,reason,created_at FROM project_memory_versions WHERE memory_id=? ORDER BY revision",m.id).filter(r=>{try{this.get(repo,id,r.revision);return true;}catch(error){if((error as any).code==='memory_not_found')return false;throw error;}}).map(r=>({...r,supersedes:JSON.stringify(this.get(repo,id,r.revision).supersedes),sources:JSON.stringify(this.get(repo,id,r.revision).sources)}));}
+ /** Free-file edits retain legacy provenance and audience without requiring the directory form. */
+ writeFile(repo:string,id:string,expected:number,input:{content?:string;deleted?:boolean;restore?:boolean}){
+  const access=memoryAuthorize(this.access,repo,true);if(access.role)fail(403,'memory_role_read_only');
+  const old=this.get(repo,id);if(old.revision!==expected)fail(409,'note_revision_changed');
+  const row=this.store.get('SELECT * FROM project_memories WHERE repository_id=? AND id=?',repo,old.id)!,data=JSON.parse(row.data);
+  data.supersedes??=[];data.catalog=memoryCatalog(data,row.fact_key);data.review??=null;
+  if(input.content===old.body&&!input.deleted&&!input.restore&&!['archived','revoked'].includes(old.status))return old;
+  if(input.content!==undefined){if(typeof input.content!=='string')fail(400,'invalid_note_content');if(data.authority==='repository')fail(409,'memory_repository_authority');data.body=input.content;data.verification='unverified';
+   if(this.store.get('SELECT kind FROM principals WHERE id=?',access.actor.principal_id)?.kind==='human'){data.owner='human';data.verification='human_asserted';}}
+  if(input.deleted)data.status='archived';else if(input.restore||input.content!==undefined&&['archived','revoked'].includes(data.status))data.status='needs_review';
+  return this.commit(repo,row.fact_key,row,data,'user:'+access.actor.principal_id,input.deleted?'file deleted':input.restore?'file version restored':'file content saved');
+ }
  /** Small review contract for humans or an explicitly delegated independent review process; not a scheduler. */
  review(repo:string,id:string,expected:number,input:any){
   const access=memoryAuthorize(this.access,repo,true);if(access.role)fail(403,'memory_agent_cannot_review');
