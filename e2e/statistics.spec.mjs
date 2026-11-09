@@ -12,7 +12,7 @@ async function dates(page,from,to=from){
   await page.getByLabel('开始日期（本地）',{exact:true}).fill(from);await page.getByLabel('结束日期（本地）',{exact:true}).fill(to);
   await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('#count')).toContainText(from+' 至 '+to);
 }
-test('统计按浏览器本地日显示费用、token、各工作流的任务，并支持仓库筛选、权限与空数据',async({page,browser})=>{
+test('统计按浏览器本地日显示费用、token、各工作类型的任务，并支持仓库筛选、权限与空数据',async({page,browser})=>{
   const h=await harness(),{admin,password}=await setup(h),a=await account(admin);
   await repository(admin,a.id,'101');await repository(admin,a.id,'202');
   const kinds=['review.issue','review.pr','development.issue','development.pr'];
@@ -26,8 +26,7 @@ test('统计按浏览器本地日显示费用、token、各工作流的任务，
     metricTask(h.store,'undated-'+repo,repo,'development.pr');h.store.run("UPDATE tasks SET created_at='' WHERE id=?",'undated-'+repo);
     h.store.run('UPDATE task_metrics SET complete=0 WHERE task_id=?','undated-'+repo);
   }
-  // Workflows beyond review and development are counted too, a custom one by its saved name.
-  const savedAt=new Date().toISOString();h.store.run(`INSERT INTO workflows(repository_id,id,name,created_at,updated_at) VALUES('101','custom.0123456789ab','Docs check',?,?)`,savedAt,savedAt);
+  // Work types beyond review and development are counted too; reply tasks of a former custom workflow count as reply work.
   for(const [id,kind,workflow] of [['docs-check','workflow.pr','custom.0123456789ab'],['failure-analysis','actions.failures',null]]){
     metricTask(h.store,id,'101',kind);h.store.run('UPDATE tasks SET created_at=?,workflow_id=? WHERE id=?','2026-11-03T16:30:00.000Z',workflow,id);
   }
@@ -47,7 +46,7 @@ test('统计按浏览器本地日显示费用、token、各工作流的任务，
     await expect(taskRow(page,'review.pr').locator('td').nth(1)).toHaveText('2');
     await expect(taskRow(page,'review.issue')).toContainText('25 小时 1 分');
     await expect(taskRow(page,'actions.failures')).toContainText('Actions 失败处理');await expect(taskRow(page,'actions.failures').locator('td').nth(1)).toHaveText('1');
-    await expect(taskRow(page,'custom.0123456789ab')).toContainText('Docs check');
+    await expect(taskRow(page,'reply')).toContainText('通用回复');
     await expect(taskRow(page,'development.pr').locator('td').nth(2)).toHaveText('— · 1 项耗时不完整');
     await expect(page.locator('.statistics-undated')).toContainText('日期不明的历史任务');
     await page.getByText('每日任务明细',{exact:true}).click();

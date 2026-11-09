@@ -13,6 +13,7 @@ import { Scheduler } from '../dist/schedules/worker.js';
 import { defaultLimits } from '../dist/schedules/types.js';
 import { nextTime, previewTimes, quietUntil } from '../dist/schedules/time.js';
 import { HttpError, randomId } from '../dist/core/security.js';
+import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
 import { channelFixture, envelope, post, finished, until, group, inGroup, bindFixture } from './channel-fixture.mjs';
 
 const target = { project_id: '101' };
@@ -253,6 +254,31 @@ test('subscription aggregates a failure incident, links recovery, respects quiet
   const incident = notifications.find(n => JSON.parse(n.payload).events[0].type === 'ci.failed'); assert.equal(JSON.parse(incident.payload).events.length, 2);
   assert.equal((await command(f, 'subscription.delete', { id: sub.id, revision: sub.revision })).value.state, 'succeeded');
   const before = f.wire.sent.length; f.advance(60000); await f.worker.tick(); assert.equal(f.wire.sent.length, before); assert.equal(f.h.store.get("SELECT count(*) n FROM notification_outbox WHERE state='blocked'").n, 3);
+});
+
+test('a Manager check plan hands its occurrence to the Manager once; a task it starts is a read-only request run by the plan\'s identity', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
+  // The Manager starts the check, with the goal it read from the plan's instruction.
+  configureDispatch(context => ({ decision: 'create', option_ids: [context.options[0].id], reason: '到期检查', brief: { goal: 'List open Issues without a label', criteria: ['Name each Issue'] } }));
+  t.after(() => configureDispatch(ruleDecider));
+  const plan = await f.create(f.plan({ name: '每周检查', workflow: 'manager.check', parameters: { instruction: 'List open Issues without a label.' } }));
+  await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
+  f.worker.produce(); const claim = f.worker.claimOccurrence(); f.worker.dispatch(claim); f.worker.dispatch(claim);
+  const event = f.h.store.get("SELECT * FROM dispatch_events WHERE type='schedule.due'");
+  assert.equal(JSON.parse(event.facts).instruction, 'List open Issues without a label.'); assert.equal(event.decision, 'create');
+  const task = f.h.store.get('SELECT * FROM tasks WHERE id=?', JSON.parse(event.result).created[0]), requests = () => f.h.store.get("SELECT count(*) n FROM tasks WHERE unique_key LIKE '101:task.request:%'").n;
+  assert.equal(JSON.parse(task.input).contract.goal, 'List open Issues without a label');
+  assert.equal(f.h.store.get('SELECT principal_id FROM task_authorizations WHERE task_id=?', task.id).principal_id, f.principal);
+  assert.equal(requests(), 1, 'one occurrence, one event, one task');
+  // Handing the check over completes the occurrence, so the plan is not held up by the task it started.
+  assert.equal(f.h.store.get('SELECT state FROM schedule_business_runs').state, 'succeeded');
+  // The rule decider of other tests starts nothing for a scheduled check: only a Manager does.
+  configureDispatch(ruleDecider);
+  await command(f, 'schedule.run-now', { id: plan.id, revision: 1 });
+  f.worker.produce(); const next = f.worker.claimOccurrence(); f.worker.dispatch(next);
+  assert.equal(requests(), 1);
+  assert.equal(f.h.store.get("SELECT decision FROM dispatch_events WHERE type='schedule.due' ORDER BY created_at DESC,rowid DESC LIMIT 1").decision, 'ignore');
 });
 
 test('controlled workflow contract dispatches a fake business handler once, preserves its run and enforces tool/model budgets', async t => {

@@ -1,10 +1,10 @@
 // Task process and project computer views. Loaded after app.js and reuses its helpers ($, api, element, state, states, timestamp).
 const terminalStates = ['succeeded', 'pr_opened', 'completed', 'cancelled', 'superseded', 'failed'];
 const kindLabels = { 'gate.onboarding': '接入门禁', 'review.issue': '检视 Issue', 'review.pr': '检视 PR', 'development.issue': '开发 Issue', 'development.pr': '跟进 bot PR', 'release.observe': 'CI 观察', 'release.notes': '发行说明', 'actions.failures': 'Actions 失败分析',
-  'workflow.issue': '自定义工作流 Issue', 'workflow.pr': '自定义工作流 PR', 'task.request': '普通任务' };
+  'workflow.issue': '通用回复 Issue', 'workflow.pr': '通用回复 PR', 'task.request': '普通任务' };
 const modeLabels = { 'review.issue': '检视', 'review.pr': '检视', 'development.issue': '开发', 'development.pr': '跟进' };
 const phaseLabels = { prepare: '准备工作区', model: '模型执行', validate: '测试验证', acceptance: '独立验收', publish: '发布', done: '完成' };
-// Role coordination words shared by the task view, the 角色 page and the workflow summary. A harness is how a role runs;
+// Role coordination words shared by the task view and the 「Manager 与角色」 page. A harness is how a role runs;
 // the built-in roles keep their short names (Manager delegates Dev, Test, Reviewer and UX; QA stays independent).
 // Role ids are chosen by the project (a custom observer may be called "constructor"), so lookups by id read own
 // properties only and fall back to the role's own name.
@@ -38,7 +38,7 @@ const environmentFaultCause = {
 function environmentFault(code) { return code ? `${environmentErrors[code] || '未归类的故障'}（${code}）。${environmentFaultCause[code] || '原因见日志：docker compose -p bot logs manager bot'}` : null; }
 function taskState(task) { return task.status === 'waiting_configuration' && task.error_code === 'repository_has_no_commit' ? badge('仓库还没有提交', 'warning') : state(task.status); }
 
-// An event workflow's task has no Issue or PR: it names its summary instead (the release or the Actions run).
+// An event task has no Issue or PR: it names its summary instead (the release or the Actions run).
 function objectLabel(task) { return task.object_number == null ? String(task.summary || kindLabels[task.kind] || task.kind) : `${task.kind.endsWith('.pr') ? 'PR' : 'Issue'} #${task.object_number}`; }
 function githubUrl(task) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(task.full_name || '') || !task.object_number) return null;
@@ -504,10 +504,10 @@ function taskFactsCard(task, record, publications) {
       rows.append(row);
     }
     part('发布', null, rows);
-  } else part('发布', badge(terminalStates.includes(task.status) ? '没有写到 GitHub' : '还没有'), mutedLine(terminalStates.includes(task.status) ? '这个任务没有写到 GitHub 的内容，结果只留在控制台。' : '验收通过后，由控制面按工作流允许的写入发布到 GitHub。'));
+  } else part('发布', badge(terminalStates.includes(task.status) ? '没有写到 GitHub' : '还没有'), mutedLine(terminalStates.includes(task.status) ? '这个任务没有写到 GitHub 的内容，结果只留在控制台。' : '验收通过后，由控制面按工作类型允许的写入发布到 GitHub。'));
   return section;
 }
-// How the task ran: under the project controller or on the workflow's own executor, and the delegations actually recorded.
+// How the task ran: under the project controller or on its work type's own executor, and the delegations actually recorded.
 function taskExecutionCard(record, roles, purposes) {
   const section = card('谁在执行'), controller = controllerOf(roles), qaRuns = roles?.runs.filter(run => run.role === 'qa').length || 0;
   section.classList.add('task-execution');
@@ -515,11 +515,11 @@ function taskExecutionCard(record, roles, purposes) {
   else if (controller) {
     const legacy = roles.snapshot(controller.snapshot_id)?.legacy;
     section.append(element('p', `角色协调：主控 Manager（${harnessName(controller.harness)}${legacy ? '，旧配置沿用' : ''}）按需委派工作，候选由它提名后交给独立 QA。`));
-  } else section.append(element('p', '原来的执行器：这个任务没有经过主控，由工作流在项目电脑里的 Pi 进程直接执行。'));
+  } else section.append(element('p', '原来的执行器：这个任务没有经过主控，由项目电脑里的 Pi 进程直接执行。'));
   if (roles) section.append(facts([['独立 QA', qaRuns ? `运行过 ${qaRuns} 次，每次都是新的上下文` : record?.candidate ? '等待验收' : '有候选后验收']]));
   // The delegations in the order they were recorded, each with the harness of every run that executed it. A stage
   // timeline, once the server keeps one per task, belongs in this list too; until then nothing here is inferred from the
-  // workflow's flowchart or the role configuration.
+  // Manager prompt or the role configuration.
   const work = (roles?.assignments || []).filter(a => !['manager', 'qa'].includes(a.role));
   if (roles && !roles.complete) section.append(element('p', `委派记录没有读完：服务端的分页游标没有前进，下面只列出已读到的 ${roles.assignments.length} 条，看不出现在是谁在处理。`, 'endpoint-warning'));
   if (work.length) {
@@ -540,14 +540,26 @@ function taskExecutionCard(record, roles, purposes) {
         + (run.stop_reason ? `（${own(stopReasons, run.stop_reason) || run.stop_reason}）` : '')).join('；') + '。'));
       list.append(item);
     }
-    section.append(element('h4', '委派记录'), list, mutedLine('按实际记录的先后列出。这不是预设流程，也不授予权限：委派谁由主控按任务决定，写入只来自工作流设置。'));
+    section.append(element('h4', '委派记录'), list, mutedLine('按实际记录的先后列出。这不是预设流程，也不授予权限：委派谁由主控按任务决定，写入只来自工作类型配置。'));
   } else if (controller && roles.complete) section.append(mutedLine('主控还没有委派工作。'));
   return section;
+}
+// Which events the Manager created or continued this task for, and why. Its brief explains the work; it grants nothing.
+function taskDispatchCard(entries) {
+  const section = card('Manager 分派'), list = element('ul', '', 'history');
+  for (const entry of entries) {
+    const item = element('li', '');
+    item.append(element('strong', entry.relation === 'created' ? '因事件新建' : '续接事件'), ' ', element('span', entry.summary), element('p', '理由：' + (entry.reason || '—'), 'muted'));
+    if (entry.brief?.goal) item.append(element('p', '简要说明：' + entry.brief.goal + (entry.brief.criteria?.length ? '（' + entry.brief.criteria.join('；') + '）' : ''), 'muted'));
+    item.append(element('span', timestamp(entry.decided_at || entry.created_at), 'muted')); list.append(item);
+  }
+  section.append(list); return section;
 }
 function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
   if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(record, roles, purposes));
+  if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
   const info = card('任务');
   info.append(facts([['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],

@@ -20,13 +20,13 @@ test('management UI, direct API and model tools agree on real persisted query, c
     const direct=(await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value;
     expect(direct.task.status).toBe('waiting_environment');expect(direct.task.error_code).toBe('environment_not_ready');
     await page.screenshot({path:'.tmp/management-164/query-desktop.png',fullPage:true});
-    // The model submits a versioned command; the page and the old workflow API see the resulting default prompt.
+    // The model submits a versioned command; the page and the Manager API see the resulting Manager section.
     await message.fill('更新任务默认提示词');await page.getByRole('button',{name:'发送',exact:true}).click();
     await expect(feed).toContainText('操作 workflow.update · succeeded');
     await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     const configured=(await query(admin,'get_effective_config',{project_id:'101'})).value;
     expect(configured.workflows.find(w=>w.id==='review.issue').prompt.effective).toBe('Inspect evidence and cite the original logs.');
-    expect((await admin('/api/repositories/101/workflows/review.issue')).value.workflow.prompt.effective).toBe('Inspect evidence and cite the original logs.');
+    expect((await admin('/api/repositories/101/manager')).value.manager.sections.find(entry=>entry.id==='review.issue').content).toBe('Inspect evidence and cite the original logs.');
     await page.getByRole('button',{name:'快捷操作',exact:true}).click();
     await expect(page.getByLabel('默认提示词',{exact:true})).toHaveValue('Inspect evidence and cite the original logs.');
     await page.screenshot({path:'.tmp/management-164/configuration-desktop.png',fullPage:true});
@@ -122,7 +122,7 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.unrouteAll({ behavior: 'wait' });
     await scope.selectOption('project:101'); await expect(message).toHaveValue('101 的草稿'); await expect(feed).toContainText('environment_not_ready');
     // Opening the project entry again reuses the same chat and keeps the current settings page.
-    await page.locator('.project-nav').getByRole('link', { name: '角色', exact: true }).click();
+    await page.locator('.project-nav').getByRole('link', { name: 'Manager 与角色', exact: true }).click();
     await page.locator('.project-nav').getByRole('link', { name: '管理对话', exact: true }).click();
     await expect(page).toHaveURL(/#\/projects\/101\/roles$/); await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
     await scope.selectOption('project:102'); await expect(message).toHaveValue('102 的草稿');
@@ -131,35 +131,14 @@ test('project chat links select the project, and a delayed old read cannot repla
     await expect(scope).toHaveValue('project:102'); await expect(message).toHaveValue('102 的草稿');
     await page.locator('#tabs').getByRole('button', { name: '管理对话', exact: true }).click();
     await expect(scope).toHaveValue('project:101'); await expect(message).toHaveValue('101 的草稿');
-    await page.locator('.project-nav').getByRole('link', { name: '工作流', exact: true }).click();
-    await page.getByRole('button', { name: '用聊天新增', exact: true }).click();
-    const workflow = page.getByRole('dialog', { name: '工作流助手', exact: true });
-    await expect(workflow).toBeVisible(); await expect(page.getByRole('dialog', { name: '管理助手', exact: true })).toBeHidden();
-    // Hide the global launcher while the workflow assistant is open, including after dragging it.
-    const send = workflow.getByRole('button', { name: '发送', exact: true });
+    // With the chat collapsed on a narrow screen, its launcher covers none of the header navigation.
+    await page.getByRole('button', { name: '收起管理助手', exact: true }).click();
     const unobstructed = node => { const rect = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)); };
-    await expect(page.locator('#management-launcher')).toBeHidden();
-    expect(await send.evaluate(unobstructed)).toBe(true);
     await page.setViewportSize({ width: 390, height: 844 }); await page.evaluate(() => scrollTo(0, 0));
     for (const nav of await page.locator('#tabs button:visible').all()) { await nav.scrollIntoViewIfNeeded(); expect(await nav.evaluate(unobstructed)).toBe(true); }
-    expect(await send.evaluate(unobstructed)).toBe(true);
-    await page.locator('#tabs').getByRole('button', { name: '项目', exact: true }).click();
-    await expect(page).toHaveURL(/#\/projects$/); await expect(workflow).toBeVisible();
     mkdirSync('.tmp/management-fixes', { recursive: true }); await page.screenshot({ path: '.tmp/management-fixes/narrow-header.png' });
     await page.setViewportSize({ width: 1440, height: 900 });
-    const bounds = await workflow.boundingBox(), handle = await workflow.locator('.assistant-head').boundingBox();
-    await page.mouse.move(handle.x + 70, handle.y + 20); await page.mouse.down();
-    await page.mouse.move(handle.x + 70 + 16 - bounds.x, handle.y + 20 + 284 - bounds.y, { steps: 12 }); await page.mouse.up();
-    const dragged = await workflow.boundingBox(); expect(Math.abs(dragged.x - 16)).toBeLessThan(2); expect(Math.abs(dragged.y - 284)).toBeLessThan(2);
-    expect(await workflow.locator('textarea').evaluate(node => {
-      const rect = node.getBoundingClientRect();
-      return [[rect.left + 8, rect.top + 8], [rect.left + 8, rect.bottom - 8], [rect.right - 8, rect.bottom - 8]].every(([x, y]) => node.contains(document.elementFromPoint(x, y)));
-    })).toBe(true);
-    expect(await send.evaluate(unobstructed)).toBe(true);
-    await page.screenshot({ path: '.tmp/management-fixes/dragged-desktop.png' });
-    await workflow.getByRole('button', { name: '收起', exact: true }).click(); await expect(page.locator('#management-launcher')).toBeVisible();
-    await page.getByRole('button', { name: '打开管理助手', exact: true }).click();
-    await expect(workflow).toBeHidden(); await expect(message).toHaveValue('101 的草稿');
+    await page.getByRole('button', { name: '打开管理助手', exact: true }).click(); await expect(message).toHaveValue('101 的草稿');
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
     expect(errors).toEqual([]);
   } finally { release?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
