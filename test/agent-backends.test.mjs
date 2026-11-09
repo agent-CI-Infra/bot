@@ -56,7 +56,7 @@ async function fixture(t, respond) {
   return { s, manager, requests, task, redactor, guard, workspace, put, view: () => roleApi(s, admin, 'GET', url, {}) };
 }
 
-test('new role configurations default to Pi; all registered backends are selectable by every role without changing authority', async t => {
+test('new roles default to Pi; general backends preserve role authority and Claude Code remains worker-only', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const config = f.put({ roles: [{ role_id: 'security' }] });
   assert.ok(config.roles.every(r => r.harness_ref.id === 'pi'));
@@ -66,7 +66,13 @@ test('new role configurations default to Pi; all registered backends are selecta
     assert.equal(saved.roles.find(r => r.role_id === 'manager').capability_policy_ref.id, 'controller-coordination');
     assert.equal(saved.roles.find(r => r.role_id === 'qa').output_schema_ref.id, 'acceptance-verdict');
   }
-  for (const backend of ['codex', 'claude_code', 'opencode']) {
+  const claude = f.view().backends.find(b => b.id === 'claude_code');
+  assert.equal(claude.available, true);
+  assert.deepEqual(claude.kinds, ['writer', 'observer', 'evaluator']);
+  const saved = f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'claude_code' } }] });
+  assert.equal(saved.roles.find(r => r.role_id === 'dev').harness_ref.id, 'claude_code');
+  for (const role of ['coordinator', 'manager']) assert.throws(() => f.put({ roles: [{ role_id: role, harness_ref: { id: 'claude_code' } }] }), { code: 'harness_role_unsupported' });
+  for (const backend of ['codex', 'opencode']) {
     const view = f.view(), entry = view.backends.find(b => b.id === backend);
     assert.equal(entry.available, false); assert.ok(entry.integration_issue);
     assert.throws(() => f.put({ roles: [{ role_id: 'dev', harness_ref: { id: backend } }] }), e => e.code === 'agent_backend_unavailable' && e.field === 'roles.dev.harness_ref.id');
