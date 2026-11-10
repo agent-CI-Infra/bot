@@ -372,3 +372,15 @@ test('a custom role called constructor shows its own name and responsibility on 
   // The delegation that has not run yet takes today's definition and harness.
   assert.match(p.side(), /Construction inspector v2\nProcess\n进行中\n职责：Inspect the changed construction paths\./);
 });
+
+
+test('a source-owned task shows its actual role without inventing a controller or legacy Pi executor',async t=>{
+  for(const role of ['reviewer','manager']){
+    const task={id:'owned-'+role,repository_id:'101',kind:'task.request',status:'running',phase:'model',attempt:1,structured:record(),origin:{source_kind:'role',source_role:role,executor_role:role,conversation_id:'chat-a',source_message:'incoming-a'}};
+    const view=taskPage(t,task,{instances:role==='manager'?[{id:'m',role:'manager',harness:'native',snapshot_id:'s'}]:[],assignments:[],runs:[],snapshots:{}});
+    view.page.run('function taskOriginCaption(origin) { return origin.executor_role; } function note(value) { return element("p", value); }');await view.open();
+    assert.ok(view.next().includes('角色 '+role+' 正在处理'));assert.ok(view.side().includes('任务执行角色：'+role),role+': '+text(view.page.$('task-error'))+'; side='+view.side());assert.doesNotMatch(view.side(),/原来的执行器|Pi 进程直接执行|按需委派/);
+    const active=view.page.run(`taskNextStep(${JSON.stringify(task)},${JSON.stringify(record())},{complete:true,instances:[],runs:[],assignments:[{id:'own-run',status:'running',role:'reviewer',name:'Reviewer',harness:'native'}]})`);
+    assert.match(active,/正在处理任务/);assert.doesNotMatch(active,/主控交给/);
+  }
+});

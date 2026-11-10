@@ -450,13 +450,14 @@ function taskNextStep(task, record, roles, purposes = {}) {
   if (roles?.runs.some(run => run.role === 'qa' && run.status === 'running')) return `独立 QA 正在新的上下文里验收候选 ${shortId(record?.candidate?.id)}。`;
   if (roles && !roles.complete) return `委派记录没有读完（已读 ${roles.assignments.length} 条），现在说不清是谁在处理。`;
   const working = roles?.assignments.filter(a => a.status === 'running' && !['manager', 'qa'].includes(a.role)).at(-1);
-  if (working) return `${roleLabel(working.role, working.name)}（${harnessName(working.harness)}）正在做主控交给它的工作` + (purposes[working.id] ? `：${clipText(purposes[working.id], 160)}` : '。');
+  if (working) return `${roleLabel(working.role, working.name)}（${harnessName(working.harness)}）${task.origin?.source_kind === 'role' ? '正在处理任务' : '正在做主控交给它的工作'}` + (purposes[working.id] ? `：${clipText(purposes[working.id], 160)}` : '。');
   if (task.phase === 'prepare') return '控制面正在准备工作区：拉取固定提交，写入项目电脑。';
   if (task.phase === 'validate') return '控制面正在项目电脑里运行仓库测试。';
   // Without any role records the page cannot tell who is at work, and does not pretend to.
   if (!roles) return `正在执行（${phaseLabels[task.phase] || task.phase || '阶段未知'}）；读不到角色记录，说不清现在是谁在处理。`;
   // All records read, the acceptance phase, and no QA run going on: QA has not started yet or has already returned.
   if (task.phase === 'acceptance') return '任务处在独立验收阶段，但现在没有正在运行的 QA：控制面还没开始这次验收，或者正在处理验收结论。';
+  if (task.origin?.source_kind === 'role' && task.origin.executor_role) return `角色 ${task.origin.executor_role} 正在处理` + (next ? `：${next}` : '。');
   if (controllerOf(roles)) return '主控 Manager 正在读任务记录，决定下一步委派谁' + (next ? `；它记下的下一步：${next}` : '。');
   return '执行器（项目电脑里的 Pi 进程）正在处理' + (next ? `：${next}` : '。');
 }
@@ -508,10 +509,11 @@ function taskFactsCard(task, record, publications) {
   return section;
 }
 // How the task ran: under the project controller or on its work type's own executor, and the delegations actually recorded.
-function taskExecutionCard(record, roles, purposes) {
+function taskExecutionCard(task, record, roles, purposes) {
   const section = card('谁在执行'), controller = controllerOf(roles), qaRuns = roles?.runs.filter(run => run.role === 'qa').length || 0;
   section.classList.add('task-execution');
   if (!roles) section.append(mutedLine('读不到这个任务的角色记录。'));
+  else if (task.origin?.source_kind === 'role' && task.origin.executor_role) section.append(element('p', `任务执行角色：${task.origin.executor_role}。实际运行与独立 QA 记录将在下方显示。`));
   else if (controller) {
     const legacy = roles.snapshot(controller.snapshot_id)?.legacy;
     section.append(element('p', `角色协调：主控 Manager（${harnessName(controller.harness)}${legacy ? '，旧配置沿用' : ''}）按需委派工作，候选由它提名后交给独立 QA。`));
@@ -559,7 +561,7 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
   if (task.origin) { const origin = card('任务来源与执行者'); origin.append(note(taskOriginCaption(task.origin)), facts([['来源消息', task.origin.source_message], ['父任务', task.origin.source_task_id]])); side.append(origin); }
-  if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(record, roles, purposes));
+  if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(task, record, roles, purposes));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
   const info = card('任务');
   info.append(facts([['优先级', task.priority || 'P2'], ['入队序号', String(task.queue_seq ?? '—')], ['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],

@@ -269,3 +269,19 @@ test('software request endpoint is explicit, defaults off and intersects fixed s
   assert.equal(new TaskRecords(s).get(report).contract.endpoint,'report');
   assert.throws(()=>commands.tool(caller(),'create_task',{request:'Unknown endpoint',criteria:['Valid result'],endpoint:'merge'}),{code:'invalid_task_endpoint'});
 });
+
+
+test('managed-task context keeps large candidate bodies as references and reads scoped originals in bounded chunks',async t=>{
+  const {s,commands,caller,create}=fixture(t),source=caller(),id=create(source).id,records=new TaskRecords(s),{observation}=await import('../dist/tasks/evidence.js');
+  const raw=JSON.stringify({execution:'bounded-context',name:'read_file',version:'v1',result:{content:'raw-evidence-marker'.repeat(20000)}});
+  records.history(id,'execution_evidence',JSON.parse(raw));const history=s.get('SELECT id FROM task_history WHERE task_id=? ORDER BY id DESC LIMIT 1',id).id;
+  records.submit(id,[{kind:'report',reference:'task:'+id+':report',version:'v1',content:{body:'artifact-body-marker'.repeat(20000)}}],[observation('task_history:'+history,'v1',raw)],{summary:'The retained result is available by reference'});
+  const context=commands.tool(source,'read_managed_task',{task_id:id});const text=JSON.stringify(context);
+  assert.ok(!text.includes('raw-evidence-marker'));assert.ok(!text.includes('artifact-body-marker'));assert.equal(context.task.candidate.evidence[0].source,'task_history:'+history);
+  const original=commands.tool(source,'read_managed_task',{task_id:id,source:'task_history:'+history,offset:raw.indexOf('raw-evidence-marker'),length:96}).evidence;
+  assert.equal(original.chunk.length,96);assert.ok(original.chunk.startsWith('raw-evidence-marker'));assert.equal(original.total,raw.length);
+  const other=create(source,'A separate item').id;
+  assert.equal(commands.tool(source,'read_managed_task',{task_id:other,source:'task_history:'+history}).evidence.error,'evidence_not_offered');
+  assert.throws(()=>commands.tool(source,'read_managed_task',{task_id:id,offset:1}),{code:'evidence_source_required'});
+  assert.ok(JSON.stringify(records.get(id)).includes('artifact-body-marker'),'original task audit is preserved');
+});

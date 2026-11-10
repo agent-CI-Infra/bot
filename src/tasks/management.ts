@@ -222,7 +222,7 @@ const tool = (name: string, description: string, properties: any, required: stri
   parameters: { type: 'object', properties, required, additionalProperties: false } } });
 export const taskManagementTools = [
   tool('list_managed_tasks', 'List tasks owned by this trusted caller. This never reads another conversation or project.', { offset: { type: 'integer' }, limit: { type: 'integer' } }),
-  tool('read_managed_task', 'Read one owned or explicitly assigned task and its current revision.', { task_id: { type: 'string' } }, ['task_id']),
+  tool('read_managed_task', 'Read an owned or assigned task as artifact/evidence references. To read an original observation, pass an offered source and a bounded offset/length. This never returns executor transcripts.', { task_id: { type: 'string' }, source: { type: 'string' }, offset: { type: 'integer' }, length: { type: 'integer',maximum:32000 } }, ['task_id']),
   tool('create_task', 'Create a task in the current project, executing as yourself by default. Another executor requires delegation. Set execute=false to record it without running. A reviewable_pull_request endpoint requires explicit project code/PR writes and source/executor authority; it never bypasses tests or independent QA.', {
     request: { type: 'string' }, criteria: { type: 'array', items: { type: 'string' } }, endpoint: { type: 'string', enum: ['report','reviewable_pull_request'] }, executor_role: { type: 'string' }, execute: { type: 'boolean' } }, ['request', 'criteria']),
   tool('manage_task', 'Append an instruction, continue, pause, or cancel an owned or assigned task. Terminal software deliveries cannot be reopened.', {

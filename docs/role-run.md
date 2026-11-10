@@ -119,3 +119,5 @@ ORDER BY id;
 验证命令：`npm test`（`test/role-run.test.mjs`、`test/run-environments.test.mjs`）与真实 Docker 隔离验收 `npm run test:isolation:docker`（见 [Issue #169 验收](issue-169-acceptance.md)）。
 
 正式 task 与主会话使用同一外部模型账本。ACP 每次 prompt 尝试留下 acp_prompt 回执；它不能证明真实 provider 调用次数或 token，原任务预算查询因此返回 unknown_requests 与 lower_bound，金额保持未知，不当成免费或已知零用量。Claude provider 渐进回执和 Codex 线程 delta 记入同一发票后，任务预算仍以原协议事件为准，不再把投影账单加一次。
+
+普通事项的执行提示和主会话任务读取使用同一 TaskRecords.context，只携带候选 artifact／evidence 引用，不把完整命令日志复制进之后的每次模型请求。read_managed_task 可按已提供的 source、offset、length 复用原 readEvidence 分页读取；原任务归属、来源失效与知识访问检查仍生效，原始任务审计不被裁剪。

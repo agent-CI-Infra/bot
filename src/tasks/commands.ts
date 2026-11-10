@@ -9,6 +9,8 @@ import { captureTaskConfiguration } from './configuration.js';
 import { stageReplanContext } from '../roles/schedule.js';
 import { assertManagedTask, assertManagedExecution, assertTaskCaller, createManagedTask, operatorTaskCaller, taskCallerActor, type TaskCaller } from './management.js';
 import { TaskError } from '../agent/common.js';
+import { readEvidence } from './evidence.js';
+import { taskTraceAccess } from '../memory/access.js';
 import { assertRequestPullRequest, softwareRequest } from './pull-request.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
@@ -170,8 +172,16 @@ export class TaskCommands {
         {...row,summary:'[原来源已变化，旧任务内容不提供给模型]',source_unavailable:true}),has_more:rows.length>limit,next_offset:rows.length>limit?offset+limit:null};
     }
     if(name==='read_managed_task'){
-      fields(args,['task_id']);const id=String(args.task_id);assertManagedTask(this.store,caller,id);const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
-      return {task:this.sourceVisible(task)?new TaskRecords(this.store).get(id):{id,repository_id:task.repository_id,status:task.status,source_unavailable:true},origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
+      fields(args,['task_id','source','offset','length']);const id=String(args.task_id);assertManagedTask(this.store,caller,id);const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
+      if(!this.sourceVisible(task))return {task:{id,repository_id:task.repository_id,status:task.status,source_unavailable:true}};
+      const records=new TaskRecords(this.store);
+      if(args.source!==undefined){
+        if(typeof args.source!=='string')fail(400,'invalid_evidence_source');
+        const candidate=records.get(id).candidate;
+        return {evidence:candidate?readEvidence(this.store,id,candidate,args,taskTraceAccess(this.store,{...task,active_role:caller.role})): {error:'evidence_not_offered'}};
+      }
+      if(args.offset!==undefined||args.length!==undefined)fail(400,'evidence_source_required');
+      return {task:records.context(id),origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
     }
     if(name==='create_task'){
       fields(args,['request','criteria','executor_role','execute','endpoint']);
