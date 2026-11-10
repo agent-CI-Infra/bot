@@ -245,3 +245,27 @@ test('allowed Issue publishing uses Publisher idempotency and unknown reconcilia
   await assert.rejects(reportTaskIssue(s, task, args, new Redactor(), async () => {}, url), { code: 'task_external_write_forbidden' });
   assert.equal(requests.length, before);
 });
+
+test('software request endpoint is explicit, defaults off and intersects fixed source, executor and project writes',async t=>{
+  const {s,save,commands,caller,create}=fixture(t),{assertRequestPullRequest,publishRequestPullRequest}=await import('../dist/tasks/pull-request.js');
+  const before=s.get('SELECT count(*) n FROM tasks').n;
+  const old=caller();assert.throws(()=>create(old,'Deliver a PR',{endpoint:'reviewable_pull_request'}),{code:'task_pull_request_forbidden'});
+  assert.equal(s.get('SELECT count(*) n FROM tasks').n,before,'rejected admission rolls back task/origin/config records');
+  s.run("UPDATE policies SET work_settings=? WHERE repository_id='r'",JSON.stringify({'task.request':{writes:['code','pull_request']}}));
+  assert.throws(()=>create(caller(),'Deliver a PR',{endpoint:'reviewable_pull_request'}),{code:'task_pull_request_forbidden'});
+  save('reviewer',{repository:'write',pull_request:'allow'});
+  assert.throws(()=>create(old,'An older caller cannot gain new authority',{endpoint:'reviewable_pull_request'}),{code:'task_pull_request_forbidden'});
+  const id=create(caller(),'Deliver an explicitly authorized PR',{endpoint:'reviewable_pull_request',execute:false}).id;
+  const task=s.get('SELECT * FROM tasks WHERE id=?',id);assert.equal(JSON.parse(task.input).contract.endpoint,'reviewable_pull_request');assertRequestPullRequest(s,task);
+  await assert.rejects(publishRequestPullRequest(s,task,new Redactor(),async()=>{},()=>{},'http://127.0.0.1:1'),{code:'acceptance_required'});
+  assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',id).executor_role,'reviewer');
+  save('reviewer',{pull_request:'deny',delegation:'allow'});
+  assert.throws(()=>assertRequestPullRequest(s,task),{code:'task_pull_request_forbidden'});
+  assert.throws(()=>create(caller(),'Delegation cannot lend PR authority',{endpoint:'reviewable_pull_request',executor_role:'dev'}),{code:'task_pull_request_forbidden'});
+  const report=create(caller(),'A report still does not ask for publication',{execute:false}).id;
+  assert.equal(JSON.parse(s.get('SELECT input FROM tasks WHERE id=?',report).input).contract.endpoint,'report');
+  const record=new TaskRecords(s).get(report);
+  assert.throws(()=>commands.api({id:'operator',role:'project_admin',repositories:['r']},'PATCH',new URL('http://local/api/tasks/'+report+'/contract'),{expected_revision:record.revision,contract:{...record.contract,endpoint:'reviewable_pull_request'}},caller()),{code:'task_pull_request_forbidden'});
+  assert.equal(new TaskRecords(s).get(report).contract.endpoint,'report');
+  assert.throws(()=>commands.tool(caller(),'create_task',{request:'Unknown endpoint',criteria:['Valid result'],endpoint:'merge'}),{code:'invalid_task_endpoint'});
+});

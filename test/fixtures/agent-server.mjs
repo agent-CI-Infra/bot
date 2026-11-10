@@ -160,7 +160,7 @@ export const server=createServer(async(req,res)=>{
     if((m=/^\/git\/ref\/heads\/(.+)$/.exec(suffix)))return repo.refs[m[1]]?send({ref:'refs/heads/'+m[1],object:{sha:repo.refs[m[1]]}}):send({},404);
     if(suffix==='/git/refs'||suffix.startsWith('/git/refs/heads/')){
       const branch=body.ref?body.ref.slice(11):suffix.slice('/git/refs/heads/'.length);stats.refWrites.push({repository_id:repo.id,branch,method,...body});
-      if(!branch.startsWith('bot/issue-')||body.force===true)return send({},403);
+      if((!branch.startsWith('bot/issue-')&&!/^bot\/task-[a-f0-9]{48}$/.test(branch))||body.force===true)return send({},403);
       if(refFailures>0){refFailures--;return send({message:'Server Error'},500);}
       if(method==='POST'&&repo.refs[branch])return send({},422);
       if(method==='PATCH'&&!commits.get(body.sha).parents.some(p=>p.sha===repo.refs[branch]))return send({},422);

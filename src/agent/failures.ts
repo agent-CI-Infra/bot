@@ -35,7 +35,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'actions_failures_disabled','actions_lease_lost','actions_run_identity_changed','actions_rerun_identity_changed','actions_attempt_identity_changed',
     'actions_jobs_identity_changed','actions_development_disabled','actions_development_not_approved','pr_release_label_conflict',
     // A work type switched off while its task waited or ran (workflow_* before #207).
-    'work_disabled','workflow_disabled','workflow_not_found',
+    'work_disabled','workflow_disabled','workflow_not_found','task_software_disabled',
     // A newer gate onboarding conversation, or a repository stopped while the agent was answering.
     'gate_session_superseded','gate_repository_stopped',
     // The workflow assistant's run was stopped by the person who started it.
@@ -44,7 +44,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'candidate_writer_busy','required_stages_incomplete','lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
   role_configuration: { label:'角色配置', codes:['stage_budget_exhausted','stage_policy_changed','stage_retry_exhausted','stage_plan_stale','role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','agent_backend_unavailable','harness_version_unavailable','harness_role_unsupported',
-    'role_model_not_available','role_model_profile_changed','role_submission_forbidden','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
+    'task_pull_request_forbidden','role_model_not_available','role_model_profile_changed','role_submission_forbidden','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
     'harness_model_api_unsupported','harness_tool_calls_required','harness_structured_output_unsupported','harness_model_profile_unsupported',
     // RoleRun admission, budgets and recovery (#169): fail closed instead of downgrading or switching silently.
     'unsupported_capability','role_budget_exhausted','budget_usage_unknown','conversation_harness_context_required','model_revision_changed','role_recovery_unsupported','claude_cost_budget_unsupported','claude_usage_budget_unknown','claude_tool_name_unsupported','claude_submission_tool_required'] },
@@ -170,6 +170,8 @@ const codeActions: Record<string,string> = {
   bot_rule_too_large:'规则文件和 skill 已不再限制大小，点「重试」即可继续。',
   too_many_bot_skills:'.agents/skills/ 下最多 32 个 SKILL.md：合并或删掉一些，提交到默认分支后点「重试」。',
   pull_request_file_limit:'PR 改动文件过多，bot 无法确认完整差异。拆小 PR 后会重新检视。',
+  task_software_disabled:'项目未开启开发或普通事项。核对项目开关与普通事项配置后重试；报告终点不会因此变为 PR 交付。',
+  task_pull_request_forbidden:'核对普通事项的 code／pull_request 写集合、来源与当前执行角色的文件／PR 能力。任务管理和委派不会增加写权限；旧请求的授权上限不会因后来加权而自动扩大。',
   role_authority_revoked:'角色的权限、角色本身或角色协作在运行中被收回，后续能力调用已停止。恢复角色协调或相应权限配置后点「重试」继续。',
   role_revision_checkpoint:'角色在安全检查点结束本次运行，同一任务和角色实例会带新 revision 自动续接。',
   unsupported_capability:'角色选用的执行后端或运行环境缺少这个阶段要求的能力（例如隔离、原始证据、取消或固定候选），运行没有启动，也不会换用其他后端。到「角色」页改用满足要求的执行后端或环境，保存后任务自动继续。',

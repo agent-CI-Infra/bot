@@ -14,11 +14,12 @@ export function testEvidence(candidate: any) {
     ? 'Reported by the agent; not rerun by the control plane.'
     : `${validation.source==='policy'?'Policy tests: '+validation.command+'\n':''}Exit code: ${validation.exit_code}`);
 }
-export function implementationText(candidate: any, issue: number) {
-  const title = shortTitle(candidate.change_title || `Implement #${issue}: ${candidate.implementation_goal || 'Update implementation'}`);
+export function implementationText(candidate: any, issue: number | null) {
+  const linked = Number.isSafeInteger(issue) && Number(issue)>0;
+  const title = shortTitle(candidate.change_title || (linked ? `Implement #${issue}: ` : '') + (candidate.implementation_goal || 'Update implementation'));
   // The model is told the control plane links the Issue; a summary that closes it anyway is not given a second line.
   const closes = new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s+(?:[\\w.-]+/[\\w.-]+)?#${issue}(?!\\d)`, 'i').test(String(candidate.summary));
-  const body = `${candidate.summary}${closes ? '' : `\n\nCloses #${issue}`}\n\n${testEvidence(candidate)}\nCommit: ${candidate.remote_sha}`;
+  const body = `${candidate.summary}${!linked || closes ? '' : `\n\nCloses #${issue}`}\n\n${testEvidence(candidate)}\nCommit: ${candidate.remote_sha}`;
   return { title, body };
 }
 // Presentation-only routing reasons are retained in task results, never published as findings.

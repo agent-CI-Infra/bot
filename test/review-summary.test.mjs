@@ -245,3 +245,10 @@ test('a development PR body links its Issue once, also when the summary already 
   // Another Issue's number is not this Issue.
   assert.match(implementationText(candidate('Closes #31'), 3).body, /^Closes #3$/m);
 });
+
+test('a direct software request never invents an Issue link or numbered title',()=>{
+  const candidate={summary:'Deliver the scoped change.',implementation_goal:'Add the verified feature',validation:{source:'policy',command:'make test',exit_code:0},remote_sha:'a'.repeat(40)};
+  for(const issue of [null,0,undefined]){
+    const text=implementationText(candidate,issue);assert.equal(text.title,'Add the verified feature');assert.doesNotMatch(text.body,/Closes #|#(?:null|undefined|0)\b/);assert.match(text.body,/Policy tests: make test/);
+  }
+});
