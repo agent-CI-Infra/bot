@@ -212,6 +212,12 @@ test('official history protocol uses max pages and thread containers; queries ma
   await post(h, id, e);
   const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_history'");
   const job = h.store.get("SELECT * FROM channel_sync_jobs WHERE chat_id=? AND container_type='chat'", chat.id);
+  const plainReply = service.adapter(service.connector(id)).normalize(envelope('ordinary reply', { message: { root_id: 'om_root', parent_id: 'om_parent' } }));
+  assert.equal(plainReply.root_id, 'om_root'); assert.equal(plainReply.thread_id, '');
+  const rich = service.adapter(service.connector(id)).normalize(envelope('', { message: { message_type: 'post', content: '{"zh_cn":{"title":"Decision","content":[[{"tag":"text","text":"Use the approved plan"}]]}}' } }));
+  assert.equal(rich.content, 'Decision\nUse the approved plan');
+  const long = 'complete text '.repeat(2000);
+  assert.equal(service.adapter(service.connector(id)).normalize(envelope(long)).content, long);
   await service.adapter(service.connector(id)).history(job);
   const request = new URL(wire.state.historyRequests[0]);
   assert.equal(request.searchParams.get('page_size'), '50'); assert.equal(request.searchParams.get('sort_type'), 'ByCreateTimeAsc');
@@ -248,4 +254,26 @@ test('official SDK frame ACK is 500 on transaction failure and 200 only after le
   await sdk.handleEventData(frame);
   assert.equal(replies[1].code, 200); assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, 1);
   assert.equal(h.store.get('SELECT count(*) n FROM channel_messages').n, 1);
+});
+
+test('bot join starts only local recording and visible-history work; project access alone cannot read a chat', async t => {
+  const { h, id, service, wire, admin, member, requests } = await channelFixture(t);
+  service.historySync.close();
+  const before = h.store.get('SELECT count(*) n FROM scoped_grants').n;
+  const joined = envelope(); joined.header.event_type = 'im.chat.member.bot.added_v1'; joined.event = { chat_id: 'oc_joined' };
+  const receipt = await post(h, id, joined);
+  assert.equal(receipt.status, 200);
+  const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_joined'");
+  assert.equal(h.store.get('SELECT state FROM channel_sync_jobs WHERE chat_id=?', chat.id).state, 'pending');
+  await finished(h, receipt.value.operation_id);
+  await until(() => wire.sent.length > 0);
+  assert.equal(requests.length, 0);
+  assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, before);
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_group_scopes').n, 0);
+  assert.ok(JSON.stringify(wire.sent[0].content).includes('另行启用'));
+  const user = await member('history-project-reader', { repository_ids: ['101'] });
+  assert.equal((await user.client('/api/channels/chats')).status, 403);
+  assert.equal((await user.client(`/api/channels/chats/${chat.id}/messages`)).status, 403);
+  assert.equal((await user.client(`/api/channels/chats/${chat.id}/sync`, 'POST', {})).status, 403);
+  assert.equal((await admin(`/api/channels/chats/${chat.id}/messages`)).status, 200);
 });
