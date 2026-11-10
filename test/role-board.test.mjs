@@ -133,12 +133,11 @@ test('角色限额是增量 PATCH：只改给出的键，其余上限保持不�
   assert.equal(view.roles.find(role => role.role === 'reviewer').limit, 4);
 });
 
-test('角色看板只读取当前角色定义内的键，删除后重建的角色不继承旧上限', async t => {
+test('角色看板只读取当前角色定义内的键，并允许名为 constructor 的角色', async t => {
   // This one needs the role configuration endpoint, which is served by the engine; the rest of this file only needs the
   // control plane, so it uses the plain fixture.
   const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
-  // A key nobody defined is ignored on read instead of coming back when a role with that id is created later.
   h.store.run("UPDATE policies SET role_concurrency='{\"ghost\":9}' WHERE repository_id='101'");
   assert.deepEqual((await admin('/api/repositories/101')).value.policy.role_concurrency, {});
   assert.equal((await board(admin)).value.roles.every(role => role.limit === null), true);
@@ -152,6 +151,67 @@ test('角色看板只读取当前角色定义内的键，删除后重建的角�
   const written = await policy(admin, { role_concurrency: { constructor: 1 } });
   assert.equal(written.status, 200, JSON.stringify(written.value));
   assert.deepEqual((await admin('/api/repositories/101')).value.policy.role_concurrency, { constructor: 1 });
+});
+
+test('删除角色会结束其限额生命周期，同名重建及重启后仍为未设置', async t => {
+  const h = await harness(t, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) })), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101');
+  const putRoles = body => admin('/api/repositories/101/roles', 'PUT', {
+    expected_revision: body.expected_revision, enabled: true, roles: body.roles ?? [], required_stages: [], ...(body.deleted_roles ? { deleted_roles: body.deleted_roles } : {}) });
+  const initial = await putRoles({ expected_revision: 0 });
+  assert.equal(initial.status, 200, JSON.stringify(initial.value));
+  assert.equal((await policy(admin, { role_concurrency: { dev: 3, reviewer: 4 } })).status, 200);
+
+  const removed = await putRoles({ expected_revision: initial.value.configuration.revision, deleted_roles: ['dev'] });
+  assert.equal(removed.status, 200, JSON.stringify(removed.value));
+  assert.equal(removed.value.configuration.roles.some(role => role.role_id === 'dev'), false);
+  assert.deepEqual((await admin('/api/repositories/101')).value.policy.role_concurrency, { reviewer: 4 });
+  assert.deepEqual(JSON.parse(h.store.get("SELECT role_concurrency FROM policies WHERE repository_id='101'").role_concurrency), { reviewer: 4 });
+
+  const recreated = await putRoles({ expected_revision: removed.value.configuration.revision, roles: [{ role_id: 'dev' }] });
+  assert.equal(recreated.status, 200, JSON.stringify(recreated.value));
+  const beforeRestart = (await board(admin)).value;
+  assert.equal(beforeRestart.enforced, false);
+  assert.equal(beforeRestart.roles.find(role => role.role === 'dev').limit, null);
+  assert.equal(beforeRestart.roles.find(role => role.role === 'dev').limit_source, 'unset');
+  assert.equal(beforeRestart.roles.find(role => role.role === 'reviewer').limit, 4);
+
+  await h.stop(); await h.start();
+  assert.deepEqual((await admin('/api/repositories/101')).value.policy.role_concurrency, { reviewer: 4 });
+  const afterRestart = (await board(admin)).value;
+  assert.equal(afterRestart.roles.find(role => role.role === 'dev').limit, null);
+  assert.equal(afterRestart.roles.find(role => role.role === 'dev').limit_source, 'unset');
+  assert.equal(afterRestart.roles.find(role => role.role === 'reviewer').limit, 4);
+});
+
+test('ready 只包含已到期且 wait_for_review 依赖满足的任务', async t => {
+  const { h, admin } = await fixture(t);
+  const stage = { stage_id: 'review', depends_on: [], delivery_types: ['code'], required: true, retry: { max_attempts: 2 }, budget: { max_tool_calls: 8 },
+    role_constraints: { kinds: ['observer'], role_ids: ['reviewer'], capabilities: ['raw_evidence', 'fixed_candidate_read', 'fresh_context'], independent: true },
+    completion: { evidence_types: ['role_result'], min_evidence: 1, no_findings: true } };
+  const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, roles: [], required_stages: [stage] });
+  assert.equal(saved.status, 200, JSON.stringify(saved.value));
+  const insert = h.store.db.prepare('INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at,input,next_run_at) VALUES(?,?,?,?,?,?,?,?,?)');
+  const now = Date.now();
+  insert.run('dependency', '101', 'review.pr', 'running', 'dependency', 90, '2026-11-10T00:00:00Z', '{}', 0);
+  insert.run('q-missing', '101', 'review.pr', 'queued', 'missing dependency', 1, '2026-11-10T00:00:01Z', JSON.stringify({ wait_for_review: 'absent' }), 0);
+  insert.run('q-future', '101', 'review.pr', 'queued', 'future', 2, '2026-11-10T00:00:02Z', '{}', now + 60_000);
+  insert.run('q-waiting', '101', 'review.pr', 'queued', 'waiting', 3, '2026-11-10T00:00:03Z', JSON.stringify({ wait_for_review: 'dependency' }), 0);
+  insert.run('q-due', '101', 'review.pr', 'queued', 'due', 4, '2026-11-10T00:00:04Z', '{}', now - 1);
+  const ready = view => view.roles.find(role => role.role === 'reviewer').ready;
+
+  const waiting = await board(admin);
+  assert.equal(waiting.status, 200, JSON.stringify(waiting.value));
+  assert.deepEqual(waiting.value.unsupported, []);
+  assert.deepEqual(ready(waiting.value).map(entry => [entry.task_id, entry.position]), [['q-due', 1]]);
+
+  h.store.run('UPDATE tasks SET next_run_at=? WHERE id=?', now, 'q-future');
+  h.store.run("UPDATE tasks SET status='succeeded' WHERE id='dependency'");
+  const eligible = await board(admin);
+  assert.equal(eligible.status, 200, JSON.stringify(eligible.value));
+  assert.deepEqual(ready(eligible.value).map(entry => [entry.task_id, entry.position]), [['q-future', 1], ['q-waiting', 2], ['q-due', 3]]);
+  assert.equal(ready(eligible.value).some(entry => entry.task_id === 'q-missing'), false);
+  assert.equal(eligible.value.enforced, false);
 });
 
 test('角色看板封顶扫描 500 个排队任务，截断时 ready_more 为 true', async t => {

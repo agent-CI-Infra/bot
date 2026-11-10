@@ -4,6 +4,7 @@ import { fail, type Json } from '../core/security.js';
 import { roleConfiguration } from './definition.js';
 import { stageAllows, type StageDefinition } from './stage-policy.js';
 import { concurrencyBounds, defaultConcurrency, repositoryConcurrency } from '../app/settings.js';
+import { waitForReviewSatisfied } from '../tasks/readiness.js';
 
 // #228 contract B: a read-only projection of per-role occupancy and the queue. Nothing here admits or blocks a run;
 // `enforced` is part of the contract and stays false until the admission pull request (#228, second PR) lands.
@@ -19,9 +20,8 @@ const roleKeys = new Set(['__proto__']);
 
 /**
  * Per-role concurrency overrides stored on the project policy. null means "explicitly unset", a missing key is "not
- * changed". This is the only read entry: it drops keys for roles the project no longer defines, so a later role with
- * the same id does not inherit a limit nobody set for it, and it drops values outside the shared bounds. Admission
- * (#228, second PR) must read through here rather than parsing the JSON itself.
+ * changed". Role deletion removes its stored entry; this read entry also drops stale or unknown role keys and values
+ * outside the shared bounds. Admission (#228, second PR) must read through here rather than parsing the JSON itself.
  */
 export function roleConcurrency(store: Store, repositoryId: string): Record<string, number | null> {
   const raw = store.get('SELECT role_concurrency FROM policies WHERE repository_id=?', repositoryId)?.role_concurrency;
@@ -82,22 +82,24 @@ function nextStage(store: Store, taskId: string, order: StageDefinition[]): Stag
 
 /**
  * GET /api/repositories/:id/role-board. Display only: `enforced` is always false and no run is blocked by it.
- * A queued task is only attributed to a role when the project's stage policy names exactly one eligible role for the
- * stage the task is waiting for; otherwise the whole queue projection reports unsupported:["role_queue"] and `ready`
- * stays empty, because guessing a role from the task kind would show a number the scheduler does not honour.
+ * Only due queued tasks whose wait_for_review dependency is settled are considered. A task is attributed to a role only
+ * when the project's stage policy names exactly one eligible role for its next stage; otherwise the whole queue projection
+ * reports unsupported:["role_queue"] and `ready` stays empty, because guessing from the task kind would show a number
+ * the scheduler does not honour.
  */
 export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
   const limit = (() => { const raw = url?.searchParams.get('ready_limit'); if (raw === null || raw === undefined) return defaultReadyLimit; if (!/^\d+$/.test(raw)) fail(400, 'invalid_ready_limit'); const value = Number(raw); if (!Number.isSafeInteger(value) || value < 1 || value > maxReady) fail(400, 'invalid_ready_limit'); return value; })();
   const config = roleConfiguration(store, repositoryId), limits = roleConcurrency(store, repositoryId);
   const stages = ordered(config.required_stages ?? []);
-  const queued = store.all('SELECT id,kind,object_number,created_at FROM tasks WHERE repository_id=? AND status=\'queued\' ORDER BY created_at,id LIMIT ?', repositoryId, queueScanLimit + 1);
+  const queued = store.all('SELECT id,kind,object_number,created_at,input FROM tasks WHERE repository_id=? AND status=\'queued\' AND next_run_at<=? ORDER BY created_at,id LIMIT ?', repositoryId, Date.now(), queueScanLimit + 1);
   let truncated = queued.length > queueScanLimit;
   if (truncated) queued.length = queueScanLimit;
+  const eligible = queued.filter(task => waitForReviewSatisfied(store, task));
   const attribution = new Map<string, string>();
   let unsupported: string[] = [];
   if (!stages.length) unsupported = ['role_queue'];
   else {
-    const ambiguous = queued.filter(task => {
+    const ambiguous = eligible.filter(task => {
       const stage = nextStage(store, task.id, stages);
       const candidates = stage ? config.roles.filter(role => role.enabled && stageAllows(stage, role)) : [];
       if (candidates.length === 1) { attribution.set(task.id, candidates[0]!.role_id); return false; }
@@ -105,7 +107,7 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
     });
     if (ambiguous.length) unsupported = ['role_queue'];
   }
-  const ready = queued.map((task, index) => ({ task, position: index + 1, role: unsupported.length ? null : attribution.get(task.id) ?? null }));
+  const ready = eligible.map((task, index) => ({ task, position: index + 1, role: unsupported.length ? null : attribution.get(task.id) ?? null }));
   const roles = config.roles.map(role => {
     const running = store.all(`SELECT r.id AS run_id,r.task_id,t.object_number,t.kind,r.role_instance_id,r.started_at
       FROM task_runs r JOIN tasks t ON t.id=r.task_id

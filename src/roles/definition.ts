@@ -266,6 +266,15 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
 export function saveConfiguration(s: Store, repositoryId: string, input: any, actor: string) {
   return s.transaction(() => {
     const current = roleConfiguration(s, repositoryId), { config, added } = normalizeConfiguration(s, repositoryId, input, current), now = new Date().toISOString();
+    if (input.deleted_roles?.length) {
+      const raw = s.get('SELECT role_concurrency FROM policies WHERE repository_id=?', repositoryId)?.role_concurrency;
+      let limits: unknown;
+      try { limits = JSON.parse(String(raw ?? '{}')); } catch { limits = {}; }
+      if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
+        for (const role of input.deleted_roles as string[]) delete (limits as Record<string, unknown>)[role];
+        s.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify(limits), repositoryId);
+      }
+    }
     for (const bundle of added) s.run('INSERT INTO skill_bundle_revisions VALUES(?,?,?,?,?,?,?)', repositoryId, bundle.id, bundle.revision, JSON.stringify(bundle.source), JSON.stringify(bundle.files.map((f: any) => ({ path: f.path, sha256: sha256(f.content), bytes: Buffer.byteLength(f.content), content: f.content }))), bundle.content_hash, now);
     const saved = { ...config, updated_at: now, updated_by: actor };
     s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?)', repositoryId, saved.revision, JSON.stringify(saved), short(config), actor, now);
