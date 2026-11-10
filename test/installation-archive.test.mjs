@@ -13,6 +13,10 @@ import { Redactor } from '../dist/agent/common.js';
 import { loadConsole } from './console-page.mjs';
 import { ProjectRemoval } from '../dist/projects/removal.js';
 import { GateOnboarding } from '../dist/projects/gate-onboarding.js';
+import { TaskEngine, resumeInstallationWaits } from '../dist/agent/engine.js';
+import { enqueue } from '../dist/review/queue.js';
+import { explainFailure } from '../dist/agent/failures.js';
+import { acceptanceFixture } from './acceptance-fixture.mjs';
 
 const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
 const ref = { github_host: 'github.com', app_id: '123', installation_id: '77' }, key = 'github.com/123/77';
@@ -242,6 +246,58 @@ test('repository removal fences cached GitHub and gate-onboarding tokens and dom
   assert.equal(next.filter(row => row.event.type === 'installation.access_revoked').length, 1);
   assert.deepEqual(next.find(row => row.event.type === 'installation.access_revoked').event.repository_ids, ['101']);
   assert.ok(!JSON.stringify(next).includes(token)); await gate.revoke(app);
+});
+
+test('tasks stopped while access was revoked or being re-verified resume once the projection allows the repository, and only then', async t => {
+  const f = await fixture(t); await f.sync().sync(f.a.id); await f.admin('/api/installations/101/activate', 'POST', {});
+  // Tasks as an earlier version left them: stopped at a checkpoint or a GitHub request, then never released.
+  const parked = (number, code = 'github_installation_access_revoked') => {
+    const id = f.h.store.transaction(() => enqueue(f.h.store, '101', 'review.issue', number, null, { number }));
+    f.h.store.run("UPDATE tasks SET status='waiting_permission',error_code=?,next_run_at=? WHERE id=?", code, Date.now() + 3600_000, id); return id;
+  };
+  const task = id => f.h.store.get('SELECT status,error_code,next_run_at FROM tasks WHERE id=?', id);
+  const resumed = id => f.h.store.all("SELECT content FROM task_logs WHERE task_id=? AND json_extract(content,'$.type')='queued' AND json_extract(content,'$.code') IS NOT NULL", id).map(row => JSON.parse(row.content));
+  const waiting = parked(1), other = parked(2, 'github_permission_403'), running = parked(3);
+  // all → selected with an empty removed list: the scope is re-verified and nothing may run until the sync completes.
+  await f.hook('selected', { action: 'removed', installation: installation(), repository_selection: 'selected', repositories_added: [], repositories_removed: [] }, 'installation_repositories');
+  assert.equal(installationExecutionDenied(f.h.store, f.a.id, '101'), true);
+  resumeInstallationWaits(f.h.store, () => false);
+  assert.equal(task(waiting).status, 'waiting_permission'); assert.equal(resumed(waiting).length, 0);
+  f.state.installations[0].repository_selection = 'selected'; await f.sync().sync(f.a.id);
+  assert.equal(installationExecutionDenied(f.h.store, f.a.id, '101'), false);
+  // A task that is still stopping is left to its own run; another waiting reason is not this wait's to end.
+  resumeInstallationWaits(f.h.store, id => id === running);
+  assert.deepEqual({ ...task(waiting) }, { status: 'queued', error_code: null, next_run_at: 0 });
+  assert.deepEqual(resumed(waiting).map(log => [log.code, log.detail]), [['github_installation_access_revoked', '安装同步已确认仓库可以执行，任务自动恢复排队。']]);
+  assert.ok(f.h.store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='installation_resumed' AND actor='framework'", waiting));
+  assert.deepEqual([task(other).status, task(other).error_code], ['waiting_permission', 'github_permission_403']);
+  assert.equal(task(running).status, 'waiting_permission');
+  resumeInstallationWaits(f.h.store, () => false);
+  assert.equal(task(running).status, 'queued'); assert.equal(resumed(waiting).length, 1, 'a resumed task is not resumed again');
+  // Suspension and removal are real revocations: the tasks keep waiting through every reconciliation.
+  const suspended = parked(4);
+  await f.hook('suspend', { ...created(), action: 'suspend' }); resumeInstallationWaits(f.h.store, () => false);
+  assert.equal(task(suspended).status, 'waiting_permission');
+  f.state.detail = installation(); await f.sync().sync(f.a.id); resumeInstallationWaits(f.h.store, () => false);
+  assert.equal(task(suspended).status, 'queued', 'a sync that confirms the installation is active again releases the wait');
+  const removed = parked(5);
+  await f.hook('removed', { action: 'removed', installation: installation(), repositories_removed: [{ id: 101 }], repositories_added: [] }, 'installation_repositories');
+  f.state.repositories[77] = []; await f.sync().sync(f.a.id); resumeInstallationWaits(f.h.store, () => false);
+  assert.equal(task(removed).status, 'waiting_permission');
+});
+
+test('a newly started engine releases installation waits left by an earlier process and runs them through its checkpoints', async t => {
+  const f = await fixture(t); await f.sync().sync(f.a.id); await f.admin('/api/installations/101/activate', 'POST', {});
+  const id = f.h.store.transaction(() => enqueue(f.h.store, '101', 'review.issue', 1, null, { number: 1 }));
+  f.h.store.run("UPDATE tasks SET status='waiting_permission',error_code='github_installation_access_revoked' WHERE id=?", id);
+  const manager = { call: async (_method, path, body) => path.endsWith('/parallel') ? { parallel: body.tasks } : { repository_id: '101', state: 'failed', generation: 1, computer: {} } };
+  const engine = new TaskEngine(f.h.store, manager, f.apiUrl, undefined, acceptanceFixture); t.after(() => engine.close());
+  engine.tick(); assert.ok(engine.active.has(id), 'the released task is claimed on the same tick'); await engine.active.get(id);
+  const task = f.h.store.get('SELECT status,error_code FROM tasks WHERE id=?', id);
+  // Past the installation checkpoint the task stops on what it needs next (here, a model for the project).
+  assert.deepEqual({ ...task }, { status: 'waiting_configuration', error_code: 'model_not_configured' });
+  assert.equal(explainFailure('github_installation_access_revoked', 'waiting_permission').automatic, true);
+  assert.match(explainFailure('github_installation_access_revoked', 'waiting_permission').action, /自动继续/);
 });
 
 test('scope contraction with empty removed, new repositories, renames and owner transfers reconcile without changing hidden or disabled settings', async t => {

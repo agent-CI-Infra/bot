@@ -72,6 +72,8 @@ export function failureCause(code: string, state?: string): FailureCause {
 
 // These states are polled by the engine and continue on their own; every other paused or failed state waits for 重试.
 const automatic = new Set(['queued','retry_wait','waiting_coordination','waiting_configuration','waiting_environment','waiting_pr_head']);
+// A wait the engine ends by itself once its condition is gone, in a state that otherwise waits for a person.
+const resumedWaits = new Set(['github_installation_access_revoked']);
 const environmentFailures = new Set(['execution_interrupted','workspace_init_failed','workspace_write_failed',
   'workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable']);
 // waiting_environment covers both unmet conditions and failed attempts. Only the latter consume the retry burst;
@@ -137,6 +139,7 @@ const codeActions: Record<string,string> = {
   agent_turn_limit:'Agent 已达到本次运行轮次上限。先检查已有结果，再调整任务范围或运行限制后重试。',
   repository_has_no_commit:'向仓库推送第一个提交后自动继续。',
   pr_head_pending:'正在等待 GitHub 把 PR head 更新到刚推送的提交，确认后自动继续。',
+  github_installation_access_revoked:'GitHub App 安装已暂停、卸载、仓库被移出安装，或安装范围正在核实。安装同步确认仓库可以访问后任务自动继续，无需点「重试」；安装确实被撤销时，先在 GitHub 恢复安装或把仓库加回安装范围。',
   object_closed_or_draft:'Issue 或 PR 已关闭或转为草稿，任务已结束，无需处理。',
   task_claim_revoked:'任务已被取消或由其他执行接管，无需处理。',
   repository_policy_disabled:'仓库已停用这类任务，任务已结束；需要时在项目设置里重新开启。',
@@ -206,5 +209,5 @@ export function explainFailure(code: string|null|undefined, state = 'failed', de
       : '模型连续 90 秒没有 token 输出，已自动重试 5 次仍失败。请检查模型服务的输出是否中断，恢复后点「重试」。',
   };
   const action = codeActions[code] || (ended.has(state) ? '任务已结束，无需处理。' : causeActions[cause](state));
-  return { cause, label: causes[cause].label, action, automatic: automatic.has(state), attempt_retry };
+  return { cause, label: causes[cause].label, action, automatic: automatic.has(state) || state === 'waiting_permission' && resumedWaits.has(code), attempt_retry };
 }

@@ -93,7 +93,7 @@ export class GitHub {
     await this.guard();
     this.store?.checkAuthorization();
     if (this.store && installationExecutionDenied(this.store, String(this.repository.account_id), String(this.repository.id)))
-      stop('github_installation_access_revoked', 'waiting_permission', 'GitHub App 安装已暂停、卸载或正在核实范围；请等待安装同步后重试。');
+      stop('github_installation_access_revoked', 'waiting_permission', 'GitHub App 安装已暂停、卸载或正在核实范围，等待安装同步确认。');
     // A window that is used up (or refused a moment ago) is not sent into: the task waits until GitHub resets it.
     const window = token && token === this.token ? this.tokenWindow : token && token === this.jwt ? this.appWindow : undefined, blocked = window ? blockedUntil(this.store, window) : null;
     if (blocked) stop('github_rate_limited', 'retry_wait', `GitHub 流控：${bucketName(window!)}本小时的请求额度已用完，${utcTime(blocked)} 重置后继续（${method} ${path} 未发送）。`, blocked - Date.now(), window!.key);
