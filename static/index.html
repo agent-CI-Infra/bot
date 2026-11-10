@@ -4,6 +4,7 @@
 <body>
 <header><div class="brand"><strong>launchpad</strong><span class="sub">管理控制台</span></div><nav id="tabs" hidden aria-label="管理页面"><button data-tab="projects">项目</button><button data-tab="management">管理对话</button><button data-tab="identity">身份与权限</button><button data-tab="board">看板</button><button data-tab="costs">统计</button><button data-tab="events">Webhook 投递</button><button data-tab="external">外部执行端</button><button data-tab="settings" data-super>全局设置</button></nav><div id="identity" hidden><span id="who"></span><button id="logout" class="quiet">退出登录</button></div></header>
 <main>
+<p id="boot" class="boot" role="status">正在载入…</p>
 <section id="access" class="card" hidden>
   <p class="eyebrow">管理入口</p><h1 id="access-title">登录</h1><p id="access-description"></p>
   <form id="access-form"><label>用户名<input name="username" autocomplete="username" maxlength="100" required></label><label>密码<input name="password" type="password" minlength="12" maxlength="256" autocomplete="current-password" required></label><button type="submit" id="access-submit">登录</button></form><p><a id="github-login" href="/auth/github/start" hidden>使用 GitHub 登录</a></p><p class="muted">本地超级管理员可使用本地账号登录恢复访问。</p>

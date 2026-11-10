@@ -7,9 +7,14 @@ export interface ActorContext {
   principal_id: string; tenant_id: string | null; project_id?: string; channel: 'web' | 'api' | 'im' | 'service';
   capabilities: string[]; authorization_revision: number; request_id: string;
 }
+// Why a grant is not usable yet, for the three conditions a client can act on differently. Additive: a
+// grant that is `pending_verification` for any other reason (an expired grant, or no active GitHub proof)
+// carries no `reason`, and a client falls back to its combined wording exactly as before.
+export type ScopeReason = 'installation_pending' | 'permission_pending' | 'tenant_missing';
 export interface EffectiveScope {
   grant_id: string; tenant_id: string | null; project_id: string | null; scope: string; role: string;
   capabilities: string[]; source: string; verified_at: number; expires_at: number | null; state: string;
+  reason?: ScopeReason;
 }
 // Object identity is the trust boundary. Deserializing an ActorContext never creates an authenticated actor.
 const issued = new WeakMap<ActorContext, { store: Store; session?: string; guard?: () => void; parent?: ActorContext; allowedCapabilities?: string[] }>();
@@ -56,14 +61,21 @@ export function listEffectiveScopes(store: Store, principal: string): EffectiveS
     capabilities: ['*'], source: 'explicit_delegation', verified_at: 0, expires_at: null, state: 'active' }] : [];
   for (const g of store.all('SELECT * FROM scoped_grants WHERE principal_id=?', principal)) {
     let state = g.revoked_at ? 'revoked' : g.expires_at !== null && g.expires_at <= Date.now() ? 'pending_verification' : 'active';
+    let reason: ScopeReason | undefined;
     if (g.source === 'github_derived' && state === 'active') {
       const installation = store.get('SELECT * FROM github_installations WHERE ref=?', g.installation_ref);
       const identity = store.get("SELECT 1 FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", principal);
       if (!identity || !installation || installation.status !== 'active' || installation.scope_pending || installation.revision !== g.installation_revision) state = 'pending_verification';
+      // Same decision, with the sub-condition kept as a label. Only the installation branches name a reason;
+      // a missing/expired GitHub proof is not one of the three, and keeps the client's combined sentence.
+      if (state === 'pending_verification')
+        reason = !installation || installation.revision !== g.installation_revision ? 'installation_pending'
+          : installation.status !== 'active' || installation.scope_pending ? 'permission_pending' : undefined;
     }
-    if (!g.tenant_id || !store.get('SELECT 1 FROM tenants WHERE id=?', g.tenant_id)) state = 'quarantined';
+    if (!g.tenant_id || !store.get('SELECT 1 FROM tenants WHERE id=?', g.tenant_id)) { state = 'quarantined'; reason = 'tenant_missing'; }
     result.push({ grant_id: g.id, tenant_id: g.tenant_id, project_id: g.project_id, scope: g.scope, role: g.role,
-      capabilities: JSON.parse(g.capabilities), source: g.source, verified_at: g.verified_at, expires_at: g.expires_at, state });
+      capabilities: JSON.parse(g.capabilities), source: g.source, verified_at: g.verified_at, expires_at: g.expires_at, state,
+      ...(reason ? { reason } : {}) });
   }
   return result;
 }

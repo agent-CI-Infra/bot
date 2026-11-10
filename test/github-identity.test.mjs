@@ -311,3 +311,53 @@ test('incomplete installation evidence, a different App or credential rotation c
   await f.identity.reverify(p); assert.equal(active(h.store, p).some(g => g.project_id === '101'), true);
   assert.equal(active(h.store, p).some(g => g.role === 'org_admin'), false);
 });
+
+test('a pending grant names the condition it waits on; states outside the three names keep no reason', async t => {
+  const f = await identityFixture(t), { h } = f, login = await f.login(), p = login.result.principal_id;
+  const credential = session(h.store, p, login.result.identity_id);
+  // The response the console reads, not the internal list: this is what has to stay backward compatible.
+  const scopes = async () => {
+    const response = await fetch(h.admin + '/api/identity', { headers: { Cookie: 'bot_session=' + credential.token } });
+    assert.equal(response.status, 200);
+    return (await response.json()).scopes.filter(g => g.source === 'github_derived');
+  };
+  const grant = h.store.get("SELECT * FROM scoped_grants WHERE principal_id=? AND source='github_derived'", p);
+  assert.ok(grant, 'the login above derives a GitHub grant');
+  const installation = () => h.store.get('SELECT * FROM github_installations WHERE ref=?', grant.installation_ref);
+  const before = installation();
+  assert.equal((await scopes())[0].reason, undefined); // an active grant names nothing
+
+  // 1) installation_pending: verified against an installation revision that has moved since.
+  h.store.run('UPDATE github_installations SET revision=revision+1 WHERE ref=?', grant.installation_ref);
+  let [scope] = await scopes();
+  assert.equal(scope.state, 'pending_verification'); assert.equal(scope.reason, 'installation_pending');
+  h.store.run('UPDATE github_installations SET revision=? WHERE ref=?', before.revision, grant.installation_ref);
+
+  // 2) permission_pending: same installation, but its scope is unconfirmed or the installation is not active.
+  h.store.run('UPDATE github_installations SET scope_pending=1 WHERE ref=?', grant.installation_ref);
+  [scope] = await scopes();
+  assert.equal(scope.state, 'pending_verification'); assert.equal(scope.reason, 'permission_pending');
+  h.store.run("UPDATE github_installations SET scope_pending=0, status='suspended' WHERE ref=?", grant.installation_ref);
+  [scope] = await scopes();
+  assert.equal(scope.reason, 'permission_pending');
+  h.store.run('UPDATE github_installations SET status=? WHERE ref=?', before.status, grant.installation_ref);
+  assert.equal((await scopes())[0].reason, undefined); // restored: usable again, no reason
+
+  // 3) tenant_missing: the grant's tenant is gone, which is the quarantined state.
+  const tenant = grant.tenant_id;
+  h.store.run("UPDATE scoped_grants SET tenant_id='missing-tenant' WHERE id=?", grant.id);
+  [scope] = await scopes();
+  assert.equal(scope.state, 'quarantined'); assert.equal(scope.reason, 'tenant_missing');
+  h.store.run('UPDATE scoped_grants SET tenant_id=? WHERE id=?', tenant, grant.id);
+
+  // Outside the three names: an expired grant, and a missing GitHub proof, keep the combined state and no reason.
+  h.store.run('UPDATE scoped_grants SET expires_at=1 WHERE id=?', grant.id);
+  [scope] = await scopes();
+  assert.equal(scope.state, 'pending_verification'); assert.equal('reason' in scope, false);
+  h.store.run('UPDATE scoped_grants SET expires_at=NULL WHERE id=?', grant.id);
+  h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", login.result.identity_id);
+  [scope] = await scopes();
+  assert.equal(scope.state, 'pending_verification'); assert.equal(scope.reason, undefined);
+  h.store.run("UPDATE external_identities SET status='active' WHERE id=?", login.result.identity_id);
+  assert.equal((await scopes())[0].state, 'active');
+});
