@@ -173,7 +173,9 @@ test('角色看板封顶扫描 500 个排队任务，截断时 ready_more 为 tr
   assert.equal(more.value.ready_more, true);
 });
 
-test('角色看板的 blocked 只保留 capacity，不返回永远为空的字段', async t => {
+test('角色看板不返回 blocked：准入落地前没有任何被拦截的数据可报', async t => {
   const { admin } = await fixture(t);
-  for (const role of (await board(admin)).value.roles) assert.deepEqual(Object.keys(role.blocked), ['capacity']);
+  // Nothing in this slice blocks a run, so a `blocked` object could only carry a hard-coded zero. A reader would take
+  // that for a measurement, which is worse than the field being absent until admission lands.
+  for (const role of (await board(admin)).value.roles) assert.equal(Object.hasOwn(role, 'blocked'), false);
 });

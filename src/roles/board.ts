@@ -114,9 +114,10 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
     const mine = ready.filter(entry => entry.role === role.role_id && role.enabled);
     if (mine.length > limit) truncated = true;
     const limitValue = limits[role.role_id] ?? null;
+    // No `blocked` object here: nothing blocks a run in this slice, so any count would be a hard-coded zero that a
+    // reader would take for a measurement. It comes back with admission, when it can report something it actually knows.
     return { role: role.role_id, enabled: !!role.enabled, limit: limitValue, limit_source: limitValue === null ? 'unset' : 'policy',
-      running, ready: mine.slice(0, limit).map(entry => ({ task_id: entry.task.id, object_number: entry.task.object_number, kind: entry.task.kind, queued_at: entry.task.created_at, position: entry.position })),
-      blocked: { capacity: 0 } };
+      running, ready: mine.slice(0, limit).map(entry => ({ task_id: entry.task.id, object_number: entry.task.object_number, kind: entry.task.kind, queued_at: entry.task.created_at, position: entry.position })) };
   });
   const version = createHash('sha256').update(JSON.stringify({ revision: config.revision, updated_at: config.updated_at ?? null, stages: config.required_stages ?? [], limits })).digest('hex').slice(0, 16);
   return { version, updated_at: config.updated_at ?? null, enforced: false,
