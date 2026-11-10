@@ -136,6 +136,11 @@ export function installationExecutionDenied(store: Store, accountId: string, rep
   return !!store.get(`SELECT 1 FROM github_installations g JOIN repositories r ON r.owner_id=g.target_id
     WHERE g.github_host='github.com' AND g.app_id=? AND r.id=? AND r.account_id=? AND (g.status<>'active' OR g.scope_pending=1)`, String(account.app_id), repositoryId, accountId);
 }
+// The same check for a registered project, through the credentials it is registered with. Task checkpoints stop on it,
+// and the engine resumes their waits on it, so a task is let go exactly when its next checkpoint would pass.
+export function repositoryExecutionDenied(store: Store, repositoryId: string): boolean {
+  return installationExecutionDenied(store, String(store.get('SELECT account_id FROM repositories WHERE id=?', repositoryId)?.account_id), repositoryId);
+}
 
 export function installationSnapshot(store: Store, ref: string): InstallationSnapshot | null {
   const row = store.get('SELECT * FROM github_installations WHERE ref=?', ref); if (!row) return null;

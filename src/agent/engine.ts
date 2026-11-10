@@ -24,7 +24,7 @@ import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
 import { GitHub } from '../github/client.js';
-import { installationExecutionDenied } from '../installations/archive.js';
+import { repositoryExecutionDenied } from '../installations/archive.js';
 import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
@@ -57,6 +57,29 @@ const retryCycleMs=8*60*60*1000;
 // Reviews and reply tasks answer on the object; development publishes a branch and PR.
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 const engineKinds="(kind LIKE 'review.%' OR kind LIKE 'development.%' OR kind LIKE 'workflow.%' OR kind IN ('release.observe','release.notes','actions.failures','gate.onboarding','task.request'))";
+// A task stopped here waits for the installation projection, not for a person: the installation was suspended or
+// uninstalled, the repository left it, or its scope was being re-verified (scope_pending, set by every scope-changing
+// webhook and by the first sync after an upgrade). The GitHub client stops on the same check before each request.
+const installationWait='github_installation_access_revoked';
+// Each engine tick lets such tasks go once the projection allows their repository again, whether the sync finished
+// before or after a restart; while access stays denied they keep waiting. A released task is queued like any other, so
+// its next checkpoint still applies the project's policy (a project an administrator disabled ends it there).
+export function resumeInstallationWaits(store:Store,active:(id:string)=>boolean){
+  const denied=new Map<string,boolean>();
+  for(const task of store.all(`SELECT id,repository_id FROM tasks WHERE ${engineKinds} AND status='waiting_permission' AND error_code=?`,installationWait)){
+    const repo=String(task.repository_id);
+    if(active(task.id))continue;
+    if(!denied.has(repo))denied.set(repo,repositoryExecutionDenied(store,repo));
+    if(denied.get(repo))continue;
+    store.transaction(()=>{
+      const now=new Date().toISOString();
+      if(!store.run("UPDATE tasks SET status='queued',error_code=NULL,next_run_at=0,updated_at=? WHERE id=? AND status='waiting_permission' AND error_code=?",now,task.id,installationWait).changes)return;
+      store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),task.id,JSON.stringify({type:'queued',repository_id:repo,code:installationWait,
+        detail:'安装同步已确认仓库可以执行，任务自动恢复排队。'}),now);
+      traceEvent(store,task.id,'installation_resumed',{code:installationWait,reason:'Installation projection allows the repository again'},null,'framework');
+    });
+  }
+}
 const computerSummary=(c:any)=>c?{cpus:c.cpus,memory_mb:c.memory_mb,network:c.network_policy,toolchain:c.build?.toolchain||null,
   extra_packages:c.packages||[],environment_variables:Object.keys(c.env||{}),setup:c.setup?{state:c.setup.state,exit_code:c.setup.exit_code}:null}:null;
 // A repository's tasks share its one project computer: up to its concurrency (project value, else the global default) run
@@ -88,7 +111,7 @@ export class TaskEngine {
   }
   tick(){
     if(this.closing)return;
-    this.coordinator.tick();resumeCoordinatedTasks(this.store,id=>this.active.has(id));
+    this.coordinator.tick();resumeCoordinatedTasks(this.store,id=>this.active.has(id));resumeInstallationWaits(this.store,id=>this.active.has(id));
     // Old installations may have parked candidates at the removed SHA fence. Recover once,
     // retaining their actual snapshots, without requiring an operator script.
     for(const old of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code='base_branch_changed'")){
@@ -193,8 +216,8 @@ export class TaskEngine {
         }
       }
       const policy=this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id);
-      if(installationExecutionDenied(this.store,String(this.store.get('SELECT account_id FROM repositories WHERE id=?',task.repository_id)?.account_id),task.repository_id))
-        stop('github_installation_access_revoked','waiting_permission','安装已失效或正在核实范围，任务等待安装同步。');
+      if(repositoryExecutionDenied(this.store,task.repository_id))
+        stop(installationWait,'waiting_permission','安装已失效或正在核实范围，任务等待安装同步。');
       const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
       if(actionsIssue!==null&&(!policy?.actions_failures_enabled||task.kind.startsWith('development.')&&!actionsDevelopmentAllowed(this.store,task.repository_id,actionsIssue)))stop('actions_development_disabled','cancelled');
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
