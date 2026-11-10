@@ -2,6 +2,7 @@ import { sourceRef } from '../roles/role-run.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {requestIntegration,integratedPublication} from '../tasks/integration.js';
+import { waitForReviewSatisfied } from '../tasks/readiness.js';
 import { checkManagementBudget } from '../management/budget.js';
 import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
@@ -108,8 +109,7 @@ export class TaskEngine {
       status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY created_at,id`,Date.now());
     const limits=new Map<string,number>();
     for(const task of tasks){
-      const dependency=JSON.parse(task.input||'{}').wait_for_review;
-      if(dependency&&![...terminal,'failed','needs_replan'].includes(this.store.get('SELECT status FROM tasks WHERE id=?',dependency)?.status))continue;
+      if(!waitForReviewSatisfied(this.store,task))continue;
       const repo=String(task.repository_id);
       if(this.active.has(task.id)||this.clearing.has(repo))continue;
       // A computer being rebuilt with new default resources takes new tasks once that is done (see ProjectService.reconcileProject).
