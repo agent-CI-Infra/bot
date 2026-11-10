@@ -1,3 +1,4 @@
+import {captureTaskConfiguration} from './configuration.js';
 import {followupDecision,followupTarget,recordFollowupRelation,coordinateFollowup,completedFollowupTarget} from './followups.js';
 import {setTaskPriority,taskRelations} from './priority.js';
 import { reconcileAssignments, assertStageAcceptance } from '../roles/schedule.js';

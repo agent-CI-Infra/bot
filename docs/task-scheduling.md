@@ -21,7 +21,7 @@ Claim selection, project capacity and claim writes share a `BEGIN IMMEDIATE` tra
 
 ## Manager planning and associations
 
-For a `pass_with_issues` result, a bounded Manager run reads the original QA facts and a compact project task index. It can inspect matching same-project task records and submit one decision per residual:
+QA observations alone do not create work. For a `pass_with_issues` result, a separate, bounded Manager run reads the original QA facts and a compact project task index. It can inspect matching same-project task records and submit one decision per residual:
 
 - `new`: create a distinct task.
 - `supplement`: append this discovery to an existing unresolved task; do not create another execution.
@@ -32,7 +32,7 @@ Titles alone never cause automatic merging. The plan is bound to parent task, ca
 
 A similar task that is running triggers a durable Coordinator request. Newly created related work waits for advice; the existing running task consumes notices at its safe checkpoint. Supplementing a running task requests coordination without stealing its claim. Neither path bypasses notice acknowledgement, candidate binding or fresh QA.
 
-If Manager infrastructure/permissions are unavailable, the original QA result is retained, a deferred-planning event records the failure, and residuals enter at explicit default P2. They can subsequently be ranked by their Task Manager or an authorized user; a classification outage is not a new business rejection. New external GitHub writes are not granted: issue publication still belongs to existing authorized work/publish tools; these associations can reference an existing Issue but do not independently create/comment on GitHub.
+If Manager infrastructure/permissions are unavailable, the original QA result is retained, a deferred-planning event records the failure, and an explicit framework-default P2 plan admits the reported issues without a human gate. Bare verdict persistence without a follow-up plan remains observation-only, preserving the upstream proportional-delivery boundary. They can subsequently be ranked by their Task Manager or an authorized user; a classification outage is not a new business rejection. New external GitHub writes are not granted: issue publication still belongs to existing authorized work/publish tools; these associations can reference an existing Issue but do not independently create/comment on GitHub.
 
 ## Interfaces
 
@@ -47,3 +47,5 @@ If Manager infrastructure/permissions are unavailable, the original QA result is
 Automated tests cover priority order, same-level FIFO, unchanged-priority stability, re-entry/ready dependencies, durable reopen, competing real Node processes, QA urgency injection being ignored, explicit Manager decisions, two-source supplementation, recurrence, active-work coordination, and scope protection. A Native tool-loop fixture covers QA facts → Manager plan → Coordinator advice → acknowledgement without accepting the child automatically. Browser coverage checks priority editing, persistence/audit and mobile width.
 
 An isolated real Native/DeepSeek replay uses the actual OpenToday residual facts from task `4f2eed3b…`: three documentation discrepancies and their existing derived tasks. The Manager classified all three as P3, chose to supplement the three existing tasks, created no duplicates, and P2 `final-integration` claimed the next slot. This validates Manager decision-making and queue application on historical facts, not a new product implementation or fresh product QA. The experiment's original database/repository were not modified.
+
+The implementation integrates the latest main-branch proportional-acceptance changes: QA should not manufacture work from cosmetic preferences or hypothetical future verification. The post-QA Manager/default scheduling plan is the distinct work-creation boundary requested in #197. Review dependencies use the shared readiness rule; a missing dependency is not considered finished.
