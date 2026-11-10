@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
+const projectSections = [['overview', '项目总览'], ['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
 // Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.
 const legacyProjectSections = { workflows: 'manager-prompt', tasks: '', review: '', development: '', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -113,9 +113,10 @@ async function renderProject(route) {
 }
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
-  const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, api('/api/repositories/'+id+'/rules').catch(()=>null), api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
+  const overview = section === 'overview', target = current;
+  const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), overview ? null : api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, overview ? null : api('/api/repositories/'+id+'/rules').catch(()=>null), overview ? null : api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  Object.assign(current, { external, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+  Object.assign(target, { external, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section, item: current.item }); }
@@ -123,7 +124,7 @@ async function reloadProject() { await loadProject(current.id); renderProject({ 
 async function reloadWith(notice) { if (notice) current.flash = notice; await reloadProject(); }
 function projectStatus() {
   const { policy, installed } = current;
-  const status = !policy.enabled ? badge('已禁用', 'warning') : policy.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning');
+  const status = !policy.enabled ? badge('已禁用', 'warning') : badge('已启用', 'info');
   const permission = installed?.access_gaps?.length ? [permissionBadge(installed)] : [];
   return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...permission, ...(current.environment ? [state(current.environment.environment.state)] : [])];
 }
@@ -152,7 +153,7 @@ function projectBody(section) {
     if (key === 'management') { const project = current.id; item.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); }); }
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();

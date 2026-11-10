@@ -22,6 +22,16 @@ function consoleState(title, text, { tone = '', retry } = {}) {
   if (retry) box.append(button('重新加载', retry)); return box;
 }
 function consoleInboxRoute() { return /^#\/inbox(?:\/(all|[1-9]\d*))?(?:\/(\d+))?$/.exec(location.hash); }
+function consoleTaskRow(row, attention = false) {
+  const item = element('article', '', 'console-attention-row'), text = element('div');
+  const guidance = attention && consoleAttention[row.status];
+  text.append(element('p', `${row.full_name || row.repository_id} · ${guidance?.[0] || projectTaskLabel(row)}`, 'eyebrow'), element('h2', row.summary || row.id));
+  if (guidance) text.append(element('p', guidance[1]));
+  if (row.error_code) text.append(element('p', row.error_code, 'muted'));
+  text.append(element('p', `更新于 ${timestamp(row.updated_at) || '未知时间'}`, 'muted'));
+  const open = button('查看任务', () => openTask(row.id).catch(error)); open.dataset.attentionTask = row.id;
+  item.dataset.taskId = row.id; item.append(text, state(row.status), open); return item;
+}
 function consoleScope() {
   const inbox = consoleInboxRoute();
   return projectRoute()?.id || (inbox ? (inbox[1] === 'all' ? null : inbox[1]) : consoleProject);
@@ -117,12 +127,7 @@ async function renderConsoleInbox(request) {
     else {
       body.append(element('p', `本页 ${rows.length} 项 · 按最近状态变更时间从早到晚排列`, 'muted'));
       for (const row of rows) {
-        const item = element('article', '', 'console-attention-row'), text = element('div'), [caption, next] = consoleAttention[row.status] || [row.status, '查看任务的实际记录。'];
-        text.append(element('p', `${row.full_name || row.repository_id} · ${caption}`, 'eyebrow'), element('h2', row.summary || row.id), element('p', next));
-        if (row.error_code) text.append(element('p', row.error_code, 'muted'));
-        text.append(element('p', `更新于 ${timestamp(row.updated_at) || '未知时间'}`, 'muted'));
-        const open = button('查看任务', () => openTask(row.id)); open.dataset.attentionTask = row.id;
-        item.append(text, state(row.status), open); body.append(item);
+        body.append(consoleTaskRow(row, true));
       }
     }
     const paging = element('nav', '', 'console-inbox-paging'); paging.setAttribute('aria-label', '待处理分页');
@@ -156,7 +161,7 @@ function restoreConsolePosition() {
 }
 function initConsoleShell() {
   const sidebar = $('console-sidebar'), kicker = element('p', '工作区', 'console-nav-label'), scope = element('label', '切换项目', 'console-project-picker'), picker = document.createElement('select');
-  picker.id = 'console-project'; picker.setAttribute('aria-label', '切换项目'); picker.addEventListener('change', () => { consoleProject = picker.value || null; location.hash = picker.value ? `#/projects/${picker.value}/basic` : '#/projects'; }); scope.append(picker);
+  picker.id = 'console-project'; picker.setAttribute('aria-label', '切换项目'); picker.addEventListener('change', () => { consoleProject = picker.value || null; location.hash = picker.value ? `#/projects/${picker.value}/overview` : '#/projects'; }); scope.append(picker);
   sidebar.append(scope, kicker, $('tabs'));
   const inbox = consoleLink('#/inbox', '待处理'); inbox.id = 'console-inbox-link'; sidebar.append(inbox);
   const secondary = element('div'); secondary.id = 'console-secondary-nav'; sidebar.append(secondary);
