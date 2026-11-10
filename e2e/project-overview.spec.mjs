@@ -20,16 +20,18 @@ async function login(page,h,password,username='administrator',hash='#/projects/1
 const metric=(page,key)=>page.locator(`[data-task-group=${key}] strong`);
 
 test('project totals and drill-down share real task records on desktop and mobile',async({page})=>{
-  const {h,password}=await fixture(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const {h,password,seed}=await fixture(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try {
     await login(page,h,password);await expect(metric(page,'all')).toHaveText('92');await expect(metric(page,'active')).toHaveText('2');
     await expect(metric(page,'queued')).toHaveText('12');await expect(metric(page,'attention')).toHaveText('2');
     await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(2);
     await expect(page.locator('.workspace-health-status')).toContainText('不代表任务或 CI 成功');
     await page.locator('[data-task-group=queued]').click();await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(10);
+    const next=page.getByRole('navigation',{name:'总览任务分页'}).getByRole('link',{name:'下一页'});await next.focus();seed('queued-fresh','queued');
+    await expect(metric(page,'queued')).toHaveText('13',{timeout:10000});await expect(next).toBeFocused();
     await page.getByRole('navigation',{name:'总览任务分页'}).getByRole('link',{name:'下一页'}).click();
-    await expect(page).toHaveURL(/overview\/queued\.10$/);await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(2);
-    await page.reload();await expect(page.locator('.workspace-task-status')).toContainText('显示 11–12 项');
+    await expect(page).toHaveURL(/overview\/queued\.10$/);await expect(page.locator('.workspace-task-rows [data-task-id]')).toHaveCount(3);
+    await page.reload();await expect(page.locator('.workspace-task-status')).toContainText('显示 11–13 项');
     await page.locator('[data-task-group=attention]').click();await expect(page.locator('.workspace-task-rows')).toContainText('补齐任务所需的模型');
   } finally {await h.stop();}
 });
@@ -43,6 +45,9 @@ test('overview refresh preserves readings and focus, and labels stale or unavail
     await page.unroute('**/api/tasks?*');await page.getByRole('button',{name:'刷新总览'}).click();await expect(metric(page,'active')).toHaveText('2');
     const focus=page.locator('[data-task-id=active] button');await focus.focus();const y=await page.evaluate(()=>scrollY);
     seed('queued-extra','queued');await expect(metric(page,'queued')).toHaveText('13',{timeout:10000});
+    await expect(focus).toBeFocused();expect(await page.evaluate(()=>scrollY)).toBe(y);
+    h.store.run("UPDATE tasks SET summary='检查桌面端导航与任务详情' WHERE id='active'");
+    await expect(page.locator('[data-task-id=active]')).toContainText('检查桌面端导航与任务详情',{timeout:10000});
     await expect(focus).toBeFocused();expect(await page.evaluate(()=>scrollY)).toBe(y);
     await page.route('**/api/tasks?*',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"tasks_unavailable"}'}));
     await page.route('**/api/environments/101',route=>route.fulfill({status:503,contentType:'application/json',body:'{"error":"manager_unavailable"}'}));
