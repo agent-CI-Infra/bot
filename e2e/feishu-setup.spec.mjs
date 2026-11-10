@@ -124,6 +124,8 @@ test('connection list shows readable cached app and enterprise names with a safe
     expect(wire.state.authRequests.length).toBe(requests);
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.screenshot({ path: output + '/connections-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: output + '/connections-mobile.png', fullPage: true });
     wire.state.tenantCode = 1184001;
     await row.getByRole('button', { name: '刷新应用信息' }).click();
     await expect(row.getByRole('status')).toContainText('tenant:tenant:readonly');
@@ -140,7 +142,7 @@ test('connection list shows readable cached app and enterprise names with a safe
     await expect(row.locator('img')).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: output + '/connections-mobile.png', fullPage: true });
+    await page.screenshot({ path: output + '/connections-mobile-long-names.png', fullPage: true });
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
