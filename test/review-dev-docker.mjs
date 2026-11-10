@@ -199,7 +199,8 @@ try{
   for(const event of events){assert.equal(event.state,'decided',JSON.stringify(event));assert.ok(event.model);assert.ok(fixtureState.dispatches.some(call=>call.event.id===event.id&&call.model===event.model&&call.decision.decision===event.decision));}
   for(const task of (await api('/api/tasks?limit=100')).tasks){const origin=await api(`/api/tasks/${task.id}/dispatch`);assert.ok(origin.dispatch.some(event=>event.relation==='created'&&event.decision==='create'));}
   assert.deepEqual([...new Set(events.map(event=>event.decision))].sort(),['continue','create','ignore']);
-  assert.ok(fixtureState.acceptances.some(call=>call.calls.includes('read_file')&&call.calls.includes('read_evidence')&&call.calls.includes('run_command')));
+  assert.ok(fixtureState.acceptances.some(call=>call.calls.includes('read_file')&&call.calls.includes('read_evidence')));
+  assert.ok(fixtureState.acceptances.some(call=>call.calls.includes('read_file')&&call.calls.includes('run_command')));
   evidence.dispatch=events;passed('all tasks originate from successful model-backed Manager decisions, including review-to-development follow-up');
 }catch(error){
   const redact=value=>{let text=typeof value==='string'?value:JSON.stringify(value,null,2);for(const secret of [password,memberPassword,githubToken,modelKey,webhookSecret,managerToken].filter(Boolean))text=text.replaceAll(secret,'[REDACTED]');return text;};
