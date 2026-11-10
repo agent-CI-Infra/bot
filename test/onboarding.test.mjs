@@ -2,6 +2,32 @@ import test from 'node:test';import assert from 'node:assert/strict';import{gene
 import{harness,setup,account,repository,testPassword}from'./helpers.mjs';
 import{Onboarding}from'../dist/onboarding/service.js';import{publicOrigin,deploymentOrigin}from'../dist/onboarding/public-url.js';import{RuleService,resolveRules,defaults,computerRequest}from'../dist/rules/service.js';
 
+test('completion uses current installation and model records, rejects skipped setup and loses readiness after revocation',async t=>{
+ let onboarding;const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store)})),{admin}=await setup(h);
+ const finish=()=>admin('/api/onboarding/complete','POST',{}),view=async()=>(await admin('/api/onboarding')).value;
+ assert.equal((await finish()).value.error,'onboarding_incomplete');assert.equal(onboarding.saved('complete'),null);
+ const a=await account(admin,{type:'github_app',app_id:'123',token:undefined,private_key:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'})});
+ const model=(await admin('/api/models','POST',{repository_id:null,api_url:'https://model.invalid/v1',model_name:'fixture',api_key:testPassword()})).value.model;
+ onboarding.save('public',{origin:'https://hooks.invalid',checked_at:new Date().toISOString()});
+ onboarding.save('app',{account_id:a.id,app_id:'123',slug:'fixture',installations:99});onboarding.save('model',model.id);
+ // A historical count from GitHub is not proof that an installation is currently usable.
+ assert.equal((await view()).readiness.installation,false);assert.equal((await finish()).status,409);
+ h.store.run(`INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,status,completeness,scope_pending,updated_at)
+   VALUES('github.com/123/77','github.com','123','77',?,'active','complete',0,?)`,a.id,new Date().toISOString());
+ await admin('/api/onboarding/installation','POST',{skip:true});assert.equal((await finish()).status,409);
+ await admin('/api/onboarding/installation','POST',{skip:false});
+ assert.equal((await view()).readiness.can_complete,true);assert.equal((await finish()).status,201);assert.equal((await view()).complete,true);
+ for(const patch of ["status='suspended'","status='deleted'","completeness='stale'","scope_pending=1"]){
+  h.store.run('UPDATE github_installations SET '+patch);assert.equal((await finish()).status,409);assert.equal((await view()).complete,false);
+  h.store.run("UPDATE github_installations SET status='active',completeness='complete',scope_pending=0");
+ }
+ const sealed=h.store.get('SELECT api_key FROM models WHERE id=?',model.id).api_key;
+ h.store.run('UPDATE models SET api_key=NULL WHERE id=?',model.id);assert.equal((await view()).readiness.model,false);assert.equal((await finish()).status,409);
+ h.store.run('UPDATE models SET api_key=? WHERE id=?',sealed,model.id);assert.equal((await view()).readiness.can_complete,true);
+ onboarding.save('app',{account_id:a.id,app_id:'999',installations:99});assert.equal((await view()).readiness.app,false);assert.equal((await finish()).status,409);
+ assert.equal(h.store.get("SELECT count(*) n FROM audit WHERE action='onboarding.completed'").n,1);
+});
+
 test('a public origin passes when this instance answers on it, console included, and fails for another instance, a forged proof or a redirect',async t=>{
  const other=await harness(t);let onboarding,h;
  // A fake network sends each host name to a real listener: this instance, another instance, a forger or a redirecting proxy.
