@@ -46,6 +46,14 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 | `DEPLOY_PATH` | 变量 | 服务器上放 `compose.yaml` 的目录。目录名就是 Compose 项目名，接管已有部署时用它原来的目录，才会沿用原来的卷 |
 | `DEPLOY_KNOWN_HOSTS` | 变量 | 服务器的 `known_hosts` 行，可用 `ssh-keyscan -p <端口> <地址>` 获取，核对指纹后填写；主机密钥不符时部署停止 |
 | `DEPLOY_SSH_KEY` | Secret | 部署用 SSH 私钥 |
+| `DEPLOY_JUMP_HOST` | 变量 | 可选的 SSH 跳板机地址；不设置时直接连接目标服务器 |
+| `DEPLOY_JUMP_PORT` | 变量 | 跳板机 SSH 端口，默认 `22` |
+| `DEPLOY_JUMP_USER` | 变量 | 跳板机 SSH 用户；设置跳板机地址时必填 |
+| `DEPLOY_JUMP_KNOWN_HOSTS` | 变量 | 核对过指纹的跳板机 `known_hosts` 行；设置跳板机地址时必填 |
+
+需要跳板机时，`DEPLOY_HOST` 和 `DEPLOY_PORT` 仍填写从跳板机能访问的目标服务器地址和 SSH 端口。工作流使用 `ProxyJump` 转发，跳板机必须允许到该目标的 TCP 转发。跳板机和目标服务器复用 `DEPLOY_SSH_KEY`，将其对应公钥分别加入两个 SSH 用户的授权列表即可；私钥只由 Actions runner 使用。两台机器的主机公钥记录会合并写入 `known_hosts`，并对两段连接都启用严格校验。跳板端口不是 `22` 时，其记录的主机字段应为 `[<跳板地址>]:<跳板端口>`。
+
+可以在 Actions → Release → Run workflow 手动检查连接，或运行 `gh workflow run release.yml --ref main`。手动运行只验证 SSH 登录并显示远端用户，发布作业和部署步骤都跳过，不打标签、不创建 Release、不更新服务器文件或容器；目标服务器未配置时检查失败。以后推送 `v*` 标签仍按原流程发布、检查 SSH 连接并部署。
 
 GHCR 包还没公开时，先在服务器上用有 `read:packages` 权限的令牌运行一次 `docker login ghcr.io`。
 
