@@ -1,6 +1,19 @@
 import type { Store } from '../storage/database.js';
 import { Redactor } from '../agent/common.js';
 
+// Configuration errors that stop Actions failure handling until an App manager or installation owner acts.
+export const actionsConfigurationErrors = ['actions_permission_missing', 'actions_workflow_run_subscription_missing'];
+/**
+ * The first missing piece of the installation's Actions setup, or null. workflow_run is a webhook event subscription
+ * (GitHub's "Workflow run"), not the Workflows permission: GitHub offers it only to an App with at least Actions read, so
+ * an installation without Actions access is reported as such rather than as a missing subscription it cannot have.
+ */
+export function actionsConfigurationError(github: { installationPermissions: Record<string, string> | null; installationEvents: string[] | null }) {
+  if (github.installationPermissions && !github.installationPermissions.actions) return 'actions_permission_missing';
+  if (!github.installationEvents?.includes('workflow_run')) return 'actions_workflow_run_subscription_missing';
+  return null;
+}
+
 export function actionsRedactor(store: Store) {
   const redactor = new Redactor();
   const add = (value: unknown) => { if (typeof value === 'string' && value) redactor.values.add(value); };
@@ -52,7 +65,7 @@ export function actionsDevelopmentAllowed(store: Store, id: string, number: numb
   const policy = store.get('SELECT * FROM policies WHERE repository_id=?', id);
   if (source.classification !== 'code' || !policy?.enabled || !policy.actions_failures_enabled || !policy.review_enabled || !policy.development_enabled) return false;
   const config = store.get('SELECT configured_at,error FROM actions_failure_scans WHERE repository_id=?', id);
-  if (!config?.configured_at || config.error === 'actions_workflow_run_subscription_missing') return false;
+  if (!config?.configured_at || actionsConfigurationErrors.includes(config.error)) return false;
   if (!issue) return true;
   const prose = String(issue.body || '').split('<!-- dept-bot-actions-log-start -->')[0]!;
   if (!['Current behavior', 'Expected behavior', 'Requested code change'].every(title => new RegExp(`## ${title}\\n+\\S`).test(prose))) return false;

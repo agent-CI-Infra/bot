@@ -739,7 +739,11 @@ function modelFields(repositoryId) {
 function showActionsFailureStatus(message, status) {
   message.className = status?.error ? 'endpoint-warning' : 'muted';
   message.textContent = status?.error ? status.error === 'actions_workflow_run_subscription_missing'
-    ? '配置错误：此仓库使用的 App 安装未订阅 workflow_run。本功能已停止写入，请 App 管理员添加事件订阅。'
+    ? '配置错误：此仓库使用的 App 安装未订阅 Webhook 事件「Workflow run」，Actions 失败分析已停止，不读取运行、不重跑、不提报。'
+      + `请 App 管理员在 App 设置的 Permissions & events → Subscribe to events 勾选「Workflow run」并保存。${eventPermissionNotes.workflow_run}`
+    : status.error === 'actions_permission_missing'
+    ? '配置错误：此仓库使用的 App 安装没有 Actions 权限，GitHub 也不会向它投递「Workflow run」事件，Actions 失败分析已停止。'
+      + '请 App 管理员在 Permissions & events 把 Actions 设为「Read and write」（读取运行只需只读，重跑失败的作业需要写），再由安装所有者接受新权限。不需要 Workflows 权限。'
     : /^model_/.test(status.error) ? `Actions 失败分析在等模型：${status.error}。请在「模型」页为 Actions 失败处理选择可用的模型，或检查项目默认模型。`
     : `Actions 失败处理已暂停：${status.error}。请检查账号授权或日志读取状态。`
     : status ? '配置检查通过后每分钟扫描；重复事件和人工重跑共用原运行的一次自动重试预算。' : '等待检查 App 事件订阅。';

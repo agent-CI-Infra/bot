@@ -56,6 +56,8 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     // Gate onboarding and Actions failure analysis need more than the baseline; that is listed without failing it.
     await expect(result).toContainText('Workflows：改为「Read and write」（当前「No access」），接入门禁需要');
     await expect(result).toContainText('Subscribe to events：勾选 Workflow run，Actions 失败分析需要');
+    // Workflow run sits next to the Workflows line but needs only Actions read.
+    await expect(result).toContainText('这是事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions「Read-only」');
     // App completeness is independent of installations that have not yet accepted its permissions or events.
     app.permissions = full; app.events = events; await accountRow.getByRole('button', { name: '重新检查', exact: true }).click();
     await expect(result).toContainText('检视和开发所需的 App 权限和事件订阅齐全。'); await expect(result).toContainText('勾选 Workflow run');
@@ -81,6 +83,7 @@ test('App 定义只在机器人账号检查，各功能的安装权限和事件�
     await expect(items.nth(1)).toContainText('把 Workflows 设为「Read and write」并保存；新增权限要由安装所有者（fixture）在 GitHub 的安装设置里接受');
     await expect(items.nth(1)).toContainText('接入门禁（手动使用时）：提交不了 .github/workflows 门禁配置 PR');
     await expect(items.nth(4)).toContainText('Actions 失败分析在读取运行之前停止：不分类、不重跑、不提报 Issue。涉及：Actions 失败分析（未开启）');
+    await expect(items.nth(4)).toContainText('勾选 Workflow run 并保存。这是事件订阅，不是 Workflows 权限');
     for (const [width, height] of [[1365, 900], [390, 844]]) {
       await page.setViewportSize({ width, height });
       await page.screenshot({ path: `.tmp/app-permissions/gaps-dialog-${width}.png` });

@@ -76,7 +76,8 @@ export async function revokeInstallationToken(apiUrl: string, token: string) {
 const actors = new Map<string, { at: number, id: string, login: string }>();
 const actorTtlMs = 3600_000;
 export class GitHub {
-  installationEvents: string[] | null = null;
+  // What the App installation itself grants and receives, read on connect; null for a bot account.
+  installationEvents: string[] | null = null; installationPermissions: Record<string,string> | null = null;
   token = ''; actorId = ''; actorLogin = ''; fullName = ''; defaultBranch = ''; expiresAt = ''; permissions: Record<string,string> = {};
   // The repository's HTTPS clone URL as GitHub reports it; the Git cache fetches from it without putting the token in it.
   cloneUrl = '';
@@ -219,6 +220,7 @@ export class GitHub {
       const app = identifyActor && !fresh ? await this.request('GET','/app', undefined, false, jwt) : null;
       const installation = await this.request('GET',this.path('/installation'), undefined, false, jwt);
       this.installationEvents = Array.isArray(installation.events) ? installation.events.map(String) : null;
+      this.installationPermissions = installation.permissions && typeof installation.permissions === 'object' ? { ...installation.permissions } : null;
       this.installationId = String(installation.id);
       this.tokenWindow = installationBucket(account!.id, String(installation.id), installation.account?.login ? String(installation.account.login) : null);
       if (String(installation.account?.id) !== this.repository.owner_id) stop('github_installation_owner_changed','waiting_permission', `GitHub App 安装 ${installation.id} 的所属账号与仓库登记的所有者不一致。`);
