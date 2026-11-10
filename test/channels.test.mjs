@@ -55,7 +55,7 @@ test('HTTP acknowledges a slow model promptly, duplicate events/messages execute
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 1);
 });
 
-test('dual-end binding uses the real browser-bound GitHub callback; forwarding, wrong operator, expiry, replay and conflict do not grant access', async t => {
+test('dual-end binding supports optional browser-bound GitHub login; forwarding, wrong operator, expiry, replay and conflict do not grant access', async t => {
   const wire = transport(); let service;
   const f = await identityFixture(t, { channels: { origin: 'https://console.example.test', fetch: wire.fetch }, onChannels: s => { service = s; } });
   const { h, admin } = f, id = await connector(admin);
@@ -66,13 +66,17 @@ test('dual-end binding uses the real browser-bound GitHub callback; forwarding, 
   const challenge = /challenge=([a-f0-9]+)/.exec(JSON.stringify(data))[1];
   assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='feishu'").n, 0);
   const started = await fetch(h.admin + '/auth/channels/start?challenge=' + challenge, { redirect: 'manual' });
-  assert.equal(started.status, 303); const browserCookie = started.headers.getSetCookie()[0].split(';')[0];
-  const auth = await fetch(started.headers.get('location'), { redirect: 'manual' }), callback = auth.headers.get('location');
+  assert.equal(started.status, 303); assert.equal(started.headers.get('location'), '/#/identity/feishu?challenge=' + challenge);
+  assert.equal(started.headers.getSetCookie().length, 0);
+  const github = await fetch(h.admin + '/auth/github/start?channel_challenge=' + challenge, { redirect: 'manual' });
+  const browserCookie = github.headers.getSetCookie()[0].split(';')[0];
+  const auth = await fetch(github.headers.get('location'), { redirect: 'manual' }), callback = auth.headers.get('location');
   const forwarded = await fetch(callback, { redirect: 'manual' }); assert.match(forwarded.headers.get('location'), /invalid_oauth_state/);
   const verified = await fetch(callback, { redirect: 'manual', headers: { Cookie: browserCookie } }); assert.equal(verified.headers.get('location'), '/#/identity/feishu');
   const cookie = verified.headers.getSetCookie().find(s => s.startsWith('bot_session=')).split(';')[0];
   const pending = await (await fetch(h.admin + '/api/channels/bindings', { headers: { Cookie: cookie } })).json();
-  assert.equal(pending.pending[0].open_id, 'ou_alice'); assert.equal(pending.pending[0].github.external_actor, '42');
+  assert.equal(pending.pending[0].open_id, 'ou_alice');
+  assert.equal(pending.pending[0].account.id, h.store.get('SELECT principal_id FROM channel_bind_requests').principal_id);
   const confirmation = pending.pending[0].confirmation, principal = h.store.get('SELECT principal_id FROM channel_bind_requests').principal_id;
   const grantCount = h.store.get('SELECT count(*) n FROM scoped_grants').n;
   assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='feishu'").n, 0);
@@ -120,6 +124,71 @@ test('dual-end binding uses the real browser-bound GitHub callback; forwarding, 
   h.store.run('UPDATE channel_connectors SET enabled=0 WHERE id=?', id);
   await assert.rejects(confirming, /channel_connector_inactive/);
   assert.equal(h.store.get('SELECT count(*) n FROM external_identities WHERE external_actor=?', racingEvent.actor_id).n, 0);
+});
+
+test('local accounts bind without GitHub configuration and Feishu access follows only their effective project grants', async t => {
+  const { h, id, service, member, admin } = await channelFixture(t);
+  const local = await member('local-feishu', { repository_ids: ['101'] });
+  assert.equal((await h.client()('/api/auth/github/status')).value.enabled, false);
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE principal_id=? AND provider='github'", local.id).n, 0);
+  const event = service.adapter(service.connector(id)).normalize(envelope('/bind', { sender: { sender_id: { open_id: 'ou_local' } } }));
+  const begun = service.bindings.begin(event), claim = { challenge: begun.challenge };
+  const link = await fetch(h.admin + '/auth/channels/start?challenge=' + begun.challenge, { redirect: 'manual' });
+  assert.equal(link.status, 303); assert.equal(link.headers.get('cache-control'), 'no-store');
+  assert.equal(h.store.get('SELECT principal_id FROM channel_bind_requests WHERE challenge_hash=?', digest(begun.challenge)).principal_id, null);
+  assert.equal((await h.client()('/api/channels/bindings/claim', 'POST', claim)).status, 401);
+  assert.equal((await local.client('/api/channels/bindings/claim', 'POST', claim, { 'X-CSRF-Token': '' })).value.error, 'csrf_required');
+  assert.equal((await local.client('/api/channels/bindings/claim', 'POST', { ...claim, principal_id: 'self-asserted-owner' })).value.error, 'unknown_field');
+  const grants = h.store.get('SELECT count(*) n FROM scoped_grants').n;
+  assert.deepEqual((await local.client('/api/channels/bindings/claim', 'POST', claim)).value, { state: 'pending_confirmation' });
+  const pending = (await local.client('/api/channels/bindings')).value.pending[0];
+  assert.equal(pending.account.id, local.id); assert.equal(pending.account.username, 'local-feishu');
+  assert.equal((await local.client('/api/channels/bindings/claim', 'POST', claim)).value.error, 'binding_login_already_started');
+  assert.equal((await h.client()('/api/channels/bindings')).status, 401);
+  await service.bindings.confirm({ ...event, event_id: 'local-confirm' }, pending.confirmation);
+  assert.equal(h.store.get("SELECT principal_id FROM external_identities WHERE provider='feishu' AND external_actor='ou_local'").principal_id, local.id);
+  assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, grants);
+  const message = project => envelope(directQuery(project, project === '101' ? 'blocked' : 'foreign'), { sender: { sender_id: { open_id: 'ou_local' } } });
+  const allowed = await post(h, id, message('101'));
+  assert.equal((await finished(h, allowed.value.operation_id)).state, 'completed');
+  const denied = await post(h, id, message('201'));
+  assert.equal((await finished(h, denied.value.operation_id)).error, 'capability_forbidden');
+  assert.equal((await admin('/api/project-admin-assignments', 'PUT', { user_id: local.id, repository_ids: [], organization_ids: [] })).status, 200);
+  const revokedAccess = await post(h, id, message('101'));
+  assert.equal((await finished(h, revokedAccess.value.operation_id)).error, 'capability_forbidden');
+  assert.equal(h.store.get("SELECT status FROM external_identities WHERE provider='feishu' AND external_actor='ou_local'").status, 'active');
+  const unprivileged = await member('local-no-grants', { repository_ids: [] });
+  const noGrantsEvent = { ...event, actor_id: 'ou_local_no_grants', event_id: 'no-grants-start' }, noGrants = service.bindings.begin(noGrantsEvent);
+  await service.bindings.authenticate(noGrants.challenge, session(h.store, unprivileged.id).token);
+  const code = service.bindings.pending(unprivileged.id)[0].confirmation;
+  await service.bindings.confirm({ ...noGrantsEvent, event_id: 'no-grants-confirm' }, String(code));
+  const blocked = await post(h, id, envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_local_no_grants' } } }));
+  assert.equal((await finished(h, blocked.value.operation_id)).error, 'capability_forbidden');
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n, 0);
+});
+
+test('platform binding claims fence concurrent accounts, revoked sessions and disabled connectors', async t => {
+  const { h, id, service, member } = await channelFixture(t);
+  const a = await member('claim-a', {}), b = await member('claim-b', {});
+  const aSession = session(h.store, a.id), bSession = session(h.store, b.id);
+  const event = service.adapter(service.connector(id)).normalize(envelope('/bind', { sender: { sender_id: { open_id: 'ou_claim' } } }));
+  const begun = service.bindings.begin(event);
+  const results = await Promise.allSettled([service.bindings.authenticate(begun.challenge, aSession.token), service.bindings.authenticate(begun.challenge, bSession.token)]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_bind_requests WHERE principal_id IS NOT NULL').n, 1);
+  const expired = service.bindings.begin({ ...event, actor_id: 'ou_expired_claim' });
+  h.store.run('UPDATE channel_bind_requests SET expires_at=0 WHERE challenge_hash=?', digest(expired.challenge));
+  await assert.rejects(service.bindings.authenticate(expired.challenge, aSession.token), /binding_expired/);
+  const revoked = service.bindings.begin({ ...event, actor_id: 'ou_revoked_claim' });
+  const authenticating = service.bindings.authenticate(revoked.challenge, bSession.token);
+  h.store.run('DELETE FROM sessions WHERE token_hash=?', digest(bSession.token));
+  await assert.rejects(authenticating, /login_required/);
+  assert.equal(h.store.get('SELECT principal_id FROM channel_bind_requests WHERE challenge_hash=?', digest(revoked.challenge)).principal_id, null);
+  const disabled = service.bindings.begin({ ...event, actor_id: 'ou_disabled_claim' });
+  const pending = service.bindings.authenticate(disabled.challenge, aSession.token);
+  h.store.run('UPDATE channel_connectors SET enabled=0 WHERE id=?', id);
+  await assert.rejects(pending, /channel_connector_inactive/);
+  assert.equal(h.store.get('SELECT principal_id FROM channel_bind_requests WHERE challenge_hash=?', digest(disabled.challenge)).principal_id, null);
 });
 
 test('the same open_id never crosses app or actor tenant, and adding a bot or self-asserting admin cannot authorize writes', async t => {

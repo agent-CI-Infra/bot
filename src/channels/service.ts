@@ -184,7 +184,7 @@ export class ChannelService {
     if (['绑定', '/bind', '重新认证', '/reauth'].includes(content)) {
       if (!this.options.origin) fail(503, 'channel_admin_origin_required');
       const binding = this.bindings.begin(e);
-      reply('请在五分钟内打开后台完成 GitHub 登录，然后回到同一私聊确认。绑定不会授予项目权限。', this.options.origin + '/auth/channels/start?challenge=' + binding.challenge);
+      reply('请在五分钟内打开后台，登录并核对要绑定的平台账户，然后回到同一私聊确认。可使用本地账户或 GitHub 登录，绑定不会授予项目权限。', this.options.origin + '/auth/channels/start?challenge=' + binding.challenge);
     } else if (/^(确认绑定|\/confirm) /.test(content)) {
       await this.bindings.confirm(e, content.slice(content.indexOf(' ') + 1).trim()); reply('双端身份绑定成功。项目权限仍由统一授权服务决定。');
     } else if (['解绑', '/unbind'].includes(content)) {

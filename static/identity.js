@@ -34,7 +34,7 @@ async function renderIdentity() {
   });
   selection.append(form, note('选择组织后，项目、任务、日志和配置请求都会限制在该组织内。'), facts([['授权版本', String(data.actor.authorization_revision)]]));
   const identities = card('登录与账号绑定');
-  identities.append(note('绑定需要同时证明当前本地会话和 GitHub 身份。同名或同邮箱账号不会自动合并，绑定本身不会增加管理权限。'));
+  identities.append(note('关联 GitHub 账号时，需同时证明当前平台会话和 GitHub 身份。同名或同邮箱账号不会自动合并，关联本身不会增加管理权限。'));
   const enabled = (await api('/api/auth/github/status')).enabled;
   const bind = element('button', '绑定 GitHub 账号'); bind.disabled = !enabled;
   bind.addEventListener('click', async () => { try { const result = await api('/api/identity/github/bind', 'POST', {}); location.assign(result.url); } catch (err) { error(err); } });
@@ -67,10 +67,10 @@ async function renderIdentity() {
     permissions.append(row);
   }
   if (!data.scopes.length) permissions.append(note('尚无管理授权。请联系管理员委派，或重新验证你在已安装项目上的 GitHub 权限。'));
-  const feishu = await feishuIdentityCard(data);
+  const feishu = await feishuIdentityCard();
   if (request !== renderVersion) return;
   panel.replaceChildren(selection, identities, feishu, permissions);
-  if (location.hash === '#/identity/feishu') feishu.scrollIntoView({ block: 'start' });
+  if (location.hash.startsWith('#/identity/feishu')) feishu.scrollIntoView({ block: 'start' });
   if (data.actor.tenant_id && data.scopes.some(g => g.state === 'active' && (g.scope === 'platform' || g.scope === 'tenant' && g.tenant_id === data.actor.tenant_id))) {
     const members = card('组织成员授权'), { grants } = await api('/api/identity/grants?tenant_id=' + encodeURIComponent(data.actor.tenant_id));
     members.append(note('继承授权和显式授权分别展示；撤销一条来源后，成员仍按其他有效来源拥有权限。'));

@@ -83,6 +83,8 @@ async function start() {
   $('access-submit').textContent = setup ? '初始化并登录' : '登录';
   $('access-form').elements.password.autocomplete = setup ? 'new-password' : 'current-password';
   $('github-login').hidden = setup || !(await api('/api/auth/github/status')).enabled;
+  const channelChallenge = /^#\/identity\/feishu\?challenge=([a-f0-9]{48})$/.exec(location.hash)?.[1];
+  $('github-login').href = '/auth/github/start' + (channelChallenge ? '?channel_challenge=' + channelChallenge : '');
   const authError = new URLSearchParams(location.search).get('auth_error');
   if (authError) notice('message', identityError(authError));
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
