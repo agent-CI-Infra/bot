@@ -92,3 +92,28 @@ test('角色看板与其他项目读取共享同一套项目权限', async t => 
   assert.equal((await board(outsider)).status, 403);
   assert.equal((await policy(outsider, { role_concurrency: { dev: 2 } })).status, 403);
 });
+
+test('阶段可解析但归属不唯一时，队列同样标为 unsupported 而不是挑一个角色', async t => {
+  const { h, admin } = await fixture(t);
+  // A stage policy that resolves to exactly one stage for the queued task, but that stage names no role_ids: every
+  // enabled observer is eligible, so the queue cannot be attributed to one role. This is the second way into
+  // unsupported:["role_queue"] — the first is "no usable stage policy at all" (covered above).
+  const observer = { depends_on: [], delivery_types: ['code'], required: true, retry: { max_attempts: 2 }, budget: { max_tool_calls: 8 },
+    role_constraints: { kinds: ['observer'], capabilities: ['raw_evidence', 'fixed_candidate_read', 'fresh_context'], independent: true },
+    completion: { evidence_types: ['role_result'], min_evidence: 1, no_findings: true } };
+  const saved = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: 0, enabled: true, roles: [], required_stages: [{ stage_id: 'review', ...observer }] });
+  assert.equal(saved.status, 200, JSON.stringify(saved.value));
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,created_at) VALUES('q1','101','review.pr','queued','pr',7,'2026-11-10T00:00:00Z')");
+  const ambiguous = (await board(admin)).value;
+  assert.deepEqual(ambiguous.unsupported, ['role_queue']);
+  for (const role of ambiguous.roles) assert.deepEqual(role.ready, [], 'an unattributable task must not be assigned a role');
+  // Naming one role turns the very same queue into a real attribution: the difference is uniqueness, not the stage.
+  const one = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: saved.value.configuration.revision, enabled: true, roles: [],
+    required_stages: [{ stage_id: 'review', ...observer, role_constraints: { ...observer.role_constraints, role_ids: ['reviewer'] } }] });
+  assert.equal(one.status, 200, JSON.stringify(one.value));
+  const resolved = (await board(admin)).value;
+  assert.deepEqual(resolved.unsupported, []);
+  assert.deepEqual(resolved.roles.find(role => role.role === 'reviewer').ready.map(entry => entry.task_id), ['q1']);
+  // Exactly one role sees the task, so no other role can claim the same capacity.
+  assert.equal(resolved.roles.filter(role => role.ready.length).length, 1);
+});
