@@ -82,7 +82,7 @@ async function renderFeishuSetup(panel, request) {
         '记录“凭证与基础信息”里的 App ID、App Secret。HTTP 接收还需“事件与回调 → 加密策略”里的 Verification Token 和 Encrypt Key。']),
       permissions, installationNote,
       note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。已有应用也需补齐并发布新版本。不申请读取全部群消息或群历史的权限。'),
-      note('长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台及 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
+      note('长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台并登录平台，可使用本地账户或 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
       channelLink('#/settings/access', '配置公网 HTTPS 地址'), button('应用已准备，填写凭据', () => { feishuChoice = { id, application_type: application.value, transport: transport.value }; go(); }, ''));
   } else if (step === 1) {
     const choice = feishuChoice?.id === id ? feishuChoice : c || { application_type: 'enterprise', transport: 'websocket' };
@@ -174,7 +174,7 @@ async function renderFeishuSetup(panel, request) {
       } catch (err) { status.className = 'view-error'; status.textContent = feishuError(err); } finally { probe.disabled = false; }
     }, ''); body.append(probe, status); next('进入绑定与试用');
   } else {
-    body.append(feishuList(['让每位使用者进入“身份与权限”，按“飞书身份绑定”引导在机器人私聊发起 /bind，完成 GitHub 登录并回原私聊确认。',
+    body.append(feishuList(['让每位使用者在机器人私聊发起 /bind，打开链接并使用本地账户或 GitHub 登录平台，核对当前账户后确认绑定，再回原私聊确认。',
       '绑定后私聊发送 /project <项目ID> 查询任务状态，确认收到业务结果。绑定不增加权限，项目管理员仍需授权。',
       '必须点击返回卡片上的“刷新执行状态”，确认收到更新结果后才完成接入。能聊天或读到机器人信息不代表卡片回调已配置；点击无响应时，检查“回调配置”的接收方式、card.action.trigger 订阅和已发布版本。',
       '需要群内使用时，先在下方批准项目和群的接收范围，再在该群 @ 机器人发起请求。']),

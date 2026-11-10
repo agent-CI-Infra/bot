@@ -166,18 +166,18 @@ export function createControlPlane(options: Options) {
     const githubIdentity = githubLogin.identity;
     if (method === 'GET' && path === '/api/auth/github/status') { respond(res, 200, { enabled: !!githubIdentity }); return; }
     if (method === 'GET' && path === '/auth/channels/start') {
-      if (!githubIdentity) return fail(503, 'github_login_not_configured');
       const challenge = text(url.searchParams.get('challenge'));
       channels.bindings.request(challenge);
-      const browser = randomId(), result = githubIdentity.begin(browser, 'login');
-      channels.bindings.associateOAuth(challenge, new URL(result.url).searchParams.get('state')!);
-      res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Set-Cookie', browserCookie(req, browser));
-      res.writeHead(303, { Location: result.url }); res.end(); return;
+      res.setHeader('Referrer-Policy', 'no-referrer'); res.setHeader('Cache-Control', 'no-store');
+      res.writeHead(303, { Location: '/#/identity/feishu?challenge=' + encodeURIComponent(challenge) }); res.end(); return;
     }
     if (method === 'GET' && path === '/auth/github/start') {
       if (!initialized()) return fail(409, 'local_recovery_setup_required');
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
+      const channelChallenge = url.searchParams.get('channel_challenge');
+      if (channelChallenge !== null) channels.bindings.request(text(channelChallenge));
       const browser = randomId(), result = githubIdentity.begin(browser, 'login');
+      if (channelChallenge !== null) channels.bindings.associateOAuth(channelChallenge, new URL(result.url).searchParams.get('state')!);
       res.setHeader('Set-Cookie', browserCookie(req, browser)); res.writeHead(303, { Location: result.url }); res.end(); return;
     }
     if (method === 'GET' && path === '/auth/github/callback') {
@@ -281,6 +281,13 @@ export function createControlPlane(options: Options) {
       const token = req.headers.cookie?.split(';').map(x => x.trim()).find(x => x.startsWith('bot_session='))?.slice(12) || '';
       store.run('DELETE FROM sessions WHERE token_hash=?', digest(token));
       res.setHeader('Set-Cookie', cookie(req, '', 0)); respond(res, 200, { ok: true }); return;
+    }
+    if (path === '/api/channels/bindings/claim' && method === 'POST') {
+      fields(input, ['challenge']);
+      // Binding proves the platform session; repository grants and GitHub availability are unrelated to association.
+      assertSessionWrite(store, sessionToken(req), user.context!);
+      await channels.bindings.authenticate(text(input.challenge), sessionToken(req));
+      respond(res, 201, { state: 'pending_confirmation' }); return;
     }
     if (path === '/api/status' && method === 'GET') {
       respond(res, 200, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true }); return;

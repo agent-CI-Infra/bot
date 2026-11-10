@@ -244,6 +244,8 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', started.value.operation_id);
     const body = f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id), challenge = /challenge=([a-f0-9]+)/.exec(JSON.stringify(body))[1];
     await page.goto(f.h.admin + '/auth/channels/start?challenge=' + challenge);
+    await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible();
+    await page.getByRole('link', { name: '使用 GitHub 登录', exact: true }).click();
     await expect(page).toHaveURL(/#\/identity\/feishu$/);
     await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
     await expect(page.getByLabel('待确认的飞书身份')).toContainText('等待原飞书操作者确认');
@@ -270,5 +272,45 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     expect(unlinkResult).toEqual({ ok: true });
     await expect(page.locator('#feishu-identity')).toContainText('ou_alice · 已解绑');
     await expect(page.locator('#feishu-identity')).toContainText('/reauth'); expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('a local account completes Feishu binding without GitHub login and keeps its existing repository scope', async ({ page }) => {
+  test.setTimeout(90000);
+  const wire = transport(), f = await managementFixture(null, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
+  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  try {
+    const id = await connector(f.admin), local = await f.member('local-feishu-user', { repository_ids: ['101'] });
+    const actor = { sender: { sender_id: { open_id: 'ou_local_browser' } } };
+    const started = await post(f.h, id, envelope('/bind', actor)); await finished(f.h, started.value.operation_id);
+    const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', started.value.operation_id);
+    const body = f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id), challenge = /challenge=([a-f0-9]+)/.exec(JSON.stringify(body))[1];
+    await page.goto(f.h.admin + '/auth/channels/start?challenge=' + challenge);
+    await expect(page.getByRole('link', { name: '使用 GitHub 登录', exact: true })).toBeHidden();
+    await login(page, f.h, local.password, 'local-feishu-user');
+    await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
+    await expect(page.locator('#feishu-identity')).toContainText('将绑定到当前平台账户：local-feishu-user');
+    await expect(page.getByText('先在上方关联 GitHub 账号', { exact: false })).toHaveCount(0);
+    expect(f.h.store.get('SELECT principal_id FROM channel_bind_requests').principal_id).toBe(null);
+    await page.getByRole('button', { name: '绑定到当前平台账户' }).click();
+    await expect(page).toHaveURL(/#\/identity\/feishu$/);
+    await expect(page.getByLabel('待确认的飞书身份')).toContainText('local-feishu-user');
+    const confirmation = await page.getByLabel('在原私聊发送的确认指令').inputValue();
+    expect(f.h.store.get("SELECT count(*) n FROM external_identities WHERE provider='feishu'").n).toBe(0);
+    const grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.screenshot({ path: output + '/local-binding-pending-desktop.png', fullPage: true });
+    const confirmed = await post(f.h, id, envelope(confirmation, actor));
+    expect((await finished(f.h, confirmed.value.operation_id)).state).toBe('completed');
+    await page.getByRole('button', { name: '刷新飞书绑定状态' }).click();
+    await expect(page.locator('#feishu-identity')).toContainText('ou_local_browser · 已绑定');
+    expect(f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='feishu'").principal_id).toBe(local.id);
+    expect(f.h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grants);
+    expect(f.h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n).toBe(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: output + '/local-binding-bound-mobile.png', fullPage: true });
+    const denied = await page.evaluate(async () => (await fetch('/api/channels/setup')).status);
+    expect(denied).toBe(403); expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });

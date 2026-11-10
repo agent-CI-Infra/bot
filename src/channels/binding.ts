@@ -1,6 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
 import { ExternalBindings, revokeIdentity, type ExternalSubject, type VerifiedExternalProof } from '../identity/bindings.js';
-import { resolveActor } from '../identity/authorization.js';
+import { assertCurrent, resolveActor } from '../identity/authorization.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
 import type { ChannelEvent } from './types.js';
 
@@ -44,21 +44,30 @@ export class ChannelBindings {
     });
   }
   async githubAuthenticated(state: string, sessionRef: string): Promise<ChannelEvent | null> {
+    // Resume OAuth links issued by older versions, or an explicitly chosen GitHub login.
     const link = this.store.get('SELECT challenge_hash FROM channel_oauth_links WHERE state_hash=?', digest(state));
     if (!link) return null;
     const row = this.store.get('SELECT * FROM channel_bind_requests WHERE challenge_hash=?', link.challenge_hash)!;
-    if (row.expires_at <= Date.now() || row.consumed_at || row.principal_id || row.oauth_state !== digest(state)) return fail(410, 'binding_expired');
+    if (row.oauth_state !== digest(state)) return fail(410, 'binding_expired');
+    return this.authenticateRequest(row, sessionRef);
+  }
+  async authenticate(challenge: string, sessionRef: string): Promise<ChannelEvent> {
+    return this.authenticateRequest(this.request(challenge), sessionRef);
+  }
+  private async authenticateRequest(row: Row, sessionRef: string): Promise<ChannelEvent> {
+    if (row.expires_at <= Date.now() || row.consumed_at) return fail(410, 'binding_expired');
+    if (row.principal_id) return fail(409, 'binding_login_already_started');
     const actor = resolveActor(this.store, sessionRef), e = this.store.secrets.open(row.subject, 'channel-bind:' + row.challenge_hash) as unknown as ChannelEvent;
-    if (!this.store.get("SELECT 1 FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", actor.principal_id)) fail(403, 'github_reauthentication_required');
     const binding = await this.identities.beginVerifiedExternalBinding(sessionRef, this.credential(e, '', row.expires_at));
     const confirm = randomId();
     this.store.transaction(() => {
       const current = this.store.get('SELECT * FROM channel_bind_requests WHERE challenge_hash=?', row.challenge_hash)!;
       if (current.principal_id || current.consumed_at || current.expires_at <= Date.now()) fail(409, 'binding_replayed');
+      assertCurrent(actor); this.source(e);
       this.store.run('UPDATE channel_bind_requests SET principal_id=?,session_ref=?,binding_ref=?,confirmation_hash=? WHERE challenge_hash=?', actor.principal_id,
         this.store.secrets.seal({ value: sessionRef }, 'channel-session:' + row.challenge_hash),
         this.store.secrets.seal({ ...binding, confirmation: confirm }, 'channel-challenge:' + row.challenge_hash), digest(confirm), row.challenge_hash);
-      this.store.run('DELETE FROM channel_oauth_links WHERE state_hash=?', digest(state));
+      this.store.run('DELETE FROM channel_oauth_links WHERE challenge_hash=?', row.challenge_hash);
     });
     return e;
   }
@@ -68,7 +77,7 @@ export class ChannelBindings {
       const binding = this.store.secrets.open(row.binding_ref, 'channel-challenge:' + row.challenge_hash);
       return { provider: 'feishu', app_id: e.app_id, installation_tenant: e.installation_tenant, actor_tenant: e.actor_tenant,
         open_id: e.actor_id, confirmation: binding.confirmation, expires_at: row.expires_at,
-        github: this.store.get("SELECT display_name,external_actor FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", principal) ?? null };
+        account: { id: principal, username: this.store.get('SELECT username FROM users WHERE id=?', principal)?.username || principal } };
     });
   }
   async confirm(e: ChannelEvent, confirmation: string): Promise<Json> {

@@ -1,20 +1,36 @@
 // Personal identity proof belongs with account permissions; app credentials live in global settings.
-async function feishuIdentityCard(identity) {
+async function feishuIdentityCard() {
   const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'); section.id = 'feishu-identity';
-  section.append(note('将本人的飞书账号关联到当前 GitHub 身份，之后可在飞书管理有权访问的项目。绑定本身不会增加项目权限。'));
+  section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
   if (me.role === 'super_admin') section.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link'));
   const steps = element('ol', '', 'feishu-binding-steps');
-  const github = identity.identities.some(i => i.provider === 'github' && i.status === 'active');
-  for (const caption of [github ? 'GitHub 身份已验证。' : '先在上方关联 GitHub 账号；收到飞书绑定链接后仍需完成本次 GitHub 登录。',
-    '在飞书搜索管理员配置的机器人，打开私聊，发送 /bind（或“绑定”）。',
-    '打开机器人返回的链接，完成 GitHub 登录；在下方核对两端身份。',
+  for (const caption of ['在飞书搜索管理员配置的机器人，打开私聊，发送 /bind（或“绑定”）。',
+    '打开机器人返回的链接，使用本地账户或 GitHub 登录平台；核对当前账户并确认绑定。',
     '复制确认指令，回到发起绑定的同一个飞书私聊发送；然后刷新绑定状态。']) steps.append(element('li', caption));
-  section.append(steps, note('绑定链接和确认指令五分钟内有效。转发链接、只完成 GitHub 登录或由其他人确认，都不能完成绑定。'));
+  section.append(steps, note('绑定链接和确认指令五分钟内有效。必须由原飞书操作者在原私聊完成确认；只登录平台或转发链接不会完成绑定。'));
+  const challenge = /^#\/identity\/feishu\?challenge=([a-f0-9]{48})$/.exec(location.hash)?.[1];
+  if (challenge) {
+    const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
+    const claim = button('绑定到当前平台账户', async () => {
+      claim.disabled = true; status.textContent = '';
+      try {
+        await api('/api/channels/bindings/claim', 'POST', { challenge });
+        history.replaceState(null, '', '#/identity/feishu'); await start();
+      } catch (err) {
+        const reason = { binding_expired: '绑定链接已过期，请在原飞书私聊重新发送 /bind。',
+          binding_replayed: '此绑定请求已处理，请刷新状态或在原私聊重新发送 /bind。',
+          binding_login_already_started: '此请求已关联平台账户，请完成原私聊确认；需要更换账户时重新发送 /bind。' };
+        status.textContent = Object.entries(reason).find(([code]) => err.message.includes(code))?.[1] || err.message;
+        claim.disabled = false;
+      }
+    }, '');
+    section.append(note(`将绑定到当前平台账户：${me.username}。如需使用其他账户，请先退出登录并重新打开绑定链接。`), claim, status);
+  }
   if (data.applications.length) section.append(note('可绑定的飞书应用：' + data.applications.map(a => a.app_id).join('、')));
   else section.append(note('尚无已启用的飞书应用。请管理员在「全局设置 → 飞书连接」完成应用接入；如已有机器人，也可直接从它的私聊发起绑定。'));
   for (const p of data.pending) {
     const pending = element('div', '', 'channel-binding'); pending.setAttribute('aria-label', '待确认的飞书身份');
-    pending.append(element('strong', '等待原飞书操作者确认'), facts([['GitHub 身份', `${p.github?.display_name || ''} · ${p.github?.external_actor || ''}`],
+    pending.append(element('strong', '等待原飞书操作者确认'), facts([['平台账户', p.account.username],
       ['飞书应用', p.app_id], ['安装租户', p.installation_tenant], ['操作者租户', p.actor_tenant], ['飞书 open_id', p.open_id], ['有效期', new Date(p.expires_at).toLocaleString()]]),
       channelCopy('在原私聊发送的确认指令', '确认绑定 ' + p.confirmation));
     section.append(pending);
