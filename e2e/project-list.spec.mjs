@@ -40,13 +40,13 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
     expect(await groupedIds(page)).toEqual([{owner: '20', ids: ['101', '303']}, {owner: '10', ids: ['202']}]);
     await expect(row('101').getByRole('button', {name: '设置', exact: true})).toBeVisible();
     mkdirSync('.tmp/project-org-groups', {recursive: true});
-    for (const [label, width, height] of [['desktop', 1440, 900], ['mobile', 390, 844]]) {
+    for (const [label, width, height] of [['wide', 1920, 1080], ['desktop', 1440, 900], ['compact', 1024, 900], ['tablet', 768, 900], ['mobile', 390, 844], ['narrow', 320, 700]]) {
       await page.setViewportSize({width, height}); await checkWidth(page);
       if (width === 390) {
         const content = await row('101').locator('.row-content').boundingBox(), actions = await row('101').locator(':scope > .actions').boundingBox();
         expect(content.width).toBeGreaterThan(300); expect(actions.y).toBeGreaterThan(content.y + content.height);
       }
-      await page.screenshot({path: `.tmp/project-org-groups/installed-${label}.png`, fullPage: true});
+      if (label === 'desktop' || label === 'mobile') await page.screenshot({path: `.tmp/project-org-groups/installed-${label}.png`, fullPage: true});
     }
     await row('101').getByRole('switch', {name: / 看板$/, exact: false}).click();
     await expect(row('101').getByRole('status')).toHaveText('看板已关闭；不再公开展示');
