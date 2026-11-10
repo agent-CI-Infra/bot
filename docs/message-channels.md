@@ -12,13 +12,13 @@
 
 向导分五步，可从已保存连接继续：
 
-1. **创建应用**：打开飞书开发者后台，开启机器人能力，复制包含消息收发和卡片创建更新的默认权限 JSON；企业自建可选择 SDK 长连接或 HTTP，商店应用只能使用 HTTP。
+1. **创建应用**：打开飞书开发者后台，开启机器人能力，按应用类型复制默认权限 JSON。两种类型均包含消息收发和卡片创建更新；企业自建另含应用身份权限“获取企业信息”（`tenant:tenant:readonly`），需先发布包含机器人能力与该权限的初始版本、通过必要审核，再保存连接。企业自建可选择 SDK 长连接或 HTTP，商店应用只能使用 HTTP。
 2. **应用凭据**：填写 App ID 和 App Secret。机器人 open_id 无需填写；自建应用保存时由服务端用有效凭据自动读取机器人身份和安装 tenant_key，读取失败则不保存改动，需先启用机器人能力并发布初始版本后重试。商店应用另需指定安装 tenant_key，才能换取该企业的访问令牌。两种应用均不限制操作者所属企业，无需填写企业白名单。HTTP 另需 Verification Token 和 Encrypt Key。编辑时空白凭据保留原值，填写其中一项只替换该项。保存时显式选择是否启用连接。
 3. **事件与回调**：消息事件与卡片操作回调均为必配项。HTTP 在“事件配置”和“回调配置”分别选择发送至开发者服务器，填写本部署公网入口下的同一个回调 URL，并分别通过地址验证；长连接等待连接建立后，在两个页签分别保存“使用长连接接收事件”和“使用长连接接收回调”。在“事件配置”添加 `im.message.receive_v1`，在“回调配置 → 添加回调”添加新版 `card.action.trigger`（卡片回传交互），不使用旧版 `card.action.trigger_v1`。再添加应用生命周期、群成员变更及商店应用票据事件。
 4. **发布与检查**：在飞书发布版本、设置可用范围并完成必要审核，再检查机器人信息；检查自动同步保存机器人身份。商店应用先保存连接配置、接收 app_ticket，再完成此检查，未获取机器人身份时拒绝处理消息和卡片。检查只证明凭据和机器人信息可读，不证明消息或卡片回调已经送达。
 5. **绑定与试用**：每位用户完成个人双端绑定，实际发送项目查询并点击返回卡片上的“刷新执行状态”，确认收到更新结果后才完成接入；此页可查看收件、发送状态，批准或撤销群接收范围。卡片点击无响应时，检查“回调配置”的接收方式、新版 `card.action.trigger` 订阅和已发布版本；仅凭据检查或聊天成功不能证明回调可用。
 
-卡片是默认功能。向导的基础权限 JSON 默认包含以下应用身份权限，个人身份权限为空：
+卡片是默认功能。向导的基础权限 JSON 按当前应用类型生成，默认包含以下应用身份权限，个人身份权限为空；获取企业信息仅加入企业自建应用的权限 JSON：
 
 | 权限 | 用途 |
 | --- | --- |
@@ -26,16 +26,17 @@
 | `im:message.group_at_msg:readonly` | 接收群内 @ 机器人的消息 |
 | `im:message:send_as_bot` | 以机器人身份发送消息、发送和更新交互卡片 |
 | `cardkit:card:write` | 创建与更新卡片 |
+| `tenant:tenant:readonly` | 企业自建应用自动获取安装 tenant_key；保存连接前需开通并发布生效 |
 
 导入权限不会自动订阅卡片操作回调。新应用和已有应用都必须补齐权限、分别配置事件与回调，再创建并发布新版本。卡片实体权限见[创建卡片实体](https://open.feishu.cn/document/cardkit-v1/card/create)，回调结构见[卡片回传交互](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-callback-communication)。
 
 连接列表、创建、修改、凭据检查、收发诊断及应用配置回执均要求 `platform.manage`，组织管理员不能修改全局应用。项目群映射及其回执要求该项目的 `config.write`，可映射不同 GitHub 组织的项目。消息、卡片和定时通知仍逐次校验操作者或接收者对目标项目的权限及来源；项目组织由目标项目决定。个人页面只读取自己的绑定及全部已启用应用的公开标识，未获项目授权的人也可绑定，不返回应用凭据或安装策略。凭据写入独立密封记录，后台不回显密钥。绑定和结果链接需要稳定的后台地址：使用统一入口，即接入向导验证的公网地址，未验证时使用部署的 `BOT_PUBLIC_ORIGIN`（旧名 `BOT_ADMIN_ORIGIN`）；两者都没有时，使用保存 GitHub 登录配置时的控制台地址。
 
-安装 tenant_key 必须是机器人实际安装的企业，用来匹配事件头，不限制消息发送者或卡片点击者所属企业。企业自建应用首次保存时自动调用[获取企业信息](https://open.feishu.cn/document/server-docs/tenant-v2/tenant/query)，读取 `data.tenant.tenant_key`；后续编辑沿用已保存的安装企业，切换应用时重新读取。商店应用从应用启用事件或登录授权信息取得对应企业的 tenant_key 后填写。企业名称、`display_id`、App ID 和 `tenant_access_token` 不能代替它。旧 API 客户端仍可显式提供安装 tenant_key；已废弃的 `actor_tenants` 输入兼容接收但不生效，连接读取结果不再包含该字段。
+安装 tenant_key 必须是机器人实际安装的企业，用来匹配事件头，不限制消息发送者或卡片点击者所属企业。企业自建应用首次保存时自动调用[获取企业信息](https://open.feishu.cn/document/server-docs/tenant-v2/tenant/query)，读取 `data.tenant.tenant_key`。该接口需要应用身份权限 `tenant:tenant:readonly`，必须先在飞书开通此权限并发布包含该权限的版本、通过必要审核，再保存连接；仅导入权限但尚未发布仍可能失败。后续编辑沿用已保存的安装企业，切换应用时重新读取。商店应用从应用启用事件或登录授权信息取得对应企业的 tenant_key 后填写。企业名称、`display_id`、App ID 和 `tenant_access_token` 不能代替它。旧 API 客户端仍可显式提供安装 tenant_key；已废弃的 `actor_tenants` 输入兼容接收但不生效，连接读取结果不再包含该字段。
 
 bot 不设操作者企业白名单。飞书侧的应用可用范围、对外共享能力及安装状态决定用户能否接触机器人；收到可信事件后，bot 仍要求个人双端身份绑定和目标项目授权，群数据另受项目—群范围控制。操作者 tenant_key 继续作为外部身份、会话和卡片操作者校验的一部分：不同企业的相同 open_id 不共享绑定或会话，也不能互用卡片。
 
-`GET /api/channels/setup` 返回管理员可见连接及当前入口地址；`POST /api/channels/feishu/probe` 用自建应用的 `{app_id,app_secret}` 临时检查，或用 `{connector_id,expected_revision}` 检查已保存连接。请求仅访问固定的飞书 API，不保存临时凭据、不修改个人身份和授权、不发送测试消息。成功返回机器人名称、open_id、`state:verified` 和 `event_delivery_verified:false`；已保存连接还返回 `revision`，机器人身份变化时自动更新并递增连接版本。版本变化、鉴权失败和商店应用票据缺失分别返回稳定错误码，平台原始错误和访问令牌不返回客户端。
+`GET /api/channels/setup` 返回管理员可见连接及当前入口地址；`POST /api/channels/feishu/probe` 用自建应用的 `{app_id,app_secret}` 临时检查，或用 `{connector_id,expected_revision}` 检查已保存连接。请求仅访问固定的飞书 API，不保存临时凭据、不修改个人身份和授权、不发送测试消息。成功返回机器人名称、open_id、`state:verified` 和 `event_delivery_verified:false`；已保存连接还返回 `revision`，机器人身份变化时自动更新并递增连接版本。版本变化、鉴权失败和商店应用票据缺失分别返回稳定错误码；保存时获取安装企业失败返回 `channel_tenant_unavailable`，提示开通 `tenant:tenant:readonly` 并发布生效后重试，不保存部分连接或凭据。平台原始错误和访问令牌不返回客户端。
 
 SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自建可选择官方 SDK 长连接。HTTP 原始请求体按飞书规则验签，校验五分钟时间窗、Verification Token、App ID 和安装 tenant_key，支持 Encrypt Key 的 AES-256-CBC 解密。长连接由服务端持有应用凭据认证，两种方式复用同一持久收件队列、来源检查和去重。
 
