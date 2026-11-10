@@ -101,6 +101,21 @@ test('a role run binds a validated RunContext, a scheduler epoch and a token; ev
   assert.ok(!everything.includes('fixture-model-key-169')); assert.ok(!/rrt_[\w-]{12}\.[\w-]{43}/.test(everything));
 });
 
+test('a live authority change discards the physical transcript before resuming the same logical role instance', async t => {
+  const requests = [], f = await fixture(t, body => { requests.push(body); return call('finish', { summary: 'done' }); });
+  await runRole(f.spec, 'dev');
+  const instance = f.s.get("SELECT * FROM role_instances WHERE task_id='t' AND role='dev'");
+  f.s.run('UPDATE role_instances SET session=?,harness_state=?,runtime=? WHERE id=?',
+    JSON.stringify([{ role: 'user', content: 'obsolete-authority-transcript' }]), '{"session_id":"obsolete-session"}', 'obsolete-runtime', instance.id);
+  f.put({ roles: [{ role_id: 'dev', harness_ref: { id: 'native' }, permissions: { commands: 'deny' } }] });
+  await runRole(f.spec, 'dev');
+  assert.ok(!JSON.stringify(requests.at(-1).messages).includes('obsolete-authority-transcript'));
+  const resumed = f.s.get("SELECT * FROM role_instances WHERE task_id='t' AND role='dev'");
+  assert.equal(resumed.id, instance.id); assert.notEqual(resumed.source_fence, instance.source_fence);
+  assert.notEqual(resumed.runtime, 'obsolete-runtime');
+  assert.ok(f.s.get("SELECT 1 FROM task_history WHERE task_id='t' AND type='source_authorization_changed'"));
+});
+
 test('capability tokens are bound to tenant, project, task, run and epoch; reuse, expiry, revocation, a stale lease and forgeries are refused', async t => {
   const f = await fixture(t, () => call('finish', {}));
   const a = bound(f.s), other = bound(f.s, { task: 'o', project: 'other', scope: 'assign-o' });

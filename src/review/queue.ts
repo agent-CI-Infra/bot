@@ -37,6 +37,15 @@ export function mentionsBot(event: string, payload: Json): boolean {
 }
 // What the bot writes itself carries its marker; a bot account posts as an ordinary GitHub user, so the sender type is not enough.
 const botMarker = /<!-- dept-bot[:-]/;
+// An employee's publication must not re-enter as a fresh high-authority Manager
+// event. The marker is committed before sending, including uncertain responses.
+function rolePublicationEcho(store: Store, repository: string, body: unknown): boolean {
+  for (const match of String(body ?? '').matchAll(/<!-- dept-bot:([a-f0-9]{48}) -->/g)) {
+    if (store.get(`SELECT 1 FROM github_effects e JOIN tasks t ON t.id=e.task_id JOIN task_origins o ON o.task_id=t.id
+      WHERE e.id=? AND t.repository_id=? AND o.source_kind='role' AND e.kind IN ('issue','pull_request')`, match[1]!, repository)) return true;
+  }
+  return false;
+}
 const botWrote = (payload: any, body: unknown) => payload?.sender?.type === 'Bot' || botMarker.test(String(body ?? ''));
 const clip = (value: unknown, limit = 4000) => { const text = String(value ?? ''); return text.length > limit ? text.slice(0, limit) + '…' : text; };
 // A person updated an open Issue or PR after it was opened: edited its title or body, commented, submitted a review or replied
@@ -167,6 +176,7 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
   const notClosed = (object: any) => object && object.state !== 'closed' && object.draft !== true && Number.isSafeInteger(Number(object.number)) && Number(object.number) > 0;
   if (event === 'issues' && !p.issue?.pull_request && notClosed(p.issue)) {
     const issue = p.issue, number = Number(issue.number);
+    if (action === 'opened' && rolePublicationEcho(store, repositoryId, issue.body)) return null;
     if (action === 'opened' && filters['issue.opened']) return { ...base('issue.opened', `issue.opened:${number}`, 'issue', number, `Issue 打开：${clip(issue.title, 120)} #${number}`, { object: objectFacts(issue) }),
       options: [{ id: 'review', work: 'review.issue', title: `检视 Issue #${number}`, default: true, spec: { type: 'object', kind: 'review.issue', number, head: null, input: payload, delivery } },
         replyOption('issue', number, null, payload, 'opened', delivery)] };
@@ -193,6 +203,7 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
   if (event === 'pull_request' && notClosed(p.pull_request) && sha(p.pull_request.head?.sha)) {
     const pr = p.pull_request, number = Number(pr.number), head = sha(pr.head.sha)!;
     const opened = ['opened', 'ready_for_review'].includes(action) && filters['pull_request.opened'], pushed = action === 'synchronize' && filters['pull_request.synchronize'];
+    if (opened && rolePublicationEcho(store, repositoryId, pr.body)) return null;
     if (opened || pushed) {
       const type = opened ? 'pull_request.opened' : 'pull_request.synchronize';
       return { ...base(type, `${type}:${number}:${head}`, 'pr', number, `${opened ? 'PR 打开' : 'PR 推送新提交'}：${clip(pr.title, 120)} #${number}`, { object: objectFacts(pr) }),

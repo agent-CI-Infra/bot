@@ -5,6 +5,7 @@ import { blobSha, operationId, stop, TaskError, treeSha } from '../agent/common.
 import { implementationText, reviewText, summaryComment, humanItems, markHuman, type HumanItem, type Place, type Prompted, type DevelopmentWait } from './text.js';
 import { inlineLocation } from '../review/findings.js';
 import { applyReleaseCategory, releaseCategory } from './release-label.js';
+import { assertTaskExternalEffect } from '../tasks/management.js';
 
 /**
  * A bot pull request now at `sha`. Only a confirmed head and its refreshed description count, once across retries. The revision
@@ -18,6 +19,7 @@ export class Publisher {
   constructor(readonly store:Store,readonly github:GitHub,readonly task:Row,readonly validate:()=>Promise<void>, readonly headDelays = [0, 250, 750, 1500, 2500],readonly log:(value:any)=>void=()=>{},readonly beforeWrite?:()=>void){}
   // replayable effects (such as adding a label) are idempotent on GitHub, so an unknown response may be sent again.
   async effect(key:string,kind:string,request:any,send:()=>Promise<any>,find:()=>Promise<any>,replayable=false){
+    assertTaskExternalEffect(this.store,this.task,kind);
     const id=operationId(this.task.id+':'+key),marker=`<!-- dept-bot:${id} -->`;
     let row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);
     if(!row){this.store.run("INSERT INTO github_effects VALUES(?,?,?,?, 'pending',NULL,?)",id,this.task.id,kind,JSON.stringify(request),marker);row=this.store.get('SELECT * FROM github_effects WHERE id=?',id);}
@@ -33,7 +35,7 @@ export class Publisher {
     // Withdrawal must remain available even when a delivery gate no longer permits advancement.
     const checkStages=()=>{if(kind!=='dequeue')assertPublicationStages(this.store,this.task.id);};
     const previous=this.github.beforeWrite;
-    try{await this.validate();checkStages();this.github.beforeWrite=()=>{checkStages();previous?.();this.beforeWrite?.();};const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
+    try{await this.validate();checkStages();assertTaskExternalEffect(this.store,this.task,kind);this.github.beforeWrite=()=>{checkStages();assertTaskExternalEffect(this.store,this.task,kind);previous?.();this.beforeWrite?.();};const result=await send();this.store.run("UPDATE github_effects SET state='sent',response=? WHERE id=?",JSON.stringify(result),id);return result;}
     catch(error){this.store.run('UPDATE github_effects SET state=? WHERE id=?',error instanceof TaskError&&error.code==='github_response_unknown'?'unknown':'pending',id);throw error;}
     finally{this.github.beforeWrite=previous;}
   }

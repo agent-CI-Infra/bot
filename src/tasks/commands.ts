@@ -1,18 +1,31 @@
 import {relateTasks} from './followups.js';
 import {setTaskPriority} from './priority.js';
 import type { Store } from '../storage/database.js';
-import { randomId, fields, fail, type Json } from '../core/security.js';
+import { randomId, fields, fail, digest, object, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
 import { TaskRecords } from './service.js';
 import { traceEvent } from './trace.js';
 import { captureTaskConfiguration } from './configuration.js';
 import { stageReplanContext } from '../roles/schedule.js';
+import { assertManagedTask, assertTaskCaller, createManagedTask, operatorTaskCaller, taskCallerActor, type TaskCaller } from './management.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 /** Shared task mutation boundary for the console, management tools and future message adapters. */
 export class TaskCommands {
   constructor(readonly store:Store, readonly hooks:{active?:(id:string)=>boolean;tick?:()=>void}={}){}
-  api(user:Actor,method:string,url:URL,input:Json):Json|undefined {
+  /** The role caller is an issued object supplied only by trusted runtime/transport code, never an HTTP field. */
+  api(user:Actor,method:string,url:URL,input:Json,caller?:TaskCaller):Json|undefined {
+    const target = /^\/api\/tasks\/([^/]+)\//.exec(url.pathname);
+    if (caller) {
+      assertTaskCaller(this.store,caller,true);
+      if (url.pathname === '/api/tasks' && method === 'POST') {
+        if (input.repository_id !== caller.project_id) fail(403,'task_project_mismatch');
+      } else if (target) assertManagedTask(this.store,caller,target[1]!,true);
+      else return fail(403,'task_operation_forbidden');
+    } else if (target && method !== 'GET') {
+      const project=this.store.get('SELECT repository_id FROM tasks WHERE id=?',target[1]!)?.repository_id;
+      if(project) operatorTaskCaller(this.store,user,project);
+    }
     const relation=/^\/api\/tasks\/([^/]+)\/relate$/.exec(url.pathname);
     if(relation&&method==='POST'){
       fields(input,['task_id','key','relationship','reason','evidence']);const filter=scope(user,'repository_id');const task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,relation[1]!,...filter.args);if(!task)fail(404,'task_not_found');
@@ -88,22 +101,28 @@ export class TaskCommands {
       this.store.audit(user.id,'project.context',contextMatch[1]!,contextMatch[1]!);return {context:records.project(contextMatch[1]!)};
     }
     if(url.pathname==='/api/tasks'&&method==='POST') {
-      fields(input,['repository_id','request','contract']);
+      fields(input,['repository_id','request','contract',...(caller?['executor_role','execute']:[])]);
       if(typeof input.repository_id!=='string'||typeof input.request!=='string'||!input.request.trim()||input.request.length>60000)fail(400,'invalid_task_request');
       repository(this.store,user,input.repository_id as string);
       const id=randomId(),now=new Date().toISOString();
       const contract=input.contract as any;
       if(!contract||!Array.isArray(contract.criteria)||!contract.criteria.length||typeof contract.endpoint!=='string'||!contract.endpoint.trim())fail(400,'invalid_task_contract');
       // Validate before insertion; rollback also removes trigger-created records on failure.
-      this.store.transaction(()=>{
-        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,created_at,updated_at) VALUES(?,?,'task.request','queued',?,?,?,?)",id,input.repository_id as string,(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),now,now);
+      if (caller && (input.executor_role !== undefined && typeof input.executor_role !== 'string' || input.execute !== undefined && typeof input.execute !== 'boolean')) fail(400,'invalid_task_executor');
+      const key=caller?'managed:'+digest(JSON.stringify([caller.owner_key,caller.source_message,caller.source_task_id,
+        caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role])):null;
+      const previous=key?this.store.get('SELECT id FROM tasks WHERE unique_key=?',key):undefined;
+      if(previous){assertManagedTask(this.store,caller!,previous.id,true);return {id:previous.id,replayed:true};}
+      createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),input.executor_role as string|undefined,()=>{
+        this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,unique_key,created_at,updated_at) VALUES(?,?,'task.request',?,?,?,?,?,?)",id,input.repository_id as string,input.execute===false?'paused':'queued',(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),key,now,now);
         try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
         // Persist the authoritative validated contract for executor recovery.
         this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract}),id);
         captureTaskConfiguration(this.store,id);
         if (user.context) this.store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, user.context.principal_id,
-          this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', input.repository_id as string)!.tenant_id, input.repository_id as string, 'tasks.write');
+          this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', input.repository_id as string)!.tenant_id, input.repository_id as string, caller?'tasks.manage_own':'tasks.write');
         this.store.audit(user.id,'task.create',id,input.repository_id as string);
+        return id;
       });this.hooks.tick?.();return {id};
     }
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
@@ -126,5 +145,32 @@ export class TaskCommands {
       traceEvent(this.store,task.id,'intervention',{action:'retry',stage_plan:stageReplanContext(this.store,task.id)},null,'user:'+user.id);
       this.store.audit(user.id,'task.retry',task.id,task.repository_id);
     });this.hooks.tick?.();return {ok:true};
+  }
+  /** Model tools, conversations and role runs all call the same API mutations and ownership checks. */
+  tool(caller:TaskCaller,name:string,args:any):Json {
+    args=object(args);
+    assertTaskCaller(this.store,caller,!['list_managed_tasks','read_managed_task'].includes(name));
+    const actor=taskCallerActor(this.store,caller),user:Actor={id:caller.principal_id??'role:'+caller.role,username:caller.role??'operator',role:'project_admin',csrf:'',repositories:[caller.project_id],context:actor};
+    if(name==='list_managed_tasks'){
+      fields(args,['offset','limit']);const offset=args.offset??0,limit=args.limit??20;
+      if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>100)fail(400,'invalid_pagination');
+      const rows=this.store.all('SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.updated_at,o.executor_role,o.conversation_id FROM tasks t JOIN task_origins o ON o.task_id=t.id WHERE o.project_id=? AND o.owner_key=? ORDER BY t.created_at DESC,t.id LIMIT ? OFFSET ?',caller.project_id,caller.owner_key,limit+1,offset);
+      return {tasks:rows.slice(0,limit),has_more:rows.length>limit,next_offset:rows.length>limit?offset+limit:null};
+    }
+    if(name==='read_managed_task'){
+      fields(args,['task_id']);assertManagedTask(this.store,caller,String(args.task_id));return {task:new TaskRecords(this.store).get(String(args.task_id)),origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',String(args.task_id))??null};
+    }
+    if(name==='create_task'){
+      fields(args,['request','criteria','executor_role','execute']);
+      return this.api(user,'POST',new URL('http://local/api/tasks'),{repository_id:caller.project_id,request:args.request,
+        contract:{goal:args.request,criteria:args.criteria,scope:[String(args.request).slice(0,2000)],endpoint:'report'},
+        ...(args.executor_role!==undefined?{executor_role:args.executor_role}:{}),...(args.execute!==undefined?{execute:args.execute}:{})},caller)!;
+    }
+    if(name==='manage_task'){
+      fields(args,['task_id','action','instruction']);if(!['instructions','retry','pause','cancel'].includes(String(args.action)))fail(400,'task_operation_forbidden');
+      if(args.action!=='instructions'&&args.instruction!==undefined)fail(400,'unknown_field');
+      return this.api(user,'POST',new URL('http://local/api/tasks/'+String(args.task_id)+'/'+args.action),args.action==='instructions'?{instruction:args.instruction}:{},caller)!;
+    }
+    return fail(403,'task_tool_not_allowed');
   }
 }

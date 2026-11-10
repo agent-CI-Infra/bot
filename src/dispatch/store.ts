@@ -6,6 +6,7 @@ import { enqueue } from '../review/queue.js';
 import { enqueueEventTask } from '../work/events.js';
 import { workOffered, workPermissions } from '../work/settings.js';
 import { narrowWrites, workType } from '../work/catalog.js';
+import { assertManagedTask, assertTaskCaller, createManagedTask, eventTaskCaller } from '../tasks/management.js';
 
 /**
  * Manager dispatch. Every event that passes the control plane's filters is written here once (event_key is unique) with
@@ -134,6 +135,7 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
   if (!value || typeof value !== 'object') fail('dispatch_decision_invalid', 'The decision must be an object.');
   const decision = value.decision, ids = Array.isArray(value.option_ids) ? value.option_ids.map(String) : null;
   if (!['create', 'continue', 'ignore'].includes(decision) || !ids) fail('dispatch_decision_invalid', 'decision must be create, continue or ignore, with option_ids.');
+  if (decision !== 'ignore') assertTaskCaller(store,eventTaskCaller(store,String(context.event.repository_id),String(context.event.id)),true);
   const reason = typeof value.reason === 'string' ? value.reason.trim() : '';
   if (!reason) fail('dispatch_reason_required', 'Give the reason for the decision.');
   if (new Set(ids).size !== ids.length) fail('dispatch_decision_invalid', 'option_ids repeat an option.');
@@ -236,8 +238,9 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
     // A review that started meanwhile (another event of the object) changes the choice: create may now duplicate it.
     if (decision.seen && context.continuations.some(option => !decision.seen!.includes(option.id))) throw new InvalidDecision('dispatch_context_changed', 'A task the event could join appeared after the decision.');
     const options = JSON.parse(current.options) as CreateOption[], created: string[] = [], continued: string[] = [], declined: string[] = [], now = new Date().toISOString();
+    const caller = checked.decision === 'ignore' ? null : eventTaskCaller(store,String(current.repository_id),String(current.id));
     if (checked.decision === 'create') for (const id of checked.option_ids) {
-      const option = options.find(entry => entry.id === id)!, task = create(store, current, option, checked);
+      const option = options.find(entry => entry.id === id)!, task = createManagedTask(store,caller!,option.spec.type==='request'?undefined:'dev',()=>create(store, current, option, checked));
       if (!task) { declined.push(id); continue; }
       created.push(task);
       store.run('INSERT OR IGNORE INTO task_events VALUES(?,?,?,?)', task, current.id, 'created', now);
@@ -246,6 +249,7 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
     }
     if (checked.decision === 'continue') {
       const target = context.continuations.find(option => option.id === checked.option_ids[0])!;
+      assertManagedTask(store,caller!,target.task_id,true);
       join(store, current, target.task_id, checked); continued.push(target.task_id);
       store.run('INSERT OR IGNORE INTO task_events VALUES(?,?,?,?)', target.task_id, current.id, 'continued', now);
     }

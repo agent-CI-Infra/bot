@@ -45,8 +45,12 @@ test('live edit and recall win over delayed history, recalls received before ori
   assert.equal(ledger.query(chat.id).messages[0].content, 'edited');
   ledger.merge(chat, message('m', 10, { updated_at: 40, deleted: true }), 'live');
   ledger.merge(chat, message('m', 10, { updated_at: 90 }), 'history');
-  ledger.merge(chat, message('not-yet-seen', 50, { deleted: true }), 'live');
-  ledger.merge(chat, message('not-yet-seen', 30), 'history');
+  ledger.merge(chat, message('not-yet-seen', 50, { deleted: true, sender_id: '', sender_tenant: '' }), 'live');
+  ledger.merge(chat, message('not-yet-seen', 30, { sender_id: 'original-sender', thread_id: 'thread' }), 'history');
+  const recalled = store.get("SELECT * FROM channel_messages WHERE message_id='not-yet-seen'");
+  assert.equal(recalled.sender_id, 'original-sender'); assert.equal(recalled.created_at, 30); assert.equal(recalled.thread_id, 'thread');
+  const payload = store.secrets.open(recalled.payload, 'channel-message:' + chat.id + ':not-yet-seen');
+  assert.equal(payload.content, ''); assert.equal(payload.raw_content, ''); assert.equal(payload.deleted, true);
   assert.ok(ledger.query(chat.id).messages.every(m => m.deleted && !m.resources));
   assert.equal(ledger.query(chat.id).messages[0].content, '[消息已撤回]');
 });

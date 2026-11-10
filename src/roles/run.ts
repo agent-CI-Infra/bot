@@ -18,6 +18,9 @@ import { TaskError,stop } from '../agent/common.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,type Entry,type RoleConfiguration } from './definition.js';
 import type { PiRoleEnvironment } from '../agent/pi.js';
 import type { Row,Store } from '../storage/database.js';
+import { assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed } from '../tasks/management.js';
+import { TaskCommands } from '../tasks/commands.js';
+import { resolvePrincipalActor } from '../identity/authorization.js';
 /** The project's role configuration in its V2 form (legacy configurations are presented as V2 with legacy:true). */
 export function roleConfig(store:AgentSpec<any>['store'],task:AgentSpec<any>['task']){return roleConfiguration(store,task.repository_id,taskConfiguration(store,task)?.roles);}
 /** Whether this entry point runs under the project controller. */
@@ -101,6 +104,11 @@ const harnessEventType:Record<string,[RunEvent['type'],RunEvent['category']]>={s
 
 async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|undefined,harnessOverride:string|undefined,options:RoleRunOptions,state:LoopState,shared:{sourceInput:string;priorRun:Row|undefined;priorSubmission:Row|null|undefined;memory:any}):Promise<PreparedRun<T>>{
  const s=spec.store,task=spec.task,stage=stageForAssignment(s,assignment),workflow=workOf(task as any),{resolved,continuation}=state;let instance=state.instance;
+ const sourceFence=taskAuthorizationFence(s,task,role);
+ if(instance.source_fence!==sourceFence){
+  if(instance.sequence>0){s.run("UPDATE role_instances SET session='[]',harness_state='{}',runtime=NULL WHERE id=?",instance.id);instance={...instance,session:'[]',harness_state:'{}',runtime:null};traceEvent(s,task.id,'source_authorization_changed',{role,instance_id:instance.id,recovery:'rebuilt_from_authorized_facts'},task.trace_run_id);}
+  s.run('UPDATE role_instances SET source_fence=? WHERE id=?',sourceFence,instance.id);instance.source_fence=sourceFence;
+ }
  if(stage&&s.get('SELECT instance_id FROM role_assignments WHERE id=? AND task_id=?',assignment!,task.id)?.instance_id!==instance.id)stop('role_recovery_scope_mismatch','failed','阶段委派必须属于当前任务与角色实例。');
  const knowledgeFence=memoryViewFence(s,{...task,active_role:role});
  if(instance.knowledge_fence!==knowledgeFence){
@@ -146,11 +154,12 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const ref=traceEvent(s,task.id,'role_input',{instance_id:instance.id,role_version:definition.version,harness,assignment_id:assignment??null,recovery_mode:recover,...roleContext,skills:snapshot.skills?{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,files:snapshot.skills.files.map(f=>f.path)}:null,continuation:continuation?.ref??null,input:spec.redactor.clean(spec.prompt)},task.trace_run_id,'role:'+role,continuation?[continuation.ref]:[]);
   const denied=(tool:string|null,reason:string)=>traceEvent(s,task.id,'capability_denied',{role,instance_id:instance.id,tool,reason,snapshot_id:resolved.id,policy:snapshot.capability.id},task.trace_run_id,'framework');
   // Authority is live: a removed role, revoked permission or disabled coordination stops further capability use; the snapshot never extends it.
-  const authority=(tool?:string)=>{const reason=roleAuthority(s,task.repository_id,snapshot,tool);if(reason){denied(tool??null,reason);stop('role_authority_revoked','waiting_configuration',`${role}：${reason}`);}};
+  const direct=managedTaskOrigin(s,task.id)?.source_kind==='role';
+  const authority=(tool?:string)=>{assertTaskRole(s,task,role);const reason=roleAuthority(s,task.repository_id,snapshot,tool,direct);if(reason){denied(tool??null,reason);stop('role_authority_revoked','waiting_configuration',`${role}：${reason}`);}if(tool&&!taskToolAllowed(s,task,role,tool)){denied(tool,'source_permission_ceiling');stop('role_authority_revoked','waiting_permission','源请求不允许此能力。');}};
   // Flat permissions filter every offered tool, including the submission tool.
   const allowedTools=snapshot.capability.tools;
   const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
-  const tools=[...(spec.tools??[]),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>!allowedTools||allowedTools.includes(t.function.name));
+  const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...(snapshot.kind==='evaluator'?[]:taskManagementTools),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
   const live:Live={bound:null,exhausted:null,stage_exhausted:null,tools:0};
@@ -179,6 +188,21 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_call',category:'progress',operation_id:op,data:{name}});
     budgetGuard();
     const value=await (async()=>{
+     const caller=()=>{
+      const origin=assertManagedExecution(s,task),auth=s.get('SELECT principal_id FROM task_authorizations WHERE task_id=?',task.id),principal=origin?.principal_id??auth?.principal_id;
+      const actor=principal?resolvePrincipalActor(s,principal,null,task.repository_id):undefined;
+      return roleTaskCaller(s,task.repository_id,role,{actor,conversation_id:origin?.conversation_id??undefined,source_message:origin?.source_message??undefined,
+        source_task_id:task.id,source_run_id:b?.run_id,allowed_tools:snapshot.capability.tools?.filter(tool=>taskToolAllowed(s,task,role,tool)),
+        guard:()=>{authority(name);if(b)assertLease(s,b.run_id,b.epoch);}});
+     };
+     if(['delegate_role','delegate_roles'].includes(name)){
+      const targets=name==='delegate_role'?[args?.role]:Array.isArray(args?.assignments)?args.assignments.map((a:any)=>a?.role):[];
+      for(const target of targets){const definition=roleConfig(s,task).roles.find(r=>r.role_id===target&&r.enabled);
+       // Entry validation still diagnoses unsupported/QA targets; eligible workers use the shared executor boundary.
+       if(definition&&['writer','observer'].includes(definition.kind))taskExecutor(s,caller(),target);
+      }
+     }
+     if(taskManagementTools.some(t=>t.function.name===name))return new TaskCommands(s).tool(caller(),name,args);
      // Task facts are expanded through the gateway with this run's token: the same server-side checks for every adapter.
      if(b&&gatewayToolNames.includes(name))return gateway(s).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch});
      if(name==='read_skill'&&snapshot.skills){const files=skillFiles(s,task.repository_id,snapshot.skills);if(args?.path===undefined)return {bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},files:files.map(({content,...f})=>f)};
@@ -334,7 +358,7 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
    catch{traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,reason:'role_snapshot_unavailable'},b.run_id,'framework');appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'ended',category:'failed',data:{code:'role_snapshot_unavailable'}});stop('role_snapshot_unavailable','waiting_environment');}}
   if(b){
    if(!leaseCurrent(s,b.run_id,b.epoch)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'lease_epoch_stale'},b.run_id,'framework');stop('lease_epoch_stale','cancelled','运行的租约已被接管，迟到的结果不被接受。');}
-   const live2=roleAuthority(s,task.repository_id,p.resolved.snapshot,p.spec.finish?.name??p.resolved.snapshot.output_schema.tool??'finish');if(live2){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:live2},b.run_id,'framework');stop('role_authority_revoked','waiting_configuration',`${p.role}：${live2}`);}
+   const live2=roleAuthority(s,task.repository_id,p.resolved.snapshot,p.spec.finish?.name??p.resolved.snapshot.output_schema.tool??'finish',managedTaskOrigin(s,task.id)?.source_kind==='role');if(live2){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:live2},b.run_id,'framework');stop('role_authority_revoked','waiting_configuration',`${p.role}：${live2}`);}
    if(p.resolved.snapshot.kind==='observer'&&b.ctx.candidate_ref){const now=stageForAssignment(s,p.assignment)?latestRoleCandidate(s,task.id):inputCandidate(s,task,p.role,'observer').ref;if(!now||candidateKey(now)!==candidateKey(b.ctx.candidate_ref)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'candidate_changed',started_with:b.ctx.candidate_ref,current:now},b.run_id,'framework');stop('candidate_changed','retry_wait','检视期间固定候选已变化；旧环境的结论不能认证新内容。');}}
   }
   await p.env.release?.();
@@ -342,7 +366,7 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
   await p.spec.guard();
   return s.transaction(()=>{
   // Release and the caller's guard may await external work. Recheck immediately before recording a result.
-  const revoked=roleAuthority(s,task.repository_id,p.resolved.snapshot,p.spec.finish?.name??p.resolved.snapshot.output_schema.tool??'finish');
+  const revoked=roleAuthority(s,task.repository_id,p.resolved.snapshot,p.spec.finish?.name??p.resolved.snapshot.output_schema.tool??'finish',managedTaskOrigin(s,task.id)?.source_kind==='role');
   if(revoked)stop('role_authority_revoked','waiting_configuration',`${p.role}：${revoked}`);
   if(b)assertLease(s,b.run_id,b.epoch);
   const reference=traceEvent(s,task.id,'role_result',{instance_id:p.instance.id,role:p.role,assignment_id:assignment??null,snapshot_id:p.resolved.id,candidate_version:assignment?s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null:null,contract_revision:s.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision,result:p.spec.redactor.clean(result)},runId,'role:'+p.role,[p.inputRef]);
@@ -364,6 +388,7 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
 /** events(handle, after_cursor) → a bounded page of the run's normalized events. */
 export function roleRunEvents<T>(store:Store,handle:RoleRunHandle<T>|string,after=0,limit=100){const id=typeof handle==='string'?handle:handle.run_id;if(!id)return stop('role_run_not_started','failed');return runEvents(store,id,after,limit);}
 export async function runRole<T>(spec:AgentSpec<T>,role:string,assignment?:string,harnessOverride?:string,options:RoleRunOptions={}):Promise<{result:T;reference:string;instance_id:string;candidate_ref:CandidateRef|null;context:RunContext|null}>{
+ assertTaskRole(spec.store,spec.task,role);
  const s=spec.store,task=spec.task,existing=s.get('SELECT * FROM role_instances WHERE task_id=? AND role=?',task.id,role);
  // Under a legacy configuration an existing instance keeps the harness it was first bound to; V2 resolves the current revision.
  const pinned=!harnessOverride&&!!existing&&roleConfig(s,task).legacy;

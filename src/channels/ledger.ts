@@ -83,7 +83,24 @@ export class ChannelLedger {
   merge(chat: Row, message: StoredMessage, source: 'live' | 'history'): boolean {
     const old = this.store.get('SELECT * FROM channel_messages WHERE chat_id=? AND message_id=?', chat.id, message.message_id);
     // Recall is permanent. A delayed page/event must never restore deleted content.
-    if (old?.deleted || message.created_at < chat.retained_after && !message.deleted) return false;
+    if (old?.deleted) {
+      // A recall may arrive first, without its sender or original timestamp. Late history
+      // can fill that metadata, while both the sealed payload and query stay tombstoned.
+      if (message.deleted) return false;
+      const metadata = { sender_id: old.sender_id || message.sender_id, sender_tenant: old.sender_tenant || message.sender_tenant,
+        sender_type: old.sender_id ? old.sender_type : message.sender_type, message_type: old.sender_id ? old.message_type : message.message_type,
+        created_at: Math.min(old.created_at, message.created_at), parent_id: old.parent_id || message.parent_id,
+        root_id: old.root_id || message.root_id, thread_id: old.thread_id || message.thread_id };
+      if (Object.entries(metadata).every(([key, value]) => old[key] === value)) return false;
+      const payload = this.store.secrets.open(old.payload, 'channel-message:' + chat.id + ':' + message.message_id);
+      this.store.run(`UPDATE channel_messages SET sender_id=?,sender_tenant=?,sender_type=?,message_type=?,created_at=?,parent_id=?,root_id=?,thread_id=?,payload=? WHERE chat_id=? AND message_id=?`,
+        ...Object.values(metadata), this.store.secrets.seal({ ...payload, ...metadata, content: '', raw_content: '', deleted: true }, 'channel-message:' + chat.id + ':' + message.message_id), chat.id, message.message_id);
+      this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
+      this.store.run('UPDATE channel_chats SET revision=revision+1 WHERE id=?', chat.id);
+      if (metadata.thread_id) this.schedule(chat, 'thread', metadata.thread_id);
+      return true;
+    }
+    if (message.created_at < chat.retained_after && !message.deleted) return false;
     if (old && !message.deleted && (message.updated_at < old.updated_at || message.updated_at === old.updated_at && (source === 'history' || old.source === 'live'))) return false;
     const data = message.deleted ? { ...message, content: '', raw_content: '' } : message;
     const sealed = this.store.secrets.seal(data, 'channel-message:' + chat.id + ':' + message.message_id);

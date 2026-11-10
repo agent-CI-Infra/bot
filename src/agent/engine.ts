@@ -17,6 +17,7 @@ import { observation } from '../tasks/evidence.js';
 import { playbooks } from '../tasks/playbooks.js';
 import { restoreCheckpoint,checkpoint } from '../tasks/checkpoint.js';
 import { runRequest } from '../tasks/request.js';
+import { assertManagedExecution } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
@@ -204,13 +205,14 @@ export class TaskEngine {
       this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,content,new Date().toISOString());
     };
     const guard=async()=>{
+      try { assertManagedExecution(this.store,task); } catch(error) { if(error instanceof HttpError)stop(error.code,'waiting_permission');throw error; }
       // Only this task's own claim counts; other tasks on the same computer hold their own.
       try{checkManagementBudget(this.store,task.repository_id);}catch(error){if(error instanceof HttpError)stop(error.code,'waiting_configuration');throw error;}
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
       if(current?.claim_token!==token||claim?.token!==token||['cancelled','superseded'].includes(current.status))stop('task_claim_revoked','cancelled',`任务 ${id} 的执行权已撤销或状态已变为 ${current?.status||'不存在'}。`);
       if (task.kind === 'task.request') {
         const execution = this.store.get('SELECT * FROM task_authorizations WHERE task_id=?', id);
-        if (execution) {
+        if (execution && this.store.get('SELECT source_kind FROM task_origins WHERE task_id=?',id)?.source_kind!=='role') {
           try { authorize(resolvePrincipalActor(this.store, execution.principal_id, execution.tenant_id, task.repository_id), execution.capability); }
           catch { stop('task_actor_permission_revoked','waiting_permission','发起人的当前任务管理权限已失效。'); }
         }
