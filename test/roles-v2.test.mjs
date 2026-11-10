@@ -59,7 +59,7 @@ async function fixture(t, handler) {
 }
 const rejects = (fn, code, field) => assert.throws(fn, e => { assert.equal(e.code, code); if (field) assert.equal(e.field, field); return true; });
 
-test('role prompts replace the whole template; only common system background remains fixed at runtime', async t => {
+test('role prompts replace the whole template while common framework principles remain fixed at runtime', async t => {
   const f = await fixture(t, body => call('finish', { system: body.messages[0].content }));
   const before = roleApi(f.s, admin, 'GET', rolesUrl, {});
   assert.equal(before.system_prompt, systemInstructions);
@@ -71,6 +71,11 @@ test('role prompts replace the whole template; only common system background rem
   assert.equal(first.result.system, systemInstructions + '\n\nRole instructions:\nMy complete role instructions.');
   f.put({ roles: [{ role_id: 'reviewer', persona_prompt: '' }] });
   assert.equal(resolveRole(f.s, 'r', 'reviewer', 'task.request').system, systemInstructions + '\n\nRole instructions:\n');
+  f.put({ roles: [{ role_id: 'qa', persona_prompt: 'Preserve these project-specific QA instructions.' }] });
+  const qa = resolveRole(f.s, 'r', 'qa', 'task.request').system;
+  assert.ok(qa.endsWith('Role instructions:\nPreserve these project-specific QA instructions.'));
+  assert.ok(qa.includes("Keep work proportional to the user's requested outcome."));
+  assert.ok(qa.includes('Recording nonblocking observations does not authorize another task;'));
 });
 
 test('editable project rules, language and work prompts survive removal of fixed entry duties', async t => {
