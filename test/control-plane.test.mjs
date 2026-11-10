@@ -182,3 +182,22 @@ test('shared model access requires explicit project grants and never grants cred
   assert.equal(h.store.get("SELECT repository_id FROM deliveries WHERE delivery_id='other-account'").repository_id, null);
   assert.deepEqual((await member('/api/events')).value.events, []);
 });
+
+test('attention filtering precedes pagination and preserves repository authorization', async t => {
+  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+  await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+  const insert = (id, repo, status, date) => h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary,created_at,updated_at) VALUES(?,?,?,?,?,?,?)', id, repo, 'review.issue', status, id, date, date);
+  insert('old-blocked', '101', 'waiting_configuration', '2026-01-01T00:00:00Z');
+  insert('foreign-blocked', '202', 'waiting_permission', '2026-01-02T00:00:00Z');
+  insert('new-failed', '101', 'failed', '2026-10-01T00:00:00Z');
+  for (let i=0;i<60;i++) insert('done-'+i, '101', i%2 ? 'queued' : 'succeeded', '2026-11-01T00:00:00Z');
+  const password=testPassword(); await admin('/api/users','POST',{username:'attention-reader',password,repository_ids:['101']});
+  const reader=h.client();await reader('/api/auth/login','POST',{username:'attention-reader',password});
+  assert.deepEqual((await reader('/api/tasks?attention=1&limit=1')).value.tasks.map(r=>r.id),['old-blocked']);
+  assert.deepEqual((await reader('/api/tasks?attention=1&limit=1&offset=1')).value.tasks.map(r=>r.id),['new-failed']);
+  assert.deepEqual((await reader('/api/tasks?attention=1&offset=2')).value.tasks,[]);
+  assert.equal((await reader('/api/tasks?attention=1&repository_id=202')).status,403);
+  assert.equal((await reader('/api/tasks/foreign-blocked')).status,404);
+  assert.equal((await reader('/api/tasks?attention=arbitrary')).status,400);
+  assert.equal((await admin('/api/tasks?attention=1')).value.tasks.length,3);
+});

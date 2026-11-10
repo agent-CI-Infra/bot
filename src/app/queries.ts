@@ -61,12 +61,16 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     for(const [key,column] of [['repository_id','repository_id'],['account_id','account_id'],['owner_id','owner_id']]){
       const value=url.searchParams.get(key!);if(value){clauses.push(key==='repository_id'?'repository_id=?':`repository_id IN (SELECT id FROM repositories WHERE ${column}=?)`);args.push(value);}
     }
+    // Filter before pagination: an old blocked task must not disappear behind newer completed work.
+    const attention = url.searchParams.get('attention');
+    if (attention && attention !== '1') fail(400, 'invalid_attention_filter');
+    if (attention) clauses.push("status IN ('failed','paused','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','needs_replan')");
     // Review and development tasks are listed on separate pages.
     const priority=url.searchParams.get('priority');if(priority){if(!['P0','P1','P2','P3'].includes(priority))fail(400,'invalid_task_priority');clauses.push('priority=?');args.push(priority);}
     const kind=url.searchParams.get('kind');if(kind){if(!['review','development'].includes(kind))fail(400,'invalid_task_kind');clauses.push('kind LIKE ?');args.push(kind+'.%');}
     const limit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit'))||50)),offset=Math.max(0,Number(url.searchParams.get('offset'))||0);
     if(!Number.isSafeInteger(limit)||!Number.isSafeInteger(offset))fail(400,'invalid_pagination');
-    return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`,...args,limit,offset).map(publicTask)),execution_available:true};
+    return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY ${attention ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(publicTask)),execution_available:true};
   }
   const relations=/^\/api\/tasks\/([^/]+)\/relations$/.exec(path);
   if(relations){const task=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,relations[1]!,...filter.args);if(!task)fail(404,'task_not_found');const offset=Number(url.searchParams.get('offset')??0);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');return taskRelations(store,task!.id,offset);}

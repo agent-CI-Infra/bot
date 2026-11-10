@@ -1,9 +1,11 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>launchpad 管理</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/views.css"><link rel="stylesheet" href="/board.css"><link rel="stylesheet" href="/costs.css"><link rel="stylesheet" href="/management.css"><script src="/app.js" defer></script><script src="/views.js" defer></script><script src="/gate-onboarding.js" defer></script><script src="/external.js" defer></script><script src="/project.js" defer></script><script src="/manager.js" defer></script><script src="/roles.js" defer></script><script src="/settings.js" defer></script><script src="/schedules.js" defer></script><script src="/vendor/marked.js" defer></script><script src="/vendor/purify.js" defer></script><script src="/management.js" defer></script><script src="/identity.js" defer></script><script src="/channels.js" defer></script><script src="/feishu-setup.js" defer></script><script src="/onboarding.js" defer></script><script src="/board.js" defer></script><script src="/metrics.js" defer></script><script src="/costs.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>launchpad 管理</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/views.css"><link rel="stylesheet" href="/board.css"><link rel="stylesheet" href="/costs.css"><link rel="stylesheet" href="/management.css"><script src="/app.js" defer></script><script src="/views.js" defer></script><script src="/gate-onboarding.js" defer></script><script src="/external.js" defer></script><script src="/project.js" defer></script><script src="/manager.js" defer></script><script src="/roles.js" defer></script><script src="/settings.js" defer></script><script src="/schedules.js" defer></script><script src="/vendor/marked.js" defer></script><script src="/vendor/purify.js" defer></script><script src="/management.js" defer></script><script src="/identity.js" defer></script><script src="/channels.js" defer></script><script src="/feishu-setup.js" defer></script><script src="/onboarding.js" defer></script><script src="/board.js" defer></script><script src="/metrics.js" defer></script><script src="/costs.js" defer></script><link rel="stylesheet" href="/shell.css"><script src="/shell.js" defer></script></head>
 <body>
+<a class="skip-link" href="#main-content">跳到主要内容</a>
 <header><div class="brand"><strong>launchpad</strong><span class="sub">管理控制台</span></div><nav id="tabs" hidden aria-label="管理页面"><button data-tab="projects">项目</button><button data-tab="management">管理对话</button><button data-tab="identity">身份与权限</button><button data-tab="board">看板</button><button data-tab="costs">统计</button><button data-tab="events">Webhook 投递</button><button data-tab="external">外部执行端</button><button data-tab="settings" data-super>全局设置</button></nav><div id="identity" hidden><span id="who"></span><button id="logout" class="quiet">退出登录</button></div></header>
-<main>
+<aside id="console-sidebar" hidden aria-label="工作区导航"></aside>
+<main id="main-content" tabindex="-1">
 <section id="boot" class="boot"><p id="boot-message" role="status">正在载入…</p><button id="boot-retry" type="button" class="quiet" hidden>重试</button></section>
 <section id="access" class="card" hidden>
   <p class="eyebrow">管理入口</p><h1 id="access-title">登录</h1><p id="access-description"></p>
@@ -17,6 +19,7 @@
     <div id="paging" class="actions" hidden><button id="previous" class="quiet">上一页</button><span id="page-number"></span><button id="next" class="quiet">下一页</button></div>
   </section>
   <section id="project-page" class="project-page" aria-label="项目设置" hidden></section>
+<section id="console-page" hidden aria-live="polite"></section>
 </section>
 <p id="message" role="status" aria-live="polite"></p>
 </main>
