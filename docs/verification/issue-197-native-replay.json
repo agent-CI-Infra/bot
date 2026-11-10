@@ -1,0 +1,86 @@
+{
+  "start": "2026-11-10T13:03:41.994Z",
+  "end": "2026-11-10T13:04:25.090Z",
+  "isolated": true,
+  "source": "Actual OpenToday experiment178 parent 4f2eed3b91495ecff5e5553288767a65d606530191379980",
+  "source_candidate": "197f65c2880e83cc3990d8e2bbdc0988943fc8bfb5a9fd80969e425916b1a5ec",
+  "model": "deepseek-v4.1-flash-1017",
+  "harness": "native",
+  "manager_plan": [
+    {
+      "key": "known-issues-applicable-baseline-header",
+      "priority": "P3",
+      "action": "supplement",
+      "task_id": "893b85013f33fc1b641d8af087868031ebdd876f90c046bf",
+      "reason": "QA 结论 pass_with_issues、core_complete=true、acceptable_risk=true；本条只是 docs/known-issues.md 第 3 行表头基线与新增的“当前任务验证范围”段不一致，且该表头与基线 d092adb9 字节一致（属继承遗留），不涉及 e2e 工具是否存在或已执行/未执行判断。属非核心措辞澄清，补入已排队的该 residual 任务即可，无需新开工作。",
+      "evidence_refs": [
+        "qa:197f65c2880e83cc3990d8e2bbdc0988943fc8bfb5a9fd80969e425916b1a5ec#residual:known-issues-applicable-baseline-header",
+        "candidate:197f65c2880e83cc3990d8e2bbdc0988943fc8bfb5a9fd80969e425916b1a5ec@revision:1",
+        "task:4f2eed3b91495ecff5e5553288767a65d606530191379980"
+      ]
+    },
+    {
+      "key": "inherited-tree-vs-delivered-tree-wording",
+      "priority": "P3",
+      "action": "supplement",
+      "task_id": "09f727128b6da2ed3c804dfb6fb7bbe823642c991ed84839",
+      "reason": "contracts.md/known-issues.md/requirements-breakdown.md 中“当前继承候选树为 e9f8a999…”字样可能被略读者误读为最终候选树，但句面已限定“继承”，且 e9f8a999→38ef4e41 只差同样的六个文档文件，所有工具与未执行结论在两树上同样成立。QA 已判为不影响验收的指代措辞问题，按 P3 补入既有 residual 任务修正表述。",
+      "evidence_refs": [
+        "qa:197f65c2880e83cc3990d8e2bbdc0988943fc8bfb5a9fd80969e425916b1a5ec#residual:inherited-tree-vs-delivered-tree-wording",
+        "qa:197f65c2880e83cc3990d8e2bbdc0988943fc8bfb5a9fd80969e425916b1a5ec",
+        "task:4f2eed3b91495ecff5e5553288767a65d606530191379980"
+      ]
+    },
+    {
+      "key": "duplicated-current-status-paragraph",
+      "priority": "P3",
+      "action": "supplement",
+      "task_id": "d6b8abdfe0bf9d8f71108319b1099c2a46117430e843e48a",
+      "reason": "同一段“本次实际执行：npm ci/npm test/npm run build”被逐字追加到五份文档，当前每处内容均与复现的原始输出一致，仅存在未来漂移的维护性风险，不构成准确性或合同完整性缺陷。按 P3 补入既有 residual 任务做去重/单一来源化，不另行重复执行同类工作。",
+      "evidence_refs": [
+        "qa:197f65c2880e83cc3990d8e2bbdc0988943fc8bfb5a9fd80969e425916b1a5ec#residual:duplicated-current-status-paragraph",
+        "qa:197f65c2880e83cc3990d8e2bbdc0988943fc8bfb5a9fd80969e425916b1a5ec",
+        "task:4f2eed3b91495ecff5e5553288767a65d606530191379980"
+      ]
+    }
+  ],
+  "acceptance": "pass_with_issues",
+  "followups": [
+    "893b85013f33fc1b641d8af087868031ebdd876f90c046bf",
+    "09f727128b6da2ed3c804dfb6fb7bbe823642c991ed84839",
+    "d6b8abdfe0bf9d8f71108319b1099c2a46117430e843e48a"
+  ],
+  "next_claim": {
+    "id": "final-integration",
+    "priority": "P2"
+  },
+  "task_count": 5,
+  "usage": [
+    {
+      "state": "received",
+      "input_tokens": 5296,
+      "output_tokens": 754
+    },
+    {
+      "state": "received",
+      "input_tokens": 5781,
+      "output_tokens": 243
+    },
+    {
+      "state": "received",
+      "input_tokens": 6273,
+      "output_tokens": 57
+    },
+    {
+      "state": "received",
+      "input_tokens": 6385,
+      "output_tokens": 97
+    },
+    {
+      "state": "received",
+      "input_tokens": 6593,
+      "output_tokens": 1895
+    }
+  ],
+  "verification_boundary": "Isolated historical-fact decision replay, not fresh product QA or development. Original project/database were not changed. Evidence references are historical/model-supplied references, not a guarantee of live resolvability."
+}
