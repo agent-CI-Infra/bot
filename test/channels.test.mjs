@@ -220,6 +220,26 @@ test('cards revalidate actual clicker, message, operation version, expiry, repla
   const unlinked = await post(h, id, envelope(directQuery())); assert.equal((await finished(h, unlinked.value.operation_id)).error, 'external_binding_required');
 });
 
+test('enterprise SDK card callbacks persist once and update the original message', async t => {
+  const { h, id, wire, service } = await channelFixture(t);
+  const target = { project_id: '101', task_id: 'blocked' }, revision = service.management.service.revision(target);
+  const result = await post(h, id, envelope('/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target,
+    arguments: { instruction: 'Inspect current logs.' }, expected_revision: revision })));
+  await finished(h, result.value.operation_id);
+  const message = await until(() => wire.sent.find(s => cardToken(s))), remote = 'remote-' + (wire.sent.indexOf(message) + 1);
+  h.store.run("UPDATE channel_connectors SET transport='websocket' WHERE id=?", id);
+  let dispatcher;
+  const sockets = new ChannelConnections(service, () => ({ start: async options => { dispatcher = options.eventDispatcher; }, close() {},
+    getConnectionStatus: () => ({ state: 'connected', reconnectAttempts: 0 }) }));
+  t.after(() => sockets.close()); sockets.reconcile();
+  const click = cardEvent(cardToken(message), remote), receipt = await dispatcher.invoke(click, { needCheck: false });
+  assert.equal(receipt.state, 'queued');
+  assert.equal((await dispatcher.invoke(click, { needCheck: false })).operation_id, receipt.operation_id);
+  assert.equal((await finished(h, receipt.operation_id)).state, 'completed');
+  await until(() => wire.sent.some(s => s.method === 'PATCH' && s.url.endsWith('/' + remote)));
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox WHERE event_id=?', click.header.event_id).n, 1);
+});
+
 test('HTTP and enterprise SDK ingress share dedup; config CAS, outbox retries, current scope fences and registered notifications stay observable', async t => {
   const f = await channelFixture(t), { h, id, service, admin, wire } = f;
   assert.equal((await connector(admin, { app_id: 'cli_invalid_saas', application_type: 'saas', transport: 'websocket', enabled: false }).catch(e => ({ error: String(e) }))).error.includes('channel_transport_invalid'), true);
