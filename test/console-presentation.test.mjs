@@ -122,7 +122,7 @@ const role = (role_id, kind, harness, version = '1') => ({ role_id, kind, enable
 // Agent backends as GET /api/repositories/:id/roles lists them: peers, Pi recommended, Claude Code for worker roles only.
 const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['native', 'Native', '1', all], ['process', 'Process', '1', all], ['acp', 'ACP', '1', all], ['claude_code', 'Claude Code', '2.1.319', ['writer', 'observer', 'evaluator']]]
   .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null })).concat([{ id: 'codex', name: 'Codex', version: null, kinds: [], available: false, recommended: false, integration_issue: 171 }]);
-const roleData = (config, { workflow = 'development.issue', configured = true } = {}) => ({ configuration: config, configured, workflow, backends, recommended_backend: 'pi', harnesses: backends.filter(b => b.available).map(({ id, version, kinds }) => ({ id, version, kinds })),
+const roleData = (config, { workflow = 'development.issue', configured = true } = {}) => ({ configuration: config, configured, revision: config.revision, workflow, backends, recommended_backend: 'pi', harnesses: backends.filter(b => b.available).map(({ id, version, kinds }) => ({ id, version, kinds })),
   models: [], revisions: [], skill_inputs: [], preview: config.roles.map(r => ({ role: r.role_id, model: r.harness_ref.id === 'acp' ? { source: 'external_harness', name: 'external' } : { source: 'project', name: 'fixture-model' } })) });
 const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'acp'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
 const entries = { development: true, request: true, review: false, actions: false };
@@ -142,8 +142,11 @@ test('role overview edits backends, models and permissions without a JSON editor
   assert.ok(!picker('dev').children.find(option=>option.value==='claude_code').disabled);
   assert.match(text(view.cards[0]),/编辑逐项权限/);assert.match(text(view.cards[0]),/工作区文件/);assert.doesNotMatch(text(view.cards[0]),/能力策略/);
   assert.doesNotMatch(text(view.cards[0]),/policy@|配置（JSON）|修改配置/);
+  const status=view.cards[0].querySelector('[data-role-version]');
+  assert.equal(status.textContent,'配置版本 4 · 已生效');
   picker('dev').value='process';picker('dev').listeners.change[0]();
   assert.equal(view.page.run("roleState.draft.roles.find(r=>r.role_id==='dev').harness_ref.id"),'process');
+  assert.equal(status.textContent,'配置版本 4 · 草稿未保存');
 });
 test('role overview preserves stored legacy backends and recommends Pi only for an unsaved project', () => {
   const config={schema:2,revision:0,enabled:true,legacy:true,controller:{role:'manager',entries},roles:team('native'),skills:[]};
@@ -151,7 +154,7 @@ test('role overview preserves stored legacy backends and recommends Pi only for 
   assert.equal(saved.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'native');
   const fresh=rolesPage(roleData(config,{configured:false}));
   assert.equal(fresh.table.querySelectorAll('select').find(s=>s.getAttribute('aria-label')==='manager Agent 后端').value,'pi');
-  assert.match(text(fresh.cards[0]),/尚未保存/);
+  assert.equal(fresh.cards[0].querySelector('[data-role-version]').textContent,'推荐配置 · 尚未保存');
 });
 
 // ---- Against the real control plane: the page reads the same routes and fields the server returns. ----

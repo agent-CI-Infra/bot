@@ -44,21 +44,34 @@ test('a pending grant says which condition it waits on, and an older server with
   try {
     await page.goto(f.h.admin); await page.getByRole('link', { name: '使用 GitHub 登录' }).click();
     await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '当前角色与授权来源' })).toBeVisible();
     const grant = f.h.store.get("SELECT * FROM scoped_grants WHERE source='github_derived'");
-    // The installation moved on since the grant was verified: the installation branch of the old combined state.
     f.h.store.run('UPDATE github_installations SET revision=revision+1 WHERE ref=?', grant.installation_ref);
     await page.evaluate(() => start());
     await expect(page.locator('#identity-panel')).toContainText('安装待同步');
     await page.screenshot({ path: resolve(output, 'identity-installation-pending-1440.png'), fullPage: true });
+
+    f.h.store.run("UPDATE external_identities SET status='pending_verification' WHERE principal_id=?", grant.principal_id);
+    await page.evaluate(() => start());
+    await expect(page.locator('#identity-panel')).toContainText('待验证／权限不足，请重新授权');
+    await expect(page.locator('#identity-panel')).not.toContainText('安装待同步');
+    await expect(page.getByRole('button', { name: '重新验证 GitHub 权限' })).toBeVisible();
+    f.h.store.run("UPDATE external_identities SET status='active' WHERE principal_id=?", grant.principal_id);
+    await page.evaluate(() => start());
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.locator('#identity-panel')).toContainText('安装待同步');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.setViewportSize({ width: 1440, height: 1000 });
-    // The permission branch is a different cause with the same old state text.
+
     f.h.store.run('UPDATE github_installations SET revision=?, scope_pending=1 WHERE ref=?', grant.installation_revision, grant.installation_ref);
     await page.evaluate(() => start());
-    await expect(page.locator('#identity-panel')).toContainText('权限待核验');
+    await expect(page.locator('#identity-panel')).toContainText('安装或权限待核验');
+    await expect(page.locator('#identity-panel')).not.toContainText('安装仍有效');
+    f.h.store.run("UPDATE github_installations SET scope_pending=0, status='suspended' WHERE ref=?", grant.installation_ref);
+    await page.evaluate(() => start());
+    await expect(page.locator('#identity-panel')).toContainText('安装或权限待核验');
+    await expect(page.locator('#identity-panel')).not.toContainText('安装仍有效');
+    f.h.store.run("UPDATE github_installations SET status='active' WHERE ref=?", grant.installation_ref);
+
     // Backward compatibility: a server that predates the field sends no reason, and the console keeps its sentence.
     await page.route('**/api/identity', async route => {
       const response = await route.fetch(), body = await response.json();
@@ -71,4 +84,56 @@ test('a pending grant says which condition it waits on, and an older server with
     await expect(page.locator('#identity-panel')).not.toContainText('安装待同步');
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('the boot state waits for setup and then opens initialization', async ({ page }) => {
+  const h = await harness();
+  let release = () => {};
+  const gate = new Promise(resolve => { release = resolve; });
+  try {
+    await page.route('**/api/setup', async route => {
+      if (route.request().method() === 'GET') await gate;
+      await route.continue();
+    });
+    await page.goto(h.admin + '/');
+    await expect(page.locator('#boot')).toBeVisible();
+    await expect(page.locator('#boot-message')).toHaveText('正在载入…');
+    await expect(page.locator('#access')).toBeHidden();
+    release();
+    await expect(page.locator('#boot')).toBeHidden();
+    await expect(page.getByRole('heading', { name: '创建第一名超级管理员', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '初始化并登录', exact: true })).toBeVisible();
+  } finally { release(); await h.stop(); }
+});
+
+test('a setup failure replaces loading with an error and retries into the login page at every supported width', async ({ page }) => {
+  const h = await harness(); await setup(h);
+  let failSetup = true, setupRequests = 0;
+  try {
+    mkdirSync(output, { recursive: true });
+    await page.route('**/api/setup', route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      setupRequests++;
+      if (failSetup) return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'setup_unavailable' }) });
+      return route.continue();
+    });
+    await page.goto(h.admin + '/');
+    const bootError = page.locator('#boot-message'), retry = page.getByRole('button', { name: '重试', exact: true });
+    await expect(bootError).toHaveAttribute('role', 'alert');
+    await expect(bootError).toContainText('控制台载入失败：503 · setup_unavailable');
+    await expect(bootError).not.toContainText('正在载入');
+    await expect(page.locator('#access')).toBeHidden();
+    await expect(page.locator('#message')).toBeEmpty();
+    for (const width of [390, 768, 1440]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await expect(retry).toBeVisible(); await expect(retry).toBeEnabled();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: resolve(output, `boot-error-${width}.png`), fullPage: true });
+    }
+    failSetup = false; await retry.click();
+    await expect(page.locator('#boot')).toBeHidden();
+    await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible();
+    expect(setupRequests).toBe(2);
+  } finally { await h.stop(); }
 });

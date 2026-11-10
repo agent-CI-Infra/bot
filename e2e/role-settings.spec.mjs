@@ -66,6 +66,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await nav.getByRole('link', { name: '概览', exact: true }).click();
     await expect(page.getByRole('table', { name: '角色解析结果' })).toBeVisible();
+    await expect(page.locator('[data-role-version]')).toHaveText(`配置版本 ${saved.revision} · 草稿未保存`);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/role-settings/overview-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
