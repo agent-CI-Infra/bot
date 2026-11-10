@@ -17,13 +17,13 @@
 | `issue.opened` | Issue 打开 | 策略字段 `review_issues` |
 | `issue.updated` | Issue 标题或正文修改、可信评论 | `review_issue_updates`，默认还要 `review_issues` 开着 |
 | `issue.mention` | 评论提到 `BOT_MENTION_NAMES` 里的名字 | 默认跟随 `review_issues` |
-| `issue.labeled` | 有人（不是 App）加上项目登记的标签，或开发标签 | 标签列表；开发标签另有开关 |
+| `issue.labeled` | 有人（不是 App）加上项目登记的标签，或开发标签（同时提供开发和回应标签的检视） | 标签列表；开发标签另有开关 |
 | `pull_request.opened` | PR 打开或 Ready for review | `review_pull_requests` |
 | `pull_request.synchronize` | PR 推送新提交 | `review_pr_updates` |
 | `pull_request.updated` | PR 修改、可信讨论、提交检视、回复检视意见 | `review_pr_discussion`，默认还要 `review_pull_requests` 开着 |
 | `pull_request.mention` | PR 上的评论提到 bot | 默认跟随 `review_pull_requests` |
 | `pull_request.labeled` | 有人给 PR 加上项目登记的标签 | 标签列表 |
-| `review.published` | 检视发布：Issue 检视找到 Issue 要求的代码修改且开发条件满足，或 bot PR 的检视采纳了修改要求、发现可执行问题 | `review.published.issue`、`review.published.pr` |
+| `review.published` | 检视发布：Issue 上有人加的开发标签时的 Issue 检视，或 bot PR 的检视采纳了修改要求、发现可执行问题 | `review.published.issue`、`review.published.pr` |
 | `release.manual` | 「发版本」页请求 CI 观察或起草发行说明 | 对应工作类型的开关 |
 | `actions.run_failed` | 默认分支的 Actions 运行失败 | Actions 失败处理的开关 |
 | `gate.manual` | 「接入门禁」对话里开始或回复 | 接入门禁的开关 |
@@ -35,7 +35,7 @@
 
 每个事件写成 `dispatch_events` 里的一条记录，`event_key` 唯一，同一事件只记录一次（重复投递、同一 PR head 的 webhook 和检视发现的新 head 都是同一个事件）。记录里有控制面算好的选项：
 
-- **新建选项**：完整的任务规格（类型、对象、head、输入、唯一键），只在开发条件、修订预算、一次一个修订等控制面条件满足时才出现；
+- **新建选项**：完整的任务规格（类型、对象、head、输入、唯一键），只在开发开关、人加的开发标签、修订预算、一次一个修订等控制面条件满足时才出现。检视结论是否支持开发、有没有指派人，是 Manager 的判断，写在事件的 `facts` 里；
 - **续接选项**：同一项目同一对象上还没开始发布的检视（PR 还要求同一 head），在分派时重新查询。
 
 后台的分派器逐条认领事件（带租约），调用一次 Manager：系统提示是固定的分派规则，后面是完整 Manager 分派提示词；用户消息是事件摘要、同一对象上最近的任务和选项（每个新建选项附带它的写入）。模型用 `dispatch` 工具回答一种结果：
@@ -44,7 +44,7 @@
 - `continue`：一个续接选项，事件作为更新交给那个检视，它在发布前回应；
 - `ignore`：不处理。
 
-三种结果都必须写理由。选了没提供的选项、多要写入或格式不对时，同一次调用里把错误交回模型改一次，仍不合格就按失败处理。模型优先读 `task_models.manager`，没有时用项目默认模型。分派调用不保留会话，每次只读取事件和任务事实。
+三种结果都必须写理由。选「开发 Issue」而检视没有给出实现目标时必须附简要说明。选了没提供的选项、缺少必需的简要说明、多要写入或格式不对时，同一次调用里把错误交回模型改一次，仍不合格就按失败处理。模型优先读 `task_models.manager`，没有时用项目默认模型。分派调用不保留会话，每次只读取事件和任务事实。
 
 决定在一个事务里落地：新建任务、写续接、记录理由，并通知拥有这个事件的模块。新建任务的输入里有 `manager`（事件 id、理由、简要说明、收窄后的写入），执行时作为说明交给 agent，不能扩大范围、写入或控制面条件；任务日志有一条 `dispatch` 记录，`task_events` 把任务和事件关联起来。
 
@@ -86,7 +86,7 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 - **Actions 失败处理**：日志引用核验、单次重跑预算和同一失败只报一次不变；Manager 不处理时这次失败记为 `ignored`，不重跑也不提报。
 - **接入门禁**：方案只回到对话里，人确认后才开门禁 PR；Manager 不处理时对话里写明原因，可以再发一次。
 - **定时检查**：计划的 `workflow` 写 `manager.check`，`parameters.instruction` 写要检查什么；到期时成为 `schedule.due` 事件，Manager 可以新建一项只读的通用任务（任务的执行身份是计划的服务主体）。
-- 合并队列、发布 outbox、对账、PR head 校验、bot 分支归属、开发标签和指派人条件、发布前测试都不变。
+- 合并队列、发布 outbox、对账、PR head 校验、bot 分支归属、开发标签必须由人加上并在发布前仍在、发布前测试都不变。
 
 ## 升级迁移
 

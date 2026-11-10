@@ -97,6 +97,37 @@ test('a later event on the same Issue continues the running review; ignore leave
   assert.deepEqual(list.value.events.map(e => [e.type, e.decision, e.reason]), [['issue.updated', 'ignore', '只是致谢，不需要检视'], ['issue.updated', 'continue', '检视还没发布，补充进去']]);
 });
 
+test('a person\'s development label always reaches the Manager: it answers with a review, or develops to its own brief', async t => {
+  const f = await fixture(t);
+  await f.admin('/api/repositories/101/policy', 'PATCH', { development_enabled: true });
+  // The published review left the start to a person: no request sentence, a claim in the Issue text.
+  const result = { summary: 'The Issue reserves the fix for its author; a maintainer must decide.', requires_code_change: true, issue_requests_code: false,
+    clarification_required: true, implementation_goal: '', request_quote: '', findings: [] }, now = new Date().toISOString();
+  f.h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,result,object_number,created_at,updated_at) VALUES('rv','101','review.issue','succeeded','r','101:review.issue:5:opened','{}',?,5,?,?)", JSON.stringify(result), now, now);
+  const labeled = { ...issue, labels: [{ name: 'bot-develop' }], assignees: [] }, label = delivery => queueWebhook(f.h.store, '101', 'issues', { action: 'labeled', label: { name: 'bot-develop' }, issue: labeled, sender: { ...alice, login: 'maintainer' } }, delivery);
+  // Development does not fit yet: the Manager answers the label with a review instead of staying silent.
+  f.state.decide = input => ({ decision: 'create', option_ids: ['review'], reason: '还缺维护者对实现范围的决定，先回复',
+    brief: { goal: 'Answer the development label: say why development does not start and what a person can do.', criteria: ['Names what is missing'] } });
+  assert.equal(label('label-1'), 1); await f.run();
+  const offered = JSON.parse(f.requests[0].messages[1].content);
+  assert.deepEqual(offered.options.create.map(o => o.work), ['development.issue', 'review.issue']);
+  assert.deepEqual([offered.event.facts.development.labeled_by, offered.event.facts.development.review.clarification_required, offered.event.facts.development.review.quote_in_issue],
+    ['maintainer', true, false]);
+  assert.match(f.requests[0].messages[0].content, /## The development label/);
+  const [answer] = tasks(f.h).filter(task => task.kind === 'review.issue' && task.id !== 'rv'), answerInput = JSON.parse(answer.input);
+  assert.equal(answerInput.trigger.reason, 'labeled'); assert.match(answerInput.manager.brief.goal, /^Answer the development label/);
+  f.h.store.run("UPDATE tasks SET status='succeeded',result=? WHERE id=?", JSON.stringify(result), answer.id);
+  // Developing an Issue the review gave no goal for needs the Manager's brief; the refusal goes back to the model once.
+  f.state.decide = (input, round) => round === 0 ? { decision: 'create', option_ids: ['development'], reason: '维护者已放行' }
+    : { decision: 'create', option_ids: ['development'], reason: '维护者已放行，按说明实现', brief: { goal: 'Keep the last CRLF line.', criteria: ['A test with a CRLF file'] } };
+  assert.equal(label('label-2'), 1); await f.run();
+  const refusal = f.requests.at(-1).messages.find(m => m.role === 'tool');
+  assert.match(refusal.content, /dispatch_brief_required/);
+  const development = tasks(f.h).find(task => task.kind === 'development.issue'), input = JSON.parse(development.input);
+  assert.equal(input.manager.brief.goal, 'Keep the last CRLF line.'); assert.equal(input.review.clarification_required, true);
+  assert.equal(development.unique_key, '101:development.issue:5:update:' + events(f.h).at(-1).delivery_id);
+});
+
 test('filtered events never reach the Manager', async t => {
   const f = await fixture(t);
   f.state.decide = () => assert.fail('the Manager must not be asked');

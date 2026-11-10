@@ -207,11 +207,9 @@ test('the first line names what the person did, and an Issue ready for developme
     ['edit', 'edit', 'review', 'review_comment', 'review_comment', 'label', 'comment', 'comment']);
   // Why development has not started follows the overview.
   const waiting = (language, development) => summaryComment({ ...base, language, development }).split('\n\n')[1];
-  assert.equal(waiting('en', { reason: 'label', label: 'bot-develop', assignees: [] }), 'Development has not started: it waits for a person to add the `bot-develop` label.');
-  assert.equal(waiting('en', { reason: 'assigned', label: 'bot-develop', assignees: ['alice', 'bob'] }),
-    'Development has not started: the Issue is assigned to `alice`, `bob`, so the bot leaves it to them. To have the bot develop it, unassign it and add the `bot-develop` label again.');
-  assert.equal(waiting('en', { reason: 'app', label: 'bot-develop', assignees: [] }), 'Development has not started: a person, not an app, has to add the `bot-develop` label.');
-  assert.equal(waiting('zh', { reason: 'assigned', label: 'bot-develop', assignees: ['alice'] }), '开发还没开始：这个 Issue 已指派给 `alice`，bot 不会接手。要让 bot 开发，请取消指派，再重新加一次 `bot-develop` 标签。');
+  assert.equal(waiting('en', { reason: 'label', label: 'bot-develop' }), 'Development has not started: it waits for a person to add the `bot-develop` label.');
+  assert.equal(waiting('en', { reason: 'app', label: 'bot-develop' }), 'Development has not started: a person, not an app, has to add the `bot-develop` label.');
+  assert.equal(waiting('zh', { reason: 'app', label: 'bot-develop' }), '开发还没开始：`bot-develop` 标签要由人加上，App 加的不算。');
   assert.equal(summaryComment({ ...base, language: 'en', development: null }), 'Ready for development.\n\nReviewed commit: x');
 });
 

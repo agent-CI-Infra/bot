@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { harness,setup,account,repository } from './helpers.mjs';
 import { inlineLocation,validateReview } from '../dist/review/findings.js';
-import { Redactor } from '../dist/agent/common.js';
+import { Redactor, sha } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { developmentReady, enqueue, queueWebhook } from '../dist/review/queue.js';
 import { emptyRepositoryFixture } from './empty-repository-helpers.mjs';
@@ -148,7 +148,24 @@ test('comment Issue reviews publish with trigger context before starting authori
   await Promise.all(h.engine.active.values());
   assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',task.id).status,'succeeded');assert.equal(h.comments.length,1);
   const development=h.store.get("SELECT * FROM tasks WHERE kind='development.issue'");
-  assert.equal(development.source_task_id,task.id);assert.equal(development.status,'queued');assert.equal(development.unique_key,'101:development.issue:1:opened');
+  assert.equal(development.source_task_id,task.id);assert.equal(development.status,'queued');assert.equal(development.unique_key,'101:development.issue:1:update:'+task.id);
+});
+
+test('an Issue development the Manager started on a label works to its brief and is not held back by the review asking for a person',async t=>{
+  const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[{name:'bot-develop'}],assignees:[{login:'someone'}]};
+  const config=[];
+  const h=await emptyRepositoryFixture(t,{taskKind:'development.issue',
+    github:(path,send)=>{if(path.endsWith('/issues/1')){send(issue);return true;}},
+    execute:request=>{if(request.type==='workspace_agent_config')config.push(Buffer.from(request.base64,'base64'));}});
+  h.setBranch('ready');
+  const review={summary:'The Issue reserves the work; a maintainer must decide.',findings:[],requires_code_change:true,issue_requests_code:false,clarification_required:true,implementation_goal:'',request_quote:''};
+  h.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({review,object_hash:sha(JSON.stringify([issue.title,issue.body])),
+    manager:{event_id:'e',reason:'维护者已放行',brief:{goal:'Keep the last line of CRLF files.',criteria:['A regression test']}}}),h.taskId);
+  await h.run();
+  assert.ok(config.length,JSON.stringify(h.store.all('SELECT content FROM task_logs')));
+  const prompt=JSON.parse(JSON.parse(Buffer.concat(config).toString()).prompt);
+  assert.equal(prompt.implementation_goal,'Keep the last line of CRLF files.');assert.equal(prompt.manager.brief.criteria[0],'A regression test');
+  assert.ok(!h.store.all('SELECT content FROM task_logs').some(row=>/review_requires_human_decision|development_not_approved/.test(row.content)));
 });
 
 test('active Issue development blocks another task, and a PR comment review revises only for requests it took on',async t=>{
@@ -277,43 +294,56 @@ test('reviews always publish one summary comment and the policy label is applied
   assert.equal(requests.filter(r=>r==='POST /repos/fixture/project-101/issues/7/labels').length,2);
   assert.equal(h.store.get("SELECT state FROM github_effects WHERE kind='label'").state,'sent');
 });
-test('development needs the development label from a person and no assignee, whether the label comes before or after the review',async t=>{
+test('a person\'s development label reaches the Manager with the facts it judges by, whether it comes before or after the review',async t=>{
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,development_enabled:true});
   const review={summary:'s',requires_code_change:true,issue_requests_code:true,clarification_required:false,implementation_goal:'Fix add',request_quote:'Fix add.',findings:[],object_hash:'h'},now=new Date().toISOString();
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,result,object_number,created_at,updated_at) VALUES('rv','101','review.issue','succeeded','r','101:review.issue:5:opened','{}',?,5,?,?)",JSON.stringify(review),now,now);
   const issue=(labels,assignees=[])=>({number:5,title:'Fix add.',body:'Please fix.',state:'open',labels:labels.map(name=>({name})),assignees});
-  const labeled=async(delivery,name,type,labels,assignees)=>(await h.hook(a.path,a.secret,delivery,{repository:{id:101},action:'labeled',label:{name},sender:{id:5,type},issue:issue(labels,assignees)})).value.tasks_created;
+  const labeled=async(delivery,name,type,labels,assignees)=>(await h.hook(a.path,a.secret,delivery,{repository:{id:101},action:'labeled',label:{name},sender:{id:5,login:'maintainer',type},issue:issue(labels,assignees)})).value.tasks_created;
   const count=()=>h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue'").n;
-  // Another label, a label added by an app, or an Issue someone already took starts nothing.
+  const events=()=>h.store.all("SELECT * FROM dispatch_events WHERE type='issue.labeled' ORDER BY created_at,rowid");
+  // Another label, or a label added by an app, never reaches the Manager.
   assert.equal(await labeled('l1','bug','User',['bug']),0);
   assert.equal(await labeled('l2','bot-develop','Bot',['bot-develop']),0);
+  assert.equal(events().length,0);
+  // Whether an Issue someone is assigned to is developed is the Manager's judgement: it is offered development and a
+  // review that answers the label, with the facts. (The rule decider of these tests keeps the old answer: nothing.)
   assert.equal(await labeled('l3','bot-develop','User',['bot-develop'],[{login:'someone'}]),0);
+  const event=events().at(-1),facts=JSON.parse(event.facts);
+  assert.deepEqual(JSON.parse(event.options).map(o=>o.id),['development','review']);
+  assert.deepEqual([facts.development.label,facts.development.labeled_by,facts.development.assignees],['bot-develop','maintainer',['someone']]);
+  assert.deepEqual([facts.development.review.task_id,facts.development.review.issue_requests_code,facts.development.review.quote_in_issue],['rv',true,true]);
   // The label name comes from the first line of the development rule.
   await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/issue-development.md',content:'development_label: ship-it\n\nRules.'});
   assert.equal((await admin('/api/repositories/101/rules')).value.rules.development_label,'ship-it');
   assert.equal(await labeled('l4','bot-develop','User',['bot-develop']),0);
   await admin('/api/repositories/101/rules','PUT',{path:'.bot/rules/issue-development.md',content:null});
+  // A project that does not develop treats the label as an ordinary one.
   await admin('/api/repositories/101/policy','PATCH',{development_enabled:false});assert.equal(await labeled('l5','bot-develop','User',['bot-develop']),0);
-  await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});assert.equal(count(),0);
-  // A person's label after the review starts the development the review found requested, once.
+  await admin('/api/repositories/101/policy','PATCH',{development_enabled:true});assert.equal(count(),0);assert.equal(events().length,1);
+  // A person's label after the review starts development, keyed by that labeling; another one meanwhile is refused.
   assert.equal(await labeled('l6','BOT-develop','User',['bot-develop']),1);assert.equal(await labeled('l7','bot-develop','User',['bot-develop']),0);
   assert.equal(h.store.get("SELECT count(*) n FROM task_logs l JOIN tasks t ON t.id=l.task_id WHERE t.kind='development.issue' AND json_extract(l.content,'$.type')='queued'").n,1);
-  const input=JSON.parse(h.store.get("SELECT input FROM tasks WHERE kind='development.issue'").input);assert.deepEqual([input.review.request_quote,input.object_hash],['Fix add.','h']);
-  // A label already on the Issue when the review is published is accepted only if a user account added it last.
-  const engine=new TaskEngine(h.store,{}, undefined, undefined, acceptanceFixture),task=h.store.get("SELECT * FROM tasks WHERE id='rv'"),user={event:'labeled',label:{name:'bot-develop'},actor:{type:'User'}};
+  const created=h.store.get("SELECT input,unique_key FROM tasks WHERE kind='development.issue'"),input=JSON.parse(created.input);
+  assert.equal(created.unique_key,'101:development.issue:5:update:'+events().find(e=>JSON.parse(e.result||'{}').created?.length).delivery_id);
+  assert.deepEqual([input.review.request_quote,input.object_hash],['Fix add.',sha(JSON.stringify(['Fix add.','Please fix.']))]);
+  // A label already on the Issue when the review is published is a go-ahead only if a user account added it last.
+  const engine=new TaskEngine(h.store,{}, undefined, undefined, acceptanceFixture),task=h.store.get("SELECT * FROM tasks WHERE id='rv'"),user={event:'labeled',label:{name:'bot-develop'},actor:{type:'User',login:'maintainer'}};
   const github=(object,events)=>({object:async()=>object,pages:async()=>events,path:p=>p});
-  assert.equal(await engine.developmentApproved(github(issue(['bot-develop']),[{event:'labeled',label:{name:'bug'},actor:{type:'User'}},user]),task),true);
-  assert.equal(await engine.developmentApproved(github(issue(['bot-develop']),[user,{...user,actor:{type:'Bot'}}]),task),false);
-  assert.equal(await engine.developmentApproved(github(issue(['bot-develop'],[{login:'x'}]),[user]),task),false);
-  assert.equal(await engine.developmentApproved(github(issue([]),[user]),task),false);
+  const goAhead=await engine.developmentApproved(github(issue(['bot-develop']),[{event:'labeled',label:{name:'bug'},actor:{type:'User'}},user]),task);
+  assert.deepEqual(goAhead,{label:'bot-develop',labeled_by:'maintainer',assignees:[]});
+  assert.equal(await engine.developmentApproved(github(issue(['bot-develop']),[user,{...user,actor:{type:'Bot'}}]),task),null);
+  assert.deepEqual((await engine.developmentApproved(github(issue(['bot-develop'],[{login:'x'}]),[user]),task)).assignees,['x']);
+  assert.equal(await engine.developmentApproved(github(issue([]),[user]),task),null);
   h.store.run("DELETE FROM task_logs WHERE task_id IN (SELECT id FROM tasks WHERE kind='development.issue')");
   h.store.run("DELETE FROM tasks WHERE kind='development.issue'");
-  engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,false);assert.equal(count(),0);
-  engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,true);assert.equal(count(),1);
-  // The same predicate guards every validation of the development task until publication.
+  engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,null);assert.equal(count(),0);
+  engine.queueDevelopment({},task,{object:issue(['bot-develop']),object_hash:'h'},review,goAhead);assert.equal(count(),1);
+  // Only the label is rechecked until publication.
   assert.equal(developmentReady({labels:['Bot-Develop'],assignees:[]},'bot-develop'),true);
-  assert.equal(developmentReady({labels:[{name:'bot-develop'}],assignee:{login:'x'}},'bot-develop'),false);
+  assert.equal(developmentReady({labels:[{name:'bot-develop'}],assignee:{login:'x'}},'bot-develop'),true);
+  assert.equal(developmentReady({labels:[],assignees:[]},'bot-develop'),false);
 });
 test('task read tokens cover one repository with read permissions only, need a GitHub App and are revoked',async t=>{
   const h=await harness(t),{admin}=await setup(h),keys=generateKeyPairSync('rsa',{modulusLength:2048}),privateKey=keys.privateKey.export({type:'pkcs8',format:'pem'});

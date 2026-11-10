@@ -94,8 +94,8 @@ const conditions=[
   ['policy','review.issue','cancelled','repository_policy_disabled'],
   ['policy','development.issue','cancelled','repository_policy_disabled'],
   ['goal','development.issue','needs_replan','issue_needs_replan'],
+  // Who is assigned is the Manager's judgement when it starts development, not a recheck (except for Actions reports).
   ['label','development.issue','needs_replan','development_not_approved'],
-  ['assignee','development.issue','needs_replan','development_not_approved'],
   ['owner','development.pr','waiting_permission','bot_pr_author_changed'],
   ['bot_pr_closed','development.issue','cancelled','object_closed_or_draft'],
 ];
@@ -107,7 +107,6 @@ for(const phase of ['model','publish'])for(const [condition,kind,status,code] of
     if(condition==='head')object.head.sha='f'.repeat(40);
     if(condition==='goal')object.body='A different goal.';
     if(condition==='label')object.labels=[];
-    if(condition==='assignee')object.assignees=[{id:42}];
     if(condition==='owner')object.user.id=42;
     if(condition==='bot_pr_closed')botPR.state='closed';
     let writes=0;

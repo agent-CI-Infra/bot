@@ -36,9 +36,9 @@ export function reviewText(summary: string, findings: any[], inline: Set<string>
 export function reviewLanguage(setting: unknown, summary: string): 'zh' | 'en' {
   return setting === 'zh' || setting === 'en' ? setting : /[㐀-鿿]/.test(summary) ? 'zh' : 'en';
 }
-/** Why an Issue the review found ready for development is not being developed: no development label yet, someone is
- * assigned, or the label was added by an app. */
-export interface DevelopmentWait { reason: 'label' | 'assigned' | 'app', label: string, assignees: string[] }
+/** Why an Issue the review found ready for development is not being developed: no development label yet, or the label
+ * was added by an app. Everything else about starting development is the Manager's judgement. */
+export interface DevelopmentWait { reason: 'label' | 'app', label: string }
 /** What a person did that this review answers. */
 export type Prompted = 'comment' | 'edit' | 'review' | 'review_comment' | 'label';
 const link = (text: string, url: string) => url ? `[${text}](${url})` : text;
@@ -52,14 +52,12 @@ const words = {
     alert: (n: number, items: string) => `需要人工处理 ${n} 项：${items}。汇总见文末。`, heading: (n: number) => `需要人工处理（${n} 项）`, inline: '行内意见', mark: '需要人工处理',
     resolved: (n: number, items: string) => `已关闭 ${n} 条后续提交已修复的行内意见：${items}。`, open: (n: number, items: string) => `之前的行内意见仍未解决 ${n} 条：${items}。`, join: '；', list: '、',
     behavior: (files: string[]) => `这些文件改变了 bot 的行为，需要维护者决定是否接受：${files.join('、')}`, clarification: '需求有待人确认，确认前不会自动开发',
-    waiting: (w: DevelopmentWait) => w.reason === 'assigned' ? `开发还没开始：这个 Issue 已指派给 ${w.assignees.map(a => '`' + a + '`').join('、')}，bot 不会接手。要让 bot 开发，请取消指派，再重新加一次 \`${w.label}\` 标签。`
-      : w.reason === 'app' ? `开发还没开始：\`${w.label}\` 标签要由人加上，App 加的不算。` : `开发还没开始：等有人给这个 Issue 加上 \`${w.label}\` 标签。` },
+    waiting: (w: DevelopmentWait) => w.reason === 'app' ? `开发还没开始：\`${w.label}\` 标签要由人加上，App 加的不算。` : `开发还没开始：等有人给这个 Issue 加上 \`${w.label}\` 标签。` },
   en: { review: (n: number, at: string, sha: string) => `Review ${n}, updated ${at}, reviewed commit ${sha}`, reply: (actor: string, url: string, what: Prompted) => what === 'label' ? `; responding to the label @${actor} added` : `; responding to @${actor}'s ${link({ comment: 'comment', edit: 'edit', review: 'review', review_comment: 'inline comment' }[what], url)}`,
     alert: (n: number, items: string) => `Needs a person (${n}): ${items}. Summary at the end.`, heading: (n: number) => `Needs a person (${n})`, inline: 'inline comment', mark: 'Needs a person',
     resolved: (n: number, items: string) => `Resolved ${n} inline comment(s) fixed by later commits: ${items}.`, open: (n: number, items: string) => `Still open from earlier reviews (${n}): ${items}.`, join: '; ', list: ', ',
     behavior: (files: string[]) => `These files change the bot's behavior; a maintainer decides whether to accept them: ${files.join(', ')}`, clarification: 'The requirement needs a person to confirm it; nothing is developed automatically until then',
-    waiting: (w: DevelopmentWait) => w.reason === 'assigned' ? `Development has not started: the Issue is assigned to ${w.assignees.map(a => '`' + a + '`').join(', ')}, so the bot leaves it to them. To have the bot develop it, unassign it and add the \`${w.label}\` label again.`
-      : w.reason === 'app' ? `Development has not started: a person, not an app, has to add the \`${w.label}\` label.` : `Development has not started: it waits for a person to add the \`${w.label}\` label.` },
+    waiting: (w: DevelopmentWait) => w.reason === 'app' ? `Development has not started: a person, not an app, has to add the \`${w.label}\` label.` : `Development has not started: it waits for a person to add the \`${w.label}\` label.` },
 };
 // One line of a finding for the lists: the model's human_action, else the first line of the finding. Heading and quote
 // markers at the start and bold or italic stars go. Code spans and underscores stay, so names such as `total_value` and
