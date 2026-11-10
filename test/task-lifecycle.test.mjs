@@ -61,21 +61,24 @@ test('all five decisions map to explicit task states, for code and non-code arti
  }
 });
 const residual={key:'accessibility',description:'Missing accessible label in optional export panel',evidence:'Browser inspection at export button',impact:'Keyboard discoverability',nonblocking_reason:'Core requested flow is complete; export polish is independent',goal:'Label the export button',criteria:['Accessible name exposed in browser']};
-test('pass with issues atomically creates ordinary follow-up tasks, records lineage and is idempotent',t=>{
+test('pass with issues retains observations without scheduling work, and replay is idempotent',t=>{
  const {store,records,create}=fixture(t);create('a');records.contract('a',contract);const c=submit(records,'a');
  const verdict={...pass,outcome:'pass_with_issues',residuals:[residual,{...residual,key:'docs',goal:'Document export'}]};
- const result=records.decide('a',c.id,c.revision,verdict);assert.equal(result.followups.length,2);
+ const result=records.decide('a',c.id,c.revision,verdict);assert.deepEqual(result.followups,[]);
  assert.equal(store.get("SELECT status FROM tasks WHERE id='a'").status,'completed');
- for(const id of result.followups){assert.equal(store.get('SELECT kind FROM tasks WHERE id=?',id).kind,'task.request');assert.equal(records.get(id).contract.source.parent_task,'a');}
- assert.deepEqual(records.decide('a',c.id,c.revision,verdict),result);assert.equal(store.get('SELECT count(*) n FROM tasks').n,3);
+ assert.deepEqual(records.get('a').acceptance.residuals,verdict.residuals);
+ assert.equal(store.get('SELECT count(*) n FROM task_followups').n,0);
+ assert.deepEqual(records.decide('a',c.id,c.revision,verdict),result);assert.equal(store.get('SELECT count(*) n FROM tasks').n,1);
 });
-test('fault during residual insertion rolls back original completion and every residual; retry safely commits once',t=>{
+test('a history fault rolls back completion and observations; retry persists both exactly once',t=>{
  const {store,records,create}=fixture(t);create('a');const c=submit(records,'a');
- store.db.exec("CREATE TRIGGER inject_failure BEFORE INSERT ON task_followups BEGIN SELECT RAISE(ABORT,'injected crash'); END");
+ store.db.exec("CREATE TRIGGER inject_failure BEFORE INSERT ON task_history WHEN NEW.type='acceptance' BEGIN SELECT RAISE(ABORT,'injected crash'); END");
  assert.throws(()=>records.decide('a',c.id,c.revision,{...pass,outcome:'pass_with_issues',residuals:[residual]}),/injected crash/);
  assert.equal(store.get('SELECT count(*) n FROM tasks').n,1);assert.equal(records.get('a').acceptance,null);
  assert.equal(store.get("SELECT status FROM tasks WHERE id='a'").status,'queued');
- store.db.exec('DROP TRIGGER inject_failure');records.decide('a',c.id,c.revision,{...pass,outcome:'pass_with_issues',residuals:[residual]});assert.equal(store.get('SELECT count(*) n FROM tasks').n,2);
+ store.db.exec('DROP TRIGGER inject_failure');records.decide('a',c.id,c.revision,{...pass,outcome:'pass_with_issues',residuals:[residual]});assert.equal(store.get('SELECT count(*) n FROM tasks').n,1);
+ assert.deepEqual(records.get('a').acceptance.residuals,[residual]);
+ assert.equal(store.get("SELECT count(*) n FROM task_history WHERE type='acceptance'").n,1);
 });
 test('core gaps, missing mandatory evidence and unacceptable risk cannot pass with issues',()=>{
  for(const field of ['core_complete','required_evidence_complete','acceptable_risk'])assert.throws(()=>validateVerdict({...pass,outcome:'pass_with_issues',residuals:[residual],[field]:false}),/core_incomplete/);
@@ -98,7 +101,8 @@ test('restart persists task contract, candidate, project facts, progress, accept
  records.progress('a',['Read actual code'],'Verify browser');records.setProject('r',[{source:'repository:abc',fact:'Browser tests run with npm run test:e2e'}],0);
  const c=submit(records,'a');const accepted=records.decide('a',c.id,c.revision,{...pass,outcome:'pass_with_issues',residuals:[residual]});first.store.close();
  const second=fixture(t,path,key);const restored=second.records.get('a');assert.equal(restored.acceptance.candidate_id,c.id);assert.deepEqual(restored.acceptance.followups,accepted.followups);assert.equal(restored.project.context.revision,1);assert.deepEqual(restored.progress.completed,['Read actual code']);
- second.records.decide('a',c.id,c.revision,{...pass,outcome:'pass_with_issues',residuals:[residual]});assert.equal(second.store.get('SELECT count(*) n FROM tasks').n,2);
+ assert.deepEqual(restored.acceptance.residuals,[residual]);
+ second.records.decide('a',c.id,c.revision,{...pass,outcome:'pass_with_issues',residuals:[residual]});assert.equal(second.store.get('SELECT count(*) n FROM tasks').n,1);
 });
 test('cancellation fences late acceptance without losing history',t=>{
  const {store,records,create}=fixture(t);create('a');const c=submit(records,'a');store.run("UPDATE tasks SET status='cancelled' WHERE id='a'");assert.throws(()=>records.decide('a',c.id,c.revision,pass),/task_cancelled/);
@@ -131,13 +135,17 @@ test('large evidence stays addressable by digest and cannot read another task’
  assert.equal(readEvidence(store,'a',c,{source:e.source}).error,'evidence_digest_changed');
 });
 
-test('related draft artifacts are readable without peer approval and never confer completion or cross-family access',async t=>{
+test('legacy related draft artifacts remain readable without peer approval or cross-family access',async t=>{
  const {relatedDeliveries,readRelatedArtifact}=await import('../dist/tasks/related.js');
  const {Workspace}=await import('../dist/agent/workspace.js');const {Redactor}=await import('../dist/agent/common.js');
  const {store,records,create}=fixture(t);create('root');const parent=submit(records,'root');
- const residual=key=>({key,description:'Separate report correction',evidence:'Original report is complete',impact:'Citation precision',nonblocking_reason:'Independent of the main goal',goal:'Correct '+key,criteria:['Preserve the observed source']});
- const delivered=records.decide('root',parent.id,parent.revision,{...pass,outcome:'pass_with_issues',residuals:[residual('first'),residual('peer'),residual('reader')]});
- const [first,peer,second]=delivered.followups;
+ records.decide('root',parent.id,parent.revision,pass);
+ // Existing installations may already have related work created under the earlier policy.
+ const [first,peer,second]=['first','peer','reader'];
+ for(const id of [first,peer,second]){
+  create(id);store.run("UPDATE tasks SET source_task_id='root' WHERE id=?",id);
+  store.run("INSERT INTO task_followups VALUES('root',?,?,?)",parent.id,id,id);
+ }
  store.run("UPDATE tasks SET workspace_id=?,generation=1,status='retry_wait',phase='acceptance' WHERE id=?",'1'.repeat(48),first);
  records.submit(first,[{kind:'files',reference:'draft-report',version:'b'.repeat(40),content:{local_sha:'c'.repeat(40),files:[{path:'report.md',sha:'d'.repeat(40)}]}}],[],{summary:'Submitted, not yet accepted'});
  store.run("UPDATE tasks SET workspace_id=?,generation=1,status='retry_wait',phase='acceptance' WHERE id=?",'3'.repeat(48),peer);
@@ -155,6 +163,18 @@ test('related draft artifacts are readable without peer approval and never confe
  assert.equal((await readRelatedArtifact(store,task,workspace,{task_id:'unrelated',path:'report.md'})).error,'related_delivery_not_available');
  assert.equal(store.get('SELECT status FROM tasks WHERE id=?',first).status,'retry_wait');assert.equal(records.get(second).acceptance,null);
  assert.equal(store.get('SELECT count(*) n FROM tasks').n,4);
+});
+
+test('an existing residual task can complete with observations without extending its chain',t=>{
+ const {store,records,create}=fixture(t);create('root');const parent=submit(records,'root');records.decide('root',parent.id,parent.revision,pass);
+ create('legacy');store.run("UPDATE tasks SET source_task_id='root',input=? WHERE id='legacy'",JSON.stringify({parent_task:'root',residual}));
+ store.run("INSERT INTO task_followups VALUES('root',?,'old-residual','legacy')",parent.id);
+ const candidate=submit(records,'legacy');
+ const verdict={...pass,outcome:'pass_with_issues',residuals:[{...residual,key:'another-report-note'}]};
+ const decision=records.decide('legacy',candidate.id,candidate.revision,verdict);
+ assert.equal(records.get('legacy').progress.status,'completed');assert.deepEqual(decision.residuals,verdict.residuals);
+ assert.deepEqual(decision.followups,[]);assert.equal(store.get('SELECT count(*) n FROM tasks').n,2);
+ assert.equal(store.get('SELECT count(*) n FROM task_followups').n,1);
 });
 
 test('history reconstruction starts with recent facts, pages older observations and excludes private/foreign data',t=>{

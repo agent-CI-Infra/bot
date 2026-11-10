@@ -32,11 +32,23 @@ test('events are transaction-bound, paginated, filterable and authorized without
  assert.throws(()=>queries(s,{id:'outsider',role:'project_admin',repositories:[]},url()),/task_not_found/);
  }finally{s.close();}
 });
-test('followups resolve exact acceptance event through child and grandchild; replay creates no duplicate',()=>{
+test('legacy followups resolve exact acceptance events and replay never schedules more work',()=>{
  const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);const r=new TaskRecords(s),c=r.submit('t',[{kind:'report',reference:'report.md',version:'v1',content:'core report'}],[],{});
  const verdict={outcome:'pass_with_issues',reason:'Core complete; citation fix separate',gaps:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true,residuals:[{key:'citation',description:'Fix citation',evidence:'specific bad key',impact:'citation accuracy',nonblocking_reason:'does not invalidate core report',goal:'Fix cited key',criteria:['key exists']}]};
- const a=r.decide('t',c.id,c.revision,verdict);assert.deepEqual(r.decide('t',c.id,c.revision,verdict),a);const child=a.followups[0];const links=taskTrace(s,child,url(),'lineage');assert.equal(links.parents[0].parent_id,'t');assert.ok(links.parents[0].acceptance_event_id);
- const cc=r.submit(child,[{kind:'report',reference:'report.md',version:'v2',content:'corrected key'}],[],{}),b=r.decide(child,cc.id,cc.revision,{...verdict,residuals:[{...verdict.residuals[0],key:'fence',goal:'Fix code fence'}]});assert.equal(taskTrace(s,b.followups[0],url(),'lineage').parents[0].parent_id,child);
+ const a=r.decide('t',c.id,c.revision,verdict);assert.deepEqual(a.followups,[]);
+ const child='legacy-child';s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,source_task_id) VALUES(?,'r','task.request','queued','Legacy citation correction','{}','t')",child);
+ s.run("INSERT INTO task_followups VALUES('t',?,'citation',?)",c.id,child);
+ s.run("UPDATE task_records SET acceptance=json_set(acceptance,'$.followups',json(?)) WHERE task_id='t'",JSON.stringify([child]));
+ s.run("UPDATE task_history SET data=json_set(data,'$.followups',json(?)) WHERE task_id='t' AND type='acceptance'",JSON.stringify([child]));
+ assert.deepEqual(r.decide('t',c.id,c.revision,verdict).followups,[child]);
+ const links=taskTrace(s,child,url(),'lineage');assert.equal(links.parents[0].parent_id,'t');assert.ok(links.parents[0].acceptance_event_id);
+ const cc=r.submit(child,[{kind:'report',reference:'report.md',version:'v2',content:'corrected key'}],[],{}),b=r.decide(child,cc.id,cc.revision,{...verdict,residuals:[{...verdict.residuals[0],key:'fence',goal:'Fix code fence'}]});assert.deepEqual(b.followups,[]);
+ s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,source_task_id) VALUES('legacy-grandchild','r','task.request','completed','Legacy fence correction','{}',?)",child);
+ s.run("INSERT INTO task_followups VALUES(?,?,'fence','legacy-grandchild')",child,cc.id);
+ s.run("UPDATE task_history SET data=json_set(data,'$.followups',json(?)) WHERE task_id=? AND type='acceptance'",JSON.stringify(['legacy-grandchild']),child);
+ assert.equal(taskTrace(s,'legacy-grandchild',url(),'lineage').parents[0].parent_id,child);
+ assert.ok(taskTrace(s,'legacy-grandchild',url(),'lineage').parents[0].acceptance_event_id);
+ assert.equal(s.get('SELECT count(*) n FROM tasks').n,3);
  }finally{s.close();}
 });
 test('bounded capture marks missing content and removes private reasoning and credentials',()=>{

@@ -7,7 +7,6 @@ import type { Store } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { createHash } from 'node:crypto';
 import { playbooks } from './playbooks.js';
-import { captureTaskConfiguration } from './configuration.js';
 
 export interface Contract { goal: string; scope: string[]; constraints?: string[]; criteria: string[]; endpoint: string | null; source: unknown; completeness?: string }
 export interface Artifact { kind: string; reference: string; version: string; content?: unknown }
@@ -138,7 +137,7 @@ export class TaskRecords {
     });
   }
 
-  /** One local commit: decision, residual tasks, lineage and original completion. Replays never re-open children. */
+  /** Persist the verdict and completion together. Nonblocking observations do not authorize more work. */
   decide(id: string, candidateId: string, revision: number, verdict: Verdict, successStatus='completed', finalize=true, token?: string) {
     validateVerdict(verdict);
     return this.atomic(()=>{
@@ -157,17 +156,9 @@ export class TaskRecords {
         }
       }
       if(['completed','succeeded','pr_opened'].includes(task.status))throw new Error('task_already_delivered');
+      // Keep observations in the verdict; a new task needs its own explicit request or plan.
+      // Applying this to ordinary tasks too prevents an existing follow-up from starting another chain.
       const followups:string[]=[];
-      for(const residual of verdict.residuals){
-        const child=randomId(),now=new Date().toISOString();
-        const input={request:residual.goal,contract:{goal:residual.goal,scope:current.contract.scope,criteria:residual.criteria,endpoint:'artifact',completeness:'inherited',source:{parent_task:id,parent_revision:current.revision,candidate_id:candidateId,residual:residual.key}},
-          parent_task:id,residual,authorization:'inherited; no additional publication or merge rights'};
-        // Follow-ups use the ordinary request executor. No GitHub write or expanded policy is inherited.
-        this.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,source_task_id,created_at,updated_at) VALUES(?,?,'task.request','queued',?,?,?,?,?,?)`,child,task.repository_id,residual.goal,`residual:${id}:${candidateId}:${residual.key}`,JSON.stringify(input),id,now,now);
-        this.store.run('UPDATE task_records SET contract=? WHERE task_id=?',JSON.stringify(input.contract),child);
-        captureTaskConfiguration(this.store,child);
-        this.store.run('INSERT INTO task_followups VALUES(?,?,?,?)',id,candidateId,residual.key,child);followups.push(child);
-      }
       const rounds=current.rounds+1,passing=['pass','pass_with_issues'].includes(verdict.outcome);
       const exhausted=!passing&&verdict.outcome!=='needs_human'&&rounds>=3;
       const acceptance={...verdict,candidate_id:candidateId,revision,followups,created_at:new Date().toISOString(),exhausted};
