@@ -228,9 +228,15 @@ export class Publisher {
     if(!current&&candidate.expected_sha)stop('branch_disappeared','superseded',`待更新的分支 ${candidate.branch} 已不存在。`);
     const path=this.github.path('/git/refs'+(candidate.expected_sha?'/heads/'+encodeURIComponent(candidate.branch):''));
     const request=candidate.expected_sha?{sha:commit.sha,force:false}:{ref:'refs/heads/'+candidate.branch,sha:commit.sha};
-    const ref=await this.effect(candidate.publication_key?'branch:'+candidate.publication_key:'branch','branch',request,()=>this.github.request(candidate.expected_sha?'PATCH':'POST',path,request),async()=>{
-      const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;
-    });
+    const find=async()=>{const state=await this.github.ref(candidate.branch);return state?.object?.sha===commit.sha?state:null;};
+    // Pointing the bot's own branch at one commit is idempotent and GitHub reports the result exactly: a create that
+    // already landed answers 422 with the ref in place, a fast-forward to the same commit is a no-op. So an unknown answer
+    // (a 5xx or a dropped connection) is checked and sent again, instead of waiting for a person to release it.
+    const send=async()=>{
+      try{return await this.github.request(candidate.expected_sha?'PATCH':'POST',path,request);}
+      catch(error){if(error instanceof TaskError&&error.code==='github_http_422'){const state=await find();if(state)return state;}throw error;}
+    };
+    const ref=await this.effect(candidate.publication_key?'branch:'+candidate.publication_key:'branch','branch',request,send,find,true);
     if(ref.object?.sha!==commit.sha)stop('branch_not_confirmed',undefined,`分支 ${candidate.branch} 发布未确认：预期提交 ${commit.sha}，返回 ${ref.object?.sha||'无提交'}。`);
     return commit.sha;
   }
