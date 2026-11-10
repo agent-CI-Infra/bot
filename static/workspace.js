@@ -6,11 +6,11 @@ const workspaceGroups = [
   ['all', '全部任务记录', '包含历史；按任务记录计数。']
 ];
 function workspaceOverview() {
-  const id = current.id, owner = me.id, root = element('section', '', 'workspace-overview');
+  const id = current.id, owner = me.id, routeKey = location.hash, root = element('section', '', 'workspace-overview');
   const match = /^(active|queued|attention|all)(?:\.(\d+))?$/.exec(current.item || 'active');
   const group = match?.[1] || 'active', rawOffset = Number(match?.[2] || 0), offset = Number.isSafeInteger(rawOffset) ? rawOffset : 0, size = 10;
   const address = (key, next = 0) => `#/projects/${id}/overview/${key}${next ? '.' + next : ''}`;
-  const alive = () => root.isConnected && me?.id === owner && current?.id === id && current.section === 'overview' && projectRoute()?.id === id && projectRoute()?.section === 'overview';
+  const alive = () => root.isConnected && me?.id === owner && current?.id === id && current.section === 'overview' && location.hash === routeKey;
   const head = element('div', '', 'console-page-head'), heading = element('div');
   heading.append(element('p', 'PROJECT OVERVIEW', 'eyebrow'), element('h2', '项目总览'), note('查看工作进展，处理阻塞，并进入项目设置。'));
   const refresh = button('刷新总览', () => void update()); head.append(heading, refresh);
@@ -58,6 +58,7 @@ function workspaceOverview() {
       // Leave unchanged rows and their focused buttons in place during refresh.
       if (signature !== nextSignature || !rows.childElementCount) {
         signature = nextSignature;
+        const focusedTask = rows.contains(document.activeElement) ? document.activeElement.dataset.attentionTask : null;
         const old = new Map([...rows.children].filter(node => node.dataset.taskId).map(node => [node.dataset.taskId, node]));
         if (!data.tasks.length) rows.replaceChildren(consoleState(offset ? '本页已没有任务' : '当前范围没有任务', offset ? '任务状态可能已变化，可返回上一页。' : '这里没有匹配的任务记录，不代表环境、CI 或其他范围全部正常。'));
         else {
@@ -70,12 +71,14 @@ function workspaceOverview() {
           wanted.forEach((node, index) => { if (rows.children[index] !== node) rows.insertBefore(node, rows.children[index] || null); });
           [...rows.children].filter(node => !wanted.includes(node)).forEach(node => node.remove());
         }
+        // A changed row may replace its button; keep the same action focused if the task remains in this range.
+        if (focusedTask) rows.querySelector(`[data-attention-task="${CSS.escape(focusedTask)}"]`)?.focus({ preventScroll: true });
       }
-      const pageKey = `${offset}:${total}`;
+      const hasNext = offset + data.tasks.length < total, pageKey = `${offset}:${hasNext}`;
       if (paging.dataset.pageKey !== pageKey) {
         paging.dataset.pageKey = pageKey; paging.replaceChildren();
         if (offset) paging.append(consoleLink(address(group, Math.max(0, offset - size)), '上一页'));
-        if (offset + data.tasks.length < total) paging.append(consoleLink(address(group, offset + size), '下一页'));
+        if (hasNext) paging.append(consoleLink(address(group, offset + size), '下一页'));
       }
     } catch (err) {
       if (!alive() || revoke(err)) return;
