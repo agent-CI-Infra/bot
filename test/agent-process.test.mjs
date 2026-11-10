@@ -560,14 +560,16 @@ for(const outcome of ['return','insufficient_evidence'])test('independent accept
  const history=d.h.store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance'",d.task.id).map(r=>JSON.parse(r.data));
  assert.deepEqual(history.map(a=>a.outcome),[outcome,'pass']);
 });
-test('pre-publication pass with issues creates residual tasks only when original delivery completes',async t=>{
+test('pre-publication pass with issues delivers the PR and retains observations without starting tasks',async t=>{
  let checked=false;
  const d=await developmentHarness(t,{acceptor:async(store,task)=>{
   assert.equal(store.get('SELECT count(*) n FROM task_followups').n,0);checked=true;
   return {...await acceptanceFixture(store,task),outcome:'pass_with_issues',residuals:[{key:'docs',description:'Document an independent edge case',evidence:'The requested arithmetic change is complete',impact:'Documentation clarity',nonblocking_reason:'Does not affect the requested addition behavior',goal:'Document numeric strings',criteria:['Explain numeric string behavior with an example']}]};
  }});
- assert.ok(checked);assert.equal(d.task.status,'pr_opened');assert.equal(d.h.store.get('SELECT count(*) n FROM task_followups').n,1);
- assert.equal(d.h.store.get("SELECT count(*) n FROM tasks WHERE kind='task.request' AND status='queued'").n,1);
+ assert.ok(checked);assert.equal(d.task.status,'pr_opened');assert.equal(d.h.store.get('SELECT count(*) n FROM task_followups').n,0);
+ const acceptance=JSON.parse(d.h.store.get('SELECT acceptance FROM task_records WHERE task_id=?',d.task.id).acceptance);
+ assert.equal(acceptance.residuals[0].key,'docs');assert.deepEqual(acceptance.followups,[]);
+ assert.equal(d.h.store.get("SELECT count(*) n FROM tasks WHERE kind='task.request' AND status='queued'").n,0);
 });
 
 test('uncertain external publication leaves staged acceptance and no residuals until the PR is reconciled',async t=>{

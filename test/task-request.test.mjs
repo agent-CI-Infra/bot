@@ -23,7 +23,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  github.listen(0,'127.0.0.1');await once(github,'listening');t.after(()=>new Promise(r=>{github.close(r);github.closeAllConnections();}));
  const gh='http://127.0.0.1:'+github.address().port;
  await fetch(gh+'/fixture/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({github_token:'fixture-github-token'})});
- let executionCalls=0,acceptanceCalls=0,firstOutage=3,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false,writeOutage=0,restoredLateWrite=false,inheritedContextRead=false;
+ let executionCalls=0,acceptanceCalls=0,firstOutage=3,invalidPathObserved=false,acceptedDeliveries=0,inheritedRead=false,siblingRead=false,writeOutage=0,restoredLateWrite=false,inheritedContextRead=false,legacyParent;
  const remediations=new Map();
  const model=createServer(async(req,res)=>{
   let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw),messages=body.messages;
@@ -108,10 +108,19 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    const decisions=store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",id).map(r=>JSON.parse(r.data).outcome);
    assert.deepEqual(decisions,[mode,'pass']);
   }
-  if(mode==='multiple'){assert.ok(!store.all("SELECT data FROM task_history WHERE task_id=? AND type='execution_evidence'",id).some(r=>r.data.includes('fixture-model-token')));const observed=store.get("SELECT id FROM task_history WHERE task_id=? AND type='execution_evidence' AND json_extract(data,'$.name')='read_project_memory'",id);assert.ok(observed);assert.ok(result.candidate.evidence.some(e=>e.source==='task_history:'+observed.id),'actual memory reads are offered to independent acceptance');}
+  if(mode==='multiple'){legacyParent=id;assert.deepEqual(result.acceptance.followups,[]);assert.equal(result.acceptance.residuals.length,2);assert.ok(!store.all("SELECT data FROM task_history WHERE task_id=? AND type='execution_evidence'",id).some(r=>r.data.includes('fixture-model-token')));const observed=store.get("SELECT id FROM task_history WHERE task_id=? AND type='execution_evidence' AND json_extract(data,'$.name')='read_project_memory'",id);assert.ok(observed);assert.ok(result.candidate.evidence.some(e=>e.source==='task_history:'+observed.id),'actual memory reads are offered to independent acceptance');}
   assert.ok(!JSON.stringify(result.candidate.evidence).includes('STALE_EVIDENCE_SENTINEL'));
   assert.equal(new Set(result.candidate.evidence.map(e=>e.result.execution)).size,1);
   assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='artifact_checkpoint'",id));
+ }
+ assert.equal(store.get('SELECT count(*) n FROM task_followups').n,0);
+ // Retain compatibility with work already created by an older installation, without creating it from QA.
+ const parent=records.get(legacyParent);
+ for(const residual of parent.acceptance.residuals){
+  const id=randomBytes(24).toString('hex'),contract={goal:residual.goal,scope:parent.contract.scope,criteria:residual.criteria,endpoint:'artifact',source:{parent_task:legacyParent,candidate_id:parent.candidate.id,residual:residual.key}};
+  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,source_task_id) VALUES(?,'101','task.request','queued',?,?,?)",id,residual.goal,JSON.stringify({request:residual.goal,contract,parent_task:legacyParent,residual}),legacyParent);
+  store.run('UPDATE task_records SET contract=? WHERE task_id=?',JSON.stringify(contract),id);
+  store.run('INSERT INTO task_followups VALUES(?,?,?,?)',legacyParent,parent.candidate.id,residual.key,id);
  }
  const children=store.all("SELECT t.* FROM tasks t JOIN task_followups f ON f.task_id=t.id WHERE t.source_task_id IS NOT NULL AND t.kind='task.request' ORDER BY f.issue_key");assert.equal(children.length,2);
  for(const child of children){
@@ -121,5 +130,6 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
  if(JSON.parse(child.input).contract.source.residual==='follow-report')writeFileSync(join(root,'tasks',store.get('SELECT workspace_id FROM tasks WHERE id=?',child.id).workspace_id,'repo','report.md'),'MUTATED_AFTER_ACCEPTANCE');
  }
  assert.ok(siblingRead);assert.ok(inheritedContextRead);
+ assert.equal(store.get('SELECT count(*) n FROM task_followups').n,2,'legacy related work must not grow a new chain');
  assert.ok(invalidPathObserved);assert.ok(acceptanceCalls>=5);
 });
