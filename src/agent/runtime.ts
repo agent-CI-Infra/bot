@@ -29,6 +29,8 @@ export interface AgentSpec<T> {
   /** Control-plane snapshot of the active workspace. Never populated from a CLI report. */
   candidateSnapshot?: () => Promise<{ tree_sha: string; local_sha: string } | null>;
   onExternalUsage?: (usage: ExternalUsage) => void;
+  /** Stable provider/event receipt; progress replaces the same model ledger row. */
+  onExternalRequest?: (request:import('../metrics/accounting.js').ExternalModelRequest)=>void;
   harnessState?: { value:Record<string,any>; save:(value:Record<string,any>)=>void };
   modelTrace?: Record<string,unknown>;
   executionSignal?: AbortSignal;
@@ -36,6 +38,8 @@ export interface AgentSpec<T> {
   cancelSignal?: AbortSignal;
   /** The run's capability token for adapters that present it (worker RPC, MCP), and the server-side check of a presented one. */
   runAccess?: { readonly token: string; check: (presented: unknown) => void };
+  /** Fresh external session working directory when physical context must not be resumed. */
+  harnessSessionKey?:string;
   /** Public harness events of the session (session_bound, message, tool, ...), mirrored into the RoleRun event stream. */
   onHarnessEvent?: (event: { type: string; [key: string]: unknown }) => void;
   /** A per-run environment the framework provisioned and verified for this run (run_isolation profiles). */

@@ -54,7 +54,7 @@ test('Codex app-server: handshake, verified task tools, thread/turn binding, str
  for(const type of ['run_started','session_bound','turn','usage','tool_call','tool_result'])assert.ok(types.includes(type),type);
  const usage=instanceUsage(f.s,out.instance_id);
  assert.deepEqual([usage.model_requests,usage.input_tokens,usage.output_tokens,usage.unknown_requests,usage.semantics],[1,100,10,0,'exact']);
- assert.equal(f.reads,1);assert.equal(f.s.get('SELECT count(*) n FROM model_requests').n,0);
+ assert.equal(f.reads,1);assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source='native'").n,0);assert.equal(f.s.get("SELECT count(*) n FROM model_requests WHERE accounting_source='codex_events'").n,1);
  assert.equal(f.s.get("SELECT recovery_mode FROM task_runs ORDER BY rowid DESC LIMIT 1").recovery_mode,'new_session');
 });
 

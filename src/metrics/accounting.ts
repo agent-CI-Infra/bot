@@ -1,5 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
-import { fail, fields, object, randomId, type Json } from '../core/security.js';
+import { fail, fields, object, randomId, digest, type Json } from '../core/security.js';
 
 export interface Pricing { currency: 'USD' | 'CNY'; input_per_million: number; output_per_million: number; cache_per_million: number; }
 export function validatePricing(value: unknown): Pricing | null {
@@ -44,6 +44,55 @@ export function finishModelRequest(store: Store, id: string, usage: unknown, htt
   const cost=canPrice?((input!-(cached??0))*row.input_per_million+(cached??0)*row.cache_per_million+output!*row.output_per_million)/1000000:null;
   store.run(`UPDATE model_requests SET finished_at=?,http_status=?,state=?,input_tokens=?,output_tokens=?,cached_input_tokens=?,cost=?
     WHERE id=? AND finished_at IS NULL`,new Date().toISOString(),httpStatus,state,input,output,cached,cost,id);
+}
+export interface ExternalModelRequest {
+  key:string; source:'provider_requests'|'codex_events'|'acp_prompt';model:string;started_at?:string;
+  input_tokens:number|null;output_tokens:number|null;cached_input_tokens?:number|null;finished?:boolean;http_status?:number|null;
+  reconciles_key?:string;
+}
+/** One external receipt updates one original ledger row. Cumulative usage callbacks are never separate requests. */
+export function recordExternalModelRequest(store:Store,task:Row,runId:string,value:ExternalModelRequest):string{
+  return store.transaction(()=>{
+    let row=store.get('SELECT * FROM model_requests WHERE external_key=?',value.key);
+    if(row&&row.repository_id!==task.repository_id)return fail(409,'model_request_scope_mismatch');
+    if(!row&&value.reconciles_key){
+      const unresolved=store.get('SELECT * FROM model_requests WHERE external_key=? AND accounting_source=? AND input_tokens IS NULL AND output_tokens IS NULL',value.reconciles_key,value.source);
+      if(unresolved){if(unresolved.repository_id!==task.repository_id)return fail(409,'model_request_scope_mismatch');
+        store.run('UPDATE model_requests SET external_key=? WHERE id=?',value.key,unresolved.id);row=unresolved;}
+    }
+    if(!row){const id=beginModelRequest(store,{...task,id:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?task.id:null},value.key,
+      {id:'external:'+value.source,model:value.model,pricing:null},value.started_at);
+      store.run('UPDATE model_requests SET external_key=?,accounting_source=?,run_id=? WHERE id=?',value.key,value.source,runId,id);row=store.get('SELECT * FROM model_requests WHERE id=?',id)!;}
+    const tokens=normalizeUsage({input_tokens:value.input_tokens,output_tokens:value.output_tokens,input_tokens_details:{cached_tokens:value.cached_input_tokens}}),
+      input=tokens.input_tokens,output=tokens.output_tokens,cached=tokens.cached_input_tokens;
+    store.run(`UPDATE model_requests SET input_tokens=CASE WHEN ? IS NULL THEN input_tokens ELSE max(coalesce(input_tokens,0),?) END,
+      output_tokens=CASE WHEN ? IS NULL THEN output_tokens ELSE max(coalesce(output_tokens,0),?) END,
+      cached_input_tokens=CASE WHEN ? IS NULL THEN cached_input_tokens ELSE max(coalesce(cached_input_tokens,0),?) END,
+      finished_at=CASE WHEN ?=1 THEN coalesce(finished_at,?) ELSE finished_at END,http_status=coalesce(?,http_status),
+      state=CASE WHEN ? IS NOT NULL AND ? IS NOT NULL THEN 'external_received' ELSE 'external_usage_unknown' END WHERE id=?`,
+      input,input,output,output,cached,cached,value.finished?1:0,new Date().toISOString(),value.http_status??null,input??row.input_tokens,output??row.output_tokens,row.id);
+    return row.id;
+  });
+}
+/** Task and conversation entries consume the same stable receipts; public cumulative snapshots are not invoices. */
+export function externalModelRecorder(store:Store,task:Row,runId:string,initialModel:string,instanceId=runId){
+  let model=initialModel;const turns=new Map<string,{known:number;keys:Set<string>}>();
+  const request=(value:ExternalModelRequest)=>recordExternalModelRequest(store,task,runId,{...value,key:runId+':'+value.key,model:value.model==='external'?model:value.model});
+  const event=(value:{type:string;[key:string]:unknown})=>{
+    if(value.type==='session_bound'&&typeof value.configuredModel==='string')model=value.configuredModel;
+    if(!['turn','usage'].includes(value.type)||value.type==='usage'&&value.source!=='codex_app_server')return;
+    // ACP publishes prompt attempts separately. Only the app-server has per-turn provider usage deltas.
+    if(initialModel!=='codex')return;
+    const key='codex:'+instanceId+':'+String(value.threadId??'unbound')+':'+String(value.turnId??'unconfirmed:'+runId),pending=key+':pending',
+      turn=turns.get(key)??{known:0,keys:new Set<string>()};turns.set(key,turn);
+    if(value.type==='usage'){
+      const hash=JSON.stringify(value.thread_total);if(turn.keys.has(hash))return;turn.keys.add(hash);
+      turn.known++;const delta=value.delta as any;
+      recordExternalModelRequest(store,task,runId,{key:key+':usage:'+digest(hash),reconciles_key:pending,source:'codex_events',model,input_tokens:delta?.input_tokens??null,output_tokens:delta?.output_tokens??null,cached_input_tokens:delta?.cached_input_tokens??null,finished:true});
+    }else if(!turn.known&&['started','start_unconfirmed','ended'].includes(String(value.phase))&&!store.get('SELECT 1 FROM model_requests WHERE accounting_source=? AND external_key>=? AND external_key<?', 'codex_events',key+':usage:',key+':usage:\uffff'))
+      recordExternalModelRequest(store,task,runId,{key:pending,source:'codex_events',model,input_tokens:null,output_tokens:null,finished:value.phase!=='started'});
+  };
+  return {request,event};
 }
 export function withTaskMetrics<T extends Row>(store: Store, tasks: T[], now=Date.now()): (T & {metrics: Json})[] {
   if (!tasks.length) return [];

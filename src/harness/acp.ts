@@ -51,6 +51,7 @@ export interface AcpInput<T> {
  sessionKey:string;
  system:string;
  prompt:string;
+ onPrompt?:()=>void;
  fresh:boolean;
  /** Wire dialect and launch configuration; ACP by default. */
  protocol?:AcpProtocol;
@@ -116,6 +117,7 @@ export async function runAcp<T>(input:AcpInput<T>,signal:AbortSignal,emit:(event
    await input.guard();if(signal.aborted)throw signal.reason;
    // ACP carries the role instructions in every prompt; the app-server keeps them as the thread's developer instructions.
    const body=(protocol==='acp'?input.system+'\n\n':'')+(repair===0&&opened.notice?opened.notice+'\n\n':'')+input.prompt;
+   input.onPrompt?.();
    const {text}=await dialect.turn(body+(repair?'\nYour last turn did not submit a valid role result. Reuse existing observations and submit the required structured result, without repeating unchanged tests. If a declined permission blocks the assignment, say so in the submission instead of retrying it.':''));
    if(cancelReason)throw cancelReason;
    if(bridge.submitted)return bridge.result;

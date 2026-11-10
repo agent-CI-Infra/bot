@@ -40,6 +40,12 @@ for await (const line of createInterface({ input: process.stdin })) {
     return body.result?.content ? JSON.parse(body.result.content[0].text) : body;
   };
   if (mode === 'permission') send({ type: 'control_request', request_id: 'permission-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'gh pr create' } } });
+  if(mode==='conversation'){
+    const response=await fetch(process.env.ANTHROPIC_BASE_URL+'/v1/messages',{method:'POST',headers:{'x-api-key':process.env.ANTHROPIC_API_KEY,'content-type':'application/json'},
+      body:JSON.stringify({model:arg('--model'),max_tokens:256,messages:[{role:'user',content:'Fixture provider request'}],tools:[]})});
+    await response.json();await call('search_conversation_history',{});await call('finish',{message:'A source-bound response'});
+    send({type:'result',subtype:'success',is_error:false,num_turns:2,usage:{input_tokens:22,output_tokens:14}});continue;
+  }
   const record = await call('read_task_record', { ref: 'task:t' });
   if (mode === 'wrong_ref') await call('read_task_record', { ref: 'task:o' });
   if (mode === 'exit') process.exit(4);

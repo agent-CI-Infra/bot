@@ -81,7 +81,7 @@ async function runTurn(turnId,prompt){
  send({id:99999,result:{}});
  if(flag('REROUTE')){notify('model/rerouted',{threadId:thread.id,turnId,fromModel:thread.model,toModel:'other-model',reason:'highRiskCyberActivity'});lateTool();return;}
  if(flag('FAIL')){finish(turnId,'failed',{message:'unexpected status 401 Unauthorized',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:401}},additionalDetails:null});return;}
- if(!flag('NO_SUBMIT'))await tool('finish',{summary:'actual fixture result'});
+ if(!flag('NO_SUBMIT'))await tool('finish',flag('CONVERSATION')?{message:'A source-bound response'}:{summary:'actual fixture result'});
  finish(turnId,'completed');
 }
 function finish(turnId,status,error=null){const t=load(thread.id);const turn=t.turns.find(x=>x.id===turnId);if(turn)turn.status=status;store(t);notify('turn/completed',{threadId:thread.id,turn:turnView(turnId,status,error)});}

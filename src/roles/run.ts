@@ -21,6 +21,7 @@ import type { Row,Store } from '../storage/database.js';
 import { assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed } from '../tasks/management.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { resolvePrincipalActor } from '../identity/authorization.js';
+import { externalModelRecorder } from '../metrics/accounting.js';
 /** The project's role configuration in its V2 form (legacy configurations are presented as V2 with legacy:true). */
 export function roleConfig(store:AgentSpec<any>['store'],task:AgentSpec<any>['task']){return roleConfiguration(store,task.repository_id,taskConfiguration(store,task)?.roles);}
 /** Whether this entry point runs under the project controller. */
@@ -56,6 +57,17 @@ const skillTool={type:'function',function:{name:'read_skill',description:'List t
 const runtimeDefinition=(role:string,r:Resolved)=>({id:role,prompt:r.system,version:r.snapshot.prompt.system_hash,memory_scope:role,harness:r.snapshot.harness.id,writable:role==='dev',snapshot_id:r.id,config_revision:r.snapshot.config_revision,role_revision:r.snapshot.role_revision});
 /** The (task, role) instance, created with the current snapshot. It is the role's identity within the task. */
 export function roleInstance(s:Store,task:Row,role:string,harnessOverride?:string,entryExecutor=false){
+ if(task.kind==='role.conversation'&&task.conversation_id){
+  const resolved=resolveRole(s,task.repository_id,role,'conversation');
+  let instance=s.get('SELECT * FROM role_instances WHERE conversation_id=? AND project_id=? AND role=?',task.conversation_id,task.repository_id,role);
+  if(!instance){const id=randomId();
+   s.run('INSERT INTO role_instances(id,task_id,conversation_id,project_id,role,definition,harness,updated_at,snapshot_id,config_revision,role_revision) VALUES(?,NULL,?,?,?,?,?,?,?,?,?)',id,task.conversation_id,task.repository_id,role,JSON.stringify(runtimeDefinition(role,resolved)),resolved.snapshot.harness.id,new Date().toISOString(),resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision);
+   instance=s.get('SELECT * FROM role_instances WHERE id=?',id)!;}
+  // Main conversations keep their logical role instance, but rebuild every physical input from current local authority.
+  s.run("UPDATE role_instances SET definition=?,harness=?,snapshot_id=?,config_revision=?,role_revision=?,knowledge_fence=?,session='[]',harness_state='{}',sequence=sequence+1,updated_at=? WHERE id=?",
+   JSON.stringify(runtimeDefinition(role,resolved)),resolved.snapshot.harness.id,resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision,task.authority_fence??null,new Date().toISOString(),instance.id);
+  return s.get('SELECT * FROM role_instances WHERE id=?',instance.id)!;
+ }
  let instance=s.get('SELECT * FROM role_instances WHERE task_id=? AND role=?',task.id,role);
  if(!instance){const resolved=taskRole(s,task,role,harnessOverride,false,undefined,undefined,entryExecutor),id=randomId();
   s.run('INSERT INTO role_instances(id,task_id,role,definition,harness,updated_at,snapshot_id,config_revision,role_revision) VALUES(?,?,?,?,?,?,?,?,?)',id,task.id,role,JSON.stringify(runtimeDefinition(role,resolved)),resolved.snapshot.harness.id,new Date().toISOString(),resolved.id,resolved.snapshot.config_revision,resolved.snapshot.role_revision);
@@ -226,9 +238,12 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // Adapters read the run's credential after the run is bound (the adapter starts after onRun); before that there is none.
   Object.defineProperty(wrapped,'runAccess',{get:()=>live.bound?access:undefined,enumerable:true,configurable:true});
   wrapped.runContext=()=>live.bound?.ctx;
+  let accounting:ReturnType<typeof externalModelRecorder>|undefined;
+  const ledger=()=>live.bound?(accounting??=externalModelRecorder(s,{...task,active_role:role},live.bound.run_id,driver.id,instance.id)):undefined;
+  wrapped.onExternalRequest=value=>{ledger()?.request(value);};
   wrapped.onExternalUsage=usage=>{const b=live.bound;if(!b)return;assertLease(s,b.run_id,b.epoch);traceEvent(s,task.id,'external_model_usage',usage,b.run_id,'harness');budgetGuard();};
   // Public harness events also enter the run's normalized stream; session_bound settles a pending recovery mode.
-  wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=harnessEventType[event.type];if(!b||!mapped)return;
+  wrapped.onHarnessEvent=event=>{const b=live.bound,mapped=harnessEventType[event.type];if(!b||!mapped)return;ledger()?.event(event);
    if(event.type==='session_bound'&&b.ctx.resume_from_run_id){const mode=protocolRecovery(String(event.recoveryMode))??(['new_session','fresh_evaluation'].includes(String(event.recoveryMode))?'rebuilt_from_task_records':null);if(mode)s.run('UPDATE task_runs SET protocol_recovery=? WHERE id=?',mode,b.run_id);}
    // A permission the agent was granted is progress; only refused ones are denials.
    appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:mapped[0],category:event.type==='permission'&&event.allowed===true?'progress':mapped[1],data:{harness_event:event.type,...Object.fromEntries(Object.entries(event).filter(([k])=>k!=='type'))}});};
@@ -250,7 +265,8 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     mode=role==='qa'?'rebuilt_from_task_records':recover==='external_session_pending'?null:protocolRecovery(recover)??(recover==='new_session'?'rebuilt_from_task_records':plan.mode);
    }
    s.run('UPDATE task_runs SET run_context=?,resume_from_run_id=?,admission=?,protocol_recovery=?,operation_id=? WHERE id=?',JSON.stringify(ctx),previous??null,JSON.stringify(admission),mode,operationId,runId);
-   const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id,run_id:runId,lease_epoch:lease.epoch},[...gatewayCapabilities(snapshot),'events:write','checkpoint:write'],tokenTtl);
+   if(ctx.task_id===null)stop('role_run_protocol_invalid','waiting_configuration','Task RoleRun requires task scope.');
+   const issued=issueRunToken(s,{tenant_id:ctx.tenant_id,project_id:ctx.project_id,task_id:ctx.task_id!,run_id:runId,lease_epoch:lease.epoch},[...gatewayCapabilities(snapshot),'events:write','checkpoint:write'],tokenTtl);
    spec.redactor.add(issued.token);
    live.bound={ctx,token:issued.token,token_id:issued.id,run_id:runId,epoch:lease.epoch};
    appendRunEvent(s,{run_id:runId,lease_epoch:lease.epoch,type:'run_started',category:'progress',operation_id:operationId,data:{assignment_id:scope,resume_from_run_id:previous??null,recovery_mode:mode,start_mode:recover,candidate_ref:ctx.candidate_ref,source_ref:ctx.source_ref,budget:ctx.budget.policy_ref,admitted:admission.required}});
