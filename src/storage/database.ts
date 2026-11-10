@@ -24,6 +24,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { managementStorage } from '../management/storage.js';
 import { channelStorage } from '../channels/storage.js';
 import { scheduleStorage } from '../schedules/storage.js';
+import { taskManagementStorage } from '../tasks/management.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -189,6 +190,7 @@ export class Store {
     integrationStorage(this);
     coordinationStorage(this);
     roleStorage(this);
+    taskManagementStorage(this);
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);

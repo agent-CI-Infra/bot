@@ -7,6 +7,7 @@ import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { roleAuthority, type RoleSnapshot } from './definition.js';
 import { verifyRunToken, tenantOf } from './role-run.js';
 import { contentHash, roleRunProtocol } from './protocol.js';
+import { managedTaskOrigin, taskToolAllowed } from '../tasks/management.js';
 /**
  * TaskToolGateway: the one server-side broker through which a role run reads task facts, original records, evidence and
  * project knowledge, and proposes experience candidates. Every call presents the run's capability token and is checked
@@ -56,8 +57,10 @@ export class TaskToolGateway {
     }
     const snapshotRow = run.role_snapshot ? s.get('SELECT snapshot FROM role_snapshots WHERE id=?', run.role_snapshot) : undefined, snapshot = snapshotRow ? JSON.parse(String(snapshotRow.snapshot)) as RoleSnapshot : null;
     if (!snapshot) return this.denied(context, name, 'role_snapshot_unavailable', request);
-    const revoked = roleAuthority(s, String(task.repository_id), snapshot, permissionToolName[name]);
+    const revoked = roleAuthority(s, String(task.repository_id), snapshot, permissionToolName[name],managedTaskOrigin(s,task.id)?.source_kind==='role');
     if (revoked) return this.denied(context, name, revoked, request);
+    try { if(!taskToolAllowed(s,task,String(run.role),permissionToolName[name]!))return this.denied(context,name,'source_permission_ceiling',request); }
+    catch { return this.denied(context,name,'source_authorization_revoked',request); }
     const args = request.arguments && typeof request.arguments === 'object' && !Array.isArray(request.arguments) ? request.arguments : {};
     let result: any;
     try { result = await this.execute(context, String(run.role ?? ''), name, args, request); }

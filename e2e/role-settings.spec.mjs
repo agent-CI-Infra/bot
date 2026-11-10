@@ -30,6 +30,8 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(page.getByText('能力策略', { exact: true })).toHaveCount(0);
     await page.getByLabel('dev 工作区文件权限', { exact: true }).selectOption('read');
     await page.getByLabel('dev 运行命令权限', { exact: true }).selectOption('deny');
+    await page.getByLabel('dev 任务管理权限', { exact: true }).selectOption('write');
+    await page.getByLabel('dev 委派角色权限', { exact: true }).selectOption('deny');
     await page.getByLabel('预算方式', { exact: true }).selectOption('bounded');
     await page.getByLabel('单次运行最多模型轮数', { exact: true }).fill('12');
     await page.getByLabel('单次输出最多 token', { exact: true }).fill('2048');
@@ -41,7 +43,7 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置');
     let saved = (await admin('/api/repositories/101/roles')).value.configuration, dev = saved.roles.find(role => role.role_id === 'dev');
     expect(dev.persona_prompt).toBe('先读复现，再修改代码并验证。'); expect(dev.model_profile_ref.model_id).toBe(model.id);
-    expect(dev.permissions).toMatchObject({ repository: 'read', commands: 'deny' });
+    expect(dev.permissions).toMatchObject({ repository: 'read', commands: 'deny', task_management: 'write', delegation: 'deny' });
     expect(dev.capability_policy_ref).toBeUndefined();
     expect(dev.budget_policy_ref).toMatchObject({ id: 'bounded', max_turns: 12, max_output_tokens: 2048 });
     await nav.getByRole('link', { name: '概览', exact: true }).click();
@@ -63,6 +65,8 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     mkdirSync('.tmp/role-settings', { recursive: true });
     await page.screenshot({ path: '.tmp/role-settings/role-detail.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByLabel('dev 任务管理权限', { exact: true })).toHaveValue('write');
+    await expect(page.getByLabel('dev 委派角色权限', { exact: true })).toHaveValue('deny');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await nav.getByRole('link', { name: '概览', exact: true }).click();
     await expect(page.getByRole('table', { name: '角色解析结果' })).toBeVisible();

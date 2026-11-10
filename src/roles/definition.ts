@@ -368,12 +368,12 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
  * Live authority of a running role. A snapshot explains what a run started with; it never keeps authority that has since
  * been withdrawn. Disabling the role, switching coordination off or narrowing its permissions stops further tool use.
  */
-export function roleAuthority(s: Store, repositoryId: string, snapshot: RoleSnapshot, tool?: string): string | null {
+export function roleAuthority(s: Store, repositoryId: string, snapshot: RoleSnapshot, tool?: string, direct=false): string | null {
   const config = roleConfiguration(s, repositoryId);
   const definition = config.roles.find(r => r.role_id === snapshot.role_id);
   if (!definition) return 'role_removed';
   if (!definition.enabled) return 'role_disabled';
-  if (!config.enabled && !config.legacy && snapshot.kind !== 'evaluator') return 'role_coordination_disabled';
+  if (!direct && !config.enabled && !config.legacy && snapshot.kind !== 'evaluator') return 'role_coordination_disabled';
   const live = definition.permissions;
   if (tool && snapshot.capability.tools && !snapshot.capability.tools.includes(tool)) return 'tool_not_in_permissions';
   if (tool && !permitsTool(live, tool)) return 'capability_revoked';
