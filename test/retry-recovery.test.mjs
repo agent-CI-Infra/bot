@@ -184,6 +184,8 @@ test('GitHub rate limits keep their own window without consuming or resetting th
     else send({message:'Server Error'},502);
     return true;
   }});
+  // The response and retry scheduling share one instant; processing time is not retry jitter.
+  const now=Date.now();t.mock.method(Date,'now',()=>now);
   for(let i=0;i<4;i++){h.due();await h.run();}
   limited=true;
   for(let i=0;i<6;i++){
