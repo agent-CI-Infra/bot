@@ -55,6 +55,7 @@ for (const width of [1440, 390]) test(`continuous group/private conversation, ro
     await task.locator('.board-card-title').click();
     await expect(page.getByRole('heading', { name: '任务来源与执行者', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect(page.locator('.task-execution')).toContainText('任务执行角色：reviewer');
     await page.screenshot({ path: `.tmp/channel-conversation-245/shared-task-${width}.png`, fullPage: true }); expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
