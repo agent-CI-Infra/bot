@@ -36,16 +36,24 @@ test('global administrator connects an app through the wizard, resumes it and se
     wire.state.authCode = 10003; await page.getByRole('button', { name: '检查凭据并读取机器人' }).click();
     await expect(page.getByRole('alert')).toContainText('无法通过鉴权');
     wire.state.authCode = 0; await page.getByRole('button', { name: '检查凭据并读取机器人' }).click();
-    await expect(page.getByLabel('机器人 open_id', { exact: true })).toHaveValue('ou_bot');
+    await expect(page.getByLabel('机器人 open_id', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('alert')).toContainText('凭据已验证');
+    await expect(page.getByText('填写机器人实际安装的飞书企业标识', { exact: false })).toContainText('data.tenant.tenant_key');
+    await expect(page.getByText('限定哪些飞书企业的成员', { exact: false })).toContainText('填写同一个值');
     await page.getByLabel('应用安装租户 tenant_key').fill('install-tenant');
     await page.getByLabel('允许的操作者 tenant_key（逗号分隔）').fill('actor-tenant');
     await page.getByLabel('Verification Token', { exact: true }).fill(credentials.verification_token);
     await page.getByLabel('Encrypt Key', { exact: true }).fill(credentials.encrypt_key);
+    wire.state.authCode = 10003;
+    await page.getByRole('button', { name: '保存连接并继续' }).click();
+    await expect(page.getByRole('alert')).toContainText('无法通过鉴权');
+    expect(f.h.store.get('SELECT count(*) n FROM channel_connectors').n).toBe(0);
+    wire.state.authCode = 0; wire.state.botOpenId = 'ou_automatic_save';
     await page.getByRole('button', { name: '保存连接并继续' }).click();
     await expect(page.getByLabel('HTTP 回调地址')).toHaveValue(/https:\/\/console.example.test\/hooks\/feishu\/[a-f0-9]{48}/);
     await expect(page.getByText('还必须在“事件与回调 → 回调配置”', { exact: false })).toContainText('两处地址验证均通过');
     await expect(page.getByText('必须在“回调配置 → 添加回调”', { exact: false })).toContainText('card.action.trigger');
-    const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'"); expect(c.enabled).toBe(1); expect(c.transport).toBe('http');
+    const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'"); expect(c.enabled).toBe(1); expect(c.transport).toBe('http'); expect(c.bot_open_id).toBe('ou_automatic_save');
     await page.screenshot({ path: output + '/events-desktop.png', fullPage: true });
     await page.getByRole('button', { name: '事件与卡片回调已保存，前往发布' }).click(); await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: '凭据已验证' })).toContainText('尚未验证事件投递');
@@ -64,7 +72,7 @@ test('global administrator connects an app through the wizard, resumes it and se
     await page.getByRole('button', { name: '保存连接并继续' }).click(); await expect(page).toHaveURL(new RegExp(c.id + '/2$'));
     const updated = f.h.store.get('SELECT * FROM channel_connectors WHERE id=?', c.id), sealed = f.h.store.get('SELECT sealed FROM channel_credentials WHERE id=?', updated.credential_ref);
     expect(f.h.store.secrets.open(sealed.sealed, 'channel-credential:' + updated.credential_ref)).toEqual({ ...credentials, app_secret: 'rotated-fixture-secret' });
-    await page.goto(f.h.admin + '/#/settings/feishu/' + c.id + '/1'); await expect(page.getByLabel('机器人 open_id')).toBeVisible();
+    await page.goto(f.h.admin + '/#/settings/feishu/' + c.id + '/1'); await expect(page.getByLabel('App Secret（留空保留）')).toBeVisible();
     await f.admin('/api/channels/connectors/' + c.id, 'PATCH', { expected_revision: updated.revision, enabled: false });
     await page.getByRole('button', { name: '保存连接并继续' }).click();
     await expect(page.getByRole('alert')).toContainText('连接已被其他操作更新');
@@ -72,6 +80,38 @@ test('global administrator connects an app through the wizard, resumes it and se
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: output + '/credentials-mobile.png', fullPage: true }); expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('store apps save without manual bot identity and synchronize it after receiving the installation ticket', async ({ page }) => {
+  const wire = transport(), h = await harness(null, undefined, { channels: { fetch: wire.fetch, longConnections: false } });
+  const f = { h, ...await setup(h) };
+  try {
+    await page.goto(h.admin + '/#/settings/feishu/new/0'); await login(page, h, f.password);
+    await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('saas');
+    await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
+    await expect(page.getByLabel('机器人 open_id')).toHaveCount(0);
+    await page.getByLabel('App ID', { exact: true }).fill('cli_store_wizard');
+    await page.getByLabel('App Secret', { exact: true }).fill(credentials.app_secret);
+    await page.getByLabel('应用安装租户 tenant_key').fill('install-tenant');
+    await page.getByLabel('允许的操作者 tenant_key（逗号分隔）').fill('install-tenant');
+    await page.getByLabel('Verification Token', { exact: true }).fill(credentials.verification_token);
+    await page.getByLabel('Encrypt Key', { exact: true }).fill(credentials.encrypt_key);
+    await page.getByRole('button', { name: '保存连接并继续' }).click();
+    await expect(page.getByRole('heading', { name: '事件与回调', exact: true })).toBeVisible();
+    const c = h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_store_wizard'"); expect(c.bot_open_id).toBe('');
+    await page.getByRole('button', { name: '事件与卡片回调已保存，前往发布' }).click();
+    await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
+    await expect(page.getByRole('status').filter({ hasText: '尚未收到有效的商店应用票据' })).toBeVisible();
+    const ticket = { ts: String(Date.now() / 1000), uuid: 'wizard-ticket', token: credentials.verification_token, type: 'event_callback',
+      event: { type: 'app_ticket', app_id: 'cli_store_wizard', app_ticket: 'fixture-store-ticket' } };
+    expect((await post(h, c.id, ticket, { encrypted: true })).value.state).toBe('completed');
+    for (let i = 0; i < 2; i++) {
+      await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
+      await expect(page.getByRole('status').filter({ hasText: '机器人身份已自动同步' })).toBeVisible();
+    }
+    const updated = h.store.get('SELECT * FROM channel_connectors WHERE id=?', c.id);
+    expect(updated.bot_open_id).toBe('ou_bot'); expect(updated.revision).toBe(2);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
 
 test('enterprise long connections require callback configuration as well as message events', async ({ page }) => {

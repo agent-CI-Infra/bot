@@ -71,7 +71,7 @@ test('startup migrates organization connections without replacing credentials, b
 test('Feishu probes use saved or ephemeral credentials, return safe bot facts and never claim event delivery', async t => {
   const { admin, id, wire, h } = await channelFixture(t);
   const checked = await probe(admin, id);
-  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', state: 'verified', event_delivery_verified: false });
+  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', revision: 1, state: 'verified', event_delivery_verified: false });
   const preview = await admin('/api/channels/feishu/probe', 'POST', { app_id: 'cli_preview', app_secret: 'unsaved-preview-secret' });
   assert.equal(preview.status, 201); assert.equal(preview.value.bot_open_id, 'ou_bot');
   assert.equal(wire.state.authRequests.at(-1).app_id, 'cli_preview');
@@ -112,4 +112,54 @@ test('socket setup needs only an app secret; switching to HTTP requires signing 
   assert.deepEqual(h.store.secrets.open(row.sealed, 'channel-credential:' + c.credential_ref), { app_secret: 'rotated-secret', verification_token: 'http-token', encrypt_key: 'http-key' });
   assert.equal((await edit({ expected_revision: 3, application_type: 'saas', transport: 'websocket' })).value.error, 'channel_transport_invalid');
   assert.doesNotMatch(JSON.stringify((await admin('/api/channels/setup')).value), /socket-secret|rotated-secret|http-token|http-key/);
+});
+
+test('enterprise saves discover the bot from effective credentials and failed discovery leaves no partial configuration', async t => {
+  const { admin, h, wire } = await channelFixture(t);
+  wire.state.botOpenId = 'ou_discovered';
+  const id = await connector(admin, { app_id: 'cli_auto', bot_open_id: undefined });
+  const before = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+  assert.equal(before.bot_open_id, 'ou_discovered');
+  const edit = credentials => admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, credentials });
+  wire.state.authCode = 10003;
+  assert.equal((await edit({ app_secret: 'invalid-secret' })).value.error, 'channel_auth_failed');
+  assert.deepEqual(h.store.get('SELECT * FROM channel_connectors WHERE id=?', id), before);
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_credentials').n, 2);
+  wire.state.authCode = 0; wire.state.botOpenId = 'ou_rotated';
+  assert.equal((await edit({ app_secret: 'valid-rotated-secret' })).status, 200);
+  const after = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+  assert.equal(after.bot_open_id, 'ou_rotated'); assert.equal(after.revision, 2);
+  const stored = h.store.get('SELECT sealed FROM channel_credentials WHERE id=?', after.credential_ref);
+  assert.equal(h.store.secrets.open(stored.sealed, 'channel-credential:' + after.credential_ref).app_secret, 'valid-rotated-secret');
+});
+
+test('automatic discovery rechecks the revision after asynchronous authentication before saving rotated credentials', async t => {
+  const { admin, id, h, wire } = await channelFixture(t);
+  let release; wire.state.authGate = new Promise(r => { release = r; }); t.after(() => release());
+  const pending = admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, credentials: { app_secret: 'pending-secret' } });
+  await until(() => wire.state.authStarted);
+  assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, enabled: false })).status, 200);
+  release();
+  assert.equal((await pending).value.error, 'channel_revision_conflict');
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_credentials').n, 1);
+  assert.equal(h.store.get('SELECT revision,enabled FROM channel_connectors WHERE id=?', id).enabled, 0);
+});
+
+test('store apps bootstrap without a bot ID, then persist discovery after a verified ticket and retain revision checks', async t => {
+  const { admin, h, wire } = await channelFixture(t);
+  const id = await connector(admin, { app_id: 'cli_auto_store', application_type: 'saas', bot_open_id: undefined });
+  assert.equal(wire.state.authRequests.length, 0);
+  assert.equal(h.store.get('SELECT bot_open_id FROM channel_connectors WHERE id=?', id).bot_open_id, '');
+  const message = () => envelope('/bind', { header: { app_id: 'cli_auto_store' } });
+  assert.equal((await post(h, id, message())).value.error, 'channel_bot_unavailable');
+  assert.equal((await probe(admin, id)).value.error, 'channel_app_ticket_required');
+  const ticket = { ts: String(Date.now() / 1000), uuid: 'auto-ticket', token: credentials.verification_token, type: 'event_callback',
+    event: { type: 'app_ticket', app_id: 'cli_auto_store', app_ticket: 'fixture-store-ticket' } };
+  assert.equal((await post(h, id, ticket, { encrypted: true })).value.state, 'completed');
+  assert.equal((await probe(admin, id)).value.revision, 2);
+  assert.equal(h.store.get('SELECT bot_open_id FROM channel_connectors WHERE id=?', id).bot_open_id, 'ou_bot');
+  assert.equal((await probe(admin, id)).value.error, 'channel_revision_conflict');
+  assert.equal((await probe(admin, id, 2)).value.revision, 2);
+  assert.equal((await post(h, id, message())).value.state, 'queued');
+  assert.ok(wire.state.authRequests.some(a => a.tenant_key === 'install-tenant'));
 });
