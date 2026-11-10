@@ -13,7 +13,7 @@ async function api(path, method = 'GET', body, { signal } = {}) {
   const value = await response.json();
   // authorization_changed has its own guidance; field names the configuration path a validation error concerns
   // (for example roles.reviewer.harness_ref.id).
-  if (!response.ok) throw Object.assign(new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : value.error === 'note_revision_changed' ? '文件已被其他操作更新，请刷新后再保存。' : `${response.status} · ${value.error}`), value.field ? { field: value.field } : {});
+  if (!response.ok) throw Object.assign(new Error(value.error === 'authorization_changed' ? '权限已变化，请刷新页面后按当前权限重试。' : value.error === 'note_revision_changed' ? '文件已被其他操作更新，请刷新后再保存。' : `${response.status} · ${value.error}`), { status: response.status, ...(value.field ? { field: value.field } : {}) });
   return value;
 }
 function notice(id, text = '', tone = '') {
@@ -206,6 +206,7 @@ async function render(quiet = false) {
     const line = element('div', '', 'row'), content = element('div', '', 'row-content'), status=element('div','','row-state');line.setAttribute('role','listitem');line.dataset.key=String(row.id);rowSignatures.set(line,JSON.stringify(row));
     const name = taskTab ? `${row.kind === 'development.pr' ? '跟进 ' : ''}${objectLabel(row)} · ${row.full_name || '仓库 ' + row.repository_id}` : (tab==='events'?(row.full_name?row.full_name+' · '+row.route:row.route):row.full_name) || row.name || row.username || row.model_name || row.summary || row.route || '未知事件';
     content.append(element('strong', name));
+    if (tab === 'projects' && !hiddenView && row.registered !== false) content.append(consoleLink(`#/projects/${row.id}/overview`, '项目总览', '查看工作进展与待处理事项'));
     const detail = tab === 'events' ? `${timestamp(row.received_at)} · ${deliveryCaption(row)} · ${row.delivery_id}`
       : taskTab ? `${phaseLabels[row.phase] || row.phase} · ${row.head_sha ? '提交 ' + row.head_sha.slice(0,12) : '等待材料'} · 第 ${row.attempt} 次 · 更新于 ${timestamp(row.updated_at)}${row.error_code ? ' · '+faultSummary(row.error_code,row.error_cause) : ''}${tab === 'reviews' && Array.isArray(row.result?.findings) ? ` · ${row.result.findings.length} 条发现` : ''}`
       : installedView ? installedDetail(row) : `仓库 ID ${row.id}${row.model_id ? '' : ' · 未选模型'}`;

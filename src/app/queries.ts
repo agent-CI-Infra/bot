@@ -9,6 +9,7 @@ import { deliveryResult } from '../review/delivery.js';
 import { fail, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { explainFailure } from '../agent/failures.js';
+import { taskGroupSQL } from './project-activity.js';
 // Faults are classified when read, so logs written before a cause existed are explained the same way.
 function faultCause(log:Record<string,any>){
   if(!String(log.content).startsWith('{"type":"fault"'))return log;
@@ -64,13 +65,26 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     // Filter before pagination: an old blocked task must not disappear behind newer completed work.
     const attention = url.searchParams.get('attention');
     if (attention && attention !== '1') fail(400, 'invalid_attention_filter');
-    if (attention) clauses.push("status IN ('failed','paused','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','needs_replan')");
     // Review and development tasks are listed on separate pages.
     const priority=url.searchParams.get('priority');if(priority){if(!['P0','P1','P2','P3'].includes(priority))fail(400,'invalid_task_priority');clauses.push('priority=?');args.push(priority);}
     const kind=url.searchParams.get('kind');if(kind){if(!['review','development'].includes(kind))fail(400,'invalid_task_kind');clauses.push('kind LIKE ?');args.push(kind+'.%');}
+    const group=url.searchParams.get('group');
+    if(group && group!=='all' && !Object.hasOwn(taskGroupSQL,group)) fail(400,'invalid_task_group');
+    if(attention && group && group!=='attention') fail(400,'conflicting_task_filters');
+    const summaryRequested=url.searchParams.get('summary');
+    if(summaryRequested && summaryRequested!=='1') fail(400,'invalid_task_summary');
+    const selected=attention?'attention':group;
     const limit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit'))||50)),offset=Math.max(0,Number(url.searchParams.get('offset'))||0);
     if(!Number.isSafeInteger(limit)||!Number.isSafeInteger(offset))fail(400,'invalid_pagination');
-    return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY ${attention ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(publicTask)),execution_available:true};
+    const read=()=>{
+      // Count before status filtering and pagination; the transaction keeps counts and rows in one database snapshot.
+      const summary=summaryRequested ? { ...store.get(`SELECT COUNT(*) AS "all",${Object.entries(taskGroupSQL).map(([key,sql])=>`COALESCE(SUM(CASE WHEN ${sql} THEN 1 ELSE 0 END),0) AS ${key}`).join(',')}
+        FROM tasks WHERE ${clauses.join(' AND ')}`,...args), sampled_at:new Date().toISOString() } : undefined;
+      const selectedClauses=[...clauses];
+      if(selected && selected!=='all') selectedClauses.push(taskGroupSQL[selected as keyof typeof taskGroupSQL]);
+      return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(publicTask)),execution_available:true,...(summary?{summary}:{})};
+    };
+    return summaryRequested?store.transaction(read):read();
   }
   const relations=/^\/api\/tasks\/([^/]+)\/relations$/.exec(path);
   if(relations){const task=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,relations[1]!,...filter.args);if(!task)fail(404,'task_not_found');const offset=Number(url.searchParams.get('offset')??0);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');return taskRelations(store,task!.id,offset);}
