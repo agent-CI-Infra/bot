@@ -199,7 +199,7 @@ test('loading a scope disables composing until its draft is restored, and abando
     });
     await scope.selectOption('project:102'); await blocked;
     await expect(message).toBeDisabled(); await expect(send).toBeDisabled();
-    await expect(page.getByRole('button', { name: '有哪些任务需要处理？', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /查看任务进展/ })).toBeDisabled();
     await scope.selectOption('project:201'); await expect(message).toBeEnabled(); await message.fill('201 载入后的新草稿');
     release(); await done; await expect(scope).toHaveValue('project:201'); await expect(message).toHaveValue('201 载入后的新草稿');
     await page.unrouteAll({ behavior: 'wait' });

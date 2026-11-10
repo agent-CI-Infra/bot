@@ -1,3 +1,35 @@
+// Model text is untrusted. Parse Markdown, then allow only document markup before attaching it to the live page.
+function renderManagementMarkdown(node, text) {
+  const fragment = DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }), {
+    RETURN_DOM_FRAGMENT: true,
+    ALLOWED_TAGS: ['p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em', 'del', 'blockquote', 'ul', 'ol', 'li', 'pre', 'code', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'input'],
+    ALLOWED_ATTR: ['href', 'title', 'start', 'align', 'type', 'checked', 'disabled'],
+    ALLOW_DATA_ATTR: false, ALLOW_ARIA_ATTR: false
+  });
+  for (const input of fragment.querySelectorAll('input')) {
+    if (input.type !== 'checkbox') input.remove(); else input.disabled = true;
+  }
+  for (const anchor of fragment.querySelectorAll('a')) {
+    const href = anchor.getAttribute('href');
+    try {
+      const url = new URL(href, location.href);
+      if (!href || !['https:', 'http:', 'mailto:'].includes(url.protocol)) anchor.removeAttribute('href');
+      else if (url.origin !== location.origin) { anchor.target = '_blank'; anchor.rel = 'noopener noreferrer'; }
+    } catch { anchor.removeAttribute('href'); }
+  }
+  for (const table of fragment.querySelectorAll('table')) {
+    const wrap = element('div', '', 'management-table'); table.replaceWith(wrap); wrap.append(table);
+    wrap.tabIndex = 0; wrap.setAttribute('role', 'region'); wrap.setAttribute('aria-label', '回答中的表格');
+  }
+  node.replaceChildren(fragment);
+}
+const managementOperationLabels = {
+  list_projects: '查询项目', list_tasks: '查询任务', get_task: '读取任务状态', get_effective_config: '读取项目配置',
+  get_usage: '查询成本与预算', list_audit: '查询操作记录', 'task.create': '创建任务', 'task.pause': '暂停任务',
+  'task.cancel': '取消任务', 'task.retry': '重试任务', 'task.instructions': '追加任务指令', 'task.contract': '修订任务目标',
+  'task.adopt-config': '采用新执行配置', 'workflow.update': '更新工作配置', 'manager.update': '更新 Manager 配置',
+  'project.update': '更新项目配置', 'roles.update': '更新角色', 'rules.update': '更新规则', 'configuration.pr': '创建配置 PR'
+};
 // One authenticated chat surface survives page navigation. Minimizing it never cancels a submitted command.
 let managementChat = null;
 function syncManagementChat() {
@@ -11,7 +43,7 @@ function syncManagementChat() {
   box.setAttribute('role', 'dialog'); box.setAttribute('aria-labelledby', 'management-chat-title');
   const head = element('div', '', 'management-window-head'), title = element('div', '', 'management-window-title');
   const heading = element('h2', '管理助手'); heading.id = 'management-chat-title';
-  title.append(heading, element('p', '聊任务、查进展、调整项目配置'));
+  title.append(heading, element('p', '从了解情况，到推进下一步'));
   const minimize = button('收起', () => Promise.resolve(minimizeManagementChat()).catch(error), 'quiet');
   const maximize = button('全屏', () => toggleManagementFullscreen(), 'quiet');
   const controls = element('div', '', 'actions'); controls.append(maximize, minimize); head.append(title, controls);
@@ -167,23 +199,31 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const available = value => [...scope.options].some(option => option.value === value);
   scope.value = projectId && available('project:' + projectId) ? 'project:' + projectId : available(stored(scopeKey)) ? stored(scopeKey) : 'platform';
   const toolsButton = button('快捷操作', () => showTools(!toolsOpen), 'quiet'); toolsButton.setAttribute('aria-expanded', 'false'); toolsButton.setAttribute('aria-controls', 'management-tools');
-  header.append(field('管理范围', scope), toolsButton); panel.append(header);
+  const fresh = button('＋ 新建会话', () => openConversation(true).catch(showError), 'quiet management-new-conversation');
+  fresh.setAttribute('aria-label', '新建会话');
+  header.append(field('管理范围', scope), fresh, toolsButton); panel.append(header);
   const sessions = element('details', '', 'management-sessions'), sessionBody = element('div', '', 'management-session-controls');
   sessions.append(element('summary', '会话记录'));
   const conversations = document.createElement('select'); conversations.setAttribute('aria-label', '持久会话');
-  const fresh = button('新建会话', () => openConversation(true).catch(showError), 'quiet');
-  sessionBody.append(field('切换会话', conversations), fresh); sessions.append(sessionBody); panel.append(sessions);
+  sessionBody.append(field('切换会话', conversations)); sessions.append(sessionBody); panel.append(sessions);
   const feed = element('div', '', 'management-feed'); feed.setAttribute('aria-label', '管理会话记录'); feed.setAttribute('role', 'log'); feed.setAttribute('aria-live', 'polite');
   const welcome = element('div', '', 'management-welcome');
-  welcome.append(element('span', '✦', 'management-welcome-icon'), element('h3', '有什么需要我帮你？'), element('p', '可以直接问任务进展，也可以告诉我想调整什么。', 'muted'));
-  for (const text of ['有哪些任务需要处理？', '当前项目的配置是什么？']) welcome.append(button(text, () => { message.value = text; message.focus(); }, 'quiet'));
-  feed.append(welcome); panel.append(feed);
+  welcome.append(element('span', '✦', 'management-welcome-icon'), element('p', '你的项目工作台', 'management-eyebrow'), element('h3', '一起推进下一步'), element('p', '查进展、找原因、调整配置。执行过程和结果都会在这里实时呈现。', 'muted'));
+  const suggestions = element('div', '', 'management-suggestions');
+  for (const [caption, text] of [['查看任务进展', '有哪些任务需要处理？'], ['分析阻塞原因', '帮我看看任务为什么没有继续。'], ['了解项目配置', '当前项目的配置是什么？']]) {
+    const suggestion = button('', () => { message.value = text; message.focus(); }, 'quiet');
+    suggestion.append(element('strong', caption), element('span', text)); suggestions.append(suggestion);
+  }
+  welcome.append(suggestions); feed.append(welcome);
+  const feedWrap = element('div', '', 'management-feed-wrap'), latest = button('↓ 回到最新消息', () => { followOutput = true; feed.scrollTop = feed.scrollHeight; latest.hidden = true; }, 'quiet management-latest');
+  latest.hidden = true; feedWrap.append(feed, latest); panel.append(feedWrap);
   const tools = element('div', '', 'management-tools'); tools.id = 'management-tools'; tools.hidden = true;
   tools.append(element('h3', '快捷操作'), note('直接查询或使用表单。操作结果会回到对话里。'),
     note('默认配置只影响新任务；补充指令会追加记录。修改目标或验收条件会使旧候选和验收失效。采用新执行配置前，请先暂停并等待旧执行结束。'));
   const actions = element('div', '', 'management-queries'), forms = element('div', '', 'management-forms'); tools.append(actions, forms); panel.append(tools);
-  const status = element('p', '正在读取会话…', 'management-status muted'); status.setAttribute('role', 'status'); panel.append(status);
-  const input = document.createElement('form'), message = textarea('management-message', '', { rows: 3, placeholder: '告诉管理助手你想做什么…' });
+  const statusBar = element('div', '', 'management-status-bar'), status = element('p', '正在读取会话…', 'management-status muted'); status.setAttribute('role', 'status');
+  const reconnect = button('重新连接', () => read(), 'quiet'); reconnect.hidden = true; statusBar.append(status, reconnect); panel.append(statusBar);
+  const input = document.createElement('form'), message = textarea('management-message', '', { rows: 3, placeholder: '发消息，或告诉我你想推进什么…' });
   input.className = 'management-input'; message.setAttribute('aria-label', '管理消息'); message.maxLength = 16000;
   const send = element('button', '发送'), stopButton = button('停止', async () => {
     const id = active, owner = conversation; if (!id) return;
@@ -191,19 +231,31 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   }, 'quiet');
   send.type = 'submit'; send.disabled = true; stopButton.hidden = true;
   const footer = element('div', '', 'management-input-footer'), controls = element('div', '', 'actions');
-  controls.append(stopButton, send); footer.append(element('span', 'Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(message, footer); panel.append(input);
+  controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(message, footer); panel.append(input);
   let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null, formGeneration = 0;
-  let disposed = false, opening = false, submitting = false, historyReady = false, toolsOpen = false, toolsDirty = true;
+  let disposed = false, opening = false, submitting = false, historyReady = false, toolsOpen = false, toolsDirty = true, followOutput = true, renderFrame = 0;
+  const pendingMarkdown = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
   const showError = err => { if (!disposed) { status.textContent = err.message; status.classList.add('view-error'); } };
+  feed.addEventListener('scroll', () => { followOutput = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 64; if (followOutput) latest.hidden = true; });
+  const scrollOutput = () => { if (followOutput) feed.scrollTop = feed.scrollHeight; else latest.hidden = false; };
+  const queueMarkdown = answer => {
+    pendingMarkdown.add(answer);
+    if (!renderFrame) renderFrame = requestAnimationFrame(() => {
+      renderFrame = 0;
+      for (const item of pendingMarkdown) renderManagementMarkdown(item.body, item.text);
+      pendingMarkdown.clear(); scrollOutput();
+    });
+  };
   const updateBusy = () => {
     message.disabled = opening || !conversation;
     for (const suggestion of welcome.querySelectorAll('button')) suggestion.disabled = message.disabled;
-    send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active; onActivity(!!active);
+    send.disabled = opening || !historyReady || submitting || !!active; stopButton.hidden = !active;
+    fresh.disabled = opening || submitting; input.classList.toggle('is-running', !!active); onActivity(!!active);
   };
   function showTools(open) {
-    toolsOpen = open; tools.hidden = !open; feed.hidden = open; input.hidden = open;
+    toolsOpen = open; tools.hidden = !open; feedWrap.hidden = open; feed.hidden = open; input.hidden = open;
     toolsButton.textContent = open ? '返回对话' : '快捷操作'; toolsButton.setAttribute('aria-expanded', String(open));
     if (open && toolsDirty) void refreshTools();
   }
@@ -217,14 +269,69 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const turn = id => {
     if (turns.has(id)) return turns.get(id);
     welcome.hidden = true;
-    const item = element('article', '', 'management-turn'), request = messages.get(id)?.input;
+    const record = messages.get(id), item = element('article', '', 'management-turn'), request = record?.input;
     if (request) {
       const userMessage = element('div', '', 'management-user');
-      userMessage.append(element('strong', '你'), element('p', request.content ?? request.query?.operation ?? request.command?.operation ?? '管理请求')); item.append(userMessage);
+      userMessage.append(element('strong', '你'), element('p', request.content ?? managementOperationLabels[request.query?.operation ?? request.command?.operation] ?? request.query?.operation ?? request.command?.operation ?? '管理请求')); item.append(userMessage);
     }
-    const replies = element('div', '', 'management-replies'); item.append(replies); feed.append(item);
-    const value = { replies, provisional: null }; turns.set(id, value); return value;
+    const assistant = element('div', '', 'management-assistant'), avatar = element('span', '✦', 'management-avatar'); avatar.setAttribute('aria-hidden', 'true');
+    const content = element('div', '', 'management-assistant-content'), meta = element('div', '', 'management-assistant-meta');
+    const badge = element('span', '', 'management-turn-state'), elapsed = element('span', '', 'management-elapsed');
+    meta.append(element('strong', '管理助手'), badge, elapsed);
+    const progress = element('details', '', 'management-progress'), progressSummary = element('summary', '执行进展'), stepsBody = element('div', '', 'management-steps');
+    progress.hidden = true; progress.open = true; progress.append(progressSummary, stepsBody);
+    const replies = element('div', '', 'management-replies'); content.append(meta, progress, replies); assistant.append(avatar, content); item.append(assistant); feed.append(item);
+    const value = { item, replies, badge, elapsed, progress, progressSummary, stepsBody, steps: [], provisional: null,
+      state: record?.state ?? 'pending', stage: '正在连接助手', startedAt: record?.created_at ?? new Date().toISOString(), finishedAt: record?.updated_at, notice: null };
+    turns.set(id, value); paintTurn(value); return value;
   };
+  function paintTurn(value) {
+    const running = ['pending', 'running'].includes(value.state), waiting = value.steps.some(step => step.state === 'awaiting_approval');
+    const uncertain = value.steps.some(step => ['unknown', 'executing'].includes(step.state));
+    value.badge.textContent = running ? value.stage : { completed: waiting ? '等待审批' : uncertain ? '结果待确认' : value.steps.some(step => step.state === 'failed' || step.state === 'rejected') ? '操作未成功' : '已完成', failed: '处理失败', stopped: '已停止', interrupted: '运行中断' }[value.state] ?? value.state;
+    value.badge.dataset.state = running ? 'running' : waiting ? 'awaiting_approval' : uncertain ? 'unknown' : value.state;
+    const end = running ? Date.now() : Date.parse(value.finishedAt || value.startedAt), seconds = Math.max(0, Math.floor((end - Date.parse(value.startedAt)) / 1000));
+    value.elapsed.textContent = seconds < 60 ? seconds + ' 秒' : Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒';
+    const completed = value.steps.filter(step => step.state === 'succeeded').length;
+    value.progressSummary.textContent = '执行进展 · ' + completed + '/' + value.steps.length + ' 步完成';
+    value.progress.hidden = !value.steps.length;
+    value.item.setAttribute('aria-busy', String(running));
+  }
+  function finishTurn(value, state, at) {
+    value.state = state; value.finishedAt = at;
+    if (value.provisional) { value.provisional.node.classList.remove('management-stream'); value.provisional = null; }
+    for (const step of value.steps.filter(step => step.state === 'running')) setStepState(step, state === 'completed' ? 'unknown' : 'interrupted');
+    if (state === 'interrupted' && !value.notice) {
+      value.notice = element('p', '服务重启中断了这次处理。已产生的结果保留在执行进展中，请核对后再继续。', 'management-run-notice'); value.replies.append(value.notice);
+    }
+    paintTurn(value);
+  }
+  function answer(value) {
+    if (value.provisional) return value.provisional;
+    const node = element('article', '', 'management-answer management-stream'), body = element('div', '', 'management-markdown');
+    const item = { node, body, text: '' }, actions = element('div', '', 'management-answer-actions');
+    const copy = button('复制回答', async () => {
+      try { await navigator.clipboard.writeText(item.text); copy.textContent = '已复制'; }
+      catch { showError(new Error('复制失败，请选中回答后复制。')); }
+    }, 'quiet');
+    actions.append(copy); node.append(body, actions); value.replies.append(node); value.provisional = item; return item;
+  }
+  function setStepState(step, state) {
+    step.state = state; step.box.dataset.state = state;
+    step.status.textContent = { running: '进行中', succeeded: '已完成', failed: '失败', rejected: '已拒绝', awaiting_approval: '等待审批', unknown: '待确认', executing: '执行中', interrupted: '结果未确认' }[state] ?? state;
+  }
+  function toolStep(value, data, sequence) {
+    const box = element('details', '', 'management-step'), summary = element('summary', '', 'management-step-summary');
+    const operation = data.arguments?.operation, caption = managementOperationLabels[operation] ?? operation ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
+    const indicator = element('span', '', 'management-step-indicator'); indicator.setAttribute('aria-hidden', 'true');
+    const state = element('span', '', 'management-step-status'), detail = element('div', '', 'management-step-detail');
+    summary.append(indicator, element('span', caption, 'management-step-caption'), state); box.append(summary, detail); value.stepsBody.append(box);
+    if (data.arguments) {
+      const args = element('details', '', 'management-step-arguments'); args.append(element('summary', '查看请求参数'), element('pre', JSON.stringify(data.arguments, null, 2))); detail.append(args);
+    }
+    const step = { id: data.call_id ?? 'legacy-' + sequence, box, detail, status: state, name: data.name, state: 'running' };
+    value.steps.push(step); setStepState(step, 'running'); paintTurn(value); return step;
+  }
   const output = (parent, label, value, receipt = false) => {
     const box = element(receipt ? 'details' : 'article', '', 'management-observation' + (receipt ? ' management-receipt' : ' management-answer'));
     box.append(element(receipt ? 'summary' : 'strong', label));
@@ -253,9 +360,19 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   function event(row) {
     if (row.sequence <= cursor) return; cursor = row.sequence;
     const data = row.data, currentTurn = turn(row.message_id), replies = currentTurn.replies;
-    if (row.type === 'tool_result') {
+    if (row.type === 'running' || row.type === 'model_start') {
+      currentTurn.state = 'running'; currentTurn.stage = data.turn > 0 ? '正在整理结果' : '正在分析请求';
+      if (row.type === 'model_start' && currentTurn.provisional) { currentTurn.provisional.node.classList.remove('management-stream'); currentTurn.provisional = null; }
+    } else if (row.type === 'tool_call') {
+      if (currentTurn.provisional) { currentTurn.provisional.node.classList.remove('management-stream'); currentTurn.provisional = null; }
+      const step = toolStep(currentTurn, data, row.sequence);
+      currentTurn.stage = step.box.querySelector('.management-step-caption').textContent;
+    } else if (row.type === 'tool_result') {
       const receipt = data.result;
-      const box = output(replies, receipt.operation ? `操作 ${receipt.operation} · ${receipt.state}` : '查询事实', receipt, true);
+      const step = currentTurn.steps.find(item => data.call_id ? item.id === data.call_id : item.name === data.name && item.state === 'running') ?? toolStep(currentTurn, data, row.sequence);
+      setStepState(step, receipt.operation ? receipt.state : 'succeeded');
+      const box = output(step.detail, receipt.operation ? `操作 ${receipt.operation} · ${receipt.state}` : '查询事实', receipt, true);
+      currentTurn.stage = '正在整理结果';
       if (receipt.id && receipt.operation) {
         toolsDirty = true;
         const links = element('p', ''); links.append(link('/api/management/commands/' + receipt.id, '命令回执'));
@@ -264,26 +381,42 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
         const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? receipt.result?.id : null);
         if (taskId) box.append(button('查看任务', () => openTask(taskId), 'quiet'));
         if (receipt.result?.rollback) box.append(button('按原值回滚', () => submit({ command: receipt.result.rollback }), 'quiet'));
+        const updateReceipt = next => {
+          setStepState(step, next.state); paintTurn(currentTurn);
+          output(step.detail, '更新回执', next, true);
+        };
         if (['unknown', 'executing'].includes(receipt.state)) box.append(button('对账并回读', async () => {
-          try { output(replies, '对账回执', await api(endpoint + '/commands/' + receipt.id + '/resume', 'POST', {}), true); } catch (err) { showError(err); }
+          try { updateReceipt(await api(endpoint + '/commands/' + receipt.id + '/resume', 'POST', {})); } catch (err) { showError(err); }
         }, 'quiet'));
         if (receipt.state === 'awaiting_approval') box.append(button('批准此版本', async () => {
-          try { output(replies, '审批结果', await api(endpoint + '/commands/' + receipt.id + '/approval', 'POST', { parameter_hash: receipt.parameter_hash, expected_revision: receipt.expected_revision, decision: 'approve' }), true); } catch (err) { showError(err); }
+          try { updateReceipt(await api(endpoint + '/commands/' + receipt.id + '/approval', 'POST', { parameter_hash: receipt.parameter_hash, expected_revision: receipt.expected_revision, decision: 'approve' })); } catch (err) { showError(err); }
         }, 'quiet'));
       }
       onActivity(!!active, true);
     } else if (row.type === 'reply') {
-      currentTurn.provisional?.remove(); currentTurn.provisional = null;
-      output(replies, '管理助手', data.text); onActivity(!!active, true);
-    } else if (['error', 'tool_error', 'stopped'].includes(row.type)) output(replies, '运行状态', data, true);
-    else if (row.type === 'text') {
-      if (!currentTurn.provisional) { currentTurn.provisional = element('p', '', 'management-stream'); replies.append(currentTurn.provisional); }
-      currentTurn.provisional.textContent += data.delta ?? ''; status.textContent = '助手正在回复…';
+      const item = answer(currentTurn); item.text = data.text; item.node.classList.remove('management-stream'); queueMarkdown(item); currentTurn.provisional = null;
+      onActivity(!!active, true);
+    } else if (row.type === 'text') {
+      const item = answer(currentTurn); item.text += data.delta ?? ''; queueMarkdown(item);
+      currentTurn.stage = '正在回复'; status.textContent = '助手正在回复…';
+    } else if (row.type === 'tool_error') {
+      const step = currentTurn.steps.find(item => data.call_id ? item.id === data.call_id : item.name === data.name && item.state === 'running') ?? toolStep(currentTurn, data, row.sequence);
+      setStepState(step, currentTurn.state === 'stopped' ? 'interrupted' : 'failed');
+      step.detail.append(element('p', '操作未完成：' + data.error, 'management-run-notice'));
+    } else if (row.type === 'done') finishTurn(currentTurn, data.state ?? 'completed', row.created_at);
+    else if (row.type === 'error' || row.type === 'stopped') {
+      finishTurn(currentTurn, row.type === 'error' ? 'failed' : 'stopped', row.created_at);
+      if (!currentTurn.notice) {
+        currentTurn.notice = element('p', row.type === 'stopped' ? '已停止后续处理。已提交的操作仍保留结果，请在执行进展中核对。' : '这次处理未完成：' + data.error + '。可以检查项目模型与权限配置后继续。', 'management-run-notice');
+        replies.append(currentTurn.notice);
+      }
+      onActivity(!!active, true);
     }
-    feed.scrollTop = feed.scrollHeight;
+    paintTurn(currentTurn); scrollOutput();
   }
   async function read() {
     if (reading || !conversation || disposed) return reading;
+    reconnect.hidden = true; status.classList.remove('view-error');
     const id = conversation, generation = scopeGeneration;
     const work = (async () => {
       try {
@@ -296,20 +429,23 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
           const pending = page.messages.find(message => ['pending', 'running'].includes(message.state));
           active = pending?.id ?? null; historyReady = !page.has_more; updateBusy();
           if (page.has_more) continue;
-          for (const message of page.messages) turn(message.id);
-          if (!pending) { status.textContent = '会话已就绪 · 操作结果以回执为准'; break; }
-          status.textContent = '管理助手正在处理，收起窗口后仍会继续。';
+          for (const message of page.messages) {
+            const value = turn(message.id);
+            if (!['pending', 'running'].includes(message.state)) finishTurn(value, message.state, message.updated_at);
+          }
+          if (!pending) { status.textContent = '就绪 · 操作结果可在执行进展中核对'; break; }
+          status.textContent = '处理中 · 可以继续写草稿，收起窗口后仍会继续';
           streamController = new AbortController();
           const response = await fetch(endpoint + '/conversations/' + id + '/events?stream=1&after=' + cursor, { signal: streamController.signal });
           if (!response.ok) throw new Error('读取运行流失败，请重新连接。');
           const reader = response.body.getReader(), decoder = new TextDecoder(); let text = '';
           for (;;) {
             const part = await reader.read(); if (!alive(generation) || conversation !== id) { await reader.cancel(); return; }
-            if (part.done) break; text += decoder.decode(part.value, { stream: true });
+            if (part.done) { if (text.trim()) event(JSON.parse(text)); break; } text += decoder.decode(part.value, { stream: true });
             let at; while ((at = text.indexOf('\n')) >= 0) { const line = text.slice(0, at); text = text.slice(at + 1); if (line) event(JSON.parse(line)); }
           }
         }
-      } catch (err) { if (alive(generation)) showError(new Error(err.message + ' 已提交的命令仍可回读，请在快捷操作中重新连接。')); }
+      } catch (err) { if (alive(generation)) { reconnect.hidden = false; showError(new Error('连接已中断，已提交的操作会继续。点击重新连接以读取进展。' + err.message)); } }
     })();
     reading = work;
     try { await work; } finally { if (reading === work) reading = null; if (!disposed && generation !== scopeGeneration && conversation) void read(); }
@@ -317,7 +453,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   async function openConversation(create = false, selected = null) {
     if (conversation) drafts.set(conversation, message.value);
     const generation = ++scopeGeneration; formGeneration++; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
-    remember(scopeKey, scope.value); cursor = 0; turns.clear(); messages.clear(); feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
+    remember(scopeKey, scope.value); cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
     forms.replaceChildren(); toolsDirty = true; status.classList.remove('view-error'); status.textContent = '正在读取会话…';
     try {
       const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope.value);
@@ -337,7 +473,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     try {
       const result = await api(endpoint + '/conversations/' + id + '/messages', 'POST', { source_message: crypto.randomUUID(), ...body });
       if (!alive(generation) || conversation !== id) return true;
-      messages.set(result.id, { input: body }); turn(result.id); active = result.id; showTools(false); sessions.open = false; void read(); return true;
+      messages.set(result.id, { input: body, state: result.state, created_at: new Date().toISOString() }); turn(result.id); active = result.id;
+      followOutput = true; showTools(false); sessions.open = false; scrollOutput(); status.textContent = '请求已发送 · 正在连接助手'; void read(); return true;
     } catch (err) { if (alive(generation)) showError(err); return false; }
     finally { if (alive(generation)) { submitting = false; updateBusy(); } }
   }
@@ -383,10 +520,11 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   });
   scope.onchange = () => openConversation().catch(showError);
   conversations.onchange = () => openConversation(false, conversations.value).catch(showError);
-  await openConversation();
+  const elapsedTimer = setInterval(() => { for (const value of turns.values()) if (['pending', 'running'].includes(value.state)) paintTurn(value); }, 1000);
+  try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); throw err; }
   return {
     async setScope(value) { if (!available(value)) { showError(new Error('当前账号无权管理这个项目。')); return; } if (scope.value !== value) { scope.value = value; await openConversation(); } },
     focus() { if (toolsOpen) toolsButton.focus(); else message.focus(); },
-    dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); drafts.clear(); }
+    dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); pendingMarkdown.clear(); drafts.clear(); }
   };
 }

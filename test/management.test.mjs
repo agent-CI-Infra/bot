@@ -151,6 +151,12 @@ test('persistent conversations execute actual model tools, replay messages and s
   assert.equal((await admin('/api/management/conversations/'+conversation+'/messages','POST',body)).value.id,sent.value.id);
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE source_conversation=?",conversation).n,1);assert.ok(result.events.some(e=>e.type==='tool_result'&&e.data.result.state==='succeeded'));
   assert.ok(!JSON.stringify(requests).includes('fixture-provider-key'));
+  const starts=result.events.filter(e=>e.type==='model_start');assert.deepEqual(starts.map(e=>e.data.turn),[0,1,2]);
+  for(const call of result.events.filter(e=>e.type==='tool_call')){
+    assert.ok(call.data.call_id);
+    const receipt=result.events.find(e=>e.type==='tool_result'&&e.data.call_id===call.data.call_id);
+    assert.ok(receipt);assert.ok(receipt.sequence>call.sequence);
+  }
   const other=await member('other',{repository_ids:['101']});assert.equal((await other.client('/api/management/conversations/'+conversation)).status,404);
   const last=result.next_after;assert.deepEqual((await admin('/api/management/conversations/'+conversation+'/events?after='+last)).value.events,[]);
 });
