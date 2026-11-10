@@ -215,7 +215,10 @@ test('outbox timeout is unknown, crash recovery never blindly resends and reconc
   assert.equal(f.h.store.get('SELECT state FROM notification_outbox WHERE id=?', crashed.id).state, 'unknown');
 });
 test('429 backs off, attempts remain durable, retry budget dead-letters and rate limits defer transport', async t => {
-  const f = await fixture(t); await f.create(f.plan({ limits: { ...defaultLimits, retries: 1, notifications_per_minute: 1 } }));
+  const f = await fixture(t);
+  // Keep the first send and the 2001 ms retry in the same fixed minute bucket.
+  f.advance(60000 - f.now() % 60000);
+  await f.create(f.plan({ limits: { ...defaultLimits, retries: 1, notifications_per_minute: 1 } }));
   f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
   const second = otherWorker(f, t, { send: async () => { throw new HttpError(503, 'channel_rate_limited'); } });
   const claim = second.claimNotification(); await second.send(claim);

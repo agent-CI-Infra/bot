@@ -120,12 +120,22 @@ test('Claude Code protocol fixture: bounded text, fragmented UTF-8, denied promp
 
 test('Claude Code protocol fixture: checkpoint, cancellation reaps descendants and rejects late submission', async t => {
   const f = await claudeFixture(t, { mode: 'wait' }), p = await roleRuns.prepare(f.spec, 'dev', undefined, 'claude_code'), h = await roleRuns.start(p);
-  for (let i = 0; i < 100 && !f.s.get("SELECT harness_state FROM role_instances WHERE harness_state<>'{}'"); i++) await new Promise(r => setTimeout(r, 20));
-  const state = f.state(), checkpoint = await roleRuns.checkpoint(h); assert.equal(checkpoint.session.external_session.session_id, state.sessionId); assert.ok(checkpoint.session.external_session.sha256);
-  const pid = Number(readFileSync(join(state.directory, 'home', 'child.pid')));
-  const receipt = await roleRuns.cancel(h, 'test'); assert.ok(receipt.settled); await assert.rejects(roleRuns.collect(h), { code: 'harness_cancelled' });
-  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
-  assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_result'").n, 0);
+  let cancelled = false;
+  try {
+    // Session binding precedes the fixture's child spawn; wait for the process this test must cancel.
+    let state; const deadline = Date.now() + f.config.timeoutMs;
+    while (Date.now() < deadline) {
+      state = f.state();
+      if (state.directory && existsSync(join(state.directory, 'home', 'child.pid'))) break;
+      await new Promise(r => setTimeout(r, 20));
+    }
+    assert.ok(state?.directory && existsSync(join(state.directory, 'home', 'child.pid')), 'fixture child must be ready before checkpoint and cancellation');
+    const checkpoint = await roleRuns.checkpoint(h); assert.equal(checkpoint.session.external_session.session_id, state.sessionId); assert.ok(checkpoint.session.external_session.sha256);
+    const pid = Number(readFileSync(join(state.directory, 'home', 'child.pid')));
+    const receipt = await roleRuns.cancel(h, 'test'); cancelled = true; assert.ok(receipt.settled); await assert.rejects(roleRuns.collect(h), { code: 'harness_cancelled' });
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='role_result'").n, 0);
+  } finally { if (!cancelled) await roleRuns.cancel(h, 'test_cleanup'); }
 });
 
 test('Claude Code protocol fixture: revoke a live lease and the driver stops without collecting', async t => {
