@@ -95,7 +95,7 @@ export class FeishuAdapter implements ChannelAdapter {
         const delay = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
         throw new ChannelRateLimitError(Number.isFinite(delay) ? Math.min(3600000, Math.max(1000, delay)) : 1000);
       }
-      if (!r.ok || data.code !== 0) fail(502, 'channel_delivery_rejected');
+      if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : 'channel_delivery_rejected');
       return data;
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }
   }
@@ -103,6 +103,13 @@ export class FeishuAdapter implements ChannelAdapter {
     const data = await this.api('/im/v1/messages?receive_id_type=' + delivery.receive_id_type, { method: 'POST',
       body: JSON.stringify({ receive_id: delivery.receive_id, msg_type: 'interactive', content: JSON.stringify(delivery.content), uuid: key.slice(0, 50) }) });
     return text(data.data?.message_id);
+  }
+  async probe(): Promise<Json> {
+    const data = await this.api('/bot/v3/info', { method: 'GET' });
+    const bot = data.bot ?? data.data?.bot;
+    if (typeof bot?.open_id !== 'string' || !bot.open_id) fail(502, 'channel_bot_unavailable');
+    this.guard();
+    return { bot_open_id: text(bot.open_id), name: typeof bot.app_name === 'string' ? bot.app_name.slice(0, 200) : '' };
   }
   async update(delivery: ChannelDelivery): Promise<string> {
     const id = text(delivery.message_id);

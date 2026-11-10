@@ -5,8 +5,8 @@
 titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
-const settingsSections = [['general', '常规'], ['onboarding', '接入向导'], ['access', '公网接入'], ['accounts', '机器人账号'], ['installations', '安装档案'], ['models', '模型'], ['users', '用户']];
-function settingsSection() { if(/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return 'onboarding'; const key = /^#\/settings\/([a-z]+)$/.exec(location.hash)?.[1]; return settingsSections.some(([name]) => name === key) ? key : 'general'; }
+const settingsSections = [['general', '常规'], ['onboarding', '接入向导'], ['feishu', '飞书连接'], ['access', '公网接入'], ['accounts', '机器人账号'], ['installations', '安装档案'], ['models', '模型'], ['users', '用户']];
+function settingsSection() { if(/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return 'onboarding'; if(/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return 'feishu'; const key = /^#\/settings\/([a-z]+)$/.exec(location.hash)?.[1]; return settingsSections.some(([name]) => name === key) ? key : 'general'; }
 // What the cards draw from; the model cards are redrawn together because deleting the default model clears it.
 let settingsView = null;
 async function renderSettings(request) {
@@ -21,6 +21,9 @@ async function renderSettings(request) {
 }
 // Each category loads only what its cards show.
 const settingsCards = {
+  async feishu(request) {
+    const panel = element('div', '', 'feishu-setup'); await renderFeishuSetup(panel, request); return [panel];
+  },
   async onboarding(request) {
     const panel = element('div', ''); panel.id = 'onboarding-panel';
     await renderOnboarding(request, panel); return [panel];

@@ -10,8 +10,11 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await page.setViewportSize({ width: 1440, height: 1100 }); await page.goto(h.admin + '/#/channels');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page.getByRole('heading', { name: '飞书双端身份绑定' })).toBeVisible();
-    await expect(page.getByText('HTTP 回调路径', { exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
+    await expect(page).toHaveURL(/#\/identity\/feishu$/);
+    await expect(page.getByRole('button', { name: '消息渠道', exact: true })).toHaveCount(0);
+    await page.goto(h.admin + '/#/settings/feishu/' + id + '/2');
+    await expect(page.getByLabel('HTTP 回调地址', { exact: true })).toBeVisible();
     await page.screenshot({ path: '.tmp/channels-165/configuration-desktop.png', fullPage: true });
     const query = await post(h, id, envelope(directQuery())); const queried = await finished(h, query.value.operation_id);
     const changed = await post(h, id, envelope('/project 101 修改提示词')); const result = await finished(h, changed.value.operation_id);
@@ -36,11 +39,10 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await until(() => wire.sent.some(s => s.receive_id === 'oc_group'));
     const groupReplies = wire.sent.filter(s => s.receive_id === 'oc_group');
     expect(JSON.stringify(groupReplies)).not.toMatch(/Project computer is stopped|environment_not_ready|Inspect task facts/);
-    await page.getByRole('button', { name: '消息渠道', exact: true }).click();
+    await page.goto(h.admin + '/#/settings/feishu/' + id + '/4');
     await expect(page.getByText('channel_group_scope_required', { exact: false })).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    expect((await page.locator('.channel-binding').first().boundingBox()).height).toBeLessThan(220);
     await page.screenshot({ path: '.tmp/channels-165/diagnostics-mobile.png', fullPage: true });
     const web = (await admin('/api/management/commands/' + operation.id)).value;
     writeFileSync('.tmp/channels-165/evidence.json', JSON.stringify({ transport: 'signed local HTTP callbacks and protocol fixtures; no live Feishu credentials',

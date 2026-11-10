@@ -191,7 +191,7 @@ export function createControlPlane(options: Options) {
         });
         const channelBinding = await channels.bindings.githubAuthenticated(url.searchParams.get('state') || '', credentials.token);
         if (result.setup_state) installationSetup.bindIdentity(result.setup_state, githubIdentity.sessionReference(credentials.token));
-        res.setHeader('Set-Cookie', [cookie(req, credentials.token), browserCookie(req, '')]); res.writeHead(303, { Location: channelBinding ? '/#/channels' : '/#/identity' }); res.end();
+        res.setHeader('Set-Cookie', [cookie(req, credentials.token), browserCookie(req, '')]); res.writeHead(303, { Location: channelBinding ? '/#/identity/feishu' : '/#/identity' }); res.end();
       } catch (error) {
         const code = error instanceof HttpError ? error.code : 'github_oauth_unavailable';
         res.writeHead(303, { Location: '/?auth_error=' + encodeURIComponent(code) + '#/identity' }); res.end();
@@ -207,7 +207,7 @@ export function createControlPlane(options: Options) {
       const result = await installationSetup.callback(url.searchParams.get('state') || '', url.searchParams.get('installation_id') || '', url.searchParams.get('setup_action') || 'install');
       respond(res, 200, result); return;
     }
-    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/schedules.js': ['schedules.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
+    const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/feishu-setup.js': ['feishu-setup.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/schedules.js': ['schedules.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/manager.js': ['manager.js', 'text/javascript'], '/roles.js': ['roles.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/management.css': ['management.css', 'text/css'], '/vendor/marked.js': ['../node_modules/marked/lib/marked.umd.js', 'text/javascript'], '/vendor/purify.js': ['../node_modules/dompurify/dist/purify.min.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
@@ -290,7 +290,7 @@ export function createControlPlane(options: Options) {
     const current = user, context = current.context!;
     if (path.startsWith('/api/channels/')) {
       if (mutation) assertSessionWrite(store, sessionToken(req), context);
-      const result = channelApi.api(context, method, url, input);
+      const result = await channelApi.api(context, method, url, input);
       if (mutation && options.channels?.longConnections !== false) channelConnections.reconcile();
       respond(res, method === 'POST' ? 201 : 200, result); return;
     }

@@ -11,7 +11,7 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     await page.goto(h.admin); await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
     // Accounts, users, review and development no longer have top-level tabs.
-    for (const gone of ['机器人账号', '用户', '检视', '开发', '接入向导']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
+    for (const gone of ['机器人账号', '用户', '检视', '开发', '接入向导', '消息渠道']) await expect(page.locator('#tabs').getByRole('button', { name: gone, exact: true })).toHaveCount(0);
     const tab = name => page.locator('#tabs').getByRole('button', { name, exact: true }), current = () => page.locator('#tabs [aria-current=page]');
     for (const [name, address] of [['看板', '#/board'], ['统计', '#/costs'], ['Webhook 投递', '#/events'], ['外部执行端', '#/external'], ['管理对话', '#/management'], ['项目', '#/projects']]) {
       await tab(name).click(); await expect(page).toHaveURL(new RegExp(address.replace(/[#/]/g, '\\$&') + '$'));
@@ -24,8 +24,8 @@ test('每个页面都有地址，旧任务地址进入看板类别；全局设�
     // Global settings: one category at a time, each with its own address; a reload keeps it.
     await tab('全局设置').click(); await expect(page).toHaveURL(/#\/settings$/);
     const nav = page.locator('.project-nav'), cards = () => page.locator('#settings-panel h3').allInnerTexts();
-    await expect(nav.getByRole('link')).toHaveText(['常规', '接入向导', '公网接入', '机器人账号', '安装档案', '模型', '用户']);
-    for (const [caption, key, shown] of [['常规', 'general', ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel']],
+    await expect(nav.getByRole('link')).toHaveText(['常规', '接入向导', '飞书连接', '公网接入', '机器人账号', '安装档案', '模型', '用户']);
+    for (const [caption, key, shown] of [['常规', 'general', ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']], ['飞书连接', 'feishu', ['飞书应用连接']], ['公网接入', 'access', ['公网 HTTPS 地址', 'Cloudflare Tunnel']],
       ['机器人账号', 'accounts', ['接入向导使用的 GitHub App', '已登记的账号', 'GitHub 请求额度']], ['安装档案', 'installations', ['GitHub App 安装档案']],
       ['模型', 'models', ['默认共享模型', '部署共享模型']], ['用户', 'users', ['用户']]]) {
       await expect(nav.getByRole('link', { name: caption, exact: true })).toHaveAttribute('href', `#/settings/${key}`);

@@ -9,7 +9,7 @@ function identityError(code) {
     user_disabled: '账号已停用，请联系管理员。' })[code] || 'GitHub 身份暂时无法验证，请稍后重试或使用本地账号登录。';
 }
 async function renderIdentity() {
-  const panel = $('identity-panel'), data = await api('/api/identity'); $('count').textContent = '';
+  const panel = $('identity-panel'), request = renderVersion, data = await api('/api/identity'); $('count').textContent = '';
   const selection = card('当前组织与项目范围'), select = document.createElement('select'), form = document.createElement('form');
   select.setAttribute('aria-label', '当前租户');
   const platform = data.scopes.some(s => s.scope === 'platform');
@@ -34,7 +34,7 @@ async function renderIdentity() {
     try { await api('/api/identity/refresh', 'POST', {}); await start(); } catch (err) { error(err); refresh.disabled = false; }
   }); identities.append(bind, refresh);
   if (!enabled) identities.append(note('GitHub 登录尚未启用。系统超级管理员可在「全局设置 → 接入向导」中配置；现有本地账号和显式委派继续可用。'));
-  for (const identity of data.identities) {
+  for (const identity of data.identities.filter(i => i.provider !== 'feishu')) {
     const row = element('div', '', 'row'), stateLabel = ({ active: '已验证', pending_verification: '待验证／需重新授权', revoked: '已撤销' })[identity.status] || identity.status;
     row.append(element('strong', identity.display_name), element('span', `${identity.provider} · ${stateLabel}`));
     if (identity.status !== 'revoked') {
@@ -57,7 +57,10 @@ async function renderIdentity() {
     permissions.append(row);
   }
   if (!data.scopes.length) permissions.append(note('尚无管理授权。请联系管理员委派，或重新验证你在已安装项目上的 GitHub 权限。'));
-  panel.replaceChildren(selection, identities, permissions);
+  const feishu = await feishuIdentityCard(data);
+  if (request !== renderVersion) return;
+  panel.replaceChildren(selection, identities, feishu, permissions);
+  if (location.hash === '#/identity/feishu') feishu.scrollIntoView({ block: 'start' });
   if (data.actor.tenant_id && data.scopes.some(g => g.state === 'active' && (g.scope === 'platform' || g.scope === 'tenant' && g.tenant_id === data.actor.tenant_id))) {
     const members = card('组织成员授权'), { grants } = await api('/api/identity/grants?tenant_id=' + encodeURIComponent(data.actor.tenant_id));
     members.append(note('继承授权和显式授权分别展示；撤销一条来源后，成员仍按其他有效来源拥有权限。'));
