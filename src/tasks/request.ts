@@ -6,7 +6,7 @@ import { controlled } from '../roles/run.js';
 import { ProjectMemory,memoryTools,memoryTool } from '../memory/project.js';
 import { traceEvent, traceSnapshot, retainedTextArtifact } from './trace.js';
 import { relatedDeliveries, relatedArtifactTool, readRelatedArtifact } from './related.js';
-import { observation } from './evidence.js';
+import { observation, boundedCandidate } from './evidence.js';
 import { checkpoint, restoreCheckpoint } from './checkpoint.js';
 import type { Store, Row } from '../storage/database.js';
 import type { Manager } from '../projects/service.js';
@@ -33,7 +33,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
   const parentResult=parent?.result?JSON.parse(parent.result):null;
   const remoteParent=/^[a-f0-9]{40}$/.test(String(parentResult?.sha||''))?parentResult.sha:null;
   const inheritedBase=remoteParent||parentSnapshot?.base_sha||parent?.head_sha;
-  const inheritedContext=parentRecord?{'parent-delivery.json':JSON.stringify({task_id:parent!.id,contract:parentRecord.contract,candidate:parentRecord.candidate,acceptance:parentRecord.acceptance},null,2),'related-deliveries.json':JSON.stringify({instruction:'Related versioned artifacts may contain reusable corrections. Read them with read_related_artifact; unaccepted drafts remain claims. Independently verify applicability without overwriting another task or changing your goal.',deliveries:relatedDeliveries(store,task).map(r=>r.description)},null,2)}:{};
+  const inheritedContext=parentRecord?{'parent-delivery.json':JSON.stringify({task_id:parent!.id,contract:parentRecord.contract,candidate:boundedCandidate(parentRecord.candidate),acceptance:parentRecord.acceptance},null,2),'related-deliveries.json':JSON.stringify({instruction:'Related versioned artifacts may contain reusable corrections. Read them with read_related_artifact; unaccepted drafts remain claims. Independently verify applicability without overwriting another task or changing your goal.',deliveries:relatedDeliveries(store,task).map(r=>r.description)},null,2)}:{};
 
   const update=(values:Record<string,any>)=>{
     const keys=Object.keys(values);const changed=store.run(`UPDATE tasks SET ${keys.map(k=>k+'=?').join(',')},updated_at=? WHERE id=? AND claim_token=?`,...keys.map(k=>values[k]),new Date().toISOString(),task.id,task.claim_token);if(Number(changed.changes)!==1)stop('task_claim_revoked','cancelled','任务执行权已变化。');Object.assign(task,values);

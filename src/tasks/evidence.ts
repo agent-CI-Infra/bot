@@ -9,6 +9,22 @@ export function observation(source:string,version:string,raw:string):Evidence {
   const preview=(value:any):any=>typeof value==='string'&&value.length>4000?value.slice(0,4000)+' [read_evidence for full observation]':Array.isArray(value)?value.map(preview):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,preview(v)])):value;
   return {source,version,verified:!result?.error&&!result?.timed_out&&!result?.truncated&&(result?.exit_code===undefined||result.exit_code===0),result:{...preview(data),digest:sha(raw)}};
 }
+/** A candidate as agent input where its bodies matter (acceptance, a follow-up's parent delivery). Both grow with an
+ * attempt: a files artifact lists every file of the workspace (1.5 MB for a 9,500-file repository) and evidence has one
+ * preview per command. A field of an artifact's content over 16 KB is replaced by its size; evidence previews are kept
+ * newest first within 128 KB, older entries keep their source for read_evidence. */
+export function boundedCandidate(candidate:Candidate|null){
+  if(!candidate)return null;
+  const size=(value:unknown)=>JSON.stringify(value)?.length??0;
+  const content=(value:unknown)=>value&&typeof value==='object'&&!Array.isArray(value)&&size(value)>16384
+    ?Object.fromEntries(Object.entries(value).map(([key,field])=>[key,size(field)>16384?{omitted:true,characters:size(field)}:field])):size(value)>16384?{omitted:true,characters:size(value)}:value;
+  let budget=128*1024;
+  const evidence=[...candidate.evidence].reverse().map(entry=>{
+    const cost=size(entry.result);if(cost<=budget){budget-=cost;return entry;}
+    budget=0;return {source:entry.source,version:entry.version,verified:entry.verified,result:{omitted:true,characters:cost,read:'read_evidence with this source'}};
+  }).reverse();
+  return {...candidate,artifacts:candidate.artifacts.map(artifact=>({...artifact,...(artifact.content===undefined?{}:{content:content(artifact.content)})})),evidence};
+}
 export function readEvidence(store:Store,taskId:string,candidate:Candidate,args:any,access?:MemoryAccess){
   const evidence=candidate.evidence.find(e=>e.source===args?.source);
   const source=String(args?.source||''),[kind,id]=source.split(':');

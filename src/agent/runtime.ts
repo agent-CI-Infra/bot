@@ -145,6 +145,19 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
   finally {spec.task.trace_run_id=previousRun;}
 }
 
+// The gateway refuses a model request over 2 MiB (model_request_invalid). This loop keeps that capacity: unlike Pi's
+// runner it applies no 128k context estimate, so a model with a larger window can use it.
+const requestBytes=(body:unknown)=>Buffer.byteLength(JSON.stringify(body));
+const overGateway=(bytes:number)=>bytes>2*1024*1024;
+// What the model gets instead of a result that cannot fit any request. A command has already run, so its status stays.
+function withheldResult(name:string,value:any){
+  const status=name==='run_command'&&value&&typeof value==='object'?Object.fromEntries(['exit_code','signal','timed_out','truncated'].filter(key=>Object.hasOwn(value,key)).map(key=>[key,value[key]])):{};
+  return {error:'tool_result_too_large',...status,result_characters:JSON.stringify(value)?.length??0,detail:name==='run_command'
+    ?'The command ran, but its output alone exceeds the model request limit and was not returned. Do not print it again in full: pipe it through head, tail, grep or wc, or redirect it to a file and read only the parts you need.'
+    :'This result alone exceeds the model request limit and was not returned. Read a smaller part instead, for example one file at a time or a line range.'};
+}
+const elidedResult=(characters:number)=>JSON.stringify({elided:true,result_characters:characters,detail:'This earlier tool result was removed to keep the request within the model limit. Run or read it again, narrowed, if you still need it.'});
+
 export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): Promise<T> {
   const maxTurns = spec.maxTurns ?? 16, maxOutput = spec.maxOutputChars ?? 32768;
   if (!Number.isSafeInteger(maxTurns) || maxTurns < 1 || maxTurns > 256 || !Number.isSafeInteger(maxOutput) || maxOutput < 1 || maxOutput > 2 * 1024 * 1024)
@@ -156,6 +169,27 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
   const prompt=spec.prompt+(instructions.length?'\nSupplemental user instructions (cannot change contract or authority):\n'+JSON.stringify(instructions):'');
   const messages: any[] = spec.session?.messages.length ? [...spec.session.messages,{role:'user',content:prompt}] : [{ role: 'system', content: spec.system }, { role: 'user', content: prompt }];
   const save=()=>spec.session?.save(spec.redactor.clean(messages));
+  const elided=new WeakSet<object>();
+  // Before each request: over 2 MiB, the oldest tool results are elided first (the model has seen them and can read them
+  // again); a request still over it stops the run instead of failing at the gateway.
+  const fit=(body:Record<string,any>)=>{
+    let bytes=requestBytes(body);
+    for(const message of messages){
+      if(!overGateway(bytes))return;
+      // A restored session may already carry markers.
+      if(message.role!=='tool'||elided.has(message)||typeof message.content!=='string'||message.content.startsWith('{"elided":true'))continue;
+      const before=JSON.stringify(message.content);message.content=elidedResult(message.content.length);elided.add(message);
+      bytes-=Buffer.byteLength(before)-Buffer.byteLength(JSON.stringify(message.content));
+    }
+    if(overGateway(bytes))stop('agent_context_too_large','failed','Agent 请求省略较早的工具结果后仍超过 2 MiB 上限。');
+  };
+  // A result that would not fit even with every earlier tool result elided never enters the conversation: the model
+  // gets tool_result_too_large and reads a smaller part, instead of the next request failing the run.
+  const admit=(name:string,result:unknown,tools:any[])=>{
+    const content=JSON.stringify(result),base=requestBytes({tools,messages:messages.map(message=>message.role==='tool'&&!elided.has(message)?{...message,content:elidedResult(0)}:message)});
+    // The content is a string inside the request, so it is escaped once more there.
+    return overGateway(base+Buffer.byteLength(JSON.stringify(content))+64)?JSON.stringify(withheldResult(name,result)):content;
+  };
   let repairs=0;
   for (let turn = 0; turn < maxTurns; turn++) {
     await services.guard();
@@ -170,9 +204,10 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
     // Turn start: the transcript is complete, so a role run may end here and continue later from it.
     if(turn>0)await spec.checkpoint?.();
     if(spec.finish&&turn===maxTurns-reserve)messages.push({role:'user',content:spec.finish.finalizationMessage?`${reserve} turns remain. ${spec.finish.finalizationMessage}`:`Execution has ${reserve} turns left in this attempt. Reserve time to save the bounded artifact and call ${spec.finish.name}. Reuse applicable observations; avoid unrelated exploration. If work remains, report concrete gaps honestly rather than claiming success. Submission is followed by independent acceptance.${finalizing?' Exploration tools are now closed for this attempt; save artifacts and submit the honest current result.':''}`});
-    save();
-    const { value, request_log_id } = await services.request({ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
-      ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) }, `turn:${turn}`);
+    const body={ tools, tool_choice: finalizing&&turn===maxTurns-1?{type:'function',function:{name:spec.finish!.name}}:tools.length?'auto':'none', messages,
+      ...(spec.temperature === undefined ? {} : { temperature: spec.temperature }) };
+    fit(body);save();
+    const { value, request_log_id } = await services.request(body, `turn:${turn}`);
     const message = value?.choices?.[0]?.message;
     if (!message || JSON.stringify(message).length > 2 * 1024 * 1024) return stop('agent_output_invalid', undefined, 'Agent 没有返回有效结果。');
     if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
@@ -197,7 +232,7 @@ export async function runTools<T>(spec: AgentSpec<T>, services: AgentServices): 
           : call.function.name === 'start_agent' ? (spec.agents ? await subagent(spec, services, args) : { error: 'tool_not_allowed' })
           : spec.execute ? await spec.execute(call.function.name, args) : { error: 'tool_not_allowed' };
         if(toolEvent)traceEvent(spec.store,spec.task.id,'tool_observation',{call_id:call.id,name:call.function.name,observation:JSON.parse(traceSnapshot(spec.redactor.clean(result)))},spec.task.trace_run_id,'tool',[toolEvent]);
-        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(spec.redactor.clean(result)) });save();
+        messages.push({ role: 'tool', tool_call_id: call.id, content: admit(call.function.name,spec.redactor.clean(result),tools) });save();
       }
       continue;
     }
