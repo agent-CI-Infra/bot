@@ -12,7 +12,12 @@ import {waitModelReply,modelReplyIdleMs} from '../runner/model-reply.mjs';
 const requestId='a'.repeat(48),key='stream-fixture-credential',finish={summary:'Done',requires_code_change:false,issue_requests_code:false,clarification_required:false,implementation_goal:'',request_quote:'',findings:[]};
 const sse=(delta,extra={})=>'data: '+JSON.stringify({choices:[{index:0,delta,...extra}]})+'\n\n';
 const flush=async()=>{for(let i=0;i<5;i++)await turn();};
-async function until(check){for(let i=0;i<2000;i++){if(check())return;await turn();}assert.fail('fixture did not reach the expected state');}
+async function until(check){
+  // Date and timers model token inactivity; filesystem completion still needs real elapsed time.
+  const deadline=performance.now()+5000;
+  while(performance.now()<deadline){if(check())return;await turn();}
+  assert.fail('fixture did not reach the expected state');
+}
 
 async function fixture(t,{stream=true,failDelivery=false}={}){
   const h=await harness(t),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
