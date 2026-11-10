@@ -42,7 +42,8 @@ test('项目运行状态展示执行和排队任务，自动刷新并保留项�
     expect(historyBox.y).toBeGreaterThan(queueBox.y + queueBox.height);
     await page.screenshot({ path: '.tmp/project-activity/desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.locator('.project-nav').getByRole('link', { name: '运行状态', exact: true })).toBeInViewport();
+    await expect(page.getByLabel('当前页面', { exact: true })).toBeInViewport();
+    await expect(page.getByLabel('当前页面', { exact: true })).toHaveValue('#/projects/101/activity');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/project-activity/mobile.png', fullPage: true });
     h.store.run("UPDATE tasks SET status='succeeded' WHERE id='active'"); h.store.run("DELETE FROM task_claims WHERE task_id='active'");

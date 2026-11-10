@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import {test,expect} from '@playwright/test';
 import {mkdirSync,rmSync} from 'node:fs';
 import {generateKeyPairSync} from 'node:crypto';
@@ -28,7 +29,7 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     const trust={audience:'fixture',subject:'repo:fixture/workflows:ref:refs/heads/main',repository:'fixture/workflows',repository_id:'900',owner_id:'10',workflow_ref:'fixture/workflows/.github/workflows/review.yml@refs/heads/main',ref:'refs/heads/main'};
     const oidc=await h.client('202',{name:'Actions executor',auth_type:'github_actions_oidc',trust});
     await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:h.adminBase});await login(page,h);
-    await page.getByRole('button',{name:'外部执行端',exact:true}).click();
+    await consoleNavigate(page,'外部执行端');
     const panel=page.locator('#external-panel'),guide=panel.locator('.external-guide');
     await expect(guide).toHaveCount(1);await expect(panel.locator('.row .external-guide')).toHaveCount(0);
     await expect(panel.getByRole('button',{name:'新增客户端',exact:true})).toHaveCount(0);
@@ -50,7 +51,7 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await panel.getByRole('link',{name:'配置项目外部执行',exact:true}).first().click();await expect(page).toHaveURL(/\/projects\/101\/external$/);
     await expect(page.locator('#project-page .external-guide')).toHaveCount(1);
     await expect(page.locator('#project-page .external-guide').getByRole('button',{name:'复制给我的 AI agent',exact:true})).toBeVisible();
-    await page.getByRole('button',{name:'外部执行端',exact:true}).click();await expect(guide).toHaveCount(1);
+    await consoleNavigate(page,'外部执行端');await expect(guide).toHaveCount(1);
     h.store.run("DELETE FROM settings WHERE key='external_token_audience'");await page.getByRole('button',{name:'刷新',exact:true}).click();
     await expect(panel).toContainText('尚未配置，个人电脑客户端暂不能兑换');
     await guide.locator('summary').click();await select.selectOption(a.client.id);await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();
@@ -86,7 +87,7 @@ test('项目内登记与更换公钥、创建和编辑 Webhook，只展示当前
     await panel.getByRole('button',{name:'编辑',exact:true}).click();await page.getByLabel('事件动作（留空表示全部）',{exact:true}).fill('synchronize');await save(page);await expect(panel).toContainText('synchronize');
     mkdirSync('.tmp/external-e2e',{recursive:true});await page.setViewportSize({width:1365,height:1000});await noOverflow(page);await page.screenshot({path:'.tmp/external-e2e/project-desktop.png',fullPage:true});
     const password=testPassword();await h.admin('/api/users','POST',{username:'member',password,repository_ids:['101']});await page.getByRole('button',{name:'退出登录',exact:true}).click();await login(page,h,'member',password);
-    await page.getByRole('button',{name:'外部执行端',exact:true}).click();await expect(page.getByRole('button',{name:'设置兑换地址',exact:true})).toBeHidden();await expect(page.locator('#external-panel')).not.toContainText('仓库 202');
+    await consoleNavigate(page,'外部执行端');await expect(page.getByRole('button',{name:'设置兑换地址',exact:true})).toBeHidden();await expect(page.locator('#external-panel')).not.toContainText('仓库 202');
     await page.locator('#external-panel .external-guide summary').click();await expect(page.getByRole('combobox',{name:'复制指令所用客户端',exact:true}).locator('option[value="'+foreign.client.id+'"]')).toHaveCount(0);
     await project(page,h);const row=panel.locator('.row',{hasText:'Local review workstation'}),rotated=generateKeyPairSync('rsa',{modulusLength:2048});
     await row.getByRole('button',{name:'更换公钥',exact:true}).click();await page.getByLabel('RSA 公钥（PEM）',{exact:true}).fill(rotated.publicKey.export({type:'spki',format:'pem'}));await save(page);
@@ -105,7 +106,7 @@ test('项目内登记与更换公钥、创建和编辑 Webhook，只展示当前
 
 test('空项目可直接新增，取消不留下草稿，全局仍只有一套说明',async({page})=>{
   const h=await externalFixture();try{
-    await login(page,h);await page.getByRole('button',{name:'外部执行端',exact:true}).click();await expect(page.locator('#external-panel .external-guide')).toHaveCount(1);
+    await login(page,h);await consoleNavigate(page,'外部执行端');await expect(page.locator('#external-panel .external-guide')).toHaveCount(1);
     await expect(page.locator('#external-panel')).toContainText('尚未配置外部客户端');await project(page,h);await expect(page.locator('#project-page')).toContainText('尚未配置外部客户端');
     await expect(page.locator('#project-page .external-guide')).toContainText('在本项目新增个人电脑客户端后');
     await page.getByRole('button',{name:'新增客户端',exact:true}).click();await page.getByLabel('客户端名称',{exact:true}).fill('Discarded draft');await page.getByRole('button',{name:'取消',exact:true}).click();
