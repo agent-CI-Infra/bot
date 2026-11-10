@@ -35,7 +35,7 @@ test('每类工作的卡片在所有维度保留状态、徽章和任务目标�
     await expect(page.locator('.board-filter-controls select')).toHaveCount(0);
     await expect(work(page,'101/pr/2','review.pr')).toBeVisible();await expect(work(page,'101/issue/3','review.issue')).toBeVisible();
     await expect(work(page,'101/pr/2','review.pr')).toContainText('PR #2');
-    await expect(page.getByRole('group',{name:'工作类型',exact:true}).getByRole('button')).toHaveText(['全部工作类型','检视 Issue','检视 PR','开发 Issue','跟进 bot PR','通用回复','发版本']);
+    await expect(page.getByRole('group',{name:'工作类型',exact:true}).getByRole('button')).toHaveText(['全部工作类型','检视 Issue','检视 PR','开发 Issue','跟进 bot PR','通用回复','通用任务','发版本']);
     await expect(work(page,'101/issue/1',docs.id)).toContainText('通用回复 已完成');
     for(const group of ['execution_status','category','repository']){
       await choose(page,'按…分列',group);
