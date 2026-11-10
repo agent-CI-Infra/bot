@@ -36,9 +36,9 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 
 要给某次推送到 `main` 的最新提交打标签：合并队列一次合入多个 PR 时只有最后一个提交发布镜像，`main` 的新推送也会取消旧提交还没完成的发布，这些提交打标签会失败。
 
-部署经 SSH 把该版本的 `compose.yaml` 写到服务器目录，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull` 和 `docker compose up -d --force-recreate`，等 `bot` 的健康检查通过。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。
+部署经 SSH 把该版本的 `compose.yaml` 写到服务器目录，在同目录 `.env` 里写入 `BOT_IMAGE_TAG=<版本>`（其他设置保留），然后运行 `docker compose pull`，清理上次中断留下的替换容器，再运行 `docker compose up -d --force-recreate`，等 `bot` 的健康检查通过。`compose.yaml` 每次发布都会被覆盖，服务器自己的设置放在 `.env` 或 `compose.override.yaml`。
 
-`--force-recreate` 让 Compose 按该版本的 `compose.yaml` 重建全部服务。发布本来就会换掉所有镜像标签，每个容器都会重建，所以正常部署的停机时间不会因此增加。它保证部署可以重跑：Compose 在停旧容器时中途退出（例如 Docker 停不掉某个容器），会留下已创建、从未启动的替换容器；普通 `up -d` 会沿用它们，然后因为依赖的容器没有健康状态而一直起不来。部署中断或失败后，先看日志排除原因，然后在 Actions 里对该次 Release 运行选择 Re-run failed jobs，只重跑 deploy 任务即可恢复到该版本，不需要上服务器手工处理。任何一步失败时，日志末尾都有 `docker compose ps -a` 列出的每个容器及其状态；`bot` 没有在约两分钟内变为健康时，还会附上它最近 50 行日志。manager 启动时要逐个恢复已保存的项目，期间 `up -d` 等它健康后才启动 `bot`，这段等待算在 `up -d` 里。
+部署要能重跑。Compose 重建一个容器时，先以 `<旧容器 id>_<项目>-<服务>-<序号>` 创建替换容器，再删掉旧容器，最后把替换容器改回 `<项目>-<服务>-<序号>`。中途退出（例如 Docker 停不掉某个容器）会给同一个服务留下第二个容器：普通 `up -d` 会沿用它并保留临时名，`--force-recreate` 则会因为旧容器还占着名字而失败。所以部署在 `up` 之前，先删掉本项目服务中名字不是 `<项目>-<服务>-<序号>` 的容器（只查 `docker compose ps` 列出的服务容器，不碰 manager 创建的项目电脑；替换容器没有数据，数据都在卷里），再用 `--force-recreate` 按该版本的 `compose.yaml` 重建全部服务。发布本来就会换掉所有镜像标签，每个容器都会重建，所以正常部署的停机时间不会因此增加。部署中断或失败后，先看日志排除原因，然后在 Actions 里对该次 Release 运行选择 Re-run failed jobs，只重跑 deploy 任务即可恢复到该版本，不需要上服务器手工处理。任何一步失败时，日志末尾都有 `docker compose ps -a` 列出的每个容器及其状态；`bot` 没有在约两分钟内变为健康时，还会附上它最近 50 行日志。manager 启动时要逐个恢复已保存的项目，期间 `up -d` 等它健康后才启动 `bot`，这段等待算在 `up -d` 里。`npm run test:deploy:docker` 用真实 Docker Compose 验收这一步，见[开发说明](development.md)。
 
 在仓库 Settings → Environments → `production` 中配置：
 
