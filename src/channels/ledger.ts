@@ -65,6 +65,8 @@ export class ChannelLedger {
     if (event.kind === 'bot_added') {
       this.store.run("UPDATE channel_chats SET state='active',revision=revision+1 WHERE id=?", chat.id);
       this.resync(chat.id);
+    } else if (event.kind === 'audience_changed') {
+      this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
     } else if (['bot_removed', 'chat_archived'].includes(event.kind)) {
       this.store.run('UPDATE channel_chats SET state=?,revision=revision+1 WHERE id=?', event.kind === 'chat_archived' ? 'archived' : 'removed', chat.id);
       this.store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error=? WHERE chat_id=?", event.kind, chat.id);

@@ -134,6 +134,7 @@ export class ChannelService {
       if (event.kind === 'uninstalled') {
         this.store.run('UPDATE channel_connectors SET enabled=0,revision=revision+1 WHERE id=?', c.id);
         this.store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error='app_uninstalled' WHERE chat_id IN (SELECT id FROM channel_chats WHERE connector_id=?)", c.id);
+        this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id IN (SELECT id FROM channel_chats WHERE connector_id=?)', c.id);
       }
       if (event.kind === 'audience_changed') this.store.run('UPDATE channel_group_scopes SET audience_verified_until=0,revision=revision+1 WHERE connector_id=? AND chat_id=?', c.id, event.chat_id);
       if (['bot_removed', 'chat_archived'].includes(event.kind)) this.store.run('UPDATE channel_group_scopes SET enabled=0,audience_verified_until=0,revision=revision+1 WHERE connector_id=? AND chat_id=?', c.id, event.chat_id);

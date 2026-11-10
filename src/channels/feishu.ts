@@ -75,10 +75,10 @@ export class FeishuAdapter implements ChannelAdapter {
     const addressed = message.chat_type === 'p2p' || mentions.some(m => m.id?.open_id === this.connector.bot_open_id);
     const raw = text(message.content, 200000), messageType = text(message.message_type, 80);
     let content = '';
-    try { if (messageType === 'text') content = String(object(JSON.parse(raw)).text ?? '').slice(0, 16000); } catch { return fail(400, 'channel_message_invalid'); }
+    try { content = messageText(messageType, raw); } catch { return fail(400, 'channel_message_invalid'); }
     for (const m of mentions) if (m.id?.open_id === this.connector.bot_open_id && typeof m.key === 'string') content = content.replaceAll(m.key, '').trim();
     return { ...base, actor_tenant: actorTenant, actor_id: text(id.open_id ?? id.app_id), chat_id: text(message.chat_id),
-      chat_type: message.chat_type as 'p2p' | 'group', message_id: text(message.message_id), thread_id: String(message.thread_id ?? message.root_id ?? ''),
+      chat_type: message.chat_type as 'p2p' | 'group', message_id: text(message.message_id), thread_id: String(message.thread_id ?? ''),
       parent_id: String(message.parent_id ?? ''), root_id: String(message.root_id ?? ''), created_at: eventTime(message.create_time),
       updated_at: eventTime(message.update_time ?? message.create_time), kind: 'message', content, raw_content: raw,
       message_type: messageType, sender_type: String(sender.sender_type ?? 'unknown'), addressed: addressed && sender.sender_type === 'user' && id.open_id !== this.connector.bot_open_id };
@@ -134,7 +134,7 @@ export class FeishuAdapter implements ChannelAdapter {
     const items: StoredMessage[] = data.items.map((item: any) => {
       const raw = String(item.body?.content ?? ''), messageType = text(item.msg_type, 80);
       let content = '';
-      if (messageType === 'text' && !item.deleted) { try { content = String(JSON.parse(raw).text ?? ''); } catch { fail(502, 'channel_history_invalid'); } }
+      if (!item.deleted) { try { content = messageText(messageType, raw); } catch { fail(502, 'channel_history_invalid'); } }
       return { message_id: text(item.message_id), sender_id: String(item.sender?.id ?? ''), sender_tenant: String(item.sender?.tenant_key ?? ''),
         sender_type: String(item.sender?.sender_type ?? 'unknown'), message_type: messageType, content, raw_content: raw,
         created_at: eventTime(item.create_time), updated_at: eventTime(item.update_time ?? item.create_time), deleted: !!item.deleted,
@@ -161,6 +161,23 @@ export class FeishuAdapter implements ChannelAdapter {
     await this.api('/im/v1/messages/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ content: JSON.stringify(delivery.content) }) });
     return id;
   }
+}
+
+function messageText(type: string, raw: string): string {
+  if (!['text', 'post', 'file', 'audio', 'media'].includes(type)) return '';
+  const data = object(JSON.parse(raw));
+  if (type === 'text') return String(data.text ?? '');
+  if (type !== 'post') return String(data.file_name ?? '');
+  const parts: string[] = [];
+  const walk = (node: any): void => {
+    if (Array.isArray(node)) { for (const item of node) walk(item); return; }
+    if (!node || typeof node !== 'object') return;
+    for (const [key, value] of Object.entries(node)) {
+      if (['text', 'title'].includes(key) && typeof value === 'string') parts.push(value);
+      else if (typeof value === 'object') walk(value);
+    }
+  };
+  walk(data); return parts.join('\n');
 }
 
 function eventTime(value: unknown): number {
