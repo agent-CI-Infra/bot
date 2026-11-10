@@ -149,6 +149,26 @@ export class FeishuAdapter implements ChannelAdapter {
     this.guard();
     return { bot_open_id: text(bot.open_id), name: typeof bot.app_name === 'string' ? bot.app_name.trim().slice(0, 200) : '' };
   }
+  /** is_in_chat checks this token's bot, while members lists human members only. */
+  async audience(chat: string): Promise<{ id: string; tenant: string }[]> {
+    const path = '/im/v1/chats/' + encodeURIComponent(chat) + '/members';
+    if ((await this.api(path + '/is_in_chat', { method: 'GET' })).data?.is_in_chat !== true) fail(403, 'channel_bot_not_in_chat');
+    const members = new Map<string, { id: string; tenant: string }>(), seen = new Set<string>(); let token = '';
+    for (;;) {
+      const query = new URLSearchParams({ member_id_type: 'open_id', page_size: '100', check_security_conf: 'true' });
+      if (token) query.set('page_token', token);
+      const data = (await this.api(path + '?' + query, { method: 'GET' })).data;
+      if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean' || data.trigger_security_conf_limit) fail(403, 'channel_audience_unverified');
+      for (const item of data.items) {
+        if (item.member_id_type !== 'open_id' || typeof item.member_id !== 'string' || !item.member_id || typeof item.tenant_key !== 'string' || !item.tenant_key) fail(502, 'channel_audience_invalid');
+        members.set(item.tenant_key + ':' + item.member_id, { id: item.member_id, tenant: item.tenant_key });
+      }
+      if (!data.has_more) break;
+      if (typeof data.page_token !== 'string' || !data.page_token || seen.has(data.page_token)) fail(502, 'channel_audience_cursor_stalled');
+      seen.add(data.page_token); token = data.page_token;
+    }
+    this.guard(); return [...members.values()];
+  }
   async installationInfo(): Promise<{ tenant_key: string; tenant_name: string }> {
     const data = await this.api('/tenant/v2/tenant/query', { method: 'GET' });
     const tenant = data.data?.tenant;

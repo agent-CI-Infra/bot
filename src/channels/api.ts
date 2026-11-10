@@ -9,6 +9,13 @@ export class ChannelApi {
   async api(actor: ActorContext, method: string, url: URL, input: Json): Promise<Json> {
     const store = this.service.store, path = url.pathname;
     assertCurrent(actor);
+    if (path === '/api/channels/employees' && method === 'GET') return this.service.employees.list(actor);
+    const employee = /^\/api\/channels\/chats\/([a-f0-9]{48})\/employee$/.exec(path);
+    if (employee && method === 'PUT') {
+      const result = await this.service.employees.configure(actor, employee[1]!, input);
+      if (input.enabled) this.service.ledger.resync(employee[1]!);
+      return result;
+    }
     if (path === '/api/channels/chats' && method === 'GET') {
       authorize(actor, 'platform.manage');
       const connector = url.searchParams.get('connector_id');
@@ -18,7 +25,8 @@ export class ChannelApi {
     const local = /^\/api\/channels\/chats\/([a-f0-9]{48})\/(messages|sync|retention)$/.exec(path);
     if (local) {
       // Project access alone does not authorize reading a group's messages or personal chats.
-      authorize(actor, 'platform.manage');
+      if (local[2] === 'messages' && method === 'GET' || local[2] === 'sync' && method === 'POST') this.service.employees.authorizeHistory(actor, local[1]!);
+      else authorize(actor, 'platform.manage');
       const id = local[1]!, chat = store.get('SELECT * FROM channel_chats WHERE id=?', id);
       if (!chat) return fail(404, 'channel_chat_not_found');
       if (local[2] === 'messages' && method === 'GET') {

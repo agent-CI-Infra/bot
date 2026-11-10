@@ -32,6 +32,11 @@ export function channelStorage(store: Store): void {
       source_event TEXT,payload TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
       next_attempt INTEGER NOT NULL,last_error TEXT,remote_message_id TEXT,created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS channel_control_operations(id TEXT PRIMARY KEY,project_id TEXT,receipt TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS channel_audiences(chat_id TEXT PRIMARY KEY REFERENCES channel_chats(id),revision INTEGER NOT NULL DEFAULT 1,
+      verified_until INTEGER NOT NULL DEFAULT 0,checked_at INTEGER NOT NULL DEFAULT 0,members TEXT,last_error TEXT);
+    CREATE TABLE IF NOT EXISTS channel_employee_grants(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL REFERENCES channel_chats(id),project_id TEXT NOT NULL,
+      principal_id TEXT NOT NULL UNIQUE,role_id TEXT NOT NULL,maintainer_id TEXT NOT NULL,binding_id TEXT NOT NULL,capabilities TEXT NOT NULL,
+      enabled INTEGER NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL,UNIQUE(chat_id,project_id));
   `);
   if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'connection_state'))
     store.db.exec("ALTER TABLE channel_connectors ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'idle'");

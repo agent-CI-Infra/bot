@@ -36,7 +36,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await expect(results).toContainText('这不代表飞书历史中从未存在');
       expect(wire.state.historyRequests).toHaveLength(0);
       await page.getByRole('button', { name: '显式重新同步可见历史' }).click();
-      await expect(page.getByRole('status').filter({ hasText: '同步：syncing' })).toBeVisible();
+      await expect(page.getByRole('status').filter({ hasText: '同步：正在同步' })).toBeVisible();
       await page.getByLabel('保留天数（留空保留至显式清理）').fill('30');
       await page.getByRole('button', { name: '保存本地保留策略' }).click();
       await expect(page.getByRole('status').filter({ hasText: '保留策略：30 天' })).toBeVisible();

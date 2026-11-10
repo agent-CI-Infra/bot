@@ -70,7 +70,7 @@ async function renderFeishuSetup(panel, request) {
     const sync = () => {
       transport.options[0].disabled = application.value === 'saas'; if (application.value === 'saas') transport.value = 'http';
       const scopes = ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write',
-        'im:message.group_msg', 'im:message:readonly', 'im:chat.members:bot_access', 'im:chat.members:read', 'im:chat:read'];
+        'im:message.group_msg', 'im:message:readonly', 'im:chat.members:bot_access', 'im:chat.members:read'];
       if (application.value === 'enterprise') scopes.push('tenant:tenant:readonly');
       permissions.replaceChildren(channelCopy('基础权限 JSON', JSON.stringify({ scopes: { tenant: scopes, user: [] } }, null, 2)));
       installationNote.hidden = application.value !== 'enterprise';

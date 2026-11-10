@@ -5,7 +5,8 @@ import { digest, randomId } from '../dist/core/security.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
-  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null };
+  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
+    audienceRequests: [], audience: null, inChat: true, members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
       state.authStarted++;
@@ -23,6 +24,11 @@ export function transport() {
     if (init.method === 'GET' && url.includes('/im/v1/messages?')) {
       state.historyRequests.push(url);
       return state.history ? state.history(new URL(url)) : Response.json({ code: 0, data: { items: [], has_more: false } });
+    }
+    if (init.method === 'GET' && url.includes('/members')) {
+      state.audienceRequests.push(url);
+      if (state.audience) return state.audience(new URL(url));
+      return Response.json({ code: 0, data: url.endsWith('/is_in_chat') ? { is_in_chat: state.inChat } : { items: state.members, has_more: false } });
     }
     const request = JSON.parse(init.body); sent.push({ url, method: init.method, ...request, content: JSON.parse(request.content) });
     return Response.json({ code: 0, data: { message_id: 'remote-' + sent.length } });

@@ -7,7 +7,8 @@ import { ChannelLedger } from './ledger.js';
 export class ChannelHistorySync {
   private busy = false;
   private stopped = false;
-  constructor(readonly store: Store, readonly ledger: ChannelLedger, readonly adapter: (connector: Row, guard: () => void) => FeishuAdapter) {}
+  constructor(readonly store: Store, readonly ledger: ChannelLedger, readonly adapter: (connector: Row, guard: () => void) => FeishuAdapter,
+    readonly sourceGuard: (chat: Row) => void = () => {}) {}
   close(): void { this.stopped = true; }
   private claim(id: string, now: number): Row | undefined {
     return this.store.transaction(() => {
@@ -38,6 +39,7 @@ export class ChannelHistorySync {
           if (this.stopped) throw new HttpError(409, 'channel_sync_stopped');
           const current = this.store.get('SELECT * FROM channel_connectors WHERE id=?', connector.id);
           const currentChat = this.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id);
+          if (currentChat) this.sourceGuard(currentChat);
           const lease = this.store.get('SELECT lease_token,lease_until FROM channel_sync_jobs WHERE id=?', job.id);
           if (!current?.enabled || current.revision !== connector.revision || current.app_id !== chat.app_id || current.installation_tenant !== chat.installation_tenant ||
             currentChat?.state !== 'active' || currentChat.connector_id !== connector.id || lease?.lease_token !== job.lease_token || !lease || lease.lease_until <= Date.now())
