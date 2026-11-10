@@ -15,6 +15,7 @@ import {workspace} from '../runner/workspace.mjs';
 import {pruneTasks} from '../runner/store.mjs';
 import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 import {subagentSystem} from '../dist/agent/runtime.js';
+import {TaskRecords} from '../dist/tasks/service.js';
 
 const text=message=>typeof message.content==='string'?message.content:message.content.map(block=>block.text||'').join('');
 const actor={type:'User',login:'alice',id:5};
@@ -223,6 +224,32 @@ test('real Pi fails with agent_context_too_large when compaction cannot fit the 
   assert.equal(summaries,1,'Pi tried one compaction before giving up');
   const events=d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',task.id).map(row=>JSON.parse(row.content));
   assert.ok(!events.some(event=>event.type==='agent_nudge'),'a session that cannot fit is not asked to continue');
+});
+
+test('real Pi fails with agent_context_too_large when the first request is over the limit and there is nothing to compact',async t=>{
+  // The start prompt carries the waiting update in full; a session of one message gives compaction nothing to cut.
+  const d=await live(t,{model:async()=>assert.fail('no request reaches the provider')});
+  assert.equal(d.update('z'.repeat(600000)),0);
+  const [task]=await d.run();assert.equal(task.status,'failed');assert.equal(task.error_code,'agent_context_too_large');
+  const events=d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',task.id).map(row=>JSON.parse(row.content));
+  assert.ok(!events.some(event=>event.type==='agent_nudge'),'a session that cannot fit is not asked to continue');
+});
+
+test('real Pi starts a review whose earlier attempt left a candidate with references to its command logs, not the logs',async t=>{
+  const d=await live(t,{model:async(request,n)=>{
+    if(n===1){
+      const candidate=JSON.parse(text(request.messages.at(-1))).structured_task.candidate;
+      assert.deepEqual(candidate.evidence[108],{source:'task_log:108',version:'v108',verified:true});
+      assert.ok(!JSON.stringify(request).includes('command output'),'command logs stay out of the request');
+    }
+  }});
+  // After a long attempt (109 commands) is interrupted, the next attempt of the same review starts from this record.
+  const records=new TaskRecords(d.h.store);
+  records.contract(d.h.taskId,{goal:'Review the Issue.',scope:['review.issue'],criteria:['A review'],endpoint:'report',source:{kind:'review.issue'},completeness:'explicit'});
+  records.submit(d.h.taskId,[{kind:'report',reference:'report',version:'r1',content:'report body'}],
+    Array.from({length:109},(_,i)=>({source:'task_log:'+i,version:'v'+i,verified:true,result:{type:'tool',name:'run_command',output:'command output '.repeat(300)}})),{summary:'Earlier attempt.'});
+  const [task]=await d.run();assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  assert.ok(d.requests.length>=1);
 });
 
 test('real Pi starts a sub-agent as a new session that sees only its own instructions and a narrowed tool set',async t=>{

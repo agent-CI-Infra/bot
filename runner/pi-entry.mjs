@@ -72,9 +72,10 @@ async function boundary(stage){
 let proxyQueue=Promise.resolve();
 const server=createServer((req,res)=>{const run=proxyQueue.then(()=>proxy(req,res));proxyQueue=run.catch(()=>{});});
 // A request over the 2 MiB mailbox or 128k context limit never leaves the runner. It is answered the way a provider
-// reports a context overflow (HTTP 413), because Pi starts threshold compaction from the provider's reported usage:
-// a provider counting fewer tokens than this chars/4 estimate leaves Pi below its threshold while the raw request is
-// over the limit. Pi then compacts once and retries; the run fails only when that recovery fails (compaction_end below).
+// reports a context overflow (HTTP 413), because Pi's own threshold compaction does not always run first: it measures
+// provider-reported usage, not this raw-request estimate, and it always keeps the latest ~16k tokens, so a huge message
+// among them leaves nothing to cut yet. Pi then compacts once and retries; the run fails only when that recovery fails
+// (compaction_end below).
 const overflow=(res,detail)=>{res.writeHead(413,{'Content-Type':'application/json'});
   res.end(JSON.stringify({error:{type:'invalid_request_error',code:'context_length_exceeded',message:'Request exceeds the context window of this model: '+detail}}));};
 async function proxy(req,res){

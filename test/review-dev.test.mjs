@@ -8,6 +8,7 @@ import { TaskEngine } from '../dist/agent/engine.js';
 import { developmentReady, enqueue, queueWebhook } from '../dist/review/queue.js';
 import { emptyRepositoryFixture } from './empty-repository-helpers.mjs';
 import { classificationLabels, repositoryLabels } from '../dist/review/labels.js';
+import { TaskRecords } from '../dist/tasks/service.js';
 import { ReadTokens } from '../dist/agent/read-token.js';
 import { GitHub } from '../dist/github/client.js';
 import { Publisher } from '../dist/github/publisher.js';
@@ -166,6 +167,33 @@ test('an Issue development the Manager started on a label works to its brief and
   const prompt=JSON.parse(JSON.parse(Buffer.concat(config).toString()).prompt);
   assert.equal(prompt.implementation_goal,'Keep the last line of CRLF files.');assert.equal(prompt.manager.brief.criteria[0],'A regression test');
   assert.ok(!h.store.all('SELECT content FROM task_logs').some(row=>/review_requires_human_decision|development_not_approved/.test(row.content)));
+});
+
+test('a later attempt gets the candidate of an earlier one as references, not the logs of every command it ran',async t=>{
+  const issue={id:1,number:1,state:'open',title:'Fix the bug.',body:'Please fix.',labels:[{name:'bot-develop'}]};
+  const config=[];
+  const h=await emptyRepositoryFixture(t,{taskKind:'development.issue',
+    github:(path,send)=>{if(path.endsWith('/issues/1')){send(issue);return true;}},
+    execute:request=>{
+      if(request.type==='workspace_agent_config')config.push(Buffer.from(request.base64,'base64'));
+      // Only the delivered prompt matters here; end the attempt at its first poll.
+      if(request.type==='workspace_agent_poll')return {ok:true,result:{state:'failed',error:'pi_execution_failed',detail:'fixture stop'}};
+    }});
+  h.setBranch('ready');
+  h.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({object_hash:sha(JSON.stringify([issue.title,issue.body])),
+    manager:{event_id:'e',reason:'维护者已放行',brief:{goal:'Fix the bug.',criteria:['A regression test']}}}),h.taskId);
+  // An earlier attempt submitted a candidate with the full log of each of its 109 commands as evidence.
+  const records=new TaskRecords(h.store);
+  records.contract(h.taskId,{goal:'Fix the bug.',scope:['Fix the bug.'],criteria:['A regression test'],endpoint:'reviewable_pull_request',source:{kind:'development.issue'},completeness:'explicit'});
+  const evidence=Array.from({length:109},(_,i)=>({source:'task_log:'+i,version:'v'+i,verified:true,result:{type:'tool',name:'run_command',output:'command output '.repeat(300)}}));
+  records.submit(h.taskId,[{kind:'report',reference:'report',version:'r1',content:'artifact body '.repeat(300)}],evidence,{summary:'Earlier attempt.'});
+  await h.run();
+  assert.ok(config.length,JSON.stringify(h.store.all('SELECT content FROM task_logs')));
+  const raw=Buffer.concat(config).toString(),candidate=JSON.parse(JSON.parse(raw).prompt).structured_task.candidate;
+  assert.deepEqual(candidate.evidence[108],{source:'task_log:108',version:'v108',verified:true});
+  assert.deepEqual(candidate.artifacts,[{kind:'report',reference:'report',version:'r1'}]);assert.deepEqual(candidate.claims,{summary:'Earlier attempt.'});
+  assert.ok(!raw.includes('command output')&&!raw.includes('artifact body'),'bodies stay out of the prompt');
+  assert.ok(raw.length<100000,'the prompt does not grow with the earlier attempt: '+raw.length);
 });
 
 test('active Issue development blocks another task, and a PR comment review revises only for requests it took on',async t=>{

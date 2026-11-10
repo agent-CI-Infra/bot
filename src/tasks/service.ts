@@ -60,6 +60,15 @@ export class TaskRecords {
       stage_schedule:reconcileAssignments(this.store,id),selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
       coordination:coordinationContext(this.store,id),scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
+  /** The record as an agent's task context. The candidate keeps its artifacts and evidence as references only: evidence
+   * holds the full log of every command and file read of the submitting attempt, which grows with the attempt (hundreds
+   * of KB after a long review) and would sit in every model request of the next attempt. Tools read the bodies on demand. */
+  context(id: string) {
+    const record=this.get(id),candidate=record.candidate;
+    return {...record,candidate:candidate?{id:candidate.id,revision:candidate.revision,created_at:candidate.created_at,claims:candidate.claims,
+      artifacts:candidate.artifacts.map(({kind,reference,version})=>({kind,reference,version})),
+      evidence:candidate.evidence.map(({source,version,verified})=>({source,version,verified}))}:null};
+  }
   project(id: string) { const row=this.store.get('SELECT * FROM project_context WHERE repository_id=?',id);return row?{revision:row.revision,facts:JSON.parse(row.facts),updated_at:row.updated_at}:null; }
   setProject(id: string, facts: {source:string;fact:string}[], expectedRevision: number) {
     if (!Array.isArray(facts)||facts.some(f=>!f||typeof f.source!=='string'||!f.source.trim()||typeof f.fact!=='string'||!f.fact.trim())) throw new Error('project_fact_source_required');
