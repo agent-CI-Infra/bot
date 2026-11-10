@@ -1,3 +1,5 @@
+import {relateTasks} from './followups.js';
+import {setTaskPriority} from './priority.js';
 import type { Store } from '../storage/database.js';
 import { randomId, fields, fail, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
@@ -11,6 +13,17 @@ const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workfl
 export class TaskCommands {
   constructor(readonly store:Store, readonly hooks:{active?:(id:string)=>boolean;tick?:()=>void}={}){}
   api(user:Actor,method:string,url:URL,input:Json):Json|undefined {
+    const relation=/^\/api\/tasks\/([^/]+)\/relate$/.exec(url.pathname);
+    if(relation&&method==='POST'){
+      fields(input,['task_id','key','relationship','reason','evidence']);const filter=scope(user,'repository_id');const task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,relation[1]!,...filter.args);if(!task)fail(404,'task_not_found');
+      try{return relateTasks(this.store,task!,input,'user:'+user.id);}catch(e){return fail(400,(e as Error).message);}
+    }
+    const priority=/^\/api\/tasks\/([^/]+)\/priority$/.exec(url.pathname);
+    if(priority&&method==='POST'){
+      fields(input,['priority','reason']);const filter=scope(user,'repository_id');
+      const task=this.store.get(`SELECT id,repository_id FROM tasks WHERE id=? AND ${filter.sql}`,priority[1]!,...filter.args);if(!task)fail(404,'task_not_found');
+      const result=setTaskPriority(this.store,task!.id,input.priority,input.reason,'user:'+user.id);this.store.audit(user.id,'task.priority',task!.id,task!.repository_id);this.hooks.tick?.();return result;
+    }
     const intervention=/^\/api\/tasks\/([^/]+)\/(pause|cancel|instructions|adopt-config)$/.exec(url.pathname);
     if(intervention&&method==='POST'){
       const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,intervention[1]!,...filter.args);

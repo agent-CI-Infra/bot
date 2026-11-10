@@ -1,3 +1,5 @@
+import {followupDecision,followupTarget,recordFollowupRelation,coordinateFollowup,completedFollowupTarget} from './followups.js';
+import {setTaskPriority,taskRelations} from './priority.js';
 import { reconcileAssignments, assertStageAcceptance } from '../roles/schedule.js';
 import {requestCoordination,validCoordination,coordinationContext,coordinationVersion,assertCoordinationCurrent,acknowledgeCoordination,type CoordinationRequest} from './coordination.js';
 import {recordScopeDifference,scopeDifferences} from './scope.js';
@@ -13,7 +15,7 @@ export interface Artifact { kind: string; reference: string; version: string; co
 export interface Evidence { source: string; version: string; verified: boolean; result: unknown }
 export interface Candidate { id: string; revision: number; artifacts: Artifact[]; evidence: Evidence[]; claims: unknown; created_at: string; coordination_version?: string }
 export type Outcome = 'pass' | 'pass_with_issues' | 'return' | 'insufficient_evidence' | 'needs_human';
-export interface Residual { key: string; description: string; evidence: string; impact: string; nonblocking_reason: string; goal: string; criteria: string[] }
+export interface Residual { key: string; description: string; evidence: string; impact: string; nonblocking_reason: string; goal: string; criteria: string[]; conditions?:string; workaround?:string; delivery_impact?:string }
 export interface Verdict { coordination?: CoordinationRequest; outcome: Outcome; reason: string; gaps: string[]; residuals: Residual[]; core_complete: boolean; required_evidence_complete: boolean; acceptable_risk: boolean }
 const hash = (data: unknown) => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 const outcomes = new Set(['pass','pass_with_issues','return','insufficient_evidence','needs_human']);
@@ -52,7 +54,8 @@ export class TaskRecords {
   get(id: string) {
     const r=this.store.get('SELECT * FROM task_records WHERE task_id=?',id),t=this.store.get('SELECT * FROM tasks WHERE id=?',id);
     if (!r||!t) throw new Error('task_not_found');
-    return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|paused$|needs_replan$|failed$)/.test(t.status)?t.error_code:null},
+    const relations=taskRelations(this.store,id);
+    return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), priority:{level:t.priority,sequence:t.queue_seq},relations:relations.items.map(link=>({...link,reason:link.reason.slice(0,1000),evidence:{excerpt:link.evidence.slice(0,1000),truncated:link.evidence.length>1000}})),relation_page:{total:relations.total,next_offset:relations.next_offset,url:'/api/tasks/'+id+'/relations'},progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|paused$|needs_replan$|failed$)/.test(t.status)?t.error_code:null},
       stage_schedule:reconcileAssignments(this.store,id),selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
       coordination:coordinationContext(this.store,id),scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
@@ -92,7 +95,7 @@ export class TaskRecords {
       const offset=args?.offset??0,limit=args?.limit??10;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>20)return {error:'invalid_history_page'};
       const clip=(value:any):any=>typeof value==='string'&&value.length>12000?value.slice(0,12000)+' [truncated; original retained in task_history]':Array.isArray(value)?value.map(clip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clip(v)])):value;
-      const filter="task_id=? AND type IN ('coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized','stage_plan','stage_result')";
+      const filter="task_id=? AND type IN ('priority_changed','priority_assessed','priority_defaulted','queue_entered','queue_claimed','followup_plan','followup_plan_deferred','followup_linked','followup_coordination','task_related','coordination_requested','coordination_notice','coordination_acknowledged','coordination_result','coordination_fault','scope_difference','checkpoint','artifact_checkpoint','execution_evidence','acceptance','acceptance_fault','inherited_artifact','memory_search','memory_read','memory_fault','role_handoff','role_result','role_candidate','role_record_read','delivery_nominated','role_assignment_fault','role_result_normalized','stage_plan','stage_result')";
       const total=Number(this.store.get('SELECT count(*) n FROM task_history WHERE '+filter,id)!.n);
       const rows=this.store.all('SELECT id,type,data,created_at FROM task_history WHERE '+filter+' ORDER BY id DESC LIMIT ? OFFSET ?',id,limit,offset).reverse();
       return {total,offset,next_offset:offset+rows.length<total?offset+rows.length:null,observations:rows.map(row=>({...row,data:clip(visibleMemorySnapshot(this.store,this.store.get('SELECT repository_id FROM tasks WHERE id=?',id)!.repository_id,JSON.parse(row.data),access))}))};
@@ -156,9 +159,31 @@ export class TaskRecords {
         }
       }
       if(['completed','succeeded','pr_opened'].includes(task.status))throw new Error('task_already_delivered');
-      // Keep observations in the verdict; a new task needs its own explicit request or plan.
-      // Applying this to ordinary tasks too prevents an existing follow-up from starting another chain.
+      // QA observations alone never create work. Only an explicit Manager/default-rule plan
+      // bound to this candidate can create or supplement follow-up tasks.
       const followups:string[]=[];
+      const followupPlan=this.store.get('SELECT manager_ref FROM task_followup_plans WHERE task_id=? AND candidate_id=? AND revision=?',id,candidateId,revision);
+      for(const residual of followupPlan?verdict.residuals:[]){
+        const decision=followupDecision(this.store,task,current.candidate!,residual),target=followupTarget(this.store,task,current.candidate!,residual,decision);
+        let child:string;
+        if(target&&decision.action==='supplement'&&!completedFollowupTarget(target)){
+          child=target.id;
+          if(target.status!=='running')setTaskPriority(this.store,child,decision.priority,decision.reason,'role:manager');
+          coordinateFollowup(this.store,target,target,task,current.candidate!,residual,decision);
+        }else{
+          child=randomId();const now=new Date().toISOString();
+          const input={request:residual.goal,contract:{goal:residual.goal,scope:current.contract.scope,criteria:residual.criteria,endpoint:'artifact',completeness:'inherited',source:{parent_task:id,parent_revision:current.revision,candidate_id:candidateId,residual:residual.key}},
+            parent_task:id,residual,followup_plan:{...decision,...(target&&completedFollowupTarget(target)?{action:'recurrence'}:{})},authorization:'inherited; no additional publication or merge rights'};
+          this.store.run(`INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,source_task_id,created_at,updated_at,priority) VALUES(?,?,'task.request','queued',?,?,?,?,?,?,?)`,child,task.repository_id,residual.goal,`residual:${id}:${candidateId}:${residual.key}`,JSON.stringify(input),id,now,now,decision.priority);
+          this.store.run('UPDATE task_records SET contract=? WHERE task_id=?',JSON.stringify(input.contract),child);
+          captureTaskConfiguration(this.store,child);
+          const assessed=!String(followupPlan?.manager_ref).startsWith('framework:');
+          this.history(child,assessed?'priority_assessed':'priority_defaulted',{priority:decision.priority,reason:decision.reason,evidence_refs:decision.evidence_refs,actor:assessed?'manager':'framework'});
+          if(target){recordFollowupRelation(this.store,{...task,id:child},current.candidate!,residual,{...decision,action:completedFollowupTarget(target)?'recurrence':'related'},target.id);coordinateFollowup(this.store,this.store.get('SELECT * FROM tasks WHERE id=?',child)!,target,task,current.candidate!,residual,decision);}
+        }
+        recordFollowupRelation(this.store,task,current.candidate!,residual,decision,child);
+        this.store.run('INSERT INTO task_followups VALUES(?,?,?,?)',id,candidateId,residual.key,child);followups.push(child);
+      }
       const rounds=current.rounds+1,passing=['pass','pass_with_issues'].includes(verdict.outcome);
       const exhausted=!passing&&verdict.outcome!=='needs_human'&&rounds>=3;
       const acceptance={...verdict,candidate_id:candidateId,revision,followups,created_at:new Date().toISOString(),exhausted};
