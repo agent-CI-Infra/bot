@@ -103,6 +103,47 @@ test('global administrator connects an app through the wizard, resumes it and se
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
+test('connection list shows readable cached app and enterprise names with a safe refresh on desktop and mobile', async ({ page }) => {
+  const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
+  mkdirSync(output, { recursive: true });
+  try {
+    const id = await connector(f.admin);
+    await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
+    const row = page.getByRole('group', { name: 'cli_fixture', exact: true });
+    await expect(row.getByText('应用名称待获取', { exact: true })).toBeVisible();
+    wire.state.appName = '研发协作助手'; wire.state.tenantName = '示例研发企业';
+    await row.getByRole('button', { name: '刷新应用信息' }).click();
+    await expect(row.getByRole('status')).toHaveText('应用与企业信息已检查。');
+    await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
+    await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
+    await expect(row.getByText('App ID：cli_fixture', { exact: true })).toBeVisible();
+    expect(f.h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id).revision).toBe(1);
+    const requests = wire.state.authRequests.length;
+    await page.reload();
+    await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
+    expect(wire.state.authRequests.length).toBe(requests);
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.screenshot({ path: output + '/connections-desktop.png', fullPage: true });
+    wire.state.tenantCode = 1184001;
+    await row.getByRole('button', { name: '刷新应用信息' }).click();
+    await expect(row.getByRole('status')).toContainText('tenant:tenant:readonly');
+    await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
+    wire.state.tenantCode = 0; wire.state.authCode = 10003;
+    await row.getByRole('button', { name: '刷新应用信息' }).click();
+    await expect(row.getByRole('status')).toContainText('无法通过鉴权');
+    await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
+    expect(await page.locator('body').innerText()).not.toContain(credentials.app_secret);
+    wire.state.authCode = 0; wire.state.appName = '<img src=x onerror=alert(1)> 研发协作助手';
+    wire.state.tenantName = '跨团队持续交付与基础设施研发企业'.repeat(8);
+    await row.getByRole('button', { name: '刷新应用信息' }).click();
+    await expect(row.getByText(wire.state.appName, { exact: true })).toBeVisible();
+    await expect(row.locator('img')).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: output + '/connections-mobile.png', fullPage: true });
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
 test('store apps save without manual bot identity and synchronize it after receiving the installation ticket', async ({ page }) => {
   const wire = transport(), h = await harness(null, undefined, { channels: { fetch: wire.fetch, longConnections: false } });
   const f = { h, ...await setup(h) };

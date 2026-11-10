@@ -109,14 +109,14 @@ export class FeishuAdapter implements ChannelAdapter {
     const bot = data.bot ?? data.data?.bot;
     if (typeof bot?.open_id !== 'string' || !bot.open_id) fail(502, 'channel_bot_unavailable');
     this.guard();
-    return { bot_open_id: text(bot.open_id), name: typeof bot.app_name === 'string' ? bot.app_name.slice(0, 200) : '' };
+    return { bot_open_id: text(bot.open_id), name: typeof bot.app_name === 'string' ? bot.app_name.trim().slice(0, 200) : '' };
   }
-  async installationTenant(): Promise<string> {
+  async installationInfo(): Promise<{ tenant_key: string; tenant_name: string }> {
     const data = await this.api('/tenant/v2/tenant/query', { method: 'GET' });
-    const tenant = data.data?.tenant?.tenant_key;
-    if (typeof tenant !== 'string' || !tenant) fail(502, 'channel_tenant_unavailable');
+    const tenant = data.data?.tenant;
+    if (typeof tenant?.tenant_key !== 'string' || !tenant.tenant_key) fail(502, 'channel_tenant_unavailable');
     this.guard();
-    return text(tenant);
+    return { tenant_key: text(tenant.tenant_key), tenant_name: typeof tenant.name === 'string' ? tenant.name.trim().slice(0, 200) : '' };
   }
   async update(delivery: ChannelDelivery): Promise<string> {
     const id = text(delivery.message_id);

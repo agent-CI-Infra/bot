@@ -75,7 +75,7 @@ test('startup removes legacy organization and actor enterprise restrictions with
 test('Feishu probes use saved or ephemeral credentials, return safe bot facts and never claim event delivery', async t => {
   const { admin, id, wire, h } = await channelFixture(t);
   const checked = await probe(admin, id);
-  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', revision: 1, state: 'verified', event_delivery_verified: false });
+  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', tenant_name: 'Fixture enterprise', revision: 1, state: 'verified', event_delivery_verified: false });
   const preview = await admin('/api/channels/feishu/probe', 'POST', { app_id: 'cli_preview', app_secret: 'unsaved-preview-secret' });
   assert.equal(preview.status, 201); assert.equal(preview.value.bot_open_id, 'ou_bot');
   assert.equal(wire.state.authRequests.at(-1).app_id, 'cli_preview');
@@ -102,6 +102,69 @@ test('credential probes reject stale revisions and recheck live configuration af
   release();
   assert.equal((await pending).value.error, 'channel_revision_conflict');
   assert.equal(h.store.get('SELECT enabled FROM channel_connectors WHERE id=?', id).enabled, 0);
+});
+
+test('connection names are discovered, cached across restarts and refreshed without invalidating channel configuration', async t => {
+  const { admin, h, wire, service } = await channelFixture(t);
+  const id = await connector(admin, { app_id: 'cli_names', installation_tenant: undefined, bot_open_id: undefined });
+  const read = () => h.store.get('SELECT app_name,tenant_name,revision FROM channel_connectors WHERE id=?', id);
+  assert.deepEqual(read(), { app_name: 'Fixture bot', tenant_name: 'Fixture enterprise', revision: 1 });
+  const requests = wire.state.authRequests.length;
+  for (let i = 0; i < 2; i++) {
+    const c = (await admin('/api/channels/setup')).value.connectors.find(c => c.id === id);
+    assert.equal(c.app_name, 'Fixture bot'); assert.equal(c.tenant_name, 'Fixture enterprise');
+  }
+  assert.equal(wire.state.authRequests.length, requests);
+  const event = service.adapter(service.connector(id)).normalize(envelope('/bind', { header: { app_id: 'cli_names' } }));
+  wire.state.appName = 'Renamed app'; wire.state.tenantName = 'Renamed enterprise';
+  assert.equal((await probe(admin, id)).value.revision, 1);
+  assert.deepEqual(read(), { app_name: 'Renamed app', tenant_name: 'Renamed enterprise', revision: 1 });
+  assert.equal(service.source(event).id, id);
+  await h.stop(); await h.start();
+  assert.deepEqual(read(), { app_name: 'Renamed app', tenant_name: 'Renamed enterprise', revision: 1 });
+});
+
+test('missing display information preserves cached names; an installation mismatch never updates labels', async t => {
+  const { admin, id, h, wire } = await channelFixture(t);
+  assert.equal((await probe(admin, id)).status, 201);
+  wire.state.appName = ''; wire.state.tenantCode = 1184001;
+  const partial = await probe(admin, id);
+  assert.equal(partial.status, 201); assert.equal(partial.value.tenant_error, 'channel_tenant_unavailable');
+  const read = () => h.store.get('SELECT app_name,tenant_name,revision FROM channel_connectors WHERE id=?', id);
+  const saved = { app_name: 'Fixture bot', tenant_name: 'Fixture enterprise', revision: 1 };
+  assert.deepEqual(read(), saved);
+  wire.state.tenantCode = 0; wire.state.tenantName = '';
+  assert.equal((await probe(admin, id)).status, 201); assert.deepEqual(read(), saved);
+  wire.state.installationTenant = 'other-installation'; wire.state.appName = 'Wrong app'; wire.state.tenantName = 'Wrong enterprise';
+  assert.equal((await probe(admin, id)).value.error, 'channel_source_mismatch'); assert.deepEqual(read(), saved);
+  const changed = await admin('/api/channels/connectors/' + id, 'PATCH', { app_id: 'cli_new', installation_tenant: 'other-installation', bot_open_id: 'ou_new', expected_revision: 1 });
+  assert.equal(changed.status, 200);
+  assert.deepEqual(read(), { app_name: '', tenant_name: '', revision: 2 });
+});
+
+test('a label refresh rechecks configuration after the enterprise lookup returns', async t => {
+  const { admin, id, h, wire } = await channelFixture(t);
+  let release; wire.state.tenantGate = new Promise(r => { release = r; }); t.after(() => release());
+  const pending = probe(admin, id);
+  await until(() => wire.state.tenantStarted);
+  assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, enabled: false })).status, 200);
+  release();
+  assert.equal((await pending).value.error, 'channel_revision_conflict');
+  assert.equal(h.store.get('SELECT app_name FROM channel_connectors WHERE id=?', id).app_name, '');
+});
+
+test('startup adds empty display fields to old connections without replacing their data', async t => {
+  const { h, id, service } = await channelFixture(t);
+  service.close();
+  const credentials = h.store.all('SELECT * FROM channel_credentials');
+  h.store.db.exec('ALTER TABLE channel_connectors DROP COLUMN app_name; ALTER TABLE channel_connectors DROP COLUMN tenant_name');
+  const before = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+  for (let i = 0; i < 2; i++) {
+    await h.stop(); await h.start();
+    const { app_name, tenant_name, ...after } = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+    assert.equal(app_name, ''); assert.equal(tenant_name, ''); assert.deepEqual(after, before);
+    assert.deepEqual(h.store.all('SELECT * FROM channel_credentials'), credentials);
+  }
 });
 
 test('socket setup needs only an app secret; switching to HTTP requires signing keys and partial edits preserve saved secrets', async t => {

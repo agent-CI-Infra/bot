@@ -35,6 +35,9 @@ export function channelStorage(store: Store): void {
     store.db.exec("ALTER TABLE channel_connectors ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'idle'");
   // Connections are global; keep their IDs so credentials, bindings and queued events remain valid.
   store.transaction(() => {
+    for (const column of ['app_name', 'tenant_name'])
+      if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === column))
+        store.db.exec(`ALTER TABLE channel_connectors ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
     // Existing connections also accept external members; identity and project grants still authorize each request.
     if (store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'actor_tenants'))
       store.db.exec('ALTER TABLE channel_connectors DROP COLUMN actor_tenants');

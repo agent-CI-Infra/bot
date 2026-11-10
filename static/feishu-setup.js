@@ -8,6 +8,8 @@ function feishuError(err) {
     channel_tenant_unavailable: '暂时读不到应用安装的企业信息。请在飞书“权限管理”开通应用身份权限“获取企业信息”（tenant:tenant:readonly），发布并通过必要审核后重新保存；已有该权限时请检查应用是否已启用。',
     channel_delivery_rejected: '飞书拒绝了请求。请检查凭据、机器人能力和已发布版本。',
     channel_delivery_failed: '服务器无法连接飞书开放平台，请检查网络后重试。',
+    channel_rate_limited: '飞书暂时限制了请求频率，请稍后重试。',
+    channel_source_mismatch: '飞书返回的安装企业与此连接不一致，请核对应用凭据和安装企业后重新配置。',
     channel_app_ticket_required: '尚未收到有效的商店应用票据。先完成 HTTP 事件配置、安装和发布，再重新检查。',
     channel_http_credentials_required: 'HTTP 回调需要 Verification Token 和 Encrypt Key，请从“事件与回调 → 加密策略”填写。',
     channel_revision_conflict: '连接已被其他操作更新。请刷新本页、核对当前配置后重新保存。',
@@ -26,7 +28,22 @@ async function renderFeishuSetup(panel, request) {
     if (!data.connectors.length) overview.append(note('尚未连接飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。'));
     for (const c of data.connectors) {
       const row = element('div', '', 'channel-binding');
-      row.append(element('strong', c.app_id), note(`全局共用 · ${c.enabled ? '启用' : '停用'} · ${c.transport === 'http' ? 'HTTP 回调' : '企业自建长连接'}`),
+      row.setAttribute('role', 'group'); row.setAttribute('aria-label', c.app_id);
+      const name = element('strong', c.app_name || '应用名称待获取'), tenant = note(`企业：${c.tenant_name || '名称待获取'}`);
+      const status = element('p', '', 'view-success'); status.setAttribute('role', 'status');
+      const refresh = button('刷新应用信息', async () => {
+        refresh.disabled = true; status.className = 'view-success'; status.textContent = '正在读取应用与企业信息…';
+        try {
+          const result = await api('/api/channels/feishu/probe', 'POST', { connector_id: c.id, expected_revision: c.revision });
+          c.revision = result.revision; c.app_name = result.name || c.app_name; c.tenant_name = result.tenant_name || c.tenant_name;
+          name.textContent = c.app_name || '应用名称待获取'; tenant.textContent = `企业：${c.tenant_name || '名称待获取'}`;
+          status.className = result.tenant_error ? 'view-error' : 'view-success';
+          const detail = result.tenant_error === 'channel_tenant_unavailable' ? '请在飞书开通“获取企业信息”（tenant:tenant:readonly）应用身份权限，发布并通过必要审核后，再刷新应用信息。' : feishuError(new Error(result.tenant_error || ''));
+          status.textContent = result.tenant_error ? `应用信息已读取，企业名称暂未更新。${detail}` : '应用与企业信息已检查。';
+        } catch (err) { status.className = 'view-error'; status.textContent = feishuError(err); } finally { refresh.disabled = false; }
+      }, 'quiet');
+      row.append(name, tenant, note(`App ID：${c.app_id}`), note(`全局共用 · ${c.enabled ? '启用' : '停用'} · ${c.transport === 'http' ? 'HTTP 回调' : '企业自建长连接'}`),
+        refresh, status,
         channelLink(feishuAddress(c.id, 1), '继续配置', 'button-link'), channelLink(feishuAddress(c.id, 4), '连接诊断与群范围', 'button-link'));
       overview.append(row);
     }
@@ -36,7 +53,7 @@ async function renderFeishuSetup(panel, request) {
   if (id !== 'new' && !c) { panel.append(note('连接不存在。'), channelLink('#/settings/feishu', '返回飞书连接')); return; }
   if (!c && step > 1) { panel.append(note('请先保存应用连接，再配置事件、发布和试用。'), channelLink(feishuAddress(), '从创建应用开始')); return; }
   const title = card('飞书应用连接向导'), nav = element('nav', '', 'wizard-steps'); nav.setAttribute('aria-label', '飞书连接步骤');
-  title.append(note(`第 ${step + 1} / ${feishuSteps.length} 步${c ? ' · ' + c.app_id : ''}。应用连接可随时返回继续；凭据保存后不回显。`));
+  title.append(note(`第 ${step + 1} / ${feishuSteps.length} 步${c ? ' · ' + (c.app_name || c.app_id) + (c.tenant_name ? ' · ' + c.tenant_name : '') : ''}。应用连接可随时返回继续；凭据保存后不回显。`));
   feishuSteps.forEach((caption, i) => {
     const item = button(`${i + 1}. ${caption}`, () => { location.hash = feishuAddress(id, i); }, 'quiet');
     item.disabled = !c && i > 1; if (i === step) item.setAttribute('aria-current', 'step'); nav.append(item);
