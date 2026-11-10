@@ -1,3 +1,4 @@
+import { consoleNavigate } from './console-navigation.mjs';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -34,7 +35,7 @@ test('GitHub 登录、组织切换、权限来源、撤销与本地恢复', asyn
     await page.getByRole('button', { name: '解除绑定', exact: true }).click();
     await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible();
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
-    await page.getByRole('button', { name: '登录', exact: true }).click(); await page.getByRole('button', { name: '身份与权限', exact: true }).click();
+    await page.getByRole('button', { name: '登录', exact: true }).click(); await consoleNavigate(page, '身份与权限');
     await expect(page.locator('#identity-panel')).toContainText('平台超级管理员');
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
@@ -73,7 +74,7 @@ test('绑定同一 GitHub 身份会显示冲突；本地会话可以完成新身
   try {
     await f.login(); await page.goto(f.h.admin);
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
-    await page.getByRole('button', { name: '登录', exact: true }).click(); await page.getByRole('button', { name: '身份与权限', exact: true }).click();
+    await page.getByRole('button', { name: '登录', exact: true }).click(); await consoleNavigate(page, '身份与权限');
     await page.getByRole('button', { name: '绑定 GitHub 账号', exact: true }).click();
     await expect(page.locator('#message')).toContainText('已绑定其他账号');
     f.state.id = 43;

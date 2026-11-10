@@ -15,6 +15,7 @@ async function renderSettings(request) {
   for (const [key, caption] of settingsSections) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
   // The categories are drawn at once; the chosen category's cards follow when their data arrives.
   $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
+  if (typeof syncConsoleShell === 'function') syncConsoleShell();
   const cards = await settingsCards[section](request);
   if (request !== renderVersion) return;
   content.replaceChildren(...cards);

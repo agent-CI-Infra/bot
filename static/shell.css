@@ -157,3 +157,6 @@ body.console-ready .management-page { left: var(--console-rail); }
   body.console-ready:has(.management-window:not([hidden]):not(.management-page):not(.management-fullscreen)) { --console-mobile-height: 0px; }
   body.console-ready:has(.management-window:not([hidden]):not(.management-page):not(.management-fullscreen)) .console-mobile-nav { display:none; }
 }
+
+html { scroll-padding-bottom: calc(var(--console-mobile-height,0px) + 100px); }
+@media(max-width:767px) { .console-ready #paging { padding-right:96px; } }
