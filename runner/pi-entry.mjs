@@ -71,12 +71,20 @@ async function boundary(stage){
 // One model request at a time goes through the mailbox, whether the main agent or a sub-agent sends it.
 let proxyQueue=Promise.resolve();
 const server=createServer((req,res)=>{const run=proxyQueue.then(()=>proxy(req,res));proxyQueue=run.catch(()=>{});});
+// A request over the 2 MiB mailbox or 128k context limit never leaves the runner. It is answered the way a provider
+// reports a context overflow (HTTP 413), because Pi starts threshold compaction from the provider's reported usage:
+// a provider counting fewer tokens than this chars/4 estimate leaves Pi below its threshold while the raw request is
+// over the limit. Pi then compacts once and retries; the run fails only when that recovery fails (compaction_end below).
+const overflow=(res,detail)=>{res.writeHead(413,{'Content-Type':'application/json'});
+  res.end(JSON.stringify({error:{type:'invalid_request_error',code:'context_length_exceeded',message:'Request exceeds the context window of this model: '+detail}}));};
 async function proxy(req,res){
   try{
     // Any number of model requests per task; only the chat completion endpoint is proxied.
     if(req.url!=='/v1/chat/completions'||req.method!=='POST')throw new Error('model_request_not_allowed');
-    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes>2*1024*1024){requestFailure='agent_context_too_large';throw new Error(requestFailure);};chunks.push(chunk);}const raw=Buffer.concat(chunks).toString('utf8');
-    if(modelRequestTooLarge(raw)){requestFailure='agent_context_too_large';throw new Error(requestFailure);}
+    const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes<=2*1024*1024)chunks.push(chunk);}
+    if(bytes>2*1024*1024)return overflow(res,`${bytes} bytes exceed the 2 MiB request limit.`);
+    const raw=Buffer.concat(chunks).toString('utf8');
+    if(modelRequestTooLarge(raw))return overflow(res,'the estimated tokens plus the 8192-token output reserve exceed 128000.');
     const id=randomBytes(24).toString('hex');await writeFile(dir+'/request.tmp',JSON.stringify({id,body:JSON.parse(raw)}),{mode:0o600});await rename(dir+'/request.tmp',dir+'/request.json');
     const response=await waitModelReply(dir,id);await unlink(dir+'/request.json');await unlink(dir+'/reply-'+id+'.json');
     res.writeHead(response.status,{'Content-Type':response.content_type});res.end(response.body);
@@ -145,10 +153,14 @@ try{
       return raw;
     }});
     let own=0;
-    created.subscribe(event=>{if(event.type==='message_end'&&event.message.role==='assistant'){
-      guard.check.reset();
-      const m=event.message;void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
-    }});
+    created.subscribe(event=>{
+      // Pi compacted after an over-limit request and the retry still did not fit, or the compaction itself failed.
+      if(event.type==='compaction_end'&&event.reason==='overflow'&&event.errorMessage&&!event.aborted)requestFailure='agent_context_too_large';
+      if(event.type==='message_end'&&event.message.role==='assistant'){
+        guard.check.reset();
+        const m=event.message;void writeEvent({type:'model',step:agent?++own:++steps,...(agent?{agent}:{}),reasoning:m.content.filter(c=>c.type==='thinking').map(c=>c.thinking).join(''),content:m.content.filter(c=>c.type==='text').map(c=>c.text).join(''),tool_calls:m.content.filter(c=>c.type==='toolCall').map(c=>({id:c.id,name:c.name,arguments:JSON.stringify(c.arguments)}))});
+      }
+    });
     return created;
   }
   const history=await readFile(dir+'/restore.json','utf8').then(JSON.parse).catch(()=>[]);
