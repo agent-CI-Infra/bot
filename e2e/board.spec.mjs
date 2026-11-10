@@ -57,7 +57,7 @@ test('每类工作的卡片在所有维度保留状态、徽章和任务目标�
     await work(page,'101/issue/3','review.issue').locator('.board-card-title').click();
     await expect(page.locator('#task-picker .task-choice-row')).toHaveCount(2);await expect(page.locator('#task-picker')).not.toContainText('开发 Issue');await closeTask(page);
     await choose(page,'对象类型','issue');await expect(page.locator('[data-card-key*="/pr/"]')).toHaveCount(0);
-    await expect(page.getByRole('group',{name:'对象类型',exact:true}).getByRole('button')).toHaveText(['全部对象','Issue','PR']);
+    await expect(page.getByRole('group',{name:'对象类型',exact:true}).getByRole('button')).toHaveText(['全部对象','Issue','PR','通用任务']);
     await page.getByRole('button',{name:'移除筛选 对象类型：Issue',exact:true}).click();await expect(work(page,'101/pr/2','review.pr')).toBeVisible();
     // One work type at a time; an object work type already names its object type, so that filter steps aside.
     await choose(page,'工作类型','review.issue');await expect(page.getByRole('group',{name:'对象类型',exact:true})).toBeHidden();
