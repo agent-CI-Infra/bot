@@ -116,7 +116,7 @@ test('390宽用分组下拉和纵向列表直接访问发版本，筛选结果�
     expect(await page.locator('#board-columns').evaluate(el=>el.scrollTop)).toBeGreaterThan(150);
     await work(page,'101/release/release-running','release').locator('.board-card-title').click();await expect(page).toHaveURL(/#\/projects\/101\/release$/);
     await expect(page.locator('#project-page .release-record').filter({hasText:'v1.2.3'})).toContainText('工作流运行中');
-    await page.locator('#tabs').getByRole('button',{name:'看板',exact:true}).click();await choose(page,'当前分组','review.issue');
+    await page.locator('#console-mobile-nav').getByRole('link',{name:'任务',exact:true}).click();await choose(page,'当前分组','review.issue');
     await work(page,'101/issue/3','review.issue').locator('.board-card-title').click();await expect(page.locator('#task-title')).toHaveText('检视 · Issue #3');await closeTask(page);
     await page.locator('.board-filter-details>summary').click();await choose(page,'工作类型','release');
     await expect(page.locator('.board-column:visible')).toHaveCount(1);await expect(page.locator('.board-column:visible')).toHaveAttribute('data-column-id','release');

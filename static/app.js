@@ -5,7 +5,7 @@ let grants = { assignments: [], organization_assignments: [], organizations: [] 
 const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
-  external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management' }, superTabs = ['settings'];
+  more: '#/more', inbox: '#/inbox', external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management' }, superTabs = ['settings'];
 const retryableStates = ['paused', 'failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
 async function api(path, method = 'GET', body, { signal } = {}) {
@@ -62,6 +62,7 @@ function showBootFailure(err) {
   $('boot').hidden = false;
   $('access').hidden = $('workspace').hidden = $('identity').hidden = $('tabs').hidden = true;
   document.body.classList.remove('board-mode');
+  if (typeof syncConsoleShell === 'function') syncConsoleShell();
   const message = $('boot-message');
   message.textContent = `控制台载入失败：${err.message}。请检查网络连接或服务状态后重试。`;
   message.setAttribute('role', 'alert'); message.classList.add('view-error');
@@ -84,6 +85,7 @@ async function start() {
   $('github-login').hidden = setup || !(await api('/api/auth/github/status')).enabled;
   const authError = new URLSearchParams(location.search).get('auth_error');
   if (authError) notice('message', identityError(authError));
+  if (typeof syncConsoleShell === 'function') syncConsoleShell();
   if (!me) return;
   renderCurrentUser();
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
@@ -125,16 +127,24 @@ async function route() {
   if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
-  page.hidden = !target; list.hidden = !!target || tab === 'management';
+  const consolePage = ['more', 'inbox'].includes(tab);
+  page.hidden = !target; list.hidden = !!target || tab === 'management' || consolePage;
+  $('console-page').hidden = !consolePage;
+  if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
-  if (tab === 'management' && !target) await renderManagementPage();
+  if (consolePage) {
+    if (typeof leaveManagementPage === 'function') leaveManagementPage();
+    await renderConsolePage(renderVersion);
+  } else if (tab === 'management' && !target) await renderManagementPage();
   else {
     if (typeof leaveManagementPage === 'function') leaveManagementPage();
     if (target) await renderProject(target); else await render();
     if (chatProject) void openManagementChat(chatProject).catch(error);
   }
+  if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
+  if (typeof restoreConsolePosition === 'function') restoreConsolePosition();
 }
 window.addEventListener('hashchange', () => { if (me) route().catch(error); });
 // `quiet` is the periodic refresh: the list stays on screen while loading, and only rows whose data changed are replaced

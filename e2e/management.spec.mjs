@@ -241,7 +241,8 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     await expect(page).toHaveURL(/#\/management$/); await expect(page.locator('#tabs [aria-current=page]')).toHaveText('管理对话');
     await expect(chat).toHaveAttribute('role', 'region'); await expect(grip).toBeHidden(); await expect(launcher).toBeHidden();
     const pageBox = await chat.boundingBox(), header = await page.locator('body > header').boundingBox();
-    expect(pageBox.x).toBe(0); expect(pageBox.width).toBe(1440); expect(Math.abs(pageBox.y - header.height)).toBeLessThan(2); expect(pageBox.y + pageBox.height).toBe(1000);
+    const rail = await page.locator('#console-sidebar').boundingBox();
+    expect(pageBox.x).toBe(rail.x + rail.width); expect(pageBox.width).toBe(1440 - rail.width); expect(Math.abs(pageBox.y - header.height)).toBeLessThan(2); expect(pageBox.y + pageBox.height).toBe(1000);
     await expect(message).toHaveValue('保留这条尚未发送的草稿'); await expect(send).toBeInViewport();
     await page.screenshot({ path: '.tmp/management-display/page-desktop.png' });
     await page.getByRole('button', { name: '全屏显示管理助手', exact: true }).click();
