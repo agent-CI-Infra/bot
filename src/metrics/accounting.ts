@@ -31,6 +31,9 @@ export function beginModelRequest(store: Store, task: Row, requestId: string, mo
   store.run(`INSERT INTO model_requests(id,task_id,repository_id,request_id,model_id,model_name,requested_at,
     currency,input_per_million,output_per_million,cache_per_million) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
     id,task.id,task.repository_id,requestId,model.id,model.model,time,price?.currency??null,price?.input_per_million??null,price?.output_per_million??null,price?.cache_per_million??null);
+  const origin = task.id ? store.get('SELECT conversation_id,source_message FROM task_origins WHERE task_id=?', task.id) : undefined;
+  store.run('UPDATE model_requests SET conversation_id=?,role_id=?,source_message=? WHERE id=?',task.conversation_id??origin?.conversation_id??null,
+    task.active_role??task.role_id??null,task.source_message??origin?.source_message??null,id);
   return id;
 }
 export function finishModelRequest(store: Store, id: string, usage: unknown, httpStatus: number | null, state='received'): void {

@@ -34,7 +34,7 @@ function workspaceOverview() {
     consoleLink(`#/projects/${id}/basic`, '项目设置', '分支、启用状态与配置来源'));
   aside.append(health, access); layout.append(work, aside); root.append(head, metrics, layout);
   let pending = false, lastTasks = null, lastHealth = null, signature = '', healthSignature = '';
-  const rowKey = row => JSON.stringify([row.id,row.repository_id,row.full_name,row.kind,row.object_number,row.status,row.summary,row.error_code,row.updated_at]);
+  const rowKey = row => JSON.stringify([row.id,row.repository_id,row.full_name,row.kind,row.object_number,row.status,row.summary,row.error_code,row.updated_at,row.origin]);
   const expired = (node, err, time) => {
     node.classList.add('view-error'); node.setAttribute('role', 'alert');
     node.textContent = `${err.message}。${time ? '保留上次成功数据（' + timestamp(time) + '），可能已过期。' : '暂时无法判断，不显示为零或正常。'}可用“刷新总览”重试。`;

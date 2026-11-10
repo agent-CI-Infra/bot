@@ -81,9 +81,15 @@ export function eventTaskCaller(store: Store, project: string, event: string, gu
   return issue(store, { kind: 'event', project_id: project, role: role.role_id, principal_id: null, conversation_id: null,
     source_message: event, source_task_id: null, source_run_id: null, permissions: role.permissions, config_revision: config.revision, authorization_revision: null }, { guard });
 }
-export function assertTaskCaller(store: Store, caller: TaskCaller, write = false): void {
+/** A conversation may answer without task-management authority; it still needs a trusted live source. */
+export function assertTaskSource(store: Store, caller: TaskCaller): void {
   const trust = issued.get(caller); if (!trust || trust.store !== store) return fail(403, 'task_caller_untrusted');
   trust.guard();
+  if (trust.actor) { assertCurrent(trust.actor); authorize(trust.actor, 'tasks.read', { project_id: caller.project_id }); }
+  if (caller.role && !roleOf(store, caller.project_id, caller.role)) fail(403, 'task_role_unavailable');
+}
+export function assertTaskCaller(store: Store, caller: TaskCaller, write = false): void {
+  assertTaskSource(store, caller); const trust = issued.get(caller)!;
   if (trust.actor) {
     assertCurrent(trust.actor);
     if (caller.kind === 'operator') authorize(trust.actor, write ? 'tasks.write' : 'tasks.read', { project_id: caller.project_id });

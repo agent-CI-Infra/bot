@@ -16,7 +16,7 @@ test('Feishu verifies raw signatures, decryption and app/tenant before persistin
   assert.equal((await post(h, id, envelope('', { header: { tenant_key: 'wrong' } }))).status, 403);
   assert.equal((await post(h, id, envelope('', { sender: { tenant_key: '' } }))).status, 400);
   assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, 0);
-  for (const quiet of [envelope('loop', { sender: { sender_type: 'app' } }), envelope('all group messages', { message: { chat_type: 'group' } }), envelope('old', { message: { create_time: '1' } })]) {
+  for (const quiet of [envelope('loop', { sender: { sender_type: 'app' } }), envelope('all group messages', { message: { chat_id: 'oc_group', chat_type: 'group' } }), envelope('old', { message: { create_time: '1' } })]) {
     assert.equal((await post(h, id, quiet)).value.state, 'completed');
   }
   assert.equal(h.store.get('SELECT count(*) n FROM channel_messages').n, 3);

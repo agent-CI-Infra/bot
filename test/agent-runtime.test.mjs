@@ -108,7 +108,8 @@ test('SSE bursts throttle full guards while retaining request boundaries and eve
   });
   assert.equal(value.choices[0].message.content, 'x'.repeat(50));
   assert.equal(tokens, 50);
-  assert.deepEqual(guards, { before: 2, stream: 1, after: 2 });
+  // The completed response is guarded before its snapshot is retained as well as before acceptance.
+  assert.deepEqual(guards, { before: 2, stream: 1, after: 3 });
   assert.equal(f.store.get('SELECT state FROM model_requests').state, 'received');
 });
 

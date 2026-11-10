@@ -73,7 +73,7 @@ export function bindFixture(h, id, principal, actor = 'ou_alice', tenant = 'acto
 }
 export async function channelFixture(t, options = {}) {
   const wire = transport(); let service;
-  const f = await managementFixture(t, { ...options, channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }, onChannels: s => { service = s; } });
+  const f = await managementFixture(t, store => ({ ...(typeof options === 'function' ? options(store) : options), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }, onChannels: s => { service = s; } }));
   const id = await connector(f.admin), principal = (await f.admin('/api/auth/me')).value.id;
   bindFixture(f.h, id, principal);
   return { ...f, wire, service, id, principal };

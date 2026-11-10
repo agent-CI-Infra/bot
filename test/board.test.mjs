@@ -227,7 +227,7 @@ test('reply tasks get cards of their own, and the board lists the work types; vi
   const reply=(id,number,status,time,workflow=null)=>{boardTask(h.store,id,number,'workflow.issue',status,{time});h.store.run('UPDATE tasks SET workflow_id=? WHERE id=?',workflow,id);};
   reply('docs-old',3,'failed','2026-10-01T10:00:00.000Z','custom.0123456789ab');reply('docs-new',3,'running','2026-10-01T11:00:00.000Z');reply('docs-done',5,'succeeded');
   const board=(await admin('/api/board')).value;
-  assert.deepEqual(board.workflows.map(w=>[w.id,w.name]),[['review.issue','检视 Issue'],['review.pr','检视 PR'],['development.issue','开发 Issue'],['development.pr','跟进 bot PR'],['reply','通用回复'],['release','发版本']]);
+  assert.deepEqual(board.workflows.map(w=>[w.id,w.name]),[['review.issue','检视 Issue'],['review.pr','检视 PR'],['development.issue','开发 Issue'],['development.pr','跟进 bot PR'],['reply','通用回复'],['task.request','通用任务'],['release','发版本']]);
   const cards=(await admin('/api/board/cards')).value.cards,card=(number,category)=>cards.find(c=>c.object_number===number&&c.card_category===category&&c.repository_id==='101');
   // The reply card follows its own latest task; the object's review card is unchanged.
   assert.deepEqual([card(3,'reply').task_id,card(3,'reply').bot_stage,card(3,'reply').card_category_name],['docs-new','reviewing','通用回复']);

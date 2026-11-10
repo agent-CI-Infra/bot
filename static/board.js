@@ -1,7 +1,7 @@
 // Saved views and custom fields belong to the signed-in user. Execution stages remain read-only.
 // A card is one work type's work on one object (or a release); saved views include object scope as well as grouping.
 let boardState = null, boardRequest = 0, boardDragging = false;
-const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR']];
+const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR'], ['task', '通用任务']];
 const boardMedia = matchMedia('(max-width:760px)');
 function boardButton(name, action, className = 'quiet') {
   return button(name, async event => { const control=event.currentTarget; control.disabled=true;
@@ -29,7 +29,7 @@ function boardOptions(labelText,choices,value,change) {
   select(value);return group;
 }
 function boardView() { return boardState.views.find(v=>v.id===boardState.viewId); }
-function boardTypeName(type=boardState.type) { return type==='pr'?'PR':type==='release'?'发版本':'Issue'; }
+function boardTypeName(type=boardState.type) { return type==='task'?'任务':type==='pr'?'PR':type==='release'?'发版本':'Issue'; }
 // The work types with cards. A view saved before the board listed them may filter a family (every review or every
 // development), offered while it is selected; one saved with a former custom workflow shows the reply cards.
 const boardFamilies={review:'检视（Issue 与 PR）',development:'开发与跟进（Issue 与 PR）'};
@@ -261,9 +261,10 @@ function boardSummary() {
     boardState.filters=[];boardState.type='all';boardDirty();boardShell();await boardLoadCards();
   },'board-link'));
 }
-function boardKey(item) { return `${item.repository_id}/${item.object_type}/${item.card_type==='release'?item.release_id:item.object_number}`; }
+function boardKey(item) { return `${item.repository_id}/${item.object_type}/${item.card_type==='release'?item.release_id:item.card_type==='task'?item.task_id:item.object_number}`; }
 function boardCardKey(item) { return boardKey(item)+'/'+(item.card_category||''); }
 function boardGithub(item,type=item.object_type,number=item.object_number) {
+  if(item.card_type==='task')return null;
   if(item.card_type==='release')return item.release_url||null;
   return /^[\w.-]+\/[\w.-]+$/.test(item.full_name||'')?`https://github.com/${item.full_name}/${type==='pr'?'pull':'issues'}/${number}`:null;
 }
@@ -274,8 +275,8 @@ function boardTime(value) {
 // The latest task of the card's work type explains why it sits in its stage, e.g. which task failed.
 function boardTaskBadge(prefix,status) { const [caption,tone]=states[status]||[status,''],b=badge(`${prefix} ${caption}`,tone);b.title=status;return b; }
 function boardCard(item) {
-  const release=item.card_type==='release',customMode=!!boardCustomField(),category=boardCardCategory(item);
-  const label=release?`发版本 ${item.version}`:`${boardTypeName(item.object_type)} #${item.object_number}`;
+  const release=item.card_type==='release',customMode=!!boardCustomField()&&item.card_type!=='task',category=boardCardCategory(item);
+  const label=release?`发版本 ${item.version}`:item.card_type==='task'?`任务 ${shortId(item.task_id)}`:`${boardTypeName(item.object_type)} #${item.object_number}`;
   const card=element('article','','board-card'+(release?' board-release-card':''));card.dataset.cardKey=boardKey(item);card.draggable=customMode&&!release;
   if(item.card_category)card.dataset.cardCategory=item.card_category;
   card.addEventListener('dragstart',event=>{if(!customMode||release){event.preventDefault();return;}boardDragging=true;event.dataTransfer.setData('application/x-bot-board',boardCardKey(item));event.dataTransfer.effectAllowed='move';});
@@ -285,7 +286,7 @@ function boardCard(item) {
   // Keep the object type and number beside a title that can wrap to its full length.
   const caption=element('span','','board-card-caption');title.append(caption);
   if(release)caption.append(element('span','发版本','board-card-number'),document.createTextNode(' '),element('span',item.version,'board-card-text'));
-  else if(item.title)caption.append(element('span',boardTypeName(item.object_type)+' #'+item.object_number,'board-card-number'),document.createTextNode(' '),element('span',item.title,'board-card-text'));
+  else if(item.title)caption.append(element('span',item.card_type==='task'?'任务 '+shortId(item.task_id):boardTypeName(item.object_type)+' #'+item.object_number,'board-card-number'),document.createTextNode(' '),element('span',item.title,'board-card-text'));
   else caption.append(element('span',label,'board-card-text'));
   heading.append(title);
   const url=boardGithub(item);if(url){const a=link(url,'↗','board-card-link');a.setAttribute('aria-label','在 GitHub 打开 '+label);a.title='在 GitHub 打开';heading.append(a);}
@@ -304,7 +305,7 @@ function boardCard(item) {
       const pr=boardGithub(item,'pr',item.development_pr_number),caption='→ PR #'+item.development_pr_number;badges.append(pr?link(pr,caption,'board-card-pr'):element('span',caption,'board-card-pr'));
     }
   }
-  card.append(heading,meta);if(badges.childElementCount)card.append(badges);
+  card.append(heading,meta);if(item.origin)card.append(element('p',taskOriginCaption(item.origin),'muted'));if(badges.childElementCount)card.append(badges);
   if(customMode&&!release){
     const custom=boardCustomField(),control=boardSelect(custom.name,[['','未设置'],...custom.options.map(o=>[o.id,o.name])],item.field_value||'');
     control.label.className='board-card-field';control.label.replaceChildren(control.select);
@@ -357,6 +358,7 @@ function boardAddColumn() {
   }
 }
 async function boardOpen(item) {
+  if(item.card_type==='task'){await openTask(item.task_id);return;}
   if(item.card_type==='release'){openProject(item.repository_id,'release');return;}
   const owner=me.id,label=`${boardTypeName(item.object_type)} #${item.object_number}`,conditions=[];
   const category=item.card_category;

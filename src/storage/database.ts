@@ -25,6 +25,7 @@ import { managementStorage } from '../management/storage.js';
 import { channelStorage } from '../channels/storage.js';
 import { scheduleStorage } from '../schedules/storage.js';
 import { taskManagementStorage } from '../tasks/management.js';
+import { conversationStorage } from '../roles/conversation-storage.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -194,6 +195,7 @@ export class Store {
     identityStorage(this);
     managementStorage(this);
     channelStorage(this);
+    conversationStorage(this);
     scheduleStorage(this);
     // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
     migrateWorkflows(this);
