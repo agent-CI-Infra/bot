@@ -115,7 +115,7 @@ export function createControlPlane(options: Options) {
   // Errors contain stable codes only: never echo a request, credential, SQL statement or stack.
   const wrap = (fn: (req: IncomingMessage, res: ServerResponse) => Promise<void>) => async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' https://avatars.githubusercontent.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com");
     try { await fn(req, res); }
     catch (error) {
       if (!res.headersSent) respond(res, error instanceof HttpError ? error.status : 503, { error: error instanceof HttpError ? error.code : 'service_unavailable', ...(error instanceof HttpError && error.field ? { field: error.field } : {}) });

@@ -149,7 +149,7 @@ export class GitHubIdentity implements InstallationIdentity {
           tenant_id=excluded.tenant_id,project_id=excluded.project_id,scope=excluded.scope,role=excluded.role,capabilities=excluded.capabilities,
           expires_at=excluded.expires_at,revoked_at=NULL,evidence=excluded.evidence,installation_revision=excluded.installation_revision`, item.id, principal, item.tenant,
           item.project, item.project ? 'project' : 'tenant', item.role, JSON.stringify(projectCapabilities), item.evidence, now, now + 5 * 60_000, item.installation.ref, item.installation.revision);
-        this.store.run('UPDATE external_identities SET status=?,verified_at=? WHERE id=?', uncertain && !desired.length ? 'pending_verification' : 'active', now, identity.id);
+        this.store.run('UPDATE external_identities SET display_name=?,status=?,verified_at=? WHERE id=?', String(current.login), uncertain && !desired.length ? 'pending_verification' : 'active', now, identity.id);
         if (JSON.stringify(old) !== JSON.stringify(desired.map(g => g.id).sort())) invalidate(this.store, principal, 'github.permissions_changed');
       });
     } catch (error) {

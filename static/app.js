@@ -48,6 +48,16 @@ function timestamp(value) {
   return `${pad(date.getFullYear(),4)}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 function options(select, rows, label) { const selected = select.value; while (select.options.length > 1) select.remove(1); rows.forEach(row => select.add(new Option(label(row), row.id))); if (rows.some(row => row.id === selected)) select.value = selected; }
+function renderCurrentUser() {
+  const who = $('who'), role = me.role === 'super_admin' ? '超级管理员' : '项目管理员';
+  who.replaceChildren();
+  if (!me.github) { who.textContent = `${me.username} · ${role}`; return; }
+  const avatar = document.createElement('img'); avatar.src = me.github.avatar_url;
+  avatar.alt = `${me.github.login} 的 GitHub 头像`; avatar.width = 28; avatar.height = 28; avatar.referrerPolicy = 'no-referrer';
+  avatar.addEventListener('error', () => avatar.remove());
+  const copy = element('span', '', 'current-user-copy'), name = element('span', '@' + me.github.login, 'current-user-name');
+  name.title = me.github.login; copy.append(name, element('span', role, 'current-user-role')); who.append(avatar, copy);
+}
 async function start() {
   setup = !(await api('/api/setup')).initialized;
   try { me = await api('/api/auth/me'); } catch { me = null; }
@@ -62,7 +72,7 @@ async function start() {
   const authError = new URLSearchParams(location.search).get('auth_error');
   if (authError) notice('message', identityError(authError));
   if (!me) return;
-  $('who').textContent = `${me.username} · ${me.role === 'super_admin' ? '超级管理员' : '项目管理员'}`;
+  renderCurrentUser();
   document.querySelectorAll('[data-super]').forEach(el => el.hidden = me.role !== 'super_admin');
   repositories = (await api('/api/repositories')).repositories;
   if (me.role === 'super_admin') accounts = (await api('/api/accounts')).accounts;
