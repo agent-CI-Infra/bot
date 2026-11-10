@@ -4,9 +4,11 @@ name: Release
 # images.yml published for that commit also get the tag as their version, so a release runs exactly the images the
 # merge queue checked. Then a GitHub release is created and the version is deployed to the server of the production
 # environment; until that environment names a server, deployment is skipped with a notice.
+# A manual run only checks SSH connectivity; it never publishes or deploys a version.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,6 +26,7 @@ env:
 jobs:
   release:
     name: release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       actions: read     # find the Images run of the tagged commit
@@ -98,6 +101,8 @@ jobs:
   deploy:
     name: deploy
     needs: release
+    # A manual check must run even though the release job was deliberately skipped.
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release.result == 'success') }}
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -105,9 +110,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Server settings live in the production environment: variables DEPLOY_HOST, DEPLOY_PORT (default 22),
-      # DEPLOY_USER, DEPLOY_PATH and DEPLOY_KNOWN_HOSTS, and the secret DEPLOY_SSH_KEY.
-      - name: Deploy
+      # The optional jump host uses the same deployment key, but has its own pinned host keys.
+      - name: Configure SSH
+        id: ssh
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
@@ -115,13 +120,25 @@ jobs:
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_JUMP_HOST: ${{ vars.DEPLOY_JUMP_HOST }}
+          DEPLOY_JUMP_PORT: ${{ vars.DEPLOY_JUMP_PORT || '22' }}
+          DEPLOY_JUMP_USER: ${{ vars.DEPLOY_JUMP_USER }}
+          DEPLOY_JUMP_KNOWN_HOSTS: ${{ vars.DEPLOY_JUMP_KNOWN_HOSTS }}
+          CHECK_ONLY: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           if [ -z "$DEPLOY_HOST" ]; then
+            if [ "$CHECK_ONLY" = true ]; then
+              echo "::error title=SSH settings incomplete::DEPLOY_HOST is not set in the production environment."
+              exit 1
+            fi
             echo "::notice title=Deployment skipped::DEPLOY_HOST is not set in the production environment; $TAG was released but not deployed."
             exit 0
           fi
           missing=
           for name in DEPLOY_USER DEPLOY_PATH DEPLOY_KNOWN_HOSTS DEPLOY_SSH_KEY; do [ -n "${!name}" ] || missing+=" $name"; done
+          if [ -n "$DEPLOY_JUMP_HOST" ]; then
+            for name in DEPLOY_JUMP_USER DEPLOY_JUMP_KNOWN_HOSTS; do [ -n "${!name}" ] || missing+=" $name"; done
+          fi
           if [ -n "$missing" ]; then
             echo "::error title=Deployment settings incomplete::Missing in the production environment:$missing"
             exit 1
@@ -131,8 +148,55 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           # Only the recorded host keys are trusted; an unknown or changed key stops the deployment.
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          remote() { ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "$@"; }
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" "$DEPLOY_JUMP_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          proxy_jump=
+          if [ -n "$DEPLOY_JUMP_HOST" ]; then
+            cat > ~/.ssh/config <<SSHCONFIG
+          Host deploy-jump
+            HostName $DEPLOY_JUMP_HOST
+            Port $DEPLOY_JUMP_PORT
+            User $DEPLOY_JUMP_USER
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ConnectTimeout 15
+          SSHCONFIG
+            proxy_jump='ProxyJump deploy-jump'
+          else
+            : > ~/.ssh/config
+          fi
+          cat >> ~/.ssh/config <<SSHCONFIG
+          Host deploy-target
+            HostName $DEPLOY_HOST
+            Port $DEPLOY_PORT
+            User $DEPLOY_USER
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ConnectTimeout 15
+            $proxy_jump
+          SSHCONFIG
+          chmod 600 ~/.ssh/config ~/.ssh/known_hosts
+          echo 'configured=true' >> "$GITHUB_OUTPUT"
+
+      - name: Check SSH connection
+        if: steps.ssh.outputs.configured == 'true'
+        timeout-minutes: 2
+        run: |
+          ssh deploy-target 'printf "SSH connection succeeded\n"; id'
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo 'SSH check passed. No release or deployment was performed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Keep all server writes behind the tag-push condition, independently of the SSH check.
+      - name: Deploy
+        if: github.event_name == 'push' && steps.ssh.outputs.configured == 'true'
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          remote() { ssh deploy-target "$@"; }
           dir=$(printf %q "$DEPLOY_PATH")
 
           # The compose.yaml of the release replaces the server's; local changes belong in .env or compose.override.yaml.
