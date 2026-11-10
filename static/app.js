@@ -29,6 +29,11 @@ function retryErrorText(err) {
 }
 function error(err) { if (!$('message').childElementCount) notice('message', err.message); if ($('editor').open) $('editor-error').textContent = err.message; }
 function element(tag, text, className) { const el = document.createElement(tag); el.textContent = text; if (className) el.className = className; return el; }
+// Navigation links are also used by ordinary lists, so keep their DOM helper in the shared base layer.
+function consoleLink(href, caption, hint = '') {
+  const a = element('a', '', 'console-link'); a.href = href;
+  a.append(element('span', caption)); if (hint) a.append(element('small', hint)); return a;
+}
 const states = {
   accepted:['已接收','success'], invalid_signature:['签名无效','danger'], invalid_payload:['正文无效','danger'], payload_too_large:['正文过大','danger'],
   unknown_endpoint:['入口不存在','danger'], missing_event_or_delivery:['投递信息不全','danger'],
