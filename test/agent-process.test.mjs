@@ -464,6 +464,20 @@ test('a PR that GitHub answered with 500 pauses for confirmation, and 重试 ope
   } finally { await post('/fixture/ref', { repository_id: 101, branch: 'trunk', sha: moved.previous }); }
 });
 
+// Pointing the bot's own branch at a commit is checked and sent again after an unknown answer: GitHub either has the ref at
+// that commit (the lost answer had landed) or not (it is sent), so nothing waits for a person to press 重试.
+for (const [fault, writes] of [['ref_server_errors', ['POST', 'POST']], ['ref_lost_responses', ['POST']]]) test(`a branch push answered with 500 (${fault}) resumes on its own and opens one PR`, async t => {
+  const d = await developmentHarness(t, { faults: { [fault]: 1 } }), id = d.task.id, store = d.h.store;
+  assert.deepEqual([d.task.status, d.task.error_code, d.task.phase], ['retry_wait', 'github_response_unknown', 'publish']);
+  store.run('UPDATE tasks SET next_run_at=0 WHERE id=?', id); d.engine.tick(); await Promise.all(d.engine.active.values());
+  const task = store.get('SELECT * FROM tasks WHERE id=?', id), faults = store.all('SELECT content FROM task_logs WHERE task_id=?', id).map(r => JSON.parse(r.content)).filter(l => l.type === 'fault');
+  assert.equal(task.status, 'pr_opened', JSON.stringify(faults));
+  assert.deepEqual(faults.map(f => f.code), ['github_response_unknown'], 'never paused as github_publication_unknown');
+  const branch = JSON.parse(task.result).branch, state = await fetch(d.endpoint + '/fixture/state').then(r => r.json());
+  assert.deepEqual(state.refWrites.filter(w => w.branch === branch).map(w => w.method), writes);
+  assert.equal(state.repositories.find(r => r.id === 101).createdPrs.filter(p => p.head.ref === branch).length, 1);
+});
+
 test('policy-generated untracked files and tracked edits stay outside the published snapshot', async t => {
   const policy = `node -e "const fs=require('node:fs');fs.mkdirSync('__pycache__');fs.writeFileSync('__pycache__/test.pyc','generated');fs.writeFileSync('calc.mjs','changed by policy');console.log('OK')"`;
   const d = await developmentHarness(t, { policy });

@@ -23,7 +23,8 @@ function makeRepo(id){
   return repo;
 }
 for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
-let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0;
+// refFailures answers 500 without writing; refLostResponses writes the ref and still answers 500 (the answer is lost).
+let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0,refFailures=0,refLostResponses=0;
 const stats={requests:[],models,dispatches:[],acceptances:[],refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[],issues:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
 function dispatch(context){
@@ -91,7 +92,7 @@ export const server=createServer(async(req,res)=>{
   const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
   try{
     if(url.pathname==='/fixture/config'&&method==='POST'){config={...config,...body};return send({ok:true});}
-    if(url.pathname==='/fixture/faults'&&method==='POST'){treeMismatch=!!body.tree_mismatch;pullFailures=Number(body.pull_request_server_errors||0);return send({ok:true});}
+    if(url.pathname==='/fixture/faults'&&method==='POST'){treeMismatch=!!body.tree_mismatch;pullFailures=Number(body.pull_request_server_errors||0);refFailures=Number(body.ref_server_errors||0);refLostResponses=Number(body.ref_lost_responses||0);return send({ok:true});}
     // Move a branch: to a given commit, or one empty upstream commit ahead of where it is.
     if(url.pathname==='/fixture/ref'&&method==='POST'){
       const repo=repositories.get(String(body.repository_id)),current=repo.refs[body.branch];
@@ -160,9 +161,11 @@ export const server=createServer(async(req,res)=>{
     if(suffix==='/git/refs'||suffix.startsWith('/git/refs/heads/')){
       const branch=body.ref?body.ref.slice(11):suffix.slice('/git/refs/heads/'.length);stats.refWrites.push({repository_id:repo.id,branch,method,...body});
       if(!branch.startsWith('bot/issue-')||body.force===true)return send({},403);
+      if(refFailures>0){refFailures--;return send({message:'Server Error'},500);}
       if(method==='POST'&&repo.refs[branch])return send({},422);
       if(method==='PATCH'&&!commits.get(body.sha).parents.some(p=>p.sha===repo.refs[branch]))return send({},422);
       repo.refs[branch]=body.sha;for(const pr of repo.pulls.values())if(pr.head.ref===branch)pr.head.sha=body.sha;
+      if(refLostResponses>0){refLostResponses--;return send({message:'Server Error'},500);}
       return send({ref:'refs/heads/'+branch,object:{sha:body.sha}},201);
     }
     if((m=/^\/git\/commits\/(.+)$/.exec(suffix)))return send(commits.get(m[1])||{},commits.has(m[1])?200:404);
