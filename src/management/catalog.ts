@@ -36,7 +36,11 @@ export function validate(schema: Json, value: any): void {
       if(!value||typeof value!=='object'||Array.isArray(value))fail(400,'invalid_management_arguments');
       const properties=(schema.properties??{}) as Json;
       if((schema.required as string[]??[]).some(k=>!Object.hasOwn(value,k)))fail(400,'invalid_management_arguments');
-      for(const [key,v] of Object.entries(value)){if(['__proto__','constructor','prototype'].includes(key))fail(400,'unexpected_management_field');if(Object.hasOwn(properties,key))validate(properties[key] as Json,v);else if(schema.additionalProperties===false)fail(400,'unexpected_management_field');}
+      // `__proto__` is never a legitimate key. A closed schema also refuses `constructor`/`prototype`, but an open map
+      // (additionalProperties !== false, such as the role-id keyed `role_concurrency`) may legally be keyed by either:
+      // they are ordinary role names, and refusing them would make such a role impossible to configure.
+      const open=schema.additionalProperties!==false;
+      for(const [key,v] of Object.entries(value)){if(key==='__proto__'||!open&&['constructor','prototype'].includes(key))fail(400,'unexpected_management_field');if(Object.hasOwn(properties,key))validate(properties[key] as Json,v);else if(!open)fail(400,'unexpected_management_field');}
       break;
     }
     case 'string': if(typeof value!=='string'||value.includes('\0')||value.length<Number(schema.minLength??0)||value.length>Number(schema.maxLength??Number.MAX_SAFE_INTEGER))fail(400,'invalid_management_arguments');break;
