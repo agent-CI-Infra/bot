@@ -23,7 +23,7 @@ createInterface({input:process.stdin}).on('line',async line=>{const m=JSON.parse
   send({method:'session/update',params:{sessionId,update:{sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'PRIVATE_FIXTURE_REASONING'}}}});
   send({method:'session/update',params:{sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'fixture public output '+(process.env.FIXTURE_TOKEN??'')}}}});
   send({method:'session/update',params:{sessionId,update:{sessionUpdate:'tool_call',toolCallId:'fixture-call',title:'Fixture observation',status:'in_progress',kind:'read',rawInput:{path:'fixture'}}}});
-  if(process.env.FIXTURE_NO_SUBMIT!=='true')await rpc('tools/call',{name:'finish',arguments:{summary:'actual fixture result'}});
+  if(process.env.FIXTURE_NO_SUBMIT!=='true')await rpc('tools/call',{name:'finish',arguments:process.env.FIXTURE_CONVERSATION==='true'?{message:'A source-bound response'}:{summary:'actual fixture result'}});
   reply({stopReason:'end_turn'});
  }else if(m.method==='session/cancel'&&prompt)send({id:prompt.id,result:{stopReason:'cancelled'}});
  else if(m.id!==undefined)reply({});

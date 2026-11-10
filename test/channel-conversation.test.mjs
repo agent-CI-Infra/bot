@@ -165,6 +165,12 @@ test('clearing the originating message prevents a later task result from repopul
   f.h.store.run("UPDATE tasks SET status='completed',result=? WHERE id=?",JSON.stringify({summary:'Erased historical source should not reappear'}),origin.task_id);
   await f.service.tick();await f.service.tick();assert.equal(f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE idempotency_key LIKE 'task-result:%'").n,0);
   assert.ok(!JSON.stringify(f.wire.sent).includes('Erased historical source should not reappear'));
+  f.modelState.respond=async(body,res)=>{
+    assert.ok(!JSON.stringify(body.messages).includes('A later report'));
+    const observed=body.messages.find(m=>m.role==='tool');if(!observed)return respond(res,'read_managed_task',{task_id:origin.task_id});
+    assert.equal(JSON.parse(observed.content).task.source_unavailable,true);return respond(res,'finish',{message:'Only current sources are available.'});
+  };
+  assert.equal((await complete(f,await post(f.h,f.id,inGroup('Read the old task after cleanup','ou_alice')))).state,'completed');
 });
 
 test('derived replies and protected task facts are absent from future model inputs after their source fence changes',async t=>{

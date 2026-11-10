@@ -186,7 +186,7 @@ export class ChannelLedger {
           this.store.run('UPDATE channel_inbox SET payload=? WHERE id=?', this.store.secrets.seal({ ...event, content: '', raw_content: '' }, 'channel-event:' + row.id), row.id);
       }
       if(this.store.hasTable('role_conversation_turns')){
-        this.store.run("UPDATE role_conversation_turns SET reply=NULL,state=CASE WHEN state='running' THEN 'interrupted' ELSE state END,error=CASE WHEN state='running' THEN 'conversation_history_cleaned' ELSE error END WHERE conversation_id=?",id);
+        this.store.run("UPDATE role_conversation_turns SET reply=NULL,updated_at=CASE WHEN state='running' THEN ? ELSE updated_at END,state=CASE WHEN state='running' THEN 'interrupted' ELSE state END,error=CASE WHEN state='running' THEN 'conversation_history_cleaned' ELSE error END WHERE conversation_id=?",Date.now(),id);
         this.store.run('DELETE FROM role_conversation_events WHERE turn_id IN (SELECT id FROM role_conversation_turns WHERE conversation_id=?)',id);
         this.store.run('DELETE FROM role_conversation_operations WHERE turn_id IN (SELECT id FROM role_conversation_turns WHERE conversation_id=?)',id);
         this.store.run('UPDATE model_requests SET request_snapshot=NULL,response_snapshot=NULL WHERE conversation_id=?',id);

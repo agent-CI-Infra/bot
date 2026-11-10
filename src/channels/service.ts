@@ -71,11 +71,12 @@ export class ChannelService {
     const turns=projects.length?this.store.all(`SELECT id,source_message,project_id,role_id,state,reply,error,created_at,updated_at,fence FROM role_conversation_turns
       WHERE conversation_id=? AND project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`,id,...projects,offset):[];
     const requests=projects.length?this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
+      sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,sum(CASE WHEN accounting_source='acp_prompt' THEN 1 ELSE 0 END) provider_request_count_unknown,
       sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks})`,id,...projects):null;
     const costs=projects.length?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`,id,...projects):[];
     return {conversation_id:id,current_project:this.store.get('SELECT project_id FROM role_conversations WHERE id=?',id)?.project_id??null,
       turns:turns.slice(0,50).map(t=>({...t,fence:undefined,reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'conversation-reply:'+t.id).message:null,
-        stale_source:t.fence!==fence})),has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,usage:{...requests,costs,semantics:requests?.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(id)};
+        stale_source:t.fence!==fence})),has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,usage:{...requests,costs,semantics:requests?.usage_missing_requests?'lower_bound':requests?.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(id)};
   }
   connector(id: string): Row {
     const c = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', id);

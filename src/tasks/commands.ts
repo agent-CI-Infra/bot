@@ -1,18 +1,23 @@
 import {relateTasks} from './followups.js';
 import {setTaskPriority} from './priority.js';
-import type { Store } from '../storage/database.js';
-import { randomId, fields, fail, digest, object, type Json } from '../core/security.js';
+import type { Store, Row } from '../storage/database.js';
+import { randomId, fields, fail, digest, object, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
 import { TaskRecords } from './service.js';
 import { traceEvent } from './trace.js';
 import { captureTaskConfiguration } from './configuration.js';
 import { stageReplanContext } from '../roles/schedule.js';
-import { assertManagedTask, assertTaskCaller, createManagedTask, operatorTaskCaller, taskCallerActor, type TaskCaller } from './management.js';
+import { assertManagedTask, assertManagedExecution, assertTaskCaller, createManagedTask, operatorTaskCaller, taskCallerActor, type TaskCaller } from './management.js';
+import { TaskError } from '../agent/common.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 /** Shared task mutation boundary for the console, management tools and future message adapters. */
 export class TaskCommands {
   constructor(readonly store:Store, readonly hooks:{active?:(id:string)=>boolean;tick?:()=>void}={}){}
+  private sourceVisible(task:Row):boolean{
+    try{assertManagedExecution(this.store,task);return true;}
+    catch(error){if(error instanceof HttpError||error instanceof TaskError)return false;throw error;}
+  }
   /** The role caller is an issued object supplied only by trusted runtime/transport code, never an HTTP field. */
   api(user:Actor,method:string,url:URL,input:Json,caller?:TaskCaller):Json|undefined {
     const target = /^\/api\/tasks\/([^/]+)\//.exec(url.pathname);
@@ -155,10 +160,12 @@ export class TaskCommands {
       fields(args,['offset','limit']);const offset=args.offset??0,limit=args.limit??20;
       if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>100)fail(400,'invalid_pagination');
       const rows=this.store.all('SELECT t.id,t.repository_id,t.kind,t.status,t.summary,t.updated_at,o.executor_role,o.conversation_id FROM tasks t JOIN task_origins o ON o.task_id=t.id WHERE o.project_id=? AND o.owner_key=? ORDER BY t.created_at DESC,t.id LIMIT ? OFFSET ?',caller.project_id,caller.owner_key,limit+1,offset);
-      return {tasks:rows.slice(0,limit),has_more:rows.length>limit,next_offset:rows.length>limit?offset+limit:null};
+      return {tasks:rows.slice(0,limit).map(row=>this.sourceVisible(this.store.get('SELECT * FROM tasks WHERE id=?',row.id)!)?row:
+        {...row,summary:'[原来源已变化，旧任务内容不提供给模型]',source_unavailable:true}),has_more:rows.length>limit,next_offset:rows.length>limit?offset+limit:null};
     }
     if(name==='read_managed_task'){
-      fields(args,['task_id']);assertManagedTask(this.store,caller,String(args.task_id));return {task:new TaskRecords(this.store).get(String(args.task_id)),origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',String(args.task_id))??null};
+      fields(args,['task_id']);const id=String(args.task_id);assertManagedTask(this.store,caller,id);const task=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
+      return {task:this.sourceVisible(task)?new TaskRecords(this.store).get(id):{id,repository_id:task.repository_id,status:task.status,source_unavailable:true},origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
     }
     if(name==='create_task'){
       fields(args,['request','criteria','executor_role','execute']);

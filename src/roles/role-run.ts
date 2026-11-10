@@ -187,8 +187,9 @@ export function runBudget(snapshot: RoleSnapshot): Budget {
 }
 export function buildRunContext(s: Store, input: { task: Row; scope: string; run_id: string; lease_epoch: number; resume_from_run_id?: string; instance: Row; role: string; snapshot: RoleSnapshot; snapshot_id: string; candidate: CandidateRef | null }): RunContext {
   const { task, snapshot } = input;
-  const ctx: RunContext = { protocol: roleRunProtocol.id, task_id: String(task.id), assignment_id: input.scope, run_id: input.run_id, tenant_id: tenantOf(s, String(task.repository_id)), project_id: String(task.repository_id),
-    principal_ref: principalOf(s, task), source_ref: sourceRef(s, task), candidate_ref: input.candidate, configuration_snapshot_ref: 'role_snapshots:' + input.snapshot_id, lease_epoch: input.lease_epoch,
+  const conversation=task.kind==='role.conversation'&&!!task.conversation_id;
+  const ctx: RunContext = { protocol: roleRunProtocol.id, task_id:conversation?null:String(task.id),...(conversation?{conversation_id:String(task.conversation_id)}:{}),assignment_id: input.scope, run_id: input.run_id, tenant_id: tenantOf(s, String(task.repository_id)), project_id: String(task.repository_id),
+    principal_ref:conversation?'principal:'+task.principal_id:principalOf(s, task),source_ref:conversation?'conversation_message:'+task.source_message:sourceRef(s, task), candidate_ref: input.candidate, configuration_snapshot_ref: 'role_snapshots:' + input.snapshot_id, lease_epoch: input.lease_epoch,
     ...(input.resume_from_run_id ? { resume_from_run_id: input.resume_from_run_id } : {}), contract_revision: Number(s.get('SELECT revision FROM task_records WHERE task_id=?', task.id)?.revision ?? 0),
     policy_revision: `${snapshot.capability.id}@${snapshot.capability.version}`, role_revision: `${input.role}@${snapshot.role_revision}:config:${snapshot.config_revision}`, harness_revision: `${snapshot.harness.id}@${snapshot.harness.version}`,
     skill_revisions: snapshot.skills ? [`${snapshot.skills.id}@${snapshot.skills.revision}:${snapshot.skills.content_hash}`] : [], model_revision: modelRevision(snapshot), budget: runBudget(snapshot),
@@ -204,12 +205,31 @@ export function buildRunContext(s: Store, input: { task: Row; scope: string; run
  */
 export function scopeUsage(s: Store, scope: string, at = Date.now()) { return usageOf(s, 'lease_scope', scope, at); }
 /** Usage of every run of one role instance (the role within its task): what a cumulative budget counts. */
-export function instanceUsage(s: Store, instanceId: string, at = Date.now()) { return usageOf(s, 'role_instance_id', instanceId, at); }
+export function instanceUsage(s: Store, instanceId: string, at = Date.now()) {
+  const instance=s.get('SELECT * FROM role_instances WHERE id=?',instanceId);
+  return instance?.conversation_id?conversationUsage(s,instance,undefined,at):usageOf(s, 'role_instance_id', instanceId, at);
+}
+/** The same cumulative role budget, including non-task turns; clearing private transcripts keeps usage counters. */
+export function conversationUsage(s:Store,instance:Row,sourceMessage?:string,at=Date.now()){
+  const args=[instance.conversation_id,instance.project_id,instance.role,...(sourceMessage?[sourceMessage]:[])],
+    modelWhere='task_id IS NULL AND conversation_id=? AND repository_id=? AND role_id=?'+(sourceMessage?' AND source_message=?':''),
+    turnWhere='conversation_id=? AND project_id=? AND role_id=?'+(sourceMessage?' AND source_message=?':'');
+  const m=s.get(`SELECT count(*) n,coalesce(sum(input_tokens),0) i,coalesce(sum(output_tokens),0) o,
+    sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) unknown,sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced FROM model_requests WHERE ${modelWhere}`,...args)!;
+  const t=s.get(`SELECT count(*) n,coalesce(sum(tool_calls),0) tools,coalesce(min(usage_complete),1) complete,
+    coalesce(sum(max(0,CASE WHEN state='running' THEN ? ELSE updated_at END-created_at)),0) wall FROM role_conversation_turns WHERE ${turnWhere}`,at,...args)!;
+  const cost=s.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE ${modelWhere} AND cost IS NOT NULL GROUP BY currency`,...args).map(r=>({currency:String(r.currency),amount:Number(r.amount)}));
+  return {runs:Number(t.n),model_requests:Number(m.n),input_tokens:Number(m.i),output_tokens:Number(m.o),total_tokens:Number(m.i)+Number(m.o),
+    unknown_requests:Number(m.unknown??0),tool_calls:Number(t.tools),wall_ms:Number(t.wall),cost,unpriced_requests:Number(m.unpriced??0),
+    tool_usage_complete:!!t.complete,semantics:m.unknown||!t.complete?'lower_bound' as const:'exact' as const};
+}
 function usageOf(s: Store, column: 'lease_scope' | 'role_instance_id', value: string, at: number) {
   const runs = s.all(`SELECT id,started_at,ended_at FROM task_runs WHERE ${column}=?`, value), ids = runs.map(r => String(r.id));
   if (!ids.length) return { runs: 0, model_requests: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, unknown_requests: 0, tool_calls: 0, wall_ms: 0, cost: [] as { currency: string; amount: number }[], unpriced_requests: 0, semantics: 'exact' as 'exact' | 'lower_bound' };
   const marks = ids.map(() => '?').join(',');
-  const m = s.get(`SELECT count(*) n,coalesce(sum(input_tokens),0) i,coalesce(sum(output_tokens),0) o,sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) unknown,sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced FROM model_requests WHERE run_id IN (${marks})`, ...ids)!;
+  // Provider/Codex receipt rows also feed the common invoice ledger. Their original run events below remain the
+  // budget authority, including legacy/recovered events without a projected row; never count both copies.
+  const m = s.get(`SELECT count(*) n,coalesce(sum(input_tokens),0) i,coalesce(sum(output_tokens),0) o,sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) unknown,sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced FROM model_requests WHERE run_id IN (${marks}) AND accounting_source NOT IN ('provider_requests','codex_events')`, ...ids)!;
   const costs = s.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE run_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`, ...ids).map(r => ({ currency: String(r.currency), amount: Number(r.amount) }));
   const tools = Number(s.get(`SELECT count(*) n FROM task_history WHERE run_id IN (${marks}) AND type='tool_observation'`, ...ids)!.n);
   // An external agent with its own model (Codex) reports usage per model response as thread-total deltas; each report is one

@@ -26,7 +26,7 @@ export interface Budget {
 /** The backend's input view of a run. Every field is a reference or a version; secrets never appear here. */
 export interface RunContext {
   protocol: typeof roleRunProtocol.id;
-  task_id: string; assignment_id: string; run_id: string; tenant_id: string; project_id: string;
+  task_id: string | null; conversation_id?:string; assignment_id: string; run_id: string; tenant_id: string; project_id: string;
   principal_ref: string; source_ref: string; candidate_ref: CandidateRef | null; configuration_snapshot_ref: string;
   lease_epoch: number; resume_from_run_id?: string; contract_revision: number;
   stage_policy_hash?:string;
@@ -90,7 +90,7 @@ export function validateCandidateRef(value: any, field = 'candidate_ref'): Candi
   if (value.kind === 'no_changes') { ref(value.source_ref, field + '.source_ref'); if (!hex(64).test(value.record_hash ?? '')) invalid(field + '.record_hash'); }
   return value as CandidateRef;
 }
-const contextKeys = ['protocol', 'task_id', 'assignment_id', 'run_id', 'tenant_id', 'project_id', 'principal_ref', 'source_ref', 'candidate_ref', 'configuration_snapshot_ref', 'lease_epoch', 'resume_from_run_id', 'contract_revision', 'policy_revision', 'role_revision', 'harness_revision', 'skill_revisions', 'model_revision', 'budget', 'execution_context','stage','stage_policy_hash'];
+const contextKeys = ['protocol', 'task_id', 'conversation_id', 'assignment_id', 'run_id', 'tenant_id', 'project_id', 'principal_ref', 'source_ref', 'candidate_ref', 'configuration_snapshot_ref', 'lease_epoch', 'resume_from_run_id', 'contract_revision', 'policy_revision', 'role_revision', 'harness_revision', 'skill_revisions', 'model_revision', 'budget', 'execution_context','stage','stage_policy_hash'];
 const budgetKeys = ['policy_ref', 'accounting', 'max_turns', 'max_output_tokens', 'max_total_tokens', 'max_model_requests', 'max_tool_calls', 'max_wall_ms', 'max_concurrency', 'max_cost'];
 export function validateBudget(value: any, field = 'budget'): Budget {
   if (!value || typeof value !== 'object' || Object.keys(value).some(k => !budgetKeys.includes(k)) || budgetKeys.some(k => !Object.hasOwn(value, k))) return invalid(field);
@@ -105,7 +105,9 @@ export function validateRunContext(value: any): RunContext {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid('run_context');
   const unknown = Object.keys(value).find(k => !contextKeys.includes(k)); if (unknown) invalid(unknown);
   if (value.protocol !== roleRunProtocol.id) invalid('protocol');
-  for (const key of ['task_id', 'assignment_id', 'run_id', 'tenant_id', 'project_id']) if (typeof value[key] !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value[key])) invalid(key);
+  const conversation=value.task_id===null;
+  if(conversation&&(typeof value.conversation_id!=='string'||!/^[A-Za-z0-9_.:-]{1,128}$/.test(value.conversation_id)||value.candidate_ref!==null||value.stage!==undefined||value.stage_policy_hash!==undefined)||!conversation&&value.conversation_id!==undefined)invalid('conversation_scope');
+  for (const key of [...(conversation?[]:['task_id']), 'assignment_id', 'run_id', 'tenant_id', 'project_id']) if (typeof value[key] !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(value[key])) invalid(key);
   ref(value.principal_ref, 'principal_ref'); ref(value.source_ref, 'source_ref'); ref(value.configuration_snapshot_ref, 'configuration_snapshot_ref');
   if (value.candidate_ref !== null) validateCandidateRef(value.candidate_ref);
   if (!Number.isSafeInteger(value.lease_epoch) || value.lease_epoch < 1) invalid('lease_epoch');

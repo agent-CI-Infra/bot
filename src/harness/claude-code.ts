@@ -69,7 +69,7 @@ export async function prepareClaudeCode<T>(spec: AgentSpec<T>) {
     return prepared;
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
-const scope = (ctx: RunContext) => ({ tenant_id: ctx.tenant_id, project_id: ctx.project_id, task_id: ctx.task_id, instance_id: ctx.execution_context?.role_instance_id, role: ctx.execution_context?.role, assignment_id: ctx.assignment_id });
+const scope = (ctx: RunContext) => ({ tenant_id: ctx.tenant_id, project_id: ctx.project_id, task_id: ctx.task_id,...(ctx.conversation_id?{conversation_id:ctx.conversation_id}:{}),instance_id: ctx.execution_context?.role_instance_id, role: ctx.execution_context?.role, assignment_id: ctx.assignment_id });
 const identity = (value: any) => value && Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'assignment_id'));
 const inputs = (ctx: RunContext) => contentHash({ source: ctx.source_ref, contract: ctx.contract_revision, candidate: ctx.candidate_ref, role: ctx.role_revision, policy: ctx.policy_revision, skills: ctx.skill_revisions, model: ctx.model_revision });
 function transcriptExists(home: string, sid: string) {
@@ -108,7 +108,7 @@ async function runAtGateway<T>(spec: AgentSpec<T>, bridge: ClaudeBridge<T>, sign
   if (ctx.budget.max_cost) return fail('claude_cost_budget_unsupported');
   const token = spec.runAccess.token; spec.redactor.add(token);
   await checkGateway(config, token, signal);
-  const previous = spec.harnessState?.value ?? {}, fresh = ['observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '') || spec.roleRun?.recovery_mode === 'rebuilt_from_task_records';
+  const previous = spec.harnessState?.value ?? {}, fresh = !!ctx.conversation_id || ['observer', 'evaluator'].includes(ctx.execution_context?.kind ?? '') || spec.roleRun?.recovery_mode === 'rebuilt_from_task_records';
   if (!fresh && previous.sessionId && previous.scope && contentHash(identity(previous.scope)) !== contentHash(identity(scope(ctx)))) return fail('claude_session_scope_mismatch');
   const inputHash = inputs(ctx), root = join(config.stateDirectory, contentHash(scope(ctx))), compatible = !fresh && previous.sessionId && contentHash(previous.scope) === contentHash(scope(ctx)) && previous.configurationHash === prepared.configurationHash && previous.inputHash === inputHash;
   privateDirectory(root);

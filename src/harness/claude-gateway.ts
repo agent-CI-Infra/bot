@@ -10,7 +10,7 @@ import { TaskError } from '../agent/common.js';
 export interface ClaudeProvider { baseUrl: string; credentialFile: string }
 interface RequestUsage {
   ref: string; providerId: string | null; started: string; input: number | null; output: number | null;
-  complete: boolean; finalOutput: boolean; reason: string;
+  complete: boolean; finalOutput: boolean; reason: string;ended?:boolean;model?:string;status?:number;
 }
 /** Decode only usage from the upstream wire; text, tool arguments and private thinking never enter the ledger. */
 class ProviderUsageStream {
@@ -53,7 +53,9 @@ export async function claudeModelGateway<T>(spec: AgentSpec<T>, provider: Claude
     semantics: requests.some(r => !r.complete) ? 'lower_bound' : 'exact', cost: 'unknown', accounting_source: 'provider_requests',
     unresolved_requests: requests.filter(r => !r.complete).map(r => ({ request_ref: r.ref, provider_request_id: r.providerId, started_at: r.started, reason: r.reason })),
     reconciliation: 'Match request_ref / provider_request_id and started_at to provider records; retain unknown if no final usage is available. Retryable errors may retry within known cumulative limits.' });
-  const publish = () => spec.onExternalUsage?.(usage());
+  const record=(r:RequestUsage)=>spec.onExternalRequest?.({key:ctx.run_id+':'+r.ref,source:'provider_requests',model:r.model??'external',started_at:r.started,
+    input_tokens:r.input,output_tokens:r.output,finished:!!r.ended,http_status:r.status??null});
+  const publish = () => {for(const r of requests)record(r);spec.onExternalUsage?.(usage());};
   const count = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
   const offered = new Set((spec.tools ?? []).map(t => 'mcp__bot__' + t.function.name)); offered.add('EndConversation');
   const server = createServer(async (req, res) => {
@@ -77,21 +79,24 @@ export async function claudeModelGateway<T>(spec: AgentSpec<T>, provider: Claude
           body.tool_choice?.type === 'tool' && !offered.has(body.tool_choice.name)) return deny(403, 'model_or_tools_not_allowed');
       }
       spec.runAccess?.check(req.headers['x-api-key']); await spec.guard();
+      if(messages)await spec.beforeModel?.();
       const headers: Record<string, string> = { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' };
       const requestId = messages ? randomUUID() : null;
       if (requestId) headers['x-client-request-id'] = requestId;
       if (typeof req.headers['anthropic-beta'] === 'string' && req.headers['anthropic-beta'].length < 4096) headers['anthropic-beta'] = req.headers['anthropic-beta'];
       arm(timing.firstByteMs);
+      if(messages){receipt={ref:'provider_request:'+requestId,providerId:null,started:new Date().toISOString(),input:null,output:null,complete:false,finalOutput:false,reason:'awaiting_provider_usage',model:body.model};requests.push(receipt);record(receipt);}
       const pending = fetch(provider.baseUrl.replace(/\/$/, '') + (models ? '/v1/models?limit=1000' : '/v1/messages'), {
         method: models ? 'GET' : 'POST', headers, ...(messages ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal: AbortSignal.any([transportSignal, requestAbort.signal])
       });
       // A budget callback may interrupt before awaiting headers; observe and abort that transport in finally too.
       void pending.catch(() => {});
       // Nothing is unknown merely because a CLI process started. Only an initiated provider request can incur use.
-      if (messages) { receipt = { ref: 'provider_request:' + requestId, providerId: null, started: new Date().toISOString(), input: null, output: null, complete: false, finalOutput: false, reason: 'awaiting_provider_usage' }; requests.push(receipt); publish(); }
+      if(messages)publish();
       const upstream = await pending;
       arm(timing.idleMs);
       if (receipt) {
+        receipt.status=upstream.status;
         const id = upstream.headers.get('request-id'); if (id && /^[\w.-]{1,160}$/.test(id)) receipt.providerId = id;
         // A completed client/rate-limit rejection did not generate a model response. It is not an unresolved bill.
         if (upstream.status >= 400 && upstream.status < 500) { receipt.input = receipt.output = 0; receipt.complete = true; receipt.reason = 'provider_rejected_request'; }
@@ -125,7 +130,7 @@ export async function claudeModelGateway<T>(spec: AgentSpec<T>, provider: Claude
     } finally {
       if (timeout) clearTimeout(timeout); requestAbort.abort();
       // Also persists transport failures before any assistant message. Preserve measured lower bounds, never zero them.
-      if (receipt) { try { publish(); } catch {} }
+      if (receipt) { receipt.ended=true;try { publish(); } catch {} }
       handlers.delete(handler); if (!handlers.size) drained?.();
     }
   });

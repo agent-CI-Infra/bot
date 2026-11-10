@@ -150,7 +150,8 @@ async function channelConversation(id, target) {
     try {
       if (!more) { offset = 0; turns.replaceChildren(); }
       const result = await api('/api/channels/chats/' + id + '/conversation?offset=' + offset); offset = result.next_offset;
-      summary.replaceChildren(facts([['会话', result.conversation_id], ['当前项目', result.current_project || '尚未选择'], ['模型请求', String(result.usage.requests || 0)],
+      summary.replaceChildren(facts([['会话', result.conversation_id], ['当前项目', result.current_project || '尚未选择'], ['模型请求记录', String(result.usage.requests || 0)], ['用量未完整核验', String(result.usage.usage_missing_requests || 0)],
+        ['后端未报告实际请求次数的回合', String(result.usage.provider_request_count_unknown || 0)],
         ['已记录费用', result.usage.costs.map(c => c.currency + ' ' + c.amount).join('、') || '尚无已定价费用'], ['未知费用请求', String(result.usage.unpriced_requests || 0)]]));
       status.textContent = '本地同步：' + channelSyncText(result.sync_state) + '。未核验／缺口：' + result.gaps.map(g => channelGapText(g.reason)).join('、') + '。费用只汇总同一模型请求账本，未知金额不按零处理。';
       for (const turn of result.turns) {
