@@ -32,9 +32,10 @@ test('a real Pi controller session delegates a role, reads its result by referen
   t.after(async () => { await manager.recover(); store.close(); rmSync(root, { recursive: true, force: true }); });
   const model = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); bodies.push(body);
-    const system = text(body.messages[0].content), done = results(body.messages), ref = done.find(r => r.result_ref)?.result_ref;
+    const tools = body.tools.map(t => t.function.name), done = results(body.messages), ref = done.find(r => r.result_ref)?.result_ref;
     let message;
-    if (!system.includes('Coordinate only.')) message = call('finish', { summary: 'implemented by dev' });
+    // Custom prompts replace the template, so recognize the controller by its offered tools.
+    if (!tools.includes('nominate_delivery')) message = call('finish', { summary: 'implemented by dev' });
     else if (!ref) message = call('delegate_role', { role: 'dev', purpose: 'Implement the contract', refs: ['task:t'] });
     else if (!done.some(r => r.content)) message = call('read_task_record', { ref });
     else if (!steps.wrote) { steps.wrote = true; message = call('write_file', { path: 'src/a.js', content: 'x' }); }
@@ -72,7 +73,14 @@ test('a real Pi controller session delegates a role, reads its result by referen
   const state = JSON.parse(readFileSync(join(controllerDir, 'state.json'), 'utf8'));
   assert.deepEqual([state.state, state.agent, state.version], ['completed', 'pi', installed]);
   // Pi only ever offered the controller's tools to the model; the forbidden calls were refused by the control plane.
-  for (const body of bodies.filter(b => text(b.messages[0].content).includes('Coordinate only.'))) assert.ok(body.tools.every(t => session.tools.includes(t.function.name)));
+  const controllerBodies = bodies.filter(b => b.tools.some(t => t.function.name === 'nominate_delivery'));
+  assert.ok(controllerBodies.length >= 4);
+  for (const body of controllerBodies) {
+    const system = text(body.messages[0].content);
+    assert.ok(system.includes('You may edit files and merge pull requests yourself.'));
+    assert.ok(!system.includes('Coordinate only.'));
+    assert.ok(body.tools.every(t => session.tools.includes(t.function.name)));
+  }
   const denied = store.all("SELECT data FROM task_history WHERE type='capability_denied'").map(row => JSON.parse(row.data));
   assert.ok(denied.some(d => d.tool === 'write_file' && d.reason === 'not_offered'));
   assert.ok(denied.some(d => d.reason === 'delegation_not_allowed' && d.requested_role === 'qa'));
