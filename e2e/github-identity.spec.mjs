@@ -83,3 +83,32 @@ test('绑定同一 GitHub 身份会显示冲突；本地会话可以完成新身
     await page.screenshot({ path: resolve(output, 'bound-local-account.png'), fullPage: true });
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
+
+test('全局用户按实际项目显示 GitHub 继承与手工委派，编辑手工分配不会覆盖继承权限', async ({ page }) => {
+  const f = await identityFixture(), errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  try {
+    const login = await f.login(), principal = login.result.principal_id;
+    await page.goto(f.h.admin + '/#/settings/users');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const row = page.locator('#settings-panel .row').filter({ has: page.getByText('@administrator', { exact: true }) });
+    await expect(row).toContainText('当前可见项目（1）'); await expect(row).toContainText('fixture/project-101 · 可配置 · GitHub 继承权限');
+    await expect(row).toContainText('手工分配：无'); await expect(row).not.toContainText('看不到任何项目'); await expect(row).not.toContainText('other/project-201');
+    await row.getByRole('button', { name: '修改仓库权限', exact: true }).click();
+    const editor = page.locator('#editor'), picker = editor.getByLabel('仓库权限');
+    await expect(editor).toContainText('已验证的 GitHub 继承权限仍然有效');
+    expect(await picker.evaluate(select => [...select.selectedOptions].map(o => o.value))).toEqual([]);
+    await picker.selectOption([]); await editor.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(row).toContainText('fixture/project-101 · 可配置 · GitHub 继承权限');
+    await page.screenshot({ path: resolve(output, 'user-effective-access-desktop.png'), fullPage: true });
+    await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: ['201'] });
+    f.h.store.run("UPDATE scoped_grants SET expires_at=0 WHERE principal_id=? AND source='github_derived'", principal);
+    await page.reload(); await expect(row).toContainText('GitHub 权限待验证');
+    await expect(row).toContainText('other/project-201 · 可配置 · Bot 显式委派'); await expect(row).not.toContainText('fixture/project-101');
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: resolve(output, 'user-effective-access-mobile.png'), fullPage: true });
+    await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: [] });
+    await page.reload(); await expect(row).toContainText('当前没有可访问的项目'); expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});

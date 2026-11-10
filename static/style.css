@@ -26,6 +26,7 @@ a.status-link:hover{text-decoration:underline}
 .current-user-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 .current-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .current-user-role { color: #b9d4df; font-size: 11px; }
+.user-project-access { margin: 4px 0 8px; padding-left: 20px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 @media (max-width: 760px) { #who { max-width: 150px; } }
 
 .github-login-callback { display: block; overflow-wrap: anywhere; white-space: normal; }

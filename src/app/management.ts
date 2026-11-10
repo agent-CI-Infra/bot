@@ -10,8 +10,16 @@ import { loadAutomationConfig, parseAutomationConfig } from '../automation/confi
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
 import { activateActions } from '../actions/storage.js';
+import { listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
+function userAccessView(store: Store, row: Row): Json {
+  const identity = store.get("SELECT display_name,status FROM external_identities WHERE principal_id=? AND provider='github' AND host='github.com' ORDER BY verified_at DESC LIMIT 1", row.id);
+  const scopes = listEffectiveScopes(store, row.id);
+  return { ...publicUser(row), ...(identity && identity.status !== 'revoked' ? { github_login: identity.display_name } : {}),
+    access: { projects: listEffectiveProjectAccess(store, row.id), github_pending: !!row.active && (identity?.status === 'pending_verification' ||
+      scopes.some(g => g.source === 'github_derived' && g.state === 'pending_verification')) } };
+}
 interface Grants { repositories?: string[]; organizations?: string[] }
 function grantIds(value: unknown, code: string): string[] {
   if (!Array.isArray(value) || value.length > 1000) return fail(400, code);
@@ -77,7 +85,7 @@ export async function management(store: Store, user: Actor, method: string, url:
   const path = url.pathname;
   if (path === '/api/users') {
     superAdmin(user);
-    if (method === 'GET') return { users: store.all('SELECT id,username,role,active FROM users ORDER BY username').map(publicUser) };
+    if (method === 'GET') return { users: store.all('SELECT id,username,role,active FROM users ORDER BY username').map(row => userAccessView(store, row)) };
     if (method === 'POST') {
       fields(body, ['username', 'password', 'role', 'repository_ids', 'organization_ids']);
       const username = text(body.username, 100), encoded = await hashPassword(password(body.password));

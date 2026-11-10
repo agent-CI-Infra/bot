@@ -8,7 +8,7 @@ import { InstallationSetup } from '../dist/installations/setup.js';
 import { identityStorage } from '../dist/identity/storage.js';
 import { ExternalBindings, revokeIdentity } from '../dist/identity/bindings.js';
 import { digest } from '../dist/core/security.js';
-import { testPassword } from './helpers.mjs';
+import { repository, testPassword } from './helpers.mjs';
 
 const token = client => client.cookie().slice('bot_session='.length);
 const active = (s, p) => listEffectiveScopes(s, p).filter(g => g.state === 'active');
@@ -63,6 +63,49 @@ test('existing GitHub sessions expose the verified login and avatar without chan
   const external = session(h.store, bound.result.principal_id, bound.result.identity_id);
   assert.equal((await me(external.token)).value.github.login, 'renamed-user');
   assert.doesNotMatch(JSON.stringify(first.value), /fixture-user|fixture-refresh|credentials|access_token|private_key/);
+});
+
+test('global user access matches authorized project lists, including inherited, manual, expired and read-only grants', async t => {
+  const f = await identityFixture(t), { h } = f, login = await f.login(), principal = login.result.principal_id;
+  // An enabled project in the same organization is outside this installation's current proof.
+  await repository(f.admin, f.a.id, '102');
+  const credentials = session(h.store, principal, login.result.identity_id);
+  const access = async () => {
+    const user = (await f.admin('/api/users')).value.users.find(user => user.id === principal);
+    const response = await fetch(h.admin + '/api/repositories', { headers: { Cookie: 'bot_session=' + credentials.token } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(user.access.projects.map(p => p.id).sort(), (await response.json()).repositories.map(p => p.id).sort());
+    return user;
+  };
+  let user = await access(); assert.equal(user.github_login, 'administrator');
+  assert.deepEqual(user.access, { projects: [{ id: '101', full_name: 'fixture/project-101', sources: ['github_derived'], can_configure: true }], github_pending: false });
+  await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: ['101', '201'] });
+  user = await access(); assert.deepEqual(user.access.projects.map(p => p.id).sort(), ['101', '201']);
+  assert.deepEqual(user.access.projects.find(p => p.id === '101').sources.sort(), ['explicit_delegation', 'github_derived']);
+  assert.deepEqual(user.access.projects.find(p => p.id === '201').sources, ['explicit_delegation']);
+  h.store.run("UPDATE scoped_grants SET expires_at=0 WHERE principal_id=? AND source='github_derived'", principal);
+  user = await access(); assert.equal(user.access.github_pending, true);
+  assert.ok(user.access.projects.every(p => p.sources.length === 1 && p.sources[0] === 'explicit_delegation'));
+  await f.admin('/api/project-admin-assignments', 'PUT', { user_id: principal, repository_ids: [] });
+  assert.deepEqual((await access()).access.projects, []);
+  assert.equal((await f.admin('/api/identity/grants', 'POST', { principal_id: principal, tenant_id: 'github.com:20', project_id: '201', capabilities: ['tasks.read'] })).status, 201);
+  user = await access(); assert.deepEqual(user.access.projects, [{ id: '201', full_name: 'other/project-201', sources: ['explicit_delegation'], can_configure: false }]);
+  await f.identity.reverify(principal); user = await access(); assert.equal(user.access.github_pending, false);
+  h.store.run("UPDATE github_installations SET status='suspended' WHERE ref='github.com/123/77'");
+  user = await access(); assert.equal(user.access.github_pending, true); assert.deepEqual(user.access.projects.map(p => p.id), ['201']);
+  await f.admin('/api/users/' + principal, 'PATCH', { active: false });
+  user = (await f.admin('/api/users')).value.users.find(user => user.id === principal);
+  assert.deepEqual(user.access.projects, []); assert.equal(user.access.github_pending, false);
+});
+
+test('only repository Admin automatically grants management; Write, Maintain, Triage and Read do not', async t => {
+  const f = await identityFixture(t); f.state.owner = false;
+  const login = await f.login(), principal = login.result.principal_id;
+  for (const permission of ['write', 'maintain', 'triage', 'read', 'none', 'admin']) {
+    f.state.permission = permission; await f.identity.reverify(principal);
+    const user = (await f.admin('/api/users')).value.users.find(user => user.id === principal);
+    assert.deepEqual(user.access.projects.map(p => p.id), permission === 'admin' ? ['101'] : [], permission);
+  }
 });
 
 test('OAuth only reads identity; installation queries use short-lived read-only App tokens and reject mismatched proof', async t => {
