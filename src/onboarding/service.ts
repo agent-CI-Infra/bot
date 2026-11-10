@@ -89,16 +89,42 @@ export class Onboarding {
     return {account:{id:String(targetAccount.id),login:targetAccount.login,type:targetAccount.type,html_url:'https://github.com/'+targetAccount.login},installed:!!installed,
       install_url:installUrl.href};
   }
-  // The App's owner decides where its settings page lives; older saved selections lack it until the App is checked again.
+  // The App's owner decides where its settings page lives.
   private owner(app: any): Json {
     const login = app?.owner?.login, type = app?.owner?.type;
-    if (typeof login !== 'string' || !['User', 'Organization'].includes(type)) return {};
+    if (typeof login !== 'string' || !login || !['User', 'Organization'].includes(type)) return {};
     return { owner: login, owner_type: type, settings_url: appSettingsUrl(app) };
+  }
+  async refreshApp(accountId: string): Promise<Json> {
+    const selected = this.saved('app');
+    if (!selected || selected.account_id !== accountId) return fail(409, 'github_app_changed');
+    const account = this.store.get("SELECT * FROM accounts WHERE id=? AND type='github_app'", accountId);
+    if (!account || String(account.app_id) !== String(selected.app_id)) return fail(409, 'github_app_changed');
+    let app: any, owner: Json;
+    try {
+      const secrets = this.store.secrets.open(account.credentials, 'account:' + accountId);
+      const response = await (this.options.fetcher || fetch)((this.options.githubUrl || 'https://api.github.com') + '/app', {
+        redirect: 'error', signal: AbortSignal.timeout(10000),
+        headers: { Authorization: 'Bearer ' + appJwt(account.app_id, String(secrets.private_key || '')), Accept: 'application/vnd.github+json' },
+      });
+      if (!response.ok) throw new Error();
+      app = await response.json(); owner = this.owner(app);
+      if (String(app.id) !== String(account.app_id) || typeof app.slug !== 'string' || !app.slug || !owner.settings_url) throw new Error();
+    } catch { return fail(502, 'github_app_metadata_unavailable'); }
+    // Re-read after the request so another tab's selection or installation changes cannot be overwritten.
+    const current = this.saved('app');
+    if (current?.account_id !== accountId || String(current.app_id) !== String(account.app_id)) return fail(409, 'github_app_changed');
+    const value = { ...current, slug: app.slug, ...owner, install_url: `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new` };
+    this.save('app', value);
+    return value;
   }
   /** consoleOrigin is where the administrator uses the console; it only receives the one-time manifest return. */
   async api(user: Actor, method: string, url: URL, input: Json, consoleOrigin: string): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/onboarding')) return undefined; superAdmin(user);
     if (method === 'GET' && url.pathname === '/api/onboarding') return { public_address: this.saved('public'), tunnel: await this.tunnelStatus(), app: this.saved('app'), model_id: this.saved('model'), defaults, installation_skipped: !!this.saved('installation_skipped'), complete: !!this.saved('complete'), github_login: this.options.githubLogin?.view(consoleOrigin) };
+    if (method === 'POST' && url.pathname === '/api/onboarding/app/refresh') {
+      fields(input, ['account_id']); return { app: await this.refreshApp(text(input.account_id)) };
+    }
     if (url.pathname === '/api/onboarding/github-login' && method === 'PUT') {
       if (!this.options.githubLogin) return fail(503, 'github_login_configuration_unavailable');
       return { github_login: this.options.githubLogin.update(user, input, consoleOrigin) };
