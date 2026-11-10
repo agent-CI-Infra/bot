@@ -316,3 +316,37 @@ test('output budget exhaustion is explicit and never becomes a successful empty 
  const f=await fixture(t);f.respond(()=>({choices:[{message:{content:''},finish_reason:'length'}]}));
  await assert.rejects(runAgent({...f.spec,tools:[{...tool,function:{...tool.function,name:'submit'}}],finish:{name:'submit',validate:a=>a}}),e=>e.code==='agent_output_budget_exhausted');
 });
+// The gateway's request limit; the control-plane loop applies no 128k context estimate.
+const fitsGateway=body=>Buffer.byteLength(JSON.stringify(body))<=2*1024*1024;
+const toolReplies=body=>body.messages.filter(message=>message.role==='tool').map(message=>JSON.parse(message.content));
+test('a tool result no request can hold is withheld as a tool error and the agent continues',async t=>{
+  // Production: one read_file of a 1.87 MB context file made the next request exceed 2 MiB and failed the task.
+  const f=await fixture(t);let turn=0;
+  f.respond(()=>({choices:[{message:++turn===1?{tool_calls:[call('inspect')]}:{content:'done'}}]}));
+  const result=await runAgent({...f.spec,tools:[tool],execute:async()=>({content:'x'.repeat(2200000)})});
+  assert.equal(result,'done');assert.equal(f.requests.length,2);
+  const [reply]=toolReplies(f.requests[1]);
+  assert.equal(reply.error,'tool_result_too_large');assert.ok(reply.result_characters>2200000);assert.match(reply.detail,/smaller part/);
+  assert.ok(f.requests.every(fitsGateway));
+});
+test('earlier tool results are elided, oldest first, when the conversation outgrows the request limits',async t=>{
+  // Each result fits on its own; eight of them are 2.4 MB, which the gateway would refuse.
+  const f=await fixture(t);let turn=0;
+  f.respond(()=>({choices:[{message:++turn<=8?{tool_calls:[{...call('inspect'),id:'call'+turn}]}:{content:'done'}}]}));
+  let n=0;const result=await runAgent({...f.spec,tools:[tool],maxTurns:12,execute:async()=>({content:String(++n).repeat(300000)})});
+  assert.equal(result,'done');assert.equal(f.requests.length,9);
+  assert.ok(f.requests.every(fitsGateway),'every request fits the gateway');
+  const replies=toolReplies(f.requests.at(-1)),elided=replies.findIndex(reply=>!reply.elided);
+  assert.equal(replies.length,8);assert.ok(elided>=1,'the oldest results are elided');
+  assert.ok(replies.slice(0,elided).every(reply=>reply.result_characters>300000)&&replies.slice(elided).every(reply=>!reply.elided),'only a prefix of the oldest results is elided');
+  assert.equal(replies.at(-1).content,'8'.repeat(300000),'the latest result is kept');
+});
+test('a request still over 2 MiB without any tool result to elide stops as agent_context_too_large before reaching the gateway',async t=>{
+  const f=await fixture(t);
+  await assert.rejects(runAgent({...f.spec,prompt:'p'.repeat(2200000)}),error=>error.code==='agent_context_too_large');
+  assert.equal(f.requests.length,0);
+});
+test('a prompt and results within 2 MiB are sent unchanged, for models with a window over 128k',async t=>{
+  const f=await fixture(t);
+  assert.equal(await runAgent({...f.spec,prompt:'p'.repeat(600000)}),'done');assert.equal(f.requests.length,1);
+});

@@ -30,6 +30,21 @@ test('real evaluator starts fresh, can inspect raw artifacts, records separate m
  assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_evidence'").n,1);
  assert.equal(f.h.store.get('SELECT count(*) n FROM model_requests WHERE task_id=?',f.task.id).n,2);
 });
+test('the evaluator gets a bounded candidate: a workspace file list and old evidence previews stay out, sources stay readable',async t=>{
+ // Production: a files artifact listing 9,500 files (1.5 MB) put the evaluator's first request over 2 MiB.
+ const f=await fixture(t,()=>({role:'assistant',content:JSON.stringify(pass)}));
+ const evidence=Array.from({length:109},(_,i)=>({source:'task_log:'+i,version:'v'+i,verified:true,result:{type:'tool',name:'run_command',output:'command output '.repeat(200)}}));
+ f.records.submit('delivery',[{kind:'report',reference:'report.md',version:'v2',content:'Executor claims verified'},
+   {kind:'files',reference:'workspace:w',version:'t1',content:{files:Array.from({length:12000},(_,i)=>({path:'src/file-'+i+'.ts',sha:'a'.repeat(40),size:i})),local_sha:'b'.repeat(40),base_sha:'c'.repeat(40)}}],evidence,{summary:'claim'});
+ const verdict=await evaluateDelivery(f.h.store,f.task,{call:async()=>({content:'Actual observed artifact'})},new Redactor(),async()=>{},false);
+ assert.equal(verdict.outcome,'pass');
+ assert.ok(Buffer.byteLength(JSON.stringify(f.requests[0]))<512*1024,'the first request stays small: '+JSON.stringify(f.requests[0]).length);
+ const candidate=JSON.parse(f.requests[0].messages[1].content).candidate,[report,files]=candidate.artifacts;
+ assert.equal(report.content,'Executor claims verified','small artifact content is kept');
+ assert.equal(files.content.files.omitted,true);assert.ok(files.content.files.characters>1000000);assert.equal(files.content.local_sha,'b'.repeat(40));
+ assert.equal(candidate.evidence.length,109);assert.deepEqual(candidate.evidence[108],evidence[108],'the newest previews are kept');
+ assert.equal(candidate.evidence[0].source,'task_log:0');assert.equal(candidate.evidence[0].result.omitted,true,'older previews become sources for read_evidence');
+});
 test('an evaluator outage is recoverable infrastructure failure, does not reject or complete the candidate',async t=>{
  const f=await fixture(t,(_b,n)=>n<=3?{status:503}:{role:'assistant',content:JSON.stringify(pass)});
  await assert.rejects(evaluateDelivery(f.h.store,f.task,{call:async()=>({})},new Redactor(),async()=>{}),{code:'model_http_503',state:'retry_wait'});
