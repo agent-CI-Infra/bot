@@ -1,4 +1,4 @@
-const feishuSteps = ['创建应用', '凭据与范围', '事件与回调', '发布与检查', '绑定与试用'];
+const feishuSteps = ['创建应用', '应用凭据', '事件与回调', '发布与检查', '绑定与试用'];
 // Only non-secret selections survive a step change. Credentials stay in the form until saved, never browser storage.
 let feishuChoice = null;
 const feishuAddress = (id = 'new', step = 0) => `#/settings/feishu/${id}/${step}`;
@@ -15,24 +15,24 @@ function feishuError(err) {
 }
 function feishuList(items) { const list = element('ol', '', 'feishu-instructions'); for (const text of items) list.append(element('li', text)); return list; }
 async function renderFeishuSetup(panel, request) {
-  const [data, identity] = await Promise.all([api('/api/channels/setup'), api('/api/identity')]);
+  const data = await api('/api/channels/setup');
   if (request !== renderVersion) return;
   const match = /^#\/settings\/feishu\/(new|[a-f0-9]{48})\/([0-4])$/.exec(location.hash);
   if (!match) {
     const overview = card('飞书应用连接');
-    overview.append(note('由全局管理员连接飞书应用，再由每位用户在「身份与权限」中绑定本人身份。应用接入不会为飞书用户自动授予项目权限。'),
+    overview.append(note('由全局管理员连接飞书应用，全系统共用，无需选择 GitHub 组织。每位用户在「身份与权限」中绑定本人身份，之后仍按已有项目权限使用。'),
       channelLink(feishuAddress(), '新增飞书应用连接', 'button-link'));
     if (!data.connectors.length) overview.append(note('尚未连接飞书应用。按向导完成应用创建、凭据、事件订阅、发布和试用。'));
     for (const c of data.connectors) {
       const row = element('div', '', 'channel-binding');
-      row.append(element('strong', c.app_id), note(`${identity.tenants.find(t => t.id === c.tenant_id)?.display_name || c.tenant_id} · ${c.enabled ? '启用' : '停用'} · ${c.transport === 'http' ? 'HTTP 回调' : '企业自建长连接'}`),
+      row.append(element('strong', c.app_id), note(`全局共用 · ${c.enabled ? '启用' : '停用'} · ${c.transport === 'http' ? 'HTTP 回调' : '企业自建长连接'}`),
         channelLink(feishuAddress(c.id, 1), '继续配置', 'button-link'), channelLink(feishuAddress(c.id, 4), '连接诊断与群范围', 'button-link'));
       overview.append(row);
     }
     panel.append(overview); return;
   }
   const id = match[1], step = Number(match[2]), c = data.connectors.find(row => row.id === id);
-  if (id !== 'new' && !c) { panel.append(note('连接不存在或不在当前组织范围内。'), channelLink('#/settings/feishu', '返回飞书连接')); return; }
+  if (id !== 'new' && !c) { panel.append(note('连接不存在。'), channelLink('#/settings/feishu', '返回飞书连接')); return; }
   if (!c && step > 1) { panel.append(note('请先保存应用连接，再配置事件、发布和试用。'), channelLink(feishuAddress(), '从创建应用开始')); return; }
   const title = card('飞书应用连接向导'), nav = element('nav', '', 'wizard-steps'); nav.setAttribute('aria-label', '飞书连接步骤');
   title.append(note(`第 ${step + 1} / ${feishuSteps.length} 步${c ? ' · ' + c.app_id : ''}。应用连接可随时返回继续；凭据保存后不回显。`));
@@ -62,8 +62,7 @@ async function renderFeishuSetup(panel, request) {
   } else if (step === 1) {
     const choice = feishuChoice?.id === id ? feishuChoice : c || { application_type: 'enterprise', transport: 'websocket' };
     const form = element('form', '', 'project-form'), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
-    const tenant = channelSelect(form, '项目所属组织', 'tenant_id', identity.tenants.filter(t => !identity.actor.tenant_id || t.id === identity.actor.tenant_id).map(t => [t.id, t.display_name]), c?.tenant_id);
-    tenant.disabled = !!c;
+    form.append(note('此应用连接全局共用，不绑定 GitHub 组织，也不授予用户项目权限。下方 tenant_key 表示飞书企业，用于校验消息来源。'));
     const app = channelField(form, 'App ID', 'app_id', c?.app_id || ''); app.required = true; app.readOnly = !!c;
     const secret = channelField(form, c ? 'App Secret（留空保留）' : 'App Secret', 'app_secret', '', 'password'); secret.required = !c;
     const bot = channelField(form, '机器人 open_id', 'bot_open_id', c?.bot_open_id || ''); bot.required = true;
@@ -89,21 +88,20 @@ async function renderFeishuSetup(panel, request) {
     }
     const enabled = channelField(form, '启用连接', 'enabled', '', 'checkbox'); enabled.checked = c ? !!c.enabled : true;
     form.append(note(`当前接入：${choice.application_type === 'enterprise' ? '企业自建' : 'SaaS / 商店应用'} · ${choice.transport === 'http' ? 'HTTP 回调' : 'SDK 长连接'}。保存后按“启用连接”状态接收事件，管理操作仍检查用户绑定和项目权限。`));
-    const save = element('button', '保存连接并继续'); save.type = 'submit'; save.disabled = !tenant.options.length; form.append(message, save);
-    if (!tenant.options.length) form.append(note('还没有可配置的组织。先在 GitHub 接入向导安装并同步项目。'), channelLink('#/settings/onboarding', '打开 GitHub 接入向导'));
+    const save = element('button', '保存连接并继续'); save.type = 'submit'; form.append(message, save);
     form.addEventListener('submit', async event => {
       event.preventDefault(); save.disabled = true; message.textContent = ''; message.className = 'view-error';
       const credentials = Object.fromEntries([['app_secret', secret.value.trim()], ['verification_token', verification?.value.trim()], ['encrypt_key', encryption?.value.trim()]].filter(([, value]) => value));
       try {
-        const result = await api('/api/channels/connectors' + (c ? '/' + c.id : ''), c ? 'PATCH' : 'POST', { tenant_id: tenant.value, app_id: app.value.trim(), installation_tenant: installation.value.trim(), actor_tenants: actors.value.split(',').map(s => s.trim()).filter(Boolean),
+        const result = await api('/api/channels/connectors' + (c ? '/' + c.id : ''), c ? 'PATCH' : 'POST', { app_id: app.value.trim(), installation_tenant: installation.value.trim(), actor_tenants: actors.value.split(',').map(s => s.trim()).filter(Boolean),
           bot_open_id: bot.value.trim(), application_type: choice.application_type, transport: choice.transport, enabled: enabled.checked, expected_revision: c?.revision ?? 0,
           ...(Object.keys(credentials).length ? { credentials } : {}) });
         secret.value = ''; if (verification) verification.value = ''; if (encryption) encryption.value = '';
         feishuChoice = null; location.hash = feishuAddress(result.connector_id, 2);
-      } catch (err) { message.textContent = feishuError(err); } finally { save.disabled = !tenant.options.length; }
+      } catch (err) { message.textContent = feishuError(err); } finally { save.disabled = false; }
     }); body.append(form);
   } else if (step === 2) {
-    body.append(note(c.enabled ? '连接已启用，可以配置飞书事件订阅。' : '连接当前停用。请返回“凭据与范围”启用，再完成事件验证。'));
+    body.append(note(c.enabled ? '连接已启用，可以配置飞书事件订阅。' : '连接当前停用。请返回“应用凭据”启用，再完成事件验证。'));
     if (c.transport === 'http') {
       let callback = null;
       try { const origin = new URL(data.origin); if (origin.protocol === 'https:') callback = origin.origin + c.callback_path; } catch {}
@@ -130,7 +128,7 @@ async function renderFeishuSetup(panel, request) {
       try {
         const result = await api('/api/channels/feishu/probe', 'POST', { connector_id: c.id, expected_revision: c.revision });
         status.className = 'view-success'; status.textContent = `凭据已验证 · ${result.name || result.bot_open_id}。尚未验证事件投递。`;
-        if (result.bot_open_id !== c.bot_open_id) { status.className = 'view-error'; status.textContent = '机器人 open_id 与保存值不同。请返回“凭据与范围”更新并保存，之后重新检查。'; }
+        if (result.bot_open_id !== c.bot_open_id) { status.className = 'view-error'; status.textContent = '机器人 open_id 与保存值不同。请返回“应用凭据”更新并保存，之后重新检查。'; }
       } catch (err) { status.className = 'view-error'; status.textContent = feishuError(err); } finally { probe.disabled = false; }
     }, ''); body.append(probe, status); next('进入绑定与试用');
   } else {

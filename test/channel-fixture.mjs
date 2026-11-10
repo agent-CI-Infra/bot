@@ -21,7 +21,7 @@ export function transport() {
   } };
 }
 export async function connector(admin, override = {}) {
-  const result = await admin('/api/channels/connectors', 'POST', { tenant_id: 'github.com:10', app_id: 'cli_fixture', installation_tenant: 'install-tenant',
+  const result = await admin('/api/channels/connectors', 'POST', { app_id: 'cli_fixture', installation_tenant: 'install-tenant',
     actor_tenants: ['actor-tenant', 'other-tenant'], bot_open_id: 'ou_bot', application_type: 'enterprise', transport: 'http', enabled: true, credentials, expected_revision: 0, ...override });
   if (result.status !== 201) throw new Error(JSON.stringify(result));
   return result.value.connector_id;

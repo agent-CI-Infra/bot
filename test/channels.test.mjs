@@ -138,6 +138,42 @@ test('the same open_id never crosses app or actor tenant, and adding a bot or se
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 0);
 });
 
+test('one global connection serves authorized projects in different organizations without widening user or group permissions', async t => {
+  const f = await channelFixture(t), { h, id, admin, service } = f;
+  h.store.run("UPDATE installed_repositories SET owner_id='20',owner_login='second-fixture' WHERE repository_id='201'");
+  const member = await f.member('multi-org-im', { repository_ids: ['101', '201'] });
+  bindFixture(h, id, member.id, 'ou_multi');
+  const send = (project, task) => post(h, id, envelope(directQuery(project, task), { sender: { sender_id: { open_id: 'ou_multi' } } }));
+  for (const [project, task] of [['101', 'blocked'], ['201', 'foreign']]) {
+    const r = await send(project, task); assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
+  }
+  const denied = await send('102', 'blocked'); assert.equal((await finished(h, denied.value.operation_id)).error, 'capability_forbidden');
+  const event = service.adapter(service.connector(id)).normalize(envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_multi' } } }));
+  const actor = await service.actor(event, '201');
+  assert.equal(actor.tenant_id, 'github.com:20');
+  assert.throws(() => authorize(actor, 'tasks.read', { project_id: '101' }), /tenant_forbidden/);
+  const firstOrg = await f.member('first-org-config', { organization_ids: ['10'] });
+  assert.equal((await group(firstOrg.client, id, { project_id: '201' })).status, 403);
+  const secondOrg = await f.member('second-org-config', { organization_ids: ['20'] });
+  const rejected = await post(h, id, inGroup(directQuery('201', 'foreign'), 'ou_multi'));
+  assert.equal((await finished(h, rejected.value.operation_id)).error, 'channel_group_scope_required');
+  const approved = await group(secondOrg.client, id, { project_id: '201' }); assert.equal(approved.status, 200);
+  assert.equal((await secondOrg.client('/api/channels/operations/' + approved.value.operation_id)).status, 200);
+  assert.equal((await firstOrg.client('/api/channels/operations/' + approved.value.operation_id)).status, 403);
+  const accepted = await post(h, id, inGroup(directQuery('201', 'foreign'), 'ou_multi'));
+  assert.equal((await finished(h, accepted.value.operation_id)).state, 'completed');
+  const unapproved = await post(h, id, inGroup(directQuery('101', 'blocked'), 'ou_multi'));
+  assert.equal((await finished(h, unapproved.value.operation_id)).error, 'channel_group_scope_required');
+  const token = member.client.cookie().split('=')[1];
+  const destination = service.enqueue(resolveActor(h.store, token, { project_id: '201' }), event, '201', 'multi-org-destination');
+  const destinations = await member.client('/api/management/query', 'POST', { operation: 'list_schedule_destinations', target: { project_id: '201' }, arguments: {} });
+  assert.ok(destinations.value.destinations.some(d => d.id === destination.operation_id));
+  h.store.run('DELETE FROM project_admin_assignments WHERE user_id=? AND repository_id=?', member.id, '201');
+  invalidate(h.store, member.id, 'test-project-revoked');
+  const revoked = await send('201', 'foreign'); assert.equal((await finished(h, revoked.value.operation_id)).error, 'capability_forbidden');
+  assert.equal((await admin('/api/channels/setup')).value.connectors.length, 1);
+});
+
 test('group scope rejects private facts, limits result fields, isolates each sender and invalidates on audience changes', async t => {
   const f = await channelFixture(t), { h, id, admin, wire, principal } = f;
   h.store.run("UPDATE installed_repositories SET private=1 WHERE repository_id='101'");

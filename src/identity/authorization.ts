@@ -168,11 +168,16 @@ export function resolveServiceActor(store: Store, principal: string): ActorConte
   return Object.freeze(actor);
 }
 // For trusted asynchronous workers/adapters. This function is never exposed as an HTTP/model tool.
-export function resolvePrincipalActor(store: Store, principal: string, tenant: string, project?: string, channel: ActorContext['channel'] = 'api', parent?: ActorContext): ActorContext {
+export function resolvePrincipalActor(store: Store, principal: string, tenant: string | null, project?: string, channel: ActorContext['channel'] = 'api', parent?: ActorContext): ActorContext {
   if (parent) { assertCurrent(parent); if (parent.principal_id !== principal) fail(403, 'principal_mismatch'); }
   identityProjection(store); consumeInstallationChanges(store);
   if (!revision(store, principal)) return fail(403, 'principal_inactive');
-  const scopes = listEffectiveScopes(store, principal).filter(g => g.state === 'active' && (!g.tenant_id || g.tenant_id === tenant));
+  if (project) {
+    const target = store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project);
+    if (!target?.tenant_id || tenant && tenant !== target.tenant_id) return fail(403, 'tenant_forbidden');
+    tenant = target.tenant_id;
+  }
+  const scopes = listEffectiveScopes(store, principal).filter(g => g.state === 'active' && (!tenant || !g.tenant_id || g.tenant_id === tenant));
   const actor: ActorContext = { principal_id: principal, tenant_id: tenant, ...(project ? { project_id: project } : {}), channel,
     capabilities: [...new Set(scopes.flatMap(s => s.capabilities))], authorization_revision: revision(store, principal), request_id: randomId() };
   issued.set(actor, { store, parent }); return Object.freeze(actor);

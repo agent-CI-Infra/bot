@@ -49,8 +49,8 @@ export class ScheduleService {
     if (!protection || protection.project_id !== project) fail(403, 'schedule_destination_project_mismatch');
     const event = payload.event as unknown as ChannelEvent;
     this.channels.source(event);
-    const connector = this.channels.connector(event.connector_id), tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)?.tenant_id;
-    if (connector.tenant_id !== tenant) fail(403, 'schedule_destination_tenant_mismatch');
+    const tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)?.tenant_id;
+    if (!tenant) fail(403, 'schedule_destination_project_mismatch');
     if (event.chat_type === 'group') this.channels.groupScope(event, project, 'summary');
     else {
       // A recipient's present read access is separate from a service schedule's execution rights.
