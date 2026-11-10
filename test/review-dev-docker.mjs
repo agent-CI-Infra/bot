@@ -189,10 +189,14 @@ try{
     await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.getByLabel('用户名',{exact:true}).fill('member');await page.getByLabel('密码',{exact:true}).fill(memberPassword);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'看板',exact:true}).click();await page.locator('#board-columns').getByText(/fixture\/project-101/).first().waitFor();
     assert.ok(!(await page.locator('#board-columns').innerText()).includes('fixture/project-202'));await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/review-dev/project-mobile.png'});assert.deepEqual(errors,[]);
     const foreignTask=(await tasks('202',3,'development.issue'))[0].id;
-    const denied=await page.evaluate(async id=>{const me=await(await fetch('/api/auth/me')).json();return Promise.all([
-      fetch('/api/tasks/'+id).then(r=>r.status),fetch('/api/tasks/'+id+'/logs').then(r=>r.status),
-      fetch('/api/tasks/'+id+'/retry',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':me.csrf_token},body:'{}'}).then(r=>r.status)]);},foreignTask);
-    assert.deepEqual(denied,[404,404,404]);
+    const beforeRetry=(await api('/api/tasks/'+foreignTask)).task;
+    const denied=await page.evaluate(async id=>{const me=await(await fetch('/api/auth/me')).json(),result=async response=>({status:response.status,error:(await response.json()).error});return Promise.all([
+      fetch('/api/tasks/'+id).then(result),fetch('/api/tasks/'+id+'/logs').then(result),
+      fetch('/api/tasks/'+id+'/retry',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':me.csrf_token},body:'{}'}).then(result)]);},foreignTask);
+    // Reads hide out-of-scope tasks; the write guard rejects the repository before the retry handler runs.
+    assert.deepEqual(denied,[{status:404,error:'task_not_found'},{status:404,error:'task_not_found'},{status:403,error:'repository_forbidden'}]);
+    const afterRetry=(await api('/api/tasks/'+foreignTask)).task;
+    for(const key of ['status','attempt','error_code','updated_at'])assert.deepEqual(afterRetry[key],beforeRetry[key]);
   }finally{await browser.close();}passed('desktop and mobile task pages obey administrator repository scope');
   evidence.issueFlow={review:(await tasks('101',1,'review.issue'))[0].id,development:development.id,branch:development.result.branch,pr:development.result.pr_number};
   const events=(await Promise.all(['101','202','303'].map(repo=>dispatches(repo)))).flat(),fixtureState=await fake('state');
