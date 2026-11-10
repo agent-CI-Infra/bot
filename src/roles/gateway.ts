@@ -11,7 +11,7 @@ import { contentHash, roleRunProtocol } from './protocol.js';
  * TaskToolGateway: the one server-side broker through which a role run reads task facts, original records, evidence and
  * project knowledge, and proposes experience candidates. Every call presents the run's capability token and is checked
  * again on the server: token binding and expiry, the current lease epoch, the run still running, the principal's current
- * authorization, the role's live policy, and the reference's own scope. A reference is a pointer, not a pass to read
+ * authorization, the role's live permissions, and the reference's own scope. A reference is a pointer, not a pass to read
  * everything: other tasks, other role instances' runs and model exchanges, and other roles' scoped memory are refused,
  * and a refused or guessed reference gets the same answer as a missing one. The gateway has no SQL, shell, publication,
  * merge or management tool. Calls and the exact versions read go into the task trace.
@@ -25,10 +25,10 @@ export const gatewayTools = [
   tool('propose_experience', 'Propose an unverified experience candidate with its evidence references. It asserts no fact and changes no decision.', { key: { type: 'string' }, body: { type: 'string' }, evidence: { type: 'array', items: { type: 'string' } }, request_id: { type: 'string' } }, ['key', 'body', 'evidence'])
 ];
 export const gatewayToolNames = gatewayTools.map(t => t.function.name);
-// The capability policy names each gateway tool is governed by.
-const policyName: Record<string, string> = { read_task_record: 'read_task_record', list_task_records: 'read_task_history', search_knowledge: 'search_project_memory', read_knowledge: 'read_project_memory', propose_experience: 'remember_project_memory' };
-/** The gateway capabilities a role's policy allows; a token carries only these. */
-export const gatewayCapabilities = (snapshot: RoleSnapshot) => gatewayToolNames.filter(name => !snapshot.capability.tools || snapshot.capability.tools.includes(policyName[name]!)).map(name => 'gateway:' + name);
+// The resource-tool aliases used by flat permissions.
+const permissionToolName: Record<string, string> = { read_task_record: 'read_task_record', list_task_records: 'read_task_history', search_knowledge: 'search_project_memory', read_knowledge: 'read_project_memory', propose_experience: 'remember_project_memory' };
+/** The gateway capabilities a role's permissions allow; a token carries only these. */
+export const gatewayCapabilities = (snapshot: RoleSnapshot) => gatewayToolNames.filter(name => !snapshot.capability.tools || snapshot.capability.tools.includes(permissionToolName[name]!)).map(name => 'gateway:' + name);
 const refusal = (code: string) => ({ error: code });
 export interface GatewayRequest { tool: string; arguments?: any; run_id?: string; lease_epoch?: number; request_id?: string }
 
@@ -56,7 +56,7 @@ export class TaskToolGateway {
     }
     const snapshotRow = run.role_snapshot ? s.get('SELECT snapshot FROM role_snapshots WHERE id=?', run.role_snapshot) : undefined, snapshot = snapshotRow ? JSON.parse(String(snapshotRow.snapshot)) as RoleSnapshot : null;
     if (!snapshot) return this.denied(context, name, 'role_snapshot_unavailable', request);
-    const revoked = roleAuthority(s, String(task.repository_id), snapshot, policyName[name]);
+    const revoked = roleAuthority(s, String(task.repository_id), snapshot, permissionToolName[name]);
     if (revoked) return this.denied(context, name, revoked, request);
     const args = request.arguments && typeof request.arguments === 'object' && !Array.isArray(request.arguments) ? request.arguments : {};
     let result: any;

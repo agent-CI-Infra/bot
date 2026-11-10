@@ -63,7 +63,7 @@ test('new roles default to Pi; general backends preserve role authority and Clau
   for (const backend of ['native', 'process', 'acp', 'pi']) {
     const saved = f.put({ roles: config.roles.map(r => ({ role_id: r.role_id, harness_ref: { id: backend } })) });
     assert.ok(saved.roles.every(r => r.harness_ref.id === backend));
-    assert.equal(saved.roles.find(r => r.role_id === 'manager').capability_policy_ref.id, 'controller-coordination');
+    assert.equal(saved.roles.find(r => r.role_id === 'manager').permissions.delegation, 'allow');
     assert.equal(saved.roles.find(r => r.role_id === 'qa').output_schema_ref.id, 'acceptance-verdict');
   }
   const claude = f.view().backends.find(b => b.id === 'claude_code');

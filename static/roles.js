@@ -1,8 +1,6 @@
 // Role settings share one draft across the overview and role pages. Only an explicit save changes the configuration.
-const policyLabels = { controller: '任务主控', 'controller-coordination': '任务主控与跨任务协调', coordinator: '跨任务建议', writer: '开发执行', observer: '观察与测试', 'observer-readonly': '只读观察', evaluator: '独立验收' };
 const environmentLabels = { 'control-session': '受限主控会话', 'task-workspace': '任务工作区', 'candidate-checkout': '候选的独立检出', 'evaluation-checkout': '验收的独立检出', 'isolated-workspace': '每次运行独立容器', 'isolated-candidate': '独立容器内的固定候选' };
 const outputLabels = { 'delivery-nomination': '提名交付候选', 'coordination-result': '跨任务建议', 'entry-delivery': '任务交付结果', 'role-findings': '检视或测试发现', 'acceptance-verdict': '独立验收结论' };
-const authorityLabels = { query_facts: '读取任务事实', delegate: '委派角色', coordinate: '协调任务', nominate: '提名候选', edit_candidate: '修改候选代码', decide_acceptance: '独立验收', finish_task: '直接结束任务', override_qa: '覆盖验收结论', publish: '直接发布', merge: '合并 PR', grant_permissions: '授予权限' };
 const budgetFields = [['max_turns', '单次运行最多模型轮数', 4, 256], ['max_output_tokens', '单次输出最多 token', 256, 32768], ['max_total_tokens', '任务累计 token', 1000, 100000000], ['max_model_requests', '任务累计模型请求', 1, 10000], ['max_tool_calls', '任务累计工具调用', 1, 10000], ['max_wall_seconds', '任务累计秒数', 60, 86400]];
 
 function roleSelect(name, value, choices, change) {
@@ -47,18 +45,15 @@ function roleBackendPicker(role, state, redraw) {
     redraw();
   });
 }
-function rolePolicyPicker(role, state, redraw) {
-  return roleSelect(role.role_id + ' 能力策略', role.capability_policy_ref.id, state.data.capability_policies.filter(policy => policy.kind === role.kind).map(policy => [policy.id, policyLabels[policy.id] || policy.id]), id => {
-    role.capability_policy_ref = { id }; state.dirty = true; redraw();
-  });
-}
-function roleCapabilityDetails(role, data) {
-  const box = element('div', '', 'role-capabilities'), policy = data.capability_policies.find(entry => entry.id === role.capability_policy_ref.id);
-  if (!policy) { box.append(note('当前策略已不可用，请重新选择。')); return box; }
-  const allowed = Object.entries(policy.authorities).filter(([, on]) => on).map(([key]) => authorityLabels[key] || key), denied = Object.entries(policy.authorities).filter(([, on]) => !on).map(([key]) => authorityLabels[key] || key);
-  box.append(element('p', '允许：' + (allowed.join('、') || '无')), note('不允许：' + denied.join('、')));
-  box.append(note(policy.tools === null ? '工具由当前任务入口提供，并受任务范围和项目授权约束。' : '可调用工具：' + policy.tools.join('、')));
-  box.append(note('策略由控制面执行；提示词、模型和 Agent 后端都不能扩大这些权限。内容变化时系统会记录新版本，页面无需填写哈希。')); return box;
+const permissionModeLabels = { none: '禁止', read: '只读', write: '读写', allow: '允许', deny: '拒绝' };
+function rolePermissionEditor(role, state) {
+  const box = element('fieldset', '', 'role-permissions'); box.append(element('legend', '权限控制'));
+  box.append(note('逐项设置。工具还必须由当前任务入口提供，并受项目和任务授权限制。文件只读不会禁止命令修改文件；要禁止命令，请同时将「运行命令」设为拒绝。'));
+  for (const item of state.data.permission_items || []) {
+    const control = roleSelect(role.role_id + ' ' + item.name + '权限', role.permissions[item.id], item.modes.map(mode => [mode, permissionModeLabels[mode]]), value => { role.permissions[item.id] = value; state.dirty = true; });
+    const row = element('div', '', 'role-permission-row'); row.append(field(item.name, control), note(item.detail)); box.append(row);
+  }
+  return box;
 }
 function rolesConsole() {
   const id = current.id, holder = element('div', '', 'roles-page'), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
@@ -70,7 +65,7 @@ function rolesConsole() {
       let state = current.rolesDraft;
       if (!state || !state.dirty) {
         const config = data.configuration;
-        state = { data, dirty: false, draft: { enabled: config.enabled, controller: structuredClone(config.controller), roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind, ...(!data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })), skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) } };
+        state = { data, dirty: false, draft: { deleted_roles: [], enabled: config.enabled, controller: structuredClone(config.controller), roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind, ...(!data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })), skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) } };
         current.rolesDraft = state;
       }
       const draw = () => {
@@ -109,7 +104,7 @@ function rolesConsole() {
   return [holder, message];
 }
 function roleOverviewCards(state, redraw) {
-  const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', 'Agent 后端', '模型', '技能包', '能力策略'], '角色解析结果');
+  const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', 'Agent 后端', '模型', '技能包', '权限控制'], '角色解析结果');
   overview.append(note('这里可以直接修改每个角色的配置；点角色名称可编辑提示词和完整设置。修改在点击「保存角色配置」后生效。模型解析结果来自最近一次读取的已保存配置。'));
   for (const role of draft.roles) {
     const row = document.createElement('tr'); row.dataset.role = role.role_id;
@@ -121,18 +116,19 @@ function roleOverviewCards(state, redraw) {
     if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更')); 
     tableCell(row, '模型', roleModelPicker(role, state), note('当前解析：' + roleModelText(data.preview.find(entry => entry.role === role.role_id))));
     tableCell(row, '技能包', roleSkillPicker(role, state));
-    const details = element('details', '', 'role-policy-details'); details.append(element('summary', '查看允许和禁止的动作'), roleCapabilityDetails(role, data));
-    tableCell(row, '能力策略', rolePolicyPicker(role, state, redraw), details); body.append(row);
+    const details = element('details', '', 'role-permission-details'); details.append(element('summary', '编辑逐项权限'), rolePermissionEditor(role, state));
+    tableCell(row, '权限控制', details); body.append(row);
   }
   overview.append(table, note('Agent 后端：' + data.backends.map(backend => backend.name + (backend.available ? '（可用）' : '（尚未接入）')).join('；')));
   const coordination = card('角色协调设置'); coordination.append(roleCheck('开启角色协调', draft, 'enabled', state));
   for (const [id, title, covers] of roleEntries) coordination.append(roleCheck(`${title}交给主控（${covers}）`, draft.controller.entries, id, state));
   coordination.append(note('关闭协调时，任务沿用原执行器；独立 QA 仍然负责验收。正在运行的任务保留启动时的配置快照。'));
   const custom = card('自定义角色'), name = input('new_role', '', { placeholder: '如 security_checker', maxLength: 32 });
-  const error = element('p', '', 'view-error'); custom.append(field('新角色标识', name), button('添加观察角色', () => {
+  const error = element('p', '', 'view-error'); custom.append(field('新角色标识', name), button('添加角色', () => {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name.value) || draft.roles.some(role => role.role_id === name.value)) { error.textContent = '使用小写字母开头的唯一名称，可包含数字、下划线或连字符。'; return; }
-    draft.roles.push({ role_id: name.value, enabled: true, kind: 'observer', name: name.value, responsibility: '', persona_prompt: '', model_profile_ref: null, skill_bundle_ref: null, harness_ref: { id: data.recommended_backend || 'pi' }, capability_policy_ref: { id: 'observer' }, environment_profile_ref: { id: 'candidate-checkout' }, budget_policy_ref: { id: 'entry-default' }, output_schema_ref: { id: 'role-findings' } }); state.dirty = true; redraw();
-  }), error);
+    const defaults = structuredClone(Object.hasOwn(data.role_defaults, name.value) ? data.role_defaults[name.value] : data.role_defaults.observer);
+    draft.roles.push({ role_id: name.value, enabled: true, name: name.value, responsibility: '', persona_prompt: Object.hasOwn(data.role_templates || {}, name.value) ? data.role_templates[name.value] : data.role_templates.observer, model_profile_ref: null, skill_bundle_ref: null, harness_ref: { id: data.recommended_backend || 'pi' }, budget_policy_ref: { id: 'entry-default' }, ...defaults }); draft.deleted_roles = (draft.deleted_roles || []).filter(id => id !== name.value); state.dirty = true; redraw();
+  }), note('新增角色默认使用可编辑的检视模板。Manager、Coordinator 和 QA 是必需角色，其余角色都可以删除。'), error);
   return [overview, coordination, roleSkillsCard(state, redraw), roleStagesCard(state, redraw), custom];
 }
 function roleSkillPicker(role, state) {
@@ -147,9 +143,13 @@ function roleSettingsCard(role, state, redraw) {
     section.append(field('模型 API', roleSelect('模型 API', profile.api, (backend?.model_api || []).map(id => [id, id]), value => { profile.api = value; state.dirty = true; })),
       roleCheck('模型支持工具调用', profile, 'tool_calls', state), field('结构化输出方式', roleSelect('结构化输出方式', profile.structured_output, (backend?.structured_output || []).map(id => [id, id]), value => { profile.structured_output = value; state.dirty = true; })));
   }
-  section.append(roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 12, maxLength: 16000 }), note('角色提示词补充职责与行为要求；工具和权限由下面的能力策略执行。'));
-  const builtin = state.data.builtin_prompts?.[role.role_id]; if (builtin) section.append(collapsible('查看固定职责与任务记录规则', builtin));
-  section.append(field('技能包', roleSkillPicker(role, state)), field('能力策略', rolePolicyPicker(role, state, redraw)), roleCapabilityDetails(role, state.data));
+  const system = textarea('system_prompt', state.data.system_prompt, { rows: 6, readOnly: true }); system.setAttribute('aria-label', '系统提示词'); system.readOnly = true;
+  section.append(field('系统提示词', system), note('所有角色共用的系统背景、环境说明和基本行为准则。角色职责与任务记录规则在下面的提示词中直接修改。'));
+  section.append(roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 18, maxLength: 32000 }), note('这份提示词包含角色完整的职责与行为要求，可以全部修改或清空；系统不会再追加固定职责。'), button('恢复角色模板', async () => {
+    if (!await askConfirm({ title: '恢复角色模板？', body: ['当前角色提示词将替换为默认模板，保存后生效。'], action: '恢复模板' })) return;
+    role.persona_prompt = (Object.hasOwn(state.data.role_templates, role.role_id) ? state.data.role_templates[role.role_id] : state.data.role_templates.observer); state.dirty = true; redraw();
+  }));
+  section.append(field('技能包', roleSkillPicker(role, state)), rolePermissionEditor(role, state));
   const environment = state.data.environment_profiles.filter(entry => entry.kinds.includes(role.kind));
   section.append(field('运行环境', roleSelect('运行环境', role.environment_profile_ref.id, environment.map(entry => [entry.id, environmentLabels[entry.id] || entry.id, entry.isolation === 'run_container' && backend?.capabilities?.isolation !== 'run_environment']), id => { role.environment_profile_ref = { id }; state.dirty = true; })));
   section.append(field('输出结果', roleSelect('输出结果', role.output_schema_ref.id, state.data.output_schemas.filter(entry => entry.kinds.includes(role.kind)).map(entry => [entry.id, outputLabels[entry.id] || entry.id]), id => { role.output_schema_ref = { id }; state.dirty = true; })));
@@ -167,7 +167,12 @@ function roleSettingsCard(role, state, redraw) {
       section.append(field('任务累计金额上限（留空不设置）', roleBound(amount, value => { if (value === '') delete role.budget_policy_ref.max_cost; else role.budget_policy_ref.max_cost = { amount: Number(value), currency: currency.value }; }, state)), field('预算币种', currency));
     }
   }
-  if (!['manager', 'dev', 'test', 'reviewer', 'ux', 'qa', 'coordinator'].includes(role.role_id)) section.append(button('移除这个角色', () => { state.draft.roles = state.draft.roles.filter(entry => entry !== role); state.dirty = true; current.item = null; history.replaceState(null, '', `#/projects/${current.id}/roles`); redraw(); }, 'quiet destructive'));
+  if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) section.append(button('删除这个角色', async () => {
+    const stages = state.draft.required_stages.filter(stage => stage.role_constraints.role_ids?.includes(role.role_id));
+    if (stages.length) { await askConfirm({ title: '先调整任务阶段', body: ['这些阶段仍指定了该角色：' + stages.map(stage => stage.stage_id).join('、') + '。请在概览中修改阶段角色或移除阶段，再删除角色。'], action: '知道了' }); return; }
+    if (!await askConfirm({ title: '删除角色 ' + role.name + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。阶段要求如引用此角色，需要一并调整。'], action: '删除角色' })) return;
+    state.draft.roles = state.draft.roles.filter(entry => entry !== role);
+    if (state.data.configuration.roles.some(entry => entry.role_id === role.role_id)) state.draft.deleted_roles = [...new Set([...(state.draft.deleted_roles || []), role.role_id])]; state.dirty = true; current.item = null; history.replaceState(null, '', `#/projects/${current.id}/roles`); redraw(); }, 'quiet destructive'));
   return section;
 }
 function roleSkillsCard(state, redraw) {

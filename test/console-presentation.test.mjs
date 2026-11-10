@@ -118,7 +118,7 @@ test('the next step is one sentence for waiting, accepting, finished and unreada
 
 // A role as GET /api/repositories/:id/roles returns it.
 const role = (role_id, kind, harness, version = '1') => ({ role_id, kind, enabled: true, name: role_id, responsibility: '', persona_prompt: '', revision: 1, model_profile_ref: null, skill_bundle_ref: null,
-  harness_ref: { id: harness, version }, capability_policy_ref: { id: 'policy', version: '1' }, environment_profile_ref: { id: 'env', version: '1' }, budget_policy_ref: { id: 'entry-default', version: '1' }, output_schema_ref: { id: 'out', version: '1' } });
+  harness_ref: { id: harness, version }, permissions: {repository:'read',commands:'deny'}, environment_profile_ref: { id: 'env', version: '1' }, budget_policy_ref: { id: 'entry-default', version: '1' }, output_schema_ref: { id: 'out', version: '1' } });
 // Agent backends as GET /api/repositories/:id/roles lists them: peers, Pi recommended, Claude Code for worker roles only.
 const all = ['controller', 'writer', 'observer', 'evaluator'], backends = [['pi', 'Pi', '1.4.0', all], ['native', 'Native', '1', all], ['process', 'Process', '1', all], ['acp', 'ACP', '1', all], ['claude_code', 'Claude Code', '2.1.319', ['writer', 'observer', 'evaluator']]]
   .map(([id, name, version, kinds]) => ({ id, name, version, kinds, available: true, recommended: id === 'pi', integration_issue: null })).concat([{ id: 'codex', name: 'Codex', version: null, kinds: [], available: false, recommended: false, integration_issue: 171 }]);
@@ -127,7 +127,7 @@ const roleData = (config, { workflow = 'development.issue', configured = true } 
 const team = controller => [role('manager', 'controller', controller, controller === 'pi' ? '1.4.0' : '1'), role('dev', 'writer', 'native'), role('test', 'observer', 'native'), role('reviewer', 'observer', 'acp'), role('ux', 'observer', 'native'), role('qa', 'evaluator', 'native'), role('coordinator', 'controller', 'native')];
 const entries = { development: true, request: true, review: false, actions: false };
 function rolesPage(data) {
-  data.capability_policies = data.configuration.roles.map(role => ({id:role.capability_policy_ref.id,kind:role.kind,tools:null,authorities:{query_facts:true,publish:false}}));
+  data.permission_items = [{id:'repository',name:'工作区文件',modes:['none','read','write'],detail:'读取或修改工作区文件。'},{id:'commands',name:'运行命令',modes:['deny','allow'],detail:'执行工作区命令。'}];
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js', 'static/roles.js'], () => [404, {}]);
   const draft = {enabled:data.configuration.enabled,controller:data.configuration.controller,roles:data.configuration.roles.map(role=>({...role,...(!data.configured?{harness_ref:{id:'pi'}}:{})})),skills:[],required_stages:[]};
   page.run(`current={id:'101',section:'roles'}; window.roleState=${JSON.stringify({data,draft,dirty:false})}; window.roleView=roleOverviewCards(roleState,()=>{});`);
@@ -140,7 +140,7 @@ test('role overview edits backends, models and permissions without a JSON editor
   assert.deepEqual(['manager','dev','reviewer'].map(id=>picker(id).value),['pi','native','acp']);
   assert.ok(picker('manager').children.find(option=>option.value==='claude_code').disabled);
   assert.ok(!picker('dev').children.find(option=>option.value==='claude_code').disabled);
-  assert.match(text(view.cards[0]),/允许：读取任务事实/);assert.match(text(view.cards[0]),/不允许：直接发布/);
+  assert.match(text(view.cards[0]),/编辑逐项权限/);assert.match(text(view.cards[0]),/工作区文件/);assert.doesNotMatch(text(view.cards[0]),/能力策略/);
   assert.doesNotMatch(text(view.cards[0]),/policy@|配置（JSON）|修改配置/);
   picker('dev').value='process';picker('dev').listeners.change[0]();
   assert.equal(view.page.run("roleState.draft.roles.find(r=>r.role_id==='dev').harness_ref.id"),'process');

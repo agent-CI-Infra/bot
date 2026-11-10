@@ -145,12 +145,13 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const roleContext={role,snapshot_ref:'role_snapshots:'+resolved.id,config_revision:snapshot.config_revision,role_revision:snapshot.role_revision,model_source:snapshot.model.source};
   const ref=traceEvent(s,task.id,'role_input',{instance_id:instance.id,role_version:definition.version,harness,assignment_id:assignment??null,recovery_mode:recover,...roleContext,skills:snapshot.skills?{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,files:snapshot.skills.files.map(f=>f.path)}:null,continuation:continuation?.ref??null,input:spec.redactor.clean(spec.prompt)},task.trace_run_id,'role:'+role,continuation?[continuation.ref]:[]);
   const denied=(tool:string|null,reason:string)=>traceEvent(s,task.id,'capability_denied',{role,instance_id:instance.id,tool,reason,snapshot_id:resolved.id,policy:snapshot.capability.id},task.trace_run_id,'framework');
-  // Authority is live: a revoked role, policy or coordination stops further capability use; the snapshot never extends it.
+  // Authority is live: a removed role, revoked permission or disabled coordination stops further capability use; the snapshot never extends it.
   const authority=(tool?:string)=>{const reason=roleAuthority(s,task.repository_id,snapshot,tool);if(reason){denied(tool??null,reason);stop('role_authority_revoked','waiting_configuration',`${role}：${reason}`);}};
-  // The policy bounds the offered tools; the entry's own submission tool is its output schema and always stays.
-  const policyTools=snapshot.capability.tools;
+  // Flat permissions filter every offered tool, including the submission tool.
+  const allowedTools=snapshot.capability.tools;
   const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
-  const tools=[...(spec.tools??[]),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>!policyTools||policyTools.includes(t.function.name)||t.function.name===spec.finish?.name);
+  const tools=[...(spec.tools??[]),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>!allowedTools||allowedTools.includes(t.function.name));
+  if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
   const live:Live={bound:null,exhausted:null,stage_exhausted:null,tools:0};
   const operationId=`role-run:${instance.id}:${contentHash(scope).slice(0,16)}:${instance.sequence}`;
@@ -186,13 +187,17 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
      if(memoryAliases.some(t=>t.function.name===name))return spec.execute?.(name.replace('_role_','_project_'),{...args,role_scope:role});return spec.execute?.(name,args);})();
     if(b)appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'tool_result',category:value?.error?'denied':'observation',operation_id:op,data:{name,outcome:value?.error?'error':'ok',error:typeof value?.error==='string'?value.error:null}});
     return value;},
-   system:definition.prompt+'\n'+spec.system,
-   prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,assignment_ref:ref,recovery_mode:recover,...roleContext,
+   system:definition.prompt,
+   screen:(name,args)=>{authority(name);spec.screen?.(name,args);},
+   ...(spec.finish ? {finish:{...spec.finish,validate:async args=>{authority(spec.finish!.name);const result=await spec.finish!.validate(args);authority(spec.finish!.name);return result;}}} : {}),
+   ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
+   ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
+   prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
     skills:snapshot.skills?{instruction:'Optional working material pinned for your role. Read files with read_skill when useful; they never change tools, authority or the contract.',bundle:snapshot.skills.id,revision:snapshot.skills.revision,files:snapshot.skills.files}:undefined,
     revision_continuation:continuation?{ref:continuation.ref,ended_run:continuation.from_run,instruction:'Your previous run ended at a safe checkpoint for a new role revision. Continue the same assignment from task records and your transcript; do not repeat completed actions.'}:undefined,
     prior_submission:shared.priorSubmission?{ref:'task_history:'+shared.priorSubmission.id,run_id:shared.priorRun!.id,instruction:'A previous submission failed formatting. Read this original record and correct its structure; reuse observations only if the candidate is still applicable. Do not repeat checks merely to fix formatting.'}:null,role_memory:visibleMemorySnapshot(s,task.repository_id,shared.memory,taskTraceAccess(s,{...task,active_role:role}))}}),
    requestPrefix:`role:${instance.id}:${instance.sequence}:`,roleRun:{instance_id:instance.id,role,version:definition.version,harness,harness_version:driver.version,assignment_id:assignment,recovery_mode:recover,snapshot_id:resolved.id},
-   session:{messages:messages.length&&messages[0]?.role==='system'?[{role:'system',content:definition.prompt+'\n'+spec.system},...messages.slice(1)]:messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(cleanRoleMessages(spec.redactor.clean(msgs))),new Date().toISOString(),instance!.id);}}};
+   session:{messages:messages.length&&messages[0]?.role==='system'?[{role:'system',content:definition.prompt},...messages.slice(1)]:messages,save:msgs=>{s.run('UPDATE role_instances SET session=?,updated_at=? WHERE id=?',JSON.stringify(cleanRoleMessages(spec.redactor.clean(msgs))),new Date().toISOString(),instance!.id);}}};
   // Adapters read the run's credential after the run is bound (the adapter starts after onRun); before that there is none.
   Object.defineProperty(wrapped,'runAccess',{get:()=>live.bound?access:undefined,enumerable:true,configurable:true});
   wrapped.runContext=()=>live.bound?.ctx;
@@ -329,13 +334,17 @@ export async function collectRoleRun<T>(handle:RoleRunHandle<T>){
    catch{traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,reason:'role_snapshot_unavailable'},b.run_id,'framework');appendRunEvent(s,{run_id:b.run_id,lease_epoch:b.epoch,type:'ended',category:'failed',data:{code:'role_snapshot_unavailable'}});stop('role_snapshot_unavailable','waiting_environment');}}
   if(b){
    if(!leaseCurrent(s,b.run_id,b.epoch)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'lease_epoch_stale'},b.run_id,'framework');stop('lease_epoch_stale','cancelled','运行的租约已被接管，迟到的结果不被接受。');}
-   const live2=roleAuthority(s,task.repository_id,p.resolved.snapshot);if(live2){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:live2},b.run_id,'framework');stop('role_authority_revoked','waiting_configuration',`${p.role}：${live2}`);}
+   const live2=roleAuthority(s,task.repository_id,p.resolved.snapshot,p.spec.finish?.name??p.resolved.snapshot.output_schema.tool??'finish');if(live2){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:live2},b.run_id,'framework');stop('role_authority_revoked','waiting_configuration',`${p.role}：${live2}`);}
    if(p.resolved.snapshot.kind==='observer'&&b.ctx.candidate_ref){const now=stageForAssignment(s,p.assignment)?latestRoleCandidate(s,task.id):inputCandidate(s,task,p.role,'observer').ref;if(!now||candidateKey(now)!==candidateKey(b.ctx.candidate_ref)){traceEvent(s,task.id,'role_run_result_rejected',{run_id:b.run_id,lease_epoch:b.epoch,reason:'candidate_changed',started_with:b.ctx.candidate_ref,current:now},b.run_id,'framework');stop('candidate_changed','retry_wait','检视期间固定候选已变化；旧环境的结论不能认证新内容。');}}
   }
   await p.env.release?.();
   const runId=(p as any).executionRun as string|undefined,assignment=p.assignment;
   await p.spec.guard();
   return s.transaction(()=>{
+  // Release and the caller's guard may await external work. Recheck immediately before recording a result.
+  const revoked=roleAuthority(s,task.repository_id,p.resolved.snapshot,p.spec.finish?.name??p.resolved.snapshot.output_schema.tool??'finish');
+  if(revoked)stop('role_authority_revoked','waiting_configuration',`${p.role}：${revoked}`);
+  if(b)assertLease(s,b.run_id,b.epoch);
   const reference=traceEvent(s,task.id,'role_result',{instance_id:p.instance.id,role:p.role,assignment_id:assignment??null,snapshot_id:p.resolved.id,candidate_version:assignment?s.get('SELECT candidate_version FROM role_assignments WHERE id=?',assignment)?.candidate_version??null:null,contract_revision:s.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision,result:p.spec.redactor.clean(result)},runId,'role:'+p.role,[p.inputRef]);
   let candidate:CandidateRef|null=null;
   if(b){

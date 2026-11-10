@@ -11,7 +11,7 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { Redactor, TaskError } from '../dist/agent/common.js';
 import { runRole, roleRuns } from '../dist/roles/run.js';
 import { roleApi } from '../dist/roles/api.js';
-import { resolveRole, roleConfiguration } from '../dist/roles/definition.js';
+import { resolveRole, roleConfiguration, saveConfiguration } from '../dist/roles/definition.js';
 import { instanceUsage, revokeRunTokens } from '../dist/roles/role-run.js';
 import { claudeCodeRuntime, ClaudeJsonStream } from '../dist/harness/claude-code-protocol.js';
 import { claudeBinary } from '../dist/harness/claude-code.js';
@@ -215,7 +215,7 @@ test('pinned native Claude Code binary uses stream-json, bare restrictions and r
   const commandOptions = { cwd: code, encoding: 'utf8', timeout: 5000, env: { LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'] };
   assert.throws(() => execFileSync(process.execPath, ['--test', 'add.test.mjs'], commandOptions), e => e.status === 1);
   let writes = 0, observation;
-  f.spec.system += ' DEV_PRIVATE_MARKER_170';
+  saveConfiguration(f.s, 'r', { expected_revision: 0, enabled: true, roles: [{ role_id: 'dev', harness_ref: {id:'claude_code'}, persona_prompt: 'DEV_PRIVATE_MARKER_170' }] }, 'fixture');
   f.spec.tools.push(tool('write_file'), tool('run_command'));
   f.spec.execute = async (name, args) => {
     if (name === 'write_file') { assert.equal(args.path, 'add.mjs'); if (readFileSync(join(code, args.path), 'utf8') !== args.content) { writeFileSync(join(code, args.path), args.content); writes++; } return { written: true }; }
@@ -240,7 +240,8 @@ test('pinned native Claude Code binary uses stream-json, bare restrictions and r
   writeFileSync(join(active, 'add.mjs'), 'export const add = (a, b) => a + b + 1;\n'); writeFileSync(join(active, 'add.test.mjs'), readFileSync(join(code, 'add.test.mjs')));
   const fixedHash = contentHash(readFileSync(join(active, 'add.mjs'), 'utf8'));
   const candidate = new TaskRecords(f.s).submit('t', [{ kind: 'file', reference: 'artifact:seeded-arithmetic', version: fixedHash, content: { path: 'add.mjs', content_hash: fixedHash } }], [], { fixture: true });
-  const review = await runRole({ ...f.spec, system: 'INDEPENDENT_REVIEW_PROBE', tools: f.spec.tools.filter(t => t.function.name !== 'write_file'), finish: { name: 'finish', validate: value => { assert.equal(observation.exit_code, 1); assert.equal(observation.candidate_hash, fixedHash); assert.ok(value.findings.length); return { ...value, candidate_hash: fixedHash, test: observation }; } } }, 'reviewer', undefined, 'claude_code');
+  saveConfiguration(f.s, 'r', { expected_revision: 1, enabled: true, roles: [{ role_id: 'reviewer', harness_ref: {id:'claude_code'}, persona_prompt: 'INDEPENDENT_REVIEW_PROBE' }] }, 'fixture');
+  const review = await runRole({ ...f.spec, tools: f.spec.tools.filter(t => t.function.name !== 'write_file'), finish: { name: 'finish', validate: value => { assert.equal(observation.exit_code, 1); assert.equal(observation.candidate_hash, fixedHash); assert.ok(value.findings.length); return { ...value, candidate_hash: fixedHash, test: observation }; } } }, 'reviewer', undefined, 'claude_code');
   assert.ok(review.result.findings.length); assert.notEqual(JSON.parse(f.s.get("SELECT harness_state FROM role_instances WHERE role='reviewer'").harness_state).sessionId, state.sessionId);
   const reviewRun = f.s.get("SELECT id FROM task_runs WHERE role='reviewer' ORDER BY rowid DESC LIMIT 1"); assert.equal(roleRuns.events(f.s, reviewRun.id).events.at(-1).data.input_candidate_ref.ref, 'candidate:' + candidate.id);
   assert.ok(!JSON.stringify(f.s.all('SELECT data FROM task_history')).includes('service-key-fixture-170'));

@@ -42,7 +42,7 @@ function facts(s: Store, taskId: string) {
   // as editing the workflow did.
   const workflow = legacyWorkflowRow(s, task.repository_id, fixed?.workflow?.id ?? task.kind), version = workVersion(s, task.repository_id, workOf(task as any));
   // Only relevant gate policy changes invalidate results; changing a persona alone is handled by role revisions.
-  const authority=(configuration:typeof live)=>configuration.roles.filter(role=>(configuration.required_stages??[]).some(stage=>stageAllows(stage,{...role,enabled:true}))).map(({role_id,enabled,capability_policy_ref,environment_profile_ref,harness_ref})=>({role_id,enabled,capability_policy_ref,environment_profile_ref,harness_ref}));
+  const authority=(configuration:typeof live)=>configuration.roles.filter(role=>(configuration.required_stages??[]).some(stage=>stageAllows(stage,{...role,enabled:true}))).map(({role_id,enabled,permissions,environment_profile_ref,harness_ref})=>({role_id,enabled,permissions,environment_profile_ref,harness_ref}));
   const policyHash = stageHash({ stages: live.required_stages ?? [], authority:authority(live), test_command: policy?.test_command ?? '', workflow, ...(version ? { work: version } : {}) });
   return { task, record, config, live, policy, policyHash, authorityChanged:stageHash(authority(config))!==stageHash(authority(live)) };
 }

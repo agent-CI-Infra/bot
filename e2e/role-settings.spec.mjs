@@ -25,6 +25,11 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await nav.getByRole('link', { name: 'Dev', exact: true }).click();
     await expect(page).toHaveURL(/\/roles\/dev$/);
     await page.getByLabel('角色提示词', { exact: true }).fill('先读复现，再修改代码并验证。');
+    await expect(page.getByLabel('系统提示词', { exact: true })).toHaveAttribute('readonly', '');
+    await expect(page.getByText('查看固定职责与任务记录规则', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('能力策略', { exact: true })).toHaveCount(0);
+    await page.getByLabel('dev 工作区文件权限', { exact: true }).selectOption('read');
+    await page.getByLabel('dev 运行命令权限', { exact: true }).selectOption('deny');
     await page.getByLabel('预算方式', { exact: true }).selectOption('bounded');
     await page.getByLabel('单次运行最多模型轮数', { exact: true }).fill('12');
     await page.getByLabel('单次输出最多 token', { exact: true }).fill('2048');
@@ -36,6 +41,8 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置');
     let saved = (await admin('/api/repositories/101/roles')).value.configuration, dev = saved.roles.find(role => role.role_id === 'dev');
     expect(dev.persona_prompt).toBe('先读复现，再修改代码并验证。'); expect(dev.model_profile_ref.model_id).toBe(model.id);
+    expect(dev.permissions).toMatchObject({ repository: 'read', commands: 'deny' });
+    expect(dev.capability_policy_ref).toBeUndefined();
     expect(dev.budget_policy_ref).toMatchObject({ id: 'bounded', max_turns: 12, max_output_tokens: 2048 });
     await nav.getByRole('link', { name: '概览', exact: true }).click();
     await page.getByRole('button', { name: '添加技能包', exact: true }).click();
@@ -62,5 +69,44 @@ test('角色概览和详情通过表单保存模型、提示词、预算、技�
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/role-settings/overview-mobile.png', fullPage: true });
     expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});
+
+test('新增角色、删除内置角色并重载，只有三个必需角色不可删除', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    await page.goto(h.admin + '/#/projects/101/roles');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByLabel('新角色标识', { exact: true }).fill('security');
+    await page.getByRole('button', { name: '添加角色', exact: true }).click();
+    const nav = page.locator('.role-nav');
+    await nav.getByRole('link', { name: 'security', exact: true }).click();
+    await page.getByLabel('角色提示词', { exact: true }).fill('检查输入边界并记录证据。');
+    await page.getByLabel('security 运行命令权限', { exact: true }).selectOption('deny');
+    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置');
+    for (const name of ['Manager', '跨任务协调', '独立 QA']) {
+      await nav.getByRole('link', { name, exact: true }).click();
+      await expect(page.getByRole('button', { name: '删除这个角色', exact: true })).toHaveCount(0);
+    }
+    await nav.getByRole('link', { name: 'Reviewer', exact: true }).click();
+    await page.getByRole('button', { name: '删除这个角色', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '删除角色', exact: true }).click();
+    await expect(nav.getByRole('link', { name: 'Reviewer', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(2);
+    await page.reload();
+    await expect(nav.getByRole('link', { name: 'Reviewer', exact: true })).toHaveCount(0);
+    await nav.getByRole('link', { name: 'security', exact: true }).click();
+    await expect(page.getByLabel('角色提示词', { exact: true })).toHaveValue('检查输入边界并记录证据。');
+    await expect(page.getByLabel('security 运行命令权限', { exact: true })).toHaveValue('deny');
+    await page.getByRole('button', { name: '删除这个角色', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '删除角色', exact: true }).click();
+    await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
+    await expect.poll(async () => (await admin('/api/repositories/101/roles')).value.configuration.revision).toBe(3);
+    const roles = (await admin('/api/repositories/101/roles')).value.configuration.roles.map(role => role.role_id);
+    expect(roles).not.toContain('reviewer'); expect(roles).not.toContain('security');
   } finally { await h.stop(); }
 });
