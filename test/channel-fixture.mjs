@@ -5,15 +5,17 @@ import { digest, randomId } from '../dist/core/security.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
-  const sent = [], state = { failures: 0, authGate: null, authRequests: [] };
+  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot' };
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
+      state.authStarted++;
       if (state.authGate) await state.authGate;
       const auth = JSON.parse(init.body); state.authRequests.push({ url, tenant_key: auth.tenant_key, app_id: auth.app_id });
       if (url.endsWith('/app_access_token')) return Response.json({ code: 0, app_access_token: 'fixture-app-access-token' });
-      return Response.json({ code: 0, tenant_access_token: 'fixture-only-access-token' });
+      return Response.json({ code: state.authCode, tenant_access_token: 'fixture-only-access-token', msg: 'fixture-feishu-app-secret' });
     }
     if (state.failures) { state.failures--; return Response.json({ code: 999, msg: 'fixture failure' }, { status: 503 }); }
+    if (url.endsWith('/bot/v3/info')) return Response.json({ code: state.botCode, bot: { open_id: state.botOpenId, app_name: 'Fixture bot' }, msg: 'fixture-only-access-token' });
     const request = JSON.parse(init.body); sent.push({ url, method: init.method, ...request, content: JSON.parse(request.content) });
     return Response.json({ code: 0, data: { message_id: 'remote-' + sent.length } });
   } };

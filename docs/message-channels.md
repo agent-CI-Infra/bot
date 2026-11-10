@@ -4,7 +4,19 @@
 
 ## 配置与权限
 
-在后台「消息渠道」配置项目所属 GitHub 组织、App ID、安装 tenant_key、允许的操作者 tenant_key 和机器人 open_id。组织配置需要当前租户的 `config.write`，项目群映射需要该项目的 `config.write`；项目权限仍由身份服务决定。凭据写入独立密封记录，连接只保存引用；后台不回显密钥。绑定和结果链接需要稳定的后台地址：使用统一入口，即接入向导验证的公网地址，未验证时使用部署的 `BOT_PUBLIC_ORIGIN`（旧名 `BOT_ADMIN_ORIGIN`）；两者都没有时，使用保存 GitHub 登录配置时的控制台地址。
+全局管理员从「全局设置 → 飞书连接」（`/#/settings/feishu`）进入应用连接向导；个人飞书身份在「身份与权限 → 飞书身份绑定」（`/#/identity/feishu`）中关联。顶部不再单列「消息渠道」，旧 `/#/channels` 地址会跳转到个人绑定入口，GitHub 绑定回调也直接返回该入口。
+
+向导分五步，可从已保存连接继续：
+
+1. **创建应用**：打开飞书开发者后台，开启机器人能力，复制最小基础权限 JSON；企业自建可选择 SDK 长连接或 HTTP，商店应用只能使用 HTTP。
+2. **凭据与范围**：选择项目所属 GitHub 组织，填写 App ID、安装 tenant_key 和允许的操作者 tenant_key。自建应用可检查 App Secret 并读取机器人 open_id；尚未发布机器人时也可按飞书 API 返回值填写。长连接只需 App Secret；HTTP 另需 Verification Token 和 Encrypt Key。编辑时空白凭据保留原值，填写其中一项只替换该项。保存时显式选择是否启用连接。
+3. **事件与回调**：HTTP 复制本部署公网入口下的回调 URL；长连接等待连接建立后保存订阅方式。消息事件与 `card.action.trigger` 卡片回调分别配置，再添加应用生命周期、群成员变更及商店应用票据事件。
+4. **发布与检查**：在飞书发布版本、设置可用范围并完成必要审核，再检查机器人信息。检查只证明凭据和机器人信息可读，不证明消息或卡片回调已经送达。
+5. **绑定与试用**：每位用户完成个人双端绑定，实际发送项目查询并点击返回卡片；此页可查看收件、发送状态，批准或撤销群接收范围。
+
+向导读取和凭据检查接口要求 `platform.manage`，普通用户不能使用。底层组织连接 API 仍要求当前租户的 `config.write`，项目群映射要求该项目的 `config.write`；项目权限仍由身份服务决定。个人页面只读取自己的绑定及当前授权组织中已启用应用的标识，不返回应用凭据或安装策略。凭据写入独立密封记录，后台不回显密钥。绑定和结果链接需要稳定的后台地址：使用统一入口，即接入向导验证的公网地址，未验证时使用部署的 `BOT_PUBLIC_ORIGIN`（旧名 `BOT_ADMIN_ORIGIN`）；两者都没有时，使用保存 GitHub 登录配置时的控制台地址。
+
+`GET /api/channels/setup` 返回管理员可见连接及当前入口地址；`POST /api/channels/feishu/probe` 用自建应用的 `{app_id,app_secret}` 临时检查，或用 `{connector_id,expected_revision}` 检查已保存连接。请求仅访问固定的飞书 API，不保存临时凭据、不修改身份和授权、不发送测试消息。成功返回机器人名称、open_id、`state:verified` 和 `event_delivery_verified:false`；版本变化、鉴权失败和商店应用票据缺失分别返回稳定错误码，平台原始错误和访问令牌不返回客户端。
 
 SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自建可选择官方 SDK 长连接。HTTP 原始请求体按飞书规则验签，校验五分钟时间窗、Verification Token、App ID 和安装 tenant_key，支持 Encrypt Key 的 AES-256-CBC 解密。长连接由服务端持有应用凭据认证，两种方式复用同一持久收件队列、来源检查和去重。
 
@@ -18,12 +30,12 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 1. 在飞书私聊发送 `绑定` 或 `/bind`。机器人创建五分钟、一次性的 challenge，并将链接发回发起私聊。
 2. 打开链接，在当前浏览器完成 GitHub OAuth。GitHub state 使用既有浏览器绑定、S256 PKCE 和单次消费契约，并关联渠道 challenge。此时尚未绑定飞书。
-3. 后台「消息渠道」展示 GitHub 数字身份、飞书 App、安装/操作者租户及 open_id。核对后，将页面显示的 `确认绑定 <一次性值>` 发回原飞书私聊。
+3. 后台「身份与权限 → 飞书身份绑定」展示 GitHub 数字身份、飞书 App、安装/操作者租户及 open_id。核对后，复制页面显示的 `确认绑定 <一次性值>` 发回原飞书私聊。
 4. 服务端验证同一应用、安装租户、操作者租户、open_id、私聊和线程，再通过身份模块的 `ExternalBindings` 完成持久关联。
 
 只打开链接、转发链接、错误浏览器、错误飞书操作者、超时和重复确认均不能完成绑定。已有映射属于其他 principal 时返回 `external_identity_conflict`；撤销的映射仍归原 principal，不能通过重新绑定接管。绑定不写入 `scoped_grants`；没有项目权限的 GitHub 用户也可以关联身份，但管理请求仍被拒绝。
 
-`身份` / `/identity` 查询当前关联状态；`解绑` / `/unbind` 撤销原身份服务中的映射；`重新认证` / `/reauth` 重新走双端证明。后台也可查看和解绑。验证失败使用明确错误码，不打印凭据、OAuth code、challenge 或个人聊天正文到日志和审计。
+`身份` / `/identity` 查询当前关联状态；`解绑` / `/unbind` 撤销原身份服务中的映射；`重新认证` / `/reauth` 重新走双端证明。个人绑定页面提供步骤说明、待确认身份与指令、刷新状态和解除飞书绑定；撤销后提示重新认证。验证失败使用明确错误码，不打印凭据、OAuth code、challenge 或个人聊天正文到日志和审计。
 
 ## 管理会话与结果
 
@@ -55,8 +67,10 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 验证
 
-`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channels.test.mjs` 覆盖验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。
+`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channels.test.mjs` 覆盖验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
 
 `e2e/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
+
+`e2e/feishu-setup.spec.mjs` 经实际页面验证管理员创建/恢复连接、失败提示、版本冲突，以及用户从合法飞书绑定事件开始，经浏览器 GitHub OAuth、原私聊确认到查看与解绑的完整路径。桌面和手机截图保存在 `.tmp/feishu-setup-165/`；同样使用本地协议夹具，不代表已连接真实飞书应用。
 
 实现依据：[飞书回调验签与解密](https://open.feishu.cn/document/event-subscription-guide/callback-subscription/receive-and-handle-callbacks)、[官方 Node SDK](https://github.com/larksuite/node-sdk)、[长连接接收事件](https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-)。实际开通时仍需按应用类型核对权限与可用事件。

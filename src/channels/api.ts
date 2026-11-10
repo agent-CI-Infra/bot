@@ -1,13 +1,40 @@
 import type { ActorContext } from '../identity/authorization.js';
-import { assertCurrent, authorize } from '../identity/authorization.js';
+import { assertCurrent, authorize, listEffectiveScopes } from '../identity/authorization.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { ChannelService } from './service.js';
+import { FeishuAdapter } from './feishu.js';
 
 export class ChannelApi {
   constructor(readonly service: ChannelService) {}
-  api(actor: ActorContext, method: string, url: URL, input: Json): Json {
+  async api(actor: ActorContext, method: string, url: URL, input: Json): Promise<Json> {
     const store = this.service.store, path = url.pathname;
     assertCurrent(actor);
+    if (path === '/api/channels/setup' && method === 'GET') {
+      authorize(actor, 'platform.manage');
+      return { ...await this.api(actor, 'GET', new URL('/api/channels/connectors', url), {}), origin: this.service.options.origin || null };
+    }
+    if (path === '/api/channels/feishu/probe' && method === 'POST') {
+      authorize(actor, 'platform.manage');
+      fields(input, ['connector_id', 'expected_revision', 'app_id', 'app_secret']);
+      const guard = () => authorize(actor, 'platform.manage');
+      let adapter: FeishuAdapter;
+      if (input.connector_id !== undefined) {
+        if (input.app_id !== undefined || input.app_secret !== undefined) fail(400, 'unknown_field');
+        const c = store.get('SELECT * FROM channel_connectors WHERE id=?', text(input.connector_id));
+        if (!c) return fail(404, 'channel_connector_not_found');
+        authorize(actor, 'config.write', { tenant_id: c.tenant_id });
+        const current = () => {
+          guard(); authorize(actor, 'config.write', { tenant_id: c.tenant_id });
+          if (store.get('SELECT revision FROM channel_connectors WHERE id=?', c.id)?.revision !== input.expected_revision) fail(409, 'channel_revision_conflict');
+        };
+        current(); adapter = this.service.adapter(c, current);
+      } else {
+        // Only enterprise apps can authenticate before their first installation ticket arrives.
+        adapter = new FeishuAdapter({ app_id: text(input.app_id, 200), application_type: 'enterprise' },
+          { app_secret: text(input.app_secret, 4096) }, this.service.options.fetch, guard);
+      }
+      return { ...await adapter.probe(), state: 'verified', event_delivery_verified: false };
+    }
     const receipt = /^\/api\/channels\/operations\/([a-f0-9]{48})$/.exec(path);
     if (receipt && method === 'GET') {
       const row = store.get('SELECT * FROM channel_control_operations WHERE id=?', receipt[1]!);
@@ -18,6 +45,10 @@ export class ChannelApi {
     if (path === '/api/channels/bindings' && method === 'GET') return {
       bindings: store.all("SELECT id,provider,connector,external_tenant,external_actor,display_name,status,verified_at FROM external_identities WHERE principal_id=? AND provider='feishu'", actor.principal_id),
       pending: this.service.bindings.pending(actor.principal_id),
+      // Personal setup only needs public app identifiers in the actor's currently authorized organizations.
+      applications: store.all('SELECT id,app_id,tenant_id FROM channel_connectors WHERE enabled=1').filter(c =>
+        (!actor.tenant_id || actor.tenant_id === c.tenant_id) && listEffectiveScopes(store, actor.principal_id).some(s =>
+          s.state === 'active' && (s.scope === 'platform' || s.tenant_id === c.tenant_id))),
     };
     if (path === '/api/channels/connectors' && method === 'GET') {
       const rows = store.all('SELECT * FROM channel_connectors').filter(c => { try { authorize(actor, 'config.write', { tenant_id: c.tenant_id }); return true; } catch { return false; } });
@@ -55,10 +86,23 @@ export class ChannelApi {
           const value = input.credentials as Json;
           if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400, 'channel_credentials_required');
           fields(value, ['app_secret', 'verification_token', 'encrypt_key']);
-          const secret = Object.fromEntries(['app_secret', 'verification_token', 'encrypt_key'].map(k => [k, text(value[k], 4096)]));
+          const previous = current ? store.get('SELECT sealed FROM channel_credentials WHERE id=?', current.credential_ref) : undefined;
+          const secret: Json = previous ? store.secrets.open(previous.sealed, 'channel-credential:' + current!.credential_ref) : {};
+          for (const key of ['app_secret', 'verification_token', 'encrypt_key']) if (value[key] !== undefined) secret[key] = text(value[key], 4096);
+          text(secret.app_secret, 4096);
+          if (transport === 'http') {
+            if (!secret.verification_token || !secret.encrypt_key) fail(400, 'channel_http_credentials_required');
+          }
+          if (current && current.app_id !== app) { delete secret.app_ticket; delete secret.app_ticket_time; }
           credential = randomId(); store.run('INSERT INTO channel_credentials VALUES(?,?)', credential, store.secrets.seal(secret, 'channel-credential:' + credential));
         }
         if (!credential) fail(400, 'channel_credentials_required');
+        // Switching a socket to HTTP also needs verification credentials when no key was rotated.
+        if (transport === 'http' && input.credentials === undefined) {
+          const stored = store.get('SELECT sealed FROM channel_credentials WHERE id=?', credential)!;
+          const secret = store.secrets.open(stored.sealed, 'channel-credential:' + credential);
+          if (!secret.verification_token || !secret.encrypt_key) fail(400, 'channel_http_credentials_required');
+        }
         if (current) {
           store.run('UPDATE channel_connectors SET app_id=?,installation_tenant=?,actor_tenants=?,bot_open_id=?,application_type=?,transport=?,credential_ref=?,enabled=?,revision=revision+1 WHERE id=? AND revision=?',
             app, installation, JSON.stringify(tenants), bot, String(type), String(transport), credential, Number(enabled), id, expected);
