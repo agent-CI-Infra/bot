@@ -64,8 +64,16 @@ test('global administrator connects an app through the wizard, resumes it and se
     wire.state.tenantCode = 0;
     await page.getByRole('button', { name: '保存连接并继续' }).click();
     await expect(page.getByLabel('HTTP 回调地址')).toHaveValue(/https:\/\/console.example.test\/hooks\/feishu\/[a-f0-9]{48}/);
-    await expect(page.getByText('还必须在“事件与回调 → 回调配置”', { exact: false })).toContainText('两处地址验证均通过');
-    await expect(page.getByText('必须在“回调配置 → 添加回调”', { exact: false })).toContainText('card.action.trigger');
+    const steps = page.getByRole('list', { name: '事件与回调配置步骤' }).getByRole('listitem');
+    await expect(steps).toHaveCount(3);
+    await expect(steps.nth(0).getByLabel('HTTP 回调地址')).toBeVisible();
+    await expect(steps.nth(0)).toContainText('将事件发送至开发者服务器');
+    await expect(steps.nth(0)).toContainText('保存并通过地址验证');
+    await expect(steps.nth(1)).toContainText('将回调发送至开发者服务器');
+    await expect(steps.nth(1)).toContainText('第 1 步的同一个 HTTP 回调地址');
+    await expect(steps.nth(1)).toContainText('单独保存并通过地址验证');
+    await expect(steps.nth(1)).toContainText('card.action.trigger，推荐');
+    await expect(steps.nth(2).getByRole('button', { name: '事件与卡片回调已保存，前往发布' })).toBeVisible();
     const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'"); expect(c.enabled).toBe(1); expect(c.transport).toBe('http'); expect(c.bot_open_id).toBe('ou_automatic_save'); expect(c.installation_tenant).toBe('install-tenant');
     await page.screenshot({ path: output + '/events-desktop.png', fullPage: true });
     await page.getByRole('button', { name: '事件与卡片回调已保存，前往发布' }).click(); await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
@@ -111,6 +119,9 @@ test('store apps save without manual bot identity and synchronize it after recei
     await page.getByLabel('Encrypt Key', { exact: true }).fill(credentials.encrypt_key);
     await page.getByRole('button', { name: '保存连接并继续' }).click();
     await expect(page.getByRole('heading', { name: '事件与回调', exact: true })).toBeVisible();
+    const events = page.getByRole('list', { name: '事件与回调配置步骤' }).getByRole('listitem').nth(0);
+    await expect(events.getByRole('link', { name: '配置公网 HTTPS 地址' })).toBeVisible();
+    await expect(events).toContainText('app_ticket');
     const c = h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_store_wizard'"); expect(c.bot_open_id).toBe('');
     await page.getByRole('button', { name: '事件与卡片回调已保存，前往发布' }).click();
     await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
@@ -129,11 +140,29 @@ test('store apps save without manual bot identity and synchronize it after recei
 
 test('enterprise long connections require callback configuration as well as message events', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
+  mkdirSync(output, { recursive: true });
   try {
     const id = await connector(f.admin, { transport: 'websocket' });
     await page.goto(f.h.admin + '/#/settings/feishu/' + id + '/2'); await login(page, f.h, f.password);
-    await expect(page.getByText('等待下方传输状态显示已连接', { exact: false })).toContainText('使用长连接接收回调');
-    await expect(page.getByText('必须在“回调配置 → 添加回调”', { exact: false })).toContainText('不要选旧版 card.action.trigger_v1');
+    const steps = page.getByRole('list', { name: '事件与回调配置步骤' }).getByRole('listitem');
+    await expect(steps).toHaveCount(3);
+    await expect(steps.nth(0)).toContainText('等待上方传输状态显示已连接');
+    await expect(steps.nth(0)).toContainText('使用长连接接收事件');
+    await expect(steps.nth(0)).toContainText('im.message.receive_v1');
+    await expect(steps.nth(0)).toContainText('im.chat.member.user.deleted_v1');
+    await steps.nth(0).getByRole('button', { name: '刷新连接状态' }).click();
+    await expect(steps.nth(1)).toContainText('使用长连接接收回调');
+    await expect(steps.nth(1)).toContainText('card.action.trigger，推荐');
+    await expect(steps.nth(1)).toContainText('card.action.trigger_v1），旧版不支持长连接');
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.screenshot({ path: output + '/events-websocket-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: output + '/events-websocket-mobile.png', fullPage: true });
+    const current = f.h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id);
+    await f.admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: current.revision, enabled: false });
+    await page.reload();
+    await expect(steps.nth(0).getByRole('link', { name: '前往启用连接' })).toHaveAttribute('href', '#/settings/feishu/' + id + '/1');
     await page.getByRole('button', { name: '1. 创建应用', exact: true }).click();
     const scopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toContain('cardkit:card:write');

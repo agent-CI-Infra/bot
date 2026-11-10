@@ -114,22 +114,34 @@ async function renderFeishuSetup(panel, request) {
       } catch (err) { message.textContent = feishuError(err); } finally { save.disabled = false; }
     }); body.append(form);
   } else if (step === 2) {
-    body.append(note(c.enabled ? '连接已启用，可以配置飞书事件订阅。' : '连接当前停用。请返回“应用凭据”启用，再完成事件验证。'));
+    body.append(note(c.enabled ? '连接已启用。' : '连接当前停用。'),
+      facts([['传输状态', c.transport === 'http' ? 'HTTP 回调' : c.health.connection_state]]));
+    const instructions = element('ol', '', 'feishu-instructions'); instructions.setAttribute('aria-label', '事件与回调配置步骤');
+    const events = element('li'), callbacks = element('li'), publish = element('li');
+    events.append(element('strong', '配置事件'));
+    callbacks.append(element('strong', '配置新版卡片回调'));
+    publish.append(element('strong', '保存并前往发布'));
+    if (!c.enabled) events.append(note('先返回“应用凭据”启用连接，再继续配置。'), channelLink(feishuAddress(id, 1), '前往启用连接'));
     if (c.transport === 'http') {
       let callback = null;
       try { const origin = new URL(data.origin); if (origin.protocol === 'https:') callback = origin.origin + c.callback_path; } catch {}
-      body.append(note('在“事件与回调 → 事件配置”选择“将事件发送至开发者服务器”。下面的地址来自本部署的控制台公网入口。'));
-      if (callback) body.append(channelCopy('HTTP 回调地址', callback));
-      else body.append(note('尚无可用的公网 HTTPS 地址。先在“公网接入”完成配置，再返回继续。'), channelLink('#/settings/access', '配置公网 HTTPS 地址'));
-      body.append(note('还必须在“事件与回调 → 回调配置”选择“将回调发送至开发者服务器”，填写上面同一个 HTTP 回调地址。事件配置和回调配置需分别保存，确保两处地址验证均通过。'));
-    } else body.append(note('等待下方传输状态显示已连接，再在飞书“事件与回调 → 事件配置”选择“使用长连接接收事件”并保存；随后在“回调配置”选择“使用长连接接收回调”并保存。两处必须分别配置，无需填写公网地址。'));
-    body.append(facts([['传输状态', c.transport === 'http' ? 'HTTP 回调' : c.health.connection_state]]), feishuList([
-      '在“事件配置”添加 im.message.receive_v1（接收消息）。只接收私聊及群内 @，不订阅全部群消息。',
-      '必须在“回调配置 → 添加回调”单独添加 card.action.trigger（卡片回传交互），不要添加到“事件配置”，也不要选旧版 card.action.trigger_v1。卡片按钮默认依赖此回调。',
-      '订阅 im.chat.member.user.added_v1、im.chat.member.user.deleted_v1，用于成员变化后使群接收范围失效；再添加应用卸载和状态变更事件。',
-      c.application_type === 'saas' ? '商店应用还需配置 app_ticket 推送、安装租户和应用生命周期事件。尚未收到票据时无法检测发送凭据。' : '保存事件与回调配置，下一步发布应用版本。']),
-      button('刷新连接状态', () => render().catch(error), 'quiet'));
-    next('事件与卡片回调已保存，前往发布');
+      events.append(note('在飞书“事件与回调 → 事件配置”选择“将事件发送至开发者服务器”，填写下方 HTTP 回调地址，保存并通过地址验证。'));
+      if (callback) events.append(channelCopy('HTTP 回调地址', callback));
+      else events.append(note('尚无可用的公网 HTTPS 地址。先在“公网接入”完成配置，再返回继续。'), channelLink('#/settings/access', '配置公网 HTTPS 地址'));
+      callbacks.append(note('切换到“事件与回调 → 回调配置”，选择“将回调发送至开发者服务器”，填写第 1 步的同一个 HTTP 回调地址，单独保存并通过地址验证。'));
+    } else {
+      events.append(note('等待上方传输状态显示已连接，再在飞书“事件与回调 → 事件配置”选择“使用长连接接收事件”并保存，无需填写公网地址。'));
+      callbacks.append(note('切换到“事件与回调 → 回调配置”，选择“使用长连接接收回调”并单独保存，无需填写公网地址。'));
+    }
+    events.append(button('刷新连接状态', () => render().catch(error), 'quiet'),
+      note('在“事件配置 → 添加事件”添加 im.message.receive_v1（接收消息）。只接收私聊及群内 @，不订阅全部群消息。'),
+      note('同时添加 im.chat.member.user.added_v1、im.chat.member.user.deleted_v1，用于成员变化后使群接收范围失效；再添加应用卸载和状态变更事件。'));
+    if (c.application_type === 'saas') events.append(note('商店应用还需配置 app_ticket 推送、安装租户和应用生命周期事件。尚未收到票据时无法检测发送凭据。'));
+    callbacks.append(note('在“回调配置 → 添加回调”的“卡片”分类中，选择新版“卡片回传交互”（card.action.trigger，推荐）并添加。卡片按钮依赖此回调。'),
+      note('不要选“消息卡片回传交互（旧）”（card.action.trigger_v1），旧版不支持长连接；新版回调应添加到“回调配置”。'));
+    publish.append(note('确认“事件配置”和“回调配置”已分别保存，再点击下方按钮，前往下一步创建并发布应用新版本。'),
+      button('事件与卡片回调已保存，前往发布', () => go(), ''));
+    instructions.append(events, callbacks, publish); body.append(instructions);
   } else if (step === 3) {
     body.append(feishuList(['在飞书“版本管理与发布”创建新版本，核对机器人能力、默认消息与卡片权限，以及事件订阅和 card.action.trigger 卡片回调。已有应用新增权限或回调后也必须重新发布。',
       '设置应用可用范围，让需要使用机器人的成员能搜索和私聊它。发布版本，需要审核时等待企业管理员通过。',
