@@ -27,6 +27,13 @@ test('global administrator connects an app through the wizard, resumes it and se
     expect(scopes.scopes.user).toEqual([]);
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('enterprise');
+    const enterpriseScopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
+    expect(enterpriseScopes.scopes.tenant).toEqual([...scopes.scopes.tenant, 'tenant:tenant:readonly']);
+    expect(enterpriseScopes.scopes.user).toEqual([]);
+    await expect(page.getByText('企业自建应用需先开通', { exact: false })).toContainText('再进入下一步保存连接');
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => { window.copiedFeishuScopes = value; } } }));
+    await page.getByRole('button', { name: '复制基础权限 JSON', exact: true }).click();
+    expect(JSON.parse(await page.evaluate(() => window.copiedFeishuScopes))).toEqual(enterpriseScopes);
     await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
     expect(f.h.store.get('SELECT count(*) n FROM tenants').n).toBe(0);
     await expect(page.getByRole('heading', { name: '应用凭据', exact: true })).toBeVisible();
@@ -48,6 +55,13 @@ test('global administrator connects an app through the wizard, resumes it and se
     await expect(page.getByRole('alert')).toContainText('无法通过鉴权');
     expect(f.h.store.get('SELECT count(*) n FROM channel_connectors').n).toBe(0);
     wire.state.authCode = 0; wire.state.botOpenId = 'ou_automatic_save';
+    wire.state.tenantCode = 1184001;
+    await page.getByRole('button', { name: '保存连接并继续' }).click();
+    await expect(page.getByRole('alert')).toContainText('tenant:tenant:readonly');
+    await expect(page.getByRole('alert')).toContainText('发布并通过必要审核后重新保存');
+    expect(f.h.store.get('SELECT count(*) n FROM channel_connectors').n).toBe(0);
+    expect(f.h.store.get('SELECT count(*) n FROM channel_credentials').n).toBe(0);
+    wire.state.tenantCode = 0;
     await page.getByRole('button', { name: '保存连接并继续' }).click();
     await expect(page.getByLabel('HTTP 回调地址')).toHaveValue(/https:\/\/console.example.test\/hooks\/feishu\/[a-f0-9]{48}/);
     await expect(page.getByText('还必须在“事件与回调 → 回调配置”', { exact: false })).toContainText('两处地址验证均通过');

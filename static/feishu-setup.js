@@ -5,7 +5,7 @@ const feishuAddress = (id = 'new', step = 0) => `#/settings/feishu/${id}/${step}
 function feishuError(err) {
   const reasons = { channel_auth_failed: 'App ID 或 App Secret 无法通过鉴权，请从飞书应用的“凭证与基础信息”重新复制。',
     channel_bot_unavailable: '暂时读不到机器人信息。请先发布包含机器人能力的初始版本，再返回检查；配置事件后还需发布新版本。',
-    channel_tenant_unavailable: '暂时读不到应用安装的企业信息。请确认应用已启用、所需权限已生效，再重新保存。',
+    channel_tenant_unavailable: '暂时读不到应用安装的企业信息。请在飞书“权限管理”开通应用身份权限“获取企业信息”（tenant:tenant:readonly），发布并通过必要审核后重新保存；已有该权限时请检查应用是否已启用。',
     channel_delivery_rejected: '飞书拒绝了请求。请检查凭据、机器人能力和已发布版本。',
     channel_delivery_failed: '服务器无法连接飞书开放平台，请检查网络后重试。',
     channel_app_ticket_required: '尚未收到有效的商店应用票据。先完成 HTTP 事件配置、安装和发布，再重新检查。',
@@ -49,14 +49,21 @@ async function renderFeishuSetup(panel, request) {
     const initial = feishuChoice?.id === id ? feishuChoice : c || { application_type: 'enterprise', transport: 'websocket' };
     const application = channelSelect(choices, '应用类型', 'application_type', [['enterprise', '企业自建'], ['saas', 'SaaS / 商店应用']], initial.application_type);
     const transport = channelSelect(choices, '事件接收方式', 'transport', [['websocket', '企业自建 SDK 长连接（无需公网事件地址）'], ['http', 'HTTP 事件回调']], initial.transport);
-    const sync = () => { transport.options[0].disabled = application.value === 'saas'; if (application.value === 'saas') transport.value = 'http'; };
+    const permissions = element('div'), installationNote = note('企业自建应用需先开通“获取企业信息”（tenant:tenant:readonly）应用身份权限，并发布包含机器人能力和该权限的初始版本、通过必要审核，再进入下一步保存连接；否则无法自动获取安装企业。');
+    const sync = () => {
+      transport.options[0].disabled = application.value === 'saas'; if (application.value === 'saas') transport.value = 'http';
+      const scopes = ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write'];
+      if (application.value === 'enterprise') scopes.push('tenant:tenant:readonly');
+      permissions.replaceChildren(channelCopy('基础权限 JSON', JSON.stringify({ scopes: { tenant: scopes, user: [] } }, null, 2)));
+      installationNote.hidden = application.value !== 'enterprise';
+    };
     application.addEventListener('change', sync); sync();
     body.append(note('需要飞书应用开发权限；发布版本可能需要企业管理员审核。使用应用机器人接收私聊和群内 @ 消息。'), choices,
       channelLink('https://open.feishu.cn/app', '打开飞书开发者后台', 'button-link'), feishuList([
         '创建或打开飞书应用，在“添加应用能力”中开启机器人。已有应用可以直接继续。',
-        '在“权限管理 → 批量导入/导出”导入下方默认权限，包含消息收发和卡片创建与更新。成员变更和应用生命周期事件按订阅界面的提示开通所需权限。',
+        '在“权限管理 → 批量导入/导出”导入下方当前应用类型的默认权限，包含消息收发和卡片创建与更新；企业自建另含获取企业信息。成员变更和应用生命周期事件按订阅界面的提示开通所需权限。',
         '记录“凭证与基础信息”里的 App ID、App Secret。HTTP 接收还需“事件与回调 → 加密策略”里的 Verification Token 和 Encrypt Key。']),
-      channelCopy('基础权限 JSON', JSON.stringify({ scopes: { tenant: ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write'], user: [] } }, null, 2)),
+      permissions, installationNote,
       note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。已有应用也需补齐并发布新版本。不申请读取全部群消息或群历史的权限。'),
       note('长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台及 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
       channelLink('#/settings/access', '配置公网 HTTPS 地址'), button('应用已准备，填写凭据', () => { feishuChoice = { id, application_type: application.value, transport: transport.value }; go(); }, ''));
@@ -81,7 +88,7 @@ async function renderFeishuSetup(panel, request) {
     form.append(note('读取不到机器人时，先发布包含机器人能力的初始版本再重试；完成事件订阅后还需发布新版本。'));
     let installation;
     if (choice.application_type === 'enterprise') {
-      form.append(note('应用安装企业由系统在保存时自动获取，无需填写 tenant_key。安装企业仅用于核对应用事件来源，不限制操作者所属企业。'));
+      form.append(note('应用安装企业由系统在保存时自动获取，无需填写 tenant_key。请先开通应用身份权限“获取企业信息”（tenant:tenant:readonly），并发布包含该权限的版本、通过必要审核，再保存连接。安装企业仅用于核对应用事件来源，不限制操作者所属企业。'));
     } else {
       installation = channelField(form, '应用安装租户 tenant_key', 'installation_tenant', c?.installation_tenant || ''); installation.required = true;
       form.append(note('商店应用需要先指定机器人安装的飞书企业，才能换取该企业的访问令牌。可从该企业的应用启用事件或登录授权信息获取 tenant_key；此字段用于核对应用事件来源，不限制操作者所属企业。'));
