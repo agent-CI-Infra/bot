@@ -62,6 +62,8 @@ async function start() {
   setup = !(await api('/api/setup')).initialized;
   try { me = await api('/api/auth/me'); } catch { me = null; }
   if (typeof syncManagementChat === 'function') syncManagementChat();
+  // The shell was blank until both requests above answered; the boot line covers that gap and leaves with them.
+  $('boot').hidden = true;
   $('access').hidden = !!me; $('workspace').hidden = !me; $('identity').hidden = !me; $('tabs').hidden = !me;
   if (!me) document.body.classList.remove('board-mode');
   $('access-title').textContent = setup ? '创建第一名超级管理员' : '登录';

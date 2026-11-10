@@ -9,6 +9,15 @@ function identityError(code) {
     github_oauth_failed: 'GitHub 授权失败，请重新授权。', github_oauth_denied: 'GitHub 授权已取消，请重新发起。',
     user_disabled: '账号已停用，请联系管理员。' })[code] || 'GitHub 身份暂时无法验证，请稍后重试或使用本地账号登录。';
 }
+// A grant's state in words. `reason` is an additive server field: an older server omits it and every grant
+// keeps the combined sentence it had before, so nothing here depends on it being present.
+function grantStateText(grant) {
+  const reason = ({ installation_pending: '安装待同步：GitHub App 安装已更新或尚在同步，稍后会自动重试。',
+    permission_pending: '权限待核验：安装仍有效，但当前权限范围不足，请重新验证 GitHub 权限。',
+    })[grant.reason];
+  if (reason) return reason;
+  return ({ active: '有效', pending_verification: '待验证／权限不足，请重新授权', revoked: '已撤销', quarantined: '归属待处理' })[grant.state] || grant.state;
+}
 async function renderIdentity() {
   const panel = $('identity-panel'), request = renderVersion, data = await api('/api/identity'); $('count').textContent = '';
   const selection = card('当前组织与项目范围'), select = document.createElement('select'), form = document.createElement('form');
@@ -50,10 +59,10 @@ async function renderIdentity() {
   const permissions = card('当前角色与授权来源');
   permissions.append(note('GitHub 派生权限依赖当前 GitHub 证明和有效安装范围；显式委派独立保存。撤销其中一种来源不会移除另一种来源。'));
   for (const grant of data.scopes.filter(g => !data.actor.tenant_id || !g.tenant_id || g.tenant_id === data.actor.tenant_id)) {
-    const row = element('div', '', 'row'), source = grant.source === 'github_derived' ? 'GitHub 当前权限（继承）' : '显式委派';
+    const row = element('div', '', 'row perm-row'), source = grant.source === 'github_derived' ? 'GitHub 当前权限（继承）' : '显式委派';
     row.append(element('strong', ({ super_admin: '平台超级管理员', org_admin: '组织管理员', project_admin: '项目管理员', delegated: '受委派成员' })[grant.role] || grant.role),
       element('p', `${source} · ${grant.project_id ? '项目 ' + grant.project_id : grant.tenant_id || '平台'}`),
-      element('p', ({ active: '有效', pending_verification: '待验证／权限不足，请重新授权', revoked: '已撤销', quarantined: '归属待处理' })[grant.state] || grant.state),
+      element('p', grantStateText(grant)),
       element('p', '能力：' + grant.capabilities.join(', ')));
     permissions.append(row);
   }
