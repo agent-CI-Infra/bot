@@ -269,14 +269,25 @@ function accountLine(row) {
     [element('span', row.credentials_configured ? '凭据已配置' : '凭据已撤销', 'status status-' + (row.credentials_configured ? 'success' : 'warning'))],
     [button('删除', () => deleteAccount(row).catch(error), 'quiet destructive')]);
 }
+function userDisplayName(user) { return user.github_login ? '@' + user.github_login : user.username; }
+function userAccessLines(user) {
+  const projects = user.access?.projects || [], lines = [element('p', projects.length ? `当前可见项目（${projects.length}）：` : '当前没有可访问的项目')];
+  if (projects.length) {
+    const list = element('ul', '', 'user-project-access');
+    for (const project of projects) list.append(element('li', `${project.full_name} · ${project.can_configure ? '可配置' : '可查看'} · ${project.sources.map(source => source === 'github_derived' ? 'GitHub 继承权限' : 'Bot 显式委派').join('、')}`));
+    lines.push(list);
+  }
+  if (user.access?.github_pending) lines.push(element('p', 'GitHub 权限待验证，未计入当前可见项目；用户可在「身份与权限」重新验证。', 'warning'));
+  lines.push(element('p', grantSummary(user))); return lines;
+}
 function userLine(row) {
-  return settingsRow(row.username, `${row.role === 'super_admin' ? '超级管理员 · 管理全部项目' : '项目管理员'} · ID ${row.id}`, row.role === 'project_admin' ? [element('p', grantSummary(row))] : [],
+  return settingsRow(userDisplayName(row), `${row.role === 'super_admin' ? '超级管理员 · 管理全部项目' : '项目管理员'} · ID ${row.id}`, row.role === 'project_admin' ? userAccessLines(row) : [],
     [element('span', row.active ? '已启用' : '已停用', 'status' + (row.active ? ' status-success' : ''))],
     [...(row.role === 'project_admin' ? [button('修改仓库权限', () => editGrants(row))] : []), button('删除', () => deleteUser(row).catch(error), 'quiet destructive')]);
 }
 async function deleteUser(row) {
   const self = row.id === me.id, kept = '仓库和组织授权、个人看板设置一并去掉，登录名可以重新使用；操作审计保留。';
-  const deleted = await askConfirm({ title: self ? `删除你自己的账号 ${row.username}？` : `删除用户 ${row.username}？`, action: '删除', danger: true,
+  const deleted = await askConfirm({ title: self ? `删除你自己的账号 ${userDisplayName(row)}？` : `删除用户 ${userDisplayName(row)}？`, action: '删除', danger: true,
     body: self ? ['只有还剩另一名活跃的超级管理员时才能删除。删除后当前会话立即失效，需要用其他超级管理员登录。', kept] : ['它的会话立即失效。', kept, '不能删除最后一名活跃的超级管理员。'],
     run: () => api('/api/users/' + encodeURIComponent(row.id), 'DELETE', { confirm: true }).catch(err => { throw new Error(removalMessage(err)); }) });
   if (!deleted) return;
@@ -340,25 +351,25 @@ function grantField(user) {
   const owners = new Set(grants.organizations.map(org => org.owner_id)), keptOwners = [...organizations].filter(id => !owners.has(id));
   if (keptOwners.length) group('不在安装列表的组织', keptOwners.map(id => [`组织 ID ${id}（不在安装列表）`, 'organization:' + id, true]));
   select.size = Math.min(12, select.options.length + select.querySelectorAll('optgroup').length);
-  label.append(select, element('span', select.options.length ? '按住 Ctrl（macOS 为 ⌘）可选多项。不选表示不授权，看不到任何项目。' : '还没有已安装的仓库，先在「项目」页同步安装列表。', 'muted'));
+  label.append(select, element('span', select.options.length ? '这里只修改手工分配；按住 Ctrl（macOS 为 ⌘）可选多项。不选表示不增加手工授权，已验证的 GitHub 继承权限仍然有效。' : '还没有已安装的仓库，先在「项目」页同步安装列表。', 'muted'));
   return label;
 }
 function chosenGrants(form) {
   const chosen = [...form.elements.grants.selectedOptions].map(option => option.value.split(':')), ids = kind => chosen.filter(([value]) => value === kind).map(([, id]) => id);
   return { repository_ids: ids('repository'), organization_ids: ids('organization') };
 }
-// What a project administrator holds, as chosen: whole organizations and single repositories.
+// Manual assignments remain editable independently of the effective access shown above them.
 function grantSummary(user) {
   const installed = new Map(grants.organizations.flatMap(org => org.repositories.map(repo => [repo.id, repo])));
   const organizations = grants.organization_assignments.filter(row => row.user_id === user.id)
     .map(row => grants.organizations.find(org => org.owner_id === row.owner_id)?.owner_login || `组织 ID ${row.owner_id}（不在安装列表）`);
   const repos = grants.assignments.filter(row => row.user_id === user.id).map(({ repository_id: id }) => { const repo = installed.get(id);
     return repo ? repo.full_name + (repo.registered ? '' : '（未启动）') : (repositories.find(project => project.id === id)?.full_name || '仓库 ID ' + id) + '（不在安装列表）'; });
-  if (!organizations.length && !repos.length) return '未分配仓库，看不到任何项目';
-  return [organizations.length ? '整个组织：' + organizations.join('、') : '', repos.length ? '仓库：' + repos.join('、') : ''].filter(Boolean).join(' · ');
+  if (!organizations.length && !repos.length) return '手工分配：无';
+  return '手工分配 · ' + [organizations.length ? '整个组织：' + organizations.join('、') : '', repos.length ? '仓库：' + repos.join('、') : ''].filter(Boolean).join(' · ');
 }
 function editGrants(user) {
-  editingUser = user; editorKind = 'users'; $('editor-note').hidden = true; $('editor-title').textContent = `修改 ${user.username} 的仓库权限`;
+  editingUser = user; editorKind = 'users'; $('editor-note').hidden = true; $('editor-title').textContent = `修改 ${userDisplayName(user)} 的仓库权限`;
   $('editor-fields').replaceChildren(grantField(user)); $('editor-error').textContent = ''; $('editor').showModal();
 }
 $('editor-form').addEventListener('submit', async event => {

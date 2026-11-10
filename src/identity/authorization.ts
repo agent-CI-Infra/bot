@@ -107,13 +107,26 @@ export function authorize(actor: ActorContext, capability: string, resource: { t
     tenant = row.tenant_id;
   }
   if (actor.tenant_id && tenant !== actor.tenant_id) fail(403, 'tenant_forbidden');
-  const allowed = listEffectiveScopes(store, actor.principal_id).some(g => g.state === 'active' &&
+  if (!matchingGrants(store, listEffectiveScopes(store, actor.principal_id), capability, tenant, project).length) fail(403, 'capability_forbidden');
+}
+// Permission summaries and request authorization share the same scope and installation checks.
+function matchingGrants(store: Store, scopes: EffectiveScope[], capability: string, tenant: string | null, project?: string): EffectiveScope[] {
+  return scopes.filter(g => g.state === 'active' &&
     (g.scope === 'platform' || !!tenant && g.tenant_id === tenant && (g.scope === 'tenant' || !!project && g.project_id === project)) &&
     (g.capabilities.includes('*') || g.capabilities.includes(capability)) &&
     // An owner-wide derived grant is bounded by the current installation, including projects synchronized later.
     (g.source !== 'github_derived' || !project || !!store.get(`SELECT 1 FROM installation_repositories r JOIN scoped_grants s ON s.installation_ref=r.installation_ref
       WHERE s.id=? AND r.repository_id=? AND r.present=1`, g.grant_id, project)));
-  if (!allowed) fail(403, 'capability_forbidden');
+}
+export function listEffectiveProjectAccess(store: Store, principal: string): { id: string; full_name: string; sources: string[]; can_configure: boolean }[] {
+  const scopes = listEffectiveScopes(store, principal);
+  return store.all(`SELECT r.id,r.full_name,p.tenant_id FROM repositories r JOIN identity_projects p ON p.project_id=r.id
+    WHERE p.tenant_id IS NOT NULL ORDER BY r.full_name`).flatMap(project => {
+    const grants = matchingGrants(store, scopes, 'tasks.read', project.tenant_id, project.id);
+    const configuration = matchingGrants(store, scopes, 'config.write', project.tenant_id, project.id);
+    return grants.length ? [{ id: project.id, full_name: project.full_name, sources: [...new Set([...grants, ...configuration].map(g => g.source))],
+      can_configure: configuration.length > 0 }] : [];
+  });
 }
 export function effectiveRepositories(store: Store, actor: ActorContext): string[] {
   return store.all('SELECT project_id FROM identity_projects WHERE tenant_id IS NOT NULL').flatMap(r => {

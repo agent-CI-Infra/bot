@@ -98,7 +98,7 @@ const settingsCards = {
   async users(request) {
     const [{ users }, assigned] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);
     grants = assigned;
-    return [settingsList('用户', '超级管理员管理全部项目和这里的设置；项目管理员只看到分配给自己的组织和仓库。', users.map(userLine), '还没有用户。', '新增用户', 'users')];
+    return [settingsList('用户', '项目权限由 GitHub 当前权限和 Bot 内显式委派共同决定；下面显示当前可见项目及来源。超级管理员管理全部项目和全局设置。', users.map(userLine), '还没有用户。', '新增用户', 'users')];
   },
 };
 // The resources a computer gets for every value its project does not set itself, chosen from common sizes inside the
