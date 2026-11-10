@@ -9,6 +9,7 @@ import { fail, fields, hashPassword, password, randomId, text, type Json } from 
 import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
+import { policyView, roleBoard, roleConcurrencyValue } from '../roles/board.js';
 import { activateActions } from '../actions/storage.js';
 import { listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 
@@ -242,14 +243,23 @@ export async function management(store: Store, user: Actor, method: string, url:
         JOIN policies p ON p.repository_id=r.id ${projectActivityJoin} WHERE ${filter.sql} ORDER BY r.full_name`, ...filter.args), url) };
     }
   }
+  const roleBoardMatch = /^\/api\/repositories\/([^/]+)\/role-board$/.exec(path);
+  if (roleBoardMatch) {
+    // Read-only projection: the same project grant as every other /api/repositories/:id read, and no audit entry.
+    repository(store, user, roleBoardMatch[1]!);
+    if (method !== 'GET') return fail(405, 'method_not_allowed');
+    return roleBoard(store, roleBoardMatch[1]!, url);
+  }
   const repoMatch = /^\/api\/repositories\/([^/]+)(\/policy)?$/.exec(path);
   if (repoMatch) {
     const id = repoMatch[1]!; repository(store, user, id);
     // The project's own concurrency is task_concurrency (null follows the default); the default comes with it so a project
     // administrator sees what an empty field means without reading the global settings.
     const concurrency = () => ({ task_concurrency_default: defaultConcurrency(store) });
-    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!,
-      actions_failures: store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', id) || null, ...concurrency() };
+    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: policyView(store.get('SELECT * FROM policies WHERE repository_id=?', id))!,
+      actions_failures: store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', id) || null,
+      // Role limits have no default on purpose: an empty map means "no per-role limit", not a number we picked.
+      role_concurrency_default: null, ...concurrency() };
     if (method === 'PATCH' && repoMatch[2]) {
       return updatePolicy(store,user,id,body);
     }
@@ -276,8 +286,10 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
   repository(store,user,id);
       // Review guidance and the review label are rule files (PUT /api/repositories/:id/rules), not policy fields.
       fields(body, ['model_id', 'review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled','test_command','max_revisions','base_branch','automation',
-        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models']);
+        'review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion','review_language','task_concurrency','task_models','role_concurrency']);
       const taskConcurrency = body.task_concurrency === undefined || body.task_concurrency === null ? body.task_concurrency : concurrencyValue(body.task_concurrency);
+      // Per-role limits are an inner limit inside the project concurrency, never a replacement for it; null unsets one role.
+      const roleConcurrencyLimits = body.role_concurrency === undefined ? undefined : roleConcurrencyValue(store, id, body.role_concurrency);
       for (const key of ['review_issues', 'review_pull_requests', 'review_pr_updates', 'review_issue_updates', 'review_pr_discussion']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
       if (body.review_language !== undefined && (typeof body.review_language !== 'string' || !['auto', 'zh', 'en'].includes(body.review_language))) fail(400, 'invalid_review_language');
       for (const key of ['review_enabled', 'development_enabled', 'actions_failures_enabled', 'enabled']) if (body[key] !== undefined && typeof body[key] !== 'boolean') fail(400, 'invalid_policy');
@@ -335,6 +347,7 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
-        return { policy: store.get('SELECT * FROM policies WHERE repository_id=?', id)!, execution_available: true, task_concurrency_default: defaultConcurrency(store) };
+        if (roleConcurrencyLimits !== undefined) store.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify(roleConcurrencyLimits), id);
+        return { policy: policyView(store.get('SELECT * FROM policies WHERE repository_id=?', id))!, execution_available: true, role_concurrency_default: null, task_concurrency_default: defaultConcurrency(store) };
       });
 }
