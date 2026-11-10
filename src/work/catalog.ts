@@ -46,8 +46,8 @@ const writeSets: Record<Base, { options: string[]; defaults: string[]; locked: s
   'release.notes': { options: ['release_notes', 'issue'], defaults: ['release_notes'], locked: [] },
   actions: { options: ['actions_rerun', 'issue'], defaults: ['actions_rerun', 'issue'], locked: [] },
   gate: { options: ['gate_plan'], defaults: ['gate_plan'], locked: ['gate_plan'] },
-  // Ordinary tasks remain free of GitHub writes by default; Issue reporting needs an explicit project and role grant.
-  request: { options: ['issue'], defaults: [], locked: [] }
+  // Ordinary tasks remain free of writes by default; Issue/PR delivery needs explicit project and source-role grants.
+  request: { options: ['code', 'pull_request', 'issue'], defaults: [], locked: [] }
 };
 export const githubScopes = ['contents', 'issues', 'pull_requests', 'actions', 'checks', 'statuses', 'metadata'];
 
@@ -79,7 +79,7 @@ export const workTypes: WorkType[] = [
   { id: 'gate.onboarding', name: '接入门禁', base: 'gate', object: 'repository', kinds: ['gate.onboarding'], section: 'gate.onboarding', defaultEnabled: true,
     description: '在「接入门禁」对话里分析仓库、设计各 lane 的门禁命令并回答问题；人确认方案后，控制面才开门禁 PR。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,
-    description: '处理直接创建的普通事项或 Manager 接受的定时检查。默认不写 GitHub；提报 Issue 需项目与角色分别显式允许。' }
+    description: '处理直接创建的普通事项或 Manager 接受的定时检查。默认不写 GitHub；提报 Issue 或交付 PR 需项目与来源角色分别显式允许；PR 仍经测试及独立 QA。' }
 ];
 export const workType = (id: string) => workTypes.find(work => work.id === id);
 /** The work type a task belongs to: reply tasks (including those of former custom workflows) are one work type. */

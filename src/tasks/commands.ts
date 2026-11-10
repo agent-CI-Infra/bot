@@ -9,6 +9,7 @@ import { captureTaskConfiguration } from './configuration.js';
 import { stageReplanContext } from '../roles/schedule.js';
 import { assertManagedTask, assertManagedExecution, assertTaskCaller, createManagedTask, operatorTaskCaller, taskCallerActor, type TaskCaller } from './management.js';
 import { TaskError } from '../agent/common.js';
+import { assertRequestPullRequest, softwareRequest } from './pull-request.js';
 const terminal=['succeeded','pr_opened','completed','cancelled','superseded'];
 const replies=(kind:string)=>kind.startsWith('review.')||kind.startsWith('workflow.');
 /** Shared task mutation boundary for the console, management tools and future message adapters. */
@@ -92,6 +93,8 @@ export class TaskCommands {
         this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",task!.id);
         this.store.run('DELETE FROM development_candidates WHERE task_id=?',task!.id);
         traceEvent(this.store,task!.id,'intervention',{action:'contract_revision',before:new TaskRecords(this.store).get(task!.id).revision-1,after:contract,reason:'explicit user contract revision',stage_plan:stageReplanContext(this.store,task!.id)},null,'user:'+user.id);
+        const revised=this.store.get('SELECT * FROM tasks WHERE id=?',task!.id)!;
+        if(softwareRequest(revised))try{assertRequestPullRequest(this.store,revised);}catch(error){if(error instanceof TaskError)fail(403,error.code);throw error;}
         this.store.audit(user.id,'task.contract',task!.id,task!.repository_id);
       });this.hooks.tick?.();return {task:new TaskRecords(this.store).get(task!.id)};
     }
@@ -118,7 +121,7 @@ export class TaskCommands {
         caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role])):null;
       const previous=key?this.store.get('SELECT id FROM tasks WHERE unique_key=?',key):undefined;
       if(previous){assertManagedTask(this.store,caller!,previous.id,true);return {id:previous.id,replayed:true};}
-      createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),input.executor_role as string|undefined,()=>{
+      this.store.transaction(()=>{createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),input.executor_role as string|undefined,()=>{
         this.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,unique_key,created_at,updated_at) VALUES(?,?,'task.request',?,?,?,?,?,?)",id,input.repository_id as string,input.execute===false?'paused':'queued',(input.request as string).slice(0,160),JSON.stringify({request:input.request,contract}),key,now,now);
         try {new TaskRecords(this.store).contract(id,{...contract,source:{type:'request',actor:user.id},completeness:'explicit'});}catch{fail(400,'invalid_task_contract');}
         // Persist the authoritative validated contract for executor recovery.
@@ -128,6 +131,9 @@ export class TaskCommands {
           this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', input.repository_id as string)!.tenant_id, input.repository_id as string, caller?'tasks.manage_own':'tasks.write');
         this.store.audit(user.id,'task.create',id,input.repository_id as string);
         return id;
+      });
+      const created=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
+      if(softwareRequest(created))try{assertRequestPullRequest(this.store,created);}catch(error){if(error instanceof TaskError)fail(403,error.code);throw error;}
       });this.hooks.tick?.();return {id};
     }
     const match=/^\/api\/tasks\/([^/]+)\/retry$/.exec(url.pathname);if(!match||method!=='POST')return undefined;
@@ -168,9 +174,10 @@ export class TaskCommands {
       return {task:this.sourceVisible(task)?new TaskRecords(this.store).get(id):{id,repository_id:task.repository_id,status:task.status,source_unavailable:true},origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
     }
     if(name==='create_task'){
-      fields(args,['request','criteria','executor_role','execute']);
+      fields(args,['request','criteria','executor_role','execute','endpoint']);
+      if(args.endpoint!==undefined&&!['report','reviewable_pull_request'].includes(String(args.endpoint)))fail(400,'invalid_task_endpoint');
       return this.api(user,'POST',new URL('http://local/api/tasks'),{repository_id:caller.project_id,request:args.request,
-        contract:{goal:args.request,criteria:args.criteria,scope:[String(args.request).slice(0,2000)],endpoint:'report'},
+        contract:{goal:args.request,criteria:args.criteria,scope:[String(args.request).slice(0,2000)],endpoint:args.endpoint??'report'},
         ...(args.executor_role!==undefined?{executor_role:args.executor_role}:{}),...(args.execute!==undefined?{execute:args.execute}:{})},caller)!;
     }
     if(name==='manage_task'){

@@ -188,7 +188,8 @@ export class Publisher {
   }
   async branch(candidate:any){
     const branch=this.store.get('SELECT * FROM bot_branches WHERE repository_id=? AND branch=?',this.task.repository_id,candidate.branch);
-    if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-'))stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
+    const direct=this.store.get("SELECT 1 FROM tasks WHERE id=? AND repository_id=? AND kind='task.request'",candidate.owner_task_id,this.task.repository_id)&&candidate.branch==='bot/task-'+candidate.owner_task_id;
+    if(!branch||branch.task_id!==candidate.owner_task_id||candidate.branch===this.github.defaultBranch||!candidate.branch.startsWith('bot/issue-')&&!direct)stop('branch_not_owned','waiting_permission',`分支 ${candidate.branch} 不属于已登记的任务分支，禁止发布。`);
     await this.validate();
     if(candidate.remote_sha && this.store.get("SELECT state FROM github_effects WHERE id=?",operationId(this.task.id+':'+(candidate.publication_key?'branch:'+candidate.publication_key:'branch')))?.state==='sent'){
       if((await this.github.ref(candidate.branch))?.object?.sha!==candidate.remote_sha)stop('branch_head_changed','superseded',`分支 ${candidate.branch} 已偏离已发布提交 ${candidate.remote_sha}。`);
