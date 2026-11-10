@@ -107,3 +107,43 @@ test('review file tools can update project notes but refuse repository writes',a
   const events=(await readFile(join(dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(events.find(e=>e.type==='tool'&&e.arguments?.path==='tracked.md').result.error,'review_repository_write_forbidden');
 });
+
+// A model turn can end without the finishing call (an empty or failed reply, or prose). The runner asks the same session
+// to continue, keeping its work, and fails with agent_finish_missing only after a bounded number of tries.
+async function finishRun(t,{calls,env}){
+  const base=await mkdtemp(join(tmpdir(),'pi-finish-')),id=randomWorkspaceId(),root=join(base,id),dir=join(root,'agent');
+  await mkdir(dir,{recursive:true});await mkdir(join(root,'repo'));t.after(()=>rm(base,{recursive:true,force:true}));
+  await writeFile(join(dir,'input.json'),JSON.stringify({workspace_id:id,system:'Review fixture',capabilities:workspaceProfile('review.issue',{}).capabilities,prompt:JSON.stringify(calls),
+    tools:['read_file','finish_review'].map(name=>({function:{name,parameters:{type:'object'}}}))}));
+  await writeFile(join(root,'repo','README.md'),'fixture');
+  const entry=pathToFileURL(resolve('runner/pi-entry.mjs')).href,fixture=pathToFileURL(resolve('test/fixtures/pi-session.mjs')).href,hook=join(base,'hooks.mjs');
+  await writeFile(hook,`import {registerHooks} from 'node:module';registerHooks({resolve(specifier,context,next){if(specifier==='@earendil-works/pi-coding-agent'||context.parentURL===${JSON.stringify(entry)}&&specifier==='./workspace.mjs')return {url:${JSON.stringify(fixture)},shortCircuit:true};return next(specifier,context);}});`);
+  const child=spawn(process.execPath,['--import',hook,'runner/pi-entry.mjs',root],{env:{...process.env,BOT_RUNNER_TEST_ROOT:base,...env},stdio:['ignore','pipe','pipe']}),closed=once(child,'close');
+  t.after(async()=>{child.kill('SIGKILL');await closed;});
+  assert.equal((await closed)[0],0);
+  return {state:JSON.parse(await readFile(join(dir,'state.json'),'utf8')),events:(await readFile(join(dir,'events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse)};
+}
+
+test('a turn that ends without the finishing call continues in the same session and then finishes',async t=>{
+  // The first turn reads a file and stops with an empty answer; the continuation calls finish_review.
+  const {state,events}=await finishRun(t,{calls:[{name:'read_file',args:{path:'README.md'}}],
+    env:{BOT_FIXTURE_LAST_TEXT:'',BOT_FIXTURE_CONTINUE:JSON.stringify([[{name:'finish_review',args:{summary:'Finished after continuing'}}]])}});
+  assert.equal(state.state,'completed');assert.equal(state.result.summary,'Finished after continuing');
+  const nudges=events.filter(e=>e.type==='agent_nudge');
+  assert.equal(nudges.length,1);assert.deepEqual(nudges[0].finishing_tools,['finish_review']);
+  // The work of the first turn stayed in the session: the read ran once, before the continuation.
+  assert.deepEqual(events.filter(e=>e.type==='tool').map(e=>e.name),['read_file','finish_review']);
+});
+
+test('a session that never finishes fails with agent_finish_missing instead of a TypeError',async t=>{
+  const {state,events}=await finishRun(t,{calls:[{name:'read_file',args:{path:'README.md'}}],env:{BOT_FIXTURE_LAST_TEXT:''}});
+  assert.equal(state.state,'failed');assert.equal(state.error,'agent_finish_missing');
+  assert.match(state.detail,/ended 4 turns without calling finish_review/);
+  assert.equal(events.filter(e=>e.type==='agent_nudge').length,3);
+});
+
+test('a JSON answer written as text still finishes the session without asking it to continue',async t=>{
+  const {state,events}=await finishRun(t,{calls:[{name:'read_file',args:{path:'README.md'}}],env:{BOT_FIXTURE_LAST_TEXT:'```json\n{"summary":"Text result"}\n```'}});
+  assert.equal(state.state,'completed');assert.equal(state.result.summary,'Text result');
+  assert.equal(events.filter(e=>e.type==='agent_nudge').length,0);
+});
