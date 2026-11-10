@@ -29,6 +29,10 @@ const exchange=createTokenExchange(dir);
 const repositoryTool=createRepositoryTool(dir);
 // The tools that end the task: finish_review unless the configuration names others (a development task ends with its PR).
 const finishTools=new Set(config.finish_tools||['finish_review']);
+// The calls that end this session as the model sees them: the finish tools and, for development, create_pull_request.
+const finishingNames=config.tools.map(tool=>tool.function.name).filter(name=>finishTools.has(name)||name==='create_pull_request'&&config.finish_on_pull_request!==false);
+// How many times one prompt may be followed by "continue and finish" before the run fails with agent_finish_missing.
+const finishNudges=3;
 // Tools the control plane runs itself (a project controller's task-record queries and delegation). The call waits
 // without a deadline: a delegation lasts as long as the delegated role runs.
 const controlTools=new Set(config.control_tools||[]);
@@ -167,12 +171,30 @@ try{
   if(config.review_session&&history.length&&(history.reduce((sum,message)=>sum+estimateTokens(message),0)+estimateTokens({role:'user',content:prompt+config.system,timestamp:Date.now()})>104000||Buffer.byteLength(JSON.stringify(history))>1536*1024)){
     try{await session.compact();}catch(error){requestFailure='agent_context_too_large';throw error;}
   }
+  // A JSON result written as the last answer, the older way to finish; undefined when there is none.
+  const textResult=()=>{
+    const text=session.getLastAssistantText();if(typeof text!=='string'||!text.trim())return undefined;
+    try{return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{return undefined;}
+  };
+  // Runs one prompt until the session finishes. A turn can end without finishing: an empty or failed model reply, or prose
+  // instead of the finishing call. The work so far is in this session, so it is asked to continue (a bounded number of
+  // times) rather than failing the attempt and starting again in a fresh workspace.
+  async function untilFinished(input){
+    for(let nudge=0;;nudge++){
+      try{await session.prompt(input);}catch(error){if(!finished||requestFailure)throw error;}
+      if(requestFailure)throw new Error(requestFailure);
+      // A controlled session ends only through its control-plane submission; without one the control plane decides.
+      if(finished||controlTools.size)return finished||null;
+      const result=textResult();if(result!==undefined)return result;
+      const names=finishingNames.join(' or ')||'a finishing tool';
+      if(nudge>=finishNudges)throw Object.assign(new Error('agent_finish_missing'),{detail:`The model ended ${nudge+1} turns without calling ${names}.`});
+      await writeEvent({type:'agent_nudge',attempt:nudge+1,finishing_tools:finishingNames});
+      input=`Your last reply ended the turn without finishing the task: it did not call ${names}. Continue from where you stopped, using the work already done in this session, and finish by calling ${names}.`;
+    }
+  }
   for(;;){
-    try{await session.prompt(prompt);}catch(error){if(!finished||requestFailure)throw error;}
-    if(requestFailure)throw new Error(requestFailure);
+    const result=await untilFinished(prompt);
     await events;
-    // A controlled session ends only through its control-plane submission; without one the control plane decides.
-    const result=finished||(controlTools.size?null:JSON.parse(session.getLastAssistantText().replace(/^```(?:json)?\s*|\s*```$/g,'')));
     if(!config.review_session){await save({state:'completed',result,...sdk});break;}
     // Persist the compacted projection, not old system prompts, model selection or discarded raw entries.
     const messages=clean(session.messages.filter(message=>['user','assistant','toolResult','compactionSummary'].includes(message.role)).map(message=>message.role==='compactionSummary'
@@ -190,5 +212,6 @@ try{
   }
 }catch(error){await events.catch(()=>{});
   // The reason goes into the task log; issued tokens are masked like every event.
-  await save({state:'failed',error:requestFailure||((error?.message==='agent_context_too_large')?'agent_context_too_large':'pi_execution_failed'),detail:clean(String(error?.message||error||'unknown')).slice(0,1000)});}
+  const known=['agent_context_too_large','agent_finish_missing'];
+  await save({state:'failed',error:requestFailure||(known.includes(error?.message)?error.message:'pi_execution_failed'),detail:clean(String(error?.detail||error?.message||error||'unknown')).slice(0,1000)});}
 finally{session?.dispose();server.closeAllConnections();server.close();}
