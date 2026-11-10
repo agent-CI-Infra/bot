@@ -32,7 +32,7 @@ async function fixture(t,{stages=[],roles=[],file=':memory:',handler}={}) {
   s.run("INSERT INTO repositories VALUES('r','fixture/stages','o','a')");
   s.run("INSERT INTO repositories VALUES('other','fixture/other','o','a')");
   const server=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;const body=JSON.parse(raw);calls.push(body);const system=body.messages[0].content;
-    const message=handler?await handler(body):system.includes('QA verified')?call('finish',{outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true}):system.includes('Inspect fixed')?(body.messages.at(-1).role==='tool'?call('submit_role_result',{summary:'checked',findings:[],inspected_scope:['fixture'],unknowns:[]}):call('read_file',{path:'fixture'})):call('finish',{summary:'implemented'});
+    const message=handler?await handler(body):JSON.parse(body.messages[1].content).role_context?.role==='qa'?call('finish',{outcome:'pass',reason:'verified',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true}):body.tools.some(tool=>tool.function.name==='submit_role_result')?(body.messages.at(-1).role==='tool'?call('submit_role_result',{summary:'checked',findings:[],inspected_scope:['fixture'],unknowns:[]}):call('read_file',{path:'fixture'})):call('finish',{summary:'implemented'});
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:10,completion_tokens:5}}));});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   s.run('INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES(?,?,?,?,?,?)','m','r',`http://127.0.0.1:${server.address().port}/v1`,'fixture',s.secrets.seal({value:'fixture-stages-key'},'model:m'),'now');
@@ -235,7 +235,7 @@ test('serial dev → reviewer → test binds evidence to exact candidate and sti
 
 test('read-only stages really overlap on the same candidate and cannot race a writer',async t=>{
   let release,started=0;const barrier=new Promise(r=>release=r);
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']}),stage('test',{deps:['dev']})],handler:async body=>{if(!body.messages[0].content.includes('Inspect fixed'))return call('finish',{summary:'implemented'});if(body.messages.at(-1).role==='tool')return call('submit_role_result',{summary:'checked',findings:[],unknowns:[],inspected_scope:['fixture']});if(++started===2)release();await barrier;return call('read_file',{path:'fixture'});}});f.plan();await f.writer();
+  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev']}),stage('test',{deps:['dev']})],handler:async body=>{if(!body.tools.some(tool=>tool.function.name==='submit_role_result'))return call('finish',{summary:'implemented'});if(body.messages.at(-1).role==='tool')return call('submit_role_result',{summary:'checked',findings:[],unknowns:[],inspected_scope:['fixture']});if(++started===2)release();await barrier;return call('read_file',{path:'fixture'});}});f.plan();await f.writer();
   assert.deepEqual(reconcileAssignments(f.s,'t').next,['reviewer','test']);
   const checks=[f.observer('reviewer'),f.observer('test')];await barrier;
   await assert.rejects(f.writer('concurrent-writer','c','d'),{code:'candidate_writer_busy'});
@@ -278,7 +278,7 @@ test('absent stages preserve minimal teams; code gates do not apply to artifact 
 
 test('stage budgets and retries survive optional replanning and do not open a new execution allowance',async t=>{
   for(const harness of ['native','process'])await t.test(harness,async t=>{
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],budget:{max_tool_calls:1},attempts:1})],roles:[{role_id:'reviewer',harness_ref:{id:harness}}],handler:body=>!body.messages[0].content.includes('Inspect fixed')?call('finish',{summary:'implemented'}):body.messages.filter(m=>m.role==='tool').length<2?call('read_file',{path:'fixture'}):call('submit_role_result',{summary:'inspected',findings:[],unknowns:[],inspected_scope:['fixture']})});const plan=f.plan();await f.writer();
+  const f=await fixture(t,{stages:[stage('dev',{writer:true}),stage('reviewer',{deps:['dev'],budget:{max_tool_calls:1},attempts:1})],roles:[{role_id:'reviewer',harness_ref:{id:harness}}],handler:body=>!body.tools.some(tool=>tool.function.name==='submit_role_result')?call('finish',{summary:'implemented'}):body.messages.filter(m=>m.role==='tool').length<2?call('read_file',{path:'fixture'}):call('submit_role_result',{summary:'inspected',findings:[],unknowns:[],inspected_scope:['fixture']})});const plan=f.plan();await f.writer();
   await assert.rejects(f.observer('reviewer'),{code:'stage_budget_exhausted'});
   assert.equal(reconcileAssignments(f.s,'t').stages.find(s=>s.stage_id==='reviewer').waiting_reason,'stage_retry_exhausted');
   const optional={...stage('ux',{deps:['dev']}),required:false};planTask(f.s,'t',f.records.get('t').revision,[...JSON.parse(plan.stages),optional],plan.revision);
@@ -305,7 +305,7 @@ test('later snapshot operations keep the collected commit for unchanged files, b
 
 test('failed, truncated or irrelevant observations do not satisfy required execution evidence',async t=>{
   const review=stage('reviewer',{deps:['dev']});review.completion.tools=['run_command'];
-  const f=await fixture(t,{stages:[stage('dev',{writer:true}),review],handler:body=>body.messages[0].content.includes('Inspect fixed')?(body.messages.at(-1).role==='tool'?call('submit_role_result',{summary:'claimed pass',findings:[],unknowns:[],inspected_scope:['fixture']}):call('run_command',{command:'npm test'})):call('finish',{summary:'implemented'})});f.plan();await f.writer();f.assign('reviewer','bad-proof','reviewer');
+  const f=await fixture(t,{stages:[stage('dev',{writer:true}),review],handler:body=>body.tools.some(tool=>tool.function.name==='submit_role_result')?(body.messages.at(-1).role==='tool'?call('submit_role_result',{summary:'claimed pass',findings:[],unknowns:[],inspected_scope:['fixture']}):call('run_command',{command:'npm test'})):call('finish',{summary:'implemented'})});f.plan();await f.writer();f.assign('reviewer','bad-proof','reviewer');
   const current=latestRoleCandidate(f.s,'t');traceEvent(f.s,'t','role_candidate',{role:'reviewer',sha:current.commit_sha,version:current.tree_hash,workspace_id:'readonly'});
   await runRole({...f.spec(),system:'Inspect fixed',tools:[tool('run_command'),tool('submit_role_result')],finish:{name:'submit_role_result',validate:v=>v},execute:async()=>({exit_code:1,output:'assertion failed'})},'reviewer','bad-proof');
   const result=JSON.parse(f.s.get("SELECT result FROM task_stage_results WHERE stage_id='reviewer'").result);

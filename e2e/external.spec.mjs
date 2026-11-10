@@ -52,6 +52,7 @@ test('全局仅一套说明，选择客户端复制含轮询的指令；地址�
     await expect(page.locator('#project-page .external-guide').getByRole('button',{name:'复制给我的 AI agent',exact:true})).toBeVisible();
     await page.getByRole('button',{name:'外部执行端',exact:true}).click();await expect(guide).toHaveCount(1);
     h.store.run("DELETE FROM settings WHERE key='external_token_audience'");await page.getByRole('button',{name:'刷新',exact:true}).click();
+    await expect(panel).toContainText('尚未配置，个人电脑客户端暂不能兑换');
     await guide.locator('summary').click();await select.selectOption(a.client.id);await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();
     const missing=await page.evaluate(()=>navigator.clipboard.readText());expect(missing).toContain('兑换地址尚未配置');expect(missing).toContain('不要猜测或编造 URL');expect(missing).not.toContain(h.audience);expect(missing).not.toContain('curl --fail-with-body');expect(missing).not.toContain('https://bot.invalid/external/events');
     await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async()=>{throw new Error('unavailable');}}}));

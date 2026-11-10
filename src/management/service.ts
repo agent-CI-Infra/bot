@@ -298,7 +298,7 @@ export class ManagementService {
             notice:'Manager 配置已保存为第 '+saved.revision+' 版，只影响之后的分派和新建任务；已有 run 保留原配置。'};
         }else if(operation==='roles.update'){
           const allowed=JSON.parse(this.policy(actor,target.project_id)?.role_fields??'["enabled","controller","roles","skills","required_stages"]');
-          if(Object.keys(args).some(k=>k!=='expected_revision'&&!allowed.includes(k)))fail(403,'role_setting_forbidden');
+          if(Object.keys(args).some(k=>k!=='expected_revision'&&!allowed.includes(k==='deleted_roles'?'roles':k)))fail(403,'role_setting_forbidden');
           result=roleApi(this.store,user,'PUT',new URL('http://local/api/repositories/'+target.project_id+'/roles'),args)!;
           result={...result,effect:'future_tasks'};
         }else if(operation.startsWith('task.')){

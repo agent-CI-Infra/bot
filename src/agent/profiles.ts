@@ -25,6 +25,16 @@ export interface WorkspaceAgentProfile {
 }
 /** A reply task's prompt: the Manager's reply section (or a former custom workflow's own prompt); other work takes its rules from the effective .bot rules. */
 export interface WorkPrompt { id: string; name: string; prompt: string }
+/** Editable project rules stay in task context when role execution replaces the entry's fixed system text. */
+export function roleAssignmentContext(context: any, workflow?: WorkPrompt) {
+  const guideOnly = !!workflow || ['workflow', 'event'].includes(context?.mode);
+  return { ...context, effective_rules: undefined, review_rules: undefined, project_instructions: {
+    files: (context?.effective_rules?.files ?? []).filter((file: any) => file.path.startsWith('.bot/') && file.path !== '.bot/computer.yaml' && (!guideOnly || file.path === '.bot/guide.md'))
+      .map((file: any) => ({ path: file.path, source: file.source, content: file.effective })),
+    language: context?.review_rules?.language,
+    ...(workflow ? { work_prompt: workflow.prompt, work_name: workflow.name } : {})
+  } };
+}
 const modes: Record<string, 'review' | 'publication' | 'reply'> = { 'review.issue': 'review', 'review.pr': 'review', 'development.issue': 'publication', 'development.pr': 'publication',
   'workflow.issue': 'reply', 'workflow.pr': 'reply' };
 

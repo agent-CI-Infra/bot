@@ -10,7 +10,7 @@ import { TaskRecords } from '../tasks/service.js';
 import { taskTools, playbookInstructions, playbooks } from '../tasks/playbooks.js';
 import { type Store, type Row } from '../storage/database.js';
 import { type Workspace } from './workspace.js';
-import { workspaceProfile } from './profiles.js';
+import { workspaceProfile, roleAssignmentContext } from './profiles.js';
 import { runAgent, type AgentSpec } from './runtime.js';
 import { type Redactor, stop, blobSha, TaskError } from './common.js';
 import { piAdapter, type PiSession } from './pi.js';
@@ -52,7 +52,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
   const system = profile.system + '\n' + playbookInstructions;
   context={...context,project_memory:new ProjectMemory(store).context(task),playbook_request:JSON.parse(task.input||'{}').playbook_request||null,playbook_catalog:playbooks.map(({content,...p})=>p),structured_task:store.get('SELECT 1 FROM tasks WHERE id=?',task.id)?records.get(task.id):null};
   // Only development ends with its pull request; any other work that may open one carries on to its own finish.
-  const config = { system, prompt: JSON.stringify({ ...context, effective_rules: undefined, review_rules: undefined }), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
+  const config = { system, prompt: JSON.stringify(roleAssignmentContext(context, prompt)), tools: profile.tools, capabilities: profile.capabilities, workspace_id: task.workspace_id, review_session: !!conversation,
     finish_on_pull_request: profile.completion === 'publication', finish_tools: profile.finishTools,
     ...(profile.subagentSystem ? { subagent_system: profile.subagentSystem } : {}) };
   if(profile.completion==='publication'&&createPullRequest&&controlled(store,task,'development'))return developmentTeam(workspace,system,config.prompt,createPullRequest,profile.capabilities.workspace);

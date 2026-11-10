@@ -8,6 +8,7 @@ import { configureDispatch, Dispatcher } from '../dist/dispatch/worker.js';
 import { queueWebhook, enqueue } from '../dist/review/queue.js';
 import { taskPermissions } from '../dist/tasks/configuration.js';
 import { workPermissions } from '../dist/work/settings.js';
+import { roleConfiguration, saveConfiguration } from '../dist/roles/definition.js';
 
 // These tests ask the Manager for real: events wait for its model call instead of the rule decider other tests use.
 configureDispatch(null);
@@ -38,6 +39,25 @@ async function fixture(t) {
   const run = async () => { dispatcher.tick(); await dispatcher.idle(); };
   return { h, admin, a, requests, state, dispatcher, run };
 }
+
+test('event dispatch reads the editable Manager role and honors permission revocation before applying a decision', async t => {
+  const f = await fixture(t), save = values => saveConfiguration(f.h.store, '101', { expected_revision: roleConfiguration(f.h.store, '101').revision, enabled: true, roles: [{ role_id: 'manager', ...values }] }, 'fixture');
+  save({ persona_prompt: 'My complete event and task coordination instructions.' });
+  f.state.decide = () => {
+    save({ permissions: { dispatch: 'deny' } });
+    return { decision: 'create', option_ids: [JSON.parse(f.requests[0].messages[1].content).options.create[0].id], reason: '这条已被收回权限的决策不能落地' };
+  };
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'revoked-manager');
+  await f.run();
+  assert.ok(f.requests[0].messages[0].content.includes('My complete event and task coordination instructions.'));
+  assert.ok(!f.requests[0].messages[0].content.includes('Coordinate only.'));
+  assert.equal(events(f.h)[0].state, 'pending');
+  assert.equal(JSON.parse(events(f.h)[0].error).code, 'role_authority_revoked');
+  assert.equal(tasks(f.h).length, 0);
+  f.h.store.run('UPDATE dispatch_events SET next_run_at=0');
+  await f.run();
+  assert.equal(f.requests.length, 1, 'a denied dispatch does not call a model');
+});
 
 test('an event reaches the Manager once; its decision creates the task with the reason, and deciding again never duplicates it', async t => {
   const f = await fixture(t);
