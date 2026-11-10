@@ -103,7 +103,7 @@ test('restart recovers an unacknowledged delivery and cancellation prevents queu
 test('forwarding never follows a redirect or sends to a newly resolved private target',async t=>{
  let hits=0;const receiver=createServer((req,res)=>{hits++;res.writeHead(302,{Location:'/redirected'});res.end();});receiver.listen(0,'127.0.0.1');await once(receiver,'listening');t.after(()=>new Promise(resolve=>receiver.close(resolve)));
  assert.equal(await sendWebhook('http://127.0.0.1:'+receiver.address().port+'/',Buffer.from('{}'),{},['127.0.0.1']),302);assert.equal(hits,1);
- const h=await externalFixture(t),c=await h.client();assert.equal((await fetch(h.webhook+'/api/external/clients')).status,404);assert.equal((await fetch(h.adminBase+'/external/token',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,404);
+ const h=await externalFixture(t),c=await h.client();assert.equal((await fetch(h.webhook+'/api/external/clients')).status,401);
  assert.equal((await h.exchange(c.client.id,c.privateKey,{permissions:{contents:'write'}})).status,400);
 });
 

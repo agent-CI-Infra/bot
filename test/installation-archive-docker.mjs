@@ -19,7 +19,7 @@ const composeConfig = {
     bot: { image, depends_on: { 'key-init': { condition: 'service_completed_successfully' }, github: { condition: 'service_started' } },
       environment: { BOT_DATABASE_PATH: '/data/control.sqlite', BOT_MASTER_KEY_FILE: '/keys/master.key', BOT_MANAGER_TOKEN_FILE: '/internal/manager.token',
         BOT_MANAGER_URL: 'http://github:8080', BOT_GITHUB_API_URL: 'http://github:8080', BOT_COOKIE_SECURE: 'false' },
-      volumes: ['data:/data', 'keys:/keys:ro', 'internal:/internal:ro'], ports: ['127.0.0.1::8791', '127.0.0.1::8792'], read_only: true, tmpfs: ['/tmp'] },
+      volumes: ['data:/data', 'keys:/keys:ro', 'internal:/internal:ro'], ports: ['127.0.0.1::8791'], read_only: true, tmpfs: ['/tmp'] },
   }, volumes: { data: {}, keys: {}, internal: {} },
 };
 writeFileSync(composeFile, JSON.stringify(composeConfig, null, 2));
@@ -55,8 +55,8 @@ try {
   writeFileSync(resolve(output, 'build.log'), docker(['build', '--tag', image, '.']));
   compose(['up', '-d']);
   const address = (service, port) => 'http://' + compose(['port', service, String(port)]).trim();
-  base = address('bot', 8792); hookBase = address('bot', 8791); fixtureBase = address('github', 8080);
-  evidence.ports = { admin: new URL(base).port, webhook: new URL(hookBase).port, fixture: new URL(fixtureBase).port };
+  base = hookBase = address('bot', 8791); fixtureBase = address('github', 8080);
+  evidence.ports = { entry: new URL(base).port, fixture: new URL(fixtureBase).port };
   await wait(async () => (await fetch(base + '/healthz')).ok, '独立控制面启动');
   await api('/api/setup', 'POST', { username: 'administrator', password });
   const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -71,8 +71,8 @@ try {
   value = await snapshot(); assert.equal(value.status, 'active'); assert.equal(value.completeness, 'error');
   assert.equal((await api(archive + '/repositories')).repositories.filter(row => row.present).length, 1);
   await setFixture({ failure: 0 }); compose(['restart', 'bot']);
-  base = address('bot', 8792); hookBase = address('bot', 8791);
-  evidence.ports_after_restart = { admin: new URL(base).port, webhook: new URL(hookBase).port };
+  base = hookBase = address('bot', 8791);
+  evidence.ports_after_restart = { entry: new URL(base).port };
   await wait(async () => (await snapshot()).completeness === 'complete', '容器重启后恢复同步');
   assert.equal((await api(archive + '/events')).events.length, 1);
   passed('403 保留最后成功范围；真实容器重启后恢复持久化同步且档案不丢失');

@@ -163,7 +163,7 @@ test('the wizard explains fallback rules once and still warns about named non-we
   assert.equal(rows[0].querySelector('button').textContent, '检查并使用此域名');
   assert.equal(rows[1].querySelector('p').textContent, 'wrong.invalid → http://bot:8792');
   assert.equal(rows[2].querySelector('p').textContent, 'named-status.invalid → http_status:404');
-  assert.ok(rows.slice(1).every(row => row.querySelector('.status-danger').textContent === '不是 webhook 路由'));
+  assert.ok(rows.slice(1).every(row => row.querySelector('.status-danger').textContent === '不是 Bot 入口路由'));
   const explanations = () => page.$('onboarding-panel').querySelector('#wizard-tunnel').querySelectorAll('p').filter(p => p.textContent.includes('自带的兜底规则'));
   assert.equal(explanations().length, 1);
   assert.ok(explanations()[0].classList.contains('muted'));

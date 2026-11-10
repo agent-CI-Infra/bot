@@ -1,24 +1,53 @@
 import test from 'node:test';import assert from 'node:assert/strict';import{generateKeyPairSync,randomBytes}from'node:crypto';import{readFileSync,statSync}from'node:fs';
 import{harness,setup,account,repository,testPassword}from'./helpers.mjs';
-import{Onboarding}from'../dist/onboarding/service.js';import{publicOrigin}from'../dist/onboarding/public-url.js';import{RuleService,resolveRules,defaults,computerRequest}from'../dist/rules/service.js';
+import{Onboarding}from'../dist/onboarding/service.js';import{publicOrigin,deploymentOrigin}from'../dist/onboarding/public-url.js';import{RuleService,resolveRules,defaults,computerRequest}from'../dist/rules/service.js';
 
-test('a public origin must prove this webhook listener and cannot expose the console or redirect',async t=>{
- let onboarding,mode='webhook';const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{probe:async raw=>{const url=new URL(raw);if(url.pathname.includes('probe'))return{status:mode==='redirect'?302:200,body:JSON.stringify(onboarding.probe(url.searchParams.get('nonce'),mode==='console'?'admin':'webhook'))};return{status:mode==='split'&&url.pathname==='/api/setup'?200:404,body:'{}'};}})}));const{admin}=await setup(h);
+test('a public origin passes when this instance answers on it, console included, and fails for another instance, a forged proof or a redirect',async t=>{
+ const other=await harness(t);let onboarding,h;
+ // A fake network sends each host name to a real listener: this instance, another instance, a forger or a redirecting proxy.
+ const routes={'same.invalid':()=>h.admin,'other.invalid':()=>other.admin};
+ h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{probe:async raw=>{const url=new URL(raw);
+   if(url.hostname==='redirect.invalid')return{status:302,body:''};
+   if(url.hostname==='forged.invalid')return{status:200,body:JSON.stringify({proof:'0'.repeat(48)})};
+   const r=await fetch(routes[url.hostname]()+url.pathname+url.search,{redirect:'manual'});return{status:r.status,body:await r.text()};}})}));const{admin}=await setup(h);
  for(const value of ['http://hooks.invalid','https://u:p@hooks.invalid','https://hooks.invalid/path','https://hooks.invalid?q=1'])assert.throws(()=>publicOrigin(value));
- assert.equal((await admin('/api/onboarding/address','POST',{origin:'https://hooks.invalid'})).status,201);
- for(mode of ['console','split','redirect'])assert.equal((await admin('/api/onboarding/address','POST',{origin:'https://other.invalid'})).status,400);
- assert.equal((await admin('/api/onboarding')).value.public_address.origin,'https://hooks.invalid');assert.throws(()=>onboarding.probe('not-issued','webhook'));
+ // The same listener serves the console; the former rule that a public address must hide it is gone.
+ for(const path of ['/','/app.js','/api/setup'])assert.equal((await fetch(h.admin+path)).status,200);
+ assert.equal((await admin('/api/onboarding/address','POST',{origin:'https://same.invalid'})).status,201);
+ for(const origin of ['https://other.invalid','https://forged.invalid','https://redirect.invalid']){const r=await admin('/api/onboarding/address','POST',{origin});assert.equal(r.status,400);assert.equal(r.value.error,'webhook_probe_failed');}
+ assert.equal((await admin('/api/onboarding')).value.public_address.origin,'https://same.invalid');assert.throws(()=>onboarding.probe('not-issued'));
+});
+test('the address check never connects to loopback, private or link-local targets',async t=>{
+ const h=await harness(t),{admin}=await setup(h);
+ for(const origin of ['https://127.0.0.1','https://10.1.2.3','https://169.254.169.254']){const r=await admin('/api/onboarding/address','POST',{origin});assert.equal(r.status,400);assert.equal(r.value.error,'public_address_required');}
+ assert.equal((await admin('/api/onboarding')).value.public_address,null);
+});
+test('BOT_PUBLIC_ORIGIN replaces BOT_ADMIN_ORIGIN, and a conflict or a malformed value stops startup',()=>{
+ const warnings=[],resolve=env=>deploymentOrigin(env,message=>warnings.push(message));
+ assert.equal(resolve({}),undefined);assert.equal(resolve({BOT_PUBLIC_ORIGIN:'',BOT_ADMIN_ORIGIN:' '}),undefined);
+ assert.equal(resolve({BOT_PUBLIC_ORIGIN:'https://bot.invalid/'}),'https://bot.invalid');assert.deepEqual(warnings,[]);
+ // The deprecated name still works and says so; the same value under both names is not a conflict.
+ assert.equal(resolve({BOT_ADMIN_ORIGIN:'https://bot.invalid'}),'https://bot.invalid');assert.equal(warnings.length,1);assert.match(warnings[0],/BOT_PUBLIC_ORIGIN/);
+ assert.equal(resolve({BOT_PUBLIC_ORIGIN:'https://bot.invalid',BOT_ADMIN_ORIGIN:'https://bot.invalid/'}),'https://bot.invalid');
+ assert.throws(()=>resolve({BOT_PUBLIC_ORIGIN:'https://bot.invalid',BOT_ADMIN_ORIGIN:'https://console.invalid'}),/differ/);
+ for(const value of ['http://lan.invalid','https://bot.invalid/path','https://u:p@bot.invalid','https://bot.invalid?q=1','not a url'])assert.throws(()=>resolve({BOT_PUBLIC_ORIGIN:value}),/BOT_PUBLIC_ORIGIN/);
+ assert.throws(()=>resolve({BOT_ADMIN_ORIGIN:'http://192.168.1.5:8792'}),/BOT_ADMIN_ORIGIN/);
+ for(const value of ['http://127.0.0.1:8791','http://localhost:8791'])assert.equal(resolve({BOT_PUBLIC_ORIGIN:value}),value);
 });
 test('manifest creates fixed permissions and events, converts once without a PAT, and never returns credentials',async t=>{
  const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}),secret=randomBytes(32).toString('hex');let onboarding,calls=[];
- const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{fetcher:async(url,options)=>{calls.push({url,options});return new Response(JSON.stringify({id:123,slug:'fixture-app',name:'Fixture',pem,webhook_secret:secret,client_secret:'discard-this'}));}})}));const{admin}=await setup(h);
+ const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{fetcher:async(url,options)=>{calls.push({url,options});return new Response(JSON.stringify({id:123,slug:'fixture-app',name:'Fixture',owner:{login:'fixture',type:'Organization'},html_url:'https://github.com/apps/fixture-app',pem,webhook_secret:secret,client_secret:'discard-this'}));}})}));const{admin}=await setup(h);
  assert.equal((await admin('/api/onboarding/manifest','POST',{organization:'fixture',name:'Fixture'})).status,409);onboarding.save('public',{origin:'https://hooks.invalid'});
  const prepared=(await admin('/api/onboarding/manifest','POST',{organization:'fixture',name:'Fixture'})).value;
  assert.deepEqual(prepared.manifest.default_events,['issues','pull_request','issue_comment','pull_request_review','pull_request_review_comment','organization']);assert.deepEqual(prepared.manifest.default_permissions,{contents:'write',issues:'write',pull_requests:'write',statuses:'write',actions:'write',checks:'write',metadata:'read',members:'read'});assert.equal(prepared.manifest.hook_attributes.active,true);assert.match(prepared.manifest.hook_attributes.url,/^https:\/\/hooks.invalid\/hooks\/github\//);
- // GitHub sends the browser to redirect_url; the console reopens login configuration inside global settings.
- assert.match(prepared.manifest.redirect_url,/\/onboarding\/github\/callback$/);assert.deepEqual(prepared.manifest.callback_urls,[h.admin+'/auth/github/callback']);
+ // What GitHub keeps in the App lives on the verified entry; redirect_url only returns this browser once, to its console.
+ assert.equal(prepared.manifest.url,'https://hooks.invalid');assert.equal(prepared.manifest.setup_url,'https://hooks.invalid/onboarding/github/setup');assert.deepEqual(prepared.manifest.callback_urls,['https://hooks.invalid/auth/github/callback']);
+ assert.equal(prepared.manifest.redirect_url,h.admin+'/onboarding/github/callback');
+ assert.equal((await admin('/api/onboarding/manifest','POST',{organization:'fixture',name:'Fixture'},{Origin:'https://hooks.invalid'})).value.manifest.redirect_url,'https://hooks.invalid/onboarding/github/callback');
  const state=new URL(prepared.create_url).searchParams.get('state'),returned=await fetch(`${h.admin}/onboarding/github/callback?code=manifest-fixture-code&state=${state}`,{redirect:'manual'});
- assert.equal(returned.status,303);assert.equal(returned.headers.get('location'),'/#/settings/onboarding/2');await assert.rejects(onboarding.callback('manifest-fixture-code',state));assert.equal(calls.length,1);assert.equal(calls[0].options.headers.Authorization,undefined);
+ assert.equal(returned.status,303);assert.equal(returned.headers.get('location'),'/#/settings/onboarding/2');
+ // The App's owner gives the login step a direct link to its settings page.
+ const app=(await admin('/api/onboarding')).value.app;assert.equal(app.owner,'fixture');assert.equal(app.owner_type,'Organization');assert.equal(app.settings_url,'https://github.com/organizations/fixture/settings/apps/fixture-app');await assert.rejects(onboarding.callback('manifest-fixture-code',state));assert.equal(calls.length,1);assert.equal(calls[0].options.headers.Authorization,undefined);
  const view=JSON.stringify((await admin('/api/accounts')).value);assert.ok(!view.includes(secret)&&!view.includes(pem));assert.ok(!JSON.stringify((await admin('/api/onboarding')).value).includes(secret));assert.ok(!JSON.stringify(h.store.all('SELECT * FROM accounts')).includes(pem));
 });
 test('tunnel token is private and write-only; skip installation does not enable review; project admins cannot change onboarding',async t=>{

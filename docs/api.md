@@ -1,6 +1,6 @@
 # 管理 API
 
-管理页面的操作都经由下列接口，它们和管理页面一起在管理端口（默认 `127.0.0.1:8792`）；只有 `/hooks/github/...` 在 Webhook 端口。部署见[部署细节](deployment.md)。
+管理页面的操作都经由下列接口。它们和管理页面、OAuth 与 App 回调、Webhook 在同一个业务端口（容器 `8791`，宿主默认 `127.0.0.1:8791`），对外经同一个 HTTPS 入口访问；Webhook 和外部执行端路径按自己的签名或令牌认证，不需要浏览器会话。部署见[部署细节](deployment.md)。
 
 除初始化状态、初始化、登录和健康检查外，管理 API 都需要登录会话。登录／初始化响应设置 `HttpOnly; SameSite=Strict` Cookie，并返回 `csrf_token`；之后的写请求必须提供同值 `X-CSRF-Token` 和 `Content-Type: application/json`。登录后 `GET /api/auth/me` 可读取当前会话的 CSRF 值。接口不接受额外字段，不支持传入 `role` 将自己升级。HTTP 失败只返回稳定错误码，不回显输入或内部异常。
 
@@ -8,7 +8,7 @@
 
 | 路径 | 方法 | 功能和范围 |
 | --- | --- | --- |
-| `/healthz` | GET | 两个监听端口的数据库健康检查 |
+| `/healthz` | GET | 业务端口的数据库健康检查 |
 | `/api/setup` | GET / POST | 初始化状态／仅首次创建超级管理员，POST 字段 `username,password` |
 | `/api/auth/login`、`/api/auth/logout`、`/api/auth/me` | POST / POST / GET | 登录、退出、会话与仓库权限 |
 | `/api/users`、`/api/users/:id` | GET / POST、PATCH / DELETE | 超级管理员列出／创建用户、停用或启用；创建可带 `role,repository_ids,organization_ids`，含义同下行，超级管理员忽略这两项。DELETE 需 `confirm:true`，删除会话、仓库和组织授权、个人看板设置，审计保留；最后一名活跃超级管理员返回 409 `last_super_admin`，删除自己成功后会话失效 |
@@ -64,7 +64,7 @@
 | `/api/tasks/:id/retry` | POST | 有权项目管理员重试故障任务；发布未知时仍先对账，不直接重复 POST。`waiting_publication` 的重试即人工确认：结果未知的写入回到待发送，先查找，查不到才发送。`needs_replan` 在尚未写入 GitHub 时从准备阶段重新规划 |
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
 | `/api/costs` | GET | 授权范围内的统计。参数 `timezone` 为浏览器的 IANA 时区（省略时兼容 UTC，无效时返回 400 `invalid_statistics_timezone`），`from,to` 为该时区的 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。模型费用和 token 按 `requested_at` 的本地日、项目聚合；费用最多 5000 个日期／项目分组，超限要求缩小范围。返回 `days,summary,prices,timezone,collection_started_at,tasks`；`tasks` 独立聚合，不占费用分组配额。不返回模型密钥或原始请求 |
-| `/hooks/github/:account/:endpoint` | POST | 仅 Webhook 端口，按已登记入口验签和归档 |
+| `/hooks/github/:account/:endpoint` | POST | 按已登记入口验签和归档，不需要登录会话 |
 
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置、未启动或已禁用的仓库只归档，不生成任务。
 

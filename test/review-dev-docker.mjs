@@ -39,12 +39,12 @@ writeFileSync(override,`services:
       BOT_PROJECT_IMAGE: ${image('project-computer')}
     ports: ["127.0.0.1:18893:8793"]
 `);
-const env={...process.env,DOCKER_CONFIG:resolve('.tmp/review-dev/docker'),BUILDX_CONFIG:resolve('.tmp/review-dev/buildx'),BOT_WEBHOOK_PORT:'18891',BOT_ADMIN_PORT:'18892'};
+const env={...process.env,DOCKER_CONFIG:resolve('.tmp/review-dev/docker'),BUILDX_CONFIG:resolve('.tmp/review-dev/buildx'),BOT_PORT:'18891'};
 const docker=args=>execFileSync('docker',args,{env,encoding:'utf8',maxBuffer:8*1024*1024});
 const compose=args=>docker(['compose','-f','compose.yaml','-f','compose.build.yaml','-f',override,'-p',project,...args]);
-const base='http://127.0.0.1:18892',fixture='http://127.0.0.1:18894',id=()=>randomBytes(24).toString('hex');
+const base='http://127.0.0.1:18891',fixture='http://127.0.0.1:18894',id=()=>randomBytes(24).toString('hex');
 const password=id(),memberPassword=id(),githubToken=id(),modelKey=id(),webhookSecret=id();let cookie='',csrf='',deployment;
-const evidence={checks:[],ports:[18891,18892,18893,18894],project};
+const evidence={checks:[],ports:[18891,18893,18894],project};
 const passed=name=>{evidence.checks.push(name);console.log('PASS '+name);};
 async function wait(fn,description){const end=Date.now()+120000;while(Date.now()<end){try{const result=await fn();if(result)return result;}catch(error){if(error.message.startsWith('Task failed:'))throw error;}await new Promise(r=>setTimeout(r,250));}throw new Error('Timed out: '+description);}
 async function api(path,method='GET',body){
@@ -66,8 +66,9 @@ const pull=(repo,number,state,draft=false)=>({id:4000+number,number,state:'open'
 try{
   compose(['up','-d','--build']);await wait(async()=>(await fetch(base+'/healthz')).ok,'control health');
   const botId=compose(['ps','-q','bot']).trim(),control=JSON.parse(docker(['inspect',botId]))[0],address=Object.values(control.NetworkSettings.Networks)[0].IPAddress;
-  const denied=compose(['exec','-T','tunnel','node','--input-type=module','-e',`for(const url of ['http://bot:8792/healthz','http://${address}:8792/healthz']){try{await fetch(url,{signal:AbortSignal.timeout(1500)});process.exit(1);}catch{}}process.stdout.write('isolated');`]);assert.equal(denied.trim(),'isolated');
-  assert.equal(compose(['exec','-T','tunnel','node','--input-type=module','-e',"process.stdout.write(String((await fetch('http://webhook:8791/api/setup')).status))"]).trim(),'404');passed('Tunnel edge network cannot reach the management listener, even by its control-network IP');
+  // The tunnel reaches the whole business entry only through the gateway; the bot and manager themselves stay out of reach.
+  const denied=compose(['exec','-T','tunnel','node','--input-type=module','-e',`for(const url of ['http://bot:8791/healthz','http://${address}:8791/healthz','http://manager:8793/ready']){try{await fetch(url,{signal:AbortSignal.timeout(1500)});process.exit(1);}catch{}}process.stdout.write('isolated');`]);assert.equal(denied.trim(),'isolated');
+  assert.equal(compose(['exec','-T','tunnel','node','--input-type=module','-e',"process.stdout.write(String((await fetch('http://webhook:8791/api/setup')).status))"]).trim(),'200');passed('Tunnel edge network reaches the single entry only via the gateway, never the bot or manager directly');
   await fake('config',{github_token:githubToken,model_key:modelKey});
   const managerToken=compose(['exec','-T','bot','node','--input-type=module','-e',"import {readFileSync} from 'node:fs';process.stdout.write(readFileSync('/internal/manager.token').toString('base64'))"]).trim();
   deployment=createHash('sha256').update(Buffer.from(managerToken,'base64')).digest('hex').slice(0,16);

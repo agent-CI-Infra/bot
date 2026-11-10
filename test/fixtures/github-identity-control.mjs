@@ -44,6 +44,6 @@ const fixture = createServer(async (req, res) => {
   send({}, 404);
 });
 fixture.listen(8080, '0.0.0.0');
-const servers = createControlPlane({ store, staticDirectory: '/app/static', githubIdentity: identity });
-servers.admin.listen(8792, '0.0.0.0');
-process.on('SIGTERM', () => { servers.admin.close(); fixture.close(); store.close(); process.exit(0); });
+const { server } = createControlPlane({ store, staticDirectory: '/app/static', githubIdentity: identity });
+server.listen(8791, '0.0.0.0');
+process.on('SIGTERM', () => { server.close(); fixture.close(); store.close(); process.exit(0); });

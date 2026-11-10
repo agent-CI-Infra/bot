@@ -37,15 +37,19 @@ services:
       BOT_COOKIE_SECURE: "${BOT_COOKIE_SECURE:-false}"
       BOT_GITHUB_OAUTH_CLIENT_ID: "${BOT_GITHUB_OAUTH_CLIENT_ID:-}"
       BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE: "${BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE:-/run/secrets/github-oauth-client-secret}"
+      BOT_PUBLIC_ORIGIN: "${BOT_PUBLIC_ORIGIN:-}"
+      # Deprecated alias of BOT_PUBLIC_ORIGIN, still read before v0.3.0; startup stops when the two differ.
       BOT_ADMIN_ORIGIN: "${BOT_ADMIN_ORIGIN:-}"
       BOT_TUNNEL_TOKEN_FILE: /tunnel/token
       BOT_TUNNEL_METRICS_URL: http://webhook:8794
       # The version the global settings page shows: the tag these images were pulled with.
       BOT_IMAGE_TAG: "${BOT_IMAGE_TAG:-latest}"
     stop_grace_period: 100s
+    # The single business port: console, login, App callbacks and webhooks. It binds loopback by default, because it now
+    # also serves the console and first-time setup; set BOT_BIND_ADDRESS=0.0.0.0 only for a reverse proxy on another host.
+    # BOT_WEBHOOK_PORT is the deprecated name of BOT_PORT (read before v0.3.0); BOT_ADMIN_PORT no longer publishes anything.
     ports:
-      - "0.0.0.0:${BOT_WEBHOOK_PORT:-8791}:8791"
-      - "127.0.0.1:${BOT_ADMIN_PORT:-8792}:8792"
+      - "${BOT_BIND_ADDRESS:-127.0.0.1}:${BOT_PORT:-${BOT_WEBHOOK_PORT:-8791}}:8791"
     volumes:
       - bot-data:/data
       - bot-keys:/keys:ro
@@ -67,8 +71,9 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
-  # Fixed gateway from the tunnel network to bot:8791. It runs from the control-plane image but stays a separate
-  # container, so the tunnel can never reach the admin listener.
+  # Fixed gateway from the tunnel network to the business listener bot:8791 (the whole public entry). It runs from the
+  # control-plane image but stays a separate container, so the tunnel never joins the control network and cannot reach
+  # the manager. Cloudflare routes keep the service URL http://webhook:8791.
   webhook:
     image: ghcr.io/agent-ci-infra/bot-control-plane:${BOT_IMAGE_TAG:-latest}
     command: ["node", "webhook/main.mjs"]

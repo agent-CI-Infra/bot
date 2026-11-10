@@ -47,7 +47,9 @@ import { ScheduleService } from './schedules/service.js';
 import { Scheduler } from './schedules/worker.js';
 import { registerScheduledChecks } from './dispatch/schedule.js';
 
-interface Options { store: Store; staticDirectory: string; secureCookies?: boolean; adminOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
+interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
+  // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
+  publicOrigin?: string; maxBodyBytes?: number; projects?: ProjectService; engine?: TaskEngine;
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
@@ -70,7 +72,7 @@ export function createControlPlane(options: Options) {
   const { store } = options;
   const external = options.external || new ExternalService(store);
   const githubLogin = options.githubLogin || new GitHubLogin(store, {
-    identity: options.githubIdentity, environment: () => options.githubOAuth, defaultOrigin: options.adminOrigin,
+    identity: options.githubIdentity, environment: () => options.githubOAuth, defaultOrigin: options.publicOrigin,
     apiUrl: options.githubUrl || options.githubOAuth?.apiUrl, webUrl: options.githubOAuth?.webUrl,
   });
   const onboarding = options.onboarding || new Onboarding(store);
@@ -84,7 +86,7 @@ export function createControlPlane(options: Options) {
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
-  const channels = new ChannelService(store, managementApi.agent, { ...options.channels, get origin() { return options.channels?.origin || githubLogin.adminOrigin || options.adminOrigin; } });
+  const channels = new ChannelService(store, managementApi.agent, { ...options.channels, get origin() { return options.channels?.origin || githubLogin.origin || options.publicOrigin; } });
   const channelApi = new ChannelApi(channels), channelConnections = new ChannelConnections(channels);
   options.onChannels?.(channels);
   const schedules = new ScheduleService(store, sharedManagement, channels, options.schedules?.clock);
@@ -93,14 +95,18 @@ export function createControlPlane(options: Options) {
   const removal = new ProjectRemoval(store, options.installations, options.projects, options.engine);
   const releases = options.releases || new ReleaseService(store, options.githubUrl);
   const loginAttempts = new Map<string, { n: number; until: number }>();
-  const deploymentOrigin = (req: IncomingMessage) => options.adminOrigin || `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
+  const requestOrigin = (req: IncomingMessage) => `${options.secureCookies ? 'https' : 'http'}://${req.headers.host}`;
+  const deploymentOrigin = (req: IncomingMessage) => options.publicOrigin || requestOrigin(req);
+  const loopback = (req: IncomingMessage) => { try { return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL('http://' + req.headers.host).hostname); } catch { return false; } };
+  // Writes come from the deployment origin, the single public entry, or a console address saved before the single entry.
+  // A browser on this machine stays writable even when those name another address: DNS rebinding cannot send a loopback Host.
+  const writableOrigins = (req: IncomingMessage) => [deploymentOrigin(req), githubLogin.entry, githubLogin.savedOrigin, ...(loopback(req) ? [requestOrigin(req)] : [])];
   const secureCookie = (req: IncomingMessage) => {
     if (options.secureCookies) return true;
     // Login/logout POSTs have already passed the Origin fence; a new alias must not change local recovery cookies.
     if (req.method === 'POST' && req.headers.origin) return req.headers.origin.startsWith('https:');
-    const origin = githubLogin.adminOrigin;
-    return options.adminOrigin?.startsWith('https:') ||
-      origin?.startsWith('https:') && new URL(origin).host === req.headers.host;
+    return options.publicOrigin?.startsWith('https:') ||
+      [githubLogin.entry, githubLogin.savedOrigin].some(origin => origin?.startsWith('https:') && new URL(origin).host === req.headers.host);
   };
   const cookie = (req: IncomingMessage, token: string, age = 43200) => `bot_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${age}${secureCookie(req) ? '; Secure' : ''}`;
   const browserCookie = (req: IncomingMessage, token: string) => `bot_oauth=${token}; HttpOnly; SameSite=Lax; Path=/auth/github; Max-Age=600${secureCookie(req) ? '; Secure' : ''}`;
@@ -116,9 +122,12 @@ export function createControlPlane(options: Options) {
       else res.end();
     }
   };
-  const webhook = createServer(wrap(async (req, res) => {
-    const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname;
-    if (req.method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'webhook')); return; }
+  // The single business listener. GitHub and Feishu deliveries, external executors and public boards come first: each
+  // authenticates itself (signature, token or published board) and never needs a browser session, Origin or CSRF token.
+  // The console, OAuth and App callbacks follow with their own checks; manager and tunnel interfaces are never served here.
+  const server = createServer(wrap(async (req, res) => {
+    const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
+    if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '')); return; }
     if (options.boards && /^\/(dashboard|boards)(\/|$)/.test(path)) {
       res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' https: data:; font-src 'self' data:; connect-src 'self' https://api.github.com; frame-ancestors 'none'; base-uri 'none'");
       if (await options.boards.serve(req, res, url)) return;
@@ -146,17 +155,15 @@ export function createControlPlane(options: Options) {
       respond(res,200,await external.publicApi(path,value,String(req.headers.authorization||'')));return;
     }
     const match = /^\/hooks\/github\/([a-f0-9]{48})\/([a-f0-9]{48})$/.exec(path);
-    if (req.method !== 'POST' || !match) return fail(404, 'not_found');
-    const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
-    const result = await ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.repositoryConfigs, options.githubUrl);
-    respond(res, result.status, result.response);
-    // Installation changes are already recorded; a full listing follows outside the delivery path.
-    if (result.status === 200 && 'sync' in result && result.sync) options.installations?.schedule(match[1]!);
-  }));
-  const admin = createServer(wrap(async (req, res) => {
-    const url = new URL(req.url || '/', 'http://localhost'), path = url.pathname, method = req.method || 'GET';
+    if (method === 'POST' && match) {
+      const input = await body(req, options.maxBodyBytes ?? 2 * 1024 * 1024);
+      const result = await ingest(store, match[1]!, match[2]!, req.headers, input.bytes, input.complete, options.repositoryConfigs, options.githubUrl);
+      respond(res, result.status, result.response);
+      // Installation changes are already recorded; a full listing follows outside the delivery path.
+      if (result.status === 200 && 'sync' in result && result.sync) options.installations?.schedule(match[1]!);
+      return;
+    }
     const githubIdentity = githubLogin.identity;
-    if (method === 'GET' && path === '/.well-known/bot-webhook-probe') { respond(res, 200, onboarding.probe(url.searchParams.get('nonce') || '', 'admin')); return; }
     if (method === 'GET' && path === '/api/auth/github/status') { respond(res, 200, { enabled: !!githubIdentity }); return; }
     if (method === 'GET' && path === '/auth/channels/start') {
       if (!githubIdentity) return fail(503, 'github_login_not_configured');
@@ -200,7 +207,6 @@ export function createControlPlane(options: Options) {
       const result = await installationSetup.callback(url.searchParams.get('state') || '', url.searchParams.get('installation_id') || '', url.searchParams.get('setup_action') || 'install');
       respond(res, 200, result); return;
     }
-    if (method === 'GET' && path === '/healthz') { store.get('SELECT 1'); respond(res, 200, { ok: true }); return; }
     const assets: Record<string, [string, string]> = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/channels.js': ['channels.js', 'text/javascript'], '/identity.js': ['identity.js', 'text/javascript'], '/management.js': ['management.js','text/javascript'], '/schedules.js': ['schedules.js','text/javascript'], '/style.css': ['style.css', 'text/css'],
       '/views.js': ['views.js', 'text/javascript'], '/gate-onboarding.js': ['gate-onboarding.js', 'text/javascript'], '/views.css': ['views.css', 'text/css'], '/board.js': ['board.js', 'text/javascript'], '/board.css': ['board.css', 'text/css'], '/metrics.js':['metrics.js','text/javascript'], '/costs.js':['costs.js','text/javascript'], '/costs.css':['costs.css','text/css'], '/external.js':['external.js','text/javascript'], '/project.js': ['project.js', 'text/javascript'], '/manager.js': ['manager.js', 'text/javascript'], '/roles.js': ['roles.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/onboarding.js': ['onboarding.js', 'text/javascript'],
       '/docs/external-token-api.md': ['../docs/external-token-api.md', 'text/plain'] };
@@ -212,7 +218,7 @@ export function createControlPlane(options: Options) {
     if (path === '/api/setup' && method === 'GET') { respond(res, 200, { initialized: initialized() }); return; }
     const mutation = !['GET', 'HEAD'].includes(method);
     if (mutation && req.headers.origin) {
-      if (![deploymentOrigin(req), githubLogin.adminOrigin].includes(req.headers.origin)) fail(403, 'origin_forbidden');
+      if (!writableOrigins(req).includes(req.headers.origin)) fail(403, 'origin_forbidden');
     }
     if (path === '/api/setup' && method === 'POST' && initialized()) fail(409, 'already_initialized');
     const publicRequest = path === '/api/setup' && method === 'POST' || path === '/api/auth/login' && method === 'POST';
@@ -311,7 +317,7 @@ export function createControlPlane(options: Options) {
       }
     };
     guard();
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, githubLogin.adminOrigin || options.adminOrigin || `${options.secureCookies?'https':'http'}://${req.headers.host}`) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
@@ -319,9 +325,9 @@ export function createControlPlane(options: Options) {
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
     respond(res, method === 'POST' ? 201 : 200, result);
   }));
-  for (const server of [webhook, admin]) { server.requestTimeout = 30_000; server.headersTimeout = 10_000; }
+  server.requestTimeout = 30_000; server.headersTimeout = 10_000;
   let connectionTimer: ReturnType<typeof setInterval>;
-  webhook.once('listening', () => {
+  server.once('listening', () => {
     channels.start();
     if (options.schedules?.automatic !== false) scheduler.start();
     if (options.channels?.longConnections !== false) {
@@ -329,6 +335,6 @@ export function createControlPlane(options: Options) {
       connectionTimer = setInterval(() => channelConnections.reconcile(), 1000); connectionTimer.unref();
     }
   });
-  admin.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); void scheduler.close().catch(()=>{}); void managementApi.agent.close().catch(()=>{}); });
-  return { webhook, admin };
+  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); void scheduler.close().catch(()=>{}); void managementApi.agent.close().catch(()=>{}); });
+  return { server };
 }
