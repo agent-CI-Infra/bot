@@ -107,7 +107,7 @@ test('credential probes reject stale revisions and recheck live configuration af
 test('connection names are discovered, cached across restarts and refreshed without invalidating channel configuration', async t => {
   const { admin, h, wire, service } = await channelFixture(t);
   const id = await connector(admin, { app_id: 'cli_names', installation_tenant: undefined, bot_open_id: undefined });
-  const read = () => h.store.get('SELECT app_name,tenant_name,revision FROM channel_connectors WHERE id=?', id);
+  const read = () => ({ ...h.store.get('SELECT app_name,tenant_name,revision FROM channel_connectors WHERE id=?', id) });
   assert.deepEqual(read(), { app_name: 'Fixture bot', tenant_name: 'Fixture enterprise', revision: 1 });
   const requests = wire.state.authRequests.length;
   for (let i = 0; i < 2; i++) {
@@ -130,7 +130,7 @@ test('missing display information preserves cached names; an installation mismat
   wire.state.appName = ''; wire.state.tenantCode = 1184001;
   const partial = await probe(admin, id);
   assert.equal(partial.status, 201); assert.equal(partial.value.tenant_error, 'channel_tenant_unavailable');
-  const read = () => h.store.get('SELECT app_name,tenant_name,revision FROM channel_connectors WHERE id=?', id);
+  const read = () => ({ ...h.store.get('SELECT app_name,tenant_name,revision FROM channel_connectors WHERE id=?', id) });
   const saved = { app_name: 'Fixture bot', tenant_name: 'Fixture enterprise', revision: 1 };
   assert.deepEqual(read(), saved);
   wire.state.tenantCode = 0; wire.state.tenantName = '';
@@ -158,7 +158,7 @@ test('startup adds empty display fields to old connections without replacing the
   service.close();
   const credentials = h.store.all('SELECT * FROM channel_credentials');
   h.store.db.exec('ALTER TABLE channel_connectors DROP COLUMN app_name; ALTER TABLE channel_connectors DROP COLUMN tenant_name');
-  const before = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+  const before = { ...h.store.get('SELECT * FROM channel_connectors WHERE id=?', id) };
   for (let i = 0; i < 2; i++) {
     await h.stop(); await h.start();
     const { app_name, tenant_name, ...after } = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
