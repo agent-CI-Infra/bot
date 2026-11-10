@@ -24,7 +24,14 @@ for (const view of ['project_admin', 'super_admin', 'hidden']) {
     assert.deepEqual(page.$('rows').querySelectorAll('h2').map(title => title.textContent), ['old-name']);
     assert.equal(page.$('rows').querySelectorAll('.row').length, 1);
     rows = []; await page.run('render()');
-    assert.equal(page.$('rows').childElementCount, 0, 'an empty page has no empty owner groups');
+    assert.equal(page.$('rows').querySelectorAll('.project-owner-group').length, 0, 'an empty page has no empty owner groups');
+    assert.equal(page.$('rows').querySelectorAll('.row').length, 0, 'access guidance does not invent project rows');
+    if (view === 'project_admin') {
+      assert.equal(page.$('rows').childElementCount, 1);
+      const guidance = page.$('rows').querySelector('.console-state');
+      assert.equal(guidance.querySelector('h2').textContent, '已登录，尚无可管理的项目');
+      assert.equal(guidance.querySelector('a').href, '#/identity');
+    } else assert.equal(page.$('rows').childElementCount, 0);
   });
 }
 
