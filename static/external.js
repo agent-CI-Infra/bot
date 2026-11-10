@@ -24,7 +24,7 @@ function externalAgentInstructions(client,audience){
   const exchange=audience
     ?'兑换地址（同时是签名证明的 audience）：'+audience+'\n公钥登记完成后，用本机私钥签名，再通过任意 HTTP 客户端兑换。curl 请求示例：\n'+externalTokenRequest(audience)
     :'兑换地址尚未配置。请先让超级管理员在「外部执行端 → 设置兑换地址」保存以 /external/token 结尾的 HTTPS 地址，再从页面重新复制指令；不要猜测或编造 URL，配置完成前不要兑换。';
-  return '请在我的个人电脑上完成部门 Bot 公钥接入。客户端 ID：'+client.id+'；绑定仓库 ID：'+client.repository_id+'。\n\n'
+  return '请在我的个人电脑上完成 launchpad 公钥接入。客户端 ID：'+client.id+'；绑定仓库 ID：'+client.repository_id+'。\n\n'
     +'1. 可使用任意语言或工具，不需要 Node.js，也不要求下载项目脚本。详细接口规则和 OpenSSL＋curl 完整示例：https://github.com/agent-CI-Infra/bot/blob/main/docs/external-token-api.md（管理入口也可打开 '+new URL(externalTokenDocs,location.origin).href+'）。先检查密钥文件是否已存在，不要覆盖已有私钥；如果没有，在本机私有目录运行：\n'+externalKeyCommands+'\n只将 bot-client.pub.pem 的公钥内容交给我，由我在这个客户端的「登记公钥／更换公钥」中保存，并等待我确认。只接受 BEGIN PUBLIC KEY 的 SPKI PEM、2048–4096 位 RSA。bot-client.pem 私钥始终留在我的电脑，不要粘贴到 Bot、聊天或日志。\n\n'
     +'2. '+exchange+'\n签名证明是最长 120 秒的 RS256 JWT：header 为 {"alg":"RS256","typ":"JWT"}；payload 中 iss 和 sub 都为 '+client.id+'，aud 必须与上面的完整兑换地址一致，iat 为当前 Unix 秒，exp 大于 iat 且不超过 iat + 120，jti 为每次新生成的 16–128 位字母、数字、下划线或短横线。JWT 三段都用无填充 base64url 编码，对 header.payload 用 RSA-SHA256 签名。\n'
     +'在 umask 077 的私有目录中，将 Authorization: Bearer <签名JWT> 写入 proof-header.txt；将 '+JSON.stringify({client_id:client.id,request_id:'<与 jti 完全相同>'})+' 写入 token-request.json，再发送上面的 POST 请求。只发送签名证明，不上传私钥；不要开启 shell 跟踪或在聊天、日志、提交中显示私钥、签名证明或响应 token。请求不可重放，失败时先查看原因，确需重新兑换时生成新的 jti 和证明。安全地保留响应里的 grant_id、token 和 expires_at 供本次任务使用。\n\n'

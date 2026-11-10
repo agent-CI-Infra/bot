@@ -1,6 +1,6 @@
-# 部门公共 Bot
+# launchpad
 
-这是部门公共的 GitHub App，负责检视 Issue 和 PR。仓库启用后，新开的 Issue 会收到一次检视评论；PR 在打开、标为可检视（Ready for review）以及 head 更新（推送新提交）时检视，草稿 PR 不检视；管理员可以按仓库关掉其中某种触发。bot 只发评论，不批准、不请求变更，也不合并。管理员为仓库打开开发后，bot 才会按 Issue 改代码并开 PR。许可证为 Apache-2.0。
+launchpad 是一个 GitHub App，负责检视 Issue 和 PR。仓库启用后，新开的 Issue 会收到一次检视评论；PR 在打开、标为可检视（Ready for review）以及 head 更新（推送新提交）时检视，草稿 PR 不检视；管理员可以按仓库关掉其中某种触发。bot 只发评论，不批准、不请求变更，也不合并。管理员为仓库打开开发后，bot 才会按 Issue 改代码并开 PR。许可证为 Apache-2.0。
 
 ## 安装到你的仓库
 
