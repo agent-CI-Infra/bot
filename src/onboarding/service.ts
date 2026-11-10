@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import type { Store } from '../storage/database.js';
 import { type Actor, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
-import { publicOrigin, probeGet, loginCallbackPath, registrationPath, setupPath } from './public-url.js';
+import { publicOrigin, probeGet, registrationPath, setupPath } from './public-url.js';
 import { appEvents, appJwt, appPermissions } from '../github/client.js';
 import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
@@ -177,7 +177,6 @@ export class Onboarding {
       // Everything GitHub keeps in the App lives on the verified entry. redirect_url only returns this browser once, to the
       // console it started from.
       const manifest = { name, url: address.origin, redirect_url: consoleOrigin + registrationPath, setup_url: address.origin + setupPath, public: input.public===true,
-        callback_urls: [address.origin + loginCallbackPath],
         hook_attributes: { url: address.origin + `/hooks/github/${account}/${endpoint}`, active: true },
         default_permissions: { ...appPermissions, members: 'read' }, default_events: [...appEvents, 'organization'] };
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };

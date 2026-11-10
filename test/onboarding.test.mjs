@@ -41,7 +41,7 @@ test('manifest creates fixed permissions and events, converts once without a PAT
  const prepared=(await admin('/api/onboarding/manifest','POST',{organization:'fixture',name:'Fixture'})).value;
  assert.deepEqual(prepared.manifest.default_events,['issues','pull_request','issue_comment','pull_request_review','pull_request_review_comment','organization']);assert.deepEqual(prepared.manifest.default_permissions,{contents:'write',issues:'write',pull_requests:'write',statuses:'write',actions:'write',checks:'write',metadata:'read',members:'read'});assert.equal(prepared.manifest.hook_attributes.active,true);assert.match(prepared.manifest.hook_attributes.url,/^https:\/\/hooks.invalid\/hooks\/github\//);
  // What GitHub keeps in the App lives on the verified entry; redirect_url only returns this browser once, to its console.
- assert.equal(prepared.manifest.url,'https://hooks.invalid');assert.equal(prepared.manifest.setup_url,'https://hooks.invalid/onboarding/github/setup');assert.deepEqual(prepared.manifest.callback_urls,['https://hooks.invalid/auth/github/callback']);
+ assert.equal(prepared.manifest.url,'https://hooks.invalid');assert.equal(prepared.manifest.setup_url,'https://hooks.invalid/onboarding/github/setup');assert.equal(prepared.manifest.callback_urls,undefined);
  assert.equal(prepared.manifest.redirect_url,h.admin+'/onboarding/github/callback');
  assert.equal((await admin('/api/onboarding/manifest','POST',{organization:'fixture',name:'Fixture'},{Origin:'https://hooks.invalid'})).value.manifest.redirect_url,'https://hooks.invalid/onboarding/github/callback');
  const state=new URL(prepared.create_url).searchParams.get('state'),returned=await fetch(`${h.admin}/onboarding/github/callback?code=manifest-fixture-code&state=${state}`,{redirect:'manual'});
@@ -66,7 +66,7 @@ test('legacy selected App metadata is refreshed in place without changing login,
  }})})),{admin}=await setup(h),a=await account(admin,{type:'github_app',app_id:'123',private_key:pem,token:undefined});
  const original={account_id:a.id,app_id:'123',slug:'fixture-app',installations:3,webhook_url:'https://hooks.invalid/existing',install_url:'https://github.com/apps/fixture-app/installations/new'};
  onboarding.save('app',original);onboarding.save('installation_skipped',true);
- await admin('/api/onboarding/github-login','PUT',{enabled:true,client_id:'Iv1.existing',client_secret:secret});
+ await admin('/api/onboarding/github-login','PUT',{enabled:true,client_id:'Ov23.existing',client_secret:secret});
  const credentials=h.store.get('SELECT credentials FROM accounts WHERE id=?',a.id).credentials,login=h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value;
  assert.equal((await admin('/api/onboarding')).value.app.settings_url,undefined);assert.equal(calls.length,0);
  const refresh=()=>admin('/api/onboarding/app/refresh','POST',{account_id:a.id});

@@ -8,7 +8,7 @@ import { loginCallbackPath, verifiedOrigin } from '../onboarding/public-url.js';
 const key = 'identity.github_login';
 // admin_origin is the origin a configuration was saved for. The live callback follows the single public entry; the saved copy
 // only serves a deployment without one (loopback testing) and keeps a console address saved before the single entry writable.
-interface Configuration { enabled: boolean; client_id: string; client_secret: string; admin_origin: string; account_id: string | null }
+interface Configuration { enabled: boolean; client_id: string; client_secret: string; admin_origin: string; account_id: string | null; application_type?: 'oauth_app' | 'github_app' }
 interface Options {
   environment?: () => GitHubOAuthConfig | undefined; identity?: GitHubIdentity;
   /** BOT_PUBLIC_ORIGIN, used until the wizard verifies a public address. */
@@ -39,23 +39,15 @@ export class GitHubLogin {
     if (!this.environmentRead) { this.environmentConfig = this.options.environment?.(); this.environmentRead = true; }
     return this.environmentConfig;
   }
-  private selectedApp(): { id: string | null; client_id: string; client_secret: string } {
-    const selected = this.store.get("SELECT value FROM settings WHERE key='onboarding.app'");
-    const id = selected ? JSON.parse(selected.value)?.account_id : null;
-    const row = id && this.store.get("SELECT credentials FROM accounts WHERE id=? AND type='github_app'", id);
-    const credentials = row ? this.store.secrets.open(row.credentials, `account:${id}`) : {};
-    return { id: row ? id : null, client_id: String(credentials.oauth_client_id || ''), client_secret: String(credentials.oauth_client_secret || '') };
+  private applicationType(config: Configuration): 'oauth_app' | 'github_app' {
+    return config.application_type || (config.account_id || /^Iv/.test(config.client_id) ? 'github_app' : 'oauth_app');
   }
-  private configuration(origin = ''): { config: Configuration; previous: Configuration; source: string } {
-    const stored = this.stored(), environment = stored ? undefined : this.environment(), app = this.selectedApp();
-    const previous = stored?.config || { enabled: !!environment, client_id: environment?.clientId || app.client_id,
-      client_secret: environment?.clientSecret || app.client_secret, account_id: app.id,
-      admin_origin: this.entry || originOf(environment?.redirectUri) || origin };
-    // Selecting an App prepares a draft; the active login changes only when an administrator saves it.
-    if (app.id && (stored ? previous.account_id !== app.id : environment && environment.clientId !== app.client_id))
-      return { previous, source: 'app', config: { ...previous, enabled: false, account_id: app.id,
-        client_id: app.client_id, client_secret: app.client_secret } };
-    return { config: previous, previous, source: stored ? 'wizard' : environment ? 'deployment' : 'app' };
+  private configuration(origin = ''): { config: Configuration; source: string } {
+    const stored = this.stored(), environment = stored ? undefined : this.environment();
+    return { config: stored?.config || { enabled: !!environment, client_id: environment?.clientId || '',
+      client_secret: environment?.clientSecret || '', account_id: null,
+      application_type: environment?.applicationType || (/^Iv/.test(environment?.clientId || '') ? 'github_app' : 'oauth_app'),
+      admin_origin: this.entry || originOf(environment?.redirectUri) || origin }, source: stored ? 'wizard' : environment ? 'deployment' : 'empty' };
   }
   /** The single public entry: the address the wizard verified, else the deployment's BOT_PUBLIC_ORIGIN. */
   get entry(): string | undefined { return verifiedOrigin(this.store) || this.options.defaultOrigin || undefined; }
@@ -71,7 +63,7 @@ export class GitHubLogin {
       if (this.options.identity) return this.options.identity;
       const config = this.environment(); if (!config) return undefined;
       const origin = this.entry || originOf(config.redirectUri), revision = 'environment\n' + origin;
-      if (this.cached?.revision !== revision) this.cached = { revision, identity: new GitHubIdentity(this.store, { ...config, redirectUri: (origin || '') + loginCallbackPath }, () => {
+      if (this.cached?.revision !== revision) this.cached = { revision, identity: new GitHubIdentity(this.store, { ...config, applicationType: config.applicationType || (/^Iv/.test(config.clientId) ? 'github_app' : 'oauth_app'), redirectUri: (origin || '') + loginCallbackPath }, () => {
         if (this.store.get('SELECT 1 FROM settings WHERE key=?', key)) fail(409, 'github_login_configuration_changed');
       }) };
       return this.cached.identity;
@@ -82,7 +74,7 @@ export class GitHubLogin {
     if (this.cached?.revision !== revision) {
       const c = stored.config;
       this.cached = { revision, identity: new GitHubIdentity(this.store, {
-        clientId: c.client_id, clientSecret: c.client_secret, redirectUri: origin + loginCallbackPath,
+        clientId: c.client_id, clientSecret: c.client_secret, applicationType: this.applicationType(c), redirectUri: origin + loginCallbackPath,
         apiUrl: this.options.apiUrl || this.options.identity?.config.apiUrl,
         webUrl: this.options.webUrl || this.options.identity?.config.webUrl,
       }, () => {
@@ -100,37 +92,31 @@ export class GitHubLogin {
       callback_url: origin ? origin + loginCallbackPath : '',
       // A configuration saved for another address (such as a former separate console domain) still has that callback at GitHub.
       ...(saved && saved !== origin ? { previous_callback_url: saved + loginCallbackPath } : {}),
-      account_id: config.account_id, source };
+      account_id: null, application_type: this.applicationType(config), migration_required: config.enabled && this.applicationType(config) === 'github_app', source };
   }
   update(user: Actor, input: Json, requestOrigin: string): Json {
     superAdmin(user);
     fields(input, ['enabled', 'client_id', 'client_secret', 'revoke_secret']);
     if (typeof input.enabled !== 'boolean' || input.revoke_secret !== undefined && typeof input.revoke_secret !== 'boolean') return fail(400, 'invalid_github_login_configuration');
-    const { config: draft, previous: old } = this.configuration(requestOrigin), app = this.selectedApp();
-    const id = input.client_id === undefined ? draft.client_id : typeof input.client_id === 'string' ? input.client_id.trim() : fail(400, 'invalid_github_client_id');
+    const { config: old } = this.configuration(requestOrigin);
+    const id = input.client_id === undefined ? old.client_id : typeof input.client_id === 'string' ? input.client_id.trim() : fail(400, 'invalid_github_client_id');
     if (id && !/^[a-zA-Z0-9._-]{1,200}$/.test(id)) return fail(400, 'invalid_github_client_id');
-    if (draft.account_id !== old.account_id && draft.client_id && id !== draft.client_id) return fail(409, 'github_login_app_changed');
     if (input.client_secret !== undefined && (typeof input.client_secret !== 'string' || input.client_secret.length > 32768)) return fail(400, 'invalid_github_client_secret');
     const supplied = typeof input.client_secret === 'string' ? input.client_secret.trim() : '';
     if (input.revoke_secret && supplied) return fail(400, 'conflicting_credentials');
-    const secret = input.revoke_secret ? '' : supplied || (id === draft.client_id ? draft.client_secret : id === app.client_id ? app.client_secret : '');
+    const secret = input.revoke_secret ? '' : supplied || (id === old.client_id ? old.client_secret : '');
+    if (input.enabled && (/^Iv/.test(id) || this.store.all("SELECT id,credentials FROM accounts WHERE type='github_app'").some(row =>
+      this.store.secrets.open(row.credentials, `account:${row.id}`).oauth_client_id === id))) return fail(400, 'github_login_oauth_app_required');
     // GitHub login needs an HTTPS (or loopback) callback; saving a disabled configuration never fails on the address.
     const callback = this.entry || requestOrigin;
-    const config: Configuration = { enabled: input.enabled, client_id: id, client_secret: secret, account_id: app.id,
+    const config: Configuration = { enabled: input.enabled, client_id: id, client_secret: secret, account_id: null, application_type: 'oauth_app',
       admin_origin: input.enabled ? loginOrigin(callback) : usableOrigin(callback) || this.savedOrigin || '' };
     if (config.enabled && (!id || !secret)) return fail(400, !id ? 'github_client_id_required' : 'github_login_secret_required');
     this.store.transaction(() => {
       this.store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', key, this.store.secrets.seal(config, key));
-      if (input.revoke_secret) for (const accountId of new Set([old.account_id, app.id].filter(Boolean))) {
-        const account = this.store.get('SELECT credentials FROM accounts WHERE id=?', accountId!);
-        if (!account) continue;
-        const credentials = this.store.secrets.open(account.credentials, `account:${accountId}`);
-        delete credentials.oauth_client_secret;
-        this.store.run('UPDATE accounts SET credentials=? WHERE id=?', this.store.secrets.seal(credentials, `account:${accountId}`), accountId!);
-      }
-      // Neither outstanding nor in-flight callbacks may commit under a newly selected App.
+      // Neither outstanding nor in-flight callbacks may commit under a newly configured OAuth App.
       this.store.run('DELETE FROM github_oauth_states');
-      const credentialsChanged = old.client_id !== id || !config.enabled;
+      const credentialsChanged = old.client_id !== id || this.applicationType(old) !== 'oauth_app' || !config.enabled;
       for (const identity of this.store.all("SELECT id,principal_id FROM external_identities WHERE provider='github' AND status<>'revoked'")) {
         if (credentialsChanged) {
           this.store.run("UPDATE external_identities SET credentials=NULL,status='pending_verification' WHERE id=?", identity.id);

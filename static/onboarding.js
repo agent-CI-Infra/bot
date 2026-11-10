@@ -86,102 +86,69 @@ function accountInstallationForm(){
   });
   const form=section.querySelector('form'),actions=element('div','','actions');actions.append(form.querySelector('[type=submit]'));form.append(actions,result);return section;
 }
-// Keep each GitHub page's instructions beside the field it supplies. Client secrets now live under Credentials.
-function githubLoginGuide(saved,app,controls){
+// Login has its own OAuth App; the repository App and its installation are configured in their own steps.
+function githubLoginGuide(saved,controls){
   const steps=element('ol','','login-guide');
   const step=(title,...nodes)=>{const item=element('li','');item.append(element('strong',title),...nodes);steps.append(item);};
-  const entry=[];
-  if(app?.settings_url)entry.push(link(app.settings_url,`打开 ${app.slug} 的 GitHub App 设置`),
-    note(app.owner_type==='Organization'?`这个 App 属于组织 ${app.owner}。`:`这个 App 属于个人账号 ${app.owner}。`));
-  else if(app)entry.push(note('读取 App 信息后会在这里显示设置入口；可在本页点「刷新 App 信息」重试。'),
-    wizardDetails('手动打开 App 设置',note(`个人账号：头像 → Settings → Developer settings → GitHub Apps；组织：组织页面 → Settings → Developer settings → GitHub Apps。找到 ${app.slug}，点「Edit」。`)));
-  else entry.push(note('尚未选择 App 时，请填写你要用于登录的 GitHub App 凭据。正常接入流程会在第 2 步选择或创建 App。'));
-  step('General：填写 Client ID 和登录回调',...entry,
-    note('打开 App 设置左侧的 General。在「About」区域复制 Client ID，填入下面；已预填时核对即可。'),
-    note(`它不是 App ID${app?`（这个 App 的 App ID 是 ${app.app_id}）`:''}，两者不能互换；Client ID 和 Client secret 必须来自同一个 App。`),
-    controls.client,
-    note('在 General 的「Identifying and authorizing users → Callback URL」添加下面的地址，保留已有的其他回调，点「Save changes」。'),
-    element('code',saved.callback_url||'先完成第 1 步的公网 HTTPS 地址验证','github-login-callback'));
-  const reusable=saved.source==='app'&&saved.client_id&&saved.secret_configured;
-  const secretPath=note('在 GitHub App 设置左侧切换到「Credentials」，在「Client secrets」区域点「Generate a new client secret」，把生成的值填入下面。GitHub 只显示一次。');
-  step('Credentials：填写 Client secret',
-    note(reusable?'这个 App 由向导创建，Client ID 和 Client secret 已加密保存，不用再生成；下面留空即可。'
-      :saved.secret_configured?'已保存 Client secret，无需重新生成；下面留空会保留原值。需要更换时，按下面的路径生成新值。':'需要为这个 App 准备 Client secret：'),
-    saved.secret_configured?wizardDetails('需要更换 Client secret 时',secretPath):secretPath,
-    controls.secret,note('Client secret 只保存、不回显。请 App 所有者或指定管理员本人填写，不要经聊天、Issue 或邮件转发。'));
-  step('Permissions & events：确认组织身份验证权限',
-    ...(app?.settings_url?[link(app.settings_url+'/permissions','打开 Permissions & events')]:[]),
-    note('需要识别组织 owner 时，在 App 设置左侧的「Permissions & events」把 Organization permissions → Members 设为「Read-only」，勾选 organization 事件并保存。向导新建的 App 已包含这两项；新增权限在接下来的安装步骤由目标账号接受。'),
-    note('安装时自动请求用户授权可保持关闭，用户点击登录按钮时才会发起 OAuth。'));
-  step('回到本页：保存并启用',controls.enabled,
-    note('勾选启用后点下方「保存登录配置」，立即生效。保存前，当前生效的登录配置继续使用；也可以暂不启用，继续下一步安装。'),
-    controls.revoke);
+  step('创建独立 OAuth App',
+    link('https://github.com/settings/applications/new','在 GitHub 创建 OAuth App'),
+    note('个人 Settings → Developer settings → OAuth Apps → New OAuth App。也可以由组织在组织设置中登记 OAuth App。不要选择 GitHub Apps，也不要复制第 2 步仓库 App 的凭据。'),
+    note('Application name 填容易辨认的名称，例如 Bot 登录；Homepage URL 填下面的 Bot 入口；Authorization callback URL 填下面的登录回调。'),
+    facts([['Homepage URL',saved.origin||location.origin]]),element('code',saved.callback_url,'github-login-callback'),
+    note('不需要启用 Device flow，也不需要安装到仓库。Bot 不申请额外 scope，只读取 GitHub 公开身份资料；仓库操作和权限核验由第 2 步的 GitHub App 完成。'));
+  step('复制这个 OAuth App 的登录凭据',
+    link('https://github.com/settings/developers','打开已有的 OAuth Apps'),
+    note('登记后进入这个 OAuth App 的设置，复制 Client ID。它不是 App ID，也不是仓库 GitHub App 的 Client ID。'),controls.client,
+    note(saved.secret_configured?'已加密保存此 OAuth App 的 Client secret；留空保留。更换 Client ID 时，必须同时填写新 App 的 secret。':'在这个 OAuth App 的 Client secrets 区域点「Generate a new client secret」，把生成的值填入下面。'),
+    controls.secret,note('Client secret 只保存、不回显。请管理员本人填写，不要经聊天、Issue 或邮件转发。'));
+  step('保存并启用登录',controls.enabled,
+    note('保存前，当前生效的登录配置继续使用；保存并启用后切换为独立 OAuth App。用户下次登录会在 GitHub 确认身份授权。也可以暂不启用，继续安装仓库 App。'),controls.revoke);
   return steps;
 }
-// Every GitHub-facing address shares the single public entry, but each one belongs to a different App field.
 function githubAddresses(saved,app){
   const origin=saved.origin||location.origin,row=(url,where)=>{const value=element('span','');value.append(element('code',url),element('span',where,'muted'));return value;};
   const list=facts([
-    ['用户授权 Callback URL',row(saved.callback_url||origin+'/auth/github/callback','本页第 4 步，填在 Identifying and authorizing users → Callback URL')],
-    ['安装 Setup URL',row(origin+'/onboarding/github/setup','Post installation → Setup URL；向导新建的 App 已自动填写')],
-    ['App 注册回调',row('/onboarding/github/callback','只在向导创建 App 时由 GitHub 使用一次，不填进 App 设置')],
-    ['Webhook URL',row(app?.webhook_url||origin+'/hooks/github/<account_id>/<endpoint_id>','Webhook → Webhook URL；由向导写入 App，不用手填')],
-  ]);list.classList.add('login-addresses');
-  return [element('p','同一个 HTTPS 入口下的 GitHub 地址各有用途，不能互相替代：'),list];
+    ['登录 Callback URL',row(saved.callback_url||origin+'/auth/github/callback','独立 OAuth App → Authorization callback URL')],
+    ['安装 Setup URL',row(origin+'/onboarding/github/setup','仓库 GitHub App → Post installation → Setup URL；向导自动填写')],
+    ['App 注册回调',row('/onboarding/github/callback','只在向导创建仓库 GitHub App 时使用一次，不填进 OAuth App')],
+    ['Webhook URL',row(app?.webhook_url||origin+'/hooks/github/<account_id>/<endpoint_id>','仓库 GitHub App → Webhook URL；由向导写入')],
+  ]);list.classList.add('login-addresses');return [note('两类 App 各有用途，下面的地址不能互相替代：'),list];
 }
-function githubLoginForm(saved, app){
+function githubLoginForm(saved,app){
   saved ||= {enabled:false,client_id:'',secret_configured:false,origin:location.origin,callback_url:location.origin+'/auth/github/callback'};
-  const client=input('client_id',saved.client_id||'',{maxLength:200,autocomplete:'off'}),
-    secret=input('client_secret','',{type:'password',autocomplete:'new-password',maxLength:32768,placeholder:saved.secret_configured?'已保存；留空保留原值':'粘贴 GitHub App 的 Client secret'}),
+  const migration=saved.migration_required;
+  const draft=migration?{...saved,client_id:'',secret_configured:false}:saved;
+  const client=input('client_id',draft.client_id||'',{maxLength:200,autocomplete:'off'}),
+    secret=input('client_secret','',{type:'password',autocomplete:'new-password',maxLength:32768,placeholder:draft.secret_configured?'已保存；留空保留原值':'粘贴独立 OAuth App 的 Client secret'}),
     enabled=checkbox('enabled',!!saved.enabled,'启用 GitHub 账号登录'),
-    revoke=checkbox('revoke_secret',false,'清除已保存的 Client secret，并停用 GitHub 登录');
+    revoke=checkbox('revoke_secret',false,'清除登录 Client secret，并停用 GitHub 登录');
   const loginEnabled=enabled.querySelector('input');
   const requireClient=()=>{client.required=loginEnabled.checked;};loginEnabled.addEventListener('change',requireClient);requireClient();
   revoke.querySelector('input').addEventListener('change',e=>{if(e.target.checked)loginEnabled.checked=false;requireClient();});
-  const notices=app?[note(`所选 App：${app.slug}（App ID ${app.app_id}）。登录使用这个 App 的凭据。`)]:[];
-  if(app&&saved.source==='app'){
-    notices.push(note('所选 App 的登录配置尚未保存。保存并启用后才会切换；如已有生效的登录配置，它在保存前继续使用。'));
-    if(!saved.client_id)notices.push(note('此 App 尚无可复用的 Client ID 和 Client secret：请填写这个 App 自己的值，不能沿用旧 App 的值。'));
-  }
-  if(saved.previous_callback_url)notices.push(element('p',`Callback URL 已随统一入口从 ${saved.previous_callback_url} 改为 ${saved.callback_url}。请把新地址加到 GitHub App 的 Callback URL，再在这里保存一次；用户需要在新地址重新登录。确认不再使用后可删除旧地址。`,'endpoint-warning'));
+  const notices=[];
+  if(migration)notices.push(element('p','当前登录仍复用旧 GitHub App。请在本页创建独立 OAuth App 并填写新凭据；保存前旧登录继续可用。切换后原 GitHub 会话失效，已有账号在重新登录后保留绑定；请到 GitHub 的 Authorized GitHub Apps 撤销旧的个人授权，保留仓库 App 安装。','endpoint-warning'));
+  if(saved.previous_callback_url)notices.push(element('p',`Callback URL 已随统一入口从 ${saved.previous_callback_url} 改为 ${saved.callback_url}。请在 OAuth App 中更新回调地址，再保存一次。`,'endpoint-warning'));
   if(saved.origin_source==='local')notices.push(element('p','还没有验证公网 HTTPS 地址，下面的 Callback URL 只适合在本机测试。完成第 1 步后它会改为公网地址。','endpoint-warning'));
-  const controls={client:field('Client ID',client),secret:field('Client secret（只保存，不回读）',secret),enabled,revoke};
-  const guide=element('div','','github-login-instructions'),appStatus=element('p','','muted'),actions=element('div','','actions');
-  appStatus.setAttribute('role','status');appStatus.setAttribute('aria-live','polite');
-  const drawGuide=()=>guide.replaceChildren(githubLoginGuide(saved,app,controls));drawGuide();
-  const refresh=button('刷新 App 信息',async()=>{
-    refresh.disabled=true;appStatus.className='muted';appStatus.textContent='正在从 GitHub 读取 App 信息…';
-    try{
-      const result=await api('/api/onboarding/app/refresh','POST',{account_id:app.account_id});
-      if(!section.isConnected)return;app=result.app;drawGuide();appStatus.textContent='App 设置入口已更新。';
-    }catch(err){
-      if(!section.isConnected)return;appStatus.className='view-error';
-      appStatus.textContent=err.message.includes('github_app_changed')?'所选 App 已在其他页面更换，请刷新本页。':'暂时无法读取 App 信息。请检查 GitHub 连接和 App 凭据，然后在本页重试；已填写的内容会保留。';
-    }finally{refresh.disabled=false;}
-  });
-  if(app)actions.append(refresh,appStatus);
-  const section=wizardForm('GitHub 账号登录',[
-    note('登录使用所选 GitHub App，不需要另建 OAuth App。按下面的顺序完成 GitHub 设置并保存登录配置，随后继续安装。'),
-    ...notices,actions,guide,
+  const guide=githubLoginGuide(draft,{client:field('Client ID',client),secret:field('Client secret（只保存，不回读）',secret),enabled,revoke});
+  const section=wizardForm('独立 OAuth App 登录',[
+    note('登录和仓库连接分别配置：OAuth App 只确认用户身份；GitHub App 安装负责仓库连接、组织和项目权限核验。更换仓库 App 不会更换登录配置。'),
+    ...notices,guide,
     note('保存后立即生效，重启后保留。已有环境变量配置可继续使用；在这里保存后，以向导配置为准。'),
     note('首次 GitHub 登录会创建独立账号；已有本地账号应先登录后绑定。项目与组织管理员不会获得系统超级管理员权限。'),
-  ],'保存登录配置',async (value,form)=>{
+  ],'保存登录配置',async(value,form)=>{
     const clear=form.elements.revoke_secret.checked;
     const payload={enabled:form.elements.enabled.checked&&!clear,client_id:value.client_id,client_secret:clear?'':value.client_secret,revoke_secret:clear};
     try{await api('/api/onboarding/github-login','PUT',payload);}catch(err){
       const code=err.message.replace(/^\d+\s*·\s*/,'');
-      throw new Error(({github_client_id_required:'请填写同一个 GitHub App 的 Client ID。',github_login_secret_required:'启用前需要保存 Client secret。',
-        github_login_https_required:'GitHub 登录需要 HTTPS 地址：先在第 1 步验证公网 HTTPS 地址；只在本机测试时，从 http://127.0.0.1:8791 或 localhost 打开控制台再保存。',
-        invalid_admin_origin:'无法从当前访问地址生成 Callback URL，请先在第 1 步验证公网 HTTPS 地址。',
-        invalid_github_client_id:'Client ID 格式无效，请从 GitHub App 设置复制。',github_login_app_changed:'所选 App 已更换，请刷新后保存这个 App 的登录凭据。'})[code]||err.message);
+      throw new Error(({github_client_id_required:'请填写独立 OAuth App 的 Client ID。',github_login_secret_required:'启用前需要保存这个 OAuth App 的 Client secret。',
+        github_login_oauth_app_required:'这里需要 OAuth App 的凭据；请到 Developer settings → OAuth Apps 创建，不能使用仓库 GitHub App 的 Client ID。',
+        github_login_https_required:'GitHub 登录需要 HTTPS 地址：先在第 1 步验证公网 HTTPS 地址；本机测试可从 127.0.0.1 或 localhost 打开。',
+        invalid_admin_origin:'无法生成登录回调，请先验证公网 HTTPS 地址。',invalid_github_client_id:'Client ID 格式无效，请从 OAuth App 设置复制。'})[code]||err.message);
     }
     secret.value='';await start();notice('message',payload.enabled?'GitHub 登录已启用，用户可从登录页授权登录。':'已保存；当前使用本地账号登录。');return false;
   });
-  if(app&&(!app.settings_url||!app.owner||!app.owner_type))refresh.click();
-  section.append(wizardDetails('其他 GitHub 回调地址及用途',...githubAddresses(saved,app)),
-    note('GitHub 显示 404 时，请确认当前账号是 App 所有者、组织所有者或指定的 App 管理员，并核对 App 是否已转移。'));
-  section.append(githubLinkElement('GitHub 文档：用 GitHub App 实现登录','https://docs.github.com/en/apps/creating-github-apps/writing-code-for-a-github-app/building-a-login-with-github-button-with-a-github-app'),' ',
-    githubLinkElement('Callback URL 与 Setup URL 的区别','https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url'));
+  section.append(wizardDetails('GitHub 地址及用途',...githubAddresses(saved,app)),
+    githubLinkElement('GitHub 文档：创建 OAuth App','https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app'));
   return section;
 }
 async function renderOnboarding(request,panel){
@@ -212,12 +179,18 @@ async function renderOnboarding(request,panel){
     if(fallback)tunnel.append(note('没有匹配到已发布域名的请求会返回 404。这是 Cloudflare Tunnel 自带的兜底规则，不是连接故障。'));
     tunnel.append(button('刷新 tunnel 状态',()=>render().catch(error)));if(data.tunnel.token_configured)tunnel.append(button('停用 tunnel',async()=>{await api('/api/onboarding/tunnel','POST',{revoke:true});await render();}));panel.append(tunnel);next();
   }else if(onboardingStep===1){
-    panel.append(note('GitHub 登录另需组织 Members 只读权限和 organization 事件订阅，用于验证 owner 与及时失效权限；不申请成员写权限。用户登录回调为 /auth/github/callback，与安装和注册回调分开。'));
+    panel.append(note('这个 GitHub App 用于连接和操作仓库。组织 Members 只读权限和 organization 事件用于核验组织 owner 与及时失效权限；不申请成员写权限。用户登录在第 3 步单独登记 OAuth App，登录回调不填在这个仓库 App 中。'));
+    if(data.app){
+      const selected=card('当前仓库 GitHub App'),status=element('p','','muted');let app=data.app;
+      const draw=()=>{selected.replaceChildren(element('h3','当前仓库 GitHub App'),note(`${app.slug} · App ID ${app.app_id}`));if(app.settings_url)selected.append(link(app.settings_url,'打开仓库 App 设置'),link(app.settings_url+'/permissions','打开 Permissions & events'));selected.append(refresh,status);};
+      const refresh=button('刷新 App 信息',async()=>{refresh.disabled=true;try{app=(await api('/api/onboarding/app/refresh','POST',{account_id:app.account_id})).app;draw();status.textContent='App 设置入口已更新。';}catch{status.textContent='暂时无法读取 App 信息，请在本页重试。';}finally{refresh.disabled=false;}});draw();panel.append(selected);
+      if(!app.settings_url)refresh.click();
+    }
     panel.append(note('已有 App 不会随代码更新自动新增事件订阅；App 所有者仍需在 GitHub App 的 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存，评论和检视回复才会触发再次检视。'));
     const existing=accounts.filter(a=>a.type==='github_app');if(existing.length){const list=card('使用已登记的 App');list.append(note('使用此 App 会将它的 webhook 更新为第 1 步验证过的地址；已有账号凭据保持不变。'));for(const account of existing){const row=element('div','','row'),info=element('div','','row-content');info.append(element('p',account.name+' · App ID '+account.app_id),appPermissionCheck(account));row.append(info,button('使用此 App',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:account.id,update_webhook:true});wizardNext(2);}catch(e){error(e);}}));list.append(row);}panel.append(list);}
     const section=wizardForm('创建新的 GitHub App',[note('不填写权限，不使用 PAT。这里生成 manifest；浏览器提交到 GitHub 后，你只需确认创建。已有 App 时优先使用上面的账号。'),field('App 所属组织',input('organization','',{required:true})),field('App 名称',input('name','',{required:true})),checkbox('public',false,'公开 App，允许安装到其他账号'),note('这是 App 的归属组织；实际安装目标在第 4 步选择。不勾选时是组织私有 App；需要安装到其他组织或个人账号时勾选。权限始终固定。')],'准备 GitHub 确认页',async value=>{
       const result=await api('/api/onboarding/manifest','POST',{...value,public:value.public==='on'}),form=element('form','');form.method='POST';form.action=result.create_url;form.target='_blank';
-      const manifest=element('textarea','');manifest.name='manifest';manifest.value=JSON.stringify(result.manifest);manifest.hidden=true;form.append(manifest,element('p','固定权限：Contents／Issues／Pull requests／Commit statuses／Actions／Checks 写，Metadata 读；订阅 issues、pull_request、issue_comment、pull_request_review 和 pull_request_review_comment。'),element('p','身份验证另申请 Members 读权限并订阅 organization；用户登录回调为 /auth/github/callback。'),element('p','在 GitHub 确认后会回到本机向导。不要关闭本机服务。'));
+      const manifest=element('textarea','');manifest.name='manifest';manifest.value=JSON.stringify(result.manifest);manifest.hidden=true;form.append(manifest,element('p','固定权限：Contents／Issues／Pull requests／Commit statuses／Actions／Checks 写，Metadata 读；订阅 issues、pull_request、issue_comment、pull_request_review 和 pull_request_review_comment。'),element('p','权限核验另申请 Members 读权限并订阅 organization；用户登录使用第 3 步的独立 OAuth App。'),element('p','在 GitHub 确认后会回到本机向导。不要关闭本机服务。'));
       const submit=element('button','前往 GitHub 确认创建');submit.type='submit';form.append(submit);section.replaceChildren(element('h3','等待你在 GitHub 确认'),form);return false;
     });if(!data.public_address)section.append(note('先在第 1 步验证公网 HTTPS 地址，才能准备 manifest。'));panel.append(section);if(data.app)next();
   }else if(onboardingStep===2){

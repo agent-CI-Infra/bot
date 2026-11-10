@@ -50,7 +50,7 @@ test('the login callback follows the single entry and points out a callback save
   const h = await harness(t), { admin } = await setup(h), callback = origin => origin + '/auth/github/callback';
   const redirect = async () => new URL((await fetch(h.admin + '/auth/github/start', { redirect: 'manual' })).headers.get('location')).searchParams.get('redirect_uri');
   // Before a public address exists, the callback stays on the origin the configuration was saved from.
-  const saved = (await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.fixture', client_secret: testPassword() })).value.github_login;
+  const saved = (await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.fixture', client_secret: testPassword() })).value.github_login;
   assert.equal(saved.callback_url, callback(h.admin)); assert.equal(saved.origin_source, 'local'); assert.equal(saved.previous_callback_url, undefined);
   assert.equal(await redirect(), callback(h.admin));
   // Verifying the public address moves the live callback at once; the page names the old one until the configuration is saved again.
@@ -61,7 +61,7 @@ test('the login callback follows the single entry and points out a callback save
   view = (await admin(path, 'PUT', { enabled: true })).value.github_login;
   assert.equal(view.previous_callback_url, undefined); assert.equal(view.callback_url, callback('https://bot.invalid'));
   // An upgraded configuration that named a separate console domain keeps its credentials and is told to update the App.
-  legacyConfiguration(h, 'https://console.invalid', { enabled: true, client_id: 'Iv1.fixture', client_secret: testPassword() });
+  legacyConfiguration(h, 'https://console.invalid', { enabled: true, client_id: 'Ov23.fixture', client_secret: testPassword() });
   view = (await admin('/api/onboarding')).value.github_login;
   assert.equal(view.enabled, true); assert.equal(view.callback_url, callback('https://bot.invalid')); assert.equal(view.previous_callback_url, callback('https://console.invalid'));
   assert.equal(await redirect(), callback('https://bot.invalid'));
@@ -70,7 +70,7 @@ test('the login callback follows the single entry and points out a callback save
 
 test('a deployment BOT_PUBLIC_ORIGIN is the callback until the wizard verifies an address', async t => {
   const h = await harness(t, undefined, { publicOrigin: 'https://deployment.invalid' }), { admin } = await setup(h);
-  let view = (await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.fixture', client_secret: testPassword() })).value.github_login;
+  let view = (await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.fixture', client_secret: testPassword() })).value.github_login;
   assert.equal(view.callback_url, 'https://deployment.invalid/auth/github/callback'); assert.equal(view.origin_source, 'deployment');
   verify(h, 'https://bot.invalid'); view = (await admin('/api/onboarding')).value.github_login;
   assert.equal(view.callback_url, 'https://bot.invalid/auth/github/callback'); assert.equal(view.previous_callback_url, 'https://deployment.invalid/auth/github/callback');
@@ -79,18 +79,18 @@ test('a deployment BOT_PUBLIC_ORIGIN is the callback until the wizard verifies a
 test('super administrators configure login at runtime, preserve a write-only secret and retain configuration after restart', async t => {
   const h = await harness(t), { admin, password } = await setup(h), origin = h.admin, secret = testPassword();
   assert.equal((await admin('/api/auth/github/status')).value.enabled, false);
-  const saved = await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.fixture', client_secret: secret });
+  const saved = await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.fixture', client_secret: secret });
   assert.equal(saved.status, 200); assert.equal(saved.value.github_login.secret_configured, true);
   assert.equal((await admin('/api/auth/github/status')).value.enabled, true);
   const first = await fetch(h.admin + '/auth/github/start', { redirect: 'manual' }); assert.equal(first.status, 303);
   const authorize = new URL(first.headers.get('location'));
-  assert.equal(authorize.searchParams.get('client_id'), 'Iv1.fixture'); assert.equal(authorize.searchParams.get('redirect_uri'), origin + '/auth/github/callback');
+  assert.equal(authorize.searchParams.get('client_id'), 'Ov23.fixture'); assert.equal(authorize.searchParams.get('redirect_uri'), origin + '/auth/github/callback');
   assert.ok(!JSON.stringify(saved.value).includes(secret)); assert.ok(!JSON.stringify((await admin('/api/onboarding')).value).includes(secret));
   assert.ok(!h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value.includes(secret));
   assert.ok(!readFileSync(h.database).includes(Buffer.from(secret)));
   assert.equal((await admin(path, 'PUT', { enabled: true, client_secret: '' })).value.github_login.secret_configured, true);
   assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'different-client' })).value.error, 'github_login_secret_required');
-  assert.equal((await admin('/api/onboarding')).value.github_login.client_id, 'Iv1.fixture');
+  assert.equal((await admin('/api/onboarding')).value.github_login.client_id, 'Ov23.fixture');
   assert.equal(h.store.secrets.open(h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value, 'identity.github_login').client_secret, secret);
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='github_login.configured'"));
   await h.stop(); await h.start();
@@ -148,51 +148,47 @@ test('reconfiguration invalidates outstanding and in-flight OAuth callbacks with
   await assert.rejects(identity.callback('browser', callback.searchParams.get('state'), callback.searchParams.get('code')), /invalid_oauth_state/);
 });
 
-test('new App credentials are reused privately by the wizard and an explicit clear removes both saved copies', async t => {
-  const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), secret = testPassword();
+test('repository App credentials never populate login; switching or clearing OAuth leaves the repository App untouched', async t => {
+  const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), appSecret = testPassword();
   let onboarding;
   const h = await harness(t, undefined, store => ({ onboarding: onboarding = new Onboarding(store, { fetcher: async () => new Response(JSON.stringify({
-    id: 123, slug: 'new-app', pem, webhook_secret: testPassword(), client_id: 'Iv1.new-app', client_secret: secret,
+    id: 123, slug: 'new-app', pem, webhook_secret: testPassword(), client_id: 'Iv1.new-app', client_secret: appSecret,
   })) }) }));
   const { admin } = await setup(h); onboarding.save('public', { origin: 'https://hooks.invalid' });
-  await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app', client_secret: testPassword() });
   const manifest = await admin('/api/onboarding/manifest', 'POST', { organization: 'fixture', name: 'new-app' });
-  const state = new URL(manifest.value.create_url).searchParams.get('state'); await onboarding.callback('manifest-code', state);
+  await onboarding.callback('manifest-code', new URL(manifest.value.create_url).searchParams.get('state'));
   const before = (await admin('/api/onboarding')).value.github_login;
-  assert.equal(before.client_id, 'Iv1.new-app'); assert.equal(before.secret_configured, true); assert.equal(before.enabled, false);
-  assert.equal(before.source, 'app'); assert.equal(before.account_id, onboarding.saved('app').account_id);
-  const clientId = async () => new URL((await fetch(h.admin + '/auth/github/start', { redirect: 'manual' })).headers.get('location')).searchParams.get('client_id');
-  assert.equal(await clientId(), 'Iv1.old-app');
-  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app' })).value.error, 'github_login_app_changed');
-  assert.equal((await admin(path, 'PUT', { enabled: true })).status, 200);
-  assert.equal(await clientId(), 'Iv1.new-app');
-  assert.equal(h.store.secrets.open(h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value, 'identity.github_login').client_secret, secret);
-  const visible = JSON.stringify([(await admin('/api/onboarding')).value, (await admin('/api/accounts')).value]);
-  assert.ok(!visible.includes(secret)); assert.ok(!visible.includes(pem));
+  assert.equal(before.client_id, ''); assert.equal(before.secret_configured, false); assert.equal(before.enabled, false);
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.new-app', client_secret: appSecret })).value.error, 'github_login_oauth_app_required');
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.login' })).value.error, 'github_login_secret_required');
+  const secret = testPassword();
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.login', client_secret: secret })).status, 200);
+  const active = async () => new URL((await fetch(h.admin + '/auth/github/start', { redirect: 'manual' })).headers.get('location'));
+  assert.equal((await active()).searchParams.get('client_id'), 'Ov23.login');
+  assert.equal((await active()).searchParams.get('scope'), '');
+  onboarding.save('app', { account_id: 'another-app', app_id: '456', slug: 'another-app' });
+  assert.equal((await admin('/api/onboarding')).value.github_login.client_id, 'Ov23.login');
+  assert.equal((await admin('/api/onboarding')).value.github_login.enabled, true);
   await admin(path, 'PUT', { enabled: false, revoke_secret: true });
   const row = h.store.get("SELECT id,credentials FROM accounts WHERE app_id='123'");
   const credentials = h.store.secrets.open(row.credentials, 'account:' + row.id);
-  assert.equal(credentials.oauth_client_secret, undefined); assert.equal(credentials.private_key, pem);
+  assert.equal(credentials.oauth_client_secret, appSecret); assert.equal(credentials.private_key, pem);
   assert.equal((await admin('/api/onboarding')).value.github_login.secret_configured, false);
+  assert.ok(!JSON.stringify((await admin('/api/onboarding')).value).includes(secret));
 });
 
-test('a new App without OAuth credentials requires its own Client ID and never reuses the old App secret', async t => {
-  const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
-  let onboarding;
-  const h = await harness(t, undefined, store => ({ onboarding: onboarding = new Onboarding(store, { fetcher: async () => new Response(JSON.stringify({
-    id: 456, slug: 'unconfigured-app', pem, webhook_secret: testPassword(),
-  })) }) }));
-  const { admin } = await setup(h); onboarding.save('public', { origin: 'https://hooks.invalid' });
-  await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app', client_secret: testPassword() });
-  const manifest = await admin('/api/onboarding/manifest', 'POST', { organization: 'fixture', name: 'unconfigured-app' });
-  await onboarding.callback('manifest-code', new URL(manifest.value.create_url).searchParams.get('state'));
-  const draft = (await admin('/api/onboarding')).value.github_login;
-  assert.equal(draft.client_id, ''); assert.equal(draft.secret_configured, false); assert.equal(draft.enabled, false);
-  assert.equal((await admin(path, 'PUT', { enabled: true })).value.error, 'github_client_id_required');
-  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.old-app' })).value.error, 'github_login_secret_required');
-  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Iv1.new-app', client_secret: testPassword() })).status, 200);
+test('legacy App login stays active until an administrator replaces it; saved login is independent of App selection', async t => {
+  const h = await harness(t), { admin } = await setup(h);
+  legacyConfiguration(h, h.admin, { enabled: true, client_id: 'Iv1.legacy', client_secret: testPassword(), account_id: 'legacy-app' });
+  const view = (await admin('/api/onboarding')).value.github_login;
+  assert.equal(view.migration_required, true); assert.equal(view.application_type, 'github_app');
   const started = await fetch(h.admin + '/auth/github/start', { redirect: 'manual' });
-  assert.equal(new URL(started.headers.get('location')).searchParams.get('client_id'), 'Iv1.new-app');
+  assert.equal(new URL(started.headers.get('location')).searchParams.get('client_id'), 'Iv1.legacy');
+  assert.equal((await admin(path, 'PUT', { enabled: true })).value.error, 'github_login_oauth_app_required');
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.new-login' })).value.error, 'github_login_secret_required');
+  const saved = await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.new-login', client_secret: testPassword() });
+  assert.equal(saved.status, 200); assert.equal(saved.value.github_login.migration_required, false);
+  assert.equal(saved.value.github_login.application_type, 'oauth_app'); assert.equal(saved.value.github_login.account_id, null);
 });
 
 test('disabling login during callback permission verification cannot issue a new session', async t => {
@@ -201,7 +197,7 @@ test('disabling login during callback permission verification cannot issue a new
   const identity = f.githubLogin.identity, begun = new URL(identity.begin('browser', 'login').url);
   const response = await fetch(begun, { redirect: 'manual' }), callback = new URL(response.headers.get('location'));
   let entered, release; const waiting = new Promise(r => { entered = r; }), gate = new Promise(r => { release = r; });
-  f.state.apiGate = async path => { if (path === '/user/installations') { entered(); await gate; } };
+  f.state.apiGate = async path => { if (path === '/app/installations/77') { entered(); await gate; } };
   const completing = identity.callback('browser', callback.searchParams.get('state'), callback.searchParams.get('code'));
   await waiting;
   assert.equal((await admin(path, 'PUT', { enabled: false })).status, 200);
@@ -231,4 +227,23 @@ test('disabling login ends GitHub sessions and derived authority while retaining
   assert.equal(scopes.some(g => g.source === 'explicit_delegation'), true);
   authorize(resolveActor(h.store, localSession.token), 'config.write', { project_id: '101' });
   assert.equal((await admin('/api/onboarding')).status, 200);
+});
+
+
+test('migrating legacy App login clears old tokens and GitHub sessions but preserves identity ownership on the next OAuth login', async t => {
+  const f = await identityFixture(t, { wizardOnly: true }), { h, admin } = f;
+  legacyConfiguration(h, h.admin, { enabled: true, client_id: 'Iv1.legacy', client_secret: 'legacy-secret', account_id: f.a.id });
+  const complete = async () => {
+    const identity = f.githubLogin.identity, begun = new URL(identity.begin('migration-browser', 'login').url);
+    const response = await fetch(begun, { redirect: 'manual' }), callback = new URL(response.headers.get('location'));
+    return identity.callback('migration-browser', callback.searchParams.get('state'), callback.searchParams.get('code'));
+  };
+  const first = await complete(), external = session(h.store, first.principal_id, first.identity_id), local = session(h.store, first.principal_id);
+  authorize(resolveActor(h.store, external.token), 'config.write', { project_id: '101' });
+  assert.equal((await admin(path, 'PUT', { enabled: true, client_id: 'Ov23.login', client_secret: 'new-secret' })).status, 200);
+  assert.equal(h.store.get('SELECT credentials FROM external_identities WHERE id=?', first.identity_id).credentials, null);
+  assert.throws(() => resolveActor(h.store, external.token), /login_required/);
+  assert.equal(resolveActor(h.store, local.token).principal_id, first.principal_id);
+  const second = await complete(); assert.equal(second.principal_id, first.principal_id); assert.equal(second.identity_id, first.identity_id);
+  assert.equal(h.store.get('SELECT count(*) n FROM external_identities').n, 1);
 });
