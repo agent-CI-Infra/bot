@@ -9,8 +9,12 @@ function roleSelect(name, value, choices, change) {
   if (!Array.from(select.querySelectorAll('option')).some(option => option.value === String(value ?? ''))) select.add(new Option(`当前选项不可用：${value}`, value));
   select.value = value ?? ''; select.addEventListener('change', () => change(select.value)); return select;
 }
+// The list states which revision is in force and whether the draft has moved away from it; every control that
+// dirties the draft refreshes that line, so "saved" and "edited but not saved" are never confused.
+let roleDraftStatus = null;
+const roleVersionText = state => `配置版本 ${state.data.revision} · ${state.dirty ? '草稿未保存' : '已生效'}`;
 function roleBound(control, change, state) {
-  const edit = () => { change(control.type === 'checkbox' ? control.checked : control.value); state.dirty = true; };
+  const edit = () => { change(control.type === 'checkbox' ? control.checked : control.value); state.dirty = true; if (roleDraftStatus) roleDraftStatus.textContent = roleVersionText(state); };
   control.addEventListener('input', edit); control.addEventListener('change', edit); return control;
 }
 function roleText(label, object, key, state, { multiline = false, ...attributes } = {}) {
@@ -69,7 +73,7 @@ function rolesConsole() {
         current.rolesDraft = state;
       }
       const draw = () => {
-        holder.replaceChildren();
+        holder.replaceChildren(); roleDraftStatus = null;
         const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
         for (const [key, title] of [['', '概览'], ...state.draft.roles.map(role => [role.role_id, roleLabel(role.role_id, role.name)])]) {
           const item = element('a', title); item.href = `#/projects/${id}/roles${key ? '/' + key : ''}`;
@@ -104,13 +108,18 @@ function rolesConsole() {
   return [holder, message];
 }
 function roleOverviewCards(state, redraw) {
-  const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', 'Agent 后端', '模型', '技能包', '权限控制'], '角色解析结果');
+  const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', '职责', 'Agent 后端', '模型', '技能包', '预算', '权限控制'], '角色解析结果');
+  // The version line is the one place that says whether what is on screen is in force or still a draft.
+  roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; overview.append(roleDraftStatus);
   overview.append(note('这里可以直接修改每个角色的配置；点角色名称可编辑提示词和完整设置。修改在点击「保存角色配置」后生效。模型解析结果来自最近一次读取的已保存配置。'));
   for (const role of draft.roles) {
     const row = document.createElement('tr'); row.dataset.role = role.role_id;
     const link = element('a', roleLabel(role.role_id, role.name)); link.href = `#/projects/${current.id}/roles/${role.role_id}`;
     tableCell(row, '角色', link, roleText(role.role_id + ' 名称', role, 'name', state));
     tableCell(row, '启用', roleCheck(role.role_id + ' 启用', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)));
+    // Responsibility and budget are summary facts here; they stay editable on the role page itself.
+    tableCell(row, '职责', note(role.responsibility || '未填写职责'));
+    tableCell(row, '预算', note(role.budget_policy_ref?.id || '未设置'));
     const saved = data.configuration.roles.find(entry => entry.role_id === role.role_id);
     tableCell(row, 'Agent 后端', roleBackendPicker(role, state, redraw), note(data.configured ? '已保存：' + harnessName(saved?.harness_ref.id) : '尚未保存，当前显示推荐配置'));
     if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更')); 
