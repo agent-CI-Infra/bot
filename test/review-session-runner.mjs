@@ -187,6 +187,44 @@ test('real Pi keeps a large command output that fits after compaction and compac
   assert.ok(summaries>0,'Pi compacted before the third turn');
 });
 
+test('real Pi compacts and retries a request over the limit when provider usage kept it under the compaction threshold',async t=>{
+  // Pi starts threshold compaction from the provider's reported usage plus newer messages, while the runner limit
+  // estimates the whole raw request. A provider counting fewer tokens than chars/4 leaves Pi below its threshold with
+  // the third request over the limit; that request must lead to compaction, not fail the task.
+  let summaries=0;const turns=[];
+  const d=await live(t,{model:async(request,n)=>{
+    assert.ok(fitsRequest(request),'every actual provider request stays inside the existing context limit');
+    const raw=JSON.stringify(request),usage={prompt_tokens:Math.ceil(raw.length/8),completion_tokens:20};
+    if(!request.tools?.length){summaries++;return {body:{choices:[{message:{role:'assistant',content:'Summary: the first command printed a long run of a.'}}],usage}};}
+    const turn=n-summaries;turns.push(turn);
+    if(turn===3){
+      assert.ok(raw.includes('b'.repeat(240000)),'the latest output is kept');
+      assert.ok(!raw.includes('a'.repeat(1000)),'compaction removed the first output');
+    }
+    const calls=turn===1?[call('run_command',{command:printChars('a',240000)})]:turn===2?[call('run_command',{command:printChars('b',240000)})]
+      :[call('finish_review',result('Checked both outputs.'))];
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:calls}}],usage}};
+  }});
+  const [task]=await d.run();assert.equal(task.status,'succeeded',task.error_code);
+  assert.equal(summaries,1,'one compaction');assert.deepEqual(turns,[1,2,3],'the turn over the limit never reached the provider');
+});
+
+test('real Pi fails with agent_context_too_large when compaction cannot fit the next request',async t=>{
+  // Compaction keeps the latest messages, so a person's update this large still does not fit after it.
+  let summaries=0;
+  const d=await live(t,{model:async(request,n,{update})=>{
+    assert.ok(fitsRequest(request),'every actual provider request stays inside the existing context limit');
+    if(!request.tools?.length){summaries++;return {body:{choices:[{message:{role:'assistant',content:'Summary of the review so far.'}}]}};}
+    assert.equal(n,1,'the turn over the limit never reaches the provider');
+    assert.equal(update('y'.repeat(600000)),0);
+    return {body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('run_command',{command:'printf checked'})]}}]}};
+  }});
+  const [task]=await d.run();assert.equal(task.status,'failed');assert.equal(task.error_code,'agent_context_too_large');
+  assert.equal(summaries,1,'Pi tried one compaction before giving up');
+  const events=d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',task.id).map(row=>JSON.parse(row.content));
+  assert.ok(!events.some(event=>event.type==='agent_nudge'),'a session that cannot fit is not asked to continue');
+});
+
 test('real Pi starts a sub-agent as a new session that sees only its own instructions and a narrowed tool set',async t=>{
   const seen=[];
   const d=await live(t,{model:async(request,n)=>{
