@@ -151,11 +151,25 @@ function githubLoginForm(saved,app){
     githubLinkElement('GitHub 文档：创建 OAuth App','https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app'));
   return section;
 }
+function onboardingProgress(data){
+  const ready=data.readiness||{},configured=ready.can_complete===true;
+  return [
+    {ready:!!ready.public_address,text:ready.public_address?'地址已验证':'需要验证公网地址'},
+    {ready:!!ready.app,text:ready.app?'已选择仓库 App':'需要选择仓库 App'},
+    {ready:true,text:data.github_login?.enabled?'GitHub 登录已启用':'本地账号可用，GitHub 登录可选'},
+    {ready:!!ready.installation,text:ready.installation?`${ready.installation_count} 个有效安装`:data.installation_skipped?'已跳过，尚未完成接入':'需要安装并同步范围'},
+    {ready:!!ready.model,text:ready.model?'默认模型已配置':'需要选择有效的共享模型'},
+    {ready:true,text:'内置规则可用，可按项目覆盖'},
+    {ready:!!configured,text:configured?'接入配置齐全':'仍有必需配置待补齐'},
+  ];
+}
 async function renderOnboarding(request,panel){
   const data=await api('/api/onboarding'),{models}=await api('/api/models');if(request!==renderVersion)return;
   const step=addressedStep();if(step!==onboardingStep)onboardingTunnel=null;onboardingStep=step;
-  panel.replaceChildren(element('h2','接入向导'));$('count').textContent=`第 ${onboardingStep+1} / ${onboardingSteps.length} 步`;
-  const nav=element('nav','','wizard-steps');nav.setAttribute('aria-label','接入步骤');onboardingSteps.forEach((title,index)=>{const b=button(`${index+1}. ${title}`,()=>wizardNext(index));if(index===onboardingStep)b.setAttribute('aria-current','step');nav.append(b);});panel.append(nav);
+  const progress=onboardingProgress(data),intro=element('div','','onboarding-intro'),layout=element('div','','onboarding-layout'),content=element('div','','onboarding-content');
+  intro.append(element('h2','接入向导'),note('配置会分别保存。可随时返回已完成步骤；浏览步骤不会自动启用项目或开始任务。'));
+  panel.replaceChildren(intro,layout);$('count').textContent=`第 ${onboardingStep+1} / ${onboardingSteps.length} 步`;
+  const nav=element('nav','','wizard-steps onboarding-progress');nav.setAttribute('aria-label','接入步骤');onboardingSteps.forEach((title,index)=>{const item=element('div','','onboarding-step'),b=button(`${index+1}. ${title}`,()=>wizardNext(index)),status=element('small',progress[index].text);item.dataset.ready=String(progress[index].ready);if(index===onboardingStep)b.setAttribute('aria-current','step');item.append(b,status);nav.append(item);});layout.append(nav,content);panel=content;
   if(data.installation_skipped||data.app&&!data.app.installations)panel.append(element('p','尚未确认 App 安装。可以继续配置模型和规则；安装并启用项目之前，仓库检视不会开始。','wizard-notice'));
   const next=()=>panel.append(button('下一步',()=>wizardNext(Math.min(onboardingStep+1,6)),''));
   if(onboardingStep===0){
@@ -207,7 +221,9 @@ async function renderOnboarding(request,panel){
     for(const [path,content]of Object.entries(data.defaults))panel.append(collapsible(path+' · 内置默认',content));
     panel.append(note('仓库还可提供 .agents/skills/**/SKILL.md。项目「模型」页配置项目默认模型和各工作类型的模型；「Manager 与角色」页编辑 Manager 提示词（检视、开发、标签和行为指南几章就是 .bot 规则文件的控制台层）、各工作类型的开关和写入、交给 Manager 的事件，并查看规则文件来源；computer.yaml 接到现有机器配置，不另建资源系统。'));next();
   }else{
-    const summary=card('接入状态');summary.append(facts([['公网地址',data.public_address?.origin||'待验证'],['App',data.app?.slug||'待选择'],['安装',data.installation_skipped?'已跳过':data.app?.installations?'已确认':'待安装'],['GitHub 登录',data.github_login?.enabled?'已启用':'使用本地账号'],['默认模型',models.find(m=>m.id===data.model_id)?.model_name||'待配置'],['Agent','Pi 1.4.0 · 每仓库长期容器 · 模型请求经控制面代理']]));panel.append(summary);
+    const summary=card('接入状态');summary.append(facts([['公网地址',data.public_address?.origin||'待验证'],['App',data.app?.slug||'待选择'],['安装',progress[3].text],['GitHub 登录',data.github_login?.enabled?'已启用':'使用本地账号'],['默认模型',progress[4].ready?models.find(m=>m.id===data.model_id)?.model_name||'已配置':'待配置'],['Agent','Pi 1.4.0 · 每仓库长期容器 · 模型请求经控制面代理']]));panel.append(summary);
+    const missing=progress.slice(0,6).map((item,index)=>({...item,index})).filter(item=>!item.ready);
+    if(missing.length){const gaps=card('接入尚未完成');gaps.append(note('以下必需配置仍待补齐。可以继续查看或返回项目，当前状态不会标记为已完成。'));for(const item of missing)gaps.append(button(`前往第 ${item.index+1} 步：${onboardingSteps[item.index]}`,()=>wizardNext(item.index)));panel.append(gaps);}
     const projects=card('选择项目开始检视'),sync=button('同步已安装仓库',async()=>{sync.disabled=true;sync.textContent='正在同步安装范围…';try{const result=await api('/api/installations/sync','POST',{});if(result.results.some(r=>r.error))throw new Error('安装同步失败：'+result.results.filter(r=>r.error).map(r=>r.error).join('，'));await render();}catch(e){error(e);}finally{sync.disabled=false;sync.textContent='同步已安装仓库';}});projects.append(sync);
     const installed=await api('/api/installations');if(request!==renderVersion)return;
     for(const repo of installed.repositories){
@@ -219,7 +235,10 @@ async function renderOnboarding(request,panel){
       }
       projects.append(row);
     }
-    projects.append(note('这里包括已安装但尚未启动的仓库。未看到新仓时点击同步。自动开发默认关闭，在对应项目的「开发」中单独开启；尚未安装时不开始检视。'));panel.append(projects,button('完成向导',async()=>{await api('/api/onboarding/complete','POST',{});history.replaceState(null,'','#/projects');await start();},''));
+    projects.append(note('这里包括已安装但尚未启动的仓库。未看到新仓时点击同步。自动开发默认关闭，在对应项目的「开发」中单独开启；尚未安装时不开始检视。'));
+    const actions=element('div','','actions'),message=element('p','','view-error');message.setAttribute('role','alert');
+    const finish=button('完成向导',async()=>{finish.disabled=true;message.textContent='';try{await api('/api/onboarding/complete','POST',{});history.replaceState(null,'','#/projects');await start();}catch(err){message.textContent=err.message.includes('onboarding_incomplete')?'接入配置已变化，请重新检查步骤状态并补齐缺项。':err.message;finish.disabled=false;}},'');
+    finish.disabled=missing.length>0;actions.append(finish,consoleLink('#/projects','返回项目，稍后继续'));panel.append(projects,actions,message);
   }
   nav.querySelector('[aria-current=step]')?.scrollIntoView({block:'nearest',inline:'nearest'});
 }

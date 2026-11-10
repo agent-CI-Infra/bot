@@ -27,7 +27,9 @@ const settingsCards = {
   },
   async onboarding(request) {
     const panel = element('div', ''); panel.id = 'onboarding-panel';
-    await renderOnboarding(request, panel); return [panel];
+    try { await renderOnboarding(request, panel); }
+    catch (err) { if (request === renderVersion) panel.replaceChildren(consoleState('接入状态读取失败', err.message, { tone: 'error', retry: () => render().catch(error) })); }
+    return [panel];
   },
   async installations() {
     const { installations } = await api('/api/installations/archive'), section = card('GitHub App 安装档案');

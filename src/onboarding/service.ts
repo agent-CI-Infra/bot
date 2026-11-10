@@ -21,6 +21,17 @@ export class Onboarding {
   }
   saved(key: string): any { const value = this.store.get('SELECT value FROM settings WHERE key=?', 'onboarding.' + key)?.value; return value ? JSON.parse(value) : null; }
   save(key: string, value: unknown) { this.store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'onboarding.' + key, JSON.stringify(value)); }
+  readiness() {
+    const app = this.saved('app');
+    const selected = !!app && !!this.store.get("SELECT 1 FROM accounts WHERE id=? AND type='github_app' AND app_id=?", app.account_id, String(app.app_id));
+    // The saved App metadata is historical. Completion depends on the current installation projection and model.
+    const installations = selected ? Number(this.store.get(`SELECT count(*) n FROM github_installations
+      WHERE account_id=? AND app_id=? AND status='active' AND completeness='complete' AND scope_pending=0`, app.account_id, String(app.app_id))!.n) : 0;
+    const ready = { public_address: !!this.saved('public')?.origin, app: selected,
+      installation: installations > 0 && !this.saved('installation_skipped'), installation_count: installations,
+      model: !!this.store.get('SELECT 1 FROM models WHERE id=? AND repository_id IS NULL AND api_key IS NOT NULL', this.saved('model') || '') };
+    return { ...ready, can_complete: ready.public_address && ready.app && ready.installation && ready.model };
+  }
   probe(nonce: string): Json {
     for (const [id, value] of this.challenges) if (value.until < Date.now()) this.challenges.delete(id);
     const value = this.challenges.get(nonce);
@@ -121,7 +132,11 @@ export class Onboarding {
   /** consoleOrigin is where the administrator uses the console; it only receives the one-time manifest return. */
   async api(user: Actor, method: string, url: URL, input: Json, consoleOrigin: string): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/onboarding')) return undefined; superAdmin(user);
-    if (method === 'GET' && url.pathname === '/api/onboarding') return { public_address: this.saved('public'), tunnel: await this.tunnelStatus(), app: this.saved('app'), model_id: this.saved('model'), defaults, installation_skipped: !!this.saved('installation_skipped'), complete: !!this.saved('complete'), github_login: this.options.githubLogin?.view(consoleOrigin) };
+    if (method === 'GET' && url.pathname === '/api/onboarding') {
+      const tunnel = await this.tunnelStatus(), readiness = this.readiness();
+      return { public_address: this.saved('public'), tunnel, app: this.saved('app'), model_id: this.saved('model'), defaults, readiness,
+        installation_skipped: !!this.saved('installation_skipped'), complete: !!this.saved('complete') && readiness.can_complete, github_login: this.options.githubLogin?.view(consoleOrigin) };
+    }
     if (method === 'POST' && url.pathname === '/api/onboarding/app/refresh') {
       fields(input, ['account_id']); return { app: await this.refreshApp(text(input.account_id)) };
     }
@@ -182,7 +197,12 @@ export class Onboarding {
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };
     }
     if (method === 'POST' && url.pathname === '/api/onboarding/installation') { fields(input, ['skip']); if (typeof input.skip !== 'boolean') fail(400, 'invalid_skip'); this.save('installation_skipped', input.skip); return { skipped: input.skip }; }
-    if (method === 'POST' && url.pathname === '/api/onboarding/complete') { fields(input, []); this.save('complete', true); this.store.audit(user.id, 'onboarding.completed', 'system'); return { complete: true }; }
+    if (method === 'POST' && url.pathname === '/api/onboarding/complete') {
+      fields(input, []);
+      const ready = this.readiness();
+      if (!ready.can_complete) return fail(409, 'onboarding_incomplete');
+      this.save('complete', true); this.store.audit(user.id, 'onboarding.completed', 'system'); return { complete: true };
+    }
     return fail(404, 'not_found');
   }
   async callback(code: string, state: string): Promise<void> {

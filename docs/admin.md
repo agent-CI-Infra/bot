@@ -33,11 +33,11 @@ docker compose up -d
 2. **走完接入向导。** 首次登录会自动打开「全局设置 → 接入向导」（仅系统超级管理员可用），按页内的七步走：
    1. 公网 HTTPS：选「自建 HTTPS 中转」，把一个专用域名整个反向代理到 `http://<这台机器>:8791`，填 `https://<你的域名>`，点「检查并使用」。或者选「Cloudflare Tunnel」，粘贴 tunnel token 点「保存 token」，在 Cloudflare 的 Published application 把 Service URL 设为 `http://webhook:8791`，回到向导点该路由的「检查并使用此域名」。这个域名是唯一的入口，控制台、登录和 Webhook 都走它，不需要第二个域名或端口；反向代理在另一台机器时，先在 `.env` 设置 `BOT_BIND_ADDRESS=0.0.0.0`。
    2. GitHub App：填「App 所属组织」和「App 名称」，点「准备 GitHub 确认页」→「前往 GitHub 确认创建」，在 GitHub 上确认后会回到向导。权限固定为 Contents、Issues、Pull requests、Commit statuses、Actions、Checks 写，Metadata、Members 读（Actions、Checks、Commit statuses 让检视和开发任务能用只读令牌查看 CI 状态，这三项的写权限留给控制面发布状态、检查结果和重跑 CI；之前创建的 App 要在 GitHub 上补加），订阅 `issues`、`pull_request`、`issue_comment`、`pull_request_review`、`pull_request_review_comment` 和 `organization`（已有 App 需由所有者在 Permissions & events 勾选 Issue comment、Pull request review、Pull request review comment 并保存，评论和检视回复才会触发再次检视；「检查权限和事件订阅」会列出缺少的事件）；Webhook 地址 `https://<你的域名>/hooks/github/<account_id>/<endpoint_id>` 由向导写进 App，不用手填。已在「全局设置 → 机器人账号」登记过的 App 点「使用此 App」。
-   3. GitHub 登录：复用同一个 App，按页面四步操作：从页面链接打开 App 设置，复制 Client ID（不是 App ID），生成 Client secret（向导新建的 App 已带回凭据，不用再生成），把页面给出的 `https://<你的域名>/auth/github/callback` 加到 App 的 Callback URL，然后勾选启用并保存。Secret 不回读，留空保留，停用后本地恢复账号仍可用。详见[接入说明](onboarding.md#github-用户登录)。
+   3. GitHub 登录：创建独立的 OAuth App，按页面指引填写 Homepage URL 和 `https://<你的域名>/auth/github/callback`，复制这个 OAuth App 的 Client ID 并生成 Client secret，勾选启用并保存。仓库 GitHub App 与登录 OAuth App 分开配置；Secret 不回读，留空保留。本步骤可暂不启用，本地恢复账号继续可用。详见[接入说明](onboarding.md#github-用户登录)。
    4. 安装：点「在 GitHub 安装此 App」，选好仓库后回来点「重新检查安装」。
    5. 模型：在「添加模型」填接口 URL、API Key、模型名，点「保存并继续」。URL 下方会显示实际的对话地址和模型列表地址；bot 不会替你补上或去掉 `/v1`，地址不以 `/v1` 结尾时页面会提示。保存前可以点「获取模型列表」从上游选模型名，或点「测试模型」确认 URL、Key 和模型名可用。
    6. 规则：看一下内置规则，点「下一步」。
-   7. 完成：点「同步已安装仓库」，在要用的仓库那一行点「启动并启用检视」，最后点「完成向导」。
+   7. 完成：点「同步已安装仓库」，在要用的仓库那一行点「启动并启用检视」。公网地址已验证、仓库 App 有效、至少一个安装范围已完整同步且有效、共享默认模型仍有 Key 时，才可点「完成向导」。暂时跳过安装不会标记为完成；可从「返回项目，稍后继续」离开并保留已保存配置。完成接入配置不等于项目已启用或任务正在运行。
 3. **确认跑通。** 在已启用的仓库新开一个 Issue，bot 会在上面回复一条检视总结评论（之后再检视同一个 Issue 或 PR 时改写这条评论，不再新发）；第一次要先启动该仓库的虚拟电脑，会慢一些。没等到时，先在「Webhook 投递」页看投递是否到达、验签是否通过，再在「检视」页看任务状态。
 
 ## 日常使用

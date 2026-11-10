@@ -22,7 +22,7 @@ Cloudflare 自带的无主机名 `http_status:404` 兜底规则表示：未匹�
 
 没有 App 时，填写「App 所属组织」和 App 名称，向导生成 manifest，再点击「前往 GitHub 确认创建」。这里填写的是 App 的归属组织，安装目标在第 4 步选择。默认是组织私有 App；需要安装到其他组织或个人账号时，勾选「公开 App，允许安装到其他账号」。固定权限为 contents、issues、pull_requests、statuses、actions、checks 写，metadata 与 Members 读（之前创建的 App 在「全局设置 → 机器人账号」或本步「使用已登记的 App」下点「检查权限和事件订阅」：页面只列出 App 定义缺少的权限和未订阅的事件，保留 App 的 Permissions & events 链接；安装未接受的权限和事件在项目列表对应仓库行显示，悬浮徽章可查看缺项；GitHub 不提供修改 App 权限和事件订阅的接口，所以要 App 所有者在该页改好后保存一次，再由各安装方各接受一次）；default_events 为 issues、pull_request、issue_comment、pull_request_review、pull_request_review_comment、organization。已有 App 的所有者还需在 Permissions & events 中勾选 Issue comment、Pull request review、Pull request review comment 并保存，代码更新不会自动修改已有订阅。installation 和 installation_repositories 由 GitHub 自动投递，不写入 manifest。不存在创建 App 的 REST 调用，也不要求 fine-grained PAT。
 
-GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥、webhook secret，以及返回的用户授权 Client ID／Client secret 只在控制面加密保存，不回读到浏览器。回调成功后，浏览器打开向导第 3 步「GitHub 登录」，可复用刚创建的 App 凭据；保存并启用前仍仅使用本地登录。
+GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管理员，15 分钟有效，一次性使用；manifest code 兑换不带 PAT。App 私钥和 webhook secret 只在控制面加密保存，不回读到浏览器。回调成功后，浏览器打开向导第 3 步「GitHub 登录」，使用独立 OAuth App 配置登录，不复用仓库 App 的 Client ID／Client secret；保存并启用前仍可使用本地登录。
 
 第 4 步的「安装账号」支持个人账号名、组织名、`owner/repo`、GitHub 个人主页、组织或仓库链接（包括 Issue、PR、代码目录链接），以及 `git@github.com:owner/repo.git`、`ssh://git@github.com/owner/repo.git`。点击「解析账号」，控制面从链接提取 owner，再通过 GitHub 核对并显示规范名称和账号类型（组织或个人账号）；无效链接、不存在的账号和不能安装的账号类型会显示原因。解析时不连接粘贴的网址，不读取仓库内容，也不会安装 App 或启用仓库。
 
