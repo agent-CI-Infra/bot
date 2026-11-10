@@ -74,7 +74,7 @@ export class ExternalBindings {
       WHERE provider=? AND host=? AND connector=? AND external_tenant=? AND external_actor=? AND status='active' AND p.active=1`, ...subjectKeys.map(k => proof[k]));
     return row?.principal_id || null;
   }
-  async resolveExternalActor(credential: unknown, tenant: string, project: string | undefined, guard: () => void): Promise<ActorContext> {
+  async resolveExternalActor(credential: unknown, tenant: string | null, project: string | undefined, guard: () => void): Promise<ActorContext> {
     const proof = await this.verify(credential), principal = await this.resolveExternalPrincipal(credential);
     if (!proof || !principal) return fail(403, 'external_binding_required');
     const actor = resolvePrincipalActor(this.store, principal, tenant, project, 'im');

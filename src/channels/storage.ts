@@ -3,7 +3,7 @@ import type { Store } from '../storage/database.js';
 export function channelStorage(store: Store): void {
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS channel_credentials(id TEXT PRIMARY KEY,sealed TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS channel_connectors(id TEXT PRIMARY KEY,provider TEXT NOT NULL,tenant_id TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS channel_connectors(id TEXT PRIMARY KEY,provider TEXT NOT NULL,
       app_id TEXT NOT NULL,installation_tenant TEXT NOT NULL,actor_tenants TEXT NOT NULL,bot_open_id TEXT NOT NULL,
       application_type TEXT NOT NULL,transport TEXT NOT NULL,credential_ref TEXT NOT NULL,enabled INTEGER NOT NULL,
       revision INTEGER NOT NULL,last_received_at INTEGER,last_error TEXT,created_at INTEGER NOT NULL);
@@ -29,8 +29,14 @@ export function channelStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS channel_outbox(id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,
       source_event TEXT,payload TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
       next_attempt INTEGER NOT NULL,last_error TEXT,remote_message_id TEXT,created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS channel_control_operations(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,project_id TEXT,receipt TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS channel_control_operations(id TEXT PRIMARY KEY,project_id TEXT,receipt TEXT NOT NULL);
   `);
   if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'connection_state'))
     store.db.exec("ALTER TABLE channel_connectors ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'idle'");
+  // Connections are global; keep their IDs so credentials, bindings and queued events remain valid.
+  store.transaction(() => {
+    for (const table of ['channel_connectors', 'channel_control_operations'])
+      if (store.all(`PRAGMA table_info(${table})`).some(c => c.name === 'tenant_id'))
+        store.db.exec(`ALTER TABLE ${table} DROP COLUMN tenant_id`);
+  });
 }

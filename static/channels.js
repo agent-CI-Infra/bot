@@ -10,8 +10,8 @@ async function feishuIdentityCard(identity) {
     '打开机器人返回的链接，完成 GitHub 登录；在下方核对两端身份。',
     '复制确认指令，回到发起绑定的同一个飞书私聊发送；然后刷新绑定状态。']) steps.append(element('li', caption));
   section.append(steps, note('绑定链接和确认指令五分钟内有效。转发链接、只完成 GitHub 登录或由其他人确认，都不能完成绑定。'));
-  if (data.applications.length) section.append(note('当前组织可用应用：' + data.applications.map(a => a.app_id).join('、')));
-  else section.append(note('当前组织没有可用的飞书应用。请管理员在「全局设置 → 飞书连接」完成应用接入；如已有机器人，也可直接从它的私聊发起绑定。'));
+  if (data.applications.length) section.append(note('可绑定的飞书应用：' + data.applications.map(a => a.app_id).join('、')));
+  else section.append(note('尚无已启用的飞书应用。请管理员在「全局设置 → 飞书连接」完成应用接入；如已有机器人，也可直接从它的私聊发起绑定。'));
   for (const p of data.pending) {
     const pending = element('div', '', 'channel-binding'); pending.setAttribute('aria-label', '待确认的飞书身份');
     pending.append(element('strong', '等待原飞书操作者确认'), facts([['GitHub 身份', `${p.github?.display_name || ''} · ${p.github?.external_actor || ''}`],
@@ -60,7 +60,7 @@ async function channelDiagnostics(c, panel) {
     ['最后收到事件', c.health.last_received_at ? new Date(c.health.last_received_at).toLocaleString() : '尚未收到'], ['诊断', c.health.last_error || '无'], ['待处理', c.health.queued], ['发送失败', c.health.failed]]),
     note('应用鉴权成功或长连接已连接，都不能证明消息、卡片回调已配置。请完成发布并在飞书中实测。'));
   const mapping = element('form', '', 'project-form');
-  const project = channelSelect(mapping, '项目', 'project', projects.filter(p => p.tenant_id === c.tenant_id).map(p => [p.id, p.full_name]));
+  const project = channelSelect(mapping, '项目', 'project', projects.map(p => [p.id, p.full_name]));
   const chat = channelField(mapping, '群 chat_id', 'chat_id'); chat.required = true;
   const sensitivity = channelSelect(mapping, '允许的敏感级别', 'sensitivity', [['public', '公开'], ['private', '私有']]);
   const details = channelField(mapping, '允许群接收详细结果', 'details', '', 'checkbox'), attest = channelField(mapping, '我已核实群受众（授权一小时；成员变更即失效）', 'attest', '', 'checkbox');

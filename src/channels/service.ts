@@ -125,14 +125,14 @@ export class ChannelService {
     return { operation_id: id, state: 'queued' };
   }
   async actor(e: ChannelEvent, project?: string): Promise<ActorContext> {
-    const c = this.source(e);
-    return this.bindings.identities.resolveExternalActor(this.bindings.credential(e), c.tenant_id, project, () => {
+    this.source(e);
+    // The selected project supplies its organization; the connection supplies only a verified identity.
+    return this.bindings.identities.resolveExternalActor(this.bindings.credential(e), null, project, () => {
       this.source(e); if (project && e.chat_type === 'group') this.groupScope(e, project);
     });
   }
   groupScope(e: ChannelEvent, project: string, field = 'summary'): Row {
-    const c = this.source(e), p = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project);
-    if (!p || p.tenant_id !== c.tenant_id) return fail(403, 'channel_project_tenant_mismatch');
+    const c = this.source(e);
     const s = this.store.get('SELECT * FROM channel_group_scopes WHERE connector_id=? AND installation_tenant=? AND chat_id=? AND project_id=? AND enabled=1',
       c.id, e.installation_tenant, e.chat_id, project);
     // A public repository can still have private prompts, task logs and account configuration.

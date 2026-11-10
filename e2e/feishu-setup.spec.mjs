@@ -3,6 +3,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
 import { identityFixture } from '../test/identity-fixture.mjs';
 import { transport, connector, envelope, post, finished, credentials } from '../test/channel-fixture.mjs';
+import { harness, setup } from '../test/helpers.mjs';
 
 const output = '.tmp/feishu-setup-165';
 async function login(page, h, password, username = 'administrator') {
@@ -11,7 +12,8 @@ async function login(page, h, password, username = 'administrator') {
 }
 test('global administrator connects an app through the wizard, resumes it and sees credential and revision failures', async ({ page }) => {
   test.setTimeout(90000);
-  const wire = transport(), f = await managementFixture(null, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
+  const wire = transport(), h = await harness(null, undefined, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
+  const f = { h, ...await setup(h), close: () => h.stop() };
   const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
   try {
     await page.setViewportSize({ width: 1440, height: 1100 }); await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
@@ -26,7 +28,10 @@ test('global administrator connects an app through the wizard, resumes it and se
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('enterprise');
     await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
-    await page.getByLabel('项目所属组织').selectOption('github.com:10');
+    expect(f.h.store.get('SELECT count(*) n FROM tenants').n).toBe(0);
+    await expect(page.getByRole('heading', { name: '应用凭据', exact: true })).toBeVisible();
+    await expect(page.getByLabel('项目所属组织')).toHaveCount(0);
+    await expect(page.getByText('此应用连接全局共用', { exact: false })).toContainText('tenant_key 表示飞书企业');
     await page.getByLabel('App ID', { exact: true }).fill('cli_wizard'); await page.getByLabel('App Secret', { exact: true }).fill(credentials.app_secret);
     wire.state.authCode = 10003; await page.getByRole('button', { name: '检查凭据并读取机器人' }).click();
     await expect(page.getByRole('alert')).toContainText('无法通过鉴权');
@@ -80,6 +85,28 @@ test('enterprise long connections require callback configuration as well as mess
     const scopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toContain('cardkit:card:write');
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('已有应用也需补齐并发布新版本');
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('a global connection can map groups to projects from either GitHub organization', async ({ page }) => {
+  const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
+  try {
+    const id = await connector(f.admin);
+    await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
+    await expect(page.getByRole('heading', { name: '飞书应用连接', exact: true })).toBeVisible();
+    await page.evaluate(() => api('/api/identity/tenant', 'POST', { tenant_id: 'github.com:10' }));
+    await page.reload();
+    await expect(page.getByText('全局共用 · 启用', { exact: false })).toBeVisible();
+    // Return to all organizations before selecting a project belonging to the other one.
+    await page.evaluate(() => api('/api/identity/tenant', 'POST', { tenant_id: null }));
+    await page.goto(f.h.admin + '/#/settings/feishu/' + id + '/4');
+    await page.getByRole('combobox', { name: '项目', exact: true }).selectOption('201');
+    await page.getByLabel('群 chat_id').fill('oc_cross_org');
+    await page.getByLabel('允许的敏感级别').selectOption('private');
+    await page.getByLabel('我已核实群受众（授权一小时；成员变更即失效）').check();
+    await page.getByRole('button', { name: '批准或更新群范围' }).click();
+    await expect(page.getByText('oc_cross_org → 项目 201', { exact: false })).toBeVisible();
+    expect(f.h.store.get('SELECT project_id FROM channel_group_scopes WHERE connector_id=?', id).project_id).toBe('201');
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
