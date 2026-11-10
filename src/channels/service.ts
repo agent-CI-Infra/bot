@@ -50,8 +50,7 @@ export class ChannelService {
   source(e: ChannelEvent): Row {
     const c = this.connector(e.connector_id);
     if (e.connector_revision !== c.revision) fail(403, 'channel_configuration_changed');
-    if (c.provider !== e.provider || c.app_id !== e.app_id || c.installation_tenant !== e.installation_tenant ||
-      e.actor_tenant && !(JSON.parse(c.actor_tenants) as string[]).includes(e.actor_tenant)) fail(403, 'channel_source_mismatch');
+    if (c.provider !== e.provider || c.app_id !== e.app_id || c.installation_tenant !== e.installation_tenant) fail(403, 'channel_source_mismatch');
     return c;
   }
   adapter(c: Row, guard?: () => void): FeishuAdapter {

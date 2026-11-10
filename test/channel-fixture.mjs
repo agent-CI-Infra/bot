@@ -5,7 +5,7 @@ import { digest, randomId } from '../dist/core/security.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
-  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot' };
+  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', tenantCode: 0, installationTenant: 'install-tenant' };
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
       state.authStarted++;
@@ -16,13 +16,14 @@ export function transport() {
     }
     if (state.failures) { state.failures--; return Response.json({ code: 999, msg: 'fixture failure' }, { status: 503 }); }
     if (url.endsWith('/bot/v3/info')) return Response.json({ code: state.botCode, bot: { open_id: state.botOpenId, app_name: 'Fixture bot' }, msg: 'fixture-only-access-token' });
+    if (url.endsWith('/tenant/v2/tenant/query')) return Response.json({ code: state.tenantCode, data: { tenant: { tenant_key: state.installationTenant } }, msg: 'fixture-only-access-token' });
     const request = JSON.parse(init.body); sent.push({ url, method: init.method, ...request, content: JSON.parse(request.content) });
     return Response.json({ code: 0, data: { message_id: 'remote-' + sent.length } });
   } };
 }
 export async function connector(admin, override = {}) {
   const result = await admin('/api/channels/connectors', 'POST', { app_id: 'cli_fixture', installation_tenant: 'install-tenant',
-    actor_tenants: ['actor-tenant', 'other-tenant'], bot_open_id: 'ou_bot', application_type: 'enterprise', transport: 'http', enabled: true, credentials, expected_revision: 0, ...override });
+    bot_open_id: 'ou_bot', application_type: 'enterprise', transport: 'http', enabled: true, credentials, expected_revision: 0, ...override });
   if (result.status !== 201) throw new Error(JSON.stringify(result));
   return result.value.connector_id;
 }
