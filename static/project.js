@@ -113,6 +113,7 @@ async function renderProject(route) {
 }
 async function loadProject(id,section=current.section) {
   const superUser = me.role === 'super_admin';
+  // Capture the visited object before awaiting: a different project replaces current while this request is in flight.
   const overview = section === 'overview', target = current;
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), overview ? null : api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, overview ? null : api('/api/repositories/'+id+'/rules').catch(()=>null), overview ? null : api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
