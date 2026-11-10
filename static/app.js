@@ -58,8 +58,19 @@ function renderCurrentUser() {
   const copy = element('span', '', 'current-user-copy'), name = element('span', '@' + me.github.login, 'current-user-name');
   name.title = me.github.login; copy.append(name, element('span', role, 'current-user-role')); who.append(avatar, copy);
 }
+function showBootFailure(err) {
+  $('boot').hidden = false;
+  $('access').hidden = $('workspace').hidden = $('identity').hidden = $('tabs').hidden = true;
+  document.body.classList.remove('board-mode');
+  const message = $('boot-message');
+  message.textContent = `控制台载入失败：${err.message}。请检查网络连接或服务状态后重试。`;
+  message.setAttribute('role', 'alert'); message.classList.add('view-error');
+  $('boot-retry').hidden = false;
+}
 async function start() {
-  setup = !(await api('/api/setup')).initialized;
+  let setupState;
+  try { setupState = await api('/api/setup'); } catch (err) { showBootFailure(err); return; }
+  setup = !setupState.initialized;
   try { me = await api('/api/auth/me'); } catch { me = null; }
   if (typeof syncManagementChat === 'function') syncManagementChat();
   // The shell was blank until both requests above answered; the boot line covers that gap and leaves with them.
@@ -383,6 +394,12 @@ $('editor-form').addEventListener('submit', async event => {
 });
 $('cancel').addEventListener('click', () => { $('editor').close(); $('editor-form').reset(); });
 $('close-detail').addEventListener('click', () => $('detail').close());
+$('boot-retry').addEventListener('click', async () => {
+  const retry = $('boot-retry'), message = $('boot-message');
+  retry.disabled = true; retry.hidden = true;
+  message.textContent = '正在载入…'; message.setAttribute('role', 'status'); message.classList.remove('view-error');
+  try { await start(); } catch (err) { error(err); } finally { retry.disabled = false; }
+});
 $('access-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, button = $('access-submit'); button.disabled = true;
   try { await api(setup ? '/api/setup' : '/api/auth/login', 'POST', Object.fromEntries(new FormData(form))); form.reset(); await start(); } catch (err) { error(err); } finally { button.disabled = false; }

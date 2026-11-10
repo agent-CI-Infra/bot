@@ -13,7 +13,7 @@ function identityError(code) {
 // keeps the combined sentence it had before, so nothing here depends on it being present.
 function grantStateText(grant) {
   const reason = ({ installation_pending: '安装待同步：GitHub App 安装已更新或尚在同步，稍后会自动重试。',
-    permission_pending: '权限待核验：安装仍有效，但当前权限范围不足，请重新验证 GitHub 权限。',
+    permission_pending: '安装或权限待核验：GitHub App 安装已停用或权限范围仍待确认，请重新验证 GitHub 权限。',
     tenant_missing: '归属待处理：这条授权还没有可用的组织，请联系管理员处理。' })[grant.reason];
   if (reason) return reason;
   return ({ active: '有效', pending_verification: '待验证／权限不足，请重新授权', revoked: '已撤销', quarantined: '归属待处理' })[grant.state] || grant.state;

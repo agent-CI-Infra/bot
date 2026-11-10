@@ -331,6 +331,10 @@ test('a pending grant names the condition it waits on; states outside the three 
   h.store.run('UPDATE github_installations SET revision=revision+1 WHERE ref=?', grant.installation_ref);
   let [scope] = await scopes();
   assert.equal(scope.state, 'pending_verification'); assert.equal(scope.reason, 'installation_pending');
+  h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", login.result.identity_id);
+  [scope] = await scopes();
+  assert.equal(scope.state, 'pending_verification'); assert.equal(scope.reason, undefined);
+  h.store.run("UPDATE external_identities SET status='active' WHERE id=?", login.result.identity_id);
   h.store.run('UPDATE github_installations SET revision=? WHERE ref=?', before.revision, grant.installation_ref);
 
   // 2) permission_pending: same installation, but its scope is unconfirmed or the installation is not active.

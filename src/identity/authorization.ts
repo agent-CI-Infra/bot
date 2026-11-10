@@ -66,9 +66,8 @@ export function listEffectiveScopes(store: Store, principal: string): EffectiveS
       const installation = store.get('SELECT * FROM github_installations WHERE ref=?', g.installation_ref);
       const identity = store.get("SELECT 1 FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", principal);
       if (!identity || !installation || installation.status !== 'active' || installation.scope_pending || installation.revision !== g.installation_revision) state = 'pending_verification';
-      // Same decision, with the sub-condition kept as a label. Only the installation branches name a reason;
-      // a missing/expired GitHub proof is not one of the three, and keeps the client's combined sentence.
-      if (state === 'pending_verification')
+      // Reauthentication comes first when GitHub proof is missing, even if the installation also changed.
+      if (state === 'pending_verification' && identity)
         reason = !installation || installation.revision !== g.installation_revision ? 'installation_pending'
           : installation.status !== 'active' || installation.scope_pending ? 'permission_pending' : undefined;
     }
