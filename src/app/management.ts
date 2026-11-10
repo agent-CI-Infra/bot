@@ -9,7 +9,7 @@ import { fail, fields, hashPassword, password, randomId, text, type Json } from 
 import { loadAutomationConfig, parseAutomationConfig } from '../automation/config.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
-import { policyView, roleBoard, roleConcurrencyValue } from '../roles/board.js';
+import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '../roles/board.js';
 import { activateActions } from '../actions/storage.js';
 import { listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 
@@ -256,7 +256,7 @@ export async function management(store: Store, user: Actor, method: string, url:
     // The project's own concurrency is task_concurrency (null follows the default); the default comes with it so a project
     // administrator sees what an empty field means without reading the global settings.
     const concurrency = () => ({ task_concurrency_default: defaultConcurrency(store) });
-    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: policyView(store.get('SELECT * FROM policies WHERE repository_id=?', id))!,
+    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: policyView(store, store.get('SELECT * FROM policies WHERE repository_id=?', id), id)!,
       actions_failures: store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', id) || null,
       // Role limits have no default on purpose: an empty map means "no per-role limit", not a number we picked.
       role_concurrency_default: null, ...concurrency() };
@@ -347,7 +347,8 @@ export function updatePolicy(store:Store,user:Actor,id:string,body:Json):Json {
         store.audit(user.id, 'policy.updated', id, id);
         store.run('UPDATE policies SET test_command=?,max_revisions=?,base_branch=?,automation=? WHERE repository_id=?',body.test_command===undefined?previous.test_command:String(body.test_command),body.max_revisions===undefined?previous.max_revisions:Number(body.max_revisions),body.base_branch===undefined?previous.base_branch:String(body.base_branch),automation,id);
         if (taskConcurrency !== undefined) store.run('UPDATE policies SET task_concurrency=? WHERE repository_id=?', taskConcurrency as number | null, id);
-        if (roleConcurrencyLimits !== undefined) store.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify(roleConcurrencyLimits), id);
-        return { policy: policyView(store.get('SELECT * FROM policies WHERE repository_id=?', id))!, execution_available: true, role_concurrency_default: null, task_concurrency_default: defaultConcurrency(store) };
+        // A PATCH changes the limits it names and leaves every other role alone: the body is a delta, not the whole map.
+        if (roleConcurrencyLimits !== undefined) store.run('UPDATE policies SET role_concurrency=? WHERE repository_id=?', JSON.stringify({ ...roleConcurrency(store, id), ...roleConcurrencyLimits }), id);
+        return { policy: policyView(store, store.get('SELECT * FROM policies WHERE repository_id=?', id), id)!, execution_available: true, role_concurrency_default: null, task_concurrency_default: defaultConcurrency(store) };
       });
 }
