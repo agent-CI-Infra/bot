@@ -204,19 +204,24 @@ jobs:
           remote "bash -s -- $dir $(printf %q "$TAG")" <<'SCRIPT'
           set -euo pipefail
           cd "$1"
+          # Whatever step fails, show every container of the project, including stopped and never-started ones.
+          trap 'status=$?; if [ "$status" -ne 0 ]; then docker compose ps -a || true; fi' EXIT
           # Pin the version in .env, so a later plain `docker compose up -d` keeps it; other settings stay.
           touch .env
           sed -i '/^BOT_IMAGE_TAG=/d' .env
           echo "BOT_IMAGE_TAG=$2" >> .env
           docker compose pull
-          docker compose up -d
+          # Recreate every service from this release's compose.yaml, so running this job again converges after an
+          # interrupted deployment: a plain `up -d` keeps the replacement containers an interrupted Compose created but
+          # never started, and then waits on a dependency that has no health state. A release changes every image tag,
+          # so every container is recreated anyway and a normal deployment is down no longer.
+          docker compose up -d --force-recreate
           # The control-plane image's healthcheck turns healthy once the business listener (8791) answers.
           bot=$(docker compose ps -q bot)
           for _ in $(seq 1 40); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' "$bot")" = healthy ]; then docker compose ps; exit 0; fi
             sleep 3
           done
-          docker compose ps
           docker compose logs --tail 50 bot
           echo "bot did not become healthy" >&2
           exit 1
