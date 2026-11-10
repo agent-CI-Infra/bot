@@ -49,6 +49,7 @@ export class FeishuAdapter implements ChannelAdapter {
       return { ...base, actor_tenant: '', actor_id: '', chat_id: String(e.chat_id ?? ''), chat_type: 'group', message_id: '', created_at: Date.now(),
         kind: type === 'app.uninstalled' ? 'uninstalled' : 'audience_changed' };
     if (type === 'card.action.trigger') {
+      if (!this.connector.bot_open_id) fail(503, 'channel_bot_unavailable');
       const op = object(e.operator), context = object(e.context), value = object((e.action as Json)?.value);
       const tenant = text(op.tenant_key);
       if (!(JSON.parse(this.connector.actor_tenants) as string[]).includes(tenant)) fail(403, 'channel_actor_tenant_forbidden');
@@ -58,6 +59,7 @@ export class FeishuAdapter implements ChannelAdapter {
         kind: 'card', card_token: text(value.token) };
     }
     if (type !== 'im.message.receive_v1') return null;
+    if (!this.connector.bot_open_id) fail(503, 'channel_bot_unavailable');
     const sender = object(e.sender), id = object(sender.sender_id), message = object(e.message);
     if (sender.sender_type !== 'user' || id.open_id === this.connector.bot_open_id || !['p2p', 'group'].includes(String(message.chat_type))) return null;
     if (message.message_type !== 'text') return null;

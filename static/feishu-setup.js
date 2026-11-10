@@ -65,21 +65,24 @@ async function renderFeishuSetup(panel, request) {
     form.append(note('此应用连接全局共用，不绑定 GitHub 组织，也不授予用户项目权限。下方 tenant_key 表示飞书企业，用于校验消息来源。'));
     const app = channelField(form, 'App ID', 'app_id', c?.app_id || ''); app.required = true; app.readOnly = !!c;
     const secret = channelField(form, c ? 'App Secret（留空保留）' : 'App Secret', 'app_secret', '', 'password'); secret.required = !c;
-    const bot = channelField(form, '机器人 open_id', 'bot_open_id', c?.bot_open_id || ''); bot.required = true;
+    form.append(note(choice.application_type === 'enterprise' ? '机器人身份由系统在保存时自动读取，无需填写 open_id。请先启用机器人能力并发布初始版本。' : '机器人身份无需填写。先保存连接、配置 HTTP 回调并接收应用票据，再在“发布与检查”自动读取并保存。'));
     if (choice.application_type === 'enterprise') {
       const probe = button('检查凭据并读取机器人', async () => {
         message.textContent = ''; probe.disabled = true;
         try {
           const input = secret.value.trim() ? { app_id: app.value.trim(), app_secret: secret.value.trim() } : c ? { connector_id: c.id, expected_revision: c.revision } : { app_id: app.value.trim(), app_secret: '' };
-          const result = await api('/api/channels/feishu/probe', 'POST', input); bot.value = result.bot_open_id;
+          const result = await api('/api/channels/feishu/probe', 'POST', input);
+          if (c && result.revision !== undefined) { c.revision = result.revision; c.bot_open_id = result.bot_open_id; }
           message.textContent = `凭据已验证${result.name ? ' · ' + result.name : ''}。事件投递仍需订阅并发布后验证。`; message.className = 'view-success';
         } catch (err) { message.className = 'view-error'; message.textContent = feishuError(err); } finally { probe.disabled = false; }
       }, 'quiet'); probe.type = 'button'; form.append(probe);
     }
-    form.append(note('读取不到机器人时，先发布包含机器人能力的初始版本再重试；完成事件订阅后还需发布新版本。机器人 open_id 也可从飞书“获取机器人信息”接口取得。安装租户是应用实际安装的企业 tenant_key；允许的操作者租户是获准使用该连接的人所在企业，两者分别校验。'),
-      channelLink('https://open.feishu.cn/document/client-docs/bot-v3/obtain-bot-info', '飞书：获取机器人信息'));
+    form.append(note('读取不到机器人时，先发布包含机器人能力的初始版本再重试；完成事件订阅后还需发布新版本。'));
     const installation = channelField(form, '应用安装租户 tenant_key', 'installation_tenant', c?.installation_tenant || ''); installation.required = true;
+    form.append(note('填写机器人实际安装的飞书企业标识，用于核对事件来源。可在飞书 API 调试台调用“获取企业信息”，复制返回的 data.tenant.tenant_key；不要填写企业名称、企业编号 display_id、App ID 或 tenant_access_token。商店应用也可从该企业的应用启用事件或登录授权信息获取 tenant_key。'),
+      channelLink('https://open.feishu.cn/document/server-docs/tenant-v2/tenant/query', '飞书：获取企业信息'));
     const actors = channelField(form, '允许的操作者 tenant_key（逗号分隔）', 'actor_tenants', c?.actor_tenants.join(',') || ''); actors.required = true;
+    form.append(note('限定哪些飞书企业的成员可以发消息或点击卡片。同企业内部使用：与上面的安装租户填写同一个值。跨企业使用：填写获准企业的 tenant_key，以英文逗号分隔，例如 tenant_a,tenant_b。这里不授予项目权限；每人仍需完成身份绑定和项目授权。'));
     let verification, encryption;
     if (choice.transport === 'http') {
       verification = channelField(form, c ? 'Verification Token（留空保留）' : 'Verification Token', 'verification_token', '', 'password'); verification.required = !c || c.transport !== 'http';
@@ -94,7 +97,7 @@ async function renderFeishuSetup(panel, request) {
       const credentials = Object.fromEntries([['app_secret', secret.value.trim()], ['verification_token', verification?.value.trim()], ['encrypt_key', encryption?.value.trim()]].filter(([, value]) => value));
       try {
         const result = await api('/api/channels/connectors' + (c ? '/' + c.id : ''), c ? 'PATCH' : 'POST', { app_id: app.value.trim(), installation_tenant: installation.value.trim(), actor_tenants: actors.value.split(',').map(s => s.trim()).filter(Boolean),
-          bot_open_id: bot.value.trim(), application_type: choice.application_type, transport: choice.transport, enabled: enabled.checked, expected_revision: c?.revision ?? 0,
+          application_type: choice.application_type, transport: choice.transport, enabled: enabled.checked, expected_revision: c?.revision ?? 0,
           ...(Object.keys(credentials).length ? { credentials } : {}) });
         secret.value = ''; if (verification) verification.value = ''; if (encryption) encryption.value = '';
         feishuChoice = null; location.hash = feishuAddress(result.connector_id, 2);
@@ -127,8 +130,8 @@ async function renderFeishuSetup(panel, request) {
       probe.disabled = true; status.textContent = '正在检查…';
       try {
         const result = await api('/api/channels/feishu/probe', 'POST', { connector_id: c.id, expected_revision: c.revision });
-        status.className = 'view-success'; status.textContent = `凭据已验证 · ${result.name || result.bot_open_id}。尚未验证事件投递。`;
-        if (result.bot_open_id !== c.bot_open_id) { status.className = 'view-error'; status.textContent = '机器人 open_id 与保存值不同。请返回“应用凭据”更新并保存，之后重新检查。'; }
+        c.revision = result.revision; c.bot_open_id = result.bot_open_id;
+        status.className = 'view-success'; status.textContent = `凭据已验证 · ${result.name || '机器人'}，机器人身份已自动同步。尚未验证事件投递。`;
       } catch (err) { status.className = 'view-error'; status.textContent = feishuError(err); } finally { probe.disabled = false; }
     }, ''); body.append(probe, status); next('进入绑定与试用');
   } else {
