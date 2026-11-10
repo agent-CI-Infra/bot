@@ -221,3 +221,28 @@ test('task model calls use the shared address rule and keep their single 8192 ou
   const call = fake.requests.find(r => r.method === 'POST');
   assert.equal(call.path, '/v1/chat/completions'); assert.equal(call.body.max_tokens, 8192); assert.ok(!('max_completion_tokens' in call.body));
 });
+
+test('draft provider tests reuse only an authorized saved key, require a version and never save the draft',async t=>{
+  const h=await harness(t),{admin}=await setup(h),a=await account(admin),fake=await upstream(t);
+  await repository(admin,a.id,'101');await repository(admin,a.id,'202');
+  const savedKey=testPassword(),replacement=testPassword(),create=async repo=>(await admin('/api/models','POST',{repository_id:repo,api_url:fake.origin+'/saved/v1',api_key:savedKey,model_name:'saved'})).value.model;
+  const own=await create('101'),foreign=await create('202'),shared=await create(null),password=testPassword();
+  await admin('/api/users','POST',{username:'draft-prober',password,repository_ids:['101']});
+  await admin(`/api/models/${shared.id}/projects`,'PUT',{repository_ids:['101']});
+  const member=h.client();await member('/api/auth/login','POST',{username:'draft-prober',password});
+  const draft={version:own.version,api_url:fake.origin+'/v1',api_key:'',model_name:'draft-model'};
+  const result=await member(`/api/models/${own.id}/test`,'POST',draft);
+  assert.equal(result.value.ok,true);assert.equal(fake.requests.at(-1).authorization,'Bearer '+savedKey);assert.equal(fake.requests.at(-1).body.model,'draft-model');
+  const saved=(await member(`/api/models/${own.id}`)).value.model;
+  assert.equal(saved.api_url,own.api_url);assert.equal(saved.model_name,'saved');assert.equal(saved.version,own.version);
+  const calls=fake.requests.length;
+  assert.equal((await member(`/api/models/${own.id}/test`,'POST',{...draft,version:0})).status,409);
+  assert.equal((await member(`/api/models/${own.id}/test`,'POST',{model_name:'unversioned'})).status,400);
+  assert.equal((await member(`/api/models/${foreign.id}/test`,'POST',draft)).status,404);
+  assert.equal((await member(`/api/models/${shared.id}/test`,'POST',draft)).status,403);
+  assert.equal(fake.requests.length,calls);
+  const echoed=await member(`/api/models/${own.id}/test`,'POST',{...draft,api_url:fake.origin+'/echo/v1',api_key:replacement});
+  assert.equal(echoed.value.status,401);assert.ok(!JSON.stringify(echoed.value).includes(replacement));
+  assert.ok(!JSON.stringify((await admin('/api/audit')).value).includes(replacement));
+  assert.equal(h.store.secrets.open(h.store.get('SELECT api_key FROM models WHERE id=?',own.id).api_key,'model:'+own.id).value,savedKey);
+});
