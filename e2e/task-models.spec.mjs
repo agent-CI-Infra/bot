@@ -46,7 +46,15 @@ test('角色详情查看规则来源，模型独立管理且项目不能修改�
     await expect(page.getByRole('table', { name: '工作类型模型', exact: true })).toBeVisible();
     const sharedCard = page.locator('.side-card').filter({ has: page.getByRole('heading', { name: '部署共享模型', exact: true }) });
     await expect(sharedCard).toContainText('Shared model');
-    await expect(sharedCard.locator('button, input, select, form')).toHaveCount(0);
+    // Searching an authorized read-only list changes visibility, never models, credentials or defaults.
+    await expect(sharedCard.locator('button, input:not([type=search]), select, form')).toHaveCount(0);
+    const writes=[],record=req=>{if(req.method()!=='GET'&&new URL(req.url()).pathname.startsWith('/api/'))writes.push(req.method());};
+    page.on('request',record);
+    await sharedCard.getByLabel('搜索供应商或模型',{exact:true}).fill('no-shared-match');
+    await expect(sharedCard.locator('.model-entry:visible')).toHaveCount(0);
+    await sharedCard.getByLabel('搜索供应商或模型',{exact:true}).fill('');
+    await expect(sharedCard.locator('.model-entry:visible')).toHaveCount(1);
+    page.off('request',record);expect(writes).toEqual([]);
     const custom = row('custom.science');
     await expect(custom.getByRole('combobox', { name: '任务模型', exact: true })).toHaveValue(obsolete.id);
     await expect(custom.locator('option:checked')).toContainText('模型不可用');
