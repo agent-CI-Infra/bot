@@ -24,10 +24,39 @@ function makeRepo(id){
 }
 for(const id of ['101','202','303'])repositories.set(id,makeRepo(id));
 let config={github_token:'',model_key:''},treeMismatch=false,staled=false,dropComment=true,pullFailures=0;
-const stats={requests:[],models,refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[],issues:[]};
+const stats={requests:[],models,dispatches:[],acceptances:[],refWrites:[],reviews:[],comments:[],prs:[],labels:[],trees:[],issues:[]};
 const call=(name,args,id)=>({id:'call-'+id,type:'function',function:{name,arguments:JSON.stringify(args)}});
+function dispatch(context){
+  const {event,options}=context;
+  if(/^thanks[!.\s]*$/i.test(event.facts.comment?.body||''))return {decision:'ignore',option_ids:[],reason:'只是致谢，无需处理。'};
+  if(options.continue.length)return {decision:'continue',option_ids:[options.continue[0].id],reason:'将更新加入尚未发布的检视。'};
+  const work=event.type==='review.published'?`development.${event.object.type}`:`review.${event.object.type}`;
+  const option=options.create.find(option=>option.work===work);
+  const review=event.facts.review;
+  if(!option||event.type==='review.published'&&event.object.type==='issue'&&(!review?.quote_in_issue||!review.requires_code_change||review.clarification_required||event.facts.development?.assignees?.length||event.facts.development?.bot_pull_request))
+    return {decision:'ignore',option_ids:[],reason:'没有符合本场景的待办工作。'};
+  return {decision:'create',option_ids:[option.id],reason:event.type==='review.published'?'按已发布的检视启动开发。':'检视这次对象事件。'};
+}
 function model(input){
-  const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw),repoId=context.repository.split('-').at(-1),repo=repositories.get(repoId),number=context.object.number;
+  const raw=input.messages.find(m=>m.role==='user').content,context=JSON.parse(Array.isArray(raw)?raw.map(c=>c.text||'').join(''):raw);
+  // Manager requests have event/options, not the task agent's repository/object context.
+  if(input.tools?.some(tool=>tool.function?.name==='dispatch')){
+    const decision=dispatch(context);stats.dispatches.push({event:context.event,options:context.options,decision,model:input.model});
+    return call('dispatch',decision,'dispatch');
+  }
+  // Independent acceptance inspects the fixed candidate, not the executor's repository/object prompt.
+  if(input.tools?.some(tool=>tool.function?.name==='submit_acceptance')){
+    const calls=input.messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls||[]);
+    stats.acceptances.push({candidate:context.candidate.id,model:input.model,calls:calls.map(c=>c.function.name)});
+    if(!calls.some(c=>c.function.name==='read_file'))return call('read_file',{path:'calc.mjs'},'inspect');
+    const source=context.candidate.evidence.find(e=>/^(task_log|task_history):/.test(e.source)&&!calls.some(c=>c.function.name==='read_evidence'&&JSON.parse(c.function.arguments).source===e.source))?.source;
+    if(source)return call('read_evidence',{source},'evidence-'+calls.length);
+    if(context.policy.test_command&&!calls.some(c=>c.function.name==='run_command'))return call('run_command',{command:context.policy.test_command},'verify');
+    const results=input.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));
+    const failed=results.some(r=>r.error||r.exit_code!==undefined&&r.exit_code!==0);
+    return call('submit_acceptance',{outcome:failed?'return':'pass',reason:failed?'Candidate inspection or verification failed.':'Inspected the candidate and its original evidence; required tests passed.',gaps:failed?['Candidate verification failed.']:[],residuals:[],core_complete:!failed,required_evidence_complete:!failed,acceptable_risk:!failed},'accept');
+  }
+  const repoId=context.repository.split('-').at(-1),repo=repositories.get(repoId),number=context.object.number;
   models.push({repository:repoId,number,mode:context.mode,messages:input.messages,model:input.model});
   const tools=input.messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls||[]),names=tools.map(t=>t.function.name);
   let result;
