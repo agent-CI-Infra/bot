@@ -8,7 +8,7 @@ import { ChannelConnections } from '../dist/channels/connections.js';
 import { channelFixture, transport, connector, envelope, post, until, finished, bindFixture, directQuery, group, inGroup, cardEvent, cardToken, digest, credentials } from './channel-fixture.mjs';
 import { managerSection } from './helpers.mjs';
 
-test('Feishu verifies raw signatures, decryption, app/tenant, freshness and limited bot addressing before durable acknowledgement', async t => {
+test('Feishu verifies raw signatures, decryption and app/tenant before persisting all delivered messages independently of addressing', async t => {
   const { h, id, wire } = await channelFixture(t);
   assert.equal((await post(h, id, envelope(), { headers: { 'X-Lark-Signature': '0'.repeat(64) } })).status, 401);
   assert.equal((await post(h, id, envelope(), { timestamp: 1 })).status, 401);
@@ -16,9 +16,10 @@ test('Feishu verifies raw signatures, decryption, app/tenant, freshness and limi
   assert.equal((await post(h, id, envelope('', { header: { tenant_key: 'wrong' } }))).status, 403);
   assert.equal((await post(h, id, envelope('', { sender: { tenant_key: '' } }))).status, 400);
   assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, 0);
-  for (const ignored of [envelope('loop', { sender: { sender_type: 'app' } }), envelope('all group messages', { message: { chat_type: 'group' } }), envelope('old', { message: { create_time: '1' } })]) {
-    assert.equal((await post(h, id, ignored)).value.state, 'ignored');
+  for (const quiet of [envelope('loop', { sender: { sender_type: 'app' } }), envelope('all group messages', { message: { chat_type: 'group' } }), envelope('old', { message: { create_time: '1' } })]) {
+    assert.equal((await post(h, id, quiet)).value.state, 'completed');
   }
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_messages').n, 3);
   const challenge = await post(h, id, { type: 'url_verification', challenge: 'fixture-challenge', token: credentials.verification_token }, { encrypted: true });
   assert.deepEqual(challenge.value, { challenge: 'fixture-challenge' });
   const data = envelope(directQuery()), result = await post(h, id, data, { encrypted: true });

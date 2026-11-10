@@ -69,19 +69,20 @@ async function renderFeishuSetup(panel, request) {
     const permissions = element('div'), installationNote = note('企业自建应用需先开通“获取企业信息”（tenant:tenant:readonly）应用身份权限，并发布包含机器人能力和该权限的初始版本、通过必要审核，再进入下一步保存连接；否则无法自动获取安装企业。');
     const sync = () => {
       transport.options[0].disabled = application.value === 'saas'; if (application.value === 'saas') transport.value = 'http';
-      const scopes = ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write'];
+      const scopes = ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write',
+        'im:message.group_msg', 'im:message:readonly', 'im:chat.members:bot_access', 'im:chat.members:read', 'im:chat:read'];
       if (application.value === 'enterprise') scopes.push('tenant:tenant:readonly');
       permissions.replaceChildren(channelCopy('基础权限 JSON', JSON.stringify({ scopes: { tenant: scopes, user: [] } }, null, 2)));
       installationNote.hidden = application.value !== 'enterprise';
     };
     application.addEventListener('change', sync); sync();
-    body.append(note('需要飞书应用开发权限；发布版本可能需要企业管理员审核。使用应用机器人接收私聊和群内 @ 消息。'), choices,
+    body.append(note('需要飞书应用开发权限；发布版本可能需要企业管理员审核。应用机器人会将平台投递的私聊和群消息保存到本地。全量群消息属于敏感权限，必须由应用管理员审批并发布。'), choices,
       channelLink('https://open.feishu.cn/app', '打开飞书开发者后台', 'button-link'), feishuList([
         '创建或打开飞书应用，在“添加应用能力”中开启机器人。已有应用可以直接继续。',
         '在“权限管理 → 批量导入/导出”导入下方当前应用类型的默认权限，包含消息收发和卡片创建与更新；企业自建另含获取企业信息。成员变更和应用生命周期事件按订阅界面的提示开通所需权限。',
         '记录“凭证与基础信息”里的 App ID、App Secret。HTTP 接收还需“事件与回调 → 加密策略”里的 Verification Token 和 Encrypt Key。']),
       permissions, installationNote,
-      note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。已有应用也需补齐并发布新版本。不申请读取全部群消息或群历史的权限。'),
+      note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。历史读取使用 im:message:readonly，群历史还需要 im:message.group_msg。缺权限会显示同步受阻；不会宣称已同步全部历史。'),
       note('长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台并登录平台，可使用本地账户或 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
       channelLink('#/settings/access', '配置公网 HTTPS 地址'), button('应用已准备，填写凭据', () => { feishuChoice = { id, application_type: application.value, transport: transport.value }; go(); }, ''));
   } else if (step === 1) {
@@ -151,8 +152,8 @@ async function renderFeishuSetup(panel, request) {
       callbacks.append(note('切换到“事件与回调 → 回调配置”，选择“使用长连接接收回调”并单独保存，无需填写公网地址。'));
     }
     events.append(button('刷新连接状态', () => render().catch(error), 'quiet'),
-      note('在“事件配置 → 添加事件”添加 im.message.receive_v1（接收消息）。只接收私聊及群内 @，不订阅全部群消息。'),
-      note('同时添加 im.chat.member.user.added_v1、im.chat.member.user.deleted_v1，用于成员变化后使群接收范围失效；再添加应用卸载和状态变更事件。'));
+      note('在“事件配置 → 添加事件”添加 im.message.receive_v1（接收消息）和 im.message.recalled_v1（撤回消息）。获准投递的未 @ 群消息也会记录，记录不等于执行或回复。'),
+      note('同时添加 im.chat.member.bot.added_v1、im.chat.member.bot.deleted_v1、im.chat.disbanded_v1，以及 im.chat.member.user.added_v1、im.chat.member.user.deleted_v1。机器人进群启动可见历史同步；被移出、群解散或应用卸载会停止同步。成员变化使项目群接收范围失效。'));
     if (c.application_type === 'saas') events.append(note('商店应用还需配置 app_ticket 推送、安装租户和应用生命周期事件。尚未收到票据时无法检测发送凭据。'));
     callbacks.append(note('在“回调配置 → 添加回调”的“卡片”分类中，选择新版“卡片回传交互”（card.action.trigger，推荐）并添加。卡片按钮依赖此回调。'),
       note('不要选“消息卡片回传交互（旧）”（card.action.trigger_v1），旧版不支持长连接；新版回调应添加到“回调配置”。'));

@@ -5,7 +5,7 @@ import { digest, randomId } from '../dist/core/security.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
-  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0 };
+  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null };
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
       state.authStarted++;
@@ -19,6 +19,10 @@ export function transport() {
     if (url.endsWith('/tenant/v2/tenant/query')) {
       state.tenantStarted++; if (state.tenantGate) await state.tenantGate;
       return Response.json({ code: state.tenantCode, data: { tenant: { tenant_key: state.installationTenant, name: state.tenantName } }, msg: 'fixture-only-access-token' }, { status: state.tenantCode === 1184001 ? 403 : 200 });
+    }
+    if (init.method === 'GET' && url.includes('/im/v1/messages?')) {
+      state.historyRequests.push(url);
+      return state.history ? state.history(new URL(url)) : Response.json({ code: 0, data: { items: [], has_more: false } });
     }
     const request = JSON.parse(init.body); sent.push({ url, method: init.method, ...request, content: JSON.parse(request.content) });
     return Response.json({ code: 0, data: { message_id: 'remote-' + sent.length } });

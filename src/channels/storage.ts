@@ -1,6 +1,8 @@
 import type { Store } from '../storage/database.js';
+import { ledgerStorage } from './ledger.js';
 
 export function channelStorage(store: Store): void {
+  ledgerStorage(store);
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS channel_credentials(id TEXT PRIMARY KEY,sealed TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS channel_connectors(id TEXT PRIMARY KEY,provider TEXT NOT NULL,

@@ -99,6 +99,64 @@ async function channelDiagnostics(c, panel) {
   for (const op of operations.slice(0, 10)) view.append(note(`渠道操作 ${op.operation_id} · ${op.state}${op.error ? ' · ' + op.error : ''}${op.conversation_id ? ' · 会话 ' + op.conversation_id : ''}`));
   for (const d of deliveries.slice(0, 10)) view.append(note(`发送 ${d.id} · ${d.state} · 尝试 ${d.attempts}${d.last_error ? ' · ' + d.last_error : ''}`));
   panel.append(view);
+  await channelHistory(c, panel);
+}
+
+async function channelHistory(connector, panel) {
+  const section = card('本地消息与历史同步'), { chats } = await api('/api/channels/chats?connector_id=' + connector.id);
+  section.append(note('搜索只读取本地密封消息库，不向飞书回源。同步完成仅代表已遍历平台返回的可见范围，不能证明入群前历史或所有编辑均可见。附件当前仅保存资源引用，尚未下载或解析。'));
+  if (!chats.length) section.append(note('尚未收到此应用的会话事件。机器人进群或首次收到消息后会建立本地记录。'));
+  const form = element('form', '', 'project-form');
+  const select = channelSelect(form, '本地会话', 'chat', chats.map(c => [c.id, `${c.chat_type === 'group' ? '群' : '私信'} ${c.chat_id}`]));
+  const keyword = channelField(form, '消息关键词', 'keyword'), sender = channelField(form, '发送者 ID', 'sender_id');
+  const messageId = channelField(form, '消息 ID', 'message_id'), reply = channelField(form, '回复的消息 ID', 'reply_to');
+  const from = channelField(form, '开始时间', 'from', '', 'datetime-local'), to = channelField(form, '结束时间', 'to', '', 'datetime-local');
+  const queryButton = element('button', '搜索本地记录'); queryButton.type = 'submit'; queryButton.disabled = !chats.length;
+  const status = element('p', '', 'muted'), results = element('div'), controls = element('div', '', 'actions');
+  status.setAttribute('role', 'status'); results.setAttribute('aria-label', '本地消息搜索结果');
+  let cursor = null;
+  const search = async (more = false) => {
+    queryButton.disabled = true;
+    try {
+      if (!more) { cursor = null; results.replaceChildren(); }
+      const query = new URLSearchParams({ limit: '50' });
+      for (const input of [keyword, sender, messageId, reply]) if (input.value) query.set(input.name, input.value);
+      for (const input of [from, to]) if (input.value) query.set(input.name, String(new Date(input.value).getTime()));
+      if (cursor) query.set('cursor', cursor);
+      const result = await api(`/api/channels/chats/${select.value}/messages?${query}`);
+      cursor = result.next_cursor;
+      status.textContent = `同步：${result.sync_state}。缺口／未核验：${result.gaps.map(g => g.reason).join('、')}。保留策略：${result.retention.days === null ? '保留至管理员显式清理' : result.retention.days + ' 天'}。`;
+      if (!result.messages.length && !more) results.append(note('本地已同步范围没有匹配消息；这不代表飞书历史中从未存在。'));
+      for (const m of result.messages) {
+        const item = element('article', '', 'channel-binding');
+        item.append(element('strong', `${m.sender_id || '未知发送者'} · ${m.message_type}`), note(new Date(m.created_at).toLocaleString() + ' · ' + m.message_id),
+          element('p', m.content || '仅保存附件或资源引用，未解析'), ...(m.thread_id ? [note('话题 ' + m.thread_id)] : [])); results.append(item);
+      }
+      next.hidden = !result.has_more;
+    } catch (err) { status.textContent = err.message; } finally { queryButton.disabled = !chats.length; }
+  };
+  const next = button('读取下一页本地消息', () => search(true), 'quiet'); next.hidden = true;
+  controls.append(next, button('显式重新同步可见历史', async () => {
+    if (!select.value) return;
+    try { await api(`/api/channels/chats/${select.value}/sync`, 'POST', { full: true }); await search(); }
+    catch (err) { status.textContent = err.message; }
+  }, 'quiet'));
+  form.append(queryButton); form.addEventListener('submit', e => { e.preventDefault(); void search(); });
+  select.addEventListener('change', () => { void search(); });
+  const retention = element('form', '', 'project-form'), days = channelField(retention, '保留天数（留空保留至显式清理）', 'days', '', 'number');
+  days.min = '1'; days.max = '3650';
+  const before = channelField(retention, '显式清理此时间之前的记录', 'before', '', 'datetime-local');
+  const fresh = async () => (await api('/api/channels/chats?connector_id=' + connector.id)).chats.find(c => c.id === select.value);
+  retention.append(button('保存本地保留策略', async () => {
+    try { const chat = await fresh(); if (!chat) return; await api(`/api/channels/chats/${chat.id}/retention`, 'PUT', { days: days.value ? Number(days.value) : null, expected_revision: chat.revision }); await search(); }
+    catch (err) { status.textContent = err.message; }
+  }, 'quiet'), button('清理指定时间之前的本地记录', async () => {
+    if (!before.value || !confirm('清理会删除原文及派生摘要，并保留覆盖边界。继续？')) return;
+    try { const chat = await fresh(); if (!chat) return; await api(`/api/channels/chats/${chat.id}/retention`, 'DELETE', { before: new Date(before.value).getTime(), expected_revision: chat.revision }); await search(); }
+    catch (err) { status.textContent = err.message; }
+  }, 'quiet'));
+  section.append(form, status, results, controls, retention); panel.append(section);
+  if (chats.length) await search();
 }
 
 function channelLink(url, caption, className) {
