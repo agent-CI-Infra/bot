@@ -18,19 +18,21 @@ export const testPassword = () => randomBytes(20).toString('hex');
 export const randomWorkspaceId = () => randomBytes(24).toString('hex');
 export async function harness(t, manager, options = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'test-')), database = join(directory, 'control.sqlite'), key = randomBytes(32);
-  let store, servers;
+  let store, server;
   const h = { directory, database, key };
   h.start = async () => {
     store = new Store(database, key);
     h.projects = manager ? new ProjectService(store, manager) : undefined;
     const extra = typeof options === 'function' ? options(store) : options; h.external = extra.external;
-    servers = createControlPlane({ store, staticDirectory: resolve('static'), maxBodyBytes: 2048, projects: h.projects, ...extra });
-    for (const server of Object.values(servers)) { server.listen(0, '127.0.0.1'); await once(server, 'listening'); }
-    Object.assign(h, { store, admin: `http://127.0.0.1:${servers.admin.address().port}`, webhook: `http://127.0.0.1:${servers.webhook.address().port}` });
+    ({ server } = createControlPlane({ store, staticDirectory: resolve('static'), maxBodyBytes: 2048, projects: h.projects, ...extra }));
+    server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    // One listener serves the console and every delivery path; both names stay so tests read as the caller would use them.
+    const base = `http://127.0.0.1:${server.address().port}`;
+    Object.assign(h, { store, admin: base, webhook: base });
   };
   // A browser page may still hold open connections (including speculative ones without a request) when a test stops
   // its servers; close them instead of waiting for the browser to give them up.
-  h.stop = async () => { await h.external?.forwarder.close(); await Promise.all(Object.values(servers).map(server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }))); store.close(); };
+  h.stop = async () => { await h.external?.forwarder.close(); await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }); store.close(); };
   h.client = () => {
     let cookie = '', csrf = '';
     const client = async (path, method = 'GET', data, headers = {}) => {

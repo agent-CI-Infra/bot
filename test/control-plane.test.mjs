@@ -140,7 +140,8 @@ test('empty repository configuration never creates review or development tasks',
   await h.hook(a.path, a.secret, 'enabled', { action: 'opened', repository: { id: 101 } });
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 0);
   assert.deepEqual((await admin('/api/status')).value, { review_available: true, development_available: true, project_environments_available: true, model_calls_available: true });
-  assert.equal((await fetch(h.webhook + '/api/users')).status, 404);
+  // Deliveries and the console share one listener; a delivery path never stands in for a console session.
+  assert.equal((await fetch(h.webhook + '/api/users')).status, 401);
 });
 
 test('authentication, CSRF, origin and strict input checks guard management mutations', async t => {

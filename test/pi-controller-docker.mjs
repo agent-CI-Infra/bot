@@ -40,12 +40,12 @@ writeFileSync(override, `services:
     environment:
       BOT_PROJECT_IMAGE: ${image('project-computer')}
 `);
-const env = { ...process.env, DOCKER_CONFIG: resolve(out, 'docker'), BUILDX_CONFIG: resolve(out, 'buildx'), BOT_WEBHOOK_PORT: '18871', BOT_ADMIN_PORT: '18872' };
+const env = { ...process.env, DOCKER_CONFIG: resolve(out, 'docker'), BUILDX_CONFIG: resolve(out, 'buildx'), BOT_PORT: '18871' };
 const docker = args => execFileSync('docker', args, { env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 const compose = args => docker(['compose', '-f', 'compose.yaml', '-f', 'compose.build.yaml', '-f', override, '-p', project, ...args]);
-const base = 'http://127.0.0.1:18872', fixture = 'http://127.0.0.1:18874', id = () => randomBytes(24).toString('hex');
+const base = 'http://127.0.0.1:18871', fixture = 'http://127.0.0.1:18874', id = () => randomBytes(24).toString('hex');
 const password = id(), githubToken = id(), modelKey = id(), webhookSecret = id(); let cookie = '', csrf = '', deployment;
-const evidence = { project, ports: [18871, 18872, 18874], checks: [] };
+const evidence = { project, ports: [18871, 18874], checks: [] };
 const passed = (name, detail) => { evidence.checks.push({ name, ...(detail ? { detail } : {}) }); console.log('PASS ' + name); };
 async function wait(fn, description, ms = 240000) { const end = Date.now() + ms; while (Date.now() < end) { try { const value = await fn(); if (value) return value; } catch (error) { if (error.message.startsWith('Task failed:')) throw error; } await new Promise(r => setTimeout(r, 500)); } throw new Error('Timed out: ' + description); }
 async function api(path, method = 'GET', body) {

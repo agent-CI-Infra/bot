@@ -210,7 +210,7 @@ jobs:
           echo "BOT_IMAGE_TAG=$2" >> .env
           docker compose pull
           docker compose up -d
-          # The control-plane image's healthcheck turns healthy once the admin listener answers.
+          # The control-plane image's healthcheck turns healthy once the business listener (8791) answers.
           bot=$(docker compose ps -q bot)
           for _ in $(seq 1 40); do
             if [ "$(docker inspect --format '{{.State.Health.Status}}' "$bot")" = healthy ]; then docker compose ps; exit 0; fi

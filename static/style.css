@@ -22,6 +22,11 @@ a.status-link:hover{text-decoration:underline}
 #message:not(:empty),#task-error:not(:empty){display:flex;align-items:center;justify-content:space-between;gap:12px}#message>span,#task-error>span{min-width:0;overflow-wrap:anywhere}#message>button,#task-error>button{flex-shrink:0}
 
 .github-login-callback { display: block; overflow-wrap: anywhere; white-space: normal; }
+.login-guide { margin: 0; padding-left: 22px; display: grid; gap: 10px; }
+.login-guide li { min-width: 0; }
+.login-guide strong { display: block; margin-bottom: 2px; }
+.login-guide p { margin: 2px 0; }
+.login-addresses dd > span > .muted { display: block; }
 /* Management chat is mounted once per login, outside the pages that navigation replaces. */
 body:has(#management-launcher) main{padding-bottom:calc(96px + env(safe-area-inset-bottom))}
 .management-launcher{position:fixed;right:24px;bottom:24px;z-index:45;display:flex;align-items:center;gap:10px;padding:11px 18px 11px 11px;border:1px solid #286b73;border-radius:30px;background:#163f50;color:#fff;box-shadow:0 6px 24px #123d4e30;text-align:left}

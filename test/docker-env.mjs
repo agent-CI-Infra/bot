@@ -10,10 +10,10 @@ const project = 'dept-bot-env-e2e-' + randomBytes(4).toString('hex');
 const override = resolve('.tmp/project-env/compose.test.yaml');
 writeFileSync(override, 'services:\n  manager:\n    ports: ["127.0.0.1:18883:8793"]\n');
 const composeArgs = ['compose','-f','compose.yaml','-f','compose.build.yaml','-f',override,'-p',project];
-const env = { ...process.env, BOT_WEBHOOK_PORT: '18881', BOT_ADMIN_PORT: '18882', DOCKER_CONFIG: resolve('.cache/docker'), BUILDX_CONFIG: resolve('.cache/buildx') };
+const env = { ...process.env, BOT_PORT: '18881', DOCKER_CONFIG: resolve('.cache/docker'), BUILDX_CONFIG: resolve('.cache/buildx') };
 const docker = args => execFileSync('docker', args, { env, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
 const compose = args => docker([...composeArgs, ...args]);
-const base = 'http://127.0.0.1:18882', managerUrl = 'http://127.0.0.1:18883';
+const base = 'http://127.0.0.1:18881', managerUrl = 'http://127.0.0.1:18883';
 const id = () => randomBytes(24).toString('hex');
 const password = id(), memberPassword = id(), githubToken = id(), modelKey = id();
 const privateKey = generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}), webhookSecret=id();
@@ -36,7 +36,7 @@ async function manager(repo, action, request, generation = 1, operation = id()) 
   const value = await response.json(); if (!response.ok) throw new Error(value.error); return value.result;
 }
 const run = (repo, command, generation = 1, operation) => manager(repo, 'execute', { type:'command',command }, generation, operation);
-const evidence = { checks:[], ports:[18881,18882,18883], project };
+const evidence = { checks:[], ports:[18881,18883], project };
 function passed(name) { evidence.checks.push(name); console.log('PASS ' + name); }
 function inspect(name) { return JSON.parse(docker(['inspect',name]))[0]; }
 try {

@@ -63,7 +63,6 @@ test('unknown, expired, revoked and disabled grants cannot poll, and repository 
   assert.equal((await poll(h,'unknown-secret')).status,401);
   assert.equal((await fetch(h.webhook+'/external/events')).status,401);
   assert.equal((await poll(h,g.token,'/external/events?repository_id=202')).status,400);
-  assert.equal((await fetch(h.adminBase+'/external/events',{headers:{Authorization:'Bearer '+g.token}})).status,404);
   assert.equal((await poll(h,a.privateKey.export({type:'pkcs8',format:'pem'}).replaceAll('\n',''))).status,401);
   h.store.run('UPDATE external_grants SET expires_at=? WHERE id=?',new Date(Date.now()-1).toISOString(),g.grant_id);assert.equal((await poll(h,g.token)).status,401);
   h.store.run('UPDATE external_grants SET expires_at=? WHERE id=?',new Date(Date.now()+3600000).toISOString(),g.grant_id);

@@ -12,7 +12,7 @@ const docker = args => execFileSync('docker', args, { env, encoding: 'utf8', max
 const file = resolve(output, 'compose.json'), empty = resolve(output, 'empty.env'); writeFileSync(empty, '');
 writeFileSync(file, JSON.stringify({ services: { identity: { image, command: ['node', 'test/fixtures/github-identity-control.mjs'],
   volumes: ['data:/data', `${resolve('test/fixtures/github-identity-control.mjs')}:/app/test/fixtures/github-identity-control.mjs:ro`],
-  ports: ['127.0.0.1::8792', '127.0.0.1::8080'], read_only: true, tmpfs: ['/tmp'] } }, volumes: { data: {} } }));
+  ports: ['127.0.0.1::8791', '127.0.0.1::8080'], read_only: true, tmpfs: ['/tmp'] } }, volumes: { data: {} } }));
 const compose = args => docker(['compose', '--env-file', empty, '-p', project, '-f', file, ...args]);
 const evidence = { project, image, checks: [], github: '本地模拟，无真实 GitHub 写入' }; let browser, page, base, fixture;
 const passed = value => { evidence.checks.push(value); console.log('PASS ' + value); };
@@ -20,7 +20,7 @@ async function ready() { for (let i = 0; i < 100; i++) { try { if ((await fetch(
 const post = (path, body) => fetch(fixture + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 try {
   writeFileSync(resolve(output, 'build.log'), docker(['build', '-t', image, '.'])); compose(['up', '-d']);
-  base = 'http://' + compose(['port', 'identity', '8792']).trim(); fixture = 'http://' + compose(['port', 'identity', '8080']).trim(); await ready();
+  base = 'http://' + compose(['port', 'identity', '8791']).trim(); fixture = 'http://' + compose(['port', 'identity', '8080']).trim(); await ready();
   await post('/fixture/config', { origin: base, fixture });
   const password = randomBytes(20).toString('hex');
   assert.equal((await fetch(base + '/api/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'recovery', password }) })).status, 201);
@@ -34,7 +34,7 @@ try {
   assert.ok((await page.locator('#identity-panel').innerText()).includes('组织管理员'));
   assert.ok(!(await page.locator('body').innerText()).includes('docker-fixture-user'));
   await page.screenshot({ path: resolve(output, 'login.png'), fullPage: true }); passed('独立容器真实浏览器完成 S256 登录并展示派生组织权限，无 token 回显');
-  compose(['restart', 'identity']); base = 'http://' + compose(['port', 'identity', '8792']).trim(); fixture = 'http://' + compose(['port', 'identity', '8080']).trim(); await ready(); await post('/fixture/config', { origin: base, fixture }); await page.goto(base + '/#/identity');
+  compose(['restart', 'identity']); base = 'http://' + compose(['port', 'identity', '8791']).trim(); fixture = 'http://' + compose(['port', 'identity', '8080']).trim(); await ready(); await post('/fixture/config', { origin: base, fixture }); await page.goto(base + '/#/identity');
   await page.getByRole('heading', { name: '当前角色与授权来源' }).waitFor();
   assert.ok((await page.locator('#identity-panel').innerText()).includes('组织管理员')); passed('容器重启后二次迁移保留本地恢复账号、外部身份、会话和授权来源');
   await post('/fixture/owner', { owner: false }); await page.getByRole('button', { name: '重新验证 GitHub 权限' }).click();

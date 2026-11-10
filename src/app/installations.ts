@@ -83,6 +83,11 @@ export function recordInstallationEvent(store: Store, accountId: string, event: 
 function githubOrigin(value: unknown): string {
   try { const url = new URL(String(value)); return url.protocol === 'https:' ? url.origin : 'https://github.com'; } catch { return 'https://github.com'; }
 }
+/** An App's settings page (General): organization-owned Apps live under the organization, others under the owner's settings. */
+export function appSettingsUrl(app: { slug?: unknown; html_url?: unknown; owner?: { login?: unknown; type?: unknown } | null }): string {
+  const slug = encodeURIComponent(String(app.slug || '')), origin = githubOrigin(app.html_url);
+  return app.owner?.type === 'Organization' ? `${origin}/organizations/${encodeURIComponent(String(app.owner.login))}/settings/apps/${slug}` : `${origin}/settings/apps/${slug}`;
+}
 export class InstallationSync {
   private readonly running = new Map<string, Promise<Json>>();
   private readonly leases = new Map<string, SyncClaim>();
@@ -202,8 +207,7 @@ export class InstallationSync {
     let app: any;
     try { app = await this.request('/app', jwt); }
     catch (error) { return fail(502, /^[a-z_0-9]+$/.test((error as Error).message) ? (error as Error).message : 'github_unavailable'); }
-    const slug = encodeURIComponent(String(app.slug || '')), owner = app.owner as Json | undefined, origin = githubOrigin(app.html_url);
-    const settings = owner?.type === 'Organization' ? `${origin}/organizations/${encodeURIComponent(String(owner.login))}/settings/apps/${slug}/permissions` : `${origin}/settings/apps/${slug}/permissions`;
+    const owner = app.owner as Json | undefined, settings = appSettingsUrl(app) + '/permissions';
     const appMissing = missingPermissions(app.permissions), appEventsMissing = missingEvents(app.events);
     // What only some features need beyond the baseline; reported alongside, without failing the baseline check.
     const featureGaps = appGaps(app.permissions, app.events).filter(gap => gap.kind === 'permission' ? !appMissing.some(item => item.permission === gap.name) : !appEventsMissing.includes(gap.name));

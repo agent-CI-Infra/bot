@@ -4,12 +4,13 @@ import { dirname } from 'node:path';
 import type { Store } from '../storage/database.js';
 import { type Actor, superAdmin } from '../app/auth.js';
 import { fail, fields, randomId, text, type Json } from '../core/security.js';
-import { publicOrigin, probeGet } from './public-url.js';
+import { publicOrigin, probeGet, loginCallbackPath, registrationPath, setupPath } from './public-url.js';
 import { appEvents, appJwt, appPermissions } from '../github/client.js';
 import { defaults } from '../rules/service.js';
 import { installationAccount, accountInstallUrl } from './installation-target.js';
 import { InstallationSetup } from '../installations/setup.js';
 import { tunnelToken } from './tunnel-token.js';
+import { appSettingsUrl } from '../app/installations.js';
 import type { GitHubLogin } from '../identity/github-login.js';
 
 interface Options { tunnelFile?: string; tunnelMetrics?: string; githubUrl?: string; fetcher?: typeof fetch; probe?: typeof probeGet; githubLogin?: GitHubLogin }
@@ -20,20 +21,21 @@ export class Onboarding {
   }
   saved(key: string): any { const value = this.store.get('SELECT value FROM settings WHERE key=?', 'onboarding.' + key)?.value; return value ? JSON.parse(value) : null; }
   save(key: string, value: unknown) { this.store.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'onboarding.' + key, JSON.stringify(value)); }
-  probe(nonce: string, listener: string): Json {
+  probe(nonce: string): Json {
     for (const [id, value] of this.challenges) if (value.until < Date.now()) this.challenges.delete(id);
     const value = this.challenges.get(nonce);
     if (!value) return fail(404, 'probe_expired');
-    return { listener, proof: listener === 'webhook' ? value.proof : 'management_listener' };
+    return { proof: value.proof };
   }
+  // The console, OAuth, App callbacks and webhooks share this listener, so an origin that answers with this instance's
+  // one-time proof reaches all of them. probeGet pins public DNS answers and never follows a redirect; another instance or
+  // anything else on the route cannot produce the proof.
   async check(origin: string) {
     const nonce = randomId(), proof = randomId(); this.challenges.set(nonce, { proof, until: Date.now() + 60000 });
     try {
       const get = this.options.probe || probeGet, result = await get(origin + '/.well-known/bot-webhook-probe?nonce=' + nonce);
       let value: any; try { value = JSON.parse(result.body); } catch { return fail(400, 'webhook_probe_failed'); }
-      if (result.status !== 200 || value.listener !== 'webhook' || value.proof !== proof) return fail(400, value.listener === 'admin' ? 'management_port_exposed' : 'webhook_probe_failed');
-      // Also reject split routing that sends the probe to webhook but the console/API to admin.
-      for (const path of ['/', '/api/setup', '/app.js']) if ((await get(origin + path)).status !== 404) return fail(400, 'management_or_other_service_exposed');
+      if (result.status !== 200 || value?.proof !== proof) return fail(400, 'webhook_probe_failed');
     } catch (error) { if ((error as any)?.status) throw error; return fail(400, 'public_webhook_unreachable'); }
     finally { this.challenges.delete(nonce); }
     this.save('public', { origin, checked_at: new Date().toISOString() }); return this.saved('public');
@@ -87,12 +89,19 @@ export class Onboarding {
     return {account:{id:String(targetAccount.id),login:targetAccount.login,type:targetAccount.type,html_url:'https://github.com/'+targetAccount.login},installed:!!installed,
       install_url:installUrl.href};
   }
-  async api(user: Actor, method: string, url: URL, input: Json, adminOrigin: string): Promise<Json | undefined> {
+  // The App's owner decides where its settings page lives; older saved selections lack it until the App is checked again.
+  private owner(app: any): Json {
+    const login = app?.owner?.login, type = app?.owner?.type;
+    if (typeof login !== 'string' || !['User', 'Organization'].includes(type)) return {};
+    return { owner: login, owner_type: type, settings_url: appSettingsUrl(app) };
+  }
+  /** consoleOrigin is where the administrator uses the console; it only receives the one-time manifest return. */
+  async api(user: Actor, method: string, url: URL, input: Json, consoleOrigin: string): Promise<Json | undefined> {
     if (!url.pathname.startsWith('/api/onboarding')) return undefined; superAdmin(user);
-    if (method === 'GET' && url.pathname === '/api/onboarding') return { public_address: this.saved('public'), tunnel: await this.tunnelStatus(), app: this.saved('app'), model_id: this.saved('model'), defaults, installation_skipped: !!this.saved('installation_skipped'), complete: !!this.saved('complete'), github_login: this.options.githubLogin?.view(adminOrigin) };
+    if (method === 'GET' && url.pathname === '/api/onboarding') return { public_address: this.saved('public'), tunnel: await this.tunnelStatus(), app: this.saved('app'), model_id: this.saved('model'), defaults, installation_skipped: !!this.saved('installation_skipped'), complete: !!this.saved('complete'), github_login: this.options.githubLogin?.view(consoleOrigin) };
     if (url.pathname === '/api/onboarding/github-login' && method === 'PUT') {
       if (!this.options.githubLogin) return fail(503, 'github_login_configuration_unavailable');
-      return { github_login: this.options.githubLogin.update(user, input, adminOrigin) };
+      return { github_login: this.options.githubLogin.update(user, input, consoleOrigin) };
     }
     if(method==='POST'&&url.pathname==='/api/onboarding/installation-target'){fields(input,['target']);return this.installationTarget(input.target);}
     if (method === 'POST' && url.pathname === '/api/onboarding/model') {
@@ -115,7 +124,7 @@ export class Onboarding {
           if(!r.ok)throw new Error();const confirmed:any=await get('/app/hook/config');if(confirmed.url!==webhookUrl)throw new Error();
         }
       } catch { return fail(502, 'github_app_check_failed'); }
-      const value = { account_id: account!.id, app_id: String(app.id), slug: app.slug, installations: installations.length, ...(webhookUrl?{webhook_url:webhookUrl}:{}), install_url: `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new` };
+      const value = { account_id: account!.id, app_id: String(app.id), slug: app.slug, ...this.owner(app), installations: installations.length, ...(webhookUrl?{webhook_url:webhookUrl}:{}), install_url: `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new` };
       if (typeof app.client_id === 'string') this.store.run('UPDATE accounts SET credentials=? WHERE id=?',
         this.store.secrets.seal({ ...secrets, oauth_client_id: app.client_id }, 'account:' + account!.id), account!.id);
       this.save('app', value); this.save('installation_skipped', false); return { app: value };
@@ -139,8 +148,10 @@ export class Onboarding {
       if (!address?.origin) fail(409, 'public_address_not_verified');
       const state = randomId(), account = randomId(), endpoint = randomId();
       this.store.run("INSERT INTO app_manifest_states VALUES(?,?,?,?,?,'pending')", state, user.id, account, endpoint, Date.now() + 15 * 60000);
-      const manifest = { name, url: address.origin, redirect_url: adminOrigin + '/onboarding/github/callback', setup_url: adminOrigin + '/onboarding/github/setup', public: input.public===true,
-        callback_urls: [adminOrigin + '/auth/github/callback'],
+      // Everything GitHub keeps in the App lives on the verified entry. redirect_url only returns this browser once, to the
+      // console it started from.
+      const manifest = { name, url: address.origin, redirect_url: consoleOrigin + registrationPath, setup_url: address.origin + setupPath, public: input.public===true,
+        callback_urls: [address.origin + loginCallbackPath],
         hook_attributes: { url: address.origin + `/hooks/github/${account}/${endpoint}`, active: true },
         default_permissions: { ...appPermissions, members: 'read' }, default_events: [...appEvents, 'organization'] };
       return { manifest, create_url: `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new?state=${state}`, expires_in: 900 };
@@ -165,7 +176,7 @@ export class Onboarding {
       this.store.run('INSERT INTO accounts VALUES(?,?,?,?,?,?)', pending!.account_id, value.name || value.slug, 'github_app', String(value.id), this.store.secrets.seal({ private_key: value.pem,
         ...(typeof value.client_id === 'string' && typeof value.client_secret === 'string' ? { oauth_client_id: value.client_id, oauth_client_secret: value.client_secret } : {}) }, 'account:' + pending!.account_id), new Date().toISOString());
       this.store.run('INSERT INTO endpoints VALUES(?,?,?)', pending!.endpoint_id, pending!.account_id, this.store.secrets.seal({ value: value.webhook_secret }, 'endpoint:' + pending!.endpoint_id));
-      this.save('app', { account_id: pending!.account_id, app_id: String(value.id), slug: value.slug, install_url: `https://github.com/apps/${encodeURIComponent(value.slug)}/installations/new` });
+      this.save('app', { account_id: pending!.account_id, app_id: String(value.id), slug: value.slug, ...this.owner(value), install_url: `https://github.com/apps/${encodeURIComponent(value.slug)}/installations/new` });
       this.store.run("UPDATE app_manifest_states SET status='completed' WHERE state=?", state); this.store.audit(pending!.user_id, 'onboarding.app_created', pending!.account_id);
     });
   }

@@ -1,9 +1,10 @@
 import http from 'node:http';
 
-// The edge network has this fixed webhook gateway, never the bot or manager themselves.
-// Neither the request URL nor Host header can select the upstream port.
+// The edge network has this fixed gateway to the bot's single business listener, never the manager or other bot ports.
+// Neither the request URL nor Host header can select the upstream. The whole public entry passes here: the console waits
+// on GitHub and model calls, so an upstream may stay silent longer than a webhook delivery would.
 const proxy=http.createServer((req,res)=>{
-  const upstream=http.request({host:'bot',port:8791,method:req.method,path:req.url,headers:req.headers,timeout:30000},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res);});
+  const upstream=http.request({host:'bot',port:8791,method:req.method,path:req.url,headers:req.headers,timeout:120000},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res);});
   upstream.on('timeout',()=>upstream.destroy());upstream.on('error',()=>{if(!res.headersSent)res.writeHead(502);res.end();});req.on('aborted',()=>upstream.destroy());req.pipe(upstream);
 });
 proxy.requestTimeout=30000;proxy.headersTimeout=10000;proxy.listen(8791,'0.0.0.0');

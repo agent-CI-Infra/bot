@@ -10,7 +10,7 @@
 
 - Docker Engine 和 Docker Compose v2（`docker compose version` 能输出版本）。
 - 一个 GitHub 组织，以及能在其中创建和安装 GitHub App 的账号（组织所有者或 GitHub App 管理员）。
-- 一个公网 HTTPS 入口，让 GitHub 能把 Webhook 送到这台机器：自己的域名加 HTTPS 反向代理，或者 Cloudflare Tunnel。
+- 一个公网 HTTPS 入口（一个域名）：控制台、用户登录、GitHub 回调和 Webhook 都经它到达这台机器。可以是自己的域名加 HTTPS 反向代理，或者 Cloudflare Tunnel。
 - 一个兼容 Chat Completions 的模型：接口 URL、API Key 和模型名。
 
 ## 启动
@@ -23,7 +23,7 @@ curl -fsSLO https://raw.githubusercontent.com/agent-CI-Infra/bot/main/compose.ya
 docker compose up -d
 ```
 
-然后在这台机器的浏览器打开 <http://127.0.0.1:8792/>。Bot 装在远程服务器上时，先 `ssh -L 8792:127.0.0.1:8792 <服务器>`，再在自己电脑上打开同一地址。
+然后在这台机器的浏览器打开 <http://127.0.0.1:8791/>。Bot 装在远程服务器上时，先 `ssh -L 8791:127.0.0.1:8791 <服务器>`，再在自己电脑上打开同一地址。配好公网 HTTPS 入口后，也可以直接从那个地址使用控制台。
 
 镜像发布在 GHCR，匿名拉取要求这些包已公开；如果拉取报 `denied` 或 `unauthorized`，克隆本仓库后[从源码构建](deployment.md#从源码构建)。
 
@@ -31,9 +31,9 @@ docker compose up -d
 
 1. **创建超级管理员。** 首页显示「创建第一名超级管理员」：填用户名和 12–256 位密码，点「初始化并登录」。初始化只成功一次，之后这里只有登录。
 2. **走完接入向导。** 首次登录会自动打开「全局设置 → 接入向导」（仅系统超级管理员可用），按页内的七步走：
-   1. 公网 HTTPS：选「自建 HTTPS 中转」，把一个专用域名整个反向代理到 `http://<这台机器>:8791`，填 `https://<你的域名>`，点「检查并使用」。或者选「Cloudflare Tunnel」，粘贴 tunnel token 点「保存 token」，在 Cloudflare 的 Published application 把 Service URL 设为 `http://webhook:8791`，回到向导点该路由的「检查并使用此域名」。这两种 webhook 接入都不转发 8792；多人登录控制台时另配独立 HTTPS 管理入口。
+   1. 公网 HTTPS：选「自建 HTTPS 中转」，把一个专用域名整个反向代理到 `http://<这台机器>:8791`，填 `https://<你的域名>`，点「检查并使用」。或者选「Cloudflare Tunnel」，粘贴 tunnel token 点「保存 token」，在 Cloudflare 的 Published application 把 Service URL 设为 `http://webhook:8791`，回到向导点该路由的「检查并使用此域名」。这个域名是唯一的入口，控制台、登录和 Webhook 都走它，不需要第二个域名或端口；反向代理在另一台机器时，先在 `.env` 设置 `BOT_BIND_ADDRESS=0.0.0.0`。
    2. GitHub App：填「App 所属组织」和「App 名称」，点「准备 GitHub 确认页」→「前往 GitHub 确认创建」，在 GitHub 上确认后会回到向导。权限固定为 Contents、Issues、Pull requests、Commit statuses、Actions、Checks 写，Metadata、Members 读（Actions、Checks、Commit statuses 让检视和开发任务能用只读令牌查看 CI 状态，这三项的写权限留给控制面发布状态、检查结果和重跑 CI；之前创建的 App 要在 GitHub 上补加），订阅 `issues`、`pull_request`、`issue_comment`、`pull_request_review`、`pull_request_review_comment` 和 `organization`（已有 App 需由所有者在 Permissions & events 勾选 Issue comment、Pull request review、Pull request review comment 并保存，评论和检视回复才会触发再次检视；「检查权限和事件订阅」会列出缺少的事件）；Webhook 地址 `https://<你的域名>/hooks/github/<account_id>/<endpoint_id>` 由向导写进 App，不用手填。已在「全局设置 → 机器人账号」登记过的 App 点「使用此 App」。
-   3. GitHub 登录：复用同一个 App，填写 Client ID、Client secret 和控制台访问地址，把页面给出的 `/auth/github/callback` 加到 App 用户授权 Callback URL 后勾选启用并保存。新建 App 可复用向导已加密保存的凭据。公网访问需独立 HTTPS 管理域名转发至 8792；本机可用 loopback HTTP。Secret 不回读，留空保留，停用后本地恢复账号仍可用。详见[接入说明](onboarding.md#github-用户登录)。
+   3. GitHub 登录：复用同一个 App，按页面四步操作：从页面链接打开 App 设置，复制 Client ID（不是 App ID），生成 Client secret（向导新建的 App 已带回凭据，不用再生成），把页面给出的 `https://<你的域名>/auth/github/callback` 加到 App 的 Callback URL，然后勾选启用并保存。Secret 不回读，留空保留，停用后本地恢复账号仍可用。详见[接入说明](onboarding.md#github-用户登录)。
    4. 安装：点「在 GitHub 安装此 App」，选好仓库后回来点「重新检查安装」。
    5. 模型：在「添加模型」填接口 URL、API Key、模型名，点「保存并继续」。URL 下方会显示实际的对话地址和模型列表地址；bot 不会替你补上或去掉 `/v1`，地址不以 `/v1` 结尾时页面会提示。保存前可以点「获取模型列表」从上游选模型名，或点「测试模型」确认 URL、Key 和模型名可用。
    6. 规则：看一下内置规则，点「下一步」。
@@ -102,8 +102,9 @@ docker compose up -d
 
 在 `compose.yaml` 同目录的 `.env` 里写变量，然后重新 `docker compose up -d`：
 
-- 改宿主端口：`BOT_WEBHOOK_PORT`（默认 `8791`）、`BOT_ADMIN_PORT`（默认 `8792`）。
-- 远程管理：另做一个 HTTPS 反向代理到 `127.0.0.1:8792`（和 Webhook 用不同域名），设置 `BOT_COOKIE_SECURE=true` 和 `BOT_ADMIN_ORIGIN=https://<管理站域名>`。
+- 改宿主端口：`BOT_PORT`（默认 `8791`）。反向代理在另一台机器时设 `BOT_BIND_ADDRESS=0.0.0.0`（默认只绑定 `127.0.0.1`）。
+- 固定部署地址：`BOT_PUBLIC_ORIGIN=https://<你的域名>`，并设置 `BOT_COOKIE_SECURE=true`。远程使用控制台直接用这个域名，不再另建管理域名。
+- 从旧的双端口版本升级：见[从双端口升级](deployment.md#从双端口升级)。
 - 虚拟电脑不访问外网：`BOT_PROJECT_EGRESS=false`。
 - 固定版本：`BOT_IMAGE_TAG=v<版本>`（见 Releases；默认 `latest`，即 `main` 最新发布的镜像）。
 

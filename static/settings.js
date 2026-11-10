@@ -196,7 +196,7 @@ function actionForm(nodes, caption, save, extra = []) {
 function addressBody(view, redraw) {
   const saved = view.onboarding.public_address, origin = input('origin', saved?.origin || '', { type: 'url', placeholder: 'https://你的域名，不带路径' });
   return [saved ? facts([['已验证地址', saved.origin], ['检查时间', timestamp(saved.checked_at)]]) : note('还没有验证过的公网地址。'),
-    note('GitHub 把 webhook 送到这个地址。它只能连到 webhook 8791，检查会拒绝管理页面和其他实例。改了地址后，到「机器人账号」里点当前 App 的「重新检查」，把 App 的 webhook 改到新地址。'),
+    note('这是 Bot 唯一的公网入口：GitHub 把 webhook 送到这里，用户也从这里登录控制台，都到达本机业务端口 8791。检查会核对当前实例的一次性凭证，拒绝重定向、其他实例和私网地址。改了地址后：到「机器人账号」点当前 App 的「重新检查」更新 webhook；在 GitHub App 设置里把 Callback URL 和 Setup URL 改到新地址；用户需要在新地址重新登录。'),
     actionForm([field('公网 HTTPS 地址', origin)], '检查并保存', async () => {
       if (!origin.value.trim()) throw new Error('先填写公网 HTTPS 地址');
       view.onboarding.public_address = (await api('/api/onboarding/address', 'POST', { origin: origin.value.trim() })).public_address;

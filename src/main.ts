@@ -15,18 +15,21 @@ import { PublicBoards } from './public-board/service.js';
 import { ReleaseService } from './releases/service.js';
 import { ActionsFailures } from './actions/service.js';
 import { GitHubLogin } from './identity/github-login.js';
+import { deploymentOrigin, loginCallbackPath } from './onboarding/public-url.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
 if (!keyFile) throw new Error('BOT_MASTER_KEY_FILE is required');
 const databasePath = process.env.BOT_DATABASE_PATH || '/data/control.sqlite';
+// One origin for the console, login, App callbacks and webhooks; the wizard's verified address overrides it for URLs.
+const publicOrigin = deploymentOrigin(process.env, message => console.warn(message));
 const store = new Store(databasePath, readFileSync(keyFile));
 const githubLogin = new GitHubLogin(store, {
-  defaultOrigin: process.env.BOT_ADMIN_ORIGIN, apiUrl: process.env.BOT_GITHUB_API_URL,
+  defaultOrigin: publicOrigin, apiUrl: process.env.BOT_GITHUB_API_URL,
   environment: () => process.env.BOT_GITHUB_OAUTH_CLIENT_ID ? {
     clientId: process.env.BOT_GITHUB_OAUTH_CLIENT_ID,
     clientSecret: readFileSync(process.env.BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE || '', 'utf8').trim(),
-    redirectUri: (process.env.BOT_ADMIN_ORIGIN || '') + '/auth/github/callback', apiUrl: process.env.BOT_GITHUB_API_URL,
+    redirectUri: (publicOrigin || '') + loginCallbackPath, apiUrl: process.env.BOT_GITHUB_API_URL,
   } : undefined,
 });
 // Validate deployment defaults at startup; a saved wizard configuration takes precedence.
@@ -60,19 +63,16 @@ const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_UR
 const gateOnboarding = new GateOnboarding(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
-const servers = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
-  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', adminOrigin: process.env.BOT_ADMIN_ORIGIN, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
+const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
+  secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
   imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin });
-for (const [name, port] of [['webhook', 8791], ['admin', 8792]] as const) {
-  const server = servers[name];
-  server.on('error', () => { console.error(`${name} listener failed`); process.exit(1); });
-  server.listen(port, '0.0.0.0', () => console.log(`${name} listening on ${port}`));
-}
+// The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.
+server.on('error', () => { console.error('listener failed'); process.exit(1); });
+server.listen(8791, '0.0.0.0', () => console.log('listening on 8791'));
 let stopping = false;
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   if (stopping) return; stopping = true;
   clearInterval(timer); clearInterval(syncTimer); clearInterval(identityTimer);
-  let remaining = 2;
-  for (const server of Object.values(servers)) server.close(async () => { if (--remaining === 0) { await Promise.all([installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close()]); store.close(); process.exit(0); } });
+  server.close(async () => { await Promise.all([installations.close(),engine.close(),external.forwarder.close(),releases.close(),boards.close(),actionsFailures.close()]); store.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 100_000).unref();
 });

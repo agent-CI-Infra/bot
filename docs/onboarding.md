@@ -8,13 +8,13 @@
 
 ## 公网 HTTPS 与域名
 
-先准备自己的域名。自建中转需配置有效证书，整个域名只转发到 webhook 8791；管理页面 8792 保持环回绑定或独立管理入口。填写 HTTPS origin 后点击「检查并使用」。检查使用当前实例的一次性 nonce／proof，拒绝 HTTP、重定向、其他实例和管理监听，同时检查根路径、管理 API 与脚本不会被公开。DNS 地址在每次连接时校验并固定，不能指向私网。
+先准备自己的域名。这个 HTTPS 地址是 Bot 唯一的入口：控制台、用户登录、App 回调和 Webhook 都经它到达业务端口 8791，不需要第二个域名或端口。自建中转需配置有效证书，把整个域名转发到 8791，不按路径拆分。填写 HTTPS origin 后点击「检查并使用」。检查向 `/.well-known/bot-webhook-probe` 取当前实例的一次性 nonce／proof，拒绝 HTTP、重定向和其他实例；入口正常提供管理页面不影响检查。DNS 地址在每次连接时校验并固定，不能指向回环、私网或链路本地地址。
 
-Cloudflare Tunnel 是 Compose 中独立的 `tunnel` 服务。初始没有 token，不连接任何账号；在向导中保存 token 后自动连接。输入框支持直接粘贴 token，也支持 Cloudflare 给出的完整安装、运行命令（含引号或多行说明，最多 131072 个字符）；系统只提取并保存唯一的合法 token，不执行命令。没有合法 token 或包含多个不同合法 token 时会拒绝保存。token 不进入 Compose 环境变量、命令参数或读取接口：数据库加密保存，专用凭据卷中以 0600 文件交给非 root tunnel 进程读取。更换后自动重连，停用会移除文件并断开。该服务不发布宿主端口。Tunnel 位于独立 edge 网络，只能经过固定转发到 bot:8791 的 webhook 网关；控制面和 manager 不加入 edge 网络。即使远端路由填错，Tunnel 也不能直接连接管理端口。
+Cloudflare Tunnel 是 Compose 中独立的 `tunnel` 服务。初始没有 token，不连接任何账号；在向导中保存 token 后自动连接。输入框支持直接粘贴 token，也支持 Cloudflare 给出的完整安装、运行命令（含引号或多行说明，最多 131072 个字符）；系统只提取并保存唯一的合法 token，不执行命令。没有合法 token 或包含多个不同合法 token 时会拒绝保存。token 不进入 Compose 环境变量、命令参数或读取接口：数据库加密保存，专用凭据卷中以 0600 文件交给非 root tunnel 进程读取。更换后自动重连，停用会移除文件并断开。该服务不发布宿主端口。Tunnel 位于独立 edge 网络，只能经过固定转发到 bot:8791 的 `webhook` 入口网关，整个域名（含控制台）都经它到达业务端口；控制面和 manager 不加入 edge 网络。即使远端路由填错，Tunnel 也不能直接连接 bot 或 manager。
 
-在 Cloudflare 控制台的 Networks → Tunnels 创建 tunnel，在 Routes → Published application 选择自有域名，Service URL 填 `http://webhook:8791`。向导读取 tunnel 的路由和连接状态，指向管理端口的路由会标错；点击正确路由的「检查并使用此域名」后才保存公网地址。域名配置和 GitHub 确认由账号所有者在对应页面完成，Bot 不替用户点击。
+在 Cloudflare 控制台的 Networks → Tunnels 创建 tunnel，在 Routes → Published application 选择自有域名，Service URL 填 `http://webhook:8791`。向导读取 tunnel 的路由和连接状态，Service URL 不是 `http://webhook:8791` 的路由标为「不是 Bot 入口路由」；点击正确路由的「检查并使用此域名」后才保存公网地址。域名配置和 GitHub 确认由账号所有者在对应页面完成，Bot 不替用户点击。
 
-Cloudflare 自带的无主机名 `http_status:404` 兜底规则表示：未匹配已发布域名的请求返回 404。向导只显示普通说明，不把它标成连接故障；具名域名若指向其他服务，仍显示「不是 webhook 路由」。
+Cloudflare 自带的无主机名 `http_status:404` 兜底规则表示：未匹配已发布域名的请求返回 404。向导只显示普通说明，不把它标成连接故障；具名域名若指向其他服务，仍显示「不是 Bot 入口路由」。
 
 ## GitHub App 与安装
 
@@ -36,11 +36,11 @@ GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管
 
 ## GitHub 用户登录
 
-第 3 步配置用户直接用 GitHub 账号登录控制台。可以复用同一个 GitHub App，无需每名用户另建 App，也无需单独创建 OAuth App。已有 App 从其 General 页面复制 Client ID（不是 App ID），生成 Client secret，在向导填写；manifest 新建的 App 可直接复用加密保存的返回凭据。Secret 输入框始终为空，留空保存保留原值，勾选「清除已保存的 Client secret，并停用 GitHub 登录」才撤销。
+第 3 步配置用户直接用 GitHub 账号登录控制台。可以复用同一个 GitHub App，无需每名用户另建 App，也无需单独创建 OAuth App。页面按顺序给出四步：打开所选 App 的设置页、复制 Client ID、准备 Client secret、填写 Callback URL 并启用。已知 App 所有者时给出直达链接：组织所属的 App 是 `https://github.com/organizations/<组织>/settings/apps/<slug>`，个人账号所属的是 `https://github.com/settings/apps/<slug>`；所有者来自「使用此 App」或 manifest 创建时 GitHub 返回的 App 信息，较早保存的选择没有所有者时，页面给出手动路径（Settings → Developer settings → GitHub Apps → Edit），在第 4 步点「重新检查安装」后补上链接，不展示猜测的链接。只有 App 所有者、组织所有者或指定的 App 管理员能打开设置页，页面提示没有权限时请他们操作，并由他们本人填写 secret，不经聊天或 Issue 转发。Client ID 在 General 页「About」区域，不是 App ID；manifest 新建的 App 可直接复用加密保存的返回凭据，不用再生成 secret。Secret 输入框始终为空，留空保存保留原值，勾选「清除已保存的 Client secret，并停用 GitHub 登录」才撤销。
 
 已有登录配置后再新建或选择另一个 App，第三步先显示这个 App 的待保存草稿，并取消启用勾选。新 App 返回过 Client ID 和 Secret 时，页面预填它的 Client ID、保留只写 Secret；没有可复用凭据时清空旧值，明确要求填写这个新 App 的 Client ID 和 Secret。已有生效登录配置在保存前继续使用，只有保存启用后才切换，旧页面不能静默提交旧 Client ID 来启用新选中的 App。
 
-填写「控制台访问地址」，复制页面显示的 `<控制台 origin>/auth/github/callback` 到 GitHub App 的用户授权 Callback URL，保留已有注册回调和 Setup URL。多人访问需部署独立的 HTTPS 管理域名，反向代理至 8792；证书、DNS 和反向代理仍由部署方配置。Webhook 域名继续只转发至 8791，向导中的 Cloudflare Tunnel 不开放管理服务。本机测试可用 `http://127.0.0.1:8792` 或 localhost。域名不能包含路径、查询参数或账号密码。向导地址是 OAuth 回调和链接使用的地址，不会取消部署地址的写入许可。地址尚未接通或拼错时，仍可在原部署地址修改配置、退出后用本地账号重新登录；接通后的新地址也可执行写操作。
+不再单独填写控制台地址。Callback URL 由统一入口生成：`<公网地址>/auth/github/callback`，把它加到 App 的「Identifying and authorizing users → Callback URL」并保存。页面同时列出同一入口下的安装 Setup URL（`/onboarding/github/setup`）、只在创建 App 时使用一次的注册回调（`/onboarding/github/callback`）和 Webhook URL，它们对应 App 设置里的不同字段，不能互相替代。还没有验证公网地址时，Callback URL 取当前控制台地址，页面标明只适合本机测试（`http://127.0.0.1:8791` 或 localhost）。公网地址变化后，登录回调立即跟随；为其他地址保存过的配置（例如升级前的独立管理域名）会同时显示旧、新 Callback URL，在 GitHub App 加上新地址后保存一次即可。地址尚未接通或拼错时，仍可在本机 `http://127.0.0.1:8791` 修改配置、用本地账号重新登录。
 
 组织 owner 识别还需要 App 的 Members 只读权限和 organization 事件订阅。向导新建 App 已包含；已有 App 需所有者检查补齐，再由安装方接受新增权限。安装时自动请求用户授权可以保持关闭，用户点击登录按钮时才发起 OAuth。勾选启用并保存后立即生效，无需改 `.env` 或重启服务；未保存向导配置时继续兼容部署环境变量和 secret 文件，向导明确停用后不会因重启恢复环境默认值。
 

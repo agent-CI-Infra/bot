@@ -7,12 +7,9 @@ import { testPassword } from './helpers.mjs';
 
 test('verified deliveries update both public contracts through the real local collectors on the webhook listener', async t => {
   const { h, boards, state, hook, get } = await publicBoardFixture(t);
-  for (const path of ['/dashboard/', '/boards/octo/hello/']) {
-    assert.equal((await fetch(h.webhook + path)).status, 200);
-    assert.equal((await fetch(h.admin + path)).status, 404);
-  }
-  assert.equal((await fetch(h.webhook + '/')).status, 404);
-  assert.equal((await fetch(h.webhook + '/api/setup')).status, 404);
+  for (const path of ['/dashboard/', '/boards/octo/hello/']) assert.equal((await fetch(h.webhook + path)).status, 200);
+  // The console shares the listener; public boards need no session, while its API still does.
+  assert.equal((await fetch(h.webhook + '/api/users')).status, 401);
   assert.equal((await hook('bad', { 'X-Hub-Signature-256': 'sha256=' + '0'.repeat(64) })).status, 401);
   assert.equal(h.store.get('SELECT count(*) n FROM public_board_jobs').n, 0);
   assert.equal((await hook('first')).status, 200);

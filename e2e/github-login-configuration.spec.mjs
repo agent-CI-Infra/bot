@@ -11,25 +11,63 @@ async function localLogin(page, origin, password) {
   await expect(page.locator('#identity')).toBeVisible();
 }
 
-test('停用登录时填错域名，原浏览器会话可改回，退出后仍可在部署地址登录', async ({ page }) => {
+test('登录指引给出所选 App 的设置入口、Client ID 与 App ID 的区别，以及同一入口下各自用途的 GitHub 地址', async ({ page }) => {
+  const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), errors = [];
+  let onboarding;
+  const h = await harness(undefined, undefined, store => ({ onboarding: onboarding = new Onboarding(store, { fetcher: async () => new Response(JSON.stringify({
+    id: 123, slug: 'org-app', owner: { login: 'fixture-org', type: 'Organization' }, html_url: 'https://github.com/apps/org-app',
+    pem, webhook_secret: testPassword(), client_id: 'Iv1.org-app', client_secret: testPassword(),
+  })) }) }));
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const { admin, password } = await setup(h); onboarding.save('public', { origin: 'https://bot.invalid', checked_at: new Date().toISOString() });
+    const manifest = await admin('/api/onboarding/manifest', 'POST', { organization: 'fixture-org', name: 'org-app' });
+    await localLogin(page, h.admin, password);
+    await page.goto(h.admin + '/onboarding/github/callback?code=manifest-code&state=' + new URL(manifest.value.create_url).searchParams.get('state'));
+    const panel = page.locator('#onboarding-panel'), guide = panel.locator('.login-guide');
+    await expect(guide.getByRole('link', { name: '打开 org-app 的 GitHub App 设置', exact: true })).toHaveAttribute('href', 'https://github.com/organizations/fixture-org/settings/apps/org-app');
+    await expect(guide).toContainText('这个 App 属于组织 fixture-org'); await expect(guide).toContainText('GitHub 显示 404 时');
+    await expect(guide).toContainText('它不是 App ID（这个 App 的 App ID 是 123）');
+    // The wizard-created App returned reusable credentials: the page says so instead of asking for a new secret.
+    await expect(guide).toContainText('不用再生成'); await expect(page.getByLabel('Client ID', { exact: true })).toHaveValue('Iv1.org-app');
+    await expect(guide.locator('.github-login-callback')).toHaveText('https://bot.invalid/auth/github/callback');
+    for (const text of ['https://bot.invalid/onboarding/github/setup', '/onboarding/github/callback', 'https://bot.invalid/hooks/github/<account_id>/<endpoint_id>', '不能互相替代'])
+      await expect(panel).toContainText(text);
+    await expect(panel).not.toContainText('8792'); await expect(panel).not.toContainText('控制台访问地址');
+    mkdirSync('.tmp/github-login-guide', { recursive: true });
+    await page.screenshot({ path: '.tmp/github-login-guide/organization-app-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/github-login-guide/organization-app-mobile.png', fullPage: true });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    // A personal App links to its owner's settings; an App whose owner is unknown gets the manual path, never a guessed link.
+    const saved = onboarding.saved('app');
+    onboarding.save('app', { ...saved, owner: 'octo', owner_type: 'User', settings_url: 'https://github.com/settings/apps/org-app' }); await page.reload();
+    await expect(guide.getByRole('link', { name: '打开 org-app 的 GitHub App 设置', exact: true })).toHaveAttribute('href', 'https://github.com/settings/apps/org-app');
+    await expect(guide).toContainText('这个 App 属于个人账号 octo');
+    const { owner, owner_type, settings_url, ...unknown } = saved; onboarding.save('app', unknown); await page.reload();
+    await expect(guide).toContainText('还不知道 org-app 的所有者，所以不提供直达链接'); await expect(guide).toContainText('Developer settings → GitHub Apps');
+    await expect(guide.getByRole('link')).toHaveCount(0);
+    await page.screenshot({ path: '.tmp/github-login-guide/unknown-owner.png', fullPage: true });
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
+test('升级前为独立控制台地址保存的登录配置，页面提示改用统一入口的 Callback URL，保存一次后提示消失', async ({ page }) => {
   const h = await harness(), { password } = await setup(h);
   try {
+    h.store.run("INSERT INTO settings VALUES('onboarding.public',?)", JSON.stringify({ origin: 'https://bot.invalid', checked_at: new Date().toISOString() }));
+    h.store.run('INSERT INTO settings VALUES(?,?)', 'identity.github_login', h.store.secrets.seal({ enabled: true, client_id: 'Iv1.legacy', client_secret: testPassword(),
+      admin_origin: 'https://console.invalid', account_id: null }, 'identity.github_login'));
     await localLogin(page, h.admin, password); await page.goto(h.admin + '/#/settings/onboarding/2');
-    const address = () => page.getByLabel('控制台访问地址', { exact: true });
-    const save = async value => {
-      await address().fill(value);
-      const response = page.waitForResponse(r => r.url().endsWith('/api/onboarding/github-login') && r.request().method() === 'PUT');
-      await page.getByRole('button', { name: '保存登录配置', exact: true }).click(); expect((await response).status()).toBe(200);
-      await expect(page.locator('#message')).toContainText('当前使用本地账号登录');
-      await expect(address()).toHaveValue(value);
-      await expect(page.getByRole('button', { name: '保存登录配置', exact: true })).toBeEnabled();
-    };
-    await save('https://typo.invalid'); await save(h.admin);
-    await save(h.admin.replace('http:', 'https:')); await page.locator('#logout').click();
-    await localLogin(page, h.admin, password); await page.goto(h.admin + '/#/settings/onboarding/2');
-    await expect(address()).toHaveValue(h.admin.replace('http:', 'https:')); await save(h.admin);
-    mkdirSync('.tmp/onboarding-settings-fix', { recursive: true });
-    await page.screenshot({ path: '.tmp/onboarding-settings-fix/origin-recovery.png', fullPage: true });
+    const warning = page.locator('#onboarding-panel .endpoint-warning');
+    await expect(warning).toContainText('从 https://console.invalid/auth/github/callback 改为 https://bot.invalid/auth/github/callback');
+    await expect(page.getByLabel('启用 GitHub 账号登录', { exact: true })).toBeChecked();
+    mkdirSync('.tmp/github-login-guide', { recursive: true });
+    await page.screenshot({ path: '.tmp/github-login-guide/migrated-callback.png', fullPage: true });
+    await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
+    await expect(page.locator('#message')).toContainText('GitHub 登录已启用'); await expect(warning).toHaveCount(0);
+    expect(new URL((await fetch(h.admin + '/auth/github/start', { redirect: 'manual' })).headers.get('location')).searchParams.get('redirect_uri')).toBe('https://bot.invalid/auth/github/callback');
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
 });
 
@@ -41,7 +79,7 @@ for (const returned of [true, false]) test(`已有登录配置后新建 App，${
   })) }) }));
   try {
     const { admin, password } = await setup(h); onboarding.save('public', { origin: 'https://hooks.invalid' });
-    await admin('/api/onboarding/github-login', 'PUT', { enabled: true, client_id: 'Iv1.old-app', client_secret: testPassword(), admin_origin: h.admin });
+    await admin('/api/onboarding/github-login', 'PUT', { enabled: true, client_id: 'Iv1.old-app', client_secret: testPassword() });
     const manifest = await admin('/api/onboarding/manifest', 'POST', { organization: 'fixture', name: 'new-app' });
     await localLogin(page, h.admin, password);
     await page.goto(h.admin + '/onboarding/github/callback?code=manifest-code&state=' + new URL(manifest.value.create_url).searchParams.get('state'));
@@ -77,11 +115,13 @@ test('系统超级管理员在全局设置向导启用 GitHub 登录，密钥不
     await page.locator('.project-nav').getByRole('link', { name: '接入向导', exact: true }).click();
     await page.getByRole('button', { name: '3. GitHub 登录', exact: true }).click();
     await expect(page).toHaveURL(/#\/settings\/onboarding\/2$/);
+    // Without a verified public address the callback stays on this console, and the page says it only suits local testing.
+    await expect(page.locator('.github-login-callback')).toHaveText(f.h.admin + '/auth/github/callback');
+    await expect(page.locator('#onboarding-panel')).toContainText('只适合在本机测试');
     await expect(page.locator('.project-nav [aria-current=page]')).toHaveText('接入向导');
     await page.getByLabel('启用 GitHub 账号登录', { exact: true }).check();
     await page.getByLabel('Client ID', { exact: true }).fill('fixture-client');
     await page.getByLabel('Client secret（只保存，不回读）', { exact: true }).fill('fixture-secret');
-    await page.getByLabel('控制台访问地址', { exact: true }).fill(f.h.admin);
     await page.getByRole('button', { name: '保存登录配置', exact: true }).click();
     await expect(page.locator('#message')).toContainText('GitHub 登录已启用');
     await expect(page.getByLabel('Client secret（只保存，不回读）', { exact: true })).toHaveValue('');

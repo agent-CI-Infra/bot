@@ -34,12 +34,12 @@ COPY config ./config
 # Process Harness executes this worker in the control-plane container.
 COPY runner/role-worker.mjs ./runner/role-worker.mjs
 COPY scripts/external-token.mjs ./scripts/external-token.mjs
-# The webhook gateway service runs from this image too (node webhook/main.mjs), as its own container.
+# The entry gateway service runs from this image too (node webhook/main.mjs), as its own container.
 COPY webhook/main.mjs ./webhook/main.mjs
 COPY LICENSE ./LICENSE
 COPY NOTICE ./NOTICE
 USER 10001:10001
-EXPOSE 8791 8792
+EXPOSE 8791
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s \
-  CMD ["node", "--input-type=module", "-e", "const r = await fetch('http://127.0.0.1:8792/healthz'); if (!r.ok) process.exit(1)"]
+  CMD ["node", "--input-type=module", "-e", "const r = await fetch('http://127.0.0.1:8791/healthz'); if (!r.ok) process.exit(1)"]
 CMD ["node", "dist/main.js"]

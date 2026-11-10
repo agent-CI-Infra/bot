@@ -83,44 +83,75 @@ function accountInstallationForm(){
   });
   const form=section.querySelector('form'),actions=element('div','','actions');actions.append(form.querySelector('[type=submit]'));form.append(actions,result);return section;
 }
+// Login reuses the selected App's user-authorization credentials. The steps follow GitHub's settings pages; a direct link is
+// offered only when the App's owner is known, never a guessed one.
+function githubLoginGuide(saved,app){
+  const steps=element('ol','','login-guide');
+  const step=(title,...nodes)=>{const item=element('li','');item.append(element('strong',title),...nodes);steps.append(item);};
+  if(app?.settings_url)step('打开 App 设置',link(app.settings_url,`打开 ${app.slug} 的 GitHub App 设置`),
+    note(app.owner_type==='Organization'?`这个 App 属于组织 ${app.owner}：组织 Settings → Developer settings → GitHub Apps。`:`这个 App 属于个人账号 ${app.owner}：该账号的 Settings → Developer settings → GitHub Apps。`),
+    note('只有 App 所有者、组织所有者或指定的 App 管理员能打开这个页面。GitHub 显示 404 时，说明当前 GitHub 账号没有管理权限：请他们按本页步骤操作，并由他们本人把 Client secret 填进这里，不要经聊天、Issue 或邮件转发。'));
+  else if(app)step('打开 App 设置',note(`还不知道 ${app.slug} 的所有者，所以不提供直达链接。个人账号所属的 App：GitHub 右上角头像 → Settings → Developer settings → GitHub Apps；组织所属的 App：组织页面 → Settings → Developer settings → GitHub Apps。在 ${app.slug} 一行点「Edit」。`),
+    note('在第 4 步点「重新检查安装」后，这里会显示直达链接。没有权限打开设置时，请 App 所有者或组织所有者按本页步骤操作。'));
+  else step('先选择 GitHub App',note('还没有选择 GitHub App。先在第 2 步创建或选择 App；登录使用同一个 App 的凭据。'));
+  step('复制 Client ID',note(`在 App 设置的 General 页「About」区域复制 Client ID（形如 Iv1.… 或 Iv23…）。它不是 App ID${app?`（这个 App 的 App ID 是 ${app.app_id}）`:''}，两者不能互换；必须来自当前所选的同一个 App。`));
+  const reusable=saved.source==='app'&&saved.client_id&&saved.secret_configured;
+  step('准备 Client secret',note(reusable?'这个 App 由向导创建，GitHub 已返回它的 Client ID 和 Client secret，并加密保存在这里，不用再生成；下面留空即可。'
+    :'在同一页「Client secrets」点「Generate a new client secret」，把生成的值粘贴到下面的 Client secret。GitHub 只显示一次。'),
+    note(saved.secret_configured?'已保存过 Client secret：留空保存会保留原值。页面和接口都不回显它。':'Client secret 只保存、不回显，不要发到聊天、Issue 或邮件里。'));
+  step('填写 Callback URL 并启用',note('在同一页「Identifying and authorizing users」的 Callback URL 中添加下面的地址（保留已有的其他地址），点页面底部「Save changes」。'),
+    element('code',saved.callback_url||'先在第 1 步验证公网 HTTPS 地址','github-login-callback'),
+    note('回到本页勾选「启用 GitHub 账号登录」并保存；然后退出，在登录页点「使用 GitHub 登录」验证。'));
+  return steps;
+}
+// Every GitHub-facing address shares the single public entry, but each one belongs to a different App field.
+function githubAddresses(saved,app){
+  const origin=saved.origin||location.origin,row=(url,where)=>{const value=element('span','');value.append(element('code',url),element('span',where,'muted'));return value;};
+  const list=facts([
+    ['用户授权 Callback URL',row(saved.callback_url||origin+'/auth/github/callback','本页第 4 步，填在 Identifying and authorizing users → Callback URL')],
+    ['安装 Setup URL',row(origin+'/onboarding/github/setup','Post installation → Setup URL；向导新建的 App 已自动填写')],
+    ['App 注册回调',row('/onboarding/github/callback','只在向导创建 App 时由 GitHub 使用一次，不填进 App 设置')],
+    ['Webhook URL',row(app?.webhook_url||origin+'/hooks/github/<account_id>/<endpoint_id>','Webhook → Webhook URL；由向导写入 App，不用手填')],
+  ]);list.classList.add('login-addresses');
+  return [element('p','同一个 HTTPS 入口下的 GitHub 地址各有用途，不能互相替代：'),list];
+}
 function githubLoginForm(saved, app){
-  saved ||= {enabled:false,client_id:'',admin_origin:location.origin,secret_configured:false};
+  saved ||= {enabled:false,client_id:'',secret_configured:false,origin:location.origin,callback_url:location.origin+'/auth/github/callback'};
   const client=input('client_id',saved.client_id||'',{maxLength:200,autocomplete:'off'}),
     secret=input('client_secret','',{type:'password',autocomplete:'new-password',maxLength:32768,placeholder:saved.secret_configured?'已保存；留空保留原值':'粘贴 GitHub App 的 Client secret'}),
-    origin=input('admin_origin',saved.admin_origin||location.origin,{type:'url',required:true,placeholder:'浏览器访问控制台的 HTTPS 地址，不带路径'}),
     enabled=checkbox('enabled',!!saved.enabled,'启用 GitHub 账号登录'),
-    revoke=checkbox('revoke_secret',false,'清除已保存的 Client secret，并停用 GitHub 登录'),
-    callback=element('code','','github-login-callback');
+    revoke=checkbox('revoke_secret',false,'清除已保存的 Client secret，并停用 GitHub 登录');
   const loginEnabled=enabled.querySelector('input');
   const requireClient=()=>{client.required=loginEnabled.checked;};loginEnabled.addEventListener('change',requireClient);requireClient();
-  const preview=()=>{try{callback.textContent=new URL(origin.value).origin+'/auth/github/callback';}catch{callback.textContent='请先填写控制台地址';}};
-  origin.addEventListener('input',preview);preview();
   revoke.querySelector('input').addEventListener('change',e=>{if(e.target.checked)loginEnabled.checked=false;requireClient();});
+  const notices=app?[note(`所选 App：${app.slug}（App ID ${app.app_id}）。登录使用这个 App 的凭据。`)]:[];
+  if(app&&saved.source==='app'){
+    notices.push(note('所选 App 的登录配置尚未保存。保存并启用后才会切换；如已有生效的登录配置，它在保存前继续使用。'));
+    if(!saved.client_id)notices.push(note('此 App 尚无可复用的 Client ID 和 Client secret：请填写这个 App 自己的值，不能沿用旧 App 的值。'));
+  }
+  if(saved.previous_callback_url)notices.push(element('p',`Callback URL 已随统一入口从 ${saved.previous_callback_url} 改为 ${saved.callback_url}。请把新地址加到 GitHub App 的 Callback URL，再在这里保存一次；用户需要在新地址重新登录。确认不再使用后可删除旧地址。`,'endpoint-warning'));
+  if(saved.origin_source==='local')notices.push(element('p','还没有验证公网 HTTPS 地址，下面的 Callback URL 只适合在本机测试。完成第 1 步后它会改为公网地址。','endpoint-warning'));
   const section=wizardForm('GitHub 账号登录',[
-    note(app?`所选 App：${app.slug}（App ID ${app.app_id}）。Client ID 是该 App 的另一个字段。`:'可先配置用户登录；项目管理能力仍需有效的 App 安装和授权。'),
-    ...(app&&saved.source==='app'?[note('所选 App 的登录配置尚未保存。保存并启用后才会切换；如已有生效的登录配置，它在保存前继续使用。'),
-      ...(!saved.client_id?[note('此 App 尚无可复用的 Client ID 和 Secret。请从这个新 App 的 General 页面复制 Client ID，并填写它的 Client secret；不能沿用旧 App 的值。')]:[])]:[]),
-    note('保存后立即生效，重启后保留。已有环境变量配置可继续使用；在这里保存后，以向导配置为准。'),
+    note('用户可以直接用 GitHub 账号登录控制台。登录复用当前所选 GitHub App 的用户授权凭据，不需要每人另建 App，也不需要另建 OAuth App。按下面的顺序操作：'),
+    ...notices,githubLoginGuide(saved,app),...githubAddresses(saved,app),
     enabled,field('Client ID',client),field('Client secret（只保存，不回读）',secret),
-    note(saved.secret_configured?'已保存登录凭据，留空可保留；新建 App 的返回凭据可以直接复用。':'在现有 GitHub App 的设置中获取 Client ID，并生成 Client secret。用户不需要自己创建 App。'),
-    field('控制台访问地址',origin),
-    note('多人使用时准备独立的 HTTPS 管理域名，反向代理到管理服务 8792；Webhook 域名继续连接 8791。本机可用 http://127.0.0.1:8792。证书和反向代理由部署方配置；填错或尚未就绪时，仍可在原部署地址修改和登录。'),
-    element('p','把下面的用户授权 Callback URL 加到同一个 GitHub App，保留已有 Setup URL：'),callback,
+    note('保存后立即生效，重启后保留。已有环境变量配置可继续使用；在这里保存后，以向导配置为准。'),
     note('组织 owner 识别需要 Members 只读权限；新增权限须由安装目标批准。登录按钮会发起 OAuth，安装时自动请求授权可保持关闭。'),
     note('首次 GitHub 登录会创建独立账号；已有本地账号应先登录后绑定。项目与组织管理员不会获得系统超级管理员权限。'),revoke,
   ],'保存登录配置',async (value,form)=>{
     const clear=form.elements.revoke_secret.checked;
-    const payload={enabled:form.elements.enabled.checked&&!clear,client_id:value.client_id,client_secret:clear?'':value.client_secret,
-      admin_origin:value.admin_origin,revoke_secret:clear};
+    const payload={enabled:form.elements.enabled.checked&&!clear,client_id:value.client_id,client_secret:clear?'':value.client_secret,revoke_secret:clear};
     try{await api('/api/onboarding/github-login','PUT',payload);}catch(err){
       const code=err.message.replace(/^\d+\s*·\s*/,'');
       throw new Error(({github_client_id_required:'请填写同一个 GitHub App 的 Client ID。',github_login_secret_required:'启用前需要保存 Client secret。',
-        github_login_https_required:'控制台地址需要 HTTPS；本机测试可使用 localhost 或 127.0.0.1。',invalid_admin_origin:'请填写完整的控制台 origin，不含路径、查询或账号密码。',
+        github_login_https_required:'GitHub 登录需要 HTTPS 地址：先在第 1 步验证公网 HTTPS 地址；只在本机测试时，从 http://127.0.0.1:8791 或 localhost 打开控制台再保存。',
+        invalid_admin_origin:'无法从当前访问地址生成 Callback URL，请先在第 1 步验证公网 HTTPS 地址。',
         invalid_github_client_id:'Client ID 格式无效，请从 GitHub App 设置复制。',github_login_app_changed:'所选 App 已更换，请刷新后保存这个 App 的登录凭据。'})[code]||err.message);
     }
     secret.value='';await start();notice('message',payload.enabled?'GitHub 登录已启用，用户可从登录页授权登录。':'已保存；当前使用本地账号登录。');return false;
   });
-  section.append(githubLinkElement('查看 GitHub App 用户授权配置说明','https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app'));
+  section.append(githubLinkElement('GitHub 文档：用 GitHub App 实现登录','https://docs.github.com/en/apps/creating-github-apps/writing-code-for-a-github-app/building-a-login-with-github-button-with-a-github-app'),' ',
+    githubLinkElement('Callback URL 与 Setup URL 的区别','https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url'));
   return section;
 }
 async function renderOnboarding(request,panel){
@@ -131,22 +162,22 @@ async function renderOnboarding(request,panel){
   if(data.installation_skipped||data.app&&!data.app.installations)panel.append(element('p','尚未确认 App 安装。可以继续配置模型和规则；安装并启用项目之前，仓库检视不会开始。','wizard-notice'));
   const next=()=>panel.append(button('下一步',()=>wizardNext(Math.min(onboardingStep+1,6)),''));
   if(onboardingStep===0){
-    panel.append(note('需要你拥有的公网域名。HTTPS 地址只连接 webhook 8791，管理端口 8792 保持本机或独立管理入口；检查会拒绝管理页面和其他实例。'));
+    panel.append(note('需要你拥有的公网域名。这个 HTTPS 地址是 Bot 唯一的入口：控制台、用户登录、GitHub App 回调和 Webhook 都经它到达本机业务端口 8791，不需要第二个域名或端口。检查会核对当前实例的一次性凭证，拒绝 HTTP、重定向、其他实例和私网地址。'));
     if(data.public_address)panel.append(facts([['已验证地址',data.public_address.origin],['检查时间',timestamp(data.public_address.checked_at)]]));
     onboardingTunnel??=data.tunnel.token_configured;
     const mode=card('选择连接方式'),choices=element('div','','actions');
     const choose=value=>{onboardingTunnel=value;$('wizard-proxy').hidden=value;$('wizard-tunnel').hidden=!value;mode.querySelector('p').textContent='已选：'+(value?'Cloudflare Tunnel':'自建 HTTPS 中转');for(const b of choices.children){const chosen=(b.textContent==='Cloudflare Tunnel')===value;b.setAttribute('aria-pressed',String(chosen));b.className=chosen?'':'quiet';}};
     const proxyChoice=button('自建 HTTPS 中转',()=>choose(false)),tunnelChoice=button('Cloudflare Tunnel',()=>choose(true));proxyChoice.setAttribute('aria-pressed',String(!onboardingTunnel));tunnelChoice.setAttribute('aria-pressed',String(onboardingTunnel));proxyChoice.className=onboardingTunnel?'quiet':'';tunnelChoice.className=onboardingTunnel?'':'quiet';choices.append(proxyChoice,tunnelChoice);mode.append(choices,note('已选：'+(onboardingTunnel?'Cloudflare Tunnel':'自建 HTTPS 中转')));panel.append(mode);
-    const proxy=wizardForm('自建中转',[note('将专用域名反向代理到 http://本机:8791，整个域名只转发 webhook，不要转发管理页面。准备证书后在这里检查。'),field('公网 HTTPS 地址',input('origin',data.public_address?.origin||'',{type:'url',required:true,placeholder:'填写你自己的域名，不带路径'}))],'检查并使用',value=>api('/api/onboarding/address','POST',value));proxy.id='wizard-proxy';panel.append(proxy);
+    const proxy=wizardForm('自建中转',[note('将专用域名整个反向代理到 http://本机:8791（不按路径拆分，保留原始 Host）。业务端口默认只绑定本机回环地址；反向代理在另一台机器时，在 .env 设置 BOT_BIND_ADDRESS=0.0.0.0，并只对代理开放这个端口。准备证书后在这里检查。'),field('公网 HTTPS 地址',input('origin',data.public_address?.origin||'',{type:'url',required:true,placeholder:'填写你自己的域名，不带路径'}))],'检查并使用',value=>api('/api/onboarding/address','POST',value));proxy.id='wizard-proxy';panel.append(proxy);
     proxy.hidden=onboardingTunnel;const tunnel=card('Cloudflare Tunnel');tunnel.id='wizard-tunnel';tunnel.hidden=!onboardingTunnel;
     tunnel.append(note('在 Cloudflare 中创建 tunnel 并配置自有域名，可以粘贴 token 或包含 token 的完整安装、运行命令。保存后由独立 Docker tunnel 服务连接，不需要把 token 写入 Compose。'),link('https://one.dash.cloudflare.com/','打开 Cloudflare → Networks → Tunnels'));
     const credential=tunnelCredential(data.tunnel.token_configured?'已保存；留空保持原值':'粘贴 tunnel token 或 Cloudflare 完整命令');
     tunnel.append(wizardForm('连接凭据',[field('Tunnel token 或完整命令（只保存 token，不回读）',credential)],'保存 token',value=>api('/api/onboarding/tunnel','POST',value)));
-    tunnel.append(facts([['连接状态',data.tunnel.state],['Published application 的 Service URL',data.tunnel.origin]]),note('在 tunnel 的 Routes → Published application 配置自己的域名，Service URL 必须是 http://webhook:8791。不要填管理端口 8792。'));
+    tunnel.append(facts([['连接状态',data.tunnel.state],['Published application 的 Service URL',data.tunnel.origin]]),note('在 tunnel 的 Routes → Published application 配置自己的域名，Service URL 必须是 http://webhook:8791：Compose 里的入口网关把整个域名转发到 Bot 的业务端口；tunnel 不能直接连接 bot 或 manager。'));
     let fallback=false;
     for(const route of data.tunnel.routes){
       if(!route.hostname&&/^http_status:\d{3}$/.test(route.service)){fallback=true;continue;}
-      const item=element('div','','row');item.append(element('p',route.hostname+' → '+route.service));if(route.webhook_route)item.append(button('检查并使用此域名',async()=>{try{await api('/api/onboarding/address','POST',{origin:'https://'+route.hostname});await render();}catch(e){error(e);}}));else item.append(badge('不是 webhook 路由','danger'));tunnel.append(item);
+      const item=element('div','','row');item.append(element('p',route.hostname+' → '+route.service));if(route.webhook_route)item.append(button('检查并使用此域名',async()=>{try{await api('/api/onboarding/address','POST',{origin:'https://'+route.hostname});await render();}catch(e){error(e);}}));else item.append(badge('不是 Bot 入口路由','danger'));tunnel.append(item);
     }
     if(fallback)tunnel.append(note('没有匹配到已发布域名的请求会返回 404。这是 Cloudflare Tunnel 自带的兜底规则，不是连接故障。'));
     tunnel.append(button('刷新 tunnel 状态',()=>render().catch(error)));if(data.tunnel.token_configured)tunnel.append(button('停用 tunnel',async()=>{await api('/api/onboarding/tunnel','POST',{revoke:true});await render();}));panel.append(tunnel);next();
