@@ -372,16 +372,18 @@ test('an update during publication waits for completion and restores that succes
 });
 
 test('a failed model attempt retries with an empty history and the latest complete discussion',async t=>{
-  let failing=false;
-  const d=await live(t,{model:async(_request,n,{update})=>{
-    if(failing&&n===2){update('latest after failure');return {status:503,body:{error:{message:'temporarily unavailable'}}};}
+  // The provider stays unavailable for the whole attempt: a single 503 is retried within the attempt and would succeed.
+  let failing=false,failures=0;
+  const d=await live(t,{model:async(_request,_n,{update})=>{
+    if(failing){if(!failures++)update('latest after failure');return {status:503,body:{error:{message:'temporarily unavailable'}}};}
   }});
   assert.equal((await d.run())[0].status,'succeeded');failing=true;d.update('start failed follow-up');
   let task=(await d.run()).at(-1);assert.equal(task.status,'retry_wait');assert.equal(task.phase,'prepare');assert.equal(task.messages,null);
+  assert.ok(failures>1,'the attempt retried the request before giving up');
   assert.match(JSON.stringify(d.requests[1].messages),/Done 1/);
-  d.update('latest before retry');d.h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',task.id);
-  task=(await d.run()).at(-1);assert.equal(task.status,'succeeded');
-  const messages=d.requests[2].messages;assert.deepEqual(messages.map(m=>m.role),['system','user']);
+  failing=false;d.update('latest before retry');d.h.store.run('UPDATE tasks SET next_run_at=0 WHERE id=?',task.id);
+  const retried=d.requests.length;task=(await d.run()).at(-1);assert.equal(task.status,'succeeded');
+  const messages=d.requests[retried].messages;assert.deepEqual(messages.map(m=>m.role),['system','user']);
   assert.match(text(messages[1]),/latest before retry/);assert.doesNotMatch(text(messages[1]),/Done 1/);
 });
 
@@ -427,9 +429,12 @@ for(const size of [520000,2200000])test(`an oversized ${size}-character history 
   const messages=[{role:'user',content:'oversized history '+('x'.repeat(size)),timestamp:1},{...assistant,content:[{type:'text',text:'Earlier answer'}],stopReason:'stop',usage:{...assistant.usage,input:1,totalTokens:1},timestamp:2}];
   d.h.store.run('UPDATE review_sessions SET messages=?',JSON.stringify(messages));d.update('try oversized history');
   let task=(await d.run()).at(-1);assert.equal(task.status,'failed');assert.equal(task.error_code,'agent_context_too_large');assert.equal(task.messages,null);
-  assert.equal(d.requests.length,1,'oversized requests never reach the provider');d.update('latest discussion after oversized failure');
-  const retry=await d.h.admin('/api/tasks/'+task.id+'/retry','POST',{});assert.equal(retry.status,201);await Promise.all(d.h.engine.active.values());
-  task=d.h.store.get('SELECT * FROM tasks WHERE id=?',task.id);assert.equal(task.status,'succeeded');
+  assert.equal(d.requests.length,1,'oversized requests never reach the provider');
+  // A manual retry queues the task again, so the next update joins it instead of starting another review of the object.
+  const retry=await d.h.admin('/api/tasks/'+task.id+'/retry','POST',{});assert.equal(retry.status,201);
+  const tasks=d.h.store.get('SELECT count(*) n FROM tasks').n;d.update('latest discussion after oversized failure');await d.run();
+  task=d.h.store.get('SELECT * FROM tasks WHERE id=?',task.id);assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs WHERE task_id=?',task.id)));
+  assert.equal(d.h.store.get('SELECT count(*) n FROM tasks').n,tasks,'the update joined the retried review');
   assert.deepEqual(d.requests.at(-1).messages.map(m=>m.role),['system','user']);
   assert.match(text(d.requests.at(-1).messages.at(-1)),/latest discussion after oversized failure/);
 });
@@ -455,6 +460,9 @@ test('real Pi forwards a write tool to the control plane: create_issue files one
     github:async(path,send,_res,body)=>{if(path.endsWith('/issues')&&body?.title){filed.push(body);send({number:77,html_url:'https://github.invalid/issues/77',user:{id:999}},201);return true;}return false;}});
   // Issue reviews may file Issues once an administrator gives the work type the issue write in the project configuration.
   assert.equal((await saveManager(d.h.admin,'101',{work:{'review.issue':{writes:['reply','labels','issue']}}})).status,200);
+  // A task keeps the configuration pinned when it was queued; the fixture's review was queued before this grant, so drop
+  // its snapshot to start it as a review queued afterwards.
+  d.h.store.run('DELETE FROM task_execution_configs WHERE task_id=?',d.h.taskId);
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(filed.length,1);assert.match(filed[0].body,/ping &#64;alice/);assert.doesNotMatch(filed[0].title,/@/);
