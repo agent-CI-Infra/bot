@@ -14,7 +14,7 @@ test('Feishu verifies raw signatures, decryption, app/tenant, freshness and limi
   assert.equal((await post(h, id, envelope(), { timestamp: 1 })).status, 401);
   assert.equal((await post(h, id, envelope('', { header: { app_id: 'wrong' } }))).status, 403);
   assert.equal((await post(h, id, envelope('', { header: { tenant_key: 'wrong' } }))).status, 403);
-  assert.equal((await post(h, id, envelope('', { sender: { tenant_key: 'unapproved' } }))).status, 403);
+  assert.equal((await post(h, id, envelope('', { sender: { tenant_key: '' } }))).status, 400);
   assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, 0);
   for (const ignored of [envelope('loop', { sender: { sender_type: 'app' } }), envelope('all group messages', { message: { chat_type: 'group' } }), envelope('old', { message: { create_time: '1' } })]) {
     assert.equal((await post(h, id, ignored)).value.state, 'ignored');
@@ -100,13 +100,13 @@ test('dual-end binding uses the real browser-bound GitHub callback; forwarding, 
   // A principal with no project grants can bind an identity; association still cannot authorize a query.
   f.state.id = 44; f.state.owner = false; f.state.admin = false;
   const unprivileged = await f.login(), unprivilegedSession = session(h.store, unprivileged.result.principal_id, unprivileged.result.identity_id);
-  const unprivilegedEvent = { ...event, actor_id: 'ou_unprivileged', event_id: 'unprivileged-start' };
+  const unprivilegedEvent = { ...event, actor_tenant: 'external-tenant', actor_id: 'ou_unprivileged', event_id: 'unprivileged-start' };
   const noGrant = service.bindings.begin(unprivilegedEvent); service.bindings.associateOAuth(noGrant.challenge, 'no-grant-state');
   await service.bindings.githubAuthenticated('no-grant-state', unprivilegedSession.token);
   const noGrantCode = service.bindings.pending(unprivileged.result.principal_id)[0].confirmation, before = h.store.get('SELECT count(*) n FROM scoped_grants').n;
   await service.bindings.confirm({ ...unprivilegedEvent, event_id: 'unprivileged-confirm' }, noGrantCode);
   assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, before);
-  const noPermission = await post(h, id, envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_unprivileged' } } }));
+  const noPermission = await post(h, id, envelope(directQuery(), { sender: { tenant_key: 'external-tenant', sender_id: { open_id: 'ou_unprivileged' } } }));
   assert.equal((await finished(h, noPermission.value.operation_id)).error, 'capability_forbidden');
   const late = service.bindings.begin({ ...event, actor_id: 'ou_expired' }); service.bindings.associateOAuth(late.challenge, 'late-state');
   await service.bindings.githubAuthenticated('late-state', unprivilegedSession.token);
@@ -256,11 +256,43 @@ test('cards revalidate actual clicker, message, operation version, expiry, repla
   const unlinked = await post(h, id, envelope(directQuery())); assert.equal((await finished(h, unlinked.value.operation_id)).error, 'external_binding_required');
 });
 
-test('enterprise SDK card callbacks persist once and update the original message', async t => {
-  const { h, id, wire, service } = await channelFixture(t);
+test('external members use binding, project and group authorization without an enterprise list, and cards retain actor enterprise isolation', async t => {
+  const { h, id, wire, service, principal, admin } = await channelFixture(t);
+  const external = content => envelope(content, { sender: { tenant_key: 'external-tenant' } });
+  const unbound = await post(h, id, external(directQuery()));
+  assert.equal((await finished(h, unbound.value.operation_id)).error, 'external_binding_required');
+  const binding = await post(h, id, external('/bind'));
+  assert.equal((await finished(h, binding.value.operation_id)).state, 'completed');
+  bindFixture(h, id, principal, 'ou_alice', 'external-tenant');
+  const query = await post(h, id, external(directQuery()));
+  assert.equal((await finished(h, query.value.operation_id)).state, 'completed');
+  const externalGroup = () => { const data = inGroup(directQuery()); data.event.sender.tenant_key = 'external-tenant'; return data; };
+  const deniedGroup = await post(h, id, externalGroup());
+  assert.equal((await finished(h, deniedGroup.value.operation_id)).error, 'channel_group_scope_required');
+  await group(admin, id);
+  const allowedGroup = await post(h, id, externalGroup());
+  assert.equal((await finished(h, allowedGroup.value.operation_id)).state, 'completed');
+  const target = { project_id: '101', task_id: 'blocked' }, revision = service.management.service.revision(target);
+  const write = await post(h, id, external('/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target,
+    arguments: { instruction: 'Inspect external member evidence.' }, expected_revision: revision })));
+  assert.equal((await finished(h, write.value.operation_id)).state, 'completed');
+  const message = await until(() => wire.sent.find(s => cardToken(s))), token = cardToken(message), remote = 'remote-' + (wire.sent.indexOf(message) + 1);
+  // The same open_id bound to the same principal in another enterprise still cannot reuse this card.
+  const wrongTenant = await post(h, id, cardEvent(token, remote));
+  assert.equal((await finished(h, wrongTenant.value.operation_id)).error, 'channel_card_operator_mismatch');
+  const click = cardEvent(token, remote); click.event.operator.tenant_key = 'external-tenant';
+  const accepted = await post(h, id, click);
+  assert.equal((await finished(h, accepted.value.operation_id)).state, 'completed');
+  await until(() => wire.sent.some(s => s.method === 'PATCH' && s.url.endsWith('/' + remote)));
+  assert.ok(h.store.all('SELECT actor_tenant FROM channel_sessions').every(row => row.actor_tenant === 'external-tenant'));
+});
+
+test('enterprise SDK accepts external member card callbacks, persists once and updates the original message', async t => {
+  const { h, id, wire, service, principal } = await channelFixture(t);
+  bindFixture(h, id, principal, 'ou_alice', 'external-tenant');
   const target = { project_id: '101', task_id: 'blocked' }, revision = service.management.service.revision(target);
   const result = await post(h, id, envelope('/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target,
-    arguments: { instruction: 'Inspect current logs.' }, expected_revision: revision })));
+    arguments: { instruction: 'Inspect current logs.' }, expected_revision: revision }), { sender: { tenant_key: 'external-tenant' } }));
   await finished(h, result.value.operation_id);
   const message = await until(() => wire.sent.find(s => cardToken(s))), remote = 'remote-' + (wire.sent.indexOf(message) + 1);
   h.store.run("UPDATE channel_connectors SET transport='websocket' WHERE id=?", id);
@@ -268,7 +300,8 @@ test('enterprise SDK card callbacks persist once and update the original message
   const sockets = new ChannelConnections(service, () => ({ start: async options => { dispatcher = options.eventDispatcher; }, close() {},
     getConnectionStatus: () => ({ state: 'connected', reconnectAttempts: 0 }) }));
   t.after(() => sockets.close()); sockets.reconcile();
-  const click = cardEvent(cardToken(message), remote), receipt = await dispatcher.invoke(click, { needCheck: false });
+  const click = cardEvent(cardToken(message), remote); click.event.operator.tenant_key = 'external-tenant';
+  const receipt = await dispatcher.invoke(click, { needCheck: false });
   assert.equal(receipt.state, 'queued');
   assert.equal((await dispatcher.invoke(click, { needCheck: false })).operation_id, receipt.operation_id);
   assert.equal((await finished(h, receipt.operation_id)).state, 'completed');

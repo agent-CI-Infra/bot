@@ -39,7 +39,7 @@ test('an administrator can connect Feishu before any GitHub organization or proj
   assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { tenant_id: 'github.com:10', expected_revision: 1 })).value.error, 'unknown_field');
 });
 
-test('startup migrates organization connections without replacing credentials, bindings, group grants, destinations or receipts', async t => {
+test('startup removes legacy organization and actor enterprise restrictions without replacing credentials, bindings, group grants, destinations or receipts', async t => {
   const { h, id, service, admin } = await channelFixture(t);
   service.close();
   const event = service.adapter(service.connector(id)).normalize(envelope());
@@ -50,15 +50,19 @@ test('startup migrates organization connections without replacing credentials, b
   // Recreate the two legacy organization columns in this persisted fixture before a real restart.
   for (const table of ['channel_connectors', 'channel_control_operations'])
     h.store.db.exec(`ALTER TABLE ${table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'github.com:10'`);
+  h.store.db.exec(`ALTER TABLE channel_connectors ADD COLUMN actor_tenants TEXT NOT NULL DEFAULT '["actor-tenant"]'`);
   const tables = ['channel_connectors', 'channel_control_operations', 'channel_credentials', 'external_identities', 'channel_group_scopes', 'channel_bind_requests', 'channel_outbox', 'scoped_grants'];
   const snapshot = () => Object.fromEntries(tables.map(table => [table, h.store.all(`SELECT * FROM ${table}`).map(row => {
-    if (['channel_connectors', 'channel_control_operations'].includes(table)) { const { tenant_id, ...rest } = row; return rest; }
+    if (['channel_connectors', 'channel_control_operations'].includes(table)) { const { tenant_id, actor_tenants, ...rest } = row; return rest; }
     return row;
   })]));
   const before = snapshot();
   await h.stop(); await h.start();
   assert.deepEqual(snapshot(), before);
   for (const table of ['channel_connectors', 'channel_control_operations']) assert.ok(!h.store.all(`PRAGMA table_info(${table})`).some(c => c.name === 'tenant_id'));
+  assert.ok(!h.store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'actor_tenants'));
+  const external = await post(h, id, envelope('/bind', { sender: { tenant_key: 'external-tenant' } }));
+  assert.equal((await finished(h, external.value.operation_id)).state, 'completed');
   assert.equal((await admin('/api/channels/operations/' + granted.value.operation_id)).status, 200);
   assert.equal((await probe(admin, id)).status, 201);
   const r = await post(h, id, envelope(directQuery('201', 'foreign')));
@@ -136,13 +140,34 @@ test('enterprise saves discover the bot from effective credentials and failed di
 test('automatic discovery rechecks the revision after asynchronous authentication before saving rotated credentials', async t => {
   const { admin, id, h, wire } = await channelFixture(t);
   let release; wire.state.authGate = new Promise(r => { release = r; }); t.after(() => release());
-  const pending = admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, credentials: { app_secret: 'pending-secret' } });
+  const pending = admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, app_id: 'cli_changed', credentials: { app_secret: 'pending-secret' } });
   await until(() => wire.state.authStarted);
   assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 1, enabled: false })).status, 200);
   release();
   assert.equal((await pending).value.error, 'channel_revision_conflict');
   assert.equal(h.store.get('SELECT count(*) n FROM channel_credentials').n, 1);
   assert.equal(h.store.get('SELECT revision,enabled FROM channel_connectors WHERE id=?', id).enabled, 0);
+});
+
+test('enterprise saves discover the installation without an actor enterprise list and reject failed or duplicate discovery atomically', async t => {
+  const { admin, h, wire } = await channelFixture(t);
+  const create = () => connector(admin, { app_id: 'cli_auto_tenant', installation_tenant: undefined, bot_open_id: undefined, actor_tenants: ['legacy-home-only'] });
+  for (const [code, tenant] of [[1184001, 'install-tenant'], [0, '']]) {
+    wire.state.tenantCode = code; wire.state.installationTenant = tenant;
+    await assert.rejects(create(), /channel_tenant_unavailable/);
+    assert.equal(h.store.get('SELECT count(*) n FROM channel_connectors').n, 1);
+    assert.equal(h.store.get('SELECT count(*) n FROM channel_credentials').n, 1);
+  }
+  wire.state.installationTenant = 'discovered-installation';
+  const id = await create(), c = h.store.get('SELECT * FROM channel_connectors WHERE id=?', id);
+  assert.equal(c.installation_tenant, 'discovered-installation'); assert.equal(c.bot_open_id, 'ou_bot');
+  assert.ok(!Object.hasOwn(c, 'actor_tenants'));
+  const listed = (await admin('/api/channels/setup')).value.connectors.find(row => row.id === id);
+  assert.ok(!Object.hasOwn(listed, 'actor_tenants'));
+  await assert.rejects(create(), /channel_installation_conflict/);
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_credentials').n, 2);
+  const r = await post(h, id, envelope('/bind', { header: { app_id: 'cli_auto_tenant', tenant_key: 'discovered-installation' }, sender: { tenant_key: 'external-tenant' } }));
+  assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
 });
 
 test('store apps bootstrap without a bot ID, then persist discovery after a verified ticket and retain revision checks', async t => {

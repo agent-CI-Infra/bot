@@ -5,6 +5,7 @@ const feishuAddress = (id = 'new', step = 0) => `#/settings/feishu/${id}/${step}
 function feishuError(err) {
   const reasons = { channel_auth_failed: 'App ID 或 App Secret 无法通过鉴权，请从飞书应用的“凭证与基础信息”重新复制。',
     channel_bot_unavailable: '暂时读不到机器人信息。请先发布包含机器人能力的初始版本，再返回检查；配置事件后还需发布新版本。',
+    channel_tenant_unavailable: '暂时读不到应用安装的企业信息。请确认应用已启用、所需权限已生效，再重新保存。',
     channel_delivery_rejected: '飞书拒绝了请求。请检查凭据、机器人能力和已发布版本。',
     channel_delivery_failed: '服务器无法连接飞书开放平台，请检查网络后重试。',
     channel_app_ticket_required: '尚未收到有效的商店应用票据。先完成 HTTP 事件配置、安装和发布，再重新检查。',
@@ -62,7 +63,7 @@ async function renderFeishuSetup(panel, request) {
   } else if (step === 1) {
     const choice = feishuChoice?.id === id ? feishuChoice : c || { application_type: 'enterprise', transport: 'websocket' };
     const form = element('form', '', 'project-form'), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
-    form.append(note('此应用连接全局共用，不绑定 GitHub 组织，也不授予用户项目权限。下方 tenant_key 表示飞书企业，用于校验消息来源。'));
+    form.append(note('此应用连接全局共用，不绑定 GitHub 组织，也不授予用户项目权限。不限制操作者所属飞书企业；外部成员也需完成个人绑定并获得相应项目权限。'));
     const app = channelField(form, 'App ID', 'app_id', c?.app_id || ''); app.required = true; app.readOnly = !!c;
     const secret = channelField(form, c ? 'App Secret（留空保留）' : 'App Secret', 'app_secret', '', 'password'); secret.required = !c;
     form.append(note(choice.application_type === 'enterprise' ? '机器人身份由系统在保存时自动读取，无需填写 open_id。请先启用机器人能力并发布初始版本。' : '机器人身份无需填写。先保存连接、配置 HTTP 回调并接收应用票据，再在“发布与检查”自动读取并保存。'));
@@ -78,11 +79,13 @@ async function renderFeishuSetup(panel, request) {
       }, 'quiet'); probe.type = 'button'; form.append(probe);
     }
     form.append(note('读取不到机器人时，先发布包含机器人能力的初始版本再重试；完成事件订阅后还需发布新版本。'));
-    const installation = channelField(form, '应用安装租户 tenant_key', 'installation_tenant', c?.installation_tenant || ''); installation.required = true;
-    form.append(note('填写机器人实际安装的飞书企业标识，用于核对事件来源。可在飞书 API 调试台调用“获取企业信息”，复制返回的 data.tenant.tenant_key；不要填写企业名称、企业编号 display_id、App ID 或 tenant_access_token。商店应用也可从该企业的应用启用事件或登录授权信息获取 tenant_key。'),
-      channelLink('https://open.feishu.cn/document/server-docs/tenant-v2/tenant/query', '飞书：获取企业信息'));
-    const actors = channelField(form, '允许的操作者 tenant_key（逗号分隔）', 'actor_tenants', c?.actor_tenants.join(',') || ''); actors.required = true;
-    form.append(note('限定哪些飞书企业的成员可以发消息或点击卡片。同企业内部使用：与上面的安装租户填写同一个值。跨企业使用：填写获准企业的 tenant_key，以英文逗号分隔，例如 tenant_a,tenant_b。这里不授予项目权限；每人仍需完成身份绑定和项目授权。'));
+    let installation;
+    if (choice.application_type === 'enterprise') {
+      form.append(note('应用安装企业由系统在保存时自动获取，无需填写 tenant_key。安装企业仅用于核对应用事件来源，不限制操作者所属企业。'));
+    } else {
+      installation = channelField(form, '应用安装租户 tenant_key', 'installation_tenant', c?.installation_tenant || ''); installation.required = true;
+      form.append(note('商店应用需要先指定机器人安装的飞书企业，才能换取该企业的访问令牌。可从该企业的应用启用事件或登录授权信息获取 tenant_key；此字段用于核对应用事件来源，不限制操作者所属企业。'));
+    }
     let verification, encryption;
     if (choice.transport === 'http') {
       verification = channelField(form, c ? 'Verification Token（留空保留）' : 'Verification Token', 'verification_token', '', 'password'); verification.required = !c || c.transport !== 'http';
@@ -96,7 +99,7 @@ async function renderFeishuSetup(panel, request) {
       event.preventDefault(); save.disabled = true; message.textContent = ''; message.className = 'view-error';
       const credentials = Object.fromEntries([['app_secret', secret.value.trim()], ['verification_token', verification?.value.trim()], ['encrypt_key', encryption?.value.trim()]].filter(([, value]) => value));
       try {
-        const result = await api('/api/channels/connectors' + (c ? '/' + c.id : ''), c ? 'PATCH' : 'POST', { app_id: app.value.trim(), installation_tenant: installation.value.trim(), actor_tenants: actors.value.split(',').map(s => s.trim()).filter(Boolean),
+        const result = await api('/api/channels/connectors' + (c ? '/' + c.id : ''), c ? 'PATCH' : 'POST', { app_id: app.value.trim(), ...(installation ? { installation_tenant: installation.value.trim() } : {}),
           application_type: choice.application_type, transport: choice.transport, enabled: enabled.checked, expected_revision: c?.revision ?? 0,
           ...(Object.keys(credentials).length ? { credentials } : {}) });
         secret.value = ''; if (verification) verification.value = ''; if (encryption) encryption.value = '';

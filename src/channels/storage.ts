@@ -4,7 +4,7 @@ export function channelStorage(store: Store): void {
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS channel_credentials(id TEXT PRIMARY KEY,sealed TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS channel_connectors(id TEXT PRIMARY KEY,provider TEXT NOT NULL,
-      app_id TEXT NOT NULL,installation_tenant TEXT NOT NULL,actor_tenants TEXT NOT NULL,bot_open_id TEXT NOT NULL,
+      app_id TEXT NOT NULL,installation_tenant TEXT NOT NULL,bot_open_id TEXT NOT NULL,
       application_type TEXT NOT NULL,transport TEXT NOT NULL,credential_ref TEXT NOT NULL,enabled INTEGER NOT NULL,
       revision INTEGER NOT NULL,last_received_at INTEGER,last_error TEXT,created_at INTEGER NOT NULL);
     CREATE UNIQUE INDEX IF NOT EXISTS channel_installation_key ON channel_connectors(provider,app_id,installation_tenant);
@@ -35,6 +35,9 @@ export function channelStorage(store: Store): void {
     store.db.exec("ALTER TABLE channel_connectors ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'idle'");
   // Connections are global; keep their IDs so credentials, bindings and queued events remain valid.
   store.transaction(() => {
+    // Existing connections also accept external members; identity and project grants still authorize each request.
+    if (store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'actor_tenants'))
+      store.db.exec('ALTER TABLE channel_connectors DROP COLUMN actor_tenants');
     for (const table of ['channel_connectors', 'channel_control_operations'])
       if (store.all(`PRAGMA table_info(${table})`).some(c => c.name === 'tenant_id'))
         store.db.exec(`ALTER TABLE ${table} DROP COLUMN tenant_id`);

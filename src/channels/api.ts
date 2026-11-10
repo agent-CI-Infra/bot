@@ -62,7 +62,7 @@ export class ChannelApi {
     if (path === '/api/channels/connectors' && method === 'GET') {
       authorize(actor, 'platform.manage');
       const rows = store.all('SELECT * FROM channel_connectors');
-      return { connectors: rows.map(c => ({ ...c, actor_tenants: JSON.parse(c.actor_tenants), capabilities: this.service.adapter(c).capabilities,
+      return { connectors: rows.map(c => ({ ...c, capabilities: this.service.adapter(c).capabilities,
         callback_path: '/hooks/feishu/' + c.id, health: { enabled: !!c.enabled, connection_state: c.connection_state, last_received_at: c.last_received_at, last_error: c.last_error,
           queued: store.get("SELECT count(*) n FROM channel_inbox WHERE connector_id=? AND state IN ('queued','submitted')", c.id)!.n,
           failed: store.get("SELECT count(*) n FROM channel_outbox WHERE connector_id=? AND state='failed'", c.id)!.n } })) };
@@ -70,19 +70,17 @@ export class ChannelApi {
     const match = /^\/api\/channels\/connectors\/([a-f0-9]{48})(?:\/(groups|outbox|events))?$/.exec(path);
     if (path === '/api/channels/connectors' && method === 'POST' || match && !match[2] && method === 'PATCH') {
       authorize(actor, 'platform.manage');
+      // Accept the retired actor_tenants field from older clients without applying an enterprise restriction.
       fields(input, ['app_id', 'installation_tenant', 'actor_tenants', 'bot_open_id', 'application_type', 'transport', 'enabled', 'credentials', 'expected_revision']);
       const current = match ? store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!) : undefined;
       if (match && !current) return fail(404, 'channel_connector_not_found');
       const expected = current?.revision ?? 0;
       if (input.expected_revision !== expected) fail(409, 'channel_revision_conflict');
       const get = (key: string) => input[key] ?? current?.[key];
-      const app = text(get('app_id'), 200), installation = text(get('installation_tenant'));
-      if (store.get('SELECT 1 FROM channel_connectors WHERE app_id=? AND installation_tenant=? AND id<>?', app, installation, current?.id ?? '')) fail(409, 'channel_installation_conflict');
+      const app = text(get('app_id'), 200);
       const type = get('application_type'), transport = get('transport'), enabled = input.enabled ?? (current ? !!current.enabled : false);
       if (!['enterprise', 'saas'].includes(String(type)) || !['http', 'websocket'].includes(String(transport)) || transport === 'websocket' && type !== 'enterprise') fail(400, 'channel_transport_invalid');
       if (typeof enabled !== 'boolean') fail(400, 'channel_enabled_invalid');
-      const tenants = input.actor_tenants ?? (current ? JSON.parse(current.actor_tenants) : undefined);
-      if (!Array.isArray(tenants) || !tenants.length || tenants.length > 100 || tenants.some(t => typeof t !== 'string' || !t || t.length > 256)) fail(400, 'channel_actor_tenants_required');
       let credential = current?.credential_ref;
       const id = current?.id ?? randomId(), operation = randomId();
       const guard = () => {
@@ -101,6 +99,12 @@ export class ChannelApi {
       text(secret.app_secret, 4096);
       if (transport === 'http' && (!secret.verification_token || !secret.encrypt_key)) fail(400, 'channel_http_credentials_required');
       if (current && current.app_id !== app) { delete secret.app_ticket; delete secret.app_ticket_time; }
+      // An enterprise token identifies its installation; store apps need an explicit installation before token exchange.
+      const changedApp = current && (current.app_id !== app || current.application_type !== type);
+      const suppliedInstallation = input.installation_tenant ?? (changedApp ? undefined : current?.installation_tenant);
+      const installation = suppliedInstallation === undefined && type === 'enterprise'
+        ? await new FeishuAdapter({ app_id: app, application_type: type }, secret, this.service.options.fetch, guard).installationTenant()
+        : text(suppliedInstallation);
       // Older API clients may supply an ID; the wizard always discovers it from the effective credentials.
       let bot = input.bot_open_id === undefined ? current?.bot_open_id ?? '' : text(input.bot_open_id);
       const changedSource = current && (current.app_id !== app || current.installation_tenant !== installation || current.application_type !== type);
@@ -117,11 +121,11 @@ export class ChannelApi {
         }
         if (!credential) fail(400, 'channel_credentials_required');
         if (current) {
-          store.run('UPDATE channel_connectors SET app_id=?,installation_tenant=?,actor_tenants=?,bot_open_id=?,application_type=?,transport=?,credential_ref=?,enabled=?,revision=revision+1 WHERE id=? AND revision=?',
-            app, installation, JSON.stringify(tenants), bot, String(type), String(transport), credential, Number(enabled), id, expected);
+          store.run('UPDATE channel_connectors SET app_id=?,installation_tenant=?,bot_open_id=?,application_type=?,transport=?,credential_ref=?,enabled=?,revision=revision+1 WHERE id=? AND revision=?',
+            app, installation, bot, String(type), String(transport), credential, Number(enabled), id, expected);
           if (current.credential_ref !== credential) store.run('DELETE FROM channel_credentials WHERE id=?', current.credential_ref);
-        } else store.run('INSERT INTO channel_connectors(id,provider,app_id,installation_tenant,actor_tenants,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-          id, 'feishu', app, installation, JSON.stringify(tenants), bot, String(type), String(transport), credential, Number(enabled), 1, Date.now());
+        } else store.run('INSERT INTO channel_connectors(id,provider,app_id,installation_tenant,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          id, 'feishu', app, installation, bot, String(type), String(transport), credential, Number(enabled), 1, Date.now());
         store.audit(actor.principal_id, 'channel.connector.updated', id);
         const result = { operation_id: operation, state: 'succeeded', connector_id: id, revision: expected + 1 };
         store.run('INSERT INTO channel_control_operations(id,project_id,receipt) VALUES(?,NULL,?)', operation, JSON.stringify(result));
