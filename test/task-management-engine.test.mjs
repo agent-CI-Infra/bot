@@ -12,6 +12,9 @@ import { roleApi } from '../dist/roles/api.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { LocalManager } from '../dist/projects/local-manager.js';
 import { server as github } from './fixtures/agent-server.mjs';
+import { knowledgeActor } from './knowledge-fixture.mjs';
+import { authorize } from '../dist/identity/authorization.js';
+import { taskTraceAccess } from '../dist/memory/access.js';
 
 const pass = { outcome: 'pass', reason: 'Controlled fixture: inspected the supplied report candidate', gaps: [], residuals: [], core_complete: true, required_evidence_complete: true, acceptable_risk: true };
 
@@ -41,11 +44,17 @@ test('own tasks use the existing engine, executor role, runs, claims and indepen
       { role_id: 'qa', harness_ref: { id: 'native' } }
     ]
   });
-  const commands = new TaskCommands(store), source = roleTaskCaller(store, '101', 'reviewer', { conversation_id: 'persistent-chat', source_message: 'incoming-1', guard() {} });
+  const commands = new TaskCommands(store), engine = new TaskEngine(store, manager, gh + '/github');
+  const actors = [undefined, knowledgeActor(store, 'maintainer', '101'),
+    knowledgeActor(store, 'restricted', '101', ['tasks.read', 'tasks.manage_own', 'knowledge.read'])];
+  assert.throws(() => authorize(actors[2], 'tasks.write', { project_id: '101' }), { code: 'capability_forbidden' });
+  let source;
+  for (const actor of actors) {
+  source = roleTaskCaller(store, '101', 'reviewer', { actor, conversation_id: 'persistent-chat', source_message: 'incoming-1', guard() {} });
   const { id } = commands.tool(source, 'create_task', { request: 'Produce a bounded report', criteria: ['Return the report with explicit uncertainty'] });
+  if (actor) assert.equal(taskTraceAccess(store, store.get('SELECT * FROM tasks WHERE id=?', id)).actor.principal_id, actor.principal_id);
   store.run("UPDATE tasks SET status='running',claim_token='claim' WHERE id=?", id);
   store.run("INSERT INTO task_claims VALUES(?,'101','claim','now')", id);
-  const engine = new TaskEngine(store, manager, gh + '/github');
   await engine.run(id, 'claim');
   const task = store.get('SELECT * FROM tasks WHERE id=?', id);
   assert.equal(task.status, 'completed', JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?', id)));
@@ -55,6 +64,7 @@ test('own tasks use the existing engine, executor role, runs, claims and indepen
   assert.ok(requests.length >= 2);
   assert.ok(requests.every(body => !body.tools.some(t => ['delegate_role', 'delegate_roles', 'run_command', 'create_issue', 'create_pull_request'].includes(t.function.name))));
   assert.equal(store.get('SELECT count(*) n FROM github_effects WHERE task_id=?', id).n, 0);
+  }
   commands.tool(source, 'create_task', { request: 'Second report', criteria: ['Return a separate result'], execute: false });
-  assert.equal(store.get('SELECT count(*) n FROM tasks').n, 2);
+  assert.equal(store.get('SELECT count(*) n FROM tasks').n, 4);
 });

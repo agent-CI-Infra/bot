@@ -1,5 +1,6 @@
 import type { Store, Row } from '../storage/database.js';
-import { randomId, type Json } from '../core/security.js';
+import { randomId, HttpError, type Json } from '../core/security.js';
+import { TaskError } from '../agent/common.js';
 import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { TaskRecords } from '../tasks/service.js';
 import { enqueue } from '../review/queue.js';
@@ -135,7 +136,10 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
   if (!value || typeof value !== 'object') fail('dispatch_decision_invalid', 'The decision must be an object.');
   const decision = value.decision, ids = Array.isArray(value.option_ids) ? value.option_ids.map(String) : null;
   if (!['create', 'continue', 'ignore'].includes(decision) || !ids) fail('dispatch_decision_invalid', 'decision must be create, continue or ignore, with option_ids.');
-  if (decision !== 'ignore') assertTaskCaller(store,eventTaskCaller(store,String(context.event.repository_id),String(context.event.id)),true);
+  if (decision !== 'ignore') {
+    try { assertTaskCaller(store,eventTaskCaller(store,String(context.event.repository_id),String(context.event.id)),true); }
+    catch (error) { if (error instanceof HttpError) throw new TaskError(error.code, 'waiting_configuration'); throw error; }
+  }
   const reason = typeof value.reason === 'string' ? value.reason.trim() : '';
   if (!reason) fail('dispatch_reason_required', 'Give the reason for the decision.');
   if (new Set(ids).size !== ids.length) fail('dispatch_decision_invalid', 'option_ids repeat an option.');
@@ -231,7 +235,7 @@ function join(store: Store, event: Row, taskId: string, decision: Decision) {
  * Throws InvalidDecision when a continuation target is no longer running: the event is decided again.
  */
 export function applyDecision(store: Store, event: Row, decision: Decision, lease: string | null): { created: string[]; continued: string[] } {
-  return store.transaction(() => {
+  try { return store.transaction(() => {
     const current = store.get('SELECT * FROM dispatch_events WHERE id=?', event.id);
     if (!current || (lease ? current.state !== 'dispatching' || current.lease !== lease : current.state !== 'pending')) throw new InvalidDecision('dispatch_lease_lost', 'The event was decided or claimed elsewhere.');
     const context = dispatchContext(store, current), checked = checkDecision(store, context, decision);
@@ -260,7 +264,7 @@ export function applyDecision(store: Store, event: Row, decision: Decision, leas
       checked.decision, checked.reason, checked.brief ? JSON.stringify(checked.brief) : null, JSON.stringify({ created, continued, declined, ...(checked.writes ? { writes: checked.writes } : {}) }),
       checked.model ?? decision.model ?? null, now, current.id);
     return { created, continued };
-  });
+  }); } catch (error) { if (error instanceof HttpError) throw new TaskError(error.code, 'waiting_configuration'); throw error; }
 }
 
 /** The Manager's decision (and the events) behind a task, for task details. */

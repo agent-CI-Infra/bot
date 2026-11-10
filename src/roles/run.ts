@@ -192,6 +192,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
       const origin=assertManagedExecution(s,task),auth=s.get('SELECT principal_id FROM task_authorizations WHERE task_id=?',task.id),principal=origin?.principal_id??auth?.principal_id;
       const actor=principal?resolvePrincipalActor(s,principal,null,task.repository_id):undefined;
       return roleTaskCaller(s,task.repository_id,role,{actor,conversation_id:origin?.conversation_id??undefined,source_message:origin?.source_message??undefined,
+        allowed_capabilities:origin?.principal_capabilities?JSON.parse(origin.principal_capabilities):undefined,
         source_task_id:task.id,source_run_id:b?.run_id,allowed_tools:snapshot.capability.tools?.filter(tool=>taskToolAllowed(s,task,role,tool)),
         guard:()=>{authority(name);if(b)assertLease(s,b.run_id,b.epoch);}});
      };

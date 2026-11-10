@@ -1,5 +1,5 @@
 import type { Store, Row } from '../storage/database.js';
-import { authorize, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
+import { authorize, narrowActor, resolvePrincipalActor, type ActorContext } from '../identity/authorization.js';
 import { fail } from '../core/security.js';
 import { createHash } from 'node:crypto';
 
@@ -13,7 +13,9 @@ export function taskTraceAccess(store: Store, task: Row): MemoryAccess {
 export function taskMemoryAccess(store: Store, task: Row): MemoryAccess {
   const grant = store.get('SELECT * FROM task_authorizations WHERE task_id=? AND project_id=?', task.id, task.repository_id);
   if (!grant) return fail(403, 'memory_actor_unavailable');
-  const actor = resolvePrincipalActor(store, grant.principal_id, grant.tenant_id, grant.project_id, 'service');
+  const resolved = resolvePrincipalActor(store, grant.principal_id, grant.tenant_id, grant.project_id, 'service');
+  const origin = store.get('SELECT principal_capabilities FROM task_origins WHERE task_id=?', task.id);
+  const actor = origin?.principal_capabilities ? narrowActor(resolved, JSON.parse(origin.principal_capabilities)) : resolved;
   authorize(actor, grant.capability, { project_id: grant.project_id });
   return { actor, role: task.active_role || (String(task.kind).startsWith('review.') ? 'reviewer' : 'dev'), task_id: task.id, run_id: task.trace_run_id ?? undefined };
 }
