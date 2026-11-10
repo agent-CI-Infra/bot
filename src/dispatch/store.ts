@@ -155,6 +155,10 @@ export function checkDecision(store: Store, context: DispatchContext, value: any
     if (decision !== 'create' || !goal) fail('dispatch_brief_invalid', 'brief belongs to create and needs a goal.');
     brief = { goal: goal.slice(0, 2000), criteria: criteria.slice(0, 10) };
   }
+  // An Issue development without a reviewed implementation goal works to the Manager's brief, so it needs one.
+  const unscoped = decision === 'create' && context.options.some(option => ids.includes(option.id) && option.spec.type === 'object' && option.spec.kind === 'development.issue'
+    && !String((option.spec.input as any)?.review?.implementation_goal || '').trim());
+  if (unscoped && !brief) fail('dispatch_brief_required', 'Develop Issue has no reviewed implementation goal here: add a brief with the goal and the acceptance criteria.');
   return { decision, option_ids: ids, reason: reason.slice(0, 1000), brief, writes, model: typeof value.model === 'string' ? value.model : null };
 }
 

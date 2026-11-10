@@ -69,7 +69,8 @@ test('a Manager section is the console layer of its rule file; the repository fi
   assert.equal((await saveManager(admin, '101', { content: '## A `guide`\n\na\n## B `guide`\n\nb\n' })).value.error, 'duplicate_manager_section');
   assert.deepEqual([...parseSections('## 回复 `reply`\n\n```md\n## Quoted `guide`\n```\n').sections.keys()], ['reply']);
   assert.deepEqual(ruleOverrides('## 标签 `labels`\n\nreview_label: "bot-reviewed"\n', { '.bot/rules/pr-review.md': 'old' }), { '.bot/rules/labels.md': 'review_label: "bot-reviewed"' });
-  // The control plane still requires a person's development label and an unassigned Issue.
+  // The control plane still requires a person's development label; who is assigned is the Manager's judgement (the
+  // rule decider of these tests keeps the old answer for an assigned Issue).
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
   const review = { summary: 's', requires_code_change: true, issue_requests_code: true, clarification_required: false, implementation_goal: 'Fix add', request_quote: 'Fix add.', findings: [], object_hash: 'h' }, now = new Date().toISOString();
   h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,unique_key,input,result,object_number,created_at,updated_at) VALUES('rv','101','review.issue','succeeded','r','101:review.issue:5:opened','{}',?,5,?,?)", JSON.stringify(review), now, now);

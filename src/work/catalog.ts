@@ -11,7 +11,7 @@ import { defaults } from '../rules/service.js';
 // agents and read everything on GitHub with a read-only token. Writing is per work type: each write is a platform tool
 // the agent calls when it needs to (see writeCatalog), and the control plane performs it. The agent never holds a token
 // that can write, and neither the Manager prompt nor event content can add a write.
-// Control-plane conditions (development label, assignees, tests before publication, release source checks, the single
+// Control-plane conditions (a person's development label, tests before publication, release source checks, the single
 // Actions rerun) live in those tools and in the modules that own them; a work type chooses its writes, never those conditions.
 
 export interface WorkPermissions {
@@ -65,7 +65,7 @@ export const workTypes: WorkType[] = [
   { id: 'review.pr', name: '检视 PR', base: 'review', object: 'pr', kinds: ['review.pr'], section: 'review.pr', family: 'review', defaultEnabled: true,
     description: '检视 PR 的变更、测试与证据，发布 COMMENT 检视结论。' },
   { id: 'development.issue', name: '开发 Issue', base: 'development', object: 'issue', kinds: ['development.issue'], section: 'development', family: 'development', defaultEnabled: true,
-    description: 'Issue 明确要求改代码、有人加了开发标签且无人指派时，在虚拟电脑里实现、测试并创建 bot PR。' },
+    description: '有人加了开发标签、Manager 判断可以开发时，在虚拟电脑里实现、测试并创建 bot PR。' },
   { id: 'development.pr', name: '跟进 bot PR', base: 'development', object: 'pr', kinds: ['development.pr'], section: 'development', family: 'development', defaultEnabled: true,
     description: '检视采纳了 bot PR 上的修改要求，或发现可执行问题后，修订 bot 自己的 PR。' },
   { id: 'reply', name: '通用回复', base: 'reply', object: 'any', kinds: ['workflow.issue', 'workflow.pr'], section: 'reply', defaultEnabled: false,

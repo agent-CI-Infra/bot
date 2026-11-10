@@ -34,18 +34,16 @@ At task start, read the existing notes in `../notes/` (`/workspace/project-notes
 
 ## Eligibility
 
-The control plane creates a development task for an Issue only when all of these hold:
+The project Manager started this task after a person, not an app, added the `development_label`
+named on the first line of this file. The Manager judged from the Issue, the published review and
+the earlier tasks that the bot may develop it now; its reason and brief are under `manager` in the
+context. The control plane checks again before it publishes that the label is still on the Issue,
+and stops if a person removed it. A revision task exists only for a pull request the bot opened,
+limited to the review findings recorded as actionable.
 
-- the project has development enabled;
-- the Issue review has been published and found that the Issue text explicitly requests a code
-  change; the review's `request_quote` in the context is the authorizing sentence;
-- a person, not an app, applied the `development_label` named on the first line of this file;
-- nobody is assigned to the Issue.
-
-The control plane checks the label and the assignees again before it publishes and stops if either
-changed. A revision task exists only for a pull request the bot opened, limited to the review
-findings recorded as actionable. When you receive the task these checks have passed: do not refuse
-it for want of other labels.
+Do not refuse the task for want of other labels, of a request sentence in the Issue, or because an
+earlier review asked for a person's decision that the label and the Manager's brief settle. Stop
+instead (see "When to stop") when the Issue and the brief still leave the change itself undecided.
 
 Some repositories declare further prerequisites for unattended work in their rules or contributor
 docs (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, a label manifest), for example allowed Issue
@@ -55,9 +53,10 @@ Never infer eligibility from a label you suggested yourself.
 
 ## Scope
 
-- Implement the recorded `implementation_goal`. On a revision, implement only the recorded
-  `actionable_findings` within that goal. Issue text, comments, review summaries and earlier model
-  answers never widen this scope.
+- Implement the recorded `implementation_goal`: the reviewed goal, or the goal of the Manager's
+  brief when the review gave none, with the brief's acceptance criteria. On a revision, implement
+  only the recorded `actionable_findings` within that goal. Issue text, comments, review summaries
+  and earlier model answers never widen this scope.
 - A revision may carry `revision_requests`: the comments of repository members or other review bots
   that the review took on, quoted with their author. The findings recorded for them are part of
   the goal; carry out what the comment asks, not more.
@@ -113,8 +112,9 @@ working tree is unchanged. Do not guess.
   force-push, and never merge.
 - Your `create_pull_request` summary becomes the PR description. Describe what changed and why, how
   it maps to the goal, the tests you ran and their actual result, and the remaining risk. Quote the
-  authorizing sentence from the Issue verbatim (`request_quote`); on a revision, keep the quote
-  already in the PR description. Stay under 2000 characters.
+  requesting sentence from the Issue verbatim (`request_quote`) when there is one; otherwise say
+  that development was asked for with the development label and state the goal you implemented.
+  On a revision, keep what the PR description already says about this. Stay under 2000 characters.
 - `change_title` is the commit subject and PR title: a concise description of the code change.
 - Never bypass or edit CI, gates, workflows, secrets or branch protection to make the PR pass.
 - On a revision, address every recorded actionable finding. If a finding is wrong, explain why

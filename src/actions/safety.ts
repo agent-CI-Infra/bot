@@ -37,6 +37,15 @@ export function actionsSourceIssue(store: Store, task: { repository_id: string; 
     WHERE p.repository_id=? AND p.number=? AND t.kind='development.issue'`, task.repository_id, task.object_number)?.number ?? null;
 }
 
+/**
+ * An Issue filed from an Actions failure keeps the strict development gates other Issues hand to the Manager: its text
+ * comes from logs, so it is developed only unassigned and with a review that found the change requested.
+ */
+export const actionsReport = (store: Store, id: string, number: number) => !!store.get('SELECT 1 FROM actions_failure_issues WHERE repository_id=? AND number=?', id, number);
+export function actionsIssueAssigned(store: Store, id: string, number: number, issue: any) {
+  const assigned = !!issue?.assignee || Array.isArray(issue?.assignees) && issue.assignees.length > 0;
+  return assigned && actionsReport(store, id, number);
+}
 export function actionsDevelopmentAllowed(store: Store, id: string, number: number, issue?: any, result?: any) {
   const source = store.get('SELECT classification FROM actions_failure_issues WHERE repository_id=? AND number=?', id, number);
   if (!source) return true;

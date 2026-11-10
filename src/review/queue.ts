@@ -1,18 +1,23 @@
 import { captureTaskConfiguration } from '../tasks/configuration.js';
 import { type Store } from '../storage/database.js';
 import { randomId, type Json } from '../core/security.js';
+import { sha as digest } from '../agent/common.js';
 import { reviewObjectState } from './sessions.js';
 import { developmentLabel } from '../rules/service.js';
-import { actionsDevelopmentAllowed } from '../actions/safety.js';
+import { actionsDevelopmentAllowed, actionsReport } from '../actions/safety.js';
 import { recordEvent, type CreateOption, type EventInput } from '../dispatch/store.js';
-import { eventFilters, labelDispatched, type EventFilters } from '../work/settings.js';
+import { eventFilters, labelDispatched, workOffered, type EventFilters } from '../work/settings.js';
 
 export const sameLabel = (name: unknown, label: string) => String(name ?? '').toLowerCase() === label.toLowerCase();
-// A person's go-ahead for development: the development label is on the Issue and nobody has claimed it.
+// A person's go-ahead for development: the development label is on the Issue. Whether the Issue should be developed
+// (what the review found, who is assigned) is the Manager's judgement, not a control-plane condition.
 export function developmentReady(issue: any, label: string) {
   const labels = Array.isArray(issue?.labels) ? issue.labels : [];
-  return labels.some((l: any) => sameLabel(typeof l === 'string' ? l : l?.name, label)) && !issue.assignee && !(Array.isArray(issue.assignees) && issue.assignees.length);
+  return labels.some((l: any) => sameLabel(typeof l === 'string' ? l : l?.name, label));
 }
+/** The logins assigned to an Issue, for the Manager's facts. */
+export const assigneesOf = (issue: any) => [...(Array.isArray(issue?.assignees) ? issue.assignees : []), ...(issue?.assignee && !issue.assignees?.length ? [issue.assignee] : [])]
+  .map((a: any) => String(a?.login || '')).filter(Boolean);
 // The review found an explicit request for this code change in the Issue's own title or body.
 export function reviewRequestsCode(issue: any, result: any) {
   const text = String(issue?.title) + '\n' + String(issue?.body || ''), quote = String(result?.request_quote || '');
@@ -98,7 +103,8 @@ export function enqueue(store: Store, repositoryId: string, kind: string, number
   if (!Number.isSafeInteger(number) || number < 1 || kind.endsWith('.pr') && !/^[a-f0-9]{40}$/.test(head || '')) return null;
   if (kind === 'development.issue' && !actionsDevelopmentAllowed(store, repositoryId, number)) return null;
   if (commentId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[1-9]\d*$/.test(commentId))) return null;
-  if (updateId !== null && (!['review.issue','review.pr'].includes(kind) || !/^[\w-]{1,200}$/.test(updateId))) return null;
+  // A development is keyed by the labeling that asked for it, so a person can ask again after an earlier one ended.
+  if (updateId !== null && (!['review.issue','review.pr','development.issue'].includes(kind) || !/^[\w-]{1,200}$/.test(updateId))) return null;
   if (kind === 'development.issue' && store.get(`SELECT id FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=?
     AND status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_permission','waiting_pr_head','waiting_publication',
       'running','preparing','implementing','validating','publishing','result_ready') LIMIT 1`, repositoryId, number)) return null;
@@ -166,14 +172,22 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
         replyOption('issue', number, null, payload, 'opened', delivery)] };
     if (action === 'labeled' && openObject(issue) && p.sender?.type === 'User' && typeof p.label?.name === 'string') {
       const label = String(p.label.name), options: CreateOption[] = [];
-      const development = filters['issue.development_label'] ? labeledDevelopment(store, repositoryId, p, number, delivery) : null;
-      if (development) options.push(development);
-      if (labelDispatched(filters, 'issue', label)) {
+      // Only a project that develops answers the development label; otherwise it is an ordinary label.
+      const development = filters['issue.development_label'] && workOffered(store, repositoryId, 'development.issue', 'issue.labeled')
+        ? labeledDevelopment(store, repositoryId, p, number, delivery) : null;
+      if (development) options.push(development.option);
+      const dispatched = labelDispatched(filters, 'issue', label);
+      // The development label also offers a review that answers it, so that when the Manager does not start development
+      // the bot replies on the Issue with what is missing instead of staying silent.
+      if (dispatched || development) {
         const trigger = { event, action, reason: 'labeled', actor, label };
-        const relabel = update('issue.labeled', 'issue', number, issue, trigger, 'delivery:' + delivery, { updateId: delivery }, { label });
-        return { ...relabel, options: [...options, ...relabel.options] };
+        const relabel = update('issue.labeled', 'issue', number, issue, trigger, 'delivery:' + delivery, { updateId: delivery },
+          { label, ...(development ? { development: development.facts } : {}) });
+        // Before #207 only a dispatched label started a review; the rule decider used in tests keeps that.
+        const answers = relabel.options.map(option => option.id === 'review' && !dispatched ? { ...option, default: false } : option);
+        return { ...relabel, options: [...options, ...answers] };
       }
-      return options.length ? { ...base('issue.labeled', `issue.labeled:${number}:update:${delivery}`, 'issue', number, `Issue 加上标签 ${label}：${clip(issue.title, 120)} #${number}`, { object: objectFacts(issue), label }), options } : null;
+      return null;
     }
   }
   if (event === 'pull_request' && notClosed(p.pull_request) && sha(p.pull_request.head?.sha)) {
@@ -209,18 +223,30 @@ function webhookEvent(store: Store, repositoryId: string, event: string, payload
   }
   return null;
 }
-// A person adding the development label after the review starts the development that review found requested.
-// Labels added before the review finishes are checked when the review is published instead.
-function labeledDevelopment(store: Store, repositoryId: string, payload: any, number: number, delivery: string): CreateOption | null {
+// A person adding the development label offers development to the Manager, which judges from these facts whether the
+// Issue can be developed now. Only the go-ahead itself is a control-plane condition: an open Issue, the label added by a
+// person and still on it, and the clearance of an Issue filed from an Actions failure. Each labeling is its own go-ahead,
+// keyed by its delivery; an active development of the same Issue still refuses a second one.
+function labeledDevelopment(store: Store, repositoryId: string, payload: any, number: number, delivery: string): { option: CreateOption; facts: Json } | null {
   const issue = payload.issue;
   if (issue?.state !== 'open' || payload.sender?.type !== 'User') return null;
   let label: string; try { label = developmentLabel(store, repositoryId); } catch { return null; }
   if (!sameLabel(payload.label?.name, label) || !developmentReady(issue, label)) return null;
   const review = store.get("SELECT id,result FROM tasks WHERE repository_id=? AND kind='review.issue' AND object_number=? AND status='succeeded' ORDER BY created_at DESC LIMIT 1", repositoryId, number);
   const result = review?.result ? JSON.parse(review.result) : null;
-  if (!result || !reviewRequestsCode(issue, result) || !actionsDevelopmentAllowed(store, repositoryId, number, issue, result)) return null;
-  return { id: 'development', work: 'development.issue', title: `开发 Issue #${number}`, default: true,
-    spec: { type: 'object', kind: 'development.issue', number, head: null, input: { review: result, object_hash: result.object_hash }, delivery, source_task: review!.id } };
+  // An Actions report enters development only with a review that cleared it as a product defect.
+  const assignees = assigneesOf(issue), requested = !!result && reviewRequestsCode(issue, result);
+  if (!actionsDevelopmentAllowed(store, repositoryId, number, issue, result ?? {}) || actionsReport(store, repositoryId, number) && (assignees.length || !requested)) return null;
+  const facts = { label, labeled_by: String(payload.sender?.login || ''), assignees,
+    review: result ? { task_id: review!.id, summary: clip(result.summary, 1500), requires_code_change: !!result.requires_code_change, issue_requests_code: !!result.issue_requests_code,
+      clarification_required: !!result.clarification_required, implementation_goal: clip(result.implementation_goal, 1500), request_quote: clip(result.request_quote, 500),
+      quote_in_issue: !!result.request_quote && (String(issue.title) + '\n' + String(issue.body || '')).includes(String(result.request_quote)) } : null };
+  return { facts, option: { id: 'development', work: 'development.issue', title: `开发 Issue #${number}`,
+    // What the control plane did before #207 (for the rule decider in tests): the first development of an unassigned
+    // Issue whose review found the change requested.
+    default: requested && !assignees.length && !store.get("SELECT 1 FROM tasks WHERE repository_id=? AND kind='development.issue' AND object_number=? AND unique_key IS NOT NULL LIMIT 1", repositoryId, number),
+    spec: { type: 'object', kind: 'development.issue', number, head: null, delivery, source_task: review?.id ?? null, update_id: delivery,
+      input: { review: result, object_hash: digest(JSON.stringify([issue.title, issue.body])) } } } };
 }
 
 /** Writes the Manager event of a webhook delivery. Closing and drafting still cancel work at once, without the Manager. */

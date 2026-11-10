@@ -149,7 +149,7 @@ const codeActions: Record<string,string> = {
   branch_disappeared:'待更新的分支已被删除，这个任务已被取代，无需处理。',
   review_requires_human_decision:'检视认为需要人先确认需求：在 Issue 下补充说明后提及 bot 重新检视。重试这个任务不会改变结论。',
   issue_needs_replan:'Issue 的标题或正文在检视后被修改：在 Issue 下提及 bot 重新检视。重试这个任务不会改变结论。',
-  development_not_approved:'重新加上开发标签、并确认没有其他人接手后点「重试」。',
+  development_not_approved:'开发标签被去掉了。确实要开发时重新加上开发标签，再点「重试」。',
   actions_development_disabled:'Actions 失败处理或开发已关闭，任务已停止；需要时在项目设置重新开启，并保留人工批准。',
   actions_development_not_approved:'确认原 Issue 仍开放、无人指派、人工开发标签仍在，且检视明确确认产品缺陷；条件不满足时先重新检视。',
   actions_workflow_run_subscription_missing:'请 App 管理员为该仓库实际使用的 App 订阅 workflow_run；仅增加事件订阅不要求重新批准已有权限。',

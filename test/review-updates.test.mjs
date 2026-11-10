@@ -267,9 +267,10 @@ test('an Issue review continues the bot PR for that Issue only within the revisi
   const task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1, source_delivery_id: null };
   const object = { title: 'Fix it', body: 'Please fix the parser.', labels: [] }, development = () => h.store.get("SELECT count(*) n FROM tasks WHERE kind='development.issue' AND id<>'dev-1'").n;
   const requested = { ...result, request_quote: 'Please fix the parser.', issue_requests_code: true, implementation_goal: 'Fix the parser.' };
-  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, true); assert.equal(development(), 0);
+  const goAhead = { label: 'bot-develop', labeled_by: 'alice', assignees: [] };
+  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, goAhead); assert.equal(development(), 0);
   h.store.run("UPDATE bot_pull_requests SET revisions=1"); h.store.run("UPDATE tasks SET status='completed' WHERE id='dev-1'");
-  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, true); assert.equal(development(), 1);
+  engine.queueDevelopment({}, task, { object, trigger: { reason: 'comment' } }, requested, goAhead); assert.equal(development(), 1);
 });
 
 test('a stale PR update review is superseded without queueing a head-triggered review', async t => {
@@ -280,7 +281,7 @@ test('a stale PR update review is superseded without queueing a head-triggered r
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n, 1);
 });
 
-test('an Issue the review found ready says why development has not started: no label, someone assigned, or an app\'s label', async t => {
+test('an Issue the review found ready says why development has not started: no label or an app\'s label; an assignee is the Manager\'s judgement', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true, development_enabled: true });
   const engine = new TaskEngine(h.store, {}, undefined, undefined, acceptanceFixture), task = { id: 'review', repository_id: '101', kind: 'review.issue', object_number: 1 };
@@ -289,11 +290,12 @@ test('an Issue the review found ready says why development has not started: no l
   let issue = {}, events = [];
   const github = { path: path => path, object: async () => issue, pages: async () => events };
   const wait = () => engine.developmentWait(github, task, { object }, result);
-  issue = { labels: [], assignees: [] }; assert.deepEqual(await wait(), { reason: 'label', label: 'bot-develop', assignees: [] });
-  issue = { labels: [{ name: 'bot-develop' }], assignees: [{ login: 'alice' }] }; assert.deepEqual(await wait(), { reason: 'assigned', label: 'bot-develop', assignees: ['alice'] });
+  issue = { labels: [], assignees: [] }; assert.deepEqual(await wait(), { reason: 'label', label: 'bot-develop' });
+  // Someone assigned does not hold development back by itself: the Manager reads the assignees when it is offered.
   issue = { labels: [{ name: 'Bot-Develop' }], assignees: [] }; events = [{ event: 'labeled', label: { name: 'bot-develop' }, actor: { type: 'Bot' } }];
-  assert.deepEqual(await wait(), { reason: 'app', label: 'bot-develop', assignees: [] });
+  assert.deepEqual(await wait(), { reason: 'app', label: 'bot-develop' });
   events.push({ event: 'labeled', label: { name: 'bot-develop' }, actor: { type: 'User' } }); assert.equal(await wait(), null);
+  issue = { labels: [{ name: 'bot-develop' }], assignees: [{ login: 'alice' }] }; assert.equal(await wait(), null);
   // Nothing to say when the review found no explicit code request, or development is off.
   issue = { labels: [], assignees: [] };
   assert.equal(await engine.developmentWait(github, task, { object }, { ...result, issue_requests_code: false }), null);
