@@ -713,7 +713,8 @@ function installedDetail(row) {
   return parts.join(' · ');
 }
 function installedBadges(row) {
-  const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : row.review_enabled ? badge('工作中', 'success') : badge('未开检视', 'warning')];
+  const badges = [!row.registered ? badge('未启动', 'info') : !row.enabled ? badge('已禁用', 'warning') : badge('已启用', 'info')];
+  if (row.registered) badges.push(badge(row.review_enabled ? '检视已开启' : '检视未开启', row.review_enabled ? 'info' : ''));
   if (row.hidden) badges.push(badge('已隐藏', 'info'));
   if (row.installed === false) badges.push(badge('已移出安装', 'danger'));
   else if (row.installed === null) badges.push(badge('不在安装列表'));
