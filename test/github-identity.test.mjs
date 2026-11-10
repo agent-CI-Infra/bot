@@ -38,6 +38,33 @@ test('OAuth uses S256, browser-bound single-use state and stable numeric identit
   assert.ok(!readFileSync(h.database).includes(Buffer.from('fixture-user-42')));
 });
 
+test('existing GitHub sessions expose the verified login and avatar without changing local usernames or identity keys', async t => {
+  const f = await identityFixture(t), { h } = f, login = await f.login();
+  const credentials = session(h.store, login.result.principal_id, login.result.identity_id);
+  const me = async (token = credentials.token) => {
+    const response = await fetch(h.admin + '/api/auth/me', { headers: { Cookie: 'bot_session=' + token } });
+    return { status: response.status, value: await response.json() };
+  };
+  const first = await me(); assert.equal(first.status, 200);
+  assert.deepEqual(first.value.github, { login: 'administrator', avatar_url: 'https://avatars.githubusercontent.com/u/42?s=64&v=4' });
+  assert.match(first.value.username, /^github:42:/); assert.equal(first.value.id, login.result.principal_id);
+  f.state.login = 'renamed-user'; await f.identity.reverify(login.result.principal_id);
+  const renamed = await me(); assert.equal(renamed.value.github.login, 'renamed-user');
+  assert.equal(renamed.value.username, first.value.username); assert.equal(renamed.value.id, first.value.id);
+  assert.equal(renamed.value.github.avatar_url, first.value.github.avatar_url);
+  h.store.run("UPDATE external_identities SET status='pending_verification' WHERE id=?", login.result.identity_id);
+  assert.equal((await me()).value.github.login, 'renamed-user');
+  h.store.transaction(() => revokeIdentity(h.store, login.result.principal_id, login.result.identity_id));
+  assert.equal((await me()).status, 401);
+  // A local recovery session retains its own name even when that account has a GitHub binding.
+  const localToken = token(f.admin); f.state.id = 43;
+  const bound = await f.login('bind', localToken);
+  const local = await me(localToken); assert.equal(local.value.username, 'administrator'); assert.equal(local.value.github, undefined);
+  const external = session(h.store, bound.result.principal_id, bound.result.identity_id);
+  assert.equal((await me(external.token)).value.github.login, 'renamed-user');
+  assert.doesNotMatch(JSON.stringify(first.value), /fixture-user|fixture-refresh|credentials|access_token|private_key/);
+});
+
 test('OAuth only reads identity; installation queries use short-lived read-only App tokens and reject mismatched proof', async t => {
   const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
   const reads = state.requests.filter(r => r.authorization?.startsWith('Bearer fixture-user-'));

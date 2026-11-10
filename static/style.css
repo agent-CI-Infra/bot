@@ -21,6 +21,13 @@ a.status-link:hover{text-decoration:underline}
 /* Shared configuration dialog: one row per item with its own action. */
 #message:not(:empty),#task-error:not(:empty){display:flex;align-items:center;justify-content:space-between;gap:12px}#message>span,#task-error>span{min-width:0;overflow-wrap:anywhere}#message>button,#task-error>button{flex-shrink:0}
 
+#who { display: flex; align-items: center; gap: 8px; max-width: 220px; min-width: 0; }
+#who img { width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; object-fit: cover; }
+.current-user-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
+.current-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.current-user-role { color: #b9d4df; font-size: 11px; }
+@media (max-width: 760px) { #who { max-width: 150px; } }
+
 .github-login-callback { display: block; overflow-wrap: anywhere; white-space: normal; }
 .login-guide { margin: 0; padding-left: 22px; display: grid; gap: 10px; }
 .login-guide li { min-width: 0; }
