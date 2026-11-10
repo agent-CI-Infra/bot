@@ -36,24 +36,23 @@ GitHub 确认后返回本机管理回调。随机 state 绑定发起的超级管
 
 ## GitHub 用户登录
 
-第 3 步配置用户直接用 GitHub 账号登录控制台。可以复用同一个 GitHub App，无需每名用户另建 App，也无需单独创建 OAuth App。较早保存的 App 选择缺少所有者或设置链接时，本步会自动向 GitHub 补查；失败时在本页点「刷新 App 信息」重试，已填写的表单内容保留。成功后立即显示设置入口，无需到安装步骤刷新再返回。组织所属的 App 链接为 `https://github.com/organizations/<组织>/settings/apps/<slug>`，个人账号所属的为 `https://github.com/settings/apps/<slug>`；链接按 GitHub 返回的所有者生成，不猜测归属。刷新只更新 App 的名称、所有者和链接，不切换账号、不修改凭据、Webhook、登录配置或安装状态。
+第 3 步使用独立 **OAuth App** 登录控制台；第 2 步的 **GitHub App** 负责仓库连接、执行和权限核验。两者凭据分别保存，选择或新建仓库 App 不会切换登录配置，不需要每名用户创建 App。
 
-本步按 GitHub 设置的实际页面组织指引，输入框放在对应说明旁：
+按本页顺序操作：
 
-1. **General**：从「About」复制 Client ID（不是 App ID），填入本页；把本页给出的 Callback URL 加到「Identifying and authorizing users → Callback URL」，保留其他回调并保存。
-2. **Credentials**：在 GitHub App 设置左侧切换到「Credentials」，在「Client secrets」区域点「Generate a new client secret」，把生成的值填入本页的 Client secret。已有加密保存的 Secret 时可直接留空保留，不必生成新值；更换说明默认折叠。manifest 新建的 App 可直接复用 GitHub 返回的凭据。
-3. **Permissions & events**：需要识别组织 owner 时，确认 Members 为 Read-only，并订阅 organization 事件。新建 App 已包含，已有 App 的新增权限由接下来的安装步骤确认。
-4. **回到本页保存**：勾选「启用 GitHub 账号登录」并点「保存登录配置」，然后继续安装。也可以暂不启用，继续后续配置。
+1. 打开个人 Settings → Developer settings → **OAuth Apps → New OAuth App**（也可以由组织登记 OAuth App）。Application name 填容易辨认的名称，Homepage URL 填 Bot 统一入口，Authorization callback URL 填页面显示的 `<统一入口>/auth/github/callback`。不要选择 GitHub Apps，不需要启用 Device flow 或安装到仓库。
+2. 登记后复制这个 OAuth App 的 **Client ID**，在其 **Client secrets** 区域生成 Client secret，分别填入本页。不要使用仓库 App 的 App ID、Client ID 或 Secret。已有加密保存的登录 Secret 可以留空保留；更换 Client ID 必须同时填写新 Secret。
+3. 勾选「启用 GitHub 账号登录」，点「保存登录配置」，随后继续安装仓库 App。也可以暂不启用，继续使用本地账号。
 
-只有 App 所有者、组织所有者或指定的 App 管理员能管理设置；GitHub 显示 404 时需核对登录账号权限与 App 归属。Secret 由管理员本人填写，不经聊天或 Issue 转发。Secret 输入框始终为空，留空保存保留原值，勾选「清除已保存的 Client secret，并停用 GitHub 登录」才撤销。
+登录明确请求空 `scope`，只读取公开 GitHub 身份，不申请 `repo`、`read:org` 或其他额外权限。若这个 OAuth App 曾获得额外权限，GitHub 仍返回带额外 scope 的令牌，Bot 会拒绝登录；用户应在 Settings → Applications → Authorized OAuth Apps 撤销该 App 的旧授权后重试，或由管理员使用专用于登录的新 OAuth App。授权页由 GitHub 控制，具体文案以实际页面为准。
 
-已有登录配置后再新建或选择另一个 App，第三步先显示这个 App 的待保存草稿，并取消启用勾选。新 App 返回过 Client ID 和 Secret 时，页面预填它的 Client ID、保留只写 Secret；没有可复用凭据时清空旧值，明确要求填写这个新 App 的 Client ID 和 Secret。已有生效登录配置在保存前继续使用，只有保存启用后才切换，旧页面不能静默提交旧 Client ID 来启用新选中的 App。
+组织和仓库管理权限由仓库 GitHub App 的只读安装令牌查询，查询后撤销临时令牌。组织 owner 识别需要仓库 App 的 **Organization permissions → Members: Read-only** 和 `organization` 事件；向导新建 App 已包含，已有 App 由所有者补齐并在安装处接受新增权限。此权限不在登录 OAuth App 上配置。仓库 App 的所有者和设置入口在第 2 步显示，缺少信息时可原地刷新。
 
-不再单独填写控制台地址。Callback URL 由统一入口生成：`<公网地址>/auth/github/callback`，把它加到 App General 页的「Identifying and authorizing users → Callback URL」并保存。「其他 GitHub 回调地址及用途」默认折叠，列出同一入口下的安装 Setup URL（`/onboarding/github/setup`）、只在创建 App 时使用一次的注册回调（`/onboarding/github/callback`）和 Webhook URL；它们对应 App 设置里的不同字段，不能互相替代。还没有验证公网地址时，Callback URL 取当前控制台地址，页面标明只适合本机测试（`http://127.0.0.1:8791` 或 localhost）。公网地址变化后，登录回调立即跟随；为其他地址保存过的配置（例如升级前的独立管理域名）会同时显示旧、新 Callback URL，在 GitHub App 加上新地址后保存一次即可。地址尚未接通或拼错时，仍可在本机 `http://127.0.0.1:8791` 修改配置、用本地账号重新登录。
+「GitHub 地址及用途」列出登录 Callback URL、仓库 App 的安装 Setup URL `/onboarding/github/setup`、注册回调 `/onboarding/github/callback` 和 Webhook URL。登录回调只填入 OAuth App；其余地址用于仓库 GitHub App，不能互相替代。公网地址变化后，在 OAuth App 更新登录回调，在仓库 App 更新 Setup URL；Webhook 可由重新检查写入。没有公网地址时，页面给出本机回环地址，仅适用于本机测试。
 
-组织 owner 识别还需要 App 的 Members 只读权限和 organization 事件订阅。向导新建 App 已包含；已有 App 需所有者检查补齐，再由安装方接受新增权限。安装时自动请求用户授权可以保持关闭，用户点击登录按钮时才发起 OAuth。勾选启用并保存后立即生效，无需改 `.env` 或重启服务；未保存向导配置时继续兼容部署环境变量和 secret 文件，向导明确停用后不会因重启恢复环境默认值。
+升级前复用仓库 GitHub App 登录的配置继续运行，页面明确提示迁移并要求新 OAuth App 凭据，不会预填或复用仓库 App 的 Secret。保存新配置后，旧 GitHub 用户令牌和 GitHub 会话会清除；用户重新登录仍按 GitHub 数字 ID 关联原账号，已有本地会话、显式委派、项目和任务保留。迁移完成后，用户应在 GitHub 的 **Authorized GitHub Apps** 撤销旧个人授权，保留仓库 App 安装。
 
-修改配置会作废尚未完成的 OAuth 回调并使派生权限等待重新验证；停用或更换 Client ID 还会清除已保存的 GitHub 用户 token 并结束 GitHub 身份会话。已有本地会话、独立显式委派与项目任务保留。本地恢复账号继续可用。首次 GitHub 登录创建独立账号，同名或同邮箱不会自动合并，也不获得系统超级管理员；已有本地账号应先登录，在「身份与权限」绑定 GitHub。详见[身份与授权](identity-authorization.md)。
+Secret 由管理员本人填写，不经聊天或 Issue 转发；输入框始终不回显。勾选「清除登录 Client secret，并停用 GitHub 登录」仅清除登录配置，不修改仓库 App 凭据。保存立即生效并在重启后保留；仅未保存向导配置时使用部署环境默认值。修改配置会使尚未完成的 OAuth 回调失效并要求重新核验派生权限。首次 GitHub 登录不会合并同名或同邮箱账号，也不会授予系统超级管理员；已有本地账号应先登录后绑定。详见[身份与授权](identity-authorization.md)。
 
 ## 项目列表的快捷设置
 

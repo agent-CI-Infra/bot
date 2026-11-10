@@ -17,6 +17,7 @@ test('OAuth uses S256, browser-bound single-use state and stable numeric identit
   const f = await identityFixture(t), { h, identity } = f;
   const begun = identity.begin('browser-a', 'login'), url = new URL(begun.url);
   assert.equal(url.searchParams.get('code_challenge_method'), 'S256'); assert.equal(url.searchParams.get('code_challenge').length, 43);
+  assert.equal(url.searchParams.get('scope'), '');
   await assert.rejects(identity.callback('browser-b', url.searchParams.get('state'), 'code'), /invalid_oauth_state/);
   const authorized = await fetch(begun.url, { redirect: 'manual' }), callback = new URL(authorized.headers.get('location'));
   const result = await identity.callback('browser-a', callback.searchParams.get('state'), callback.searchParams.get('code'));
@@ -35,6 +36,33 @@ test('OAuth uses S256, browser-bound single-use state and stable numeric identit
   const credential = session(h.store, result.principal_id, result.identity_id), req = await fetch(h.admin + '/api/identity', { headers: { Cookie: 'bot_session=' + credential.token } });
   assert.doesNotMatch(await req.text(), /fixture-user|fixture-refresh|credentials|access_token|private_key/);
   assert.ok(!readFileSync(h.database).includes(Buffer.from('fixture-user-42')));
+});
+
+test('OAuth only reads identity; installation queries use short-lived read-only App tokens and reject mismatched proof', async t => {
+  const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
+  const reads = state.requests.filter(r => r.authorization?.startsWith('Bearer fixture-user-'));
+  assert.ok(reads.length > 0); assert.ok(reads.every(r => r.path === '/user'));
+  const issued = state.requests.filter(r => r.path.endsWith('/access_tokens'));
+  assert.ok(issued.length > 0); assert.deepEqual(issued[0].body.permissions, { metadata: 'read', members: 'read' });
+  assert.equal(state.requests.filter(r => r.path === '/installation/token' && r.method === 'DELETE').length, issued.length);
+  assert.equal(state.requests.some(r => r.path.startsWith('/user/')), false);
+  state.owner = false; state.admin = true; state.permissionUserId = 99;
+  await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  state.permissionUserId = 42; await f.identity.reverify(p);
+  assert.equal(active(h.store, p).some(g => g.project_id === '101'), true);
+  state.repositoryProofId = 999; await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  state.repositoryProofId = 101;
+  state.owner = true; state.membershipUserId = 99; state.admin = false;
+  await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  state.membershipUserId = 42; state.membersPermission = false;
+  await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  assert.deepEqual(state.requests.filter(r => r.path.endsWith('/access_tokens')).at(-1).body.permissions, { metadata: 'read' });
+});
+
+test('identity-only OAuth rejects previously granted extra scopes before saving a user or token', async t => {
+  const f = await identityFixture(t); f.state.scope = 'repo,read:org';
+  await assert.rejects(f.login(), /github_oauth_excessive_scope/);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM external_identities').n, 0);
 });
 
 test('current GitHub owner, selected repositories, repo admin and ordinary members follow installation scope', async t => {
@@ -192,4 +220,24 @@ test('an in-flight write cannot commit after revocation, and installation suspen
   assert.equal(h.store.get("SELECT review_enabled FROM policies WHERE repository_id='101'").review_enabled, 0);
   const current = resolveActor(h.store, credentials.token); h.store.run("UPDATE github_installations SET status='suspended' WHERE ref='github.com/123/77'");
   assert.throws(() => authorize(current, 'config.write', { project_id: '101' }), /capability_forbidden/);
+});
+
+
+test('incomplete installation evidence, a different App or credential rotation cannot retain derived authority', async t => {
+  const f = await identityFixture(t), { h, state } = f, login = await f.login(), p = login.result.principal_id;
+  state.repositoryTotal = 2; await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  state.repositoryTotal = 0; await f.identity.reverify(p); assert.ok(active(h.store, p).length > 0);
+  state.appId = 999; await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  state.appId = 123; await f.identity.reverify(p); assert.ok(active(h.store, p).length > 0);
+  state.suspended = true; await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  state.suspended = false; await f.identity.reverify(p); assert.ok(active(h.store, p).length > 0);
+  const original = h.store.get('SELECT credentials FROM accounts WHERE id=?', f.a.id).credentials;
+  state.apiGate = async path => {
+    if (path === '/installation/token') h.store.run('UPDATE accounts SET credentials=? WHERE id=?', h.store.secrets.seal(h.store.secrets.open(original, `account:${f.a.id}`), `account:${f.a.id}`), f.a.id);
+  };
+  await f.identity.reverify(p); assert.deepEqual(active(h.store, p), []);
+  state.apiGate = undefined;
+  state.owner = false; state.admin = true; state.membershipFailure = 404;
+  await f.identity.reverify(p); assert.equal(active(h.store, p).some(g => g.project_id === '101'), true);
+  assert.equal(active(h.store, p).some(g => g.role === 'org_admin'), false);
 });

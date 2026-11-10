@@ -1,11 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { Store, Row } from '../storage/database.js';
-import { digest, fail, HttpError, randomId, type Json } from '../core/security.js';
+import { digest, fail, randomId, type Json } from '../core/security.js';
 import { installationRef, numericId, type InstallationIdentity, type InstallationRef, type VerifiedInstallationAccess } from '../installations/archive.js';
 import { resolveActor, invalidate, revision } from './authorization.js';
 import { identityProjection, projectCapabilities, tenantId } from './storage.js';
+import { GitHubPermissions } from './github-permissions.js';
 
-export interface GitHubOAuthConfig { clientId: string; clientSecret: string; redirectUri: string; apiUrl?: string; webUrl?: string }
+export interface GitHubOAuthConfig { clientId: string; clientSecret: string; redirectUri: string; apiUrl?: string; webUrl?: string; applicationType?: 'oauth_app' | 'github_app' }
 export class GitHubIdentity implements InstallationIdentity {
   private refreshing = new Map<string, Promise<void>>();
   private tokens = new Map<string, Promise<string>>();
@@ -24,7 +25,7 @@ export class GitHubIdentity implements InstallationIdentity {
       principal, this.store.secrets.seal({ verifier }, `oauth:${digest(state)}`), mode, Date.now() + 10 * 60_000, setupState);
     const url = new URL('/login/oauth/authorize', this.config.webUrl || 'https://github.com');
     url.search = new URLSearchParams({ client_id: this.config.clientId, redirect_uri: this.config.redirectUri, state,
-      code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' }).toString();
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', scope: '' }).toString();
     return { url: url.toString() };
   }
   sessionReference(sessionRef: string): string {
@@ -39,6 +40,8 @@ export class GitHubIdentity implements InstallationIdentity {
     catch { return fail(502, 'github_oauth_unavailable'); }
     let token: Json; try { token = await response.json() as Json; } catch { return fail(502, 'github_oauth_failed'); }
     if (!response.ok || typeof token.access_token !== 'string' || !token.access_token || token.error) return fail(401, 'github_oauth_failed');
+    // An OAuth App previously authorized with broader scopes may retain them. Never accept that token for identity-only login.
+    if (this.config.applicationType !== 'github_app' && (typeof token.scope !== 'string' || token.scope.trim())) return fail(403, 'github_oauth_excessive_scope');
     return token;
   }
   private async api(token: string, path: string): Promise<Json> {
@@ -48,18 +51,6 @@ export class GitHubIdentity implements InstallationIdentity {
     catch { return fail(502, 'github_verification_unavailable'); }
     if (!response.ok) return fail(response.status === 401 ? 401 : 403, response.status === 401 ? 'github_reauthorization_required' : 'github_permission_pending');
     try { return await response.json() as Json; } catch { return fail(502, 'github_verification_unavailable'); }
-  }
-  private async pages(token: string, path: string, key: string): Promise<Json[]> {
-    const rows: Json[] = [], ids = new Set<string>(); let count: number | null = null;
-    for (let page = 1; page <= 1000; page++) {
-      const data = await this.api(token, `${path}?per_page=100&page=${page}`), batch = data[key];
-      if (!Array.isArray(batch) || !Number.isSafeInteger(data.total_count) || Number(data.total_count) < 0 || count !== null && data.total_count !== count) return fail(502, 'github_incomplete_evidence');
-      count = Number(data.total_count);
-      for (const row of batch as Json[]) { const id = numericId(row.id); if (!id || ids.has(id)) return fail(502, 'github_incomplete_evidence'); ids.add(id); rows.push(row); }
-      if (rows.length === count) return rows;
-      if (rows.length > count || !batch.length) break;
-    }
-    return fail(502, 'github_incomplete_evidence');
   }
   private saveToken(id: string, token: Json): void {
     const now = Date.now();
@@ -126,39 +117,25 @@ export class GitHubIdentity implements InstallationIdentity {
     const desired: { id: string; tenant: string; project: string | null; role: string; installation: Row; evidence: string }[] = [];
     try {
       const token = await this.token(identity), current = await this.api(token, '/user');
-      if (numericId(current.id) !== identity.external_actor) return fail(403, 'github_identity_mismatch');
-      const installations = await this.pages(token, '/user/installations', 'installations');
-      for (const installation of installations) {
-        const target = installation.account as Json, ref = `github.com/${numericId(installation.app_id)}/${numericId(installation.id)}`;
-        const snapshot = this.store.get('SELECT * FROM github_installations WHERE ref=?', ref);
-        if (!snapshot || snapshot.target_id !== numericId(target?.id)) { uncertain = true; continue; }
-        if (snapshot.status === 'deleted' || snapshot.status === 'suspended' || installation.suspended_at) continue;
+      if (numericId(current.id) !== identity.external_actor || typeof current.login !== 'string' || !current.login) return fail(403, 'github_identity_mismatch');
+      const permissions = new GitHubPermissions(this.store, this.config.apiUrl);
+      for (const snapshot of this.store.all("SELECT * FROM github_installations WHERE github_host='github.com'")) {
+        const ref = snapshot.ref;
+        if (snapshot.status === 'deleted' || snapshot.status === 'suspended') continue;
         if (snapshot.status !== 'active' || snapshot.scope_pending || snapshot.completeness !== 'complete') { uncertain = true; continue; }
-        const accessible = await this.pages(token, `/user/installations/${snapshot.installation_id}/repositories`, 'repositories');
-        const known = new Set(this.store.all('SELECT repository_id FROM installation_repositories WHERE installation_ref=? AND present=1', ref).map(r => r.repository_id));
-        let owner = snapshot.target_type === 'User' && identity.external_actor === snapshot.target_id;
-        if (snapshot.target_type === 'Organization') {
-          try {
-            const membership = await this.api(token, `/user/memberships/orgs/${encodeURIComponent(String(target.login))}`);
-            if (!['active', 'pending'].includes(String(membership.state)) || !['admin', 'member'].includes(String(membership.role)) ||
-              numericId((membership.organization as Json)?.id) !== snapshot.target_id) return fail(502, 'github_incomplete_evidence');
-            if (membership.state !== 'active') uncertain = true;
-            owner = membership.state === 'active' && membership.role === 'admin' && numericId((membership.organization as Json)?.id) === snapshot.target_id;
-          } catch (error) {
-            if (!(error instanceof HttpError) || error.code !== 'github_permission_pending') throw error;
-            // A repo admin can be an outside collaborator. Missing member evidence never proves organization ownership.
-            owner = false; uncertain = true;
-          }
-        }
-        const tenant = tenantId(snapshot.target_id), evidence = owner ? snapshot.target_type === 'User' ? 'personal_owner' : 'organization_owner' : 'repository_admin';
-        if (owner && snapshot.repository_selection === 'all' && snapshot.target_type === 'Organization' && [...known].every(id => accessible.some(r => numericId(r.id) === id)))
-          desired.push({ id: `github:${principal}:${ref}:tenant`, tenant, project: null, role: 'org_admin', installation: snapshot, evidence });
-        for (const repo of accessible) {
-          const id = numericId(repo.id);
-          if (!id || !known.has(id) || numericId((repo.owner as Json)?.id) !== snapshot.target_id) continue;
-          if (!owner && typeof (repo.permissions as Json | undefined)?.admin !== 'boolean') { uncertain = true; continue; }
-          if (owner || (repo.permissions as Json)?.admin === true) desired.push({ id: `github:${principal}:${ref}:${id}`, tenant, project: id, role: 'project_admin', installation: snapshot, evidence });
-        }
+        try {
+          const access = await permissions.read({ github_host: snapshot.github_host, app_id: snapshot.app_id, installation_id: snapshot.installation_id },
+            { id: identity.external_actor, login: String(current.login) });
+          if (access.target_id !== snapshot.target_id || access.repository_selection !== snapshot.repository_selection) { uncertain = true; continue; }
+          uncertain ||= access.uncertain;
+          const known = this.store.all('SELECT repository_id FROM installation_repositories WHERE installation_ref=? AND present=1', ref).map(r => r.repository_id);
+          const evidence = access.owner ? snapshot.target_type === 'User' ? 'personal_owner' : 'organization_owner' : 'repository_admin';
+          const tenant = tenantId(snapshot.target_id);
+          if (access.owner && snapshot.repository_selection === 'all' && snapshot.target_type === 'Organization' && known.every(id => access.repository_ids.includes(id)))
+            desired.push({ id: `github:${principal}:${ref}:tenant`, tenant, project: null, role: 'org_admin', installation: snapshot, evidence });
+          for (const id of known) if (access.admin_ids.includes(id))
+            desired.push({ id: `github:${principal}:${ref}:${id}`, tenant, project: id, role: 'project_admin', installation: snapshot, evidence });
+        } catch { uncertain = true; }
       }
       this.store.transaction(() => {
         this.assertConfiguration();
@@ -200,22 +177,14 @@ export class GitHubIdentity implements InstallationIdentity {
     const identity = this.store.get("SELECT * FROM external_identities WHERE principal_id=? AND provider='github' AND status='active'", actor.principal_id);
     if (!identity?.credentials) return null;
     try {
-      const token = await this.token(identity), installations = await this.pages(token, '/user/installations', 'installations');
-      const installation = installations.find(i => numericId(i.id) === ref.installation_id && numericId(i.app_id) === ref.app_id);
-      const target = installation?.account as Json | undefined, targetId = numericId(target?.id);
-      if (!targetId || actor.tenant_id && actor.tenant_id !== tenantId(targetId)) return null;
-      const repos = await this.pages(token, `/user/installations/${ref.installation_id}/repositories`, 'repositories');
-      let owner = target?.type === 'User' && identity.external_actor === targetId;
-      if (target?.type === 'Organization') {
-        try {
-          const membership = await this.api(token, `/user/memberships/orgs/${encodeURIComponent(String(target.login))}`);
-          owner = membership.state === 'active' && membership.role === 'admin' && numericId((membership.organization as Json)?.id) === targetId;
-        } catch { owner = false; }
-      }
+      const token = await this.token(identity), user = await this.api(token, '/user');
+      if (numericId(user.id) !== identity.external_actor || typeof user.login !== 'string') return null;
+      const access = await new GitHubPermissions(this.store, this.config.apiUrl).read(ref, { id: identity.external_actor, login: user.login });
+      if (actor.tenant_id && actor.tenant_id !== tenantId(access.target_id) || !access.owner && !access.repository_ids.length) return null;
       const current = resolveActor(this.store, sessionRef);
       if (current.authorization_revision !== actor.authorization_revision) return null;
-      return { github_user_id: identity.external_actor, target_id: targetId, repository_ids: owner ? null : repos.map(r => numericId(r.id)!).filter(Boolean),
-        can_manage: owner || repos.some(r => (r.permissions as Json)?.admin === true), authorization_revision: String(current.authorization_revision) };
+      return { github_user_id: identity.external_actor, target_id: access.target_id, repository_ids: access.owner ? null : access.repository_ids,
+        can_manage: access.owner || access.admin_ids.length > 0, authorization_revision: String(current.authorization_revision) };
     } catch { return null; }
   }
 }

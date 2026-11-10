@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, generateKeyPairSync } from 'node:crypto';
 import { Store } from '../../dist/storage/database.js';
 import { GitHubIdentity } from '../../dist/identity/github.js';
 import { createControlPlane } from '../../dist/server.js';
@@ -10,6 +10,7 @@ const store = new Store('/data/identity.sqlite', readFileSync(key)), codes = new
 const config = { clientId: 'docker-fixture', clientSecret: 'docker-fixture-secret', redirectUri: 'http://127.0.0.1/auth/github/callback',
   apiUrl: 'http://127.0.0.1:8080', webUrl: 'http://127.0.0.1:8080' };
 const identity = new GitHubIdentity(store, config);
+const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
 // Browser and server use different loopback ports across the container boundary.
 let browserFixtureOrigin = '';
 const begin = identity.begin.bind(identity);
@@ -20,7 +21,7 @@ const fixture = createServer(async (req, res) => {
   if (url.pathname === '/fixture/config') { config.redirectUri = body.origin + '/auth/github/callback'; browserFixtureOrigin = body.fixture; return send({ ok: true }); }
   if (url.pathname === '/fixture/owner') { owner = !!body.owner; return send({ ok: true }); }
   if (url.pathname === '/fixture/seed') {
-    store.run(`INSERT OR IGNORE INTO accounts VALUES('fixture','fixture','bot_account',NULL,?,'fixture')`, store.secrets.seal({}, 'account:fixture'));
+    store.run(`INSERT OR IGNORE INTO accounts VALUES('fixture','fixture','github_app','123',?,'fixture')`, store.secrets.seal({ private_key: pem }, 'account:fixture'));
     store.run("INSERT OR IGNORE INTO repositories VALUES('101','fixture/project-101','10','fixture')");
     store.run("INSERT OR IGNORE INTO policies(repository_id) VALUES('101')");
     store.run(`INSERT OR IGNORE INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,target_type,target_login,
@@ -34,13 +35,17 @@ const fixture = createServer(async (req, res) => {
   }
   if (url.pathname === '/login/oauth/access_token') {
     if (codes.get(body.code) !== createHash('sha256').update(body.code_verifier || '').digest('base64url')) return send({ error: 'invalid_code' });
-    codes.delete(body.code); return send({ access_token: 'docker-fixture-user', expires_in: 28800 });
+    codes.delete(body.code); return send({ scope: '', access_token: 'docker-fixture-user', expires_in: 28800 });
   }
   const target = { id: 10, type: 'Organization', login: 'fixture' };
   if (url.pathname === '/user') return send({ id: 42, login: 'docker-user' });
-  if (url.pathname === '/user/installations') return send({ total_count: 1, installations: [{ id: 77, app_id: 123, account: target }] });
-  if (url.pathname === '/user/installations/77/repositories') return send({ total_count: 1, repositories: [{ id: 101, owner: target, permissions: { admin: false } }] });
-  if (url.pathname === '/user/memberships/orgs/fixture') return send({ state: 'active', role: owner ? 'admin' : 'member', organization: target });
+  if (url.pathname === '/app/installations/77') return send({ id: 77, app_id: 123, account: target, repository_selection: 'all', permissions: { members: 'read' } });
+  if (url.pathname === '/app/installations/77/access_tokens') return send({ token: 'fixture-installation' });
+  if (url.pathname === '/installation/token') { res.writeHead(204);res.end();return; }
+  if (url.pathname === '/installation/repositories') return send({ total_count: 1, repositories: [{ id: 101, full_name: 'fixture/project-101', owner: target }] });
+  if (url.pathname === '/orgs/fixture/memberships/docker-user') return send({ state: 'active', role: owner ? 'admin' : 'member', organization: target, user: { id: 42 } });
+  if (url.pathname === '/repos/fixture/project-101') return send({ id: 101, owner: target });
+  if (url.pathname === '/repos/fixture/project-101/collaborators/docker-user/permission') return send({ permission: 'read', user: { id: 42 } });
   send({}, 404);
 });
 fixture.listen(8080, '0.0.0.0');

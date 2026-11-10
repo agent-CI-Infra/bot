@@ -4,6 +4,7 @@ function identityError(code) {
     github_identity_already_bound: '当前账号已有 GitHub 绑定。请先解除原绑定，再关联新的 GitHub 身份。',
     invalid_oauth_state: '登录验证已过期、已使用或不属于当前浏览器。请重新发起 GitHub 登录。',
     oauth_session_mismatch: '绑定时的本地会话已变化。请重新登录并发起绑定。',
+    github_oauth_excessive_scope: '这个 OAuth App 的旧授权包含额外权限。请到 GitHub Settings → Applications → Authorized OAuth Apps 撤销它，再重新登录；管理员应使用专用于登录的新 OAuth App。',
     github_login_configuration_changed: 'GitHub 登录配置已更新，请重新发起登录。',
     github_oauth_failed: 'GitHub 授权失败，请重新授权。', github_oauth_denied: 'GitHub 授权已取消，请重新发起。',
     user_disabled: '账号已停用，请联系管理员。' })[code] || 'GitHub 身份暂时无法验证，请稍后重试或使用本地账号登录。';
