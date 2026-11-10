@@ -211,10 +211,22 @@ jobs:
           sed -i '/^BOT_IMAGE_TAG=/d' .env
           echo "BOT_IMAGE_TAG=$2" >> .env
           docker compose pull
-          # Recreate every service from this release's compose.yaml, so running this job again converges after an
-          # interrupted deployment: a plain `up -d` keeps the replacement containers an interrupted Compose created but
-          # never started, and then waits on a dependency that has no health state. A release changes every image tag,
-          # so every container is recreated anyway and a normal deployment is down no longer.
+          # Compose names a service container <project>-<service>-<number>. To recreate one it creates the replacement as
+          # <old id>_<project>-<service>-<number>, removes the old container and only then renames the replacement. A
+          # deployment interrupted in between leaves a second container for the service: a plain `up -d` adopts it under
+          # that name, and recreating it conflicts with the old name. So first remove every container of the project's
+          # services that lacks its canonical name. Such a replacement holds nothing (data is in volumes), and `ps` lists
+          # only Compose's own service containers, not the project computers the manager starts.
+          for id in $(docker compose ps -a -q); do
+            read -r name canonical < <(docker inspect --format '{{.Name}} {{index .Config.Labels "com.docker.compose.project"}}-{{index .Config.Labels "com.docker.compose.service"}}-{{index .Config.Labels "com.docker.compose.container-number"}}' "$id") || continue
+            if [ "$name" != "/$canonical" ]; then
+              echo "Removing ${name#/}, left by an interrupted deployment of $canonical"
+              docker rm -f "$id" > /dev/null
+            fi
+          done
+          # Recreate every service from this release's compose.yaml, so running this job again converges whatever an
+          # interrupted deployment left. A release changes every image tag, so every container is recreated anyway and a
+          # normal deployment is down no longer.
           docker compose up -d --force-recreate
           # The control-plane image's healthcheck turns healthy once the business listener (8791) answers.
           bot=$(docker compose ps -q bot)
