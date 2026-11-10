@@ -70,3 +70,8 @@ test('two real worker processes claim FIFO exactly once under the shared project
  const outputs=await Promise.all([1,2].map(()=>promisify(execFile)(process.execPath,['--input-type=module','-e',script,path])));
  assert.deepEqual(outputs.map(r=>JSON.parse(r.stdout)).sort(),['a-second','z-first']);assert.deepEqual(f.s.all("SELECT task_id FROM task_history WHERE type='queue_claimed' ORDER BY id").map(r=>r.task_id),['z-first','a-second']);assert.equal(claimQueuedTask(f.s,'r',kind,2),undefined);
 });
+
+test('Manager cannot silently create duplicate work with a contradictory new-plus-existing-reference plan',t=>{
+ const f=fixture(t);f.create('parent');f.create('existing');const candidate=stage(f,'parent');
+ assert.throws(()=>validateFollowupPlan(f.s,f.s.get("SELECT * FROM tasks WHERE id='parent'"),candidate,[residual],{items:[decision('docs','P3','new','existing')]}),/followup_new_has_reference/);
+});
