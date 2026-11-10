@@ -53,10 +53,11 @@ async function renderFeishuSetup(panel, request) {
     body.append(note('需要飞书应用开发权限；发布版本可能需要企业管理员审核。使用应用机器人接收私聊和群内 @ 消息。'), choices,
       channelLink('https://open.feishu.cn/app', '打开飞书开发者后台', 'button-link'), feishuList([
         '创建或打开飞书应用，在“添加应用能力”中开启机器人。已有应用可以直接继续。',
-        '在“权限管理 → 批量导入/导出”导入下方基础权限。成员变更和应用生命周期事件按订阅界面的提示开通所需权限。',
+        '在“权限管理 → 批量导入/导出”导入下方默认权限，包含消息收发和卡片创建与更新。成员变更和应用生命周期事件按订阅界面的提示开通所需权限。',
         '记录“凭证与基础信息”里的 App ID、App Secret。HTTP 接收还需“事件与回调 → 加密策略”里的 Verification Token 和 Encrypt Key。']),
-      channelCopy('基础权限 JSON', JSON.stringify({ scopes: { tenant: ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot'], user: [] } }, null, 2)),
-      note('只申请私聊、群内 @ 和发送消息权限。长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台及 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
+      channelCopy('基础权限 JSON', JSON.stringify({ scopes: { tenant: ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write'], user: [] } }, null, 2)),
+      note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。已有应用也需补齐并发布新版本。不申请读取全部群消息或群历史的权限。'),
+      note('长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台及 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
       channelLink('#/settings/access', '配置公网 HTTPS 地址'), button('应用已准备，填写凭据', () => { feishuChoice = { id, application_type: application.value, transport: transport.value }; go(); }, ''));
   } else if (step === 1) {
     const choice = feishuChoice?.id === id ? feishuChoice : c || { application_type: 'enterprise', transport: 'websocket' };
@@ -109,17 +110,17 @@ async function renderFeishuSetup(panel, request) {
       body.append(note('在“事件与回调 → 事件配置”选择“将事件发送至开发者服务器”。下面的地址来自本部署的控制台公网入口。'));
       if (callback) body.append(channelCopy('HTTP 回调地址', callback));
       else body.append(note('尚无可用的公网 HTTPS 地址。先在“公网接入”完成配置，再返回继续。'), channelLink('#/settings/access', '配置公网 HTTPS 地址'));
-      body.append(note('同一个地址也用于“回调配置”。配置加密策略后保存请求地址，确保飞书的地址验证通过。'));
-    } else body.append(note('等待下方传输状态显示已连接，再在飞书“事件与回调 → 事件配置”选择“使用长连接接收事件”并保存。无需填写公网事件地址。'));
+      body.append(note('还必须在“事件与回调 → 回调配置”选择“将回调发送至开发者服务器”，填写上面同一个 HTTP 回调地址。事件配置和回调配置需分别保存，确保两处地址验证均通过。'));
+    } else body.append(note('等待下方传输状态显示已连接，再在飞书“事件与回调 → 事件配置”选择“使用长连接接收事件”并保存；随后在“回调配置”选择“使用长连接接收回调”并保存。两处必须分别配置，无需填写公网地址。'));
     body.append(facts([['传输状态', c.transport === 'http' ? 'HTTP 回调' : c.health.connection_state]]), feishuList([
       '在“事件配置”添加 im.message.receive_v1（接收消息）。只接收私聊及群内 @，不订阅全部群消息。',
-      '在“回调配置”单独添加 card.action.trigger（卡片回传交互）；使用相同的 HTTP 地址或长连接方式。',
+      '必须在“回调配置 → 添加回调”单独添加 card.action.trigger（卡片回传交互），不要添加到“事件配置”，也不要选旧版 card.action.trigger_v1。卡片按钮默认依赖此回调。',
       '订阅 im.chat.member.user.added_v1、im.chat.member.user.deleted_v1，用于成员变化后使群接收范围失效；再添加应用卸载和状态变更事件。',
       c.application_type === 'saas' ? '商店应用还需配置 app_ticket 推送、安装租户和应用生命周期事件。尚未收到票据时无法检测发送凭据。' : '保存事件与回调配置，下一步发布应用版本。']),
       button('刷新连接状态', () => render().catch(error), 'quiet'));
-    next('订阅已保存，前往发布');
+    next('事件与卡片回调已保存，前往发布');
   } else if (step === 3) {
-    body.append(feishuList(['在飞书“版本管理与发布”创建新版本，核对机器人能力、消息权限、事件与卡片回调。',
+    body.append(feishuList(['在飞书“版本管理与发布”创建新版本，核对机器人能力、默认消息与卡片权限，以及事件订阅和 card.action.trigger 卡片回调。已有应用新增权限或回调后也必须重新发布。',
       '设置应用可用范围，让需要使用机器人的成员能搜索和私聊它。发布版本，需要审核时等待企业管理员通过。',
       '返回这里检查机器人信息。凭据可用不等于消息已经送达，下一步仍需实际绑定、查询并点击状态卡片。']),
       channelLink('https://open.feishu.cn/app', '打开飞书发布应用', 'button-link'));
@@ -135,7 +136,7 @@ async function renderFeishuSetup(panel, request) {
   } else {
     body.append(feishuList(['让每位使用者进入“身份与权限”，按“飞书身份绑定”引导在机器人私聊发起 /bind，完成 GitHub 登录并回原私聊确认。',
       '绑定后私聊发送 /project <项目ID> 查询任务状态，确认收到业务结果。绑定不增加权限，项目管理员仍需授权。',
-      '点击返回卡片上的“刷新执行状态”，验证卡片回调。能聊天不代表卡片回调已配置。',
+      '必须点击返回卡片上的“刷新执行状态”，确认收到更新结果后才完成接入。能聊天或读到机器人信息不代表卡片回调已配置；点击无响应时，检查“回调配置”的接收方式、card.action.trigger 订阅和已发布版本。',
       '需要群内使用时，先在下方批准项目和群的接收范围，再在该群 @ 机器人发起请求。']),
       channelLink('#/identity/feishu', '前往个人飞书身份绑定', 'button-link'), button('刷新收件与发送状态', () => render().catch(error), 'quiet'));
     await channelDiagnostics(c, panel);

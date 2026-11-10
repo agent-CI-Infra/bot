@@ -21,7 +21,9 @@ test('global administrator connects an app through the wizard, resumes it and se
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('saas');
     await expect(page.getByLabel('事件接收方式')).toHaveValue('http');
     const scopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
-    expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot']);
+    expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write']);
+    expect(scopes.scopes.user).toEqual([]);
+    await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('enterprise');
     await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
     await page.getByLabel('项目所属组织').selectOption('github.com:10');
@@ -36,14 +38,17 @@ test('global administrator connects an app through the wizard, resumes it and se
     await page.getByLabel('Encrypt Key', { exact: true }).fill(credentials.encrypt_key);
     await page.getByRole('button', { name: '保存连接并继续' }).click();
     await expect(page.getByLabel('HTTP 回调地址')).toHaveValue(/https:\/\/console.example.test\/hooks\/feishu\/[a-f0-9]{48}/);
+    await expect(page.getByText('还必须在“事件与回调 → 回调配置”', { exact: false })).toContainText('两处地址验证均通过');
+    await expect(page.getByText('必须在“回调配置 → 添加回调”', { exact: false })).toContainText('card.action.trigger');
     const c = f.h.store.get("SELECT * FROM channel_connectors WHERE app_id='cli_wizard'"); expect(c.enabled).toBe(1); expect(c.transport).toBe('http');
     await page.screenshot({ path: output + '/events-desktop.png', fullPage: true });
-    await page.getByRole('button', { name: '订阅已保存，前往发布' }).click(); await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
+    await page.getByRole('button', { name: '事件与卡片回调已保存，前往发布' }).click(); await page.getByRole('button', { name: '检查已发布的机器人', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: '凭据已验证' })).toContainText('尚未验证事件投递');
     expect(f.h.store.get('SELECT last_received_at FROM channel_connectors WHERE id=?', c.id).last_received_at).toBe(null);
     await page.getByRole('button', { name: '进入绑定与试用' }).click();
     await expect(page.getByRole('heading', { name: '连接健康与群接收范围' })).toBeVisible();
     await expect(page.getByText('尚未收到', { exact: true })).toBeVisible();
+    await expect(page.getByText('必须点击返回卡片上的', { exact: false })).toContainText('确认收到更新结果后才完成接入');
     await page.getByRole('link', { name: '前往个人飞书身份绑定' }).click();
     await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
     await expect(page.getByRole('button', { name: '消息渠道', exact: true })).toHaveCount(0);
@@ -61,6 +66,20 @@ test('global administrator connects an app through the wizard, resumes it and se
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: output + '/credentials-mobile.png', fullPage: true }); expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('enterprise long connections require callback configuration as well as message events', async ({ page }) => {
+  const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
+  try {
+    const id = await connector(f.admin, { transport: 'websocket' });
+    await page.goto(f.h.admin + '/#/settings/feishu/' + id + '/2'); await login(page, f.h, f.password);
+    await expect(page.getByText('等待下方传输状态显示已连接', { exact: false })).toContainText('使用长连接接收回调');
+    await expect(page.getByText('必须在“回调配置 → 添加回调”', { exact: false })).toContainText('不要选旧版 card.action.trigger_v1');
+    await page.getByRole('button', { name: '1. 创建应用', exact: true }).click();
+    const scopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
+    expect(scopes.scopes.tenant).toContain('cardkit:card:write');
+    await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('已有应用也需补齐并发布新版本');
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
