@@ -10,6 +10,7 @@ import { FeishuAdapter, type ChannelFetch } from './feishu.js';
 import type { ChannelDelivery, ChannelEvent } from './types.js';
 import { ChannelLedger } from './ledger.js';
 import { ChannelHistorySync } from './history-sync.js';
+import { ChannelEmployees } from './employees.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError ? error.code : 'channel_processing_failed';
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
@@ -22,6 +23,7 @@ export class ChannelService {
   readonly bindings: ChannelBindings;
   readonly ledger: ChannelLedger;
   readonly historySync: ChannelHistorySync;
+  readonly employees: ChannelEmployees;
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
   private busy = false;
@@ -29,7 +31,8 @@ export class ChannelService {
   constructor(readonly store: Store, readonly management: ManagementAgent, readonly options: ChannelOptions = {}) {
     this.bindings = new ChannelBindings(store, e => this.source(e));
     this.ledger = new ChannelLedger(store);
-    this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard));
+    this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
+    this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.employees.guardSync(chat));
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
       const source = store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND message_id IS NOT NULL AND id=?',
@@ -49,9 +52,9 @@ export class ChannelService {
   start(): void {
     for (const chat of this.store.all("SELECT h.id FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.state='active' AND c.enabled=1 AND c.app_id=h.app_id AND c.installation_tenant=h.installation_tenant")) this.ledger.resync(chat.id);
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
-    this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
+    this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); void this.employees.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
   }
-  close(): void { this.stopped = true; this.historySync.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
+  close(): void { this.stopped = true; this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
   connector(id: string): Row {
     const c = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', id);
     if (!c) return fail(403, 'channel_connector_inactive'); return c;
@@ -129,6 +132,10 @@ export class ChannelService {
         id, c.id, event.event_id, event.kind === 'message' ? 'message:' + event.message_id : event.kind + ':' + event.event_id,
         this.store.secrets.seal(event, 'channel-event:' + id), state, Date.now());
       this.ledger.accept(event);
+      if (['audience_changed', 'bot_removed', 'chat_archived', 'uninstalled'].includes(event.kind)) {
+        for (const chat of this.store.all(`SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? ${event.chat_id ? 'AND chat_id=?' : ''}`,
+          event.provider, event.app_id, event.installation_tenant, ...(event.chat_id ? [event.chat_id] : []))) this.employees.invalidate(chat.id, event.kind);
+      }
       this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', Date.now(), c.id);
       // Revocation and audience invalidation are cheap security facts, applied before acknowledgement.
       if (event.kind === 'uninstalled') {

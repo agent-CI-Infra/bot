@@ -205,7 +205,9 @@ export class TaskEngine {
       this.store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)',randomId(),id,content,new Date().toISOString());
     };
     const guard=async()=>{
-      try { assertManagedExecution(this.store,task); } catch(error) { if(error instanceof HttpError)stop(error.code,'waiting_permission');throw error; }
+      try { assertManagedExecution(this.store,task); } catch(error) {
+        if(error instanceof HttpError)stop(error.code,error.code==='channel_employee_revalidation_required'?'retry_wait':'waiting_permission');throw error;
+      }
       // Only this task's own claim counts; other tasks on the same computer hold their own.
       try{checkManagementBudget(this.store,task.repository_id);}catch(error){if(error instanceof HttpError)stop(error.code,'waiting_configuration');throw error;}
       const current=this.store.get('SELECT * FROM tasks WHERE id=?',id),claim=this.store.get('SELECT token FROM task_claims WHERE task_id=?',id);
