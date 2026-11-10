@@ -30,7 +30,12 @@ export function ledgerStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS channel_chat_summaries(chat_id TEXT PRIMARY KEY REFERENCES channel_chats(id),
       revision INTEGER NOT NULL,authorization_revision INTEGER NOT NULL,through_time INTEGER NOT NULL,
       through_id TEXT NOT NULL,sources TEXT NOT NULL,payload TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS channel_message_scopes(chat_id TEXT NOT NULL,message_id TEXT NOT NULL,project_id TEXT NOT NULL,
+      PRIMARY KEY(chat_id,message_id),FOREIGN KEY(chat_id,message_id) REFERENCES channel_messages(chat_id,message_id) ON DELETE CASCADE);
   `);
+  if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'context_revision')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 1');
+  if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'type_verified')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN type_verified INTEGER NOT NULL DEFAULT 0');
+  if (!store.all('PRAGMA table_info(channel_message_scopes)').some(c => c.name === 'fence')) store.db.exec('ALTER TABLE channel_message_scopes ADD COLUMN fence TEXT');
 }
 
 export interface MessageQuery {
@@ -49,12 +54,15 @@ export class ChannelLedger {
     const existing = this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?',
       event.provider, event.app_id, event.installation_tenant, event.chat_id);
     if (existing) {
-      this.store.run('UPDATE channel_chats SET connector_id=?,last_received_at=? WHERE id=?', event.connector_id, Date.now(), existing.id);
+      // Recall events omit chat_type. Only an authenticated message establishes a private/group audience.
+      if(event.kind==='message'&&existing.type_verified&&existing.chat_type!==event.chat_type)fail(403,'channel_chat_type_changed');
+      this.store.run('UPDATE channel_chats SET connector_id=?,last_received_at=?,chat_type=?,type_verified=? WHERE id=?', event.connector_id, Date.now(),
+        event.kind==='message'?event.chat_type:existing.chat_type,event.kind==='message'?1:existing.type_verified,existing.id);
       return this.store.get('SELECT * FROM channel_chats WHERE id=?', existing.id)!;
     }
     const id = randomId();
-    this.store.run('INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,created_at,last_received_at) VALUES(?,?,?,?,?,?,?,?,?)',
-      id, event.provider, event.app_id, event.installation_tenant, event.chat_id, event.chat_type, event.connector_id, Date.now(), Date.now());
+    this.store.run('INSERT INTO channel_chats(id,provider,app_id,installation_tenant,chat_id,chat_type,connector_id,created_at,last_received_at,type_verified) VALUES(?,?,?,?,?,?,?,?,?,?)',
+      id, event.provider, event.app_id, event.installation_tenant, event.chat_id, event.chat_type, event.connector_id, Date.now(), Date.now(),event.kind==='message'?1:0);
     const row = this.store.get('SELECT * FROM channel_chats WHERE id=?', id)!;
     this.schedule(row, 'chat', event.chat_id);
     return row;
@@ -63,12 +71,13 @@ export class ChannelLedger {
     if (!event.chat_id || event.kind === 'card') return;
     const chat = this.chat(event);
     if (event.kind === 'bot_added') {
-      this.store.run("UPDATE channel_chats SET state='active',revision=revision+1 WHERE id=?", chat.id);
+      this.store.run("UPDATE channel_chats SET state='active',revision=revision+1,context_revision=context_revision+1 WHERE id=?", chat.id);
       this.resync(chat.id);
     } else if (event.kind === 'audience_changed') {
+      this.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
     } else if (['bot_removed', 'chat_archived'].includes(event.kind)) {
-      this.store.run('UPDATE channel_chats SET state=?,revision=revision+1 WHERE id=?', event.kind === 'chat_archived' ? 'archived' : 'removed', chat.id);
+      this.store.run('UPDATE channel_chats SET state=?,revision=revision+1,context_revision=context_revision+1 WHERE id=?', event.kind === 'chat_archived' ? 'archived' : 'removed', chat.id);
       this.store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error=? WHERE chat_id=?", event.kind, chat.id);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
     } else if (event.kind === 'message' || event.kind === 'message_recalled') {
@@ -96,7 +105,7 @@ export class ChannelLedger {
       this.store.run(`UPDATE channel_messages SET sender_id=?,sender_tenant=?,sender_type=?,message_type=?,created_at=?,parent_id=?,root_id=?,thread_id=?,payload=? WHERE chat_id=? AND message_id=?`,
         ...Object.values(metadata), this.store.secrets.seal({ ...payload, ...metadata, content: '', raw_content: '', deleted: true }, 'channel-message:' + chat.id + ':' + message.message_id), chat.id, message.message_id);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
-      this.store.run('UPDATE channel_chats SET revision=revision+1 WHERE id=?', chat.id);
+      this.store.run('UPDATE channel_chats SET revision=revision+1,context_revision=context_revision+1 WHERE id=?', chat.id);
       if (metadata.thread_id) this.schedule(chat, 'thread', metadata.thread_id);
       return true;
     }
@@ -114,7 +123,10 @@ export class ChannelLedger {
       old && message.deleted ? old.message_type : data.message_type, old && message.deleted ? old.created_at : data.created_at,
       Math.max(data.updated_at, old?.updated_at ?? 0), Date.now(), source, data.parent_id || old?.parent_id || '',
       data.root_id || old?.root_id || '', data.thread_id || old?.thread_id || '', Number(data.deleted), Number(sensitive(data)), sealed);
-    if (old) this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
+    if (old || this.store.get('SELECT 1 FROM channel_chat_summaries WHERE chat_id=? AND through_time>=?', chat.id, data.created_at)) {
+      this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
+      this.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
+    }
     this.store.run('UPDATE channel_chats SET revision=revision+1 WHERE id=?', chat.id);
     if (message.thread_id) this.schedule(chat, 'thread', message.thread_id);
     return true;
@@ -166,16 +178,41 @@ export class ChannelLedger {
       if (!chat) return fail(409, 'channel_revision_conflict');
       this.store.run('DELETE FROM channel_messages WHERE chat_id=? AND created_at<?', id, before);
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
-      this.store.run('UPDATE channel_chats SET retained_after=max(retained_after,?),revision=revision+1 WHERE id=?', before, id);
+      this.store.run('UPDATE channel_chats SET retained_after=max(retained_after,?),revision=revision+1,context_revision=context_revision+1 WHERE id=?', before, id);
       // Inbox is an authorization receipt too. Keep trusted source IDs, erase the retained message body.
       for (const row of this.store.all('SELECT id,payload FROM channel_inbox WHERE connector_id=?', chat.connector_id)) {
         const event = this.store.secrets.open(row.payload, 'channel-event:' + row.id);
         if (Number(event.created_at) < before && event.chat_id === chat.chat_id && event.installation_tenant === chat.installation_tenant && event.app_id === chat.app_id)
           this.store.run('UPDATE channel_inbox SET payload=? WHERE id=?', this.store.secrets.seal({ ...event, content: '', raw_content: '' }, 'channel-event:' + row.id), row.id);
       }
+      if(this.store.hasTable('role_conversation_turns')){
+        this.store.run("UPDATE role_conversation_turns SET reply=NULL,state=CASE WHEN state='running' THEN 'interrupted' ELSE state END,error=CASE WHEN state='running' THEN 'conversation_history_cleaned' ELSE error END WHERE conversation_id=?",id);
+        this.store.run('DELETE FROM role_conversation_events WHERE turn_id IN (SELECT id FROM role_conversation_turns WHERE conversation_id=?)',id);
+        this.store.run('DELETE FROM role_conversation_operations WHERE turn_id IN (SELECT id FROM role_conversation_turns WHERE conversation_id=?)',id);
+        this.store.run('UPDATE model_requests SET request_snapshot=NULL,response_snapshot=NULL WHERE conversation_id=?',id);
+      }
+      for(const row of this.store.all('SELECT id,payload,state FROM channel_outbox WHERE connector_id=?',chat.connector_id)){
+        const payload=this.store.secrets.open(row.payload,'channel-outbox:'+row.id) as any;
+        if(payload.event?.chat_id===chat.chat_id&&payload.event?.app_id===chat.app_id&&payload.event?.installation_tenant===chat.installation_tenant&&
+          (payload.protection?.turn_id||payload.event.created_at<before)){
+          payload.event={...payload.event,content:'',raw_content:''};payload.delivery.content={elements:[{tag:'div',text:{tag:'plain_text',content:'本地保留范围已清理。'}}]};
+          this.store.run('UPDATE channel_outbox SET payload=?,state=?,last_error=? WHERE id=?',this.store.secrets.seal(payload,'channel-outbox:'+row.id),row.state==='sent'?'sent':'failed','history_cleaned',row.id);
+        }
+      }
     });
   }
-  query(id: string, query: MessageQuery = {}): Json {
+  private view(row:Row):Json {
+    const payload=this.store.secrets.open(row.payload,'channel-message:'+row.chat_id+':'+row.message_id);
+    return {message_id:row.message_id,sender_id:row.sender_id,sender_tenant:row.sender_tenant,sender_type:row.sender_type,message_type:row.message_type,
+      created_at:row.created_at,updated_at:row.updated_at,parent_id:row.parent_id,root_id:row.root_id,thread_id:row.thread_id,deleted:!!row.deleted,sensitive:!!row.sensitive,
+      content:row.deleted?'[消息已撤回]':row.sensitive?'[敏感消息已隐藏]':String(payload.content),resources:row.deleted||row.sensitive?null:traceClean(payload.raw_content),resource_state:row.message_type==='text'?'text':'metadata_only'};
+  }
+  private visibility(projects?:string[],fence?:string):{sql:string;args:string[]} {
+    if(projects===undefined&&fence===undefined)return {sql:'',args:[]};
+    const denied=projects===undefined?'0':projects.length?'s.project_id NOT IN ('+projects.map(()=>'?').join(',')+')':'1';
+    return {sql:` AND NOT EXISTS(SELECT 1 FROM channel_message_scopes s WHERE s.chat_id=channel_messages.chat_id AND s.message_id=channel_messages.message_id AND (${denied}${fence!==undefined?' OR (s.fence IS NOT NULL AND s.fence<>?)':''}))`,args:[...(projects??[]),...(fence!==undefined?[fence]:[])]};
+  }
+  query(id: string, query: MessageQuery = {}, projects?:string[],fence?:string): Json {
     const diagnostics = this.diagnostics(id), limit = query.limit ?? 50;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || [query.from, query.to].some(v => v !== undefined && (!Number.isSafeInteger(v) || v < 0)) ||
       query.keyword !== undefined && (typeof query.keyword !== 'string' || query.keyword.length > 200) || query.from !== undefined && query.to !== undefined && query.from > query.to) fail(400, 'invalid_pagination');
@@ -183,7 +220,7 @@ export class ChannelLedger {
     if (query.cursor) {
       try {
         const cursor = JSON.parse(Buffer.from(query.cursor, 'base64url').toString());
-        if (!Number.isSafeInteger(cursor.time) || cursor.time < 0 || typeof cursor.id !== 'string' || cursor.scope !== digest(JSON.stringify({ id, ...query, cursor: undefined, limit: undefined }))) throw new Error();
+        if (!Number.isSafeInteger(cursor.time) || cursor.time < 0 || typeof cursor.id !== 'string' || cursor.scope !== digest(JSON.stringify({ id, ...query, cursor: undefined, limit: undefined,projects,fence }))) throw new Error();
         after = cursor.time; afterId = cursor.id;
       } catch { fail(400, 'invalid_pagination'); }
     }
@@ -192,22 +229,19 @@ export class ChannelLedger {
     if (query.reply_to !== undefined) { conditions.push('(parent_id=? OR root_id=?)'); args.push(query.reply_to, query.reply_to); }
     if (query.from !== undefined) { conditions.push('created_at>=?'); args.push(query.from); }
     if (query.to !== undefined) { conditions.push('created_at<=?'); args.push(query.to); }
+    const visible=this.visibility(projects,fence);
     const messages: Json[] = [];
     let scanTime = after, scanId = afterId, exhausted = false;
     // Sealed text is searched in bounded batches; plaintext is never duplicated into a SQL index.
     while (messages.length <= limit) {
-      const batch = this.store.all(`SELECT * FROM channel_messages WHERE ${conditions.join(' AND ')} AND
-        (created_at>? OR (created_at=? AND message_id>?)) ORDER BY created_at,message_id LIMIT 200`, ...args, scanTime, scanTime, scanId);
+      const batch = this.store.all(`SELECT * FROM channel_messages WHERE ${conditions.join(' AND ')}${visible.sql} AND
+        (created_at>? OR (created_at=? AND message_id>?)) ORDER BY created_at,message_id LIMIT 200`, ...args,...visible.args, scanTime, scanTime, scanId);
       if (!batch.length) { exhausted = true; break; }
       for (const row of batch) {
         scanTime = row.created_at; scanId = row.message_id;
-        const payload = this.store.secrets.open(row.payload, 'channel-message:' + id + ':' + row.message_id);
-        const content = row.deleted ? '[消息已撤回]' : row.sensitive ? '[敏感消息已隐藏]' : String(payload.content);
+        const message=this.view(row),content=String(message.content);
         if (query.keyword && (row.sensitive || row.deleted || !content.toLocaleLowerCase().includes(query.keyword.toLocaleLowerCase()))) continue;
-        messages.push({ message_id: row.message_id, sender_id: row.sender_id, sender_tenant: row.sender_tenant, sender_type: row.sender_type,
-          message_type: row.message_type, created_at: row.created_at, updated_at: row.updated_at, parent_id: row.parent_id, root_id: row.root_id,
-          thread_id: row.thread_id, deleted: !!row.deleted, sensitive: !!row.sensitive, content,
-          resources: row.deleted || row.sensitive ? null : traceClean(payload.raw_content), resource_state: row.message_type === 'text' ? 'text' : 'metadata_only' });
+        messages.push(message);
         if (messages.length > limit) break;
       }
       if (messages.length > limit) break;
@@ -215,7 +249,20 @@ export class ChannelLedger {
     }
     const more = !exhausted && messages.length > limit, items = messages.slice(0, limit), last = items.at(-1);
     const cursor = more && last ? Buffer.from(JSON.stringify({ time: last.created_at, id: last.message_id,
-      scope: digest(JSON.stringify({ id, ...query, cursor: undefined, limit: undefined })) })).toString('base64url') : null;
+      scope: digest(JSON.stringify({ id, ...query, cursor: undefined, limit: undefined,projects,fence })) })).toString('base64url') : null;
     return { chat_id: id, messages: items, next_cursor: cursor, has_more: more, ...diagnostics };
+  }
+  /** Bounded prompt windows and compaction use the same sealed local records as searches. */
+  recent(id: string, limit = 40, projects?:string[],fence?:string): Json[] {
+    const visible=this.visibility(projects,fence);
+    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql} ORDER BY created_at DESC,message_id DESC LIMIT ?`,id,...visible.args,limit).reverse().map(row=>this.view(row));
+  }
+  before(id: string, boundary: Json, after?: Json, projects?:string[],fence?:string): Json[] {
+    const visible=this.visibility(projects,fence);
+    return this.store.all(`SELECT * FROM channel_messages WHERE chat_id=?${visible.sql} AND (created_at<? OR (created_at=? AND message_id<?))
+      AND (created_at>? OR (created_at=? AND message_id>?)) ORDER BY created_at,message_id LIMIT 100`, id,
+      ...visible.args,
+      Number(boundary.created_at), Number(boundary.created_at), String(boundary.message_id), Number(after?.created_at??-1),Number(after?.created_at??-1),String(after?.message_id??''))
+      .map(row => this.view(row));
   }
 }

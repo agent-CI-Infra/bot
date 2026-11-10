@@ -46,11 +46,12 @@ async function feishuIdentityCard() {
     else row.append(note('需要恢复时，在原飞书私聊发送 /reauth，重新完成双端验证。'));
     section.append(row);
   }
-  section.append(button('刷新飞书绑定状态', () => start().catch(error), 'quiet'), note('绑定后私聊发送 /project <项目ID> 查询任务状态。群内需 @ 机器人，并由管理员单独批准群接收范围。'));
+  section.append(button('刷新飞书绑定状态', () => start().catch(error), 'quiet'), note('绑定后可直接私聊机器人；多个项目时用 /chat /project <项目ID> <请求> 选择。群内由维护人启用员工后，普通成员无需逐人绑定。'));
   section.append(await channelEmployeeSettings());
   return section;
 }
 const employeeErrors = { channel_employee_revalidation_required: '群成员正在重新核验，受保护动作暂时暂停。', channel_employee_member_required: '维护人或来源成员已不在群中。',
+  conversation_harness_context_required: '当前非任务会话入口尚未支持所选外部后端；请维护人检查角色配置。系统不会自动替换后端。',
   external_binding_required: '维护人需要有效的个人飞书绑定。', capability_forbidden: '维护人的当前项目权限不足。', channel_employee_source_inactive: '应用已停用、机器人已移出或群已归档。',
   channel_employee_project_inactive: '项目已停用。', channel_employee_role_unavailable: '所选角色不存在或已停用。', channel_employee_disabled: '群员工授权已停用。',
   channel_employee_sync_paused: '群授权或受众待核验，历史同步已暂停。', channel_bot_not_in_chat: '机器人当前不在这个群中。',
@@ -63,21 +64,27 @@ async function channelEmployeeSettings() {
   const chat = channelSelect(form, '员工所在群', 'employee_chat', [...chats.values()].map(c => [c.id, `${c.app_name || c.app_id || '已配置群'} · ${c.chat_id}`]));
   const project = channelSelect(form, '员工授权项目', 'employee_project', data.projects.map(p => [p.id, p.full_name]));
   const role = channelSelect(form, '员工使用角色', 'employee_role', []), caps = new Map();
+  const participation = channelSelect(form, '群员工发言范围', 'employee_participation', [['mentions', '仅回应 @'], ['questions', '回应 @ 及以问号结尾的文字'], ['all', '读取每条新文字后判断是否发言']]);
+  form.append(note('所有获准消息都会存入本地。扩大参与范围会增加模型用量；未 @ 的消息允许角色保持安静，机器人消息不会触发回复。'));
   for (const [id, title] of [['tasks.read', '读取获准任务'], ['tasks.manage_own', '管理自己拥有或已分派的事项'], ['knowledge.read', '读取获准项目知识'], ['knowledge.write', '记录获准项目知识']]) {
     const input = channelField(form, title, 'employee_' + id, '', 'checkbox'); input.checked = id !== 'knowledge.write'; input.disabled = id === 'tasks.read'; caps.set(id, input);
   }
   const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
   const link = channelLink('#/projects/' + project.value + '/roles', '配置角色的任务管理、委派与 GitHub 能力');
-  let expected = 0;
+  let expected = 0, refreshVersion = 0;
   const refresh = async () => {
-    role.replaceChildren();
+    const version = ++refreshVersion; role.replaceChildren(); role.disabled = true; save.disabled = true;
     if (!project.value) return;
     try {
       const result = await api('/api/repositories/' + project.value + '/roles');
+      if (version !== refreshVersion) return;
       for (const r of result.configuration.roles.filter(r => r.enabled && r.kind !== 'evaluator' && r.role_id !== 'coordinator')) role.add(new Option(r.name || r.role_id, r.role_id));
       const current = data.employees.find(g => g.chat_id === chat.value && g.project_id === project.value); expected = current?.revision || 0;
-      if (current) { role.value = current.role_id; for (const [id, input] of caps) input.checked = current.capabilities.includes(id); }
+      participation.value = current?.participation || 'mentions';
+      if (current) role.value = current.role_id;
+      for (const [id, input] of caps) input.checked = current ? current.capabilities.includes(id) : id !== 'knowledge.write';
       link.href = '#/projects/' + project.value + '/roles';
+      role.disabled = false; save.disabled = !role.options.length;
     } catch (err) { status.textContent = employeeError(err.message); }
   };
   const save = element('button', '保存群员工授权'); save.type = 'submit'; save.disabled = !chats.size || !data.projects.length;
@@ -86,7 +93,7 @@ async function channelEmployeeSettings() {
     event.preventDefault(); save.disabled = true; status.textContent = '正在核验当前绑定、项目权限与群成员…';
     try {
       await api('/api/channels/chats/' + chat.value + '/employee', 'PUT', { project_id: project.value, role_id: role.value,
-        capabilities: [...caps].filter(([, input]) => input.checked).map(([id]) => id), enabled: true, expected_revision: expected });
+        capabilities: [...caps].filter(([, input]) => input.checked).map(([id]) => id), participation: participation.value, enabled: true, expected_revision: expected });
       await start();
     } catch (err) { status.textContent = employeeError(err.message); save.disabled = false; }
   });
@@ -97,14 +104,66 @@ async function channelEmployeeSettings() {
     const row = element('article', '', 'channel-binding'), state = ({ active: '授权有效', paused: '已暂停', disabled: '已停用' })[g.state] || g.state;
     row.append(element('strong', `${state} · 项目 ${g.project_id} · ${g.role_id}`), note('群会话 ' + g.conversation_id), ...(g.error ? [note(employeeError(g.error))] : []));
     const history = element('div');
-    row.append(button('查询该群本地记录', () => channelEmployeeHistory(g, history).catch(err => error(err)), 'quiet'), history);
+    row.append(button('查看连续会话', () => channelConversation(g.chat_id, history).catch(err => error(err)), 'quiet'), button('查询该群本地记录', () => channelEmployeeHistory(g, history).catch(err => error(err)), 'quiet'), history);
     if (g.enabled) row.append(button('停用此群员工授权', async () => {
       try { await api('/api/channels/chats/' + g.chat_id + '/employee', 'PUT', { project_id: g.project_id, enabled: false, expected_revision: g.revision }); await start(); }
       catch (err) { error(err); }
     }, 'quiet'));
     box.append(row);
   }
-  return box;
+  const personal = card('我的飞书私信会话');
+  personal.append(note('私信使用本人的当前项目权限，同一私信跨项目和话题保留一个会话。默认使用 Reviewer；有项目配置权限时可选择其他启用角色。旧个人管理记录保留原追溯，不拼入群上下文。'));
+  if (!data.personal_chats.length) personal.append(note('绑定后先在飞书私聊发一条普通消息，再刷新此页。'));
+  for (const chat of data.personal_chats) {
+    const row = element('article', '', 'channel-binding'), target = element('div'), settings = element('form', '', 'project-form');
+    row.append(element('strong', '私信 ' + chat.chat_id), button('查看私信连续会话', () => channelConversation(chat.id, target).catch(error), 'quiet'),
+      button('查询私信本地记录', () => channelEmployeeHistory({ chat_id: chat.id }, target).catch(error), 'quiet'));
+    if (data.projects.length) {
+      const project = channelSelect(settings, '私信角色所属项目', 'personal_project', data.projects.map(p => [p.id, p.full_name])), role = channelSelect(settings, '私信使用角色', 'personal_role', []);
+      const save = element('button', '保存私信角色'); save.type = 'submit'; settings.append(save); let loadVersion = 0;
+      const load = async () => {
+        const version = ++loadVersion; role.disabled = true; save.disabled = true;
+        const value = await api('/api/repositories/' + project.value + '/roles');
+        if (version !== loadVersion) return;
+        role.replaceChildren();
+        for (const r of value.configuration.roles.filter(r => r.enabled && r.kind !== 'evaluator' && r.role_id !== 'coordinator')) role.add(new Option(r.name || r.role_id, r.role_id));
+        role.value = data.personal_roles.find(r => r.chat_id === chat.id && r.project_id === project.value)?.role_id || 'reviewer';
+        role.disabled = false; save.disabled = !role.options.length;
+      };
+      project.addEventListener('change', () => load().catch(error)); await load();
+      settings.addEventListener('submit', async event => {
+        event.preventDefault(); save.disabled = true;
+        try { await api('/api/channels/chats/' + chat.id + '/personal-role', 'PUT', { project_id: project.value, role_id: role.value,
+          expected_revision: data.personal_roles.find(r => r.chat_id === chat.id && r.project_id === project.value)?.revision || 0 }); await start(); }
+        catch (err) { error(err); save.disabled = false; }
+      }); row.append(settings);
+    }
+    row.append(target); personal.append(row);
+  }
+  box.append(personal); return box;
+}
+async function channelConversation(id, target) {
+  target.replaceChildren(); const summary = element('div'), turns = element('div'), status = note(''), controls = element('div', '', 'actions');
+  turns.setAttribute('aria-label', '连续会话记录'); status.setAttribute('role', 'status'); let offset = 0;
+  const next = button('下一页会话记录', () => read(true), 'quiet'); next.hidden = true;
+  const read = async more => {
+    try {
+      if (!more) { offset = 0; turns.replaceChildren(); }
+      const result = await api('/api/channels/chats/' + id + '/conversation?offset=' + offset); offset = result.next_offset;
+      summary.replaceChildren(facts([['会话', result.conversation_id], ['当前项目', result.current_project || '尚未选择'], ['模型请求', String(result.usage.requests || 0)],
+        ['已记录费用', result.usage.costs.map(c => c.currency + ' ' + c.amount).join('、') || '尚无已定价费用'], ['未知费用请求', String(result.usage.unpriced_requests || 0)]]));
+      status.textContent = '本地同步：' + channelSyncText(result.sync_state) + '。未核验／缺口：' + result.gaps.map(g => channelGapText(g.reason)).join('、') + '。费用只汇总同一模型请求账本，未知金额不按零处理。';
+      for (const turn of result.turns) {
+        const row = element('article', '', 'channel-binding');
+        row.append(element('strong', turn.role_id + ' · 项目 ' + turn.project_id), note(new Date(turn.created_at).toLocaleString() + ' · 来源 ' + turn.source_message),
+          element('p', turn.reply || (turn.stale_source ? '来源或授权范围已变化，旧派生回答不再展示。' : turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + (turn.error || turn.state))),
+          channelLink('#/projects/' + turn.project_id + '/overview/all', '查看同一项目任务看板')); turns.append(row);
+      }
+      if (!result.turns.length && !more) turns.append(note('当前授权范围暂无会话回合。原始本地消息可通过记录搜索查询。'));
+      next.hidden = !result.has_more;
+    } catch (err) { status.textContent = employeeError(err.message); }
+  };
+  controls.append(button('刷新连续会话', () => read(false), 'quiet'), next); target.append(summary, status, turns, controls); await read(false);
 }
 async function channelEmployeeHistory(grant, target) {
   target.replaceChildren(); const form = element('form', '', 'project-form'), keyword = channelField(form, '查询关键词', 'employee_keyword'),

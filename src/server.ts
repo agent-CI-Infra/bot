@@ -89,7 +89,7 @@ export function createControlPlane(options: Options) {
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
-  const channels = new ChannelService(store, managementApi.agent, { ...options.channels, get origin() { return options.channels?.origin || githubLogin.origin || options.publicOrigin; } });
+  const channels = new ChannelService(store, managementApi.agent, { ...options.channels, manager:options.channels?.manager??options.projects?.manager??options.engine?.manager, get origin() { return options.channels?.origin || githubLogin.origin || options.publicOrigin; } });
   const channelApi = new ChannelApi(channels), channelConnections = new ChannelConnections(channels);
   options.onChannels?.(channels);
   const schedules = new ScheduleService(store, sharedManagement, channels, options.schedules?.clock);
@@ -350,5 +350,7 @@ export function createControlPlane(options: Options) {
     }
   });
   server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); void scheduler.close().catch(()=>{}); void managementApi.agent.close().catch(()=>{}); });
+  const close=server.close.bind(server);
+  server.close=((callback?: (error?:Error)=>void)=>close(error=>{void channels.drain().then(()=>callback?.(error));})) as typeof server.close;
   return { server };
 }

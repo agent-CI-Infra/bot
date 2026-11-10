@@ -12,6 +12,7 @@ export const permissionItems: PermissionItem[] = [
   access('repository', '工作区文件', ['read_file'], ['write_file'], '读写可修改当前工作区；只读仅提供文件读取工具。'),
   action('commands', '运行命令', ['run_command'], '命令可以修改工作区；需要禁止执行命令时单独选择拒绝。'),
   access('task_records', '任务记录与证据', ['read_task_record', 'read_task_history', 'read_evidence'], ['record_progress'], '读取当前任务记录，或写入工作进度。'),
+  access('conversation_history', '当前会话记录', ['search_conversation_history', 'read_conversation_message', 'read_conversation_summary'], [], '只查询当前已授权会话的本地记录和摘要；不会联网回源，不开放其他群或私信。'),
   access('task_management', '任务管理', ['list_managed_tasks', 'read_managed_task'], ['create_task', 'manage_task'], '读取获准任务，或创建、追加、继续、暂停和结束自己拥有或已分派的事项。默认由自己执行；选择其他角色另需委派权限，不增加 GitHub 写权限。'),
   action('scope_differences', '记录范围差异', ['record_scope_difference'], '登记实际修改与原计划的差异及证据，不改变任务目标或授权。'),
   access('playbooks', '操作指南', ['read_playbook'], ['select_playbooks'], '读取指南，或登记本次采用的指南。'),
@@ -44,7 +45,7 @@ export const permitsTool = (permissions: RolePermissions, tool: string) => permi
 export function defaultPermissions(id: string, kind: RoleKind): RolePermissions {
   const permissions: RolePermissions = Object.fromEntries(permissionItems.map(item => [item.id, item.modes[0]!]));
   const set = (values: RolePermissions) => Object.assign(permissions, values);
-  set({ task_records: 'read', submission: 'allow' });
+  set({ task_records: 'read', conversation_history: 'read', submission: 'allow' });
   if (id === 'coordinator') set({ project_tasks: 'read', coordination: 'write' });
   else if (kind === 'controller') set({ task_records: 'write', task_management: 'write', playbooks: 'write', skills: 'read', project_tasks: 'read', coordination: 'write', stage_plan: 'write', dispatch: 'allow', delegation: 'allow', nomination: 'allow' });
   else {
@@ -59,7 +60,8 @@ export function defaultPermissions(id: string, kind: RoleKind): RolePermissions 
 export function migratePermissions(role: { role_id: string; kind: RoleKind; permissions?: RolePermissions; capability_policy_ref?: { id: string } }) {
   if (role.permissions) return { ...Object.fromEntries(permissionItems.map(item => [item.id, item.modes[0]!])),
     // Dispatch already created/continued tasks. Preserve that capability explicitly; observers gain no task writes.
-    ...(role.permissions.task_management === undefined && role.permissions.dispatch === 'allow' ? { task_management: 'write' as const } : {}), ...role.permissions };
+    ...(role.permissions.task_management === undefined && role.permissions.dispatch === 'allow' ? { task_management: 'write' as const } : {}),
+    ...(role.permissions.conversation_history === undefined && ['read','write'].includes(role.permissions.task_records??'none') ? { conversation_history: 'read' as const } : {}), ...role.permissions };
   const permissions = defaultPermissions(role.role_id, role.kind);
   if (role.capability_policy_ref?.id === 'observer-readonly') permissions.commands = 'deny';
   if (role.capability_policy_ref?.id === 'controller') { permissions.project_tasks = 'none'; permissions.coordination = 'none'; }

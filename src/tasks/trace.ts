@@ -70,6 +70,12 @@ export function traceStorage(store:Store){
   END;`);
 }
 export function traceEvent(store:Store,taskId:string,type:string,data:any,runId?:string|null,actor='framework',causedBy:string[]=[]){
+  if (!store.get('SELECT 1 FROM tasks WHERE id=?',taskId) && store.hasTable('role_conversation_turns') && store.get('SELECT 1 FROM role_conversation_turns WHERE id=?',taskId)) {
+    if(store.get('SELECT state FROM role_conversation_turns WHERE id=?',taskId)?.state!=='running')return 'conversation_event:unavailable';
+    store.run('INSERT INTO role_conversation_events(turn_id,type,payload,created_at) VALUES(?,?,?,?)',taskId,type,
+      store.secrets.seal({data:traceClean(data),actor,caused_by:causedBy},'conversation-event:'+taskId+':'+type),Date.now());
+    return 'conversation_event:'+store.get('SELECT last_insert_rowid() id')!.id;
+  }
   const r=store.run('INSERT INTO task_history(task_id,type,data,created_at,run_id,actor,caused_by) VALUES(?,?,?,?,?,?,?)',taskId,type,JSON.stringify(traceClean(data)),now(),runId??null,actor,JSON.stringify(causedBy));return 'task_history:'+r.lastInsertRowid;
 }
 export function beginRun(store:Store,task:Row,kind:string,config:any){return atomic(store,()=>{

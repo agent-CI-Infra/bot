@@ -12,7 +12,11 @@ export class Workspace {
     await this.guard();
     request=this.redactor.clean(request);
     const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
-    let row=this.store.get('SELECT * FROM task_tools WHERE id=?',id);
+    const conversation = !!this.task.conversation_id;
+    const table=conversation?'role_conversation_operations':'task_tools';
+    let row=this.store.get(`SELECT * FROM ${table} WHERE id=?`,id);
+    if(row&&conversation)row={...row,request:JSON.stringify(this.store.secrets.open(row.request,'conversation-operation:'+id+':request')),
+      result:row.result?JSON.stringify(this.store.secrets.open(row.result,'conversation-operation:'+id+':result')):null};
     if(row&&row.request!==JSON.stringify(input)){
       const previous=JSON.parse(row.request),changed=['generation','workspace_id','path','command','offset'].filter(field=>
         JSON.stringify(field==='generation'?previous.generation:previous.request?.[field])!==JSON.stringify(field==='generation'?input.generation:input.request[field]));
@@ -20,7 +24,7 @@ export class Workspace {
       stop('tool_operation_conflict',undefined,this.redactor.text(`操作 key=${key}（type=${input.request.type}）与已存请求冲突：${changed.length?changed.join('、')+' 不同':'请求内容不同'}。`));
     }
     if(row?.state==='completed')return JSON.parse(row.result);
-    if(!row)this.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,this.task.id,JSON.stringify(input));
+    if(!row)this.store.run(`INSERT INTO ${table} VALUES(?,?,?,NULL,'pending')`,id,this.task.id,conversation?this.store.secrets.seal(input,'conversation-operation:'+id+':request'):JSON.stringify(input));
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'phase',phase:'validate',operation_id:id,command:request.command,detail:`正在运行测试：${request.command}`});
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
@@ -29,7 +33,7 @@ export class Workspace {
     catch{return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${request.type}${request.path?' '+request.path:''}`);}
     await this.guard();
     const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
-    this.store.run("UPDATE task_tools SET state='completed',result=? WHERE id=?",JSON.stringify(result),id);
+    this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(result,'conversation-operation:'+id+':result'):JSON.stringify(result),id);
     // Model commands are logged by the agent loop together with the tool call; others (tests) are logged here.
     if(request.type==='workspace_command'&&!key.startsWith('model:'))this.log({type:'command',command:request.command,...result,output:clip(result.output)});
     return result;

@@ -76,7 +76,7 @@ export class ChannelEmployees {
     this.pending.set(id, work); return work;
   }
   async configure(actor: ActorContext, id: string, input: Json): Promise<Json> {
-    fields(input, ['project_id', 'role_id', 'capabilities', 'enabled', 'expected_revision']);
+    fields(input, ['project_id', 'role_id', 'capabilities', 'participation', 'enabled', 'expected_revision']);
     const project = text(input.project_id), previous = this.store.get('SELECT * FROM channel_employee_grants WHERE chat_id=? AND project_id=?', id, project);
     authorize(actor, 'config.write', { project_id: project });
     if (input.expected_revision !== (previous?.revision ?? 0)) fail(409, 'channel_revision_conflict');
@@ -92,7 +92,8 @@ export class ChannelEmployees {
         this.store.audit(actor.principal_id, 'channel.employee.disabled', previous.id, project);
       }); return { id: previous.id, revision: previous.revision + 1, enabled: false };
     }
-    const chat = this.chat(id), role = text(input.role_id), binding = this.binding(chat, actor.principal_id);
+    const chat = this.chat(id), role = text(input.role_id), binding = this.binding(chat, actor.principal_id),participation=input.participation??previous?.participation??'mentions';
+    if(!['mentions','questions','all'].includes(participation))fail(400,'channel_participation_invalid');
     if (chat.chat_type !== 'group') fail(400, 'channel_employee_group_required');
     if (!Array.isArray(input.capabilities) || !input.capabilities.includes('tasks.read') || input.capabilities.some(c => !capabilities.includes(String(c))) || new Set(input.capabilities).size !== input.capabilities.length) fail(400, 'channel_employee_capabilities_invalid');
     const grant = { id: previous?.id ?? randomId(), project_id: project, principal_id: previous?.principal_id ?? randomId(), role_id: role,
@@ -104,9 +105,9 @@ export class ChannelEmployees {
       const tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
       if (!previous) this.store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service',?,?,?)", grant.principal_id, project, tenant, 'channel:' + id);
       else this.store.run('UPDATE principals SET active=1,tenant_id=?,maintenance=? WHERE id=?', tenant, 'channel:' + id, grant.principal_id);
-      this.store.run(`INSERT INTO channel_employee_grants VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-        role_id=excluded.role_id,maintainer_id=excluded.maintainer_id,binding_id=excluded.binding_id,capabilities=excluded.capabilities,enabled=excluded.enabled,revision=excluded.revision`,
-        grant.id, id, project, grant.principal_id, role, actor.principal_id, binding.id, grant.capabilities, 1, grant.revision, Date.now());
+      this.store.run(`INSERT INTO channel_employee_grants VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+        role_id=excluded.role_id,maintainer_id=excluded.maintainer_id,binding_id=excluded.binding_id,capabilities=excluded.capabilities,enabled=excluded.enabled,revision=excluded.revision,participation=excluded.participation`,
+        grant.id, id, project, grant.principal_id, role, actor.principal_id, binding.id, grant.capabilities, 1, grant.revision, Date.now(),participation);
       // No platform/configuration/grant-management or project-wide task-write capability.
       this.store.run('DELETE FROM scoped_grants WHERE principal_id=?', grant.principal_id);
       this.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
@@ -127,12 +128,18 @@ export class ChannelEmployees {
     return current;
   }
   /** The original accepted envelope fixes the real sender; neither tool args nor task input can replace it. */
-  private receipt(chat: Row, source: string): ChannelEvent {
+  private currentMessage(chat:Row,event:ChannelEvent):void{
+    const current=this.store.get('SELECT * FROM channel_messages WHERE chat_id=? AND message_id=?',chat.id,event.message_id);
+    if(!current||current.deleted||current.sensitive)return fail(403,'channel_source_message_unavailable');
+    const payload=this.store.secrets.open(current.payload,'channel-message:'+chat.id+':'+event.message_id);
+    if(current.sender_id!==event.actor_id||current.sender_tenant!==event.actor_tenant||payload.content!==event.content)fail(403,'channel_source_message_changed');
+  }
+  private receipt(chat: Row, source: string, currentMember = true): ChannelEvent {
     const row = this.store.get('SELECT * FROM channel_inbox WHERE id=?', source);
     if (!row) return fail(403, 'channel_employee_message_required');
     const e = this.store.secrets.open(row.payload, 'channel-event:' + source) as unknown as ChannelEvent;
     if (e.kind !== 'message' || e.sender_type !== 'user' || e.provider !== chat.provider || e.app_id !== chat.app_id || e.installation_tenant !== chat.installation_tenant || e.chat_id !== chat.chat_id) fail(403, 'channel_employee_source_mismatch');
-    this.member(chat, e.actor_id, e.actor_tenant); return e;
+    this.currentMessage(chat,e);if(currentMember)this.member(chat, e.actor_id, e.actor_tenant); return e;
   }
   caller(chatId: string, project: string, source: string): TaskCaller {
     const grant = this.store.get('SELECT * FROM channel_employee_grants WHERE chat_id=? AND project_id=? AND enabled=1', chatId, project);
@@ -144,13 +151,17 @@ export class ChannelEmployees {
   }
   guardOrigin(origin: Row): void {
     const grant = this.store.get('SELECT * FROM channel_employee_grants WHERE principal_id=?', origin.principal_id ?? '');
-    if (!grant) return;
+    if (!grant) {
+      const chat=origin.conversation_id&&this.store.get("SELECT * FROM channel_chats WHERE id=? AND chat_type='p2p'",origin.conversation_id);
+      if(chat){this.guardPersonal(chat.id,origin.principal_id,origin.source_message);if(!origin.source_task_id&&origin.source_role!==this.personalRole(chat.id,origin.project_id))fail(403,'channel_personal_role_changed');}
+      return;
+    }
     this.assertGrant(grant);
     if (origin.conversation_id !== grant.chat_id || origin.project_id !== grant.project_id) fail(403, 'channel_employee_source_mismatch');
     // A delegated role can create related work; its ancestry is checked by the
     // shared task service. The root must still be this grant's configured role.
     if (!origin.source_task_id && origin.source_role !== grant.role_id) fail(403, 'channel_employee_source_mismatch');
-    this.receipt(this.chat(grant.chat_id), origin.source_message);
+    this.receipt(this.chat(grant.chat_id), origin.source_message, false);
   }
   guardSync(chat: Row): void {
     const grants = this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=?', chat.id);
@@ -162,9 +173,48 @@ export class ChannelEmployees {
   }
   authorizeHistory(actor: ActorContext, id: string): void {
     try { authorize(actor, 'platform.manage'); return; } catch (error) { if ((error as any).code !== 'capability_forbidden') throw error; }
+    const owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?',id,actor.principal_id);
+    if(owner){const binding=this.binding(this.chat(id),actor.principal_id);if(binding.external_actor===owner.actor_id&&binding.external_tenant===owner.actor_tenant)return;}
     const grant = this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? AND maintainer_id=? AND enabled=1', id, actor.principal_id)
       .find(g => { try { this.assertGrant(g); authorize(actor, 'config.write', { project_id: g.project_id }); return true; } catch { return false; } });
     if (!grant) fail(403, 'channel_history_forbidden');
+  }
+  visibleProjects(id:string,actor?:ActorContext):string[] {
+    const owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=?',id);
+    if(owner)return listEffectiveProjectAccess(this.store,actor?.principal_id??owner.principal_id).map(p=>p.id);
+    return this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? AND enabled=1',id).filter(grant=>{
+      try{this.assertGrant(grant);if(actor)authorize(actor,'tasks.read',{project_id:grant.project_id});return true;}catch{return false;}
+    }).map(g=>g.project_id);
+  }
+  personalRole(id:string,project:string):string{return this.store.get('SELECT role_id FROM channel_personal_roles WHERE chat_id=? AND project_id=?',id,project)?.role_id??'reviewer';}
+  personalOwner(id:string,event:ChannelEvent,actor:ActorContext):void{
+    const chat=this.chat(id),binding=this.binding(chat,actor.principal_id);
+    if(chat.chat_type!=='p2p'||binding.external_actor!==event.actor_id||binding.external_tenant!==event.actor_tenant)fail(403,'channel_personal_source_mismatch');
+    const previous=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=?',id);
+    if(previous&&(previous.actor_id!==event.actor_id||previous.actor_tenant!==event.actor_tenant))fail(403,'channel_personal_source_mismatch');
+    this.store.run('INSERT INTO channel_personal_owners VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET principal_id=excluded.principal_id',id,actor.principal_id,event.actor_id,event.actor_tenant);
+  }
+  guardPersonal(id:string,principal:string,source:string):void{
+    const chat=this.chat(id),owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?',id,principal),row=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',source);
+    if(!owner||!row)fail(403,'channel_personal_source_mismatch');
+    const event=this.store.secrets.open(row!.payload,'channel-event:'+source) as unknown as ChannelEvent,binding=this.binding(chat,principal);
+    if(event.chat_id!==chat.chat_id||event.app_id!==chat.app_id||event.installation_tenant!==chat.installation_tenant||event.actor_id!==owner!.actor_id||event.actor_tenant!==owner!.actor_tenant||
+      binding.external_actor!==event.actor_id||binding.external_tenant!==event.actor_tenant||event.kind!=='message')fail(403,'channel_personal_source_mismatch');
+    this.currentMessage(chat,event);
+  }
+  configurePersonal(actor:ActorContext,id:string,input:Json):Json{
+    fields(input,['project_id','role_id','expected_revision']);const project=text(input.project_id),role=text(input.role_id);
+    const owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?',id,actor.principal_id);
+    if(!owner)fail(403,'channel_personal_source_mismatch');this.authorizeHistory(actor,id);authorize(actor,'config.write',{project_id:project});
+    const definition=roleConfiguration(this.store,project).roles.find(r=>r.role_id===role&&r.enabled);
+    if(!definition||definition.kind==='evaluator'||role==='coordinator')fail(403,'conversation_role_unavailable');
+    return this.store.transaction(()=>{
+      assertCurrent(actor);const previous=this.store.get('SELECT revision FROM channel_personal_roles WHERE chat_id=? AND project_id=?',id,project);
+      if(input.expected_revision!==(previous?.revision??0))fail(409,'channel_revision_conflict');
+      this.store.run('INSERT INTO channel_personal_roles VALUES(?,?,?,?) ON CONFLICT(chat_id,project_id) DO UPDATE SET role_id=excluded.role_id,revision=excluded.revision',id,project,role,(previous?.revision??0)+1);
+      this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?',id);this.store.audit(actor.principal_id,'channel.personal_role.configured',id,project);
+      return {conversation_id:id,role_id:role,revision:(previous?.revision??0)+1};
+    });
   }
   list(actor: ActorContext): Json {
     assertCurrent(actor);
@@ -175,7 +225,9 @@ export class ChannelEmployees {
       let state = g.enabled ? 'active' : 'disabled', error = null;
       if (g.enabled) try { this.assertGrant(g); } catch (e) { state = 'paused'; error = (e as any).code ?? 'channel_employee_unavailable'; }
       return { ...g, capabilities: JSON.parse(g.capabilities), state, error, conversation_id: g.chat_id };
-    }), chats, projects: listEffectiveProjectAccess(this.store, actor.principal_id).filter(p => p.can_configure), capability_options: capabilities };
+    }), chats,personal_chats:this.store.all('SELECT c.id,c.chat_id,c.app_id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=?',actor.principal_id),
+      personal_roles:this.store.all('SELECT r.* FROM channel_personal_roles r JOIN channel_personal_owners o ON o.chat_id=r.chat_id WHERE o.principal_id=?',actor.principal_id),
+      projects: listEffectiveProjectAccess(this.store, actor.principal_id).filter(p => p.can_configure), capability_options: capabilities };
   }
   /** Refresh authority, never run business work. Queries themselves perform no provider reads. */
   async tick(): Promise<void> {

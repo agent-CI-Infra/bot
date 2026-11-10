@@ -33,7 +33,7 @@ const objectWorkflows = ['review.issue','review.pr','development.issue','develop
 // Views saved before the board listed work types filter a family: every review, or every development.
 const families = ['review','development'];
 const categoryOf = (value: string) => customWorkflowId.test(value) ? 'reply' : value;
-const knownCategory = (value: string) => objectWorkflows.includes(value) || families.includes(value) || ['release', 'reply'].includes(value) || customWorkflowId.test(value);
+const knownCategory = (value: string) => objectWorkflows.includes(value) || families.includes(value) || ['release', 'reply', 'task.request'].includes(value) || customWorkflowId.test(value);
 const execution = (status: string) => `CASE
   WHEN ${status} IN ('running','preparing','implementing','validating','publishing') THEN 'running'
   WHEN ${status}='queued' THEN 'queued'
@@ -63,7 +63,7 @@ function filters(value: unknown, store: Store, user: Actor): Filter[] {
     if (field === 'include_closed' && typeof value === 'boolean') return { field, value };
     if (typeof value !== 'string' || !value.trim() || value.length > 200) return fail(400, 'invalid_board_filter');
     if (field === 'repository_id') repository(store, user, value);
-    else if (field === 'object_type' && ['all','issue','pr'].includes(value)) { /* validated */ }
+    else if (field === 'object_type' && ['all','issue','pr','task'].includes(value)) { /* validated */ }
     else if (field === 'bot_stage' && boardStages.some(s => s.id === value)) { /* validated */ }
     else if (field === 'category' && knownCategory(value)) { /* validated */ }
     else if (field === 'execution_status' && boardExecutionStatuses.some(s => s.id === value)) { /* validated */ }
@@ -98,8 +98,8 @@ function viewFor(store: Store, user: Actor, id: string): Json {
 // The work types with cards, under their fixed names; `workflows` keeps its name in the API for older clients.
 function boardWorkflows(_store: Store, _user: Actor) {
   const list = [...objectWorkflows, 'reply'].map(id => ({ id, name: workType(id)!.name }));
-  const name = (_repository: string, id: string) => id === 'release' ? '发版本' : workType(categoryOf(id))?.name ?? '已删除的工作类型';
-  return { list: [...list, { id: 'release', name: '发版本' }], name };
+  const name = (_repository: string, id: string) => id === 'task.request' ? '通用任务' : id === 'release' ? '发版本' : workType(categoryOf(id))?.name ?? '已删除的工作类型';
+  return { list: [...list, { id: 'task.request', name: '通用任务' }, { id: 'release', name: '发版本' }], name };
 }
 function pagination(url: URL) {
   const limit = Number(url.searchParams.get('limit') || 100), offset = Number(url.searchParams.get('offset') || 0);
@@ -156,9 +156,16 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       p.id AS release_id,p.version AS version,p.stage AS release_stage,
       CASE WHEN json_valid(p.data) THEN json_extract(p.data,'$.release_url') END AS release_url
       FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id`;
-    const cte = `WITH work AS (${objectSql('review')} UNION ALL ${objectSql('development')} UNION ALL ${customSql} UNION ALL ${releaseSql})`;
+    const requestedSql = `SELECT 'task' AS card_type,'task.request' AS card_category,t.repository_id,'task' AS object_type,NULL AS object_number,
+      t.summary AS title,NULL AS github_state,0 AS draft,${taskTime('t')} AS last_seen,repos.full_name,
+      CASE WHEN t.status IN ${attention} THEN 'attention' WHEN t.status IN ${successes} THEN 'developed' ELSE 'developing' END AS bot_stage,
+      ${execution('t.status')} AS execution_status,t.id AS task_id,t.status AS task_status,NULL AS review_task_id,NULL AS review_status,
+      NULL AS development_task_id,NULL AS development_status,NULL AS development_pr_number,NULL AS field_value,
+      NULL AS release_id,t.id AS version,NULL AS release_stage,NULL AS release_url
+      FROM tasks t JOIN repositories repos ON repos.id=t.repository_id WHERE t.kind='task.request'`;
+    const cte = `WITH work AS (${objectSql('review')} UNION ALL ${objectSql('development')} UNION ALL ${customSql} UNION ALL ${releaseSql} UNION ALL ${requestedSql})`;
     // A built-in object workflow already names its object type, like the release process.
-    const typed = category !== 'release' && !objectWorkflows.includes(category);
+    const typed = !['release','task.request'].includes(category) && !objectWorkflows.includes(category);
     const access = scope(user,'w.repository_id');
     const clauses: { sql: string; args: (string | number)[]; type?: boolean }[] = [{ sql: access.sql, args: access.args }];
     if (!conditions.some(f => f.field === 'include_closed' && f.value === true)) clauses.push({sql:"coalesce(w.github_state,'open')<>'closed'",args:[]});
@@ -188,7 +195,8 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     const columnCounts = Object.fromEntries(store.all(`SELECT ${column} id,count(*) n FROM (${selected.sql}) GROUP BY 1`,...selected.args).map(row=>[String(row.id),Number(row.n)]));
     const counts = store.get(`SELECT count(*) n,sum(card_type='release') releases FROM (${selected.sql})`,...selected.args)!;
     const { name } = boardWorkflows(store,user);
-    return { cards: rows.slice(0,limit).map(row => ({ ...row, card_category_name: name(String(row.repository_id), String(row.card_category)) })), has_more: rows.length>limit, limit, offset,
+    return { cards: rows.slice(0,limit).map(row => ({ ...row, card_category_name: name(String(row.repository_id), String(row.card_category)),
+      origin:row.task_id?store.get('SELECT source_kind,source_role,executor_role,conversation_id,source_message FROM task_origins WHERE task_id=?',row.task_id)??null:null })), has_more: rows.length>limit, limit, offset,
       counts: { issue: totals.get('issue') || 0, pr: totals.get('pr') || 0 }, release_count: Number(counts.releases || 0),
       work_count: Number(counts.n), column_counts: columnCounts };
   }

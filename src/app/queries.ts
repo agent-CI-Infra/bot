@@ -19,6 +19,7 @@ const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.reposit
   object_number:row.object_number,head_sha:row.head_sha,source_task_id:row.source_task_id,generation:row.generation,phase:row.phase,
   error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail,row.retry_cycle_started_at),retry_count:row.retry_count,
   retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
+const taskOrigin=(store:Store,id:string)=>store.get('SELECT source_kind,source_role,executor_role,conversation_id,source_message,source_task_id FROM task_origins WHERE task_id=?',id)??null;
 
 function detailState(store:Store,id:string){
  const state=new TaskRecords(store).get(id),candidate=state.candidate;
@@ -82,7 +83,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
         FROM tasks WHERE ${clauses.join(' AND ')}`,...args), sampled_at:new Date().toISOString() } : undefined;
       const selectedClauses=[...clauses];
       if(selected && selected!=='all') selectedClauses.push(taskGroupSQL[selected as keyof typeof taskGroupSQL]);
-      return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(publicTask)),execution_available:true,...(summary?{summary}:{})};
+      return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${selectedClauses.join(' AND ')} ORDER BY ${selected==='attention' ? 'updated_at ASC,id ASC' : 'created_at DESC,id DESC'} LIMIT ? OFFSET ?`,...args,limit,offset).map(row=>({...publicTask(row),origin:taskOrigin(store,row.id)}))),execution_available:true,...(summary?{summary}:{})};
     };
     return summaryRequested?store.transaction(read):read();
   }
@@ -94,7 +95,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   if (task) {
     const row = store.get(`SELECT *,${repositoryName},${pushedSha},${faultDetail} AS error_detail FROM tasks WHERE id=? AND ${filter.sql}`, task[1]!, ...filter.args);
     if (!row) return fail(404, 'task_not_found');
-    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause).map(log=>({...log,content:visibleMemorySnapshot(store,row.repository_id,log.content,user.context?{actor:user.context}:undefined)})) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
+    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause).map(log=>({...log,content:visibleMemorySnapshot(store,row.repository_id,log.content,user.context?{actor:user.context}:undefined)})) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
       // Why the Manager created or continued this task, with the events behind it.
       dispatch:taskDispatch(store,row.id) };
   }

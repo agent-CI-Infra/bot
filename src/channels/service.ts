@@ -11,19 +11,26 @@ import type { ChannelDelivery, ChannelEvent } from './types.js';
 import { ChannelLedger } from './ledger.js';
 import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
+import { RoleConversations } from '../roles/conversation.js';
+import { roleConfiguration } from '../roles/definition.js';
+import { roleTaskCaller, assertManagedExecution, taskAuthorizationFence } from '../tasks/management.js';
+import type { Manager } from '../projects/service.js';
+import { TaskError } from '../agent/common.js';
 
-const errorCode = (error: unknown) => error instanceof HttpError ? error.code : 'channel_processing_failed';
+const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
-  elements: [{ tag: 'div', text: { tag: 'plain_text', content: value.slice(0, 12000) } },
+  elements: [{ tag: 'div', text: { tag: 'plain_text', content: value.length>12000?value.slice(0,11880)+'\n内容较长，此卡片仅显示前段；请登录后台查看完整记录。':value } },
     ...(link ? [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '登录后台查看' }, url: link },
       ...(token ? [{ tag: 'button', text: { tag: 'plain_text', content: '刷新执行状态' }, value: { token } }] : [])] }] : [])] });
-export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; }
+export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; }
 /** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
 export class ChannelService {
   readonly bindings: ChannelBindings;
   readonly ledger: ChannelLedger;
   readonly historySync: ChannelHistorySync;
   readonly employees: ChannelEmployees;
+  readonly conversations: RoleConversations;
+  private readonly business = new Map<string,Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
   private busy = false;
@@ -32,6 +39,7 @@ export class ChannelService {
     this.bindings = new ChannelBindings(store, e => this.source(e));
     this.ledger = new ChannelLedger(store);
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
+    this.conversations = new RoleConversations(store, management.service.tasks, options.manager);
     this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.employees.guardSync(chat));
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
@@ -54,7 +62,21 @@ export class ChannelService {
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
     this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); void this.employees.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
   }
-  close(): void { this.stopped = true; this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
+  close(): void { this.stopped = true; this.conversations.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
+  async drain():Promise<void>{await Promise.allSettled([...this.business.values()]);}
+  conversationView(actor:ActorContext,id:string,offset=0):Json{
+    this.employees.authorizeHistory(actor,id);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');
+    const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',id)!;
+    const projects=this.employees.visibleProjects(id,actor),marks=projects.map(()=>'?').join(','),fence=this.businessFence(chat);
+    const turns=projects.length?this.store.all(`SELECT id,source_message,project_id,role_id,state,reply,error,created_at,updated_at,fence FROM role_conversation_turns
+      WHERE conversation_id=? AND project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`,id,...projects,offset):[];
+    const requests=projects.length?this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
+      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks})`,id,...projects):null;
+    const costs=projects.length?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`,id,...projects):[];
+    return {conversation_id:id,current_project:this.store.get('SELECT project_id FROM role_conversations WHERE id=?',id)?.project_id??null,
+      turns:turns.slice(0,50).map(t=>({...t,fence:undefined,reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'conversation-reply:'+t.id).message:null,
+        stale_source:t.fence!==fence})),has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,usage:{...requests,costs,semantics:requests?.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(id)};
+  }
   connector(id: string): Row {
     const c = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', id);
     if (!c) return fail(403, 'channel_connector_inactive'); return c;
@@ -125,7 +147,9 @@ export class ChannelService {
     if (previous) return { operation_id: previous.id, state: previous.state, duplicate: true };
     if (!c.enabled) fail(403, 'channel_connector_inactive');
     // Reading is independent of speaking. A delayed message still belongs in the local ledger.
-    const actionable = event.kind !== 'message' || event.addressed && event.message_type === 'text' && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
+    const ambient=event.chat_type==='group'&&this.store.get(`SELECT 1 FROM channel_employee_grants g JOIN channel_chats h ON h.id=g.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND g.enabled=1
+      AND (g.participation='all' OR (g.participation='questions' AND ?=1))`,event.provider,event.app_id,event.installation_tenant,event.chat_id,/[?？]\s*$/.test(event.content)?1:0);
+    const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.message_type === 'text' && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
     const id = randomId(), state = actionable ? 'queued' : 'completed';
     this.store.transaction(() => {
       this.store.run('INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,?,?)',
@@ -196,7 +220,7 @@ export class ChannelService {
     const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key); if (previous) return previous.id;
     const id = randomId(), delivery: ChannelDelivery = { receive_id: direct ? e.actor_id : e.chat_id, receive_id_type: direct ? 'open_id' : 'chat_id', content, ...(update ? { message_id: update } : {}) };
     this.store.run('INSERT INTO channel_outbox(id,connector_id,idempotency_key,source_event,payload,state,next_attempt,created_at) VALUES(?,?,?,?,?,?,?,?)', id, e.connector_id, key, source ?? null,
-      this.store.secrets.seal({ event: e, delivery, protection }, 'channel-outbox:' + id), registered ? 'registered' : 'queued', Date.now(), Date.now());
+      this.store.secrets.seal({ event: {...e,content:'',raw_content:''}, delivery, protection }, 'channel-outbox:' + id), registered ? 'registered' : 'queued', Date.now(), Date.now());
     return id;
   }
   private async process(row: Row): Promise<void> {
@@ -223,6 +247,21 @@ export class ChannelService {
       const principal = await this.bindings.identities.resolveExternalPrincipal(this.bindings.credential(e));
       reply(principal ? '此飞书身份已绑定。授权与绑定列表请登录后台身份页查看；发送“重新认证”可重新证明双端。' : '尚未绑定。请发送“绑定”。');
     } else {
+      const chat = this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', e.provider,e.app_id,e.installation_tenant,e.chat_id);
+      const employee = chat && e.chat_type==='group' && this.store.get('SELECT 1 FROM channel_employee_grants WHERE chat_id=? AND enabled=1',chat.id);
+      const legacyCommand = /^\/project \S+\s+\/(?:query|command|link|destination)(?:\s|$)/.test(content);
+      const personalMain=e.chat_type==='p2p'&&!content.startsWith('/project ');
+      if ((employee && !legacyCommand)||personalMain) {
+        if(!chat)return fail(403,'channel_chat_not_found');
+        if (this.business.has(chat.id)) { this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return; }
+        const work = this.businessMessage(row,e,chat).catch(error=>{
+          if(this.stopped)return;
+          if(errorCode(error)==='conversation_busy'){this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;}
+          this.store.run("UPDATE channel_inbox SET state='failed',error=? WHERE id=?",errorCode(error),row.id);
+          try { this.source(e);this.queue(e,card('本次请求未完成：'+errorCode(error)+'。已有任务与回执保留，请检查后再继续。'),row.id+':business-error',row.id); } catch {}
+        }).finally(()=>this.business.delete(chat.id));
+        this.business.set(chat.id,work);return;
+      }
       const selection = /^\/project ([^\s]+)(?:\s+([\s\S]*))?$/.exec(content);
       if (!selection) { reply('请显式选择项目：/project <项目ID> <管理请求>。绑定请在私聊发送“绑定”。'); this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
       const project = selection[1]!, request = selection[2] ?? '', actor = await this.actor(e, project);
@@ -253,6 +292,72 @@ export class ChannelService {
     }
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id);
   }
+  private businessFence(chat:Row):string {
+    const visible=this.employees.visibleProjects(chat.id);
+    if(chat.chat_type==='p2p'){
+      const owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=?',chat.id);
+      return digest(JSON.stringify({owner,context:this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)?.context_revision,
+        principal:owner&&this.store.get('SELECT authorization_revision FROM principals WHERE id=?',owner.principal_id)?.authorization_revision,
+        projects:visible.map(project=>[project,roleConfiguration(this.store,project).revision,this.employees.personalRole(chat.id,project),this.store.get('SELECT enabled FROM policies WHERE repository_id=?',project)?.enabled])}));
+    }
+    return digest(JSON.stringify({context:this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)?.context_revision,
+      audience:this.store.get('SELECT revision FROM channel_audiences WHERE chat_id=?',chat.id)?.revision,
+      grants:this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? ORDER BY id',chat.id).map(g=>[g.id,g.revision,g.enabled,
+        this.store.get('SELECT authorization_revision FROM principals WHERE id=?',g.principal_id)?.authorization_revision,
+        this.store.get('SELECT authorization_revision FROM principals WHERE id=?',g.maintainer_id)?.authorization_revision,roleConfiguration(this.store,g.project_id).revision,
+        visible.includes(g.project_id)])}));
+  }
+  private async businessMessage(row:Row,e:ChannelEvent,chat:Row):Promise<void> {
+    const personal=e.chat_type==='p2p',actor=personal?await this.actor(e):undefined;
+    if(actor)this.employees.personalOwner(chat.id,e,actor);
+    const grants:Row[]=personal?this.management.service.projects(actor!).map(project_id=>({project_id,role_id:this.employees.personalRole(chat.id,project_id)})):
+      this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? AND enabled=1',chat.id);
+    const content=e.content.trim().replace(/^\/chat\s+/,''),selection=/^\/project (\S+)(?:\s+([\s\S]*))?$/.exec(content);
+    const previous=this.store.get('SELECT project_id FROM role_conversations WHERE id=?',chat.id)?.project_id;
+    const project=selection?.[1]??(grants.length===1?grants[0]!.project_id:grants.some(g=>g.project_id===previous)?previous:null);
+    if(!project){if(e.addressed)this.queue(e,card('请明确本次操作的项目：'+(personal?'/chat ':'')+'/project <项目ID> <请求>。可用项目：'+(grants.map(g=>g.project_id).join('、')||'尚无已授权项目')),row.id+':project',row.id);this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
+    const grant=grants.find(g=>g.project_id===project);if(!grant)return fail(403,'channel_employee_project_required');
+    if(!e.addressed&&grant.participation!=='all'&&!(grant.participation==='questions'&&/[?？]\s*$/.test(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
+    const privateActor=personal?await this.actor(e,project):undefined;
+    const caller=privateActor?roleTaskCaller(this.store,project,grant!.role_id,{actor:privateActor,conversation_id:chat.id,source_message:row.id,guard:()=>this.employees.guardPersonal(chat.id,privateActor.principal_id,row.id)}):this.employees.caller(chat.id,project,row.id);
+    const message=(this.ledger.query(chat.id,{message_id:e.message_id}).messages as Json[])[0];
+    if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
+    const fence=()=>this.businessFence(chat),projects=this.employees.visibleProjects(chat.id);
+    const fixed=fence(),guard=()=>{if(this.stopped)fail(409,'channel_stopped');if(personal)this.employees.guardPersonal(chat.id,caller.principal_id!,row.id);else this.employees.assertGrant(grant!);if(fence()!==fixed)fail(409,'conversation_source_changed');};
+    const summary=():Json=>{
+      const saved=this.store.get('SELECT * FROM channel_chat_summaries WHERE chat_id=?',chat.id);
+      if(!saved||JSON.parse(saved.sources).authorization_fence!==fixed)return {state:'not_compacted',notice:'摘要尚未建立；可检索本地原文。'};
+      return {...this.store.secrets.open(saved.payload,'channel-summary:'+chat.id),sources:JSON.parse(saved.sources),through_time:saved.through_time,through_id:saved.through_id,authority:'derived; inspect original messages'};
+    };
+    const recent=this.ledger.recent(chat.id,40,projects,fixed),saved=summary(),boundary=recent[0],older=boundary?this.ledger.before(chat.id,boundary,saved.through_id?{message_id:saved.through_id,created_at:saved.through_time}:undefined,projects,fixed):[];
+    // Model context is bounded; original local evidence remains available in explicit chunks.
+    const excerpt=(m:Json,limit:number):Json=>{const {resources,...rest}=m;return {...rest,content:String(m.content??'').slice(0,limit),
+      truncated:String(m.content??'').length>limit,resource_references_available:!!resources};};
+    this.store.run('UPDATE channel_inbox SET conversation_id=? WHERE id=?',chat.id,row.id);
+    const result=await this.conversations.run({id:chat.id,source_message:row.id,caller,request:selection?.[2]??content,allowSilence:!e.addressed,fence,guard,
+      context:()=>({recent_messages:recent.map(m=>excerpt(m,3000)),history:this.ledger.diagnostics(chat.id),
+        authorized_projects:grants.filter(g=>projects.includes(g.project_id)).map(g=>({project_id:g.project_id,role:g.role_id})),
+        tasks:caller.permissions?.task_management==='none'?{state:'task_management_disabled'}:this.management.service.tasks.tool(caller,'list_managed_tasks',{})}),
+      query:args=>{guard();const result=this.ledger.query(chat.id,args,projects,fixed);return {...result,messages:(result.messages as Json[]).map(m=>excerpt(m,2000))};},
+      read:args=>{
+        guard();const part=text(args.part??'content'),offset=Number(args.offset??0),limit=Number(args.limit??4000);
+        if(args.offset!==undefined&&typeof args.offset!=='number'||args.limit!==undefined&&typeof args.limit!=='number'||!['content','resources'].includes(part)||!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>8000)return fail(400,'invalid_message_chunk');
+        const found=(this.ledger.query(chat.id,{message_id:text(args.message_id),limit:1},projects,fixed).messages as Json[])[0];
+        if(!found)return {state:'not_found_locally',notice:'No implicit provider fetch.'};
+        const value=part==='content'?String(found.content??''):JSON.stringify(found.resources??[]);
+        return {...excerpt(found,0),part,offset,text:value.slice(offset,offset+limit),next_offset:offset+limit<value.length?offset+limit:null,total_characters:value.length};
+      },summary,
+      ...(older.length?{compact:{input:{prior_summary:saved,messages:older.map(m=>excerpt(m,3000)),sync:this.ledger.diagnostics(chat.id)},commit:(text:string)=>{
+        guard();const through=older.at(-1)!;this.store.run(`INSERT INTO channel_chat_summaries VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET revision=excluded.revision,
+          authorization_revision=excluded.authorization_revision,through_time=excluded.through_time,through_id=excluded.through_id,sources=excluded.sources,payload=excluded.payload`,
+          chat.id,this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)!.context_revision,caller.authorization_revision??0,Number(through.created_at),String(through.message_id),
+          JSON.stringify({authorization_fence:fixed,first_message:older[0]!.message_id,through_message:through.message_id,truncated_messages:older.filter(m=>String(m.content??'').length>3000).map(m=>m.message_id),range_hash:digest(JSON.stringify(older.map(m=>[m.message_id,m.updated_at])))}),
+          this.store.secrets.seal({summary:text},'channel-summary:'+chat.id));
+      }}}:{})});
+    guard(); if(result.message.trim())this.queue(e,card(result.message,this.url()),row.id+':business-result',row.id,{kind:personal?'personal_conversation':'employee',chat_id:chat.id,project_id:project,principal_id:caller.principal_id,
+      grant_id:grant!.id??null,grant_revision:grant!.revision??null,source_message:row.id,source_fence:fixed,turn_id:result.id});
+    this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?",row.id);
+  }
   private async result(row: Row): Promise<void> {
     const m = this.store.get('SELECT state FROM management_messages WHERE id=?', row.message_id);
     if (!m || ['pending', 'running'].includes(m.state)) return;
@@ -273,7 +378,7 @@ export class ChannelService {
     if (operations.length === 1) {
       const operation = this.management.service.read(actor, operations[0]!.id); token = randomId();
       this.store.run('INSERT INTO channel_cards VALUES(?,?,?,?,?,?,?,?,NULL)', digest(token), e.connector_id, actor.principal_id,
-        this.store.secrets.seal(e, 'channel-card:' + digest(token)), session.project_id, String(operation.id), parameterHash(operation), Date.now() + 10 * 60_000);
+        this.store.secrets.seal({...e,content:'',raw_content:''}, 'channel-card:' + digest(token)), session.project_id, String(operation.id), parameterHash(operation), Date.now() + 10 * 60_000);
     }
     let publicSummary = summary;
     if (e.chat_type === 'group' && !groupDetails) {
@@ -310,6 +415,26 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
+    if(['employee','personal_conversation'].includes(protection?.kind)){
+      const guard=()=>{
+        this.source(event);if(this.stopped)fail(409,'channel_stopped');
+        if(protection.kind==='personal_conversation')this.employees.guardPersonal(protection.chat_id,protection.principal_id,protection.source_message);
+        else{const grant=this.store.get('SELECT * FROM channel_employee_grants WHERE id=?',protection.grant_id);
+          if(!grant||grant.chat_id!==protection.chat_id||grant.project_id!==protection.project_id||grant.principal_id!==protection.principal_id||grant.revision!==protection.grant_revision)fail(403,'channel_employee_source_mismatch');
+          this.employees.assertGrant(grant!);if(!protection.task_id)this.employees.caller(grant!.chat_id,grant!.project_id,protection.source_message);}
+        if(protection.task_id){const task=this.store.get('SELECT * FROM tasks WHERE id=?',protection.task_id);if(!task)fail(404,'task_not_found');this.resultAuthority(task!);}
+        if(protection.source_fence&&this.businessFence(this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!)!==protection.source_fence)fail(409,'conversation_source_changed');
+        if(protection.turn_id){const turn=this.store.get('SELECT * FROM role_conversation_turns WHERE id=?',protection.turn_id);
+          if(turn?.state!=='completed'||turn.fence!==protection.source_fence||this.businessFence(this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!)!==turn.fence)fail(409,'conversation_source_changed');}
+      };
+      guard();const remote=await this.adapter(c,guard).send(delivery,digest(row.id));
+      if(!this.stopped)this.store.transaction(()=>{this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);
+        const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
+        const content=String(delivery.content.elements?.[0]?.text?.content??'');
+        this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:'interactive',content,raw_content:JSON.stringify(delivery.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:'',thread_id:event.thread_id,deleted:false},'live');
+        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,protection.project_id,protection.source_fence);
+      });return;
+    }
     const actor = protection ? await this.actor(event, protection.project_id) : undefined;
     const guard = () => {
       const current = this.source(event);
@@ -354,6 +479,33 @@ export class ChannelService {
           this.store.run('UPDATE channel_connectors SET last_error=? WHERE id=?', errorCode(error), row.connector_id);
         }
       }
+      // Notification only: tasks are created/claimed/run by the existing task service and engine.
+      // The outbox key is the receipt for each result revision, including across process restarts.
+      for(const event of this.store.all('SELECT * FROM channel_task_results WHERE id>(SELECT sequence FROM channel_result_cursor WHERE id=1) ORDER BY id LIMIT 50')){
+        try{this.store.transaction(()=>{
+        const task=this.store.get(`SELECT t.*,o.conversation_id,o.principal_id,o.source_message FROM tasks t JOIN task_origins o ON o.task_id=t.id
+          JOIN channel_chats c ON c.id=o.conversation_id WHERE t.id=? AND c.state='active' AND t.status IN ('completed','succeeded','pr_opened','cancelled','failed')`,event.task_id);
+        try{
+        if(!task)return;
+        const key='task-result:'+task.id+':'+digest(JSON.stringify([task.status,task.result,task.error_code,this.store.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision]));
+        if(this.store.get('SELECT 1 FROM channel_outbox WHERE idempotency_key=?',key))return;
+          this.resultAuthority(task);
+          const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',task.conversation_id)!,receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',task.source_message);
+          if(!receipt)return;const original=this.store.secrets.open(receipt.payload,'channel-event:'+task.source_message) as unknown as ChannelEvent,c=this.connector(chat.connector_id);
+          const event={...original,connector_id:c.id,connector_revision:c.revision};let protection:Json={kind:'personal_conversation',chat_id:chat.id,project_id:task.repository_id,principal_id:task.principal_id,source_message:task.source_message,task_id:task.id,source_fence:this.businessFence(chat)};
+          if(chat.chat_type==='group'){const grant=this.store.get('SELECT * FROM channel_employee_grants WHERE chat_id=? AND project_id=? AND principal_id=?',chat.id,task.repository_id,task.principal_id);if(!grant)return;
+            this.employees.assertGrant(grant);protection={...protection,kind:'employee',grant_id:grant.id,grant_revision:grant.revision};}
+          let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
+          this.queue(event,card(`任务 ${task.id}\n状态：${task.status}\n${summary||task.summary}${task.error_code?'\n原因：'+task.error_code:''}`, (this.options.origin??'')+'/#/board'),key,task.source_message,protection);
+        }catch(error){if(!(error instanceof HttpError||error instanceof TaskError))throw error;/* Withdrawn authority cannot disclose a result. */}
+        finally{this.store.run('UPDATE channel_result_cursor SET sequence=? WHERE id=1',event.id);}
+        });}catch{break;/* Queue failure rolls back the cursor; the next tick retries the same event. */}
+      }
     } finally { this.busy = false; }
+  }
+  private resultAuthority(task:Row):void{
+    assertManagedExecution(this.store,task);
+    for(const instance of this.store.all('SELECT role,source_fence FROM role_instances WHERE task_id=?',task.id))
+      if(instance.source_fence&&instance.source_fence!==taskAuthorizationFence(this.store,task,instance.role))fail(403,'task_result_authority_changed');
   }
 }

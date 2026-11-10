@@ -11,6 +11,10 @@ export class ChannelApi {
     assertCurrent(actor);
     if (path === '/api/channels/employees' && method === 'GET') return this.service.employees.list(actor);
     const employee = /^\/api\/channels\/chats\/([a-f0-9]{48})\/employee$/.exec(path);
+    const personal=/^\/api\/channels\/chats\/([a-f0-9]{48})\/personal-role$/.exec(path);
+    if(personal&&method==='PUT')return this.service.employees.configurePersonal(actor,personal[1]!,input);
+    const conversation=/^\/api\/channels\/chats\/([a-f0-9]{48})\/conversation$/.exec(path);
+    if(conversation&&method==='GET')return this.service.conversationView(actor,conversation[1]!,Number(url.searchParams.get('offset')??0));
     if (employee && method === 'PUT') {
       const result = await this.service.employees.configure(actor, employee[1]!, input);
       if (input.enabled) this.service.ledger.resync(employee[1]!);
@@ -32,7 +36,9 @@ export class ChannelApi {
       if (local[2] === 'messages' && method === 'GET') {
         const query = Object.fromEntries(url.searchParams);
         fields(query, ['message_id', 'sender_id', 'reply_to', 'thread_id', 'from', 'to', 'keyword', 'cursor', 'limit']);
-        return this.service.ledger.query(id, { ...query, ...Object.fromEntries(['from', 'to', 'limit'].filter(k => query[k] !== undefined).map(k => [k, Number(query[k])])) });
+        let projects:string[]|undefined;
+        try{authorize(actor,'platform.manage');}catch{projects=this.service.employees.visibleProjects(id,actor);}
+        return this.service.ledger.query(id, { ...query, ...Object.fromEntries(['from', 'to', 'limit'].filter(k => query[k] !== undefined).map(k => [k, Number(query[k])])) },projects);
       }
       if (local[2] === 'sync' && method === 'POST') {
         fields(input, ['full']);

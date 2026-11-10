@@ -37,7 +37,18 @@ export function channelStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS channel_employee_grants(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL REFERENCES channel_chats(id),project_id TEXT NOT NULL,
       principal_id TEXT NOT NULL UNIQUE,role_id TEXT NOT NULL,maintainer_id TEXT NOT NULL,binding_id TEXT NOT NULL,capabilities TEXT NOT NULL,
       enabled INTEGER NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL,UNIQUE(chat_id,project_id));
+    CREATE TABLE IF NOT EXISTS channel_personal_owners(chat_id TEXT PRIMARY KEY REFERENCES channel_chats(id),principal_id TEXT NOT NULL,actor_id TEXT NOT NULL,actor_tenant TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS channel_personal_roles(chat_id TEXT NOT NULL REFERENCES channel_chats(id),project_id TEXT NOT NULL,role_id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(chat_id,project_id));
+    CREATE TABLE IF NOT EXISTS channel_task_results(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS channel_result_cursor(id INTEGER PRIMARY KEY CHECK(id=1),sequence INTEGER NOT NULL);
+    INSERT OR IGNORE INTO channel_result_cursor VALUES(1,0);
+    CREATE TRIGGER IF NOT EXISTS channel_task_result AFTER UPDATE OF status,result,error_code ON tasks
+      WHEN NEW.status IN ('completed','succeeded','pr_opened','cancelled','failed') AND (OLD.status<>NEW.status OR OLD.result IS NOT NEW.result OR OLD.error_code IS NOT NEW.error_code)
+      AND EXISTS(SELECT 1 FROM task_origins o JOIN channel_chats c ON c.id=o.conversation_id WHERE o.task_id=NEW.id AND o.source_kind='role') BEGIN
+      INSERT INTO channel_task_results(task_id) VALUES(NEW.id); END;
   `);
+  if (!store.all('PRAGMA table_info(channel_employee_grants)').some(c => c.name === 'participation'))
+    store.db.exec("ALTER TABLE channel_employee_grants ADD COLUMN participation TEXT NOT NULL DEFAULT 'mentions'");
   if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'connection_state'))
     store.db.exec("ALTER TABLE channel_connectors ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'idle'");
   // Connections are global; keep their IDs so credentials, bindings and queued events remain valid.

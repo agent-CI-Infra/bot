@@ -55,6 +55,8 @@ export interface AgentSpec<T> {
   task: Row;
   redactor: Redactor;
   guard: () => Promise<void>;
+  /** Shared admission before a billable request, separate from validating its returned result. */
+  beforeModel?: () => Promise<void>;
   system: string;
   prompt: string;
   /** Reuse an execution's trusted snapshot when an adapter resumes before publication. */
@@ -124,7 +126,7 @@ export async function runAgent<T>(spec: AgentSpec<T>): Promise<T> {
         return stop('agent_tool_not_allowed', 'failed', 'Agent 请求使用未授权的工具。');
       const tools = body.tools?.map((tool: any) => allowed.get(tool.function.name));
       for (let attempt = 0; ; attempt++) {
-        try { return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken }); }
+        try { await spec.beforeModel?.(); return await requestModel({ ...spec, model, body: { ...body, ...(tools ? { tools } : {}) }, requestId: (spec.requestPrefix || '') + requestId, onToken }); }
         catch (error) {
           const transient = error instanceof TaskError && (error.code === 'model_unavailable' || error.code==='model_response_invalid' || /^model_http_(429|5\d\d)$/.test(error.code));
           if (!transient || attempt + 1 >= attempts) {if(error instanceof TaskError&&error.code==='model_response_invalid')return stop(error.code,'retry_wait',error.detail);throw error;}

@@ -558,6 +558,7 @@ function taskDispatchCard(entries) {
 function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
+  if (task.origin) { const origin = card('任务来源与执行者'); origin.append(note(taskOriginCaption(task.origin)), facts([['来源消息', task.origin.source_message], ['父任务', task.origin.source_task_id]])); side.append(origin); }
   if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(record, roles, purposes));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
   const info = card('任务');

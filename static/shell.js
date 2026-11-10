@@ -17,10 +17,16 @@ function consoleTaskRow(row, attention = false) {
   const guidance = attention && consoleAttention[row.status];
   text.append(element('p', `${row.full_name || row.repository_id} · ${guidance?.[0] || projectTaskLabel(row)}`, 'eyebrow'), element('h2', row.summary || row.id));
   if (guidance) text.append(element('p', guidance[1]));
+  if (row.origin) text.append(element('p', taskOriginCaption(row.origin), 'muted'));
   if (row.error_code) text.append(element('p', row.error_code, 'muted'));
   text.append(element('p', `更新于 ${timestamp(row.updated_at) || '未知时间'}`, 'muted'));
   const open = button('查看任务', () => openTask(row.id).catch(error)); open.dataset.attentionTask = row.id;
   item.dataset.taskId = row.id; item.append(text, state(row.status), open); return item;
+}
+function taskOriginCaption(origin) {
+  const source = origin.conversation_id ? '连续会话 ' + origin.conversation_id : origin.source_kind;
+  return '来源：' + source + ' · ' + (origin.source_role || '操作者') + ' → ' + (origin.executor_role || '原执行流程') +
+    (origin.source_role && origin.source_role === origin.executor_role ? '（自己执行）' : origin.source_role && origin.executor_role ? '（委派）' : '');
 }
 function consoleScope() {
   const inbox = consoleInboxRoute();
