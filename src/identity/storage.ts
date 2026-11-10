@@ -1,6 +1,6 @@
 import type { Store } from '../storage/database.js';
 
-export const projectCapabilities = ['tasks.read', 'tasks.write', 'roles.edit', 'roles.publish', 'knowledge.read', 'knowledge.write', 'schedules.manage', 'config.write', 'release.manage'];
+export const projectCapabilities = ['tasks.read', 'tasks.manage_own', 'tasks.write', 'roles.edit', 'roles.publish', 'knowledge.read', 'knowledge.write', 'schedules.manage', 'config.write', 'release.manage'];
 // A grant manager may explicitly delegate these; default/derived project grants never include them.
 export const explicitDelegationCapabilities = ['knowledge.review'];
 export const tenantId = (owner: string): string => `github.com:${owner}`;

@@ -6,6 +6,9 @@ import { Store } from '../dist/storage/database.js';
 import { TaskCommands } from '../dist/tasks/commands.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { queueWebhook } from '../dist/review/queue.js';
+import { knowledgeActor } from './knowledge-fixture.mjs';
+import { authorize, invalidate } from '../dist/identity/authorization.js';
+import { taskTraceAccess } from '../dist/memory/access.js';
 import { roleConfiguration } from '../dist/roles/definition.js';
 import { defaultPermissions, migratePermissions, permissionTools } from '../dist/roles/permissions.js';
 import { assertManagedExecution, assertTaskRole, assertTaskExternalEffect, roleTaskCaller, taskToolAllowed, taskManagementTools } from '../dist/tasks/management.js';
@@ -136,6 +139,34 @@ test('a source role cannot lend GitHub writes, commands, subagents or another ro
   assert.equal(taskToolAllowed(s, task, 'reviewer', 'create_issue'), false, 'old request ceiling is retained');
 });
 
+test('a persisted principal ceiling cannot acquire later knowledge grants through recovery or a derived task', t => {
+  const { s, caller, create } = fixture(t);
+  const actor = knowledgeActor(s, 'scoped', 'r', ['tasks.read', 'tasks.manage_own', 'knowledge.read']);
+  const id = create(caller({ actor })).id;
+  const before = s.get('SELECT principal_capabilities FROM task_origins WHERE task_id=?', id).principal_capabilities;
+  s.run("UPDATE scoped_grants SET capabilities=? WHERE id='scoped:r'", JSON.stringify(['tasks.read', 'tasks.manage_own', 'knowledge.read', 'knowledge.write']));
+  invalidate(s, 'scoped', 'test_additional_grant');
+  const task = s.get('SELECT * FROM tasks WHERE id=?', id);
+  assert.throws(() => authorize(taskTraceAccess(s, task).actor, 'knowledge.write', { project_id: 'r' }), { code: 'capability_forbidden' });
+  s.run("INSERT INTO tasks(id,repository_id,kind,status,summary,source_task_id) VALUES('derived','r','task.request','paused','follow-up',?)", id);
+  assert.equal(s.get("SELECT principal_capabilities FROM task_origins WHERE task_id='derived'").principal_capabilities, before);
+  assert.throws(() => authorize(taskTraceAccess(s, s.get("SELECT * FROM tasks WHERE id='derived'")).actor, 'knowledge.write', { project_id: 'r' }), { code: 'capability_forbidden' });
+});
+
+test('a delegated role cannot escape a live ancestor permission ceiling by creating another task', t => {
+  const { s, caller, create, save, commands } = fixture(t);
+  save('reviewer', { delegation: 'allow', issues: 'deny' }); save('dev', { task_management: 'write', delegation: 'allow', issues: 'allow' });
+  const parent = create(caller(), 'Root delegated task', { executor_role: 'dev' }).id;
+  const childCaller = roleTaskCaller(s, 'r', 'dev', { source_task_id: parent, guard() {} });
+  const child = commands.tool(childCaller, 'create_task', { request: 'Nested task', criteria: ['Keep root authority'] }).id;
+  const task = s.get('SELECT * FROM tasks WHERE id=?', child);
+  assertManagedExecution(s, task); assert.equal(taskToolAllowed(s, task, 'dev', 'create_issue'), false);
+  save('reviewer', { delegation: 'deny' });
+  assert.throws(() => assertManagedExecution(s, task), { code: 'task_delegation_forbidden' });
+  save('reviewer', { delegation: 'allow', task_management: 'none' });
+  assert.throws(() => assertManagedExecution(s, task), { code: 'task_management_forbidden' });
+});
+
 test('event Manager and role callers use the same task-management boundary and independent delegation check', t => {
   const { s, save } = fixture(t);
   const input = { repositoryId: 'r', key: 'event-1', type: 'issue.opened', source: 'fixture', summary: 'Review', facts: {},
@@ -143,9 +174,9 @@ test('event Manager and role callers use the same task-management boundary and i
   recordEvent(s, input);
   const event = s.get('SELECT * FROM dispatch_events'), decision = { decision: 'create', option_ids: ['review'], reason: 'Inspect eligible issue' };
   save('manager', { task_management: 'read' });
-  assert.throws(() => applyDecision(s, event, decision, null), { code: 'task_management_forbidden' });
+  assert.throws(() => applyDecision(s, event, decision, null), { code: 'task_management_forbidden', state: 'waiting_configuration' });
   save('manager', { task_management: 'write', delegation: 'deny' });
-  assert.throws(() => applyDecision(s, event, decision, null), { code: 'task_delegation_forbidden' });
+  assert.throws(() => applyDecision(s, event, decision, null), { code: 'task_delegation_forbidden', state: 'waiting_configuration' });
   save('manager', { delegation: 'allow' });
   const result = applyDecision(s, event, decision, null);
   assert.equal(result.created.length, 1);

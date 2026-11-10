@@ -124,7 +124,9 @@ export function authorize(actor: ActorContext, capability: string, resource: { t
 function matchingGrants(store: Store, scopes: EffectiveScope[], capability: string, tenant: string | null, project?: string): EffectiveScope[] {
   return scopes.filter(g => g.state === 'active' &&
     (g.scope === 'platform' || !!tenant && g.tenant_id === tenant && (g.scope === 'tenant' || !!project && g.project_id === project)) &&
-    (g.capabilities.includes('*') || g.capabilities.includes(capability)) &&
+    // Existing project administrators retain their effective task authority without
+    // rewriting old grants; the narrower capability never implies project-wide write.
+    (g.capabilities.includes('*') || g.capabilities.includes(capability) || capability === 'tasks.manage_own' && g.capabilities.includes('tasks.write')) &&
     // An owner-wide derived grant is bounded by the current installation, including projects synchronized later.
     (g.source !== 'github_derived' || !project || !!store.get(`SELECT 1 FROM installation_repositories r JOIN scoped_grants s ON s.installation_ref=r.installation_ref
       WHERE s.id=? AND r.repository_id=? AND r.present=1`, g.grant_id, project)));

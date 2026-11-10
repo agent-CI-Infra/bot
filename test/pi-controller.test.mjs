@@ -68,7 +68,7 @@ test('a real Pi controller session delegates a role, reads its result by referen
   const session = logs.find(l => l.type === 'pi_session');
   assert.ok(logs.filter(l => l.type === 'model').length >= 4 && logs.filter(l => l.type === 'model').every(l => !('reasoning' in l)), 'model events are logged without private reasoning');
   assert.equal(session.version, installed); assert.deepEqual([session.extensions, session.skills, session.context_files], [0, 0, 0]);
-  assert.deepEqual(session.tools.sort(), ['acknowledge_coordination', 'delegate_role', 'list_project_tasks', 'nominate_delivery', 'plan_task', 'read_coordination', 'read_playbook', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'relate_task', 'request_task_coordination', 'select_playbooks', 'set_task_priority', 'wait_for_tasks']);
+  assert.deepEqual(session.tools.sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_coordination', 'read_managed_task', 'read_playbook', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'relate_task', 'request_task_coordination', 'select_playbooks', 'set_task_priority', 'wait_for_tasks']);
   const controllerDir = join(root, 'tasks', JSON.parse(store.get("SELECT runtime FROM role_instances WHERE role='manager'").runtime).workspace_id, 'agent');
   const state = JSON.parse(readFileSync(join(controllerDir, 'state.json'), 'utf8'));
   assert.deepEqual([state.state, state.agent, state.version], ['completed', 'pi', installed]);
