@@ -52,7 +52,10 @@ export class ChannelHistorySync {
             if (page.has_more && (!page.page_token || page.page_token === job.page_token || this.store.get(
               'SELECT 1 FROM channel_sync_cursors WHERE job_id=? AND generation=? AND token_hash=?', job.id, job.generation, digest(page.page_token))))
               throw new ChannelHistoryError('channel_history_cursor_stalled', true);
-            for (const message of page.items) this.ledger.merge(chat, message, 'history');
+            // Explicit retention cleanup can commit while history() is awaiting HTTP.
+            // Use the boundary in this transaction, never the pre-request snapshot.
+            const currentChat = this.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id)!;
+            for (const message of page.items) this.ledger.merge(currentChat, message, 'history');
             if (page.has_more) this.store.run('INSERT INTO channel_sync_cursors VALUES(?,?,?)', job.id, job.generation, digest(page.page_token));
             else this.store.run('INSERT INTO channel_sync_ranges VALUES(?,?,?,?)', job.id, job.generation, job.start_time, job.end_time);
             // Message writes and cursor advancement either both commit, or both roll back.

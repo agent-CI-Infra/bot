@@ -185,6 +185,23 @@ test('local pagination searches decrypted safe text and metadata, hides sensitiv
   assert.ok(ledger.query(chat.id).gaps.some(g => g.reason === 'retention'));
 });
 
+test('explicit cleanup during an awaited history page fences that page and later full-resync pages', async t => {
+  const { store, ledger, chat } = fixture(t); let release, requested, calls = 0;
+  ledger.merge(chat, message('old', 10), 'live');
+  const waiting = new Promise(r => { requested = r; });
+  const response = new Promise(r => { release = r; });
+  const sync = new ChannelHistorySync(store, ledger, () => ({ history: async () => {
+    if (++calls === 1) { requested(); await response; }
+    return { items: [message('old-' + calls, 20), message('retained-' + calls, 120)], has_more: calls === 1, page_token: calls === 1 ? 'second-page' : '' };
+  } }));
+  const work = sync.tick(); await waiting;
+  ledger.cleanup(chat.id, 100, store.get('SELECT revision FROM channel_chats WHERE id=?', chat.id).revision);
+  release(); await work; await sync.tick();
+  assert.equal(calls, 2); assert.equal(store.get('SELECT state FROM channel_sync_jobs').state, 'complete');
+  assert.deepEqual(ledger.query(chat.id).messages.map(m => m.message_id), ['retained-1', 'retained-2']);
+  assert.equal(store.get('SELECT count(*) n FROM channel_messages WHERE created_at<100').n, 0);
+});
+
 test('HTTP and SDK commit inbox, non-text/quiet/bot messages and sync discovery before ACK; a database error rolls everything back', async t => {
   const { h, id, service, wire } = await channelFixture(t);
   const attachment = envelope('', { message: { message_type: 'image', content: '{"image_key":"img_fixture"}', chat_type: 'group', chat_id: 'oc_media' } });
