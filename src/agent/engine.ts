@@ -28,7 +28,7 @@ import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
 import { assigneesOf, developmentReady, reviewRequestsCode, sameLabel, reviewNewHead } from '../review/queue.js';
-import { actionsDevelopmentAllowed, actionsIssueAssigned, actionsReport, actionsSourceIssue, publicText } from '../actions/safety.js';
+import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsReport, actionsSourceIssue, publicText } from '../actions/safety.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
@@ -279,9 +279,10 @@ export class TaskEngine {
         if(task.kind==='development.issue'&&!actionsDevelopmentAllowed(this.store,task.repository_id,task.object_number,current,input.review))stop('actions_development_not_approved','needs_replan');
         const actionsIssue=actionsSourceIssue(this.store,task as {repository_id:string;kind:string;object_number:number});
         if(actionsIssue!==null){
-          if(!github.installationEvents?.includes('workflow_run')){
-            this.store.run("UPDATE actions_failure_scans SET error='actions_workflow_run_subscription_missing',configured_at=NULL WHERE repository_id=?",task.repository_id);
-            stop('actions_workflow_run_subscription_missing','waiting_configuration');
+          const configuration=actionsConfigurationError(github);
+          if(configuration){
+            this.store.run('UPDATE actions_failure_scans SET error=?,configured_at=NULL WHERE repository_id=?',configuration,task.repository_id);
+            stop(configuration,'waiting_configuration');
           }
           if(development&&task.kind.endsWith('.pr')){
             const issue=await github.object('development.issue',actionsIssue);

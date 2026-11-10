@@ -40,7 +40,7 @@ function permissionReport(report){
   if(features.length){
     const list=element('ul',''),used=gap=>gap.features.map(feature=>featureNames[feature]||feature).join('、');
     for(const gap of features)list.append(element('li',gap.kind==='permission'?`${permissionNames[gap.name]||gap.name}：改为「${accessNames[gap.required]}」（当前「${gap.current?accessNames[gap.current]||gap.current:'No access'}」），${used(gap)}需要`
-      :`Subscribe to events：勾选 ${eventNames[gap.name]||gap.name}，${used(gap)}需要`));
+      :`Subscribe to events：勾选 ${eventNames[gap.name]||gap.name}，${used(gap)}需要${eventPermissionNotes[gap.name]?`。${eventPermissionNotes[gap.name]}`:''}`));
     rows.push(element('p','下列各项只有部分功能需要，不影响检视和开发；要使用这些功能，在同一页改好并保存：'),list);
   }
   rows.push(settings(),element('p','改完后点「重新检查」。','muted'));return rows;

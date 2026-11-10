@@ -11,7 +11,7 @@ import { analysisDecision, analysisTask, classifiedEvidence, failedStepOutput, r
 import { eventTaskActive } from '../work/events.js';
 import { workPermissions } from '../work/settings.js';
 import { taskPermissions } from '../tasks/configuration.js';
-import { actionsRedactor, publicText } from './safety.js';
+import { actionsConfigurationError, actionsRedactor, publicText } from './safety.js';
 
 export const scanInterval = 60_000, scanPageSize = 50;
 // Reruns of earlier runs are looked for every 10 minutes among runs created in the last 72 hours.
@@ -57,7 +57,7 @@ export class ActionsFailures {
     try {
       if (this.store.get('SELECT type FROM accounts WHERE id=?', repo.account_id)?.type !== 'github_app') stop('actions_app_required');
       await github.connect(false, undefined, { contents: 'read', actions: 'write', issues: 'write' }, false);
-      if (!github.installationEvents?.includes('workflow_run')) stop('actions_workflow_run_subscription_missing');
+      const configuration = actionsConfigurationError(github); if (configuration) stop(configuration);
       this.store.run('UPDATE actions_failure_scans SET error=NULL,configured_at=? WHERE repository_id=? AND lease=?', new Date().toISOString(), repo.id, lease);
       // Poll sent/uncertain reruns even when discovery no longer returns their original creation window.
       let pendingError: unknown;

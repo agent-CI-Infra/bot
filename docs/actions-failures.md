@@ -4,7 +4,9 @@ Actions 失败处理是工作类型 `actions.failures`。它的开关就是每�
 
 ## 配置前提
 
-App 管理员需要在已有 App 的事件订阅中添加 `workflow_run`。新建 App 的 manifest 不能替代这个操作。此事件不属于全局 `appEvents`，因此未启用本功能的安装继续使用现有接入要求。处理器读取该仓库实际使用的安装的 `events`；没有订阅时，在项目设置和仓库读取 API 的 `actions_failures.error` 中显示 `actions_workflow_run_subscription_missing`，本功能不写 GitHub。超级管理员的项目列表按安装记录的事件，在缺少 `workflow_run` 的每个仓库行显示「事件未订阅」，开启本功能的仓库为琥珀色，未开启的为蓝色；「同步安装列表」的结论和「机器人账号」的 App 检查也会列出它，但它不计入检视和开发的基线。修改事件订阅本身不要求新增权限批准；只有实际增加安装权限时才需要安装管理员批准。
+App 管理员需要在已有 App 的事件订阅中添加 `workflow_run`，即 GitHub App 设置 Permissions & events → Subscribe to events 里的「Workflow run」。它是 Webhook 事件订阅，不是 Workflows 权限：GitHub 只要求 App 至少有 Actions read 才能订阅；Workflows 权限只用于修改 `.github/workflows` 下的文件，接入门禁需要它，本功能不需要。新建 App 的 manifest 不能替代这个操作。此事件不属于全局 `appEvents`，因此未启用本功能的安装继续使用现有接入要求。
+
+处理器读取该仓库实际使用的安装的 `permissions` 和 `events`，在项目设置和仓库读取 API 的 `actions_failures.error` 中报告最先缺少的一项：安装没有 Actions 权限时为 `actions_permission_missing`（这时 GitHub 不会提供 Workflow run 订阅，先补权限）；有 Actions 权限但没有订阅时为 `actions_workflow_run_subscription_missing`。两者都让本功能停在读取运行之前，不写 GitHub。超级管理员的项目列表按安装记录的事件，在缺少 `workflow_run` 的每个仓库行显示「事件未订阅」，开启本功能的仓库为琥珀色，未开启的为蓝色；「同步安装列表」的结论和「机器人账号」的 App 检查也会列出它，但它不计入检视和开发的基线。GitHub 文档只要求新增权限时由安装所有者批准；安装设置出现待批准的变更时接受即可。
 
 已有 App 权限包含 Actions write；处理器只请求 Contents read、Actions write、Issues write。运行读取、日志读取及写入都经过现有 GitHub 客户端、配额判断和仓库启停检查。身份检查绑定仓库 id 和所有者；按仓库持久租约串行处理，写入前再次检查功能开关和租约。
 

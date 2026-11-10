@@ -28,14 +28,14 @@ const run = (extra = {}) => ({ id: 800, run_attempt: 1, repository: { id: 101 },
 
 async function fixture(t, options = {}) {
   const state = { runs: [run()], jobs: [job()], log: log('HTTPError: HTTP 429 Too Many Requests'), requests: [], issues: [], comments: [],
-    events: [...appEvents, 'workflow_run'], workflow: 'name: Nightly\non: [schedule, workflow_dispatch]\n', tokens: [], ...options };
+    events: [...appEvents, 'workflow_run'], permissions: { contents: 'write', issues: 'write', actions: 'write' }, workflow: 'name: Nightly\non: [schedule, workflow_dispatch]\n', tokens: [], ...options };
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const url = new URL(req.url, 'http://fixture'), path = url.pathname, body = raw ? JSON.parse(raw) : undefined;
     state.requests.push({ method: req.method, path, query: url.search, body });
     const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     if (state.custom && await state.custom({ req, res, url, path, body, send })) return;
-    if (path === '/repos/fixture/project-101/installation') return send({ id: 9, account: { id: 10 }, events: state.events, permissions: { contents: 'write', issues: 'write', actions: 'write' } });
+    if (path === '/repos/fixture/project-101/installation') return send({ id: 9, account: { id: 10 }, events: state.events, permissions: state.permissions });
     if (path.endsWith('/access_tokens')) { state.tokens.push(body); return send({ token: 'fixture-actions-installation-token' }); }
     if (path === '/installation/token') return send({});
     if (path === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' });
@@ -224,6 +224,18 @@ test('subscription validation is per enabled repository, visible in API, and doe
   const f = await fixture(t, { events: [...appEvents] }); await f.hook(); await f.tick(); assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 0);
   assert.equal((await f.admin('/api/repositories/101')).value.actions_failures.error, 'actions_workflow_run_subscription_missing');
   assert.ok(!appEvents.includes('workflow_run')); await f.policy({ actions_failures_enabled: false }); f.state.requests.length = 0; await f.tick(); assert.equal(f.state.requests.length, 0);
+});
+
+test('an installation without Actions access is reported as such, not as a missing workflow_run subscription', async t => {
+  // GitHub offers Workflow run only to an App with Actions read; the Workflows permission plays no part.
+  const f = await fixture(t, { events: [...appEvents], permissions: { contents: 'write', issues: 'write', workflows: 'write' } }); await f.hook(); await f.tick();
+  assert.equal((await f.admin('/api/repositories/101')).value.actions_failures.error, 'actions_permission_missing');
+  assert.equal(f.state.issues.length, 0); assert.equal(f.reruns().length, 0);
+  assert.ok(!f.state.requests.some(r => /\/actions\/runs/.test(r.path)), 'no run is read before the configuration is complete');
+  // Read-only Actions access is enough for the subscription check to pass.
+  f.state.permissions = { contents: 'write', issues: 'write', actions: 'read' }; f.state.events = [...appEvents, 'workflow_run'];
+  await f.tick();
+  assert.equal((await f.admin('/api/repositories/101')).value.actions_failures.error, null);
 });
 
 test('new switch off makes no feature writes; development off still classifies, reruns and files', async t => {
