@@ -82,7 +82,9 @@ export class ManagementAgent {
       this.conversation(base,conversation);
     };
     const execute=async(name:string,args:any,callId:string):Promise<any>=>{
-      await guard();this.event(id,'tool_call',{name,arguments:args});
+      // Providers may reuse a tool id in later model turns. Progress needs an id unique to this invocation.
+      const eventCallId=randomId();
+      await guard();this.event(id,'tool_call',{name,call_id:eventCallId,arguments:args});
       let result:any;
       try{
         if(name==='management_query')result=await this.service.query(actor,args);
@@ -91,10 +93,10 @@ export class ManagementAgent {
           const command={...args,idempotency_key:digest(conversation+':'+input.source_message+':'+callId),source_conversation:conversation,source_message:String(input.source_message)};
           result=await this.service.submit(actor,command);
         }else fail(403,'tool_not_allowed');
-        await guard();this.event(id,'tool_result',{name,result});return result;
+        await guard();this.event(id,'tool_result',{name,call_id:eventCallId,result});return result;
       }catch(error){
         const result={error:error instanceof HttpError||error instanceof TaskError?error.code:'management_tool_failed'};
-        this.event(id,'tool_error',{name,...result});throw error;
+        this.event(id,'tool_error',{name,call_id:eventCallId,...result});throw error;
       }
     };
     try{
@@ -112,6 +114,7 @@ export class ManagementAgent {
           adapter:async({request})=>{
             const messages:any[]=[{role:'system',content:system},{role:'user',content:JSON.stringify({scope:this.conversation(base,conversation).row.scope,request:input.content,history:this.history(base,conversation).events})}];
             for(let turn=0;turn<16;turn++){
+              await guard();this.event(id,'model_start',{turn});
               const {value,request_log_id}=await request({messages,tools:managementTools,tool_choice:'auto'},'turn:'+turn,async delta=>{if(delta?.content)this.event(id,'text',{delta:redactor.text(delta.content),provisional:true});});
               this.event(id,'model_request',{request_log_id});
               const message=value?.choices?.[0]?.message;

@@ -15,6 +15,7 @@ export async function managementFixture(t,options={}) {
   const provider=createServer(async(req,res)=>{
     let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw);requests.push(body);
     if(modelState.gate)await modelState.gate;
+    if(modelState.respond){await modelState.respond(body,res);return;}
     if(modelState.failure){res.writeHead(modelState.failure,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Fixture model failure'}}));return;}
     const context=JSON.parse(body.messages[1].content),calls=body.messages.filter(m=>m.role==='assistant').flatMap(m=>m.tool_calls??[]),observations=body.messages.filter(m=>m.role==='tool').map(m=>JSON.parse(m.content));
     const request=String(context.request),configuration=request.includes('提示词'),pause=request.includes('暂停');
