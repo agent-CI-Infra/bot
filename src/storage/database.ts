@@ -1,3 +1,4 @@
+import {priorityStorage} from '../tasks/priority.js';
 import {coordinationStorage} from '../tasks/coordination.js';
 import { integrationStorage } from '../tasks/integration.js';
 import { roleStorage } from '../roles/storage.js';
@@ -182,6 +183,7 @@ export class Store {
     dispatchStorage(this);
     gateOnboardingStorage(this);
     taskStorage(this);
+    priorityStorage(this);
     traceStorage(this);
     memoryStorage(this);
     integrationStorage(this);

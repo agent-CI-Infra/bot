@@ -53,6 +53,7 @@ export function waitForCoordinatedTasks(s:Store,task:Row,a:any){
 export function coordinationContext(s:Store,id:string){return {waiting_dependencies:coordinationDependencies(s,id),requests:s.all('SELECT id,request,state,result,error,updated_at FROM task_coordinations WHERE source_task_id=? ORDER BY created_at',id).map(r=>({...r,request:JSON.parse(r.request),result:r.result?JSON.parse(r.result):null})),notices:s.all('SELECT * FROM coordination_notices WHERE task_id=? ORDER BY id',id)};}
 export function coordinationVersion(s:Store,id:string){const n=s.all('SELECT id,coordination_id,message,task_revision,candidate_id,state,reason,action FROM coordination_notices WHERE task_id=? ORDER BY id',id);return n.length?sha(JSON.stringify(n)):undefined;}
 export function assertCoordinationCurrent(s:Store,id:string,candidate:any){
+ if(s.get("SELECT id FROM task_coordinations WHERE source_task_id=? AND state IN ('queued','running')",id))stop('task_coordination_pending','waiting_coordination','An explicit coordination request is pending. Keep working facts, but wait for advice before passing acceptance or merge.');
  const current=coordinationVersion(s,id);
  if(s.get("SELECT id FROM coordination_notices WHERE task_id=? AND state IN ('pending','disputed')",id)||candidate?.coordination_version!==current)stop('task_coordination_pending','waiting_coordination','Read coordination notices, acknowledge applicability or raise an objection; submit a candidate under the current coordination context for fresh QA.');
 }

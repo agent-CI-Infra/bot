@@ -1,3 +1,4 @@
+import {assessFollowups} from './followups.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {scopeInstructions} from './scope.js';
 import { taskTraceAccess } from '../memory/access.js';
@@ -18,6 +19,15 @@ export { acceptanceInstructions as acceptanceSystem } from '../roles/pool.js';
 import { acceptanceInstructions as acceptanceSystem } from '../roles/pool.js';
 const tool=(name:string,description:string,properties:any,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 export async function evaluateDelivery(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard:()=>Promise<void>, shell=true): Promise<Verdict> {
+  const candidate=JSON.parse(store.get('SELECT candidate FROM task_records WHERE task_id=?',task.id)?.candidate??'null');
+  const verdict=await evaluateCandidate(store,task,workspace,redactor,guard,shell);
+  if(verdict.outcome==='pass_with_issues'){
+    const evaluated=store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance_evaluated' AND json_extract(data,'$.candidate_id')=? ORDER BY id DESC LIMIT 1",task.id,candidate.id);
+    await assessFollowups(store,task,candidate,verdict,workspace,guard,redactor,evaluated?'task_history:'+evaluated.id:undefined);
+  }
+  return verdict;
+}
+async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard:()=>Promise<void>, shell=true): Promise<Verdict> {
   const records=new TaskRecords(store),record=records.get(task.id),candidate=record.candidate;
   if(!candidate)throw new Error('acceptance_candidate_required');
   assertRequiredStages(store,task.id,deliveryCandidate(candidate,task.kind));
@@ -32,7 +42,7 @@ export async function evaluateDelivery(store: Store, task: Row, workspace: Works
     if(value?.outcome==='evaluation_incomplete')return stop('acceptance_budget_exhausted','retry_wait','验收未形成判断，候选和原始观察已保留：'+redactor.text(String(value.reason||'verification budget exhausted')).slice(0,2000));
     try{return validateVerdict(redactor.clean(value));}catch(error){return stop('acceptance_output_invalid','retry_wait',String((error as Error).message));}
   };
-  tools.push(tool('submit_acceptance','Submit the independent verdict now. Judge material impact on the requested result; residuals are recorded nonblocking observations and never start another task. evaluation_incomplete is an INTERNAL evaluation fault, not a business outcome: use it only if you cannot form a judgment despite available evidence. Missing necessary raw proof is insufficient_evidence; unresolved required authority/choice is needs_human.',{outcome:{type:'string',enum:['pass','pass_with_issues','return','insufficient_evidence','needs_human','evaluation_incomplete']},reason:{type:'string'},gaps:{type:'array',items:{type:'string'}},residuals:{type:'array',items:{type:'object',properties:{key:{type:'string'},description:{type:'string'},evidence:{type:'string'},impact:{type:'string'},nonblocking_reason:{type:'string'},goal:{type:'string'},criteria:{type:'array',items:{type:'string'}}},required:['key','description','evidence','impact','nonblocking_reason','goal','criteria'],additionalProperties:false}},core_complete:{type:'boolean'},required_evidence_complete:{type:'boolean'},acceptable_risk:{type:'boolean'},coordination:{type:'object',properties:{key:{type:'string'},problem:{type:'string'},proposal:{type:'string'},task_ids:{type:'array',items:{type:'string'}},refs:{type:'array',items:{type:'string'}}},required:['key','problem','proposal','task_ids','refs'],additionalProperties:false}},['outcome','reason','gaps','residuals','core_complete','required_evidence_complete','acceptable_risk']));
+  tools.push(tool('submit_acceptance','Submit the independent verdict now. Judge material impact on the requested result. Residuals are observations, not authority to execute; Task Manager separately records any follow-up plan and scheduling. This does not publish or create another acceptance task. evaluation_incomplete is an INTERNAL evaluation fault, not a business outcome: use it only if you cannot form a judgment despite available evidence. Missing raw proof is insufficient_evidence; unresolved required authority/choice is needs_human.',{outcome:{type:'string',enum:['pass','pass_with_issues','return','insufficient_evidence','needs_human','evaluation_incomplete']},reason:{type:'string'},gaps:{type:'array',items:{type:'string'}},residuals:{type:'array',items:{type:'object',properties:{key:{type:'string'},description:{type:'string'},evidence:{type:'string'},impact:{type:'string'},nonblocking_reason:{type:'string'},goal:{type:'string'},conditions:{type:'string'},workaround:{type:'string'},delivery_impact:{type:'string'},criteria:{type:'array',items:{type:'string'}}},required:['key','description','evidence','impact','nonblocking_reason','goal','criteria'],additionalProperties:false}},core_complete:{type:'boolean'},required_evidence_complete:{type:'boolean'},acceptable_risk:{type:'boolean'},coordination:{type:'object',properties:{key:{type:'string'},problem:{type:'string'},proposal:{type:'string'},task_ids:{type:'array',items:{type:'string'}},refs:{type:'array',items:{type:'string'}}},required:['key','problem','proposal','task_ids','refs'],additionalProperties:false}},['outcome','reason','gaps','residuals','core_complete','required_evidence_complete','acceptable_risk']));
   const evaluationId=randomId(),start=Date.now();
   const files=candidate.artifacts.find(a=>a.kind==='files'||a.kind==='code');
   let snapshot=files?.content as any,sourceTree=files?.version;

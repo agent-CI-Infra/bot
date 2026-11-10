@@ -46,6 +46,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    const verdict=acceptedDeliveries===2?{...pass,outcome:'pass_with_issues',residuals:[{key:'follow-report',description:'Independent report extension',evidence:'The requested report is complete',impact:'Extra documentation',nonblocking_reason:'The extension is independent of the completed report',goal:'Write follow-up from the inherited report',criteria:['Read the original report and deliver the extension']},{key:'follow-report-2',description:'Independent second extension',evidence:'Original report is complete',impact:'Documentation',nonblocking_reason:'A separate addition',goal:'Extend the accepted sibling report',criteria:['Read the accepted sibling artifact and preserve its extension']}]}:pass;
    return send({role:'assistant',content:JSON.stringify(verdict)});
   }
+  if(body.tools?.some(t=>t.function.name==='submit_followup_plan')){const context=JSON.parse(messages[1].content);return send(call('submit_followup_plan',{items:context.qa.residuals.map(r=>({key:r.key,priority:'P3',reason:'Independent optional report extension; core report verified',evidence_refs:[r.evidence],action:'new'}))},'followup-plan'));}
   executionCalls++;
   const context=JSON.parse(messages[1].content),multi=context.request.includes('multiple'),wanted=multi?['research','persistence']:['research'];
   if(multi&&!names.includes('search_project_memory'))return send(call('search_project_memory',{query:'memory'},'memory-search'));
@@ -108,20 +109,13 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    const decisions=store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",id).map(r=>JSON.parse(r.data).outcome);
    assert.deepEqual(decisions,[mode,'pass']);
   }
-  if(mode==='multiple'){legacyParent=id;assert.deepEqual(result.acceptance.followups,[]);assert.equal(result.acceptance.residuals.length,2);assert.ok(!store.all("SELECT data FROM task_history WHERE task_id=? AND type='execution_evidence'",id).some(r=>r.data.includes('fixture-model-token')));const observed=store.get("SELECT id FROM task_history WHERE task_id=? AND type='execution_evidence' AND json_extract(data,'$.name')='read_project_memory'",id);assert.ok(observed);assert.ok(result.candidate.evidence.some(e=>e.source==='task_history:'+observed.id),'actual memory reads are offered to independent acceptance');}
+  if(mode==='multiple'){legacyParent=id;assert.equal(result.acceptance.followups.length,2);assert.equal(result.acceptance.residuals.length,2);assert.ok(!store.all("SELECT data FROM task_history WHERE task_id=? AND type='execution_evidence'",id).some(r=>r.data.includes('fixture-model-token')));const observed=store.get("SELECT id FROM task_history WHERE task_id=? AND type='execution_evidence' AND json_extract(data,'$.name')='read_project_memory'",id);assert.ok(observed);assert.ok(result.candidate.evidence.some(e=>e.source==='task_history:'+observed.id),'actual memory reads are offered to independent acceptance');}
   assert.ok(!JSON.stringify(result.candidate.evidence).includes('STALE_EVIDENCE_SENTINEL'));
   assert.equal(new Set(result.candidate.evidence.map(e=>e.result.execution)).size,1);
   assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='artifact_checkpoint'",id));
  }
- assert.equal(store.get('SELECT count(*) n FROM task_followups').n,0);
- // Retain compatibility with work already created by an older installation, without creating it from QA.
- const parent=records.get(legacyParent);
- for(const residual of parent.acceptance.residuals){
-  const id=randomBytes(24).toString('hex'),contract={goal:residual.goal,scope:parent.contract.scope,criteria:residual.criteria,endpoint:'artifact',source:{parent_task:legacyParent,candidate_id:parent.candidate.id,residual:residual.key}};
-  store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,source_task_id) VALUES(?,'101','task.request','queued',?,?,?)",id,residual.goal,JSON.stringify({request:residual.goal,contract,parent_task:legacyParent,residual}),legacyParent);
-  store.run('UPDATE task_records SET contract=? WHERE task_id=?',JSON.stringify(contract),id);
-  store.run('INSERT INTO task_followups VALUES(?,?,?,?)',legacyParent,parent.candidate.id,residual.key,id);
- }
+ assert.equal(store.get('SELECT count(*) n FROM task_followups').n,2);
+ // The explicit post-QA Manager plan, not QA alone, creates these children.
  const children=store.all("SELECT t.* FROM tasks t JOIN task_followups f ON f.task_id=t.id WHERE t.source_task_id IS NOT NULL AND t.kind='task.request' ORDER BY f.issue_key");assert.equal(children.length,2);
  for(const child of children){
  store.run("UPDATE tasks SET status='running',claim_token='child-claim' WHERE id=?",child.id);authorizeKnowledgeTask(store,child.id);store.run("INSERT INTO task_claims VALUES(?,'101','child-claim','now')",child.id);

@@ -1,8 +1,8 @@
+import {claimQueuedTask} from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
 import {requestIntegration,integratedPublication} from '../tasks/integration.js';
-import { waitForReviewSatisfied } from '../tasks/readiness.js';
 import { checkManagementBudget } from '../management/budget.js';
 import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
@@ -106,21 +106,18 @@ export class TaskEngine {
     const checkpoint=Date.now();pruneReviewSessions(this.store,checkpoint);
     this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
     const tasks=this.store.all(`SELECT * FROM tasks WHERE ${engineKinds} AND
-      status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY created_at,id`,Date.now());
+      status IN ('queued','retry_wait','waiting_configuration','waiting_environment','waiting_pr_head') AND next_run_at<=? ORDER BY priority,queue_seq,id`,Date.now());
     const limits=new Map<string,number>();
-    for(const task of tasks){
-      if(!waitForReviewSatisfied(this.store,task))continue;
-      const repo=String(task.repository_id);
-      if(this.active.has(task.id)||this.clearing.has(repo))continue;
-      // A computer being rebuilt with new default resources takes new tasks once that is done (see ProjectService.reconcileProject).
+    for(const listed of tasks){
+      const repo=String(listed.repository_id);
+      if(this.clearing.has(repo))continue;
+      // A computer refresh stops admission for this project, not for other projects.
       if(!limits.has(repo))limits.set(repo,this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND action='refresh' AND state='pending'",repo)?0:repositoryConcurrency(this.store,repo));
       const running=this.running.get(repo)||new Set<string>();
       if(running.size>=limits.get(repo)!)continue;
-      const token=randomId(),now=new Date().toISOString();
-      this.store.transaction(()=>{
-        this.store.run('INSERT INTO task_claims VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET token=excluded.token,claimed_at=excluded.claimed_at',task.id,repo,token,now);
-        this.store.run("UPDATE tasks SET claim_token=?,status='running',updated_at=? WHERE id=?",token,now,task.id);
-      });
+      const task=claimQueuedTask(this.store,repo,engineKinds,limits.get(repo)!,Date.now(),[...this.active.keys()]);
+      if(!task)continue;
+      const token=task.claim_token;
       running.add(task.id);this.running.set(repo,running);
       const work=this.run(task.id,token).finally(()=>{
         this.store.run('DELETE FROM task_claims WHERE task_id=? AND token=?',task.id,token);

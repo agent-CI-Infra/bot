@@ -1,3 +1,4 @@
+import {taskRelations} from '../tasks/priority.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import { taskDispatch } from '../dispatch/store.js';
 import { taskTrace } from '../tasks/trace.js';
@@ -13,7 +14,7 @@ function faultCause(log:Record<string,any>){
   if(!String(log.content).startsWith('{"type":"fault"'))return log;
   try{const value=JSON.parse(log.content);return {...log,cause:explainFailure(value.code,value.state,value.detail,value.retry_cycle_started_at)};}catch{return log;}
 }
-const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.repository_id,full_name:row.full_name,kind:row.kind,status:row.status,summary:row.summary,
+const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.repository_id,full_name:row.full_name,kind:row.kind,status:row.status,summary:row.summary,priority:row.priority,queue_seq:row.queue_seq,
   object_number:row.object_number,head_sha:row.head_sha,source_task_id:row.source_task_id,generation:row.generation,phase:row.phase,
   error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail,row.retry_cycle_started_at),retry_count:row.retry_count,
   retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
@@ -61,11 +62,14 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       const value=url.searchParams.get(key!);if(value){clauses.push(key==='repository_id'?'repository_id=?':`repository_id IN (SELECT id FROM repositories WHERE ${column}=?)`);args.push(value);}
     }
     // Review and development tasks are listed on separate pages.
+    const priority=url.searchParams.get('priority');if(priority){if(!['P0','P1','P2','P3'].includes(priority))fail(400,'invalid_task_priority');clauses.push('priority=?');args.push(priority);}
     const kind=url.searchParams.get('kind');if(kind){if(!['review','development'].includes(kind))fail(400,'invalid_task_kind');clauses.push('kind LIKE ?');args.push(kind+'.%');}
     const limit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit'))||50)),offset=Math.max(0,Number(url.searchParams.get('offset'))||0);
     if(!Number.isSafeInteger(limit)||!Number.isSafeInteger(offset))fail(400,'invalid_pagination');
     return {tasks:withTaskMetrics(store,store.all(`SELECT *,${repositoryName},${pushedSha},CASE WHEN error_code='model_unavailable' THEN ${faultDetail} END AS error_detail FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`,...args,limit,offset).map(publicTask)),execution_available:true};
   }
+  const relations=/^\/api\/tasks\/([^/]+)\/relations$/.exec(path);
+  if(relations){const task=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,relations[1]!,...filter.args);if(!task)fail(404,'task_not_found');const offset=Number(url.searchParams.get('offset')??0);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');return taskRelations(store,task!.id,offset);}
   const trace=/^\/api\/tasks\/([^/]+)\/(events|runs|source|lineage)$/.exec(path);
   if(trace){const row=store.get(`SELECT id FROM tasks WHERE id=? AND ${filter.sql}`,trace[1]!,...filter.args);if(!row)fail(404,'task_not_found');return taskTrace(store,trace[1]!,url,trace[2]!,user.context?{actor:user.context}:undefined) as any;}
   const task = /^\/api\/tasks\/([^/]+)(\/logs)?$/.exec(path);
