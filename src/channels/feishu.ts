@@ -2,16 +2,19 @@ import { createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Row } from '../storage/database.js';
 import { fail, HttpError, object, text, type Json } from '../core/security.js';
-import type { ChannelAdapter, ChannelDelivery, ChannelEvent } from './types.js';
+import type { ChannelAdapter, ChannelDelivery, ChannelEvent, HistoryPage, StoredMessage } from './types.js';
 
 export type ChannelFetch = typeof fetch;
 export class ChannelRateLimitError extends HttpError {
   constructor(readonly retryAfterMs: number) { super(503, 'channel_rate_limited'); }
 }
+export class ChannelHistoryError extends HttpError {
+  constructor(code: string, readonly permanent: boolean) { super(permanent ? 403 : 502, code); }
+}
 const equal = (a: string, b: string) => !!a && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 /** Only this adapter reads credential values; persisted configuration and callers hold a reference. */
 export class FeishuAdapter implements ChannelAdapter {
-  readonly capabilities = { messages: true, cards: true, update: true, group_history: false as const };
+  readonly capabilities = { messages: true, cards: true, update: true, group_history: true };
   constructor(readonly connector: Row, private readonly secret: Json, private readonly request: ChannelFetch = fetch, private readonly guard: () => void = () => {}) {}
   verify(headers: IncomingHttpHeaders, body: Buffer): Json {
     const timestamp = String(headers['x-lark-request-timestamp'] ?? ''), nonce = String(headers['x-lark-request-nonce'] ?? '');
@@ -39,15 +42,21 @@ export class FeishuAdapter implements ChannelAdapter {
     if (!envelope.header && envelope.event) {
       const legacy = object(envelope.event);
       if (!['app_uninstalled', 'app_status_change'].includes(String(legacy.type))) return null;
-      envelope = { header: { app_id: legacy.app_id, tenant_key: legacy.tenant_key, event_id: envelope.uuid, event_type: 'app.uninstalled' }, event: {} };
+      envelope = { header: { app_id: legacy.app_id, tenant_key: legacy.tenant_key, event_id: envelope.uuid, event_type: 'app.uninstalled',
+        create_time: envelope.ts === undefined ? Date.now() : Math.round(Number(envelope.ts) * 1000) }, event: {} };
     }
     const h = object(envelope.header), e = object(envelope.event);
     if (h.app_id !== this.connector.app_id || h.tenant_key !== this.connector.installation_tenant) fail(403, 'channel_source_mismatch');
     const type = h.event_type, base = { provider: 'feishu' as const, connector_id: this.connector.id, connector_revision: this.connector.revision, app_id: this.connector.app_id,
-      installation_tenant: this.connector.installation_tenant, event_id: text(h.event_id), thread_id: '', content: '' };
-    if (type === 'app.uninstalled' || type === 'im.chat.member.user.added_v1' || type === 'im.chat.member.user.deleted_v1')
+      installation_tenant: this.connector.installation_tenant, event_id: text(h.event_id), thread_id: '', content: '', received_at: eventTime(h.create_time) };
+    const lifecycle = { 'app.uninstalled': 'uninstalled', 'im.chat.member.user.added_v1': 'audience_changed',
+      'im.chat.member.user.deleted_v1': 'audience_changed', 'im.chat.member.bot.added_v1': 'bot_added',
+      'im.chat.member.bot.deleted_v1': 'bot_removed', 'im.chat.disbanded_v1': 'chat_archived' } as const;
+    if (Object.hasOwn(lifecycle, String(type)))
       return { ...base, actor_tenant: '', actor_id: '', chat_id: String(e.chat_id ?? ''), chat_type: 'group', message_id: '', created_at: Date.now(),
-        kind: type === 'app.uninstalled' ? 'uninstalled' : 'audience_changed' };
+        kind: lifecycle[type as keyof typeof lifecycle] };
+    if (type === 'im.message.recalled_v1') return { ...base, actor_tenant: '', actor_id: '', chat_id: text(e.chat_id), chat_type: 'group',
+      message_id: text(e.message_id), created_at: eventTime(e.recall_time), updated_at: eventTime(e.recall_time), kind: 'message_recalled', deleted: true };
     if (type === 'card.action.trigger') {
       if (!this.connector.bot_open_id) fail(503, 'channel_bot_unavailable');
       const op = object(e.operator), context = object(e.context), value = object((e.action as Json)?.value);
@@ -60,17 +69,19 @@ export class FeishuAdapter implements ChannelAdapter {
     if (type !== 'im.message.receive_v1') return null;
     if (!this.connector.bot_open_id) fail(503, 'channel_bot_unavailable');
     const sender = object(e.sender), id = object(sender.sender_id), message = object(e.message);
-    if (sender.sender_type !== 'user' || id.open_id === this.connector.bot_open_id || !['p2p', 'group'].includes(String(message.chat_type))) return null;
-    if (message.message_type !== 'text') return null;
-    const actorTenant = text(sender.tenant_key);
+    if (!['p2p', 'group'].includes(String(message.chat_type))) return null;
+    const actorTenant = sender.sender_type === 'user' ? text(sender.tenant_key) : String(sender.tenant_key ?? '');
     const mentions = Array.isArray(message.mentions) ? message.mentions as any[] : [];
-    if (message.chat_type === 'group' && !mentions.some(m => m.id?.open_id === this.connector.bot_open_id)) return null;
-    let content: string;
-    try { content = text(object(JSON.parse(text(message.content, 20000))).text, 16000); } catch { return fail(400, 'channel_message_invalid'); }
+    const addressed = message.chat_type === 'p2p' || mentions.some(m => m.id?.open_id === this.connector.bot_open_id);
+    const raw = text(message.content, 200000), messageType = text(message.message_type, 80);
+    let content = '';
+    try { if (messageType === 'text') content = String(object(JSON.parse(raw)).text ?? '').slice(0, 16000); } catch { return fail(400, 'channel_message_invalid'); }
     for (const m of mentions) if (m.id?.open_id === this.connector.bot_open_id && typeof m.key === 'string') content = content.replaceAll(m.key, '').trim();
-    return { ...base, actor_tenant: actorTenant, actor_id: text(id.open_id), chat_id: text(message.chat_id),
+    return { ...base, actor_tenant: actorTenant, actor_id: text(id.open_id ?? id.app_id), chat_id: text(message.chat_id),
       chat_type: message.chat_type as 'p2p' | 'group', message_id: text(message.message_id), thread_id: String(message.thread_id ?? message.root_id ?? ''),
-      created_at: Number(message.create_time), kind: 'message', content };
+      parent_id: String(message.parent_id ?? ''), root_id: String(message.root_id ?? ''), created_at: eventTime(message.create_time),
+      updated_at: eventTime(message.update_time ?? message.create_time), kind: 'message', content, raw_content: raw,
+      message_type: messageType, sender_type: String(sender.sender_type ?? 'unknown'), addressed: addressed && sender.sender_type === 'user' && id.open_id !== this.connector.bot_open_id };
   }
   private async api(path: string, init: RequestInit, authenticated = true): Promise<any> {
     let token = '';
@@ -95,6 +106,12 @@ export class FeishuAdapter implements ChannelAdapter {
         const delay = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
         throw new ChannelRateLimitError(Number.isFinite(delay) ? Math.min(3600000, Math.max(1000, delay)) : 1000);
       }
+      if (path.startsWith('/im/v1/messages?') && init.method === 'GET' && (!r.ok || data.code !== 0)) {
+        const permanent = r.status === 403 || [230002, 230006, 230013, 230027, 230073, 231203, 231204, 99991672].includes(data.code);
+        throw new ChannelHistoryError(({ 230002: 'channel_bot_not_in_chat', 230006: 'channel_bot_disabled', 230013: 'channel_chat_out_of_scope',
+          230027: 'channel_history_permission_required', 230073: 'channel_thread_invisible', 231203: 'channel_history_chat_unsupported',
+          231204: 'channel_history_app_unsupported', 99991672: 'channel_history_permission_required' } as Record<number, string>)[data.code] ?? 'channel_history_rejected', permanent);
+      }
       if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : path === '/tenant/v2/tenant/query' ? 'channel_tenant_unavailable' : 'channel_delivery_rejected');
       return data;
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }
@@ -103,6 +120,27 @@ export class FeishuAdapter implements ChannelAdapter {
     const data = await this.api('/im/v1/messages?receive_id_type=' + delivery.receive_id_type, { method: 'POST',
       body: JSON.stringify({ receive_id: delivery.receive_id, msg_type: 'interactive', content: JSON.stringify(delivery.content), uuid: key.slice(0, 50) }) });
     return text(data.data?.message_id);
+  }
+  async history(job: Row): Promise<HistoryPage> {
+    // Feishu's maximum is 50 per page, not a cap on total history. Threads do not support time boundaries.
+    const query = new URLSearchParams({ container_id_type: job.container_type, container_id: job.container_id, sort_type: 'ByCreateTimeAsc', page_size: '50' });
+    if (job.container_type === 'chat') {
+      query.set('start_time', String(job.start_time)); query.set('end_time', String(job.end_time));
+    }
+    if (job.page_token) query.set('page_token', job.page_token);
+    const result = await this.api('/im/v1/messages?' + query, { method: 'GET' });
+    const data = result.data;
+    if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean' || data.has_more && typeof data.page_token !== 'string') fail(502, 'channel_history_invalid');
+    const items: StoredMessage[] = data.items.map((item: any) => {
+      const raw = String(item.body?.content ?? ''), messageType = text(item.msg_type, 80);
+      let content = '';
+      if (messageType === 'text' && !item.deleted) { try { content = String(JSON.parse(raw).text ?? ''); } catch { fail(502, 'channel_history_invalid'); } }
+      return { message_id: text(item.message_id), sender_id: String(item.sender?.id ?? ''), sender_tenant: String(item.sender?.tenant_key ?? ''),
+        sender_type: String(item.sender?.sender_type ?? 'unknown'), message_type: messageType, content, raw_content: raw,
+        created_at: eventTime(item.create_time), updated_at: eventTime(item.update_time ?? item.create_time), deleted: !!item.deleted,
+        parent_id: String(item.parent_id ?? ''), root_id: String(item.root_id ?? ''), thread_id: String(item.thread_id ?? '') };
+    });
+    return { items, has_more: data.has_more, page_token: data.page_token ?? '' };
   }
   async probe(): Promise<Json> {
     const data = await this.api('/bot/v3/info', { method: 'GET' });
@@ -123,4 +161,12 @@ export class FeishuAdapter implements ChannelAdapter {
     await this.api('/im/v1/messages/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ content: JSON.stringify(delivery.content) }) });
     return id;
   }
+}
+
+function eventTime(value: unknown): number {
+  let number = Number(value);
+  // Header timestamps from some SDK versions are microseconds; message timestamps are milliseconds.
+  if (number > 100_000_000_000_000) number = Math.floor(number / 1000);
+  if (!Number.isSafeInteger(number) || number < 0) return fail(400, 'channel_message_time_invalid');
+  return number;
 }

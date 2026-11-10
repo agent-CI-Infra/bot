@@ -28,6 +28,10 @@
 | `im:message.group_at_msg:readonly` | 接收群内 @ 机器人的消息 |
 | `im:message:send_as_bot` | 以机器人身份发送消息、发送和更新交互卡片 |
 | `cardkit:card:write` | 创建与更新卡片 |
+| `im:message.group_msg` | 接收全量群消息并读取机器人可见群历史，属于需审批的敏感权限 |
+| `im:message:readonly` | 读取机器人所在会话的可见历史及接收撤回事件 |
+| `im:chat.members:bot_access` | 接收机器人进群、移出事件 |
+| `im:chat.members:read`、`im:chat:read` | 读取成员和群信息，供群范围复核；具体可用能力仍需接入时验证 |
 | `tenant:tenant:readonly` | 企业自建应用自动获取安装 tenant_key；保存连接前需开通并发布生效 |
 
 导入权限不会自动订阅卡片操作回调。新应用和已有应用都必须补齐权限、分别配置事件与回调，再创建并发布新版本。卡片实体权限见[创建卡片实体](https://open.feishu.cn/document/cardkit-v1/card/create)，回调结构见[卡片回传交互](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-callback-communication)。
@@ -44,7 +48,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 同一商店 App 可登记多个安装租户，使用其中一个连接的回调 URL；验签后按安装 tenant_key 路由到明确登记且独立信任该签名的连接。v1 `app_ticket` 事件在确认前加密持久化，并按事件时间防止旧票据覆盖新票据；发送走 `app_access_token`、安装租户 `tenant_access_token` 的商店应用流程。尚未收到有效票据时返回 `channel_app_ticket_required`，不尝试用自建应用端点代替。安装租户停用后，同一 App 的其他已登记租户仍可通过该 URL 收件。
 
-只订阅 `im.message.receive_v1`、`card.action.trigger`、v1 应用票据/卸载/状态变更和群成员增删事件，并只申请私聊、群内 @ 机器人消息及发送/更新卡片所需权限。不申请读取全部群消息或群历史的权限。应用生命周期变化先停用受影响连接，需管理员复核后显式重新启用。添加机器人或管理群不授予项目权限。自定义群 webhook 不提供管理入口。
+订阅 `im.message.receive_v1`、`im.message.recalled_v1`、`im.chat.member.bot.added_v1`、`im.chat.member.bot.deleted_v1`、`im.chat.disbanded_v1`、`card.action.trigger`、v1 应用票据/卸载/状态变更和群成员增删事件。新增全量群消息及历史读取权限后必须由应用管理员审核、重新发布，不能只修改本地向导。应用生命周期变化先停用受影响连接，需管理员复核后显式重新启用。添加机器人或管理群不授予项目权限。自定义群 webhook 不提供管理入口。
 
 连接配置和群范围写入要求 `expected_revision`（创建为 0），冲突返回 `channel_revision_conflict`。保存返回持久化 `operation_id` 与 `state:succeeded`，可通过 `/api/channels/operations/:id` 回读。连接健康显示启用状态、长连接状态、最近收件时间、稳定错误码、待处理量和发送失败量。停用连接立即阻断新消息、模型后续调用、卡片和发送队列；接收到卸载事件时先持久停用，再确认事件。
 
@@ -81,11 +85,23 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 去重、恢复和发送队列
 
-事件按连接与 event_id 持久去重，消息再按 message_id 去重。只接受用户消息并过滤机器人自己、未 @ 的群消息、五分钟前的消息和已处理会话中逆序到达的消息。HTTP 只做验证、持久收件和必要的即时安全失效；模型和业务执行由独立 worker 执行，慢模型不阻塞回调。
+事件按连接与 event_id 持久去重，消息再按 message_id 去重。合法消息不因发送者、类型、是否 @ 或原发送时间而丢弃；HTTP 与 SDK 在同一事务提交 inbox、本地账本、同步发现和必要的安全失效，再返回成功，数据库失败返回失败。记录与业务处理分开：当前个人管理入口只处理新鲜的用户文本、私聊及群内 @；bot、附件、未 @ 和过期消息安静入库，不重放旧命令。原管理入口仍拒绝逆序业务写入。模型和业务执行由独立 worker 执行，慢模型不阻塞回调。
 
 重启不会重放已提交的管理消息：管理服务标记中断，需要查看原会话/回执；尚未提交的收件继续处理。发送 outbox 独立保存 `queued`、`sending`、`retry`、`sent`、`failed`、尝试次数和稳定错误码，网络失败指数退避，使用相同 Feishu uuid 对账重发。连接/身份/范围失效为终止失败。所有发送内容和入站正文密封保存，SDK 原始日志关闭，访问令牌只在服务端调用期间使用。
 
 `ChannelService.enqueue` 是 `NotificationOutbox` 的授权目的地注册入口，返回 `registered`、`sent:false`，不会进入即时回复 worker。用户可以发送 `/project <项目ID> /destination` 登记当前会话；[持久化调度模块](schedules.md) 消费该授权目的地，负责定时日报、事件订阅及可靠发送。登记仍不表示送达，发送前重检当前权限和群范围。
+
+## 本地消息账本与历史同步
+
+`channel_chats` 使用 `provider + app_id + installation_tenant + chat_id` 唯一标识群或私信；连接凭据轮换不创建新记录。它不直接拼接旧 `channel_sessions` 中的个人管理会话。原文和资源引用密封保存于 `channel_messages`，按会话和 message_id 合并实时/历史版本。较旧页面不覆盖较新内容，实时版本优先于同版本历史，撤回 tombstone 不被补读复活；消息变更使本地派生摘要失效。绑定串及可识别凭据在查询中隐藏，附件当前只保留元数据和资源引用，没有下载或解析能力。
+
+机器人入群或首次接触会话时持久建立 `channel_sync_jobs`。入群只发送固定记录说明，不调用业务模型或生成项目授权。同步单页使用官方最大值 50，固定升序和 chat 查询时间上界，持续分页直到 `has_more=false`；没有产品总条数上限。普通对话群的 thread 回复需要单独分页，发现 thread 后建立同一主聊天下的作业。飞书 thread 查询不支持时间范围，因此诊断保留这一限制。每页内容、发现的 thread、游标、完成区间同事务提交；过期租约可恢复，活跃租约不可抢占，重复或循环游标停止并报诊断。
+
+429 遵守 Retry-After，网络错误退避重试，缺权限、不在群、不可见话题等保持受阻状态，不标已同步完成。启动或 SDK 重连补读已完成范围的重叠增量；未完成作业保留原游标继续。撤回事件直接更新本地。官方 SDK 当前未提供通用消息编辑事件，编辑仅在同步读取时按 update_time 合并；管理员可显式全量重新同步，不能承诺编辑均被实时捕获。机器人被移出、群解散或应用停用停止后续同步和受保护发送。
+
+「连接诊断与群范围」下的本地历史页支持消息 ID、时间、关键词、发送者、回复关系与分页。`ChannelLedger` 不持有 HTTP client，页面与 API 查询不触发飞书请求；未命中只代表本地已同步范围没有结果。返回 `sync_state/coverage/gaps`，其中 `visible_range_complete` 只表示本轮遍历了平台返回的可见分页，入群前历史、真实平台可见范围及消息编辑仍显式标为未核验。现阶段历史 API 仅向 `platform.manage` 开放，项目读取权限不自动开放群记录或个人私信。
+
+默认保留策略明确为保留至管理员显式清理，`retention_days=null`；管理员可配置 1–3650 天，由同步维护周期按日清理，也可显式清理指定时间之前的记录。清理同时删除派生摘要并保留 `retained_after` 覆盖边界，旧历史补读不能恢复已清理内容。操作保留审计，客户端不能通过搜索触发清理或同步。
 
 ## 验证
 
@@ -95,4 +111,8 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 `e2e/feishu-setup.spec.mjs` 经实际页面验证管理员创建/恢复连接、失败提示、版本冲突，以及用户从合法飞书绑定事件开始，经本地平台登录或可选 GitHub OAuth、原私聊确认到查看与解绑的完整路径。本地登录场景不配置 GitHub OAuth，并核对绑定不增加仓库授权。桌面和手机截图保存在 `.tmp/feishu-setup-165/`；同样使用本地协议夹具，不代表已连接真实飞书应用。
 
+`test/channel-ledger.test.mjs` 验证事务回滚、官方 SDK frame 的失败/成功 ACK、数据库重启、全部分页和 thread、过期租约、429、异常游标、撤回合并、敏感信息、本地零回源及保留边界。`e2e/channel-history.spec.mjs` 在桌面和手机验证超过 100 条、跨成员/thread/日期的本地消息分页、搜索、同步诊断和保留配置；均为本地协议夹具，不是飞书或 GitHub 真实集成。
+
 实现依据：[飞书回调验签与解密](https://open.feishu.cn/document/event-subscription-guide/callback-subscription/receive-and-handle-callbacks)、[官方 Node SDK](https://github.com/larksuite/node-sdk)、[长连接接收事件](https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-)。实际开通时仍需按应用类型核对权限与可用事件。
+
+历史范围与协议依据：[获取会话历史消息](https://open.feishu.cn/document/server-docs/im-v1/message/list)、[接收消息](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)、[撤回消息](https://open.feishu.cn/document/server-docs/im-v1/message/events/recalled)、[机器人进群](https://open.feishu.cn/document/server-docs/im-v1/chat-member-bot/events/added)。历史权限不能保证平台提供全部历史；普通群的根消息与话题回复分页、机器人在群状态、群历史可见设置均影响实际结果。

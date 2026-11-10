@@ -9,6 +9,46 @@ export class ChannelApi {
   async api(actor: ActorContext, method: string, url: URL, input: Json): Promise<Json> {
     const store = this.service.store, path = url.pathname;
     assertCurrent(actor);
+    if (path === '/api/channels/chats' && method === 'GET') {
+      authorize(actor, 'platform.manage');
+      const connector = url.searchParams.get('connector_id');
+      return { chats: store.all(`SELECT * FROM channel_chats ${connector ? 'WHERE connector_id=?' : ''} ORDER BY last_received_at DESC`,
+        ...(connector ? [connector] : [])).map(chat => ({ ...chat, ...this.service.ledger.diagnostics(chat.id) })) };
+    }
+    const local = /^\/api\/channels\/chats\/([a-f0-9]{48})\/(messages|sync|retention)$/.exec(path);
+    if (local) {
+      // Project access alone does not authorize reading a group's messages or personal chats.
+      authorize(actor, 'platform.manage');
+      const id = local[1]!, chat = store.get('SELECT * FROM channel_chats WHERE id=?', id);
+      if (!chat) return fail(404, 'channel_chat_not_found');
+      if (local[2] === 'messages' && method === 'GET') {
+        const query = Object.fromEntries(url.searchParams);
+        fields(query, ['message_id', 'sender_id', 'reply_to', 'thread_id', 'from', 'to', 'keyword', 'cursor', 'limit']);
+        return this.service.ledger.query(id, { ...query, ...Object.fromEntries(['from', 'to', 'limit'].filter(k => query[k] !== undefined).map(k => [k, Number(query[k])])) });
+      }
+      if (local[2] === 'sync' && method === 'POST') {
+        fields(input, ['full']);
+        if (input.full !== undefined && typeof input.full !== 'boolean') fail(400, 'channel_sync_invalid');
+        this.service.connector(chat.connector_id);
+        this.service.ledger.resync(id, input.full === true);
+        store.audit(actor.principal_id, 'channel.history.resync', id);
+        return { state: 'queued', ...this.service.ledger.diagnostics(id) };
+      }
+      if (local[2] === 'retention') {
+        if (method === 'PUT') {
+          fields(input, ['days', 'expected_revision']);
+          if (input.days !== null && typeof input.days !== 'number' || !Number.isSafeInteger(input.expected_revision)) fail(400, 'channel_retention_invalid');
+          this.service.ledger.retain(id, input.days as number | null, Number(input.expected_revision));
+          store.audit(actor.principal_id, 'channel.retention.updated', id);
+        } else if (method === 'DELETE') {
+          fields(input, ['before', 'expected_revision']);
+          this.service.ledger.cleanup(id, Number(input.before), Number(input.expected_revision));
+          store.audit(actor.principal_id, 'channel.history.cleaned', id);
+        } else if (method !== 'GET') return fail(405, 'method_not_allowed');
+        return this.service.ledger.diagnostics(id);
+      }
+      return fail(405, 'method_not_allowed');
+    }
     if (path === '/api/channels/setup' && method === 'GET') {
       authorize(actor, 'platform.manage');
       return { ...await this.api(actor, 'GET', new URL('/api/channels/connectors', url), {}), origin: this.service.options.origin || null };

@@ -8,6 +8,8 @@ import { parameterHash } from '../management/service.js';
 import { ChannelBindings, externalSubject } from './binding.js';
 import { FeishuAdapter, type ChannelFetch } from './feishu.js';
 import type { ChannelDelivery, ChannelEvent } from './types.js';
+import { ChannelLedger } from './ledger.js';
+import { ChannelHistorySync } from './history-sync.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError ? error.code : 'channel_processing_failed';
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
@@ -18,11 +20,16 @@ export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longCon
 /** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
 export class ChannelService {
   readonly bindings: ChannelBindings;
+  readonly ledger: ChannelLedger;
+  readonly historySync: ChannelHistorySync;
   private timer?: ReturnType<typeof setInterval>;
+  private syncTimer?: ReturnType<typeof setInterval>;
   private busy = false;
   private stopped = false;
   constructor(readonly store: Store, readonly management: ManagementAgent, readonly options: ChannelOptions = {}) {
     this.bindings = new ChannelBindings(store, e => this.source(e));
+    this.ledger = new ChannelLedger(store);
+    this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard));
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
       const source = store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND message_id IS NOT NULL AND id=?',
@@ -40,9 +47,11 @@ export class ChannelService {
     store.run("UPDATE channel_outbox SET state='retry',last_error='delivery_interrupted' WHERE state='sending'");
   }
   start(): void {
+    for (const chat of this.store.all("SELECT h.id FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.state='active' AND c.enabled=1 AND c.app_id=h.app_id AND c.installation_tenant=h.installation_tenant")) this.ledger.resync(chat.id);
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
+    this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
   }
-  close(): void { this.stopped = true; clearInterval(this.timer); }
+  close(): void { this.stopped = true; this.historySync.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
   connector(id: string): Row {
     const c = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', id);
     if (!c) return fail(403, 'channel_connector_inactive'); return c;
@@ -51,6 +60,8 @@ export class ChannelService {
     const c = this.connector(e.connector_id);
     if (e.connector_revision !== c.revision) fail(403, 'channel_configuration_changed');
     if (c.provider !== e.provider || c.app_id !== e.app_id || c.installation_tenant !== e.installation_tenant) fail(403, 'channel_source_mismatch');
+    const chat = e.chat_id ? this.store.get('SELECT state FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', e.provider, e.app_id, e.installation_tenant, e.chat_id) : undefined;
+    if (chat && chat.state !== 'active') fail(403, 'channel_chat_inactive');
     return c;
   }
   adapter(c: Row, guard?: () => void): FeishuAdapter {
@@ -110,18 +121,24 @@ export class ChannelService {
       event.kind === 'message' ? 'message:' + event.message_id : event.kind + ':' + event.event_id);
     if (previous) return { operation_id: previous.id, state: previous.state, duplicate: true };
     if (!c.enabled) fail(403, 'channel_connector_inactive');
-    if (event.kind === 'message' && (!Number.isFinite(event.created_at) || Math.abs(Date.now() - event.created_at) > 300_000)) return { state: 'ignored', reason: 'channel_message_stale' };
-    const id = randomId();
+    // Reading is independent of speaking. A delayed message still belongs in the local ledger.
+    const actionable = event.kind !== 'message' || event.addressed && event.message_type === 'text' && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
+    const id = randomId(), state = actionable ? 'queued' : 'completed';
     this.store.transaction(() => {
       this.store.run('INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,?,?)',
         id, c.id, event.event_id, event.kind === 'message' ? 'message:' + event.message_id : event.kind + ':' + event.event_id,
-        this.store.secrets.seal(event, 'channel-event:' + id), 'queued', Date.now());
+        this.store.secrets.seal(event, 'channel-event:' + id), state, Date.now());
+      this.ledger.accept(event);
       this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', Date.now(), c.id);
       // Revocation and audience invalidation are cheap security facts, applied before acknowledgement.
-      if (event.kind === 'uninstalled') this.store.run('UPDATE channel_connectors SET enabled=0,revision=revision+1 WHERE id=?', c.id);
+      if (event.kind === 'uninstalled') {
+        this.store.run('UPDATE channel_connectors SET enabled=0,revision=revision+1 WHERE id=?', c.id);
+        this.store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error='app_uninstalled' WHERE chat_id IN (SELECT id FROM channel_chats WHERE connector_id=?)", c.id);
+      }
       if (event.kind === 'audience_changed') this.store.run('UPDATE channel_group_scopes SET audience_verified_until=0,revision=revision+1 WHERE connector_id=? AND chat_id=?', c.id, event.chat_id);
+      if (['bot_removed', 'chat_archived'].includes(event.kind)) this.store.run('UPDATE channel_group_scopes SET enabled=0,audience_verified_until=0,revision=revision+1 WHERE connector_id=? AND chat_id=?', c.id, event.chat_id);
     });
-    return { operation_id: id, state: 'queued' };
+    return { operation_id: id, state };
   }
   async actor(e: ChannelEvent, project?: string): Promise<ActorContext> {
     this.source(e);
@@ -176,8 +193,12 @@ export class ChannelService {
   }
   private async process(row: Row): Promise<void> {
     const e = this.store.secrets.open(row.payload, 'channel-event:' + row.id) as unknown as ChannelEvent;
-    if (['uninstalled', 'audience_changed'].includes(e.kind)) { this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
+    if (['uninstalled', 'audience_changed', 'message_recalled', 'bot_removed', 'chat_archived'].includes(e.kind)) { this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
     this.source(e);
+    if (e.kind === 'bot_added') {
+      this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。项目业务能力须由有资格的已绑定维护人另行启用。'), row.id + ':notice', row.id);
+      this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return;
+    }
     if (e.kind === 'card') { await this.refreshCard(row, e); return; }
     const content = e.content.trim();
     const reply = (message: string, link?: string) => this.queue(e, card(message, link), row.id + ':reply', row.id);
