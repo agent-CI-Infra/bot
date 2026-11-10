@@ -164,17 +164,18 @@ export async function models(store: Store, user: Actor, method: string, url: URL
       return { model: publicModel(store,store.get('SELECT * FROM models WHERE id=?', id)!) };
     });
   }
-  // A saved model is listed and tested with its own URL, key and name, under the same right as editing it.
+  // Draft connection tests reuse the saved key under the same edit authorization, without writing configuration.
   if ([`/api/models/${id}/upstream`, `/api/models/${id}/test`].includes(path) && method === 'POST') {
     const test = path.endsWith('/test');
-    fields(body, test ? [] : ['api_url','api_key','version']);
+    fields(body, ['api_url','api_key','version', ...(test ? ['model_name'] : [])]);
+    if (test && Object.keys(body).length && body.version === undefined) fail(400,'model_version_required');
     if (body.version !== undefined && body.version !== row.version) fail(409,'version_conflict');
-    const key = !test && typeof body.api_key === 'string' && body.api_key.trim() ? text(body.api_key,32768) : row.api_key === null ? '' : String(store.secrets.open(row.api_key, `model:${id}`).value || '');
+    const key = typeof body.api_key === 'string' && body.api_key.trim() ? text(body.api_key,32768) : row.api_key === null ? '' : String(store.secrets.open(row.api_key, `model:${id}`).value || '');
     if (!key) return fail(409, 'model_key_missing');
     // A URL saved before the query/fragment rule is checked again rather than probed as written.
-    const endpoint = apiUrl(!test && body.api_url !== undefined ? body.api_url : row.api_url);
+    const endpoint = apiUrl(body.api_url !== undefined ? body.api_url : row.api_url);
     store.audit(user.id, test ? 'model.tested' : 'model.upstream_listed', id, row.repository_id);
-    return test ? testUpstreamModel(endpoint, key, row.model_name) : listUpstreamModels(endpoint, key);
+    return test ? testUpstreamModel(endpoint, key, body.model_name === undefined ? row.model_name : text(body.model_name)) : listUpstreamModels(endpoint, key);
   }
   if (path === `/api/models/${id}/credentials/revoke` && method === 'POST') {
     fields(body, []);
