@@ -11,12 +11,6 @@ const consoleAttention = {
   waiting_publication: ['发布待核实', '先核对远程写入结果，避免重复发布。'],
   needs_replan: ['需要重新规划', '查看验收缺口和已有产物，再决定下一步。']
 };
-function consoleState(title, text, { tone = '', retry } = {}) {
-  const box = element('div', '', 'console-state' + (tone ? ' console-state-' + tone : ''));
-  box.setAttribute('role', tone === 'error' ? 'alert' : 'status');
-  box.append(element('h2', title), element('p', text));
-  if (retry) box.append(button('重新加载', retry)); return box;
-}
 function consoleInboxRoute() { return /^#\/inbox(?:\/(all|[1-9]\d*))?(?:\/(\d+))?$/.exec(location.hash); }
 function consoleTaskRow(row, attention = false) {
   const item = element('article', '', 'console-attention-row'), text = element('div');

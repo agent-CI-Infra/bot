@@ -34,6 +34,12 @@ function consoleLink(href, caption, hint = '') {
   const a = element('a', '', 'console-link'); a.href = href;
   a.append(element('span', caption)); if (hint) a.append(element('small', hint)); return a;
 }
+function consoleState(title, text, { tone = '', retry } = {}) {
+  const box = element('div', '', 'console-state' + (tone ? ' console-state-' + tone : ''));
+  box.setAttribute('role', tone === 'error' ? 'alert' : 'status');
+  box.append(element('h2', title), element('p', text));
+  if (retry) box.append(button('重新加载', retry)); return box;
+}
 const states = {
   accepted:['已接收','success'], invalid_signature:['签名无效','danger'], invalid_payload:['正文无效','danger'], payload_too_large:['正文过大','danger'],
   unknown_endpoint:['入口不存在','danger'], missing_event_or_delivery:['投递信息不全','danger'],
@@ -87,7 +93,23 @@ async function start() {
   $('access-description').textContent = setup ? '初始化只成功一次。请为本部署设置独立的管理员账号。' : '使用本系统账号进入你有权访问的仓库。';
   $('access-submit').textContent = setup ? '初始化并登录' : '登录';
   $('access-form').elements.password.autocomplete = setup ? 'new-password' : 'current-password';
-  $('github-login').hidden = setup || !(await api('/api/auth/github/status')).enabled;
+  $('access-password').type = 'password'; $('access-password-toggle').textContent = '显示密码'; $('access-password-toggle').setAttribute('aria-pressed', 'false');
+  // The same feedback component stays next to the action that failed, including OAuth callbacks.
+  (me ? $('main-content') : $('access-feedback')).append($('message'));
+  $('access').dataset.mode = setup ? 'setup' : 'local'; $('access-setup-note').hidden = !setup;
+  $('github-login').hidden = true; $('access-local-divider').hidden = true; $('access-provider-retry').hidden = true;
+  $('access-provider-status').textContent = ''; $('access-provider-note').textContent = setup ? '' : '使用本地账号，进入你有权管理的项目。';
+  if (!me && !setup) {
+    try {
+      const enabled = (await api('/api/auth/github/status')).enabled;
+      $('github-login').hidden = !enabled; $('access-local-divider').hidden = !enabled;
+      $('access').dataset.mode = enabled ? 'github' : 'local';
+      if (enabled) $('access-provider-note').textContent = 'GitHub 登录与项目授权分别核验，登录不会自动获得项目管理权限。';
+    } catch {
+      $('access-provider-status').textContent = 'GitHub 登录入口暂不可读取。可使用本地账号，或重新读取入口。'; $('access-provider-retry').hidden = false;
+    }
+  }
+
   const channelChallenge = /^#\/identity\/feishu\?challenge=([a-f0-9]{48})$/.exec(location.hash)?.[1];
   $('github-login').href = '/auth/github/start' + (channelChallenge ? '?channel_challenge=' + channelChallenge : '');
   const authError = new URLSearchParams(location.search).get('auth_error');
@@ -249,6 +271,10 @@ async function render(quiet = false) {
   if(quiet&&shown.length===entries.length&&shown.every((node,index)=>node.dataset.key===entries[index].dataset.key))
     shown.forEach((node,index)=>{if(rowSignatures.get(node)!==rowSignatures.get(entries[index]))node.replaceWith(entries[index]);});
   else $('rows').replaceChildren(...entries);
+  if (tab === 'projects' && !installedView && !repositories.length && !rows.length) {
+    const empty = consoleState('已登录，尚无可管理的项目', '可以先查看身份与权限；安装待同步或权限待核验时，按身份页提示重新验证，或联系管理员分配项目。', { retry: () => start().catch(error) });
+    empty.append(consoleLink('#/identity', '查看身份与权限')); $('rows').replaceChildren(empty);
+  }
   if(staleIntegrations)refreshStaleIntegrations();
   if(installedView&&!hiddenView&&rows.some(row=>row.permissions_stale))refreshStalePermissions();
 }
@@ -418,9 +444,33 @@ $('boot-retry').addEventListener('click', async () => {
   message.textContent = '正在载入…'; message.setAttribute('role', 'status'); message.classList.remove('view-error');
   try { await start(); } catch (err) { error(err); } finally { retry.disabled = false; }
 });
+let accessPending = false;
+$('access-password-toggle').addEventListener('click', () => {
+  const password = $('access-password'), shown = password.type === 'password'; password.type = shown ? 'text' : 'password';
+  $('access-password-toggle').textContent = shown ? '隐藏密码' : '显示密码'; $('access-password-toggle').setAttribute('aria-pressed', String(shown));
+});
+$('github-login').addEventListener('click', event => { if (accessPending) event.preventDefault(); });
+$('access-provider-retry').addEventListener('click', async () => {
+  $('access-provider-retry').disabled = true; try { await start(); } catch (err) { error(err); } finally { $('access-provider-retry').disabled = false; }
+});
 $('access-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = event.currentTarget, button = $('access-submit'); button.disabled = true;
-  try { await api(setup ? '/api/setup' : '/api/auth/login', 'POST', Object.fromEntries(new FormData(form))); form.reset(); await start(); } catch (err) { error(err); } finally { button.disabled = false; }
+  event.preventDefault(); if (accessPending) return;
+  const form = event.currentTarget, data = Object.fromEntries(new FormData(form)), submit = $('access-submit'), initializing = setup;
+  const controls = [...form.elements].map(control => [control, control.disabled]);
+  accessPending = true; controls.forEach(([control]) => { control.disabled = true; }); form.setAttribute('aria-busy', 'true');
+  submit.textContent = initializing ? '正在初始化…' : '正在登录…'; $('github-login').setAttribute('aria-disabled', 'true'); notice('message');
+  try {
+    await api(initializing ? '/api/setup' : '/api/auth/login', 'POST', data);
+    form.reset(); $('message').setAttribute('role', 'status'); const url = new URL(location.href); url.searchParams.delete('auth_error'); history.replaceState(null, '', url);
+    try { await start(); } catch (err) { showBootFailure(err); }
+  } catch (err) {
+    const text = /invalid_login/.test(err.message) ? '用户名或密码不正确，请检查后重试。' : /login_rate_limited/.test(err.message) ? '登录尝试过于频繁，请稍后再试。' : /already_initialized/.test(err.message) ? '系统已经初始化，请使用已有账号登录。' : err instanceof TypeError ? '网络连接失败，请检查连接后重试。已输入的内容仍保留在当前页面。' : err.message;
+    if (/already_initialized/.test(err.message)) await start().catch(error);
+    notice('message', text); $('message').setAttribute('role', 'alert');
+  } finally {
+    accessPending = false; controls.forEach(([control, disabled]) => { control.disabled = disabled; }); form.removeAttribute('aria-busy');
+    submit.textContent = setup ? '初始化并登录' : '登录'; $('github-login').removeAttribute('aria-disabled');
+  }
 });
 // Signing out returns to the default page, so whoever signs in next does not land on the previous user's page; the wizard
 // keeps its address (onboarding.js resets it to the first step).
