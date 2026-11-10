@@ -9,6 +9,9 @@ function wizardForm(title,fields,submit,save){
   const action=element('button',submit);action.type='submit';form.append(...fields,message,action);section.append(form);
   form.onsubmit=async event=>{event.preventDefault();action.disabled=true;message.textContent='';try{if(await save(Object.fromEntries(new FormData(form)),form)!==false)await render();}catch(error){message.textContent=error.message;}finally{action.disabled=false;}};return section;
 }
+function wizardDetails(title,...nodes){
+  const details=element('details','','fold');details.append(element('summary',title),...nodes);return details;
+}
 // The step lives in the address (#/settings/onboarding/<index>) so a reload stays on it. replaceState adds no history entry and
 // fires no hashchange; the caller draws the step.
 function wizardStep(step){history.replaceState(null,'','#/settings/onboarding/'+step);}
@@ -83,25 +86,36 @@ function accountInstallationForm(){
   });
   const form=section.querySelector('form'),actions=element('div','','actions');actions.append(form.querySelector('[type=submit]'));form.append(actions,result);return section;
 }
-// Login reuses the selected App's user-authorization credentials. The steps follow GitHub's settings pages; a direct link is
-// offered only when the App's owner is known, never a guessed one.
-function githubLoginGuide(saved,app){
+// Keep each GitHub page's instructions beside the field it supplies. Client secrets now live under Credentials.
+function githubLoginGuide(saved,app,controls){
   const steps=element('ol','','login-guide');
   const step=(title,...nodes)=>{const item=element('li','');item.append(element('strong',title),...nodes);steps.append(item);};
-  if(app?.settings_url)step('打开 App 设置',link(app.settings_url,`打开 ${app.slug} 的 GitHub App 设置`),
-    note(app.owner_type==='Organization'?`这个 App 属于组织 ${app.owner}：组织 Settings → Developer settings → GitHub Apps。`:`这个 App 属于个人账号 ${app.owner}：该账号的 Settings → Developer settings → GitHub Apps。`),
-    note('只有 App 所有者、组织所有者或指定的 App 管理员能打开这个页面。GitHub 显示 404 时，说明当前 GitHub 账号没有管理权限：请他们按本页步骤操作，并由他们本人把 Client secret 填进这里，不要经聊天、Issue 或邮件转发。'));
-  else if(app)step('打开 App 设置',note(`还不知道 ${app.slug} 的所有者，所以不提供直达链接。个人账号所属的 App：GitHub 右上角头像 → Settings → Developer settings → GitHub Apps；组织所属的 App：组织页面 → Settings → Developer settings → GitHub Apps。在 ${app.slug} 一行点「Edit」。`),
-    note('在第 4 步点「重新检查安装」后，这里会显示直达链接。没有权限打开设置时，请 App 所有者或组织所有者按本页步骤操作。'));
-  else step('先选择 GitHub App',note('还没有选择 GitHub App。先在第 2 步创建或选择 App；登录使用同一个 App 的凭据。'));
-  step('复制 Client ID',note(`在 App 设置的 General 页「About」区域复制 Client ID（形如 Iv1.… 或 Iv23…）。它不是 App ID${app?`（这个 App 的 App ID 是 ${app.app_id}）`:''}，两者不能互换；必须来自当前所选的同一个 App。`));
+  const entry=[];
+  if(app?.settings_url)entry.push(link(app.settings_url,`打开 ${app.slug} 的 GitHub App 设置`),
+    note(app.owner_type==='Organization'?`这个 App 属于组织 ${app.owner}。`:`这个 App 属于个人账号 ${app.owner}。`));
+  else if(app)entry.push(note('读取 App 信息后会在这里显示设置入口；可在本页点「刷新 App 信息」重试。'),
+    wizardDetails('手动打开 App 设置',note(`个人账号：头像 → Settings → Developer settings → GitHub Apps；组织：组织页面 → Settings → Developer settings → GitHub Apps。找到 ${app.slug}，点「Edit」。`)));
+  else entry.push(note('尚未选择 App 时，请填写你要用于登录的 GitHub App 凭据。正常接入流程会在第 2 步选择或创建 App。'));
+  step('General：填写 Client ID 和登录回调',...entry,
+    note('打开 App 设置左侧的 General。在「About」区域复制 Client ID，填入下面；已预填时核对即可。'),
+    note(`它不是 App ID${app?`（这个 App 的 App ID 是 ${app.app_id}）`:''}，两者不能互换；Client ID 和 Client secret 必须来自同一个 App。`),
+    controls.client,
+    note('在 General 的「Identifying and authorizing users → Callback URL」添加下面的地址，保留已有的其他回调，点「Save changes」。'),
+    element('code',saved.callback_url||'先完成第 1 步的公网 HTTPS 地址验证','github-login-callback'));
   const reusable=saved.source==='app'&&saved.client_id&&saved.secret_configured;
-  step('准备 Client secret',note(reusable?'这个 App 由向导创建，GitHub 已返回它的 Client ID 和 Client secret，并加密保存在这里，不用再生成；下面留空即可。'
-    :'在同一页「Client secrets」点「Generate a new client secret」，把生成的值粘贴到下面的 Client secret。GitHub 只显示一次。'),
-    note(saved.secret_configured?'已保存过 Client secret：留空保存会保留原值。页面和接口都不回显它。':'Client secret 只保存、不回显，不要发到聊天、Issue 或邮件里。'));
-  step('填写 Callback URL 并启用',note('在同一页「Identifying and authorizing users」的 Callback URL 中添加下面的地址（保留已有的其他地址），点页面底部「Save changes」。'),
-    element('code',saved.callback_url||'先在第 1 步验证公网 HTTPS 地址','github-login-callback'),
-    note('回到本页勾选「启用 GitHub 账号登录」并保存；然后退出，在登录页点「使用 GitHub 登录」验证。'));
+  const secretPath=note('在 GitHub App 设置左侧切换到「Credentials」，在「Client secrets」区域点「Generate a new client secret」，把生成的值填入下面。GitHub 只显示一次。');
+  step('Credentials：填写 Client secret',
+    note(reusable?'这个 App 由向导创建，Client ID 和 Client secret 已加密保存，不用再生成；下面留空即可。'
+      :saved.secret_configured?'已保存 Client secret，无需重新生成；下面留空会保留原值。需要更换时，按下面的路径生成新值。':'需要为这个 App 准备 Client secret：'),
+    saved.secret_configured?wizardDetails('需要更换 Client secret 时',secretPath):secretPath,
+    controls.secret,note('Client secret 只保存、不回显。请 App 所有者或指定管理员本人填写，不要经聊天、Issue 或邮件转发。'));
+  step('Permissions & events：确认组织身份验证权限',
+    ...(app?.settings_url?[link(app.settings_url+'/permissions','打开 Permissions & events')]:[]),
+    note('需要识别组织 owner 时，在 App 设置左侧的「Permissions & events」把 Organization permissions → Members 设为「Read-only」，勾选 organization 事件并保存。向导新建的 App 已包含这两项；新增权限在接下来的安装步骤由目标账号接受。'),
+    note('安装时自动请求用户授权可保持关闭，用户点击登录按钮时才会发起 OAuth。'));
+  step('回到本页：保存并启用',controls.enabled,
+    note('勾选启用后点下方「保存登录配置」，立即生效。保存前，当前生效的登录配置继续使用；也可以暂不启用，继续下一步安装。'),
+    controls.revoke);
   return steps;
 }
 // Every GitHub-facing address shares the single public entry, but each one belongs to a different App field.
@@ -131,13 +145,26 @@ function githubLoginForm(saved, app){
   }
   if(saved.previous_callback_url)notices.push(element('p',`Callback URL 已随统一入口从 ${saved.previous_callback_url} 改为 ${saved.callback_url}。请把新地址加到 GitHub App 的 Callback URL，再在这里保存一次；用户需要在新地址重新登录。确认不再使用后可删除旧地址。`,'endpoint-warning'));
   if(saved.origin_source==='local')notices.push(element('p','还没有验证公网 HTTPS 地址，下面的 Callback URL 只适合在本机测试。完成第 1 步后它会改为公网地址。','endpoint-warning'));
+  const controls={client:field('Client ID',client),secret:field('Client secret（只保存，不回读）',secret),enabled,revoke};
+  const guide=element('div','','github-login-instructions'),appStatus=element('p','','muted'),actions=element('div','','actions');
+  appStatus.setAttribute('role','status');appStatus.setAttribute('aria-live','polite');
+  const drawGuide=()=>guide.replaceChildren(githubLoginGuide(saved,app,controls));drawGuide();
+  const refresh=button('刷新 App 信息',async()=>{
+    refresh.disabled=true;appStatus.className='muted';appStatus.textContent='正在从 GitHub 读取 App 信息…';
+    try{
+      const result=await api('/api/onboarding/app/refresh','POST',{account_id:app.account_id});
+      if(!section.isConnected)return;app=result.app;drawGuide();appStatus.textContent='App 设置入口已更新。';
+    }catch(err){
+      if(!section.isConnected)return;appStatus.className='view-error';
+      appStatus.textContent=err.message.includes('github_app_changed')?'所选 App 已在其他页面更换，请刷新本页。':'暂时无法读取 App 信息。请检查 GitHub 连接和 App 凭据，然后在本页重试；已填写的内容会保留。';
+    }finally{refresh.disabled=false;}
+  });
+  if(app)actions.append(refresh,appStatus);
   const section=wizardForm('GitHub 账号登录',[
-    note('用户可以直接用 GitHub 账号登录控制台。登录复用当前所选 GitHub App 的用户授权凭据，不需要每人另建 App，也不需要另建 OAuth App。按下面的顺序操作：'),
-    ...notices,githubLoginGuide(saved,app),...githubAddresses(saved,app),
-    enabled,field('Client ID',client),field('Client secret（只保存，不回读）',secret),
+    note('登录使用所选 GitHub App，不需要另建 OAuth App。按下面的顺序完成 GitHub 设置并保存登录配置，随后继续安装。'),
+    ...notices,actions,guide,
     note('保存后立即生效，重启后保留。已有环境变量配置可继续使用；在这里保存后，以向导配置为准。'),
-    note('组织 owner 识别需要 Members 只读权限；新增权限须由安装目标批准。登录按钮会发起 OAuth，安装时自动请求授权可保持关闭。'),
-    note('首次 GitHub 登录会创建独立账号；已有本地账号应先登录后绑定。项目与组织管理员不会获得系统超级管理员权限。'),revoke,
+    note('首次 GitHub 登录会创建独立账号；已有本地账号应先登录后绑定。项目与组织管理员不会获得系统超级管理员权限。'),
   ],'保存登录配置',async (value,form)=>{
     const clear=form.elements.revoke_secret.checked;
     const payload={enabled:form.elements.enabled.checked&&!clear,client_id:value.client_id,client_secret:clear?'':value.client_secret,revoke_secret:clear};
@@ -150,6 +177,9 @@ function githubLoginForm(saved, app){
     }
     secret.value='';await start();notice('message',payload.enabled?'GitHub 登录已启用，用户可从登录页授权登录。':'已保存；当前使用本地账号登录。');return false;
   });
+  if(app&&(!app.settings_url||!app.owner||!app.owner_type))refresh.click();
+  section.append(wizardDetails('其他 GitHub 回调地址及用途',...githubAddresses(saved,app)),
+    note('GitHub 显示 404 时，请确认当前账号是 App 所有者、组织所有者或指定的 App 管理员，并核对 App 是否已转移。'));
   section.append(githubLinkElement('GitHub 文档：用 GitHub App 实现登录','https://docs.github.com/en/apps/creating-github-apps/writing-code-for-a-github-app/building-a-login-with-github-button-with-a-github-app'),' ',
     githubLinkElement('Callback URL 与 Setup URL 的区别','https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url'));
   return section;

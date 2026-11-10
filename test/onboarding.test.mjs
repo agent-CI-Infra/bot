@@ -58,6 +58,54 @@ test('tunnel token is private and write-only; skip installation does not enable 
  const password=testPassword();await admin('/api/users','POST',{username:'member',password,repository_ids:['101']});const member=h.client();await member('/api/auth/login','POST',{username:'member',password});assert.equal((await member('/api/onboarding')).status,403);
  await admin('/api/onboarding/tunnel','POST',{revoke:true});assert.equal((await admin('/api/onboarding')).value.tunnel.token_configured,false);
 });
+test('legacy selected App metadata is refreshed in place without changing login, credentials, webhook or installation state',async t=>{
+ const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}),secret=testPassword(),calls=[];
+ let onboarding,owner={login:'fixture-org',type:'Organization'};
+ const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{fetcher:async(url,options)=>{
+  calls.push({url,method:options.method||'GET'});return new Response(JSON.stringify({id:123,slug:'fixture-app',owner,html_url:'https://github.com/apps/fixture-app',client_secret:secret,pem}));
+ }})})),{admin}=await setup(h),a=await account(admin,{type:'github_app',app_id:'123',private_key:pem,token:undefined});
+ const original={account_id:a.id,app_id:'123',slug:'fixture-app',installations:3,webhook_url:'https://hooks.invalid/existing',install_url:'https://github.com/apps/fixture-app/installations/new'};
+ onboarding.save('app',original);onboarding.save('installation_skipped',true);
+ await admin('/api/onboarding/github-login','PUT',{enabled:true,client_id:'Iv1.existing',client_secret:secret});
+ const credentials=h.store.get('SELECT credentials FROM accounts WHERE id=?',a.id).credentials,login=h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value;
+ assert.equal((await admin('/api/onboarding')).value.app.settings_url,undefined);assert.equal(calls.length,0);
+ const refresh=()=>admin('/api/onboarding/app/refresh','POST',{account_id:a.id});
+ let result=await refresh();assert.equal(result.status,201);
+ assert.deepEqual(result.value.app,{...original,owner:'fixture-org',owner_type:'Organization',settings_url:'https://github.com/organizations/fixture-org/settings/apps/fixture-app'});
+ assert.ok(!JSON.stringify(result.value).includes(secret)&&!JSON.stringify(result.value).includes(pem));
+ owner={login:'fixture-user',type:'User'};result=await refresh();assert.equal(result.value.app.settings_url,'https://github.com/settings/apps/fixture-app');
+ assert.equal((await admin('/api/onboarding')).value.app.owner,'fixture-user');assert.equal(onboarding.saved('installation_skipped'),true);
+ assert.equal(h.store.get('SELECT credentials FROM accounts WHERE id=?',a.id).credentials,credentials);
+ assert.equal(h.store.get("SELECT value FROM settings WHERE key='identity.github_login'").value,login);
+ assert.deepEqual(calls.map(c=>new URL(c.url).pathname),['/app','/app']);assert.ok(calls.every(c=>c.method==='GET'));
+ for(const invalid of [null,{id:999,slug:'wrong-app',owner},{id:123,slug:'fixture-app'},{id:123,slug:'fixture-app',owner:{login:'',type:'Organization'}}]){
+  const before=onboarding.saved('app');onboarding.options.fetcher=async()=>new Response(JSON.stringify(invalid));
+  assert.equal((await refresh()).value.error,'github_app_metadata_unavailable');assert.deepEqual(onboarding.saved('app'),before);
+ }
+ onboarding.options.fetcher=async()=>new Response('{}',{status:503});assert.equal((await refresh()).status,502);
+ assert.equal((await refresh()).value.error,'github_app_metadata_unavailable');
+ assert.equal((await admin('/api/onboarding/app/refresh','POST',{account_id:a.id,client_secret:secret})).status,400);
+ await repository(admin,a.id,'101');const password=testPassword();
+ assert.equal((await admin('/api/users','POST',{username:'member',password,organization_ids:['10']})).status,201);
+ const member=h.client();assert.equal((await member('/api/auth/login','POST',{username:'member',password})).status,200);
+ for(const client of [h.client(),member])assert.equal((await client('/api/onboarding/app/refresh','POST',{account_id:a.id})).status,client===member?403:401);
+ assert.equal((await admin('/api/onboarding/app/refresh','POST',{account_id:a.id},{'X-CSRF-Token':''})).status,403);
+ assert.equal((await admin('/api/onboarding/app/refresh','POST',{account_id:a.id},{Origin:'https://other.invalid'})).status,403);
+});
+test('a slow App metadata lookup preserves newer installation fields and cannot restore another tab\'s old App selection',async t=>{
+ const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'});let onboarding,release,started;
+ const h=await harness(t,undefined,store=>({onboarding:onboarding=new Onboarding(store,{fetcher:async()=>{
+  started();await new Promise(resolve=>{release=resolve;});return new Response(JSON.stringify({id:123,slug:'fixture-app',owner:{login:'fixture',type:'Organization'}}));
+ }})})),{admin}=await setup(h),a=await account(admin,{type:'github_app',app_id:'123',private_key:pem,token:undefined});
+ const original={account_id:a.id,app_id:'123',slug:'fixture-app',installations:0};onboarding.save('app',original);
+ for(const changed of [{...original,installations:5,webhook_url:'https://new.invalid/hook'},{account_id:'another-app',app_id:'456',slug:'another-app'}]){
+  const ready=new Promise(resolve=>{started=resolve;}),pending=admin('/api/onboarding/app/refresh','POST',{account_id:a.id});await ready;
+  onboarding.save('app',changed);release();const result=await pending;
+  if(changed.account_id===a.id){assert.equal(result.status,201);assert.equal(onboarding.saved('app').installations,5);assert.equal(onboarding.saved('app').webhook_url,changed.webhook_url);}
+  else{assert.equal(result.status,409);assert.equal(result.value.error,'github_app_changed');assert.deepEqual(onboarding.saved('app'),changed);}
+ }
+ assert.equal((await admin('/api/onboarding/app/refresh','POST',{account_id:a.id})).status,409);
+});
 test('rules show per-file precedence and skills; computer overlays the existing manager spec',()=>{
  const policy={rule_overrides:JSON.stringify({'.bot/guide.md':'Console guide','.bot/rules/labels.md':'review_label: "console-label"'})};
  const result=resolveRules(policy,{'.bot/guide.md':'Repository guide','.bot/rules/pr-review.md':'Repository PR rule','.bot/computer.yaml':'memory_mb: 2048\npackages: [jq]','.agents/skills/review/SKILL.md':'Repository skill'},{cpus:2,memory_mb:4096,packages:[],max_command_minutes:60});

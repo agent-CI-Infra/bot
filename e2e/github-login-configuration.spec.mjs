@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
 import { identityFixture } from '../test/identity-fixture.mjs';
-import { harness, setup, testPassword } from '../test/helpers.mjs';
+import { harness, setup, account, testPassword } from '../test/helpers.mjs';
 import { Onboarding } from '../dist/onboarding/service.js';
 
 async function localLogin(page, origin, password) {
@@ -26,8 +26,12 @@ test('登录指引给出所选 App 的设置入口、Client ID 与 App ID 的区
     await page.goto(h.admin + '/onboarding/github/callback?code=manifest-code&state=' + new URL(manifest.value.create_url).searchParams.get('state'));
     const panel = page.locator('#onboarding-panel'), guide = panel.locator('.login-guide');
     await expect(guide.getByRole('link', { name: '打开 org-app 的 GitHub App 设置', exact: true })).toHaveAttribute('href', 'https://github.com/organizations/fixture-org/settings/apps/org-app');
-    await expect(guide).toContainText('这个 App 属于组织 fixture-org'); await expect(guide).toContainText('GitHub 显示 404 时');
+    await expect(guide).toContainText('这个 App 属于组织 fixture-org'); await expect(panel).toContainText('GitHub 显示 404 时');
     await expect(guide).toContainText('它不是 App ID（这个 App 的 App ID 是 123）');
+    await expect(guide.locator(':scope > li > strong')).toHaveText(['General：填写 Client ID 和登录回调','Credentials：填写 Client secret','Permissions & events：确认组织身份验证权限','回到本页：保存并启用']);
+    await expect(guide.locator(':scope > li').nth(0).getByLabel('Client ID',{exact:true})).toBeVisible();
+    await expect(guide.locator(':scope > li').nth(1).getByLabel('Client secret（只保存，不回读）',{exact:true})).toBeVisible();
+    await expect(guide.locator(':scope > li').nth(1)).toContainText('左侧切换到「Credentials」');await expect(guide).not.toContainText('在同一页');
     // The wizard-created App returned reusable credentials: the page says so instead of asking for a new secret.
     await expect(guide).toContainText('不用再生成'); await expect(page.getByLabel('Client ID', { exact: true })).toHaveValue('Iv1.org-app');
     await expect(guide.locator('.github-login-callback')).toHaveText('https://bot.invalid/auth/github/callback');
@@ -40,17 +44,49 @@ test('登录指引给出所选 App 的设置入口、Client ID 与 App ID 的区
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/github-login-guide/organization-app-mobile.png', fullPage: true });
     await page.setViewportSize({ width: 1280, height: 900 });
-    // A personal App links to its owner's settings; an App whose owner is unknown gets the manual path, never a guessed link.
+    // A personal App links to its owner's settings; a legacy selection is repaired on this page.
     const saved = onboarding.saved('app');
     onboarding.save('app', { ...saved, owner: 'octo', owner_type: 'User', settings_url: 'https://github.com/settings/apps/org-app' }); await page.reload();
     await expect(guide.getByRole('link', { name: '打开 org-app 的 GitHub App 设置', exact: true })).toHaveAttribute('href', 'https://github.com/settings/apps/org-app');
     await expect(guide).toContainText('这个 App 属于个人账号 octo');
     const { owner, owner_type, settings_url, ...unknown } = saved; onboarding.save('app', unknown); await page.reload();
-    await expect(guide).toContainText('还不知道 org-app 的所有者，所以不提供直达链接'); await expect(guide).toContainText('Developer settings → GitHub Apps');
-    await expect(guide.getByRole('link')).toHaveCount(0);
-    await page.screenshot({ path: '.tmp/github-login-guide/unknown-owner.png', fullPage: true });
+    await expect(guide.getByRole('link',{name:'打开 org-app 的 GitHub App 设置',exact:true})).toHaveAttribute('href',saved.settings_url);
+    expect(onboarding.saved('app').owner).toBe('fixture-org');await expect(page).toHaveURL(/#\/settings\/onboarding\/2$/);
+    await expect(guide).not.toContainText('重新检查安装');await expect(panel).not.toContainText('不提供直达链接');
+    await page.screenshot({ path: '.tmp/github-login-guide/legacy-owner-recovered.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
+test('旧 App 在登录步骤自动补查，失败可原地重试，异步刷新保留已填写的 Client ID 和 secret',async({page})=>{
+  const pem=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'pem'}),calls=[];
+  let onboarding,failed=true,started,release;
+  const h=await harness(undefined,undefined,store=>({onboarding:onboarding=new Onboarding(store,{fetcher:async raw=>{
+    calls.push(new URL(raw).pathname);if(failed)return new Response('{}',{status:503});
+    started();await new Promise(resolve=>{release=resolve;});
+    return new Response(JSON.stringify({id:123,slug:'legacy-app',owner:{login:'fixture',type:'Organization'}}));
+  }})}));
+  try{
+    const{admin,password}=await setup(h),a=await account(admin,{type:'github_app',app_id:'123',private_key:pem,token:undefined});
+    onboarding.save('app',{account_id:a.id,app_id:'123',slug:'legacy-app',installations:2});
+    await localLogin(page,h.admin,password);await page.goto(h.admin+'/#/settings/onboarding/2');
+    const panel=page.locator('#onboarding-panel'),client=page.getByLabel('Client ID',{exact:true}),secret=page.getByLabel('Client secret（只保存，不回读）',{exact:true});
+    await expect(panel.getByRole('status')).toContainText('暂时无法读取 App 信息');
+    await expect(panel.locator('.login-guide').getByRole('link')).toHaveCount(0);
+    await client.fill('Iv1.draft');const typed=testPassword();await secret.fill(typed);
+    failed=false;const ready=new Promise(resolve=>{started=resolve;});await page.getByRole('button',{name:'刷新 App 信息',exact:true}).click();await ready;
+    await client.fill('Iv1.kept-draft');release();
+    await expect(panel.getByRole('link',{name:'打开 legacy-app 的 GitHub App 设置',exact:true})).toHaveAttribute('href','https://github.com/organizations/fixture/settings/apps/legacy-app');
+    await expect(client).toHaveValue('Iv1.kept-draft');await expect(secret).toHaveValue(typed);
+    await expect(page).toHaveURL(/#\/settings\/onboarding\/2$/);expect(calls).toEqual(['/app','/app']);
+    await expect(panel).not.toContainText('重新检查安装');
+    await page.getByLabel('启用 GitHub 账号登录',{exact:true}).check();await page.getByRole('button',{name:'保存登录配置',exact:true}).click();
+    await expect(page.locator('#message')).toContainText('GitHub 登录已启用');await expect(secret).toHaveValue('');
+    const redirect=await fetch(h.admin+'/auth/github/start',{redirect:'manual'});expect(new URL(redirect.headers.get('location')).searchParams.get('client_id')).toBe('Iv1.kept-draft');
+    mkdirSync('.tmp/github-login-guide',{recursive:true});await page.screenshot({path:'.tmp/github-login-guide/in-place-retry-desktop.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    await page.screenshot({path:'.tmp/github-login-guide/in-place-retry-mobile.png',fullPage:true});
+  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
 
 test('升级前为独立控制台地址保存的登录配置，页面提示改用统一入口的 Callback URL，保存一次后提示消失', async ({ page }) => {
