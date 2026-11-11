@@ -223,3 +223,36 @@ test('a control character in a name is refused for create, rename and move inste
   assert.equal((await tree.read(file.id)).content,'one');assert.equal((await tree.read(file.id)).revision,1);
   assert.deepEqual((await tree.list()).files.map(row=>row.path),['ok.txt']);
 });
+
+test('a file renamed away from an unaddressable old name stays readable under its current name with one catalog row',async t=>{
+  // Seeded the way the older contract left it: create('ctl\u0001name.txt') then move(id,'ok.txt',1) rewrote path and kept
+  // the control-character name in legacy_paths only. The current path is addressable, so this is an ordinary file.
+  const {root,tree}=await fixture(t);
+  const file=await tree.create('ok.txt','moved body');await tree.save(file.id,'moved twice',1);
+  const path=join(root,'.write-history/file-tree.json'),catalog=JSON.parse(await readFile(path,'utf8'));
+  catalog.files.find(entry=>entry.id===file.id).legacy_paths=['ctl\u0001name.txt'];await writeFile(path,JSON.stringify(catalog));
+  const reopened=new FileTree(root),list=await reopened.list();
+  assert.deepEqual(list.files.map(entry=>entry.path),['ok.txt']);
+  assert.deepEqual(list.quarantined,[]);
+  assert.equal((await reopened.read(file.id)).content,'moved twice');
+  assert.equal((await reopened.read(file.id,1)).content,'moved body');
+  assert.equal((await reopened.versions(file.id)).versions.length,2);
+  // Listing and saving again must not invent a second row for a live path that already has one.
+  await reopened.list();await reopened.save(file.id,'moved three',2);
+  const saved=JSON.parse(await readFile(path,'utf8'));
+  assert.equal(saved.files.length,1);assert.equal(saved.files[0].id,file.id);
+  assert.deepEqual(saved.files[0].legacy_paths,['ctl\u0001name.txt']);
+});
+
+test('a queued move whose source is an unaddressable old name is retired while the file stays readable',async t=>{
+  // A move interrupted between setPath and journal cleanup: the journal still names the control-character source.
+  const {root,tree}=await fixture(t),file=await tree.create('ok.txt','body');
+  const path=join(root,'.write-history/file-tree.json'),catalog=JSON.parse(await readFile(path,'utf8'));
+  catalog.pending={operation_id:'a'.repeat(24),file_id:file.id,from:'ctl\u0001name.txt',to:'ok.txt',actor:'user:a',deleted:false,source:{dev:'1',ino:'2'}};
+  await writeFile(path,JSON.stringify(catalog));
+  const reopened=new FileTree(root);
+  assert.deepEqual((await reopened.list()).files.map(entry=>entry.path),['ok.txt']);
+  assert.equal((await reopened.read(file.id)).content,'body');
+  await reopened.save(file.id,'again',1);
+  assert.equal(JSON.parse(await readFile(path,'utf8')).pending,null);
+});

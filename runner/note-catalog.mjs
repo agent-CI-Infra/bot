@@ -29,15 +29,19 @@ export class NoteCatalog {
       // A file created before this contract may still be on disk under a name that carries a control character. Keep its
       // record (nothing is renamed or deleted) but do not index a path no request can address, so one such file cannot
       // fail the whole volume or hide healthy files next to it. The rows are reported to the listing as quarantined.
-      if(!addressable(row.path)||!row.legacy_paths.every(addressable)){this.quarantined.push(row);continue;}
+      // Only the current path decides that: an unaddressable older name in legacy_paths is a place the file used to be,
+      // and a file that has since been renamed is readable under the name it has now.
+      if(!addressable(row.path)){this.quarantined.push(row);continue;}
       if(this.paths.has(row.path)||this.histories.has(row.history_key))fail('invalid_notes_catalog');this.paths.set(row.path,row);this.histories.add(row.history_key);
       for(const ref of [row.id,...row.aliases]){if(!validNoteId(ref)||this.refs.has(ref))fail('invalid_notes_catalog');this.refs.set(ref,row);}
-      for(const path of row.legacy_paths){if(this.legacy.has(path))fail('invalid_notes_catalog');this.legacy.set(path,row);}
+      for(const path of row.legacy_paths){if(!addressable(path))continue;if(this.legacy.has(path))fail('invalid_notes_catalog');this.legacy.set(path,row);}
     }
     if(value.pending){const p=value.pending;
       if(!/^[a-f0-9]{24}$/.test(p.operation_id)||typeof p.actor!=='string'||p.actor.length>240||typeof p.deleted!=='boolean')fail('invalid_notes_catalog');
-      // The file a move belongs to may be quarantined above; recover() abandons that record under the volume lock.
-      if(this.refs.has(p.file_id))try{notePath(p.from);notePath(p.to);}catch{fail('invalid_notes_catalog');}
+      // The file a move belongs to may be quarantined above, and a move that started under the older contract may name a
+      // source no request can address any more. recover() retires either journal under the volume lock; opening the
+      // catalog never fails over a name, only over a record that is not a move at all.
+      if(typeof p.from!=='string'||typeof p.to!=='string')fail('invalid_notes_catalog');
       if(!p.deleted&&(!p.source||!/^\d+$/.test(p.source.dev)||!/^\d+$/.test(p.source.ino)))fail('invalid_notes_catalog');
     }
   }
@@ -77,6 +81,9 @@ export class NoteCatalog {
     // The move belongs to a quarantined file whose paths can no longer be addressed: abandon the record so the rest of
     // the volume stays readable and writable, and leave the two paths on disk untouched.
     if(!row)return cancel('note_move_unavailable');
+    // A source or target name the current contract cannot address was written before it; the bytes stay where they are and
+    // the journal is retired, so the catalog opens and the file keeps the path it is readable under now.
+    if(!addressable(pending.from)||!addressable(pending.to))return cancel('note_move_unavailable');
     if(![pending.from,pending.to].includes(row.path))fail('invalid_notes_catalog');
     const other=this.paths.get(pending.to);if(other&&other!==row)fail('invalid_notes_catalog');
     let source=await this.entry(pending.from),target=await this.entry(pending.to);
