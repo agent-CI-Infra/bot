@@ -333,26 +333,49 @@ function machineSection() {
   const own = name => current.rules?.computer ? current.rules.computer[name] : pc.inherited?.includes(name) ? undefined : pc[name];
   const number = (name, step) => input(name, own(name) ?? '', { type: 'number', step, min: pc.bounds?.[name]?.[0] ?? '', max: pc.bounds?.[name]?.[1] ?? '',
     placeholder: `留空使用全局默认（${pc.defaults?.[name] ?? pc[name]}）` });
+  const configField = (label, control, name) => {
+    const wrap = element('div', '', 'machine-config-field'), source = current.rules?.computer_sources?.[name];
+    const inherited = specFields.includes(name) && own(name) == null;
+    const origin = !current.rules ? '来源暂未读取' : source ? layerNames[source] : specFields.includes(name) ? '全局默认' : '内置默认';
+    const hint = element('span', `已保存来源：${origin}${inherited && source ? '，跟随全局默认' : ''}`, 'machine-config-origin');
+    if (specFields.includes(name)) {
+      const target = own(name) ?? pc.defaults?.[name];
+      hint.append(` · 配置目标 ${target ?? '未知'} · 电脑报告 ${pc[name] ?? '未知'}`);
+    }
+    wrap.append(control.tagName === 'LABEL' ? control : field(label, control), hint); return wrap;
+  };
+  const group = (title, text, ...fields) => {
+    const section = element('section', '', 'machine-config-group');
+    section.append(element('h4', title), note(text), ...fields); return section;
+  };
   const sourceLink=element('a','查看规则文件来源');sourceLink.href=`#/projects/${current.id}/roles/manager`;
   const sourceActions=element('div','','actions');sourceActions.append(sourceLink);
   // Tasks apply the repository file when they prepare; a super administrator can apply it right away.
   if(source?.source==='repository'&&editable){const apply=button('立即应用仓库文件',async()=>{apply.disabled=true;apply.textContent='正在按仓库文件重建虚拟电脑…';
     try{await api(`/api/repositories/${current.id}/rules/apply-computer`,'POST',{});current.flash='已按仓库 .bot/computer.yaml 重建虚拟电脑';await reloadProject();}catch(err){apply.disabled=false;apply.textContent='立即应用仓库文件';error(err);}});sourceActions.append(apply);}
+  const resourceGrid = element('div', '', 'field-grid');
+  resourceGrid.append(configField('CPU（核）', number('cpus', '0.25'), 'cpus'), configField('内存（MB）', number('memory_mb', '128'), 'memory_mb'),
+    configField('进程数上限', number('pids', '1'), 'pids'), configField('/tmp 大小（MB）', number('tmp_mb', '16'), 'tmp_mb'));
+  const fields = element('div', '', 'machine-config-fields');
+  fields.append(group('资源上限', '留空跟随全局默认（全局设置 → 常规）。配置目标与电脑报告分开展示，修改草稿不会改变已保存值。', resourceGrid),
+    group('软件与初始化', pc.build?.toolchain ? '镜像已包含：' + pc.build.toolchain : '额外软件包会先构建镜像；初始化脚本以项目用户在工作卷中运行。',
+      configField('额外系统软件包', textarea('packages', packagesText(shown.packages), { rows: 2, spellcheck: false, placeholder: 'Debian 包名，空格或换行分隔，例如 ffmpeg libpq-dev' }), 'packages'),
+      configField('初始化脚本', textarea('setup_script', shown.setup_script || '', { rows: 5, spellcheck: false, className: 'code', placeholder: '以项目用户在 /workspace 运行，HOME=/workspace/home 持久保存；脚本或代次变化时重新运行' }), 'setup_script'),
+      checkbox('rerun_setup', false, '保存后重新运行初始化脚本')),
+    group('网络与环境变量', '环境变量对仓库代码可见，不要填写密钥。网络设置和变量随本组配置保存。',
+      configField('网络访问', checkbox('egress', shown.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）'), 'egress'),
+      configField('环境变量', textarea('env', envText(shown.env), { rows: 3, spellcheck: false, placeholder: '每行 名称=值。对仓库代码可见，不要填写密钥' }), 'env')));
+  const impact = element('aside', '', 'machine-config-impact'), draft = element('p', '', 'machine-config-draft'); draft.setAttribute('role', 'status');
+  impact.append(element('h4', '保存影响'), draft,
+    note(editable ? '保存会按本组改动重建虚拟电脑；正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包需要先构建镜像，首次可能需要几分钟。' : '机器配置由超级管理员设置。'),
+    note('工作卷、笔记和代次保留。项目任务并发在另一组单独保存，不会重建电脑。'));
+  if (pc.resources_pending) impact.append(note('全局默认已变化，电脑等待空闲后重建。电脑报告的资源是配置目标，不能据此确认运行中容器已使用新上限。'));
+  if (source?.source === 'repository') impact.append(note('仓库仅覆盖写明的字段；表单改动写入项目控制台，下次任务准备时同名字段仍以仓库文件为准。'));
+  const layout = element('div', '', 'machine-config-layout'); layout.append(fields, impact);
   const nodes = [
-    note(source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的生效值。这里保存的是控制台配置，下次任务准备时会再次被仓库文件覆盖。':'表单显示当前生效电脑规格；仓库 .bot/computer.yaml 可以覆盖控制台值。'),sourceActions,
-    note(editable ? '保存后虚拟电脑按新配置重建：工作卷和代次保留，正在执行的命令先执行完，任务保留的后台进程会结束。新增软件包时会先构建镜像，首次可能需要几分钟。' : '机器配置由超级管理员设置。'),
-    element('h4', '资源'),
-    note('留空的资源跟随全局默认（全局设置 → 常规），全局默认改了以后这台电脑在空闲时按新值重建。'),
-    (() => { const grid = element('div', '', 'field-grid'); grid.append(field('CPU（核）', number('cpus', '0.25')), field('内存（MB）', number('memory_mb', '128')), field('进程数上限', number('pids', '1')),
-      field('/tmp 大小（MB）', number('tmp_mb', '16'))); return grid; })(),
-    checkbox('egress', shown.network_policy === 'internet egress', '允许访问外网（安装依赖、访问测试地址）'),
-    element('h4', '软件'),
-    note(pc.build?.toolchain ? '镜像已包含：' + pc.build.toolchain : ''),
-    field('额外系统软件包', textarea('packages', packagesText(shown.packages), { rows: 2, spellcheck: false, placeholder: 'Debian 包名，空格或换行分隔，例如 ffmpeg libpq-dev' })),
-    field('环境变量', textarea('env', envText(shown.env), { rows: 3, spellcheck: false, placeholder: '每行 名称=值。对仓库代码可见，不要填写密钥' })),
-    field('初始化脚本', textarea('setup_script', shown.setup_script || '', { rows: 5, spellcheck: false, className: 'code', placeholder: '以项目用户在 /workspace 运行，HOME=/workspace/home 持久保存，可联网；脚本或代次变化时重新运行' })),
-    checkbox('rerun_setup', false, '保存后重新运行初始化脚本')];
-  const form = settingsForm('配置', nodes, async (form, progress) => {
+    note(source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的配置目标，电脑是否已应用需结合上方状态核对。':'表单显示已保存的配置目标；仓库 .bot/computer.yaml 可以按字段覆盖控制台值。'),sourceActions,
+    layout];
+  const readSpec = form => {
     const spec = {};
     // null clears the project's value, so the resource follows the global default again.
     for (const name of specFields) { const text = form.elements[name].value.trim(), value = text === '' ? null : Number(text); if (value !== (own(name) ?? null)) spec[name] = value; }
@@ -362,11 +385,29 @@ function machineSection() {
     const env = parseEnv(form.elements.env.value); if (envText(env) !== envText(shown.env)) spec.env = env;
     if (form.elements.setup_script.value !== (shown.setup_script || '')) spec.setup_script = form.elements.setup_script.value;
     if (form.elements.rerun_setup.checked) spec.rerun_setup = true;
+    return spec;
+  };
+  const form = settingsForm('配置', nodes, async (form, progress) => {
+    const spec = readSpec(form);
     if (!Object.keys(spec).length) return '没有改动';
     progress(spec.packages ? '正在安装软件包并重建虚拟电脑，首次可能需要几分钟…' : spec.setup_script !== undefined || spec.rerun_setup ? '正在重建虚拟电脑并运行初始化脚本…' : '正在按新配置重建虚拟电脑…');
     await api(`/api/environments/${current.id}/configure`, 'POST', { operation_id: operationId(), generation: environment.environment.generation, spec });
     return '已保存，虚拟电脑已按新配置重建';
-  }, { editable });
+  }, { editable: editable && !!current.rules });
+  form.classList.add('machine-config-card');
+  const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
+  const update = () => {
+    try { const changes = Object.keys(readSpec(form.querySelector('form'))); draft.textContent = changes.length ? '待保存草稿：' + changes.map(key => names[key]).join('、') + '。已保存配置尚未改变。' : '本组没有待保存改动。'; }
+    catch (err) { draft.textContent = '草稿尚未保存：' + err.message; }
+  };
+  form.addEventListener('input', update); update();
+  const reread = button('重新读取电脑配置', async () => {
+    let dirty = true; try { dirty = !!Object.keys(readSpec(form.querySelector('form'))).length; } catch {}
+    if (dirty && !await askConfirm({ title: '重新读取已保存配置？', body: ['本组未保存的输入将被替换。取消可继续保留草稿。'], action: '重新读取' })) return;
+    await reloadProject().catch(error);
+  }, 'quiet');
+  // Keep recovery outside the disabled fieldset when source data was unavailable.
+  form.prepend(...(!current.rules ? [note('规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。')] : []), reread);
   return [status, concurrencyForm(), form];
 }
 // How many tasks this computer runs at once: the project's own value, or empty for the global default. Project
@@ -375,7 +416,7 @@ function concurrencyForm() {
   const own = current.policy.task_concurrency, fallback = current.concurrencyDefault;
   const value = input('task_concurrency', own ?? '', { type: 'number', min: 1, max: 32, step: 1, placeholder: `留空使用全局默认（${fallback}）` });
   return settingsForm('同时运行的任务', [field('这台虚拟电脑同时运行的任务数', value),
-    note(`当前生效 ${own ?? fallback} 个${own == null ? '（全局默认）' : ''}。取 1–32，留空跟随全局默认；超出的任务继续排队。每个任务用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限；保存不会重建虚拟电脑。`)],
+    note(`当前生效 ${own ?? fallback} 个（${own == null ? '全局默认' : '项目覆写'}）。这是项目任务并发，与角色并发限额分开。取 1–32，留空跟随全局默认；超出的任务继续排队。每个任务用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限；保存不会重建虚拟电脑。`)],
   form => { const text = form.elements.task_concurrency.value.trim(); return patchPolicy(changed({ task_concurrency: text === '' ? null : Number(text) }, { task_concurrency: own ?? null })); });
 }
 // Status cards of the machine section, re-rendered by the refresh loop without touching the form.
