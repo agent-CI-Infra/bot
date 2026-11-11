@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 import { managerFixture } from '../test/project-manager-fixture.mjs';
 
@@ -128,4 +129,26 @@ test('an uncertain move explains why retries cannot unlock the project knowledge
   await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:409,json:{error:'note_move_uncertain'}}));await f.login();
   await expect(page.locator('.knowledge-status')).toContainText('本项目知识区已暂停读写');await expect(page.locator('.knowledge-status')).toContainText('一致的完整知识卷');await exact(page,'重试读取').click();await expect(page.locator('.knowledge-status')).toContainText('重试不会解除此状态');expect(f.errors).toEqual([]);
  }finally{await f.close();}
+});
+
+test('a legacy file whose name carries a control character is reported as unreadable instead of disappearing',async({page})=>{
+  test.setTimeout(60000);const f=await fixture(page);
+  try{
+    const base='/api/repositories/101/knowledge-files';
+    await f.admin(base,'POST',{name:'healthy.txt',content:'readable body'});
+    // A volume written before the name rule can still hold a file under a name no request may address. Nothing renames
+    // or deletes it: the listing reports it, the healthy file next to it stays readable, and the bad name is not clickable.
+    const volume=join(f.notesRoot,'101'),bad='ctl\u0001name.txt',catalogPath=join(volume,'.write-history/file-tree.json');
+    await writeFile(join(volume,bad),'old bytes');
+    const catalog=JSON.parse(await readFile(catalogPath,'utf8'));
+    catalog.files.push({id:'n:'+Buffer.from(bad).toString('base64url'),path:bad,aliases:[],history_key:'b'.repeat(64),legacy_paths:[bad]});
+    await writeFile(catalogPath,JSON.stringify(catalog));
+    await f.login();
+    const notice=panel(page).getByText('另有 1 个无法打开的旧文件（名字含控制字符）',{exact:true});
+    await expect(notice).toBeVisible();await notice.click();
+    await expect(panel(page)).toContainText('ctl\\u0001name.txt');await expect(panel(page)).toContainText('名字含控制字符，无法打开');
+    await expect(panel(page).getByRole('button',{name:bad,exact:true})).toHaveCount(0);
+    await exact(page,'healthy.txt').click();await expect(page.locator('.knowledge-content')).toContainText('readable body');
+    expect(f.errors).toEqual([]);
+  }finally{await f.close();}
 });
