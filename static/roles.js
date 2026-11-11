@@ -120,7 +120,7 @@ function editableRoleDraft(data, recommend = false) {
       ...(recommend && !data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })),
     skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) };
 }
-function roleComparison(state, redraw) {
+function roleComparison(state, redraw, clearFeedback) {
   const comparison = state.comparison, section = card('比较角色配置'), choices = {};
   const local = structuredClone(state.draft); delete local.deleted_roles;
   const merged = () => mergeRoleDraft(comparison.base, local, editableRoleDraft(comparison.latest), choices);
@@ -132,7 +132,7 @@ function roleComparison(state, redraw) {
     const ids = new Set(result.draft.roles.map(role => role.role_id));
     state.draft = { ...result.draft, deleted_roles: comparison.latest.configuration.roles.filter(role => !ids.has(role.role_id)).map(role => role.role_id) };
     state.data = comparison.latest; state.base = editableRoleDraft(comparison.latest); state.conflict = false; state.comparison = null;
-    markRoleDirty(state); redraw();
+    markRoleDirty(state); clearFeedback(); redraw();
   });
   const conflicts = merged().conflicts;
   if (!conflicts.length) section.append(note('没有重叠修改：可以保留你的修改，同时保留服务器上其他人的更新。'));
@@ -158,7 +158,7 @@ function rolesConsole() {
   let state, request = 0;
   const failed = err => {
     if (!live()) return;
-    if ([401, 403].includes(err.status)) { target.rolesDraft = null; state = null; holder.replaceChildren(note('当前身份无权读取或修改角色配置，已清空本页草稿。')); }
+    if ([401, 403].includes(err.status)) { target.rolesDraft = null; state = null; holder.replaceChildren(note('当前身份无权读取或修改角色配置，已清空本页草稿。'), message); }
     message.textContent = `${err.message}${err.field ? '（配置项：' + err.field + '）' : ''}`;
   };
   const compare = async () => {
@@ -167,7 +167,7 @@ function rolesConsole() {
     try {
       const latest = await api(`/api/repositories/${id}/roles`);
       if (!live() || revision !== request) return;
-      state.comparison = { base: state.base, latest }; state.conflict = true;
+      state.comparison = { base: state.base, latest }; state.conflict = true; state.focusComparison = true;
     } catch (err) { failed(err); }
     finally { if (state) state.busy = false; if (state) state.redraw?.(); }
   };
@@ -187,8 +187,8 @@ function rolesConsole() {
       roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSettingsCard(role, state, draw));
       if (role.role_id === 'manager') fields.append(...managerSection(state.data));
     } else fields.append(...roleOverviewCards(state, draw));
-    holder.append(nav, fields);
-    if (state.comparison) holder.append(roleComparison(state, draw));
+    holder.append(nav);
+    const comparison = state.comparison ? roleComparison(state, draw, () => { message.textContent = ''; }) : null;
     const actions = element('div', '', 'actions role-save');
     const status = note(state.busy ? '正在读取或保存…' : state.dirty ? '草稿未保存；运行中任务保留原有快照。' : '保存后影响新任务和后续委派；运行中任务保留原有快照。'); status.setAttribute('role', 'status');
     const save = button('保存角色配置', async () => {
@@ -205,17 +205,24 @@ function rolesConsole() {
         if (live() && err.code === 'role_configuration_conflict') { state.conflict = true; message.textContent = '角色配置已被别人修改。当前草稿仍保留，请读取最新版本并比较。'; }
         else failed(err);
       } finally { if (state) state.busy = false; if (state) state.redraw?.(); }
-    }); save.disabled = !!state.busy || !!state.conflict;
+    }, ''); save.disabled = !!state.busy || !!state.conflict;
     const compareButton = button('读取最新版本并比较', compare); compareButton.disabled = !!state.busy;
     const discard = button('放弃草稿并刷新', async () => {
       if (state.busy) return;
       if (state.dirty && !await askConfirm({ title: '放弃未保存的角色修改？', body: ['刷新后读取服务器上的最新配置。'], action: '放弃并刷新' })) return;
       if (!live()) return; target.rolesDraft = null; await read();
     }); discard.disabled = !!state.busy;
-    actions.append(status, save, compareButton, discard); holder.append(actions);
+    actions.append(status, message, save, compareButton, discard); holder.append(actions);
+    if (comparison) holder.append(comparison); holder.append(fields);
+    if (comparison && state.focusComparison) {
+      state.focusComparison = false;
+      comparison.style.scrollMarginTop = `${Math.ceil(actions.getBoundingClientRect().height) + 16}px`;
+      comparison.scrollIntoView({ block: 'start' });
+      const heading = comparison.querySelector('h3'); heading.tabIndex = -1; heading.focus({ preventScroll: true });
+    }
   };
   const read = async () => {
-    const revision = ++request; holder.replaceChildren(note('正在读取角色配置…')); message.textContent = '';
+    const revision = ++request; holder.replaceChildren(note('正在读取角色配置…'), message); message.textContent = '';
     try {
       const data = await api(`/api/repositories/${id}/roles`);
       if (!live() || revision !== request) return;
@@ -228,10 +235,10 @@ function rolesConsole() {
     } catch (err) {
       if (!live() || revision !== request) return;
       failed(err);
-      if (![401,403].includes(err.status)) holder.replaceChildren(note('角色配置读取失败，当前状态未知。保留的草稿尚未提交。'), button('重试读取角色配置', read));
+      if (![401,403].includes(err.status)) holder.replaceChildren(note('角色配置读取失败，当前状态未知。保留的草稿尚未提交。'), message, button('重试读取角色配置', read));
     }
   };
-  holder.append(note('正在读取角色配置…')); void read(); return [holder, message];
+  holder.append(note('正在读取角色配置…')); void read(); return [holder];
 }
 function roleOverviewCards(state, redraw) {
   const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', '职责', 'Agent 后端', '模型', '技能包', '预算', '权限控制'], '角色解析结果');
@@ -274,7 +281,11 @@ function roleSettingsCard(role, state, redraw) {
   nav.setAttribute('aria-label', '角色设置分区'); section.append(nav);
   const group = (key, title) => {
     const box = element('section', '', 'role-editor-group'), heading = element('h4', title); box.id = `role-${role.role_id}-${key}`; heading.tabIndex = -1;
-    const jump = button(title, () => { box.scrollIntoView({ block: 'start' }); heading.focus({ preventScroll: true }); }, 'quiet'); jump.setAttribute('aria-controls', box.id); nav.append(jump);
+    const jump = button(title, () => {
+      const toolbar = section.closest('.roles-page').querySelector('.role-save');
+      box.style.scrollMarginTop = `${Math.ceil(toolbar.getBoundingClientRect().height) + 16}px`;
+      box.scrollIntoView({ block: 'start' }); heading.focus({ preventScroll: true });
+    }, 'quiet'); jump.setAttribute('aria-controls', box.id); nav.append(jump);
     box.append(heading); section.append(box); return box;
   };
   const basic = group('basic', '基本信息');

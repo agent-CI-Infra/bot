@@ -338,6 +338,8 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 #detail-body details.raw-payload { margin-top:14px; border-top:1px solid #e3eaf0; padding-top:10px; }
 
 /* Role editing keeps one mounted form and one draft while navigating its named sections. */
+/* Keep rounded clipping without making the project a separate scrolling ancestor for the toolbar. */
+.project-page:has(.roles-page){overflow:clip}
 .role-editor-fields{border:0;padding:0;margin:0;min-width:0;display:grid;gap:12px}
 .role-editor-nav{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}
 .role-editor-nav button{min-height:44px}
@@ -345,10 +347,11 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .role-editor-group>label{display:flex;flex-direction:column;gap:5px;margin:12px 0}
 .role-editor-group>label.check{flex-direction:row}
 .role-editor-group>h4{font-size:17px;margin:0 0 12px}
-.role-save{gap:8px;border-top:1px solid var(--border,#d8dee9);z-index:2}
-.role-save>[role=status]{flex-basis:100%;margin:0}
+.role-save{top:0;bottom:auto;gap:8px;padding:12px;border:1px solid var(--border,#d8dee9);background:var(--surface,#fff);z-index:2}
+.role-save>[role=status],.role-save>[role=alert]{flex-basis:100%;margin:0;overflow-wrap:anywhere}
+.role-save>[role=alert]:empty{display:none}
 .role-compare-field{min-width:0;margin:12px 0}
 .role-compare-values{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 .role-compare-values>div{min-width:0}
 .role-compare-values pre,.roles-page details pre{max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
-@media(max-width:767px){.role-save{bottom:calc(64px + env(safe-area-inset-bottom));padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
