@@ -117,3 +117,19 @@ body.board-mode .list-panel>.toolbar{display:none}
   .board-card-repo{white-space:normal;overflow-wrap:anywhere}
   .board-card-badges .status{white-space:normal}
 }
+
+/* List presentation shares the board's cards, grouping and server counts. */
+.board-scroll.board-list-layout{display:block;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable}
+.board-list-layout .board-column{width:auto;min-width:0;max-width:none;min-height:0;margin-bottom:12px}
+.board-list-layout .board-column-list{overflow:visible;max-height:none}
+.board-list-layout .board-column-heading{position:static}
+.board-list-layout .board-card{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:4px 20px;align-items:start}
+.board-list-layout .board-card-heading{grid-column:1;grid-row:1}
+.board-list-layout .board-card-meta{grid-column:2;grid-row:1;align-self:center;flex-wrap:wrap}
+.board-list-layout .board-card-badges,.board-list-layout .board-card>p,.board-list-layout .board-card-field{grid-column:1/-1}
+@media(max-width:760px){
+ .board-list-layout .board-card{display:flex;flex-direction:column;gap:6px}
+ .board-list-layout .board-card-heading,.board-list-layout .board-card-meta{width:100%}
+ .board-list-layout .board-column{display:none}
+ .board-list-layout .board-column.board-mobile-selected{display:block}
+}
