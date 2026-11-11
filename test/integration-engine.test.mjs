@@ -22,7 +22,7 @@ import {acceptanceFixture} from './acceptance-fixture.mjs';
 import {randomWorkspaceId} from './helpers.mjs';
 
 const toolCall=(name,args)=>({role:'assistant',content:null,tool_calls:[{id:randomBytes(8).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
-async function fixture(t,mode='clean'){
+export async function fixture(t,mode='clean',options={}){
  const root=mkdtempSync(join(tmpdir(),'bot-integration-engine-')),gitDir=join(root,'remote.git'),computer=join(root,'computer'),key=randomBytes(32);
  t.after(()=>rmSync(root,{recursive:true,force:true}));
  const git=(args,input,env={})=>execFileSync('git',['--git-dir='+gitDir,...args],{input,encoding:'utf8',env:{...process.env,GIT_AUTHOR_NAME:'Fixture',GIT_AUTHOR_EMAIL:'fixture@example.invalid',GIT_COMMITTER_NAME:'Fixture',GIT_COMMITTER_EMAIL:'fixture@example.invalid',...env},stdio:['pipe','pipe','pipe']}).trim();
@@ -30,17 +30,21 @@ async function fixture(t,mode='clean'){
  const makeTree=(files,base=null)=>{const index=join(root,'index-'+randomBytes(8).toString('hex')),env={GIT_INDEX_FILE:index};if(base)git(['read-tree',base],undefined,env);for(const [path,value] of Object.entries(files)){if(value===null)git(['update-index','--force-remove','--',path],undefined,env);else{const blob=git(['hash-object','-w','--stdin'],value);git(['update-index','--add','--cacheinfo','100644',blob,path],undefined,env);}}return git(['write-tree'],undefined,env);};
  const files={'a.txt':'1','b.txt':'1','calc.cjs':"const fs=require('fs');module.exports=Number(fs.readFileSync('a.txt'))*Number(fs.readFileSync('b.txt'));",'check.cjs':"if(require('./calc.cjs')>2)process.exit(1);"};
  const treeA=makeTree(files),base=git(['commit-tree',treeA], 'base\n');git(['update-ref','refs/heads/main',base]);
- let main=base,pr=null,puts=0,branchWrites=0,modelCalls=0,devStep=0,managerStep=0,knownRef=null,factsWait=null,factsEntered=false,staleBase=false;
+ let main=base,pr=null,puts=0,branchWrites=0,modelCalls=0,devStep=0,managerStep=0,knownRef=null,factsWait=null,factsEntered=false,staleBase=false,failedChecks=options.failedChecks??0;
  const server=createServer(async(req,res)=>{try{
   let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},url=new URL(req.url,'http://fixture'),p=url.pathname;
   const send=(v,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(v));};
   if(p==='/v1/chat/completions'){
    modelCalls++;let message;
-   if(body.tools.some(t=>t.function.name==='delegate_role')){
+   if(options.respond)message=await options.respond(body);
+   else if(body.tools.some(t=>t.function.name==='submit_retry_decision'))message=toolCall('submit_retry_decision',{action:options.retryDecision??'continue_retry',reason:'Read the repeated CI failures; choose the next action'});
+   else if(body.tools.some(t=>t.function.name==='delegate_role')){
+    if(mode==='qa-return')assert.match(JSON.stringify(body.messages),/QA_REPAIR_REQUIRED/,'Manager receives the returned QA finding');
     if(managerStep++===0)message=toolCall('delegate_role',{role:'dev',purpose:'Repair the retained integrated candidate using current failure/conflict evidence; preserve both features.',refs:['task:t']});
     else {const last=body.messages.at(-1);knownRef=JSON.parse(last.content).result_ref;message=toolCall('nominate_delivery',{result_ref:knownRef});}
    }else if(body.tools.some(t=>t.function.name==='submit_delivery')){
     if(mode==='unchanged')message=toolCall('submit_delivery',{summary:'The recovered tree already satisfies the goal',test_command:'node check.cjs'});
+    else if(mode==='qa-return')message=devStep++===0?toolCall('write_file',{path:'regression.cjs',content:'module.exports=1;'}):toolCall('submit_delivery',{summary:'Removed the conflict markers from the existing PR',test_command:'node check.cjs'});
     else if(devStep++===0)message=mode==='conflict'?toolCall('write_file',{path:'a.txt',content:'2'}):toolCall('write_file',{path:'calc.cjs',content:"const fs=require('fs');module.exports=Math.min(2,Number(fs.readFileSync('a.txt'))*Number(fs.readFileSync('b.txt')));"});
     else message=toolCall('submit_delivery',{summary:'Reconciled combined behavior',test_command:'node check.cjs'});
    }else throw Error('Unexpected model execution');
@@ -72,7 +76,7 @@ async function fixture(t,mode='clean'){
   const currentPR=()=>({...pr,head:{sha:git(['rev-parse','refs/heads/'+pr.head.ref]),ref:pr.head.ref,repo:{id:101}},base:{ref:'main',sha:staleBase?base:main}});
   if(p.endsWith('/pulls')&&req.method==='POST'){pr={id:1,node_id:'PR_fixture',number:1,state:'open',draft:false,user:{id:999},head:{ref:body.head},title:body.title,body:body.body,html_url:'https://github.invalid/pull/1'};return send(currentPR());}
   if(p.endsWith('/pulls/1')){if(req.method==='PATCH')Object.assign(pr,body);return send(currentPR());}
-  if(p.endsWith('/check-runs'))return send({check_runs:[]});
+  if(p.endsWith('/check-runs'))return send({check_runs:failedChecks-->0?[{id:99,name:'Install packages',status:'completed',conclusion:'failure'}]:[]});
   if(p.endsWith('/status'))return send({state:'pending',statuses:[]});
   if(p.endsWith('/pulls/1/merge')&&req.method==='PUT'){
    assert.equal(body.sha,currentPR().head.sha);const tree=git(['rev-parse',body.sha+'^{tree}']);
@@ -90,13 +94,15 @@ async function fixture(t,mode='clean'){
  const records=new TaskRecords(s);records.contract('t',{goal:'Keep bounded totals and preserve all features.',scope:['fixture'],criteria:['No feature lost; bounded total'],endpoint:'reviewable_pull_request'});
  const manager=new LocalManager('101',computer);await manager.call('PUT','/v1/projects/101');
  const task=s.get("SELECT * FROM tasks WHERE id='t'"),space=new Workspace(s,manager,task,new Redactor(),async()=>{},()=>{}),gh=new GitHub(s,s.get("SELECT * FROM repositories WHERE id='101'"),new Redactor(),async()=>{},endpoint);await gh.connect(true);
- const snapshot=await space.prepare(gh,base);await space.write('change-a','a.txt',Buffer.from('2'));const candidate=await space.artifact('original-candidate');
+ const snapshot=await space.prepare(gh,base);await space.write('change-a','a.txt',Buffer.from('2'));
+ if(mode==='qa-return')await space.write('conflict-marker','regression.cjs',Buffer.from('<<<<<<< ours\nmodule.exports=1;\n=======\nmodule.exports=2;\n>>>>>>> theirs\n'));
+ const candidate=await space.artifact('original-candidate');
  s.run("INSERT INTO bot_branches VALUES('101','bot/issue-7-t','t')");s.run('INSERT INTO development_candidates VALUES(?,?)','t',JSON.stringify({...candidate,files:await space.contents(candidate.files,snapshot.files),source_tree:treeA,snapshot_files:snapshot.files,skipped_files:[],base_sha:base,base_branch:'main',branch:'bot/issue-7-t',owner_task_id:'t',expected_sha:null,pr_number:null,date:new Date().toISOString(),summary:'feature a',test_command:'node check.cjs',validation:{source:'policy',exit_code:0,command:'node check.cjs'}}));
  const instance=roleInstance(s,task,'dev');s.run('UPDATE role_instances SET sequence=1 WHERE id=?',instance.id);
  // Another PR advances main before this task publishes. The old fence rejected even this PR creation.
- const changes=mode==='clean'?{'other.txt':'independent feature'}:mode==='conflict'?{'a.txt':'3'}:{'b.txt':'2'};
+ const changes=['clean','qa-return'].includes(mode)?{'other.txt':'independent feature'}:mode==='conflict'?{'a.txt':'3'}:{'b.txt':'2'};
  const treeB=makeTree(changes,treeA);main=git(['commit-tree',treeB,'-p',base],'other feature\n');git(['update-ref','refs/heads/main',main]);
- let qaCalls=0;const engine=new TaskEngine(s,manager,endpoint,undefined,async(...args)=>{qaCalls++;return acceptanceFixture(...args);});t.after(()=>engine.close());
+ let qaCalls=0;const engine=new TaskEngine(s,manager,endpoint,undefined,async(...args)=>{qaCalls++;if(options.evaluate)return options.evaluate(qaCalls,...args);if(mode==='qa-return'&&qaCalls===2){const raw=await args[2].call('fixture-conflict-read',{type:'workspace_read',path:'regression.cjs'});assert.match(raw.content,/<<<<<<< ours/);return {outcome:'return',reason:'QA_REPAIR_REQUIRED: regression.cjs contains conflict markers',gaps:['Remove the conflict markers and validate the existing PR'],residuals:[],core_complete:false,required_evidence_complete:true,acceptable_risk:false};}return acceptanceFixture(...args);});t.after(()=>engine.close());
  return {root,s,engine,key,manager,endpoint,space,pauseFacts(){let release;factsWait=new Promise(r=>release=r);return ()=>{factsWait=null;release();};},get factsEntered(){return factsEntered;},set stalePRBase(value){staleBase=value;},dev:instance.id,get main(){return main;},git,counts:()=>({puts,branchWrites,modelCalls,qaCalls})};
 }
 
@@ -132,6 +138,37 @@ for(const mode of ['clean','conflict','semantic'])test(`full engine ${mode}: sta
  if(mode==='clean')assert.equal(h.git(['show',h.main+':other.txt']),'independent feature');
  if(mode==='semantic')assert.equal(h.git(['show',h.main+':b.txt']),'2');
  assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'merged');
+});
+
+test('QA return after an existing PR resumes Manager/Dev and updates that PR before merging',async t=>{
+ const h=await fixture(t,'qa-return');h.engine.tick();await Promise.all(h.engine.active.values());
+ const original=h.s.get("SELECT * FROM tasks WHERE id='t'"),first=JSON.parse(original.result);
+ await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:first.sha,merge_method:'merge'});
+ h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
+ const returned=h.s.get("SELECT * FROM tasks WHERE id='t'");
+ assert.equal(returned.status,'queued');assert.notEqual(returned.error_code,'acceptance_publication_changed');assert.equal(h.counts().puts,0);
+ h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
+ const repaired=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(repaired.status),JSON.stringify(repaired));
+ assert.equal(JSON.parse(repaired.result).pr_number,first.pr_number);assert.notEqual(JSON.parse(repaired.result).sha,first.sha);
+ assert.equal(h.counts().qaCalls,3);assert.ok(h.counts().modelCalls>0);assert.equal(h.s.get('SELECT count(*) n FROM bot_pull_requests').n,1);
+ h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());
+ assert.equal(h.counts().puts,1);assert.equal(h.git(['show',h.main+':other.txt']),'independent feature');
+ assert.equal(h.git(['show',h.main+':regression.cjs']),'module.exports=1;');
+});
+
+for(const decision of ['continue_retry','investigate'])test(`three failed CI integrations notify Manager, which can ${decision}`,async t=>{
+ const h=await fixture(t,'clean',{failedChecks:3,retryDecision:decision});h.engine.tick();await Promise.all(h.engine.active.values());
+ // The first integration is for the already advanced main, followed by three actual failed-CI attempts.
+ for(let attempt=0;attempt<=3;attempt++){
+  const task=h.s.get("SELECT * FROM tasks WHERE id='t'");
+  const result=await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:JSON.parse(task.result).sha,merge_method:'merge'});
+  assert.equal(result.status,'integrating');h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());
+ }
+ const reports=h.s.all("SELECT data FROM task_history WHERE type='retry_report'").map(r=>JSON.parse(r.data));assert.deepEqual(reports.map(r=>r.count),[3]);
+ const decided=h.s.get("SELECT data FROM task_history WHERE type='retry_decision'");assert.equal(JSON.parse(decided.data).action,decision);
+ const task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.ok(['completed','pr_opened'].includes(task.status),JSON.stringify(task));
+ assert.equal(h.s.get("SELECT sequence FROM role_instances WHERE id=?",h.dev).sequence,decision==='investigate'?2:1);
+ h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());assert.equal(h.counts().puts,1);
 });
 
 

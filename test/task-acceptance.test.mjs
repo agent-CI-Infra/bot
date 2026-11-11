@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { harness, setup, account, repository } from './helpers.mjs';
 import { TaskRecords } from '../dist/tasks/service.js';
-import { evaluateDelivery } from '../dist/tasks/acceptance.js';
+import { evaluateDelivery, acceptanceContextFiles } from '../dist/tasks/acceptance.js';
 import { Redactor } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 const pass={outcome:'pass',reason:'Raw artifact meets the requested contract',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
@@ -29,6 +29,25 @@ test('real evaluator starts fresh, can inspect raw artifacts, records separate m
  assert.deepEqual(f.requests[0].tools.map(t=>t.function.name),['read_evidence','read_task_history','read_file','submit_acceptance']);
  assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_evidence'").n,1);
  assert.equal(f.h.store.get('SELECT count(*) n FROM model_requests WHERE task_id=?',f.task.id).n,2);
+});
+test('QA receives the actual Issue source path and reads the original behind a derived summary',async t=>{
+ const f=await fixture(t,(body,n)=>{
+  const input=JSON.parse(body.messages[1].content);
+  assert.deepEqual(input.context_files,['../context/object.json','../context/comments.json']);
+  assert.match(input.requirements_instruction,/condensed summary/);
+  return n===1?{role:'assistant',content:null,tool_calls:[{id:'source',type:'function',function:{name:'read_file',arguments:JSON.stringify({path:input.context_files[0]})}}]}:{role:'assistant',content:JSON.stringify({...pass,outcome:'return',reason:'Original FR3 requires normalized bounds',gaps:['min>max must yield the minimum depth'],core_complete:false})};
+ });
+ f.h.store.run("UPDATE tasks SET input=? WHERE id=?",JSON.stringify({context:{context_files:[{path:'../context/object.json',content:'Full original request'},{path:'../context/comments.json',content:'Comments'}]}}),f.task.id);
+ f.task.input=f.h.store.get('SELECT input FROM tasks WHERE id=?',f.task.id).input;
+ f.h.store.run('UPDATE task_records SET contract=? WHERE task_id=?',JSON.stringify({...f.records.get(f.task.id).contract,completeness:'derived_from_source'}),f.task.id);
+ const paths=[];
+ const result=await evaluateDelivery(f.h.store,f.task,{call:async(_key,r)=>{paths.push(r.path);return {content:JSON.stringify({body:'FR3: min>max yields [min,min]'})};}},new Redactor(),async()=>{},false);
+ assert.equal(result.outcome,'return');assert.deepEqual(paths,['../context/object.json']);
+ assert.equal(f.h.store.get("SELECT count(*) n FROM task_history WHERE type='acceptance_evidence' AND json_extract(data,'$.arguments.path')='../context/object.json'").n,1);
+});
+test('QA source paths support existing nested indexes and legacy/parent file maps without numeric filenames',()=>{
+ assert.deepEqual(acceptanceContextFiles({context_files:{'request.md':'original'},context:{context_files:[{path:'../context/object.json'},'../context/comments.json']}},{context_files:{'parent.md':'source','object.json':'duplicate'}}),['../context/request.md','../context/object.json','../context/comments.json','../context/parent.md']);
+ assert.deepEqual(acceptanceContextFiles({},null),[]);
 });
 test('the evaluator gets a bounded candidate: a workspace file list and old evidence previews stay out, sources stay readable',async t=>{
  // Production: a files artifact listing 9,500 files (1.5 MB) put the evaluator's first request over 2 MiB.

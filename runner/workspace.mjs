@@ -48,11 +48,12 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   // Snapshot plumbing has no command timeout or execFile output cap. Large cat-file output goes to disk.
   // The model's shell command timeout is still controlled by command().
   const git=(args,data,output)=>new Promise((res,rej)=>{
-    const chunks=[],child=spawn('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgsign=false',...args],
-      {cwd:repo,env:{...environment,...workspaceTag(input.workspace_id),GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},stdio:['pipe',output?.fd??'pipe','ignore']});
+    const chunks=[],errors=[],child=spawn('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgsign=false',...args],
+      {cwd:repo,env:{...environment,...workspaceTag(input.workspace_id),GIT_AUTHOR_NAME:'Department Bot',GIT_AUTHOR_EMAIL:author.email,GIT_COMMITTER_NAME:'Department Bot',GIT_COMMITTER_EMAIL:author.email},stdio:['pipe',output?.fd??'pipe','pipe']});
     child.stdout?.on('data',chunk=>chunks.push(chunk));
+    let errorBytes=0;child.stderr.on('data',chunk=>{if(errorBytes<8000)errors.push(chunk.subarray(0,8000-errorBytes));errorBytes+=chunk.length;});
     child.on('error',()=>rej(new Error(`git ${args[0]} could not start`)));
-    child.on('close',(code,signal)=>code===0?res(Buffer.concat(chunks)):rej(new Error(`git ${args[0]} failed: ${signal||code}`)));
+    child.on('close',(code,signal)=>code===0?res(Buffer.concat(chunks)):rej(new Error(`git ${args[0]} failed: ${signal||code}; ${Buffer.concat(errors).toString('utf8').trim()}`)));
     child.stdin.on('error',()=>{});child.stdin.end(data);
   });
   // An evaluator gets a distinct checkout of the submitted Git object, never the executor's dirty tree/session.

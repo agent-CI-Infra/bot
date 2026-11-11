@@ -28,7 +28,7 @@ export const permissionItems: PermissionItem[] = [
   action('dispatch', '处理项目事件', ['dispatch'], '决定为事件新建任务、续接任务或不处理。'),
   action('delegation', '委派角色', ['delegate_role', 'delegate_roles'], '将工作委派给已配置并启用的角色。'),
   action('subagents', '启动独立执行会话', ['start_agent'], '启动工具范围不超过当前角色的独立会话。'),
-  action('nomination', '交付提名与任务协调', ['nominate_delivery','submit_followup_plan','set_task_priority','relate_task'], '将候选交给独立 QA，按事实判级或关联任务；不等于通过验收，也不授予 GitHub 写权限。'),
+  action('nomination', '交付提名与任务协调', ['nominate_delivery','submit_followup_plan','submit_retry_decision','set_task_priority','relate_task'], '将候选交给独立 QA，按事实判级或关联任务；不等于通过验收，也不授予 GitHub 写权限。'),
   action('submission', '提交角色结果', ['submit_role_result', 'submit_delivery', 'finish', 'finish_review', 'finish_analysis', 'finish_observation', 'finish_release_notes', 'submit_gate_plan'], '提交当前任务入口要求的结构化结果。'),
   action('acceptance', '提交独立验收', ['submit_acceptance'], '仅独立验收入口提供此工具。'),
   action('pull_request', '创建或更新 bot PR', ['create_pull_request'], '请求控制面发布本次任务允许的 PR，仍须通过项目验证和 QA。'),

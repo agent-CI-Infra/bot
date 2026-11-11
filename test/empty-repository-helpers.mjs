@@ -13,6 +13,7 @@ export async function emptyRepositoryFixture(t,options={}){
     let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{},path=new URL(req.url,'http://fixture').pathname;
     const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
     if(await options.github?.(path,send,res,body))return;
+    if(path==='/v1/chat/completions'&&body.tools?.some(t=>t.function.name==='submit_retry_decision'))return send({choices:[{message:{role:'assistant',tool_calls:[{id:'retry',type:'function',function:{name:'submit_retry_decision',arguments:JSON.stringify({action:'continue_retry',reason:'Fixture keeps the existing retry scenario running'})}}]}}]});
     if(path==='/user')return send({id:999,login:'fixture-bot'});
     if(path==='/repositories/101')return send({id:101,owner:{id:10},full_name:'fixture/project-101',default_branch:'main'});
     if(path.endsWith('/issues/1'))return send({id:1,number:1,state:'open',title:'First issue',body:'Please review this project.'});
@@ -39,7 +40,7 @@ export async function emptyRepositoryFixture(t,options={}){
     return {repository_id:'101',state:'ready',generation,desired:'ready',revision:1};
   }};
   const h=await harness(undefined,manager,store=>({engine:engine=new TaskEngine(store,manager,githubUrl, undefined, acceptanceFixture)})),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
-  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:options.modelUrl??'https://model.invalid/v1',api_key:'fixture-key',model_name:'fixture-model'})).value.model;
+  const model=(await admin('/api/models','POST',{repository_id:'101',api_url:options.modelUrl??githubUrl+'/v1',api_key:'fixture-key',model_name:'fixture-model'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{review_enabled:true,model_id:options.modelConfigured===false?null:model.id});
   await h.hook(a.path,a.secret,'first-issue',{repository:{id:101},action:'opened',issue:{number:1,title:'First issue',body:'Please review this project.'}});
   const taskId=h.store.get('SELECT id FROM tasks').id;

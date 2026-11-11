@@ -1,6 +1,6 @@
 import { assertRequiredStages, deliveryCandidate } from './schedule.js';
 import {assertCoordinationCurrent} from '../tasks/coordination.js';
-import type { Store } from '../storage/database.js';
+import type { Store, Row } from '../storage/database.js';
 import { scope,type Actor } from '../app/auth.js';
 import { fields,fail,type Json } from '../core/security.js';
 import { GitHub } from '../github/client.js';
@@ -10,6 +10,7 @@ import { TaskRecords } from '../tasks/service.js';
 import { traceEvent } from '../tasks/trace.js';
 import {authorizeMerge,requestIntegration,integrationStorage} from '../tasks/integration.js';
 import {mergeQueue} from '../projects/gate-facts.js';
+import {recordRetryFailure,resolveRetry} from '../tasks/retries.js';
 
 async function checks(s:Store,github:GitHub,taskId:string,head:string){
  const runs:any[]=[];
@@ -25,7 +26,14 @@ async function checks(s:Store,github:GitHub,taskId:string,head:string){
  // Polling an unchanged queue must not manufacture apparent task progress.
  const last=s.get("SELECT data FROM task_history WHERE task_id=? AND type='merge_checks' ORDER BY id DESC LIMIT 1",taskId);
  if(last?.data!==JSON.stringify(result))traceEvent(s,taskId,'merge_checks',result,null,'framework');
+ if(!failed&&!pending)resolveRetry(s,taskId,'merge_checks');
  return result;
+}
+function retryFailedChecks(s:Store,task:Row,base:string,head:string,pr:any){
+ requestIntegration(s,task,base,'pull_request_checks_failed:'+head,pr);
+ const source=s.get("SELECT id,data FROM task_history WHERE task_id=? AND type='merge_checks' ORDER BY id DESC LIMIT 1",task.id);
+ recordRetryFailure(s,task,{group:'merge_checks',occurrence:head,code:'pull_request_checks_failed',source_ref:source?'task_history:'+source.id:undefined,
+  detail:source?JSON.stringify(JSON.parse(source.data)):undefined});
 }
 const evolved=(s:Store,task:any,head:string,merged:any,actor:Actor)=>{
  s.transaction(()=>{
@@ -108,14 +116,14 @@ async function mergeRequest(s:Store,user:Actor,method:string,url:URL,input:Json,
    fail(409,'merge_queue_removed');
   }
   if(previous&&!group){if(Date.now()-Date.parse(previous.created_at)>60000)fail(409,'merge_queue_removed');return {merged:false,status:'awaiting_queue_visibility',pr_number:pr.number};}
-  const checked=await checks(s,github,task!.id,head);if(checked.failed&&candidate?.local_sha&&task!.workspace_id){requestIntegration(s,task!,base,'pull_request_checks_failed:'+head,pr);return {merged:false,status:'integrating',task_id:task!.id};}if(checked.failed||checked.pending)fail(409,'merge_checks_not_green');
+  const checked=await checks(s,github,task!.id,head);if(checked.failed&&candidate?.local_sha&&task!.workspace_id){retryFailedChecks(s,task!,base,head,pr);return {merged:false,status:'integrating',task_id:task!.id};}if(checked.failed||checked.pending)fail(409,'merge_checks_not_green');
   const publisher=new Publisher(s,github,task!,validate);
   const enqueued=await publisher.effect('enqueue:'+head+':'+generation,'merge_queue',{head:head},()=>github.graphql('mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id position}}}',{id:remote?.id??pr.node_id,head:head}),async()=>null,true);
   traceEvent(s,task!.id,'merge_queue',{pr_number:pr.number,head_sha:head,entry_id:enqueued?.enqueuePullRequest?.mergeQueueEntry?.id??null,position:enqueued?.enqueuePullRequest?.mergeQueueEntry?.position??null,state:'ENQUEUED',base_sha:null,combined_sha:null},null,'framework');
   s.run("UPDATE task_merge_requests SET state='queued' WHERE task_id=?",task!.id);
   return {merged:false,status:'queued',pr_number:pr.number};
  }
- const checked=await checks(s,github,task!.id,head);if(checked.failed&&candidate?.local_sha&&task!.workspace_id){requestIntegration(s,task!,base,'pull_request_checks_failed:'+head,pr);return {merged:false,status:'integrating',task_id:task!.id};}if(checked.failed||checked.pending)fail(409,'merge_checks_not_green');
+ const checked=await checks(s,github,task!.id,head);if(checked.failed&&candidate?.local_sha&&task!.workspace_id){retryFailedChecks(s,task!,base,head,pr);return {merged:false,status:'integrating',task_id:task!.id};}if(checked.failed||checked.pending)fail(409,'merge_checks_not_green');
  s.audit(user.id,'task.merge.authorized',task!.id,task!.repository_id);
  const publisher=new Publisher(s,github,task!,async()=>{await validate();if(!pr.merged&&candidate?.base_sha&&(await github.ref(github.defaultBranch))?.object?.sha!==candidate.base_sha)fail(409,'merge_base_advanced');});
  const merged=await publisher.effect('merge:'+head,'merge',{pr:result.pr_number,sha:head,method:input.merge_method,actor:user.id},()=>github.request('PUT',github.path('/pulls/'+result.pr_number+'/merge'),{sha:head,merge_method:input.merge_method}),async()=>{const current=await github.object('review.pr',result.pr_number);return current.merged&&current.head.sha===head?{merged:true,sha:current.merge_commit_sha,reconciled:true}:null;});
