@@ -1,0 +1,13 @@
+.schedule-records { margin-block:24px; padding:20px; border:1px solid var(--color-border); border-radius:var(--radius-card); background:var(--color-surface); min-width:0; }
+.schedule-record-tabs,.schedule-record-paging { display:flex; flex-wrap:wrap; gap:8px; margin-block:12px; }
+.schedule-record { border:1px solid var(--color-border); border-radius:var(--radius-3); padding:12px 16px; margin-block:10px; min-width:0; }
+.schedule-record > summary { cursor:pointer; min-height:44px; line-height:1.6; overflow-wrap:anywhere; }
+.schedule-record-timeline { padding-left:24px; }
+.schedule-record-timeline > li { padding:4px 0 12px 8px; border-left:2px solid var(--color-border); }
+.schedule-record h5 { margin:8px 0; font-size:14px; }
+.schedule-record dl { display:grid; grid-template-columns:minmax(100px,.3fr) minmax(0,1fr); gap:8px 16px; margin:12px 0; }
+.schedule-record dt { color:var(--color-text-muted); }
+.schedule-record dd { margin:0; overflow-wrap:anywhere; }
+.schedule-record pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:420px; overflow:auto; }
+.schedule-record-receipt:not(:empty) { padding:16px; background:var(--color-brand-weak); border-radius:var(--radius-3); }
+@media(max-width:767px) { .schedule-records { padding:12px; } .schedule-record { padding:12px; } .schedule-record dl { grid-template-columns:minmax(0,1fr); gap:4px; } .schedule-record dd { margin-bottom:10px; } .schedule-record-timeline { padding-left:16px; } }

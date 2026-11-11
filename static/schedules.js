@@ -94,16 +94,6 @@ async function renderSchedules(panel, project) {
     subscriptionBox.append(row);
   }
   panel.append(subscriptionBox);
-  const diagnostic = element('pre', ''), retryActions = element('div', '', 'actions'); diagnostic.setAttribute('aria-label', '计划与通知记录');
-  for (const [operation, label] of [['list_occurrences', '查看运行与跳过原因'], ['list_notification_deliveries', '查看通知及失败队列'], ['list_schedule_audit', '查看触发审计']]) panel.append(button(label, async () => {
-    try {
-      const result = await read(operation); diagnostic.textContent = JSON.stringify(result, null, 2); retryActions.replaceChildren();
-      if (operation === 'list_notification_deliveries') for (const delivery of result.records.filter(d => ['dead', 'unknown'].includes(d.state))) {
-        const acknowledge = input('接受未知结果可能重复送达', '', 'checkbox');
-        if (delivery.state === 'unknown') retryActions.append(field('接受未知结果可能重复送达', acknowledge));
-        retryActions.append(button('人工补发 ' + delivery.id.slice(0, 12), () => command('notification.retry', { id: delivery.id, acknowledge_unknown: delivery.state === 'unknown' && acknowledge.checked }), 'quiet'));
-      }
-    } catch (e) { status.textContent = e.message; }
-  }, 'quiet'));
-  panel.append(diagnostic, retryActions, button('刷新定时与通知', () => renderSchedules(panel, project), 'quiet'));
+  renderScheduleRecords(panel, { project, read, invalidate: () => panel.replaceChildren(note('计划访问权限已失效，请按当前授权重新进入。')) });
+  panel.append(button('刷新定时与通知', () => renderSchedules(panel, project), 'quiet'));
 }

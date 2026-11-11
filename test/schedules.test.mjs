@@ -410,3 +410,44 @@ test('a real worker process exits after its committed claim; replacement process
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_occurrences').n, 1); assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
   assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 1);
 });
+
+test('delivery diagnostics use the historical occurrence, verify destinations and paginate only scoped records', async t => {
+  const f = await fixture(t), plan = await f.create();
+  f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence()); await f.worker.tick();
+  const first = (await query(f, 'list_notification_deliveries')).records[0];
+  assert.equal(first.origin.name, '项目日报'); assert.equal(first.origin.state, 'succeeded');
+  assert.equal(first.destination.valid, true); assert.equal(first.destination.type, 'p2p');
+  assert.equal(first.attempts_detail[0].state, 'sent'); assert.equal(first.payload.report.window.end, first.origin.logical_at);
+  const changed = f.plan({ name: '之后修改的计划' });
+  f.h.store.run('UPDATE schedules SET spec=? WHERE id=?', JSON.stringify(changed), plan.id);
+  for (let i = 0; i < 20; i++) f.h.store.run(`INSERT INTO notification_outbox
+    SELECT ?,tenant_id,project_id,destination_id,schedule_id,occurrence_id,subscription_id,subscription_revision,actor_id,authorization,
+      ?,incident,parent_id,payload,state,attempts,manual_retries,next_attempt,lease,lease_until,last_error,remote_message_id,created_at,sent_at
+    FROM notification_outbox WHERE id=?`, 'diagnostic-copy-' + i, 'diagnostic-key-' + i, first.id);
+  const page = await query(f, 'list_notification_deliveries', { limit: 20 });
+  const rest = await query(f, 'list_notification_deliveries', { limit: 20, offset: page.next_offset });
+  assert.equal(page.records.length, 20); assert.equal(rest.records.length, 1); assert.equal(rest.next_offset, null);
+  assert.equal(new Set([...page.records, ...rest.records].map(r => r.id)).size, 21);
+  assert.ok(page.records.every(r => r.origin.name === '项目日报'));
+  assert.equal((await query(f, 'list_notification_deliveries', {}, f.admin, '102')).records.length, 0);
+  f.h.store.run("UPDATE channel_outbox SET state='blocked' WHERE id=?", f.destination);
+  const invalid = (await query(f, 'list_notification_deliveries')).records[0];
+  assert.equal(invalid.destination.valid, false); assert.ok(invalid.destination.reason);
+  assert.equal(invalid.origin.name, '项目日报'); assert.equal(invalid.destination.chat_id, undefined);
+  const user = await f.member('diagnostic-without-project');
+  const denied = await user.client('/api/management/query', 'POST', { operation:'list_notification_deliveries', target, arguments:{} });
+  assert.equal(denied.status, 403); assert.equal(denied.value.records, undefined);
+});
+
+test('event diagnostics retain saved observations and never label them with a newer subscription configuration', async t => {
+  const f = await fixture(t), spec = { name:'失败事件窗口', destination_id:f.destination, events:['task.failed'], projects:['101'], aggregate_ms:60000, timezone:'UTC', enabled:true };
+  const saved = await command(f, 'notification.register', { subscription:spec });
+  f.h.store.run("UPDATE tasks SET status='failed' WHERE id='blocked'"); f.worker.fanout();
+  const first = (await query(f, 'list_notification_deliveries')).records[0];
+  assert.equal(first.origin.name, spec.name); assert.equal(first.origin.logical_at, undefined);
+  assert.equal(first.payload.events[0].type, 'task.failed'); assert.equal(first.occurrence_id, null);
+  await command(f, 'subscription.update', { id:saved.value.result.subscription.id, revision:1, subscription:{...spec,name:'之后的名称',timezone:'Asia/Shanghai'} });
+  const changed = (await query(f, 'list_notification_deliveries')).records[0];
+  assert.equal(changed.origin.name, null); assert.equal(changed.origin.timezone, null);
+  assert.equal(changed.origin.revision, 1); assert.deepEqual(changed.payload.events, first.payload.events);
+});

@@ -313,12 +313,29 @@ export class ScheduleService {
     }
     const table = ({ list_occurrences: 'schedule_occurrences', list_notification_deliveries: 'notification_outbox', list_schedule_audit: 'schedule_audit' } as Record<string, string>)[operation];
     if (!table) return fail(400, 'unknown_schedule_query');
-    const rows = this.store.all(`SELECT * FROM ${table} WHERE project_id=? ORDER BY ${table === 'schedule_occurrences' ? 'scheduled_at' : 'created_at'} DESC,id DESC LIMIT ? OFFSET ?`, project, limit, offset);
+    const rows = this.store.all(`SELECT * FROM ${table} WHERE project_id=? ORDER BY ${table === 'schedule_occurrences' ? 'scheduled_at' : 'created_at'} DESC,id DESC LIMIT ? OFFSET ?`, project, limit + 1, offset);
+    const more = rows.length > limit; rows.splice(limit);
     return { revision, records: rows.map(r => ({ ...r, ...Object.fromEntries(['snapshot', 'authorization', 'payload', 'result', 'detail'].filter(k => typeof r[k] === 'string').map(k => [k, JSON.parse(r[k])])),
-      ...(table === 'notification_outbox' ? { attempts_detail: this.store.all('SELECT * FROM notification_attempts WHERE outbox_id=? ORDER BY attempt', r.id) } : {}) })),
+      ...(table === 'notification_outbox' ? { ...this.deliveryContext(r, project), attempts_detail: this.store.all('SELECT * FROM notification_attempts WHERE outbox_id=? ORDER BY attempt', r.id) } : {}) })),
       budgets: this.store.all('SELECT * FROM schedule_budgets WHERE (scope=\'project\' AND scope_id=?) OR (scope=\'tenant\' AND scope_id=?)', project, actor.tenant_id),
-      usage: this.store.all('SELECT * FROM schedule_usage WHERE scope=\'project\' AND scope_id=? ORDER BY day DESC', project), next_offset: rows.length === limit ? offset + limit : null };
+      usage: this.store.all('SELECT * FROM schedule_usage WHERE scope=\'project\' AND scope_id=? ORDER BY day DESC', project), next_offset: more ? offset + limit : null };
   }
+  private deliveryContext(row: Row, project: string): Json {
+    // Use the occurrence snapshot, not a plan edited after this notification was produced.
+    const occurrence = row.occurrence_id ? this.store.get('SELECT * FROM schedule_occurrences WHERE id=? AND project_id=?', row.occurrence_id, project) : undefined;
+    const plan = occurrence ? JSON.parse(occurrence.snapshot).plan as Plan : undefined;
+    const subscription = row.subscription_id ? this.store.get('SELECT * FROM notification_subscriptions WHERE id=? AND project_id=?', row.subscription_id, project) : undefined;
+    const spec = subscription && subscription.revision === row.subscription_revision ? JSON.parse(subscription.spec) as SubscriptionSpec : undefined;
+    let destination: Json;
+    try {
+      const current = this.destination(row.destination_id, project);
+      destination = { valid: true, type: current.event.chat_type, chat_id: current.event.chat_id };
+    } catch (error) { destination = { valid: false, reason: error instanceof HttpError ? error.code : 'destination_unavailable' }; }
+    return { origin: plan && occurrence ? { name: plan.name, timezone: plan.timezone, revision: occurrence.revision,
+      logical_at: occurrence.logical_at, run_id: occurrence.run_id, state: occurrence.state, reason: occurrence.reason } :
+      { name: spec?.name ?? null, timezone: spec?.timezone ?? null, revision: row.subscription_revision }, destination };
+  }
+
   deliveryGuard(row: Row): ActorContext {
     this.executionScope(row.project_id);
     let execution: ActorContext;
