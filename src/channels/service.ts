@@ -5,16 +5,17 @@ import { digest, fail, HttpError, object, randomId, text, type Json } from '../c
 import { traceClean } from '../tasks/trace.js';
 import { ManagementAgent } from '../management/agent.js';
 import { parameterHash } from '../management/service.js';
-import { managementFailure, managementStates } from '../management/presentation.js';
+import { managementFailure, managementStates, serviceFailure } from '../management/presentation.js';
 import { commands } from '../management/catalog.js';
-import { managementAssistant } from '../service-roles/roles.js';
+import { managementAssistant, serviceRole } from '../service-roles/roles.js';
 import { ChannelBindings, externalSubject } from './binding.js';
 import { FeishuAdapter, type ChannelFetch } from './feishu.js';
 import type { ChannelDelivery, ChannelEvent } from './types.js';
 import { ChannelLedger } from './ledger.js';
 import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
-import { RoleConversations } from '../roles/conversation.js';
+import { bindingScope, ChannelServiceBindings } from './service-bindings.js';
+import { ChannelServiceSessions } from './service-session.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { assertManagedExecution, taskAuthorizationFence } from '../tasks/management.js';
 import type { Manager } from '../projects/service.js';
@@ -25,14 +26,15 @@ const card = (value: string, link?: string, token?: string): Json => ({ config: 
   elements: [{ tag: 'div', text: { tag: 'plain_text', content: value.length>12000?value.slice(0,11880)+'\n内容较长，此卡片仅显示前段；请登录后台查看完整记录。':value } },
     ...(link ? [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '登录后台查看' }, url: link },
       ...(token ? [{ tag: 'button', text: { tag: 'plain_text', content: '刷新执行状态' }, value: { token } }] : [])] }] : [])] });
-export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; }
+export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; }
 /** Transport replies and authorized destination registration. Durable scheduling lives in schedules/. */
 export class ChannelService {
   readonly bindings: ChannelBindings;
   readonly ledger: ChannelLedger;
   readonly historySync: ChannelHistorySync;
   readonly employees: ChannelEmployees;
-  readonly conversations: RoleConversations;
+  readonly serviceBindings: ChannelServiceBindings;
+  readonly serviceSessions: ChannelServiceSessions;
   private readonly business = new Map<string,Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
@@ -42,8 +44,9 @@ export class ChannelService {
     this.bindings = new ChannelBindings(store, e => this.source(e));
     this.ledger = new ChannelLedger(store);
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
-    this.conversations = new RoleConversations(store, management.service.tasks, options.manager);
-    this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.employees.guardSync(chat));
+    this.serviceBindings = new ChannelServiceBindings(store, this.employees);
+    this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl);
+    this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.syncGuard(chat));
     management.sourceGuard=(actor,conversation)=>{
       const source=store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND context_revision IS NOT NULL ORDER BY rowid DESC LIMIT 1',conversation);
       if(!source)return;
@@ -55,11 +58,14 @@ export class ChannelService {
     };
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
-      const source = store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND message_id IS NOT NULL AND id=?',
+      // A group's command runs as its binding's principal: the console binding, not the speaker, is its authority.
+      const binding = store.get('SELECT * FROM channel_service_bindings WHERE principal_id=?', command.principal_id);
+      const source = store.get(`SELECT * FROM channel_inbox WHERE conversation_id=? AND ${binding ? '' : 'message_id IS NOT NULL AND '}id=?`,
         command.source_conversation, String(command.source_message).replace(/^feishu:/, ''));
       if (!source) fail(403, 'channel_command_source_required');
       const e = store.secrets.open(source!.payload, 'channel-event:' + source!.id) as unknown as ChannelEvent;
       this.source(e);
+      if (binding) { this.serviceBindings.guardCommand(binding, command, e); return; }
       const subject = externalSubject(e);
       if (!store.get("SELECT 1 FROM external_identities WHERE principal_id=? AND provider=? AND host=? AND connector=? AND external_tenant=? AND external_actor=? AND status='active'",
         command.principal_id, subject.provider, subject.host, subject.connector, subject.external_tenant, subject.external_actor)) fail(403, 'external_binding_required');
@@ -79,12 +85,30 @@ export class ChannelService {
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
     this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); void this.employees.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
   }
-  close(): void { this.stopped = true; this.conversations.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
+  close(): void { this.stopped = true; this.serviceSessions.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
   async drain():Promise<void>{await Promise.allSettled([...this.business.values()]);}
+  /** Console readers of a chat's local history: platform managers, its binding's managers, the personal owner or a legacy maintainer. */
+  authorizeHistory(actor:ActorContext,id:string):void{
+    if(this.serviceBindings.canView(actor,id))return;
+    this.employees.authorizeHistory(actor,id);
+  }
+  /** Ledger scopes of bot replies a non-platform reader may see in a chat's local history. */
+  visibleScopes(id:string,actor:ActorContext):string[]{
+    const binding=this.serviceBindings.canView(actor,id);
+    return [...this.employees.visibleProjects(id,actor),...(binding?[bindingScope(binding.id)]:[])];
+  }
+  private syncGuard(chat:Row):void{
+    // A bound group keeps importing history while its binding is enabled; before any binding the app's visible range decides.
+    const binding=this.serviceBindings.get(chat.id);
+    if(binding){if(!binding.enabled)fail(403,'channel_service_binding_disabled');return;}
+    this.employees.guardSync(chat);
+  }
   conversationView(actor:ActorContext,id:string,offset=0):Json{
-    this.employees.authorizeHistory(actor,id);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');
+    this.authorizeHistory(actor,id);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');
     const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',id)!;
     if(chat.chat_type==='p2p')return this.personalView(actor,chat,offset);
+    const binding=this.serviceBindings.get(id);
+    if(binding)return this.serviceView(chat,binding,offset);
     const projects=this.employees.visibleProjects(id,actor),marks=projects.map(()=>'?').join(','),fence=this.businessFence(chat);
     const turns=projects.length?this.store.all(`SELECT id,source_message,project_id,role_id,state,reply,error,created_at,updated_at,fence FROM role_conversation_turns
       WHERE conversation_id=? AND project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`,id,...projects,offset):[];
@@ -95,6 +119,23 @@ export class ChannelService {
     return {conversation_id:id,current_project:this.store.get('SELECT project_id FROM role_conversations WHERE id=?',id)?.project_id??null,
       turns:turns.slice(0,50).map(t=>({...t,fence:undefined,reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'conversation-reply:'+t.id).message:null,
         stale_source:t.fence!==fence})),has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,usage:{...requests,costs,semantics:requests?.usage_missing_requests?'lower_bound':requests?.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(id)};
+  }
+  /** A bound group's assistant turns. Replies derived under an older scope or source are withheld, not shown. */
+  private serviceView(chat:Row,binding:Row,offset:number):Json{
+    const fence=this.serviceBindings.fence(chat.id),view=this.serviceBindings.view(binding);
+    const turns=this.store.all('SELECT * FROM channel_service_turns WHERE chat_id=? ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?',chat.id,offset);
+    const names=new Map(this.store.all('SELECT id,name FROM service_roles').map(r=>[r.id,r.name]));
+    // A group assistant is a service role: its usage is billed to the role, never to a project.
+    const requests=this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
+      sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
+      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IS NULL AND service_role_id IS NOT NULL`,chat.id)!;
+    const costs=this.store.all('SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IS NULL AND service_role_id IS NOT NULL AND cost IS NOT NULL GROUP BY currency',chat.id);
+    return {conversation_id:chat.id,mode:'service',current_project:null,binding:view,
+      turns:turns.slice(0,50).map(t=>({id:t.id,source_message:t.source_message,state:t.state,error:t.error,created_at:t.created_at,updated_at:t.updated_at,
+        role_id:names.get(t.service_role_id)??t.service_role_id,stale_source:t.fence!==fence,
+        reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'service-turn-reply:'+t.id).message:null})),
+      has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,
+      usage:{...requests,costs,semantics:requests.usage_missing_requests?'lower_bound':requests.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(chat.id)};
   }
   private personalView(actor:ActorContext,chat:Row,offset:number):Json{
     const session=this.store.get("SELECT * FROM channel_sessions WHERE connector_id=? AND chat_id=? AND principal_id=? AND project_id=''",chat.connector_id,chat.chat_id,actor.principal_id);
@@ -194,8 +235,8 @@ export class ChannelService {
     if (previous) return { operation_id: previous.id, state: previous.state, duplicate: true };
     if (!c.enabled) fail(403, 'channel_connector_inactive');
     // Reading is independent of speaking. A delayed message still belongs in the local ledger.
-    const ambient=event.chat_type==='group'&&this.store.get(`SELECT 1 FROM channel_employee_grants g JOIN channel_chats h ON h.id=g.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND g.enabled=1
-      AND (g.participation='all' OR (g.participation='questions' AND ?=1))`,event.provider,event.app_id,event.installation_tenant,event.chat_id,/[?？]\s*$/.test(event.content)?1:0);
+    const ambient=event.chat_type==='group'&&this.store.get(`SELECT 1 FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1
+      AND (b.participation='all' OR (b.participation='questions' AND ?=1))`,event.provider,event.app_id,event.installation_tenant,event.chat_id,/[?？]\s*$/.test(event.content)?1:0);
     const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.message_type === 'text' && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
     const id = randomId(), state = actionable ? 'queued' : 'completed';
     this.store.transaction(() => {
@@ -277,7 +318,7 @@ export class ChannelService {
     if (['uninstalled', 'audience_changed', 'message_recalled', 'bot_removed', 'chat_archived'].includes(e.kind)) { this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
     this.source(e);
     if (e.kind === 'bot_added') {
-      this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。项目业务能力须由有资格的已绑定维护人另行启用。'), row.id + ':notice', row.id);
+      this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。群聊助手须由已绑定飞书、对相关仓库有配置权限的维护人在控制台「身份与权限 → 飞书群聊助手」另行启用，并选择服务角色和项目范围。'), row.id + ':notice', row.id);
       this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return;
     }
     if (e.kind === 'card') { await this.refreshCard(row, e); return; }
@@ -297,25 +338,24 @@ export class ChannelService {
       reply(principal ? '此飞书身份已绑定。授权与绑定列表请登录后台身份页查看；发送“重新认证”可重新证明双端。' : '尚未绑定。请发送“绑定”。');
     } else {
       const chat = this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', e.provider,e.app_id,e.installation_tenant,e.chat_id);
-      const employee = chat && e.chat_type==='group' && this.store.get('SELECT 1 FROM channel_employee_grants WHERE chat_id=? AND enabled=1',chat.id);
+      // A bound group is served by its service role; legacy employees no longer receive messages.
+      const binding = chat && e.chat_type==='group' ? this.serviceBindings.active(chat.id) : undefined;
       const legacyCommand = /^\/project \S+\s+\/(?:query|command|link|destination)(?:\s|$)/.test(content);
       if(e.chat_type==='p2p'&&!legacyCommand){
         if(!chat)return fail(403,'channel_chat_not_found');
         await this.personalMessage(row,e,chat,content);return;
       }
-      if (employee && !legacyCommand) {
-        if(!chat)return fail(403,'channel_chat_not_found');
+      if (binding && chat && !legacyCommand) {
         if (this.business.has(chat.id)) { this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return; }
-        const work = this.businessMessage(row,e,chat).catch(error=>{
+        const work = this.serviceMessage(row,e,chat,binding).catch(error=>{
           if(this.stopped)return;
-          if(errorCode(error)==='conversation_busy'){this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;}
           this.store.run("UPDATE channel_inbox SET state='failed',error=? WHERE id=?",errorCode(error),row.id);
-          try { this.source(e);this.queue(e,card('本次请求未完成：'+errorCode(error)+'。已有任务与回执保留，请检查后再继续。'),row.id+':business-error',row.id); } catch {}
+          try { this.source(e);this.queue(e,card(serviceFailure(errorCode(error),serviceRole(this.store,binding.service_role_id)?.name??'群助手')),row.id+':business-error',row.id); } catch {}
         }).finally(()=>this.business.delete(chat.id));
         this.business.set(chat.id,work);return;
       }
       const selection = /^\/project ([^\s]+)(?:\s+([\s\S]*))?$/.exec(content);
-      if (!selection) { reply('请显式选择项目：/project <项目ID> <管理请求>。绑定请在私聊发送“绑定”。'); this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
+      if (!selection) { reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「身份与权限 → 飞书群聊助手」为本群选择服务角色和项目范围；个人绑定请在私聊发送“绑定”。'); this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
       const project = selection[1]!, request = selection[2] ?? '', actor = await this.actor(e, project);
       this.management.service.scope(actor, project);
       if (e.chat_type === 'group') this.groupScope(e, project);
@@ -383,52 +423,17 @@ export class ChannelService {
         this.store.get('SELECT authorization_revision FROM principals WHERE id=?',g.maintainer_id)?.authorization_revision,roleConfiguration(this.store,g.project_id).revision,
         visible.includes(g.project_id)])}));
   }
-  private async businessMessage(row:Row,e:ChannelEvent,chat:Row):Promise<void> {
-    const grants=this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? AND enabled=1',chat.id);
-    const content=e.content.trim().replace(/^\/chat\s+/,''),selection=/^\/project (\S+)(?:\s+([\s\S]*))?$/.exec(content);
-    const previous=this.store.get('SELECT project_id FROM role_conversations WHERE id=?',chat.id)?.project_id;
-    const project=selection?.[1]??(grants.length===1?grants[0]!.project_id:grants.some(g=>g.project_id===previous)?previous:null);
-    if(!project){if(e.addressed)this.queue(e,card('请明确本次操作的项目：/project <项目ID> <请求>。可用项目：'+(grants.map(g=>g.project_id).join('、')||'尚无已授权项目')),row.id+':project',row.id);this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
-    const grant=grants.find(g=>g.project_id===project);if(!grant)return fail(403,'channel_employee_project_required');
-    if(!e.addressed&&grant.participation!=='all'&&!(grant.participation==='questions'&&/[?？]\s*$/.test(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
-    const caller=this.employees.caller(chat.id,project,row.id);
+  /** One message in a bound group: participation decides whether to answer; the reply is protected by the turn's fence. */
+  private async serviceMessage(row:Row,e:ChannelEvent,chat:Row,binding:Row):Promise<void> {
+    const content=e.content.trim().replace(/^\/chat\s+/,'');
+    if(!e.addressed&&binding.participation!=='all'&&!(binding.participation==='questions'&&/[?？]\s*$/.test(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
     const message=(this.ledger.query(chat.id,{message_id:e.message_id}).messages as Json[])[0];
     if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
-    const fence=()=>this.businessFence(chat),projects=this.employees.visibleProjects(chat.id);
-    const fixed=fence(),guard=()=>{if(this.stopped)fail(409,'channel_stopped');this.employees.assertGrant(grant!);if(fence()!==fixed)fail(409,'conversation_source_changed');};
-    const summary=():Json=>{
-      const saved=this.store.get('SELECT * FROM channel_chat_summaries WHERE chat_id=?',chat.id);
-      if(!saved||JSON.parse(saved.sources).authorization_fence!==fixed)return {state:'not_compacted',notice:'摘要尚未建立；可检索本地原文。'};
-      return {...this.store.secrets.open(saved.payload,'channel-summary:'+chat.id),sources:JSON.parse(saved.sources),through_time:saved.through_time,through_id:saved.through_id,authority:'derived; inspect original messages'};
-    };
-    const recent=this.ledger.recent(chat.id,40,projects,fixed),saved=summary(),boundary=recent[0],older=boundary?this.ledger.before(chat.id,boundary,saved.through_id?{message_id:saved.through_id,created_at:saved.through_time}:undefined,projects,fixed):[];
-    // Model context is bounded; original local evidence remains available in explicit chunks.
-    const excerpt=(m:Json,limit:number):Json=>{const {resources,...rest}=m;return {...rest,content:String(m.content??'').slice(0,limit),
-      truncated:String(m.content??'').length>limit,resource_references_available:!!resources};};
     this.store.run('UPDATE channel_inbox SET conversation_id=? WHERE id=?',chat.id,row.id);
-    const result=await this.conversations.run({id:chat.id,source_message:row.id,caller,request:selection?.[2]??content,allowSilence:!e.addressed,fence,guard,
-      context:()=>({recent_messages:recent.map(m=>excerpt(m,3000)),history:this.ledger.diagnostics(chat.id),
-        authorized_projects:grants.filter(g=>projects.includes(g.project_id)).map(g=>({project_id:g.project_id,role:g.role_id})),
-        tasks:caller.permissions?.task_management==='none'?{state:'task_management_disabled'}:this.management.service.tasks.tool(caller,'list_managed_tasks',{})}),
-      query:args=>{guard();const result=this.ledger.query(chat.id,args,projects,fixed);return {...result,messages:(result.messages as Json[]).map(m=>excerpt(m,2000))};},
-      read:args=>{
-        guard();const part=text(args.part??'content'),offset=Number(args.offset??0),limit=Number(args.limit??4000);
-        if(args.offset!==undefined&&typeof args.offset!=='number'||args.limit!==undefined&&typeof args.limit!=='number'||!['content','resources'].includes(part)||!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(limit)||limit<1||limit>8000)return fail(400,'invalid_message_chunk');
-        const found=(this.ledger.query(chat.id,{message_id:text(args.message_id),limit:1},projects,fixed).messages as Json[])[0];
-        if(!found)return {state:'not_found_locally',notice:'No implicit provider fetch.'};
-        const value=part==='content'?String(found.content??''):JSON.stringify(found.resources??[]);
-        return {...excerpt(found,0),part,offset,text:value.slice(offset,offset+limit),next_offset:offset+limit<value.length?offset+limit:null,total_characters:value.length};
-      },summary,
-      ...(older.length?{compact:{input:{prior_summary:saved,messages:older.map(m=>excerpt(m,3000)),sync:this.ledger.diagnostics(chat.id)},commit:(text:string)=>{
-        guard();const through=older.at(-1)!;this.store.run(`INSERT INTO channel_chat_summaries VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET revision=excluded.revision,
-          authorization_revision=excluded.authorization_revision,through_time=excluded.through_time,through_id=excluded.through_id,sources=excluded.sources,payload=excluded.payload`,
-          chat.id,this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)!.context_revision,caller.authorization_revision??0,Number(through.created_at),String(through.message_id),
-          JSON.stringify({authorization_fence:fixed,first_message:older[0]!.message_id,through_message:through.message_id,truncated_messages:older.filter(m=>String(m.content??'').length>3000).map(m=>m.message_id),range_hash:digest(JSON.stringify(older.map(m=>[m.message_id,m.updated_at])))}),
-          this.store.secrets.seal({summary:text},'channel-summary:'+chat.id));
-      }}}:{})});
-    guard(); if(result.message.trim())this.queue(e,card(result.message,this.url()),row.id+':business-result',row.id,{kind:'employee',chat_id:chat.id,project_id:project,principal_id:caller.principal_id,
-      grant_id:grant!.id??null,grant_revision:grant!.revision??null,source_message:row.id,source_fence:fixed,turn_id:result.id});
-    this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?",row.id);
+    const result=await this.serviceSessions.run({chat,binding,source_message:row.id,event:e,request:content,allowSilence:!e.addressed});
+    if(result.message.trim())this.queue(e,card(result.message),row.id+':business-result',row.id,{kind:'service_binding',chat_id:chat.id,binding_id:binding.id,
+      binding_revision:binding.revision,source_message:row.id,source_fence:result.fence,turn_id:result.id});
+    this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
   }
   private async result(row: Row): Promise<void> {
     const m = this.store.get('SELECT state FROM management_messages WHERE id=?', row.message_id);
@@ -496,9 +501,17 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
-    if(['employee','personal_conversation'].includes(protection?.kind)){
+    if(['employee','personal_conversation','service_binding'].includes(protection?.kind)){
       const guard=()=>{
         this.source(event);if(this.stopped)fail(409,'channel_stopped');
+        if(protection.kind==='service_binding'){
+          const binding=this.serviceBindings.get(protection.chat_id);
+          if(!binding||binding.id!==protection.binding_id||binding.revision!==protection.binding_revision)fail(409,'conversation_source_changed');
+          this.serviceBindings.assertUsable(binding!);
+          const turn=this.store.get('SELECT state,fence FROM channel_service_turns WHERE id=?',protection.turn_id);
+          if(turn?.state!=='completed'||turn.fence!==protection.source_fence||this.serviceBindings.fence(protection.chat_id)!==protection.source_fence)fail(409,'conversation_source_changed');
+          return;
+        }
         if(protection.kind==='personal_conversation')this.employees.guardPersonal(protection.chat_id,protection.principal_id,protection.source_message);
         else{const grant=this.store.get('SELECT * FROM channel_employee_grants WHERE id=?',protection.grant_id);
           if(!grant||grant.chat_id!==protection.chat_id||grant.project_id!==protection.project_id||grant.principal_id!==protection.principal_id||grant.revision!==protection.grant_revision)fail(403,'channel_employee_source_mismatch');
@@ -513,7 +526,7 @@ export class ChannelService {
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=String(delivery.content.elements?.[0]?.text?.content??'');
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:'interactive',content,raw_content:JSON.stringify(delivery.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:'',thread_id:event.thread_id,deleted:false},'live');
-        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,protection.project_id,protection.source_fence);
+        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,protection.kind==='service_binding'?bindingScope(protection.binding_id):protection.project_id,protection.source_fence);
       });return;
     }
     const actor = protection ? await this.actor(event, protection.project_id) : undefined;

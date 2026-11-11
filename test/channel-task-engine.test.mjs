@@ -14,7 +14,8 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { resolvePrincipalActor } from '../dist/identity/authorization.js';
 
 const pass={outcome:'pass',reason:'Read the actual fixed candidate and its policy evidence',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
-for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','policy_changed_after_qa'])test('group main conversation uses the real scheduler/role/QA and returns '+scenario+' once (local protocol fixtures)',{timeout:180000},async t=>{
+// A task a legacy group employee created before #312 keeps its scheduler, QA, publication and group notification.
+for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','policy_changed_after_qa'])test('a legacy group employee task uses the real scheduler/role/QA and returns '+scenario+' once (local protocol fixtures)',{timeout:180000},async t=>{
   const endpoint=scenario==='report'?'report':'reviewable_pull_request',software=endpoint!=='report',revoked=scenario==='revoked_after_qa',changed=scenario==='policy_changed_after_qa',role=software?'dev':'reviewer',root=mkdtempSync(join(tmpdir(),'channel-engine-')),manager=new LocalManager('101',root);
   let engine,f,release;const gate=new Promise(r=>release=r);let executing=false,qaReads=0,deliveryTask,modelError;
   github.listen(0,'127.0.0.1');await once(github,'listening');const gh='http://127.0.0.1:'+github.address().port;
@@ -49,14 +50,14 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
         if(software&&!names.includes('write_file'))return send('write_file',{path:'feature.mjs',content:'export const verified = true;\n'});
         return send('submit_delivery',{summary:software?'Verified software delivered from the group':'Verified report delivered from the group',artifacts:software?[{path:'feature.mjs',description:'Verified module'}]:[],evidence:[],unknowns:[],...(software?{change_title:'feat: add verified module',release_label:'release:patch',test_command:'Project policy check'}:{})});
       }
-      const request=JSON.parse(body.messages[1].content).request;
-      if(String(request).includes('Retry publication')){if(!names.includes('manage_task'))return send('manage_task',{task_id:deliveryTask,action:'retry'});return send('finish',{message:'Publication retry recorded.'});}
-      if(String(request).includes('Continue while'))return send('finish',{message:'Main conversation remains available.'});
-      if(!names.includes('create_task'))return send('create_task',{request:'Independently deliver '+endpoint,criteria:['Return verified work to this group'],endpoint});
-      return send('finish',{message:'A separate task has started.'});
+      throw new Error('unexpected model request: '+tools.join(','));
     }catch(error){modelError=error;if(!res.writableEnded){res.statusCode=500;res.end(JSON.stringify({error:{message:'Local fixture assertion failed'}}));}}};
-    const source=inGroup('Start tracked work from an unbound member','ou_bob'),receipt=await post(f.h,f.id,source);
-    const completed=await until(()=>f.h.store.get('SELECT * FROM channel_inbox WHERE id=?',receipt.value.operation_id),r=>r&&['completed','failed'].includes(r.state),120000);assert.equal(completed.state,'completed',completed.error);
+    // The legacy employee's caller is what its conversation used to create the task; the source is an unbound member's message.
+    const commands=f.service.management.service.tasks,quiet=async text=>{const e=inGroup(text,'ou_bob');e.event.message.mentions=[];const r=await post(f.h,f.id,e);
+      await until(()=>f.h.store.get('SELECT * FROM channel_inbox WHERE id=?',r.value.operation_id),row=>row&&['completed','failed'].includes(row.state));return {event:e,receipt:r};};
+    const {event:source,receipt}=await quiet('Start tracked work from an unbound member'),caller=id=>f.service.employees.caller(chat.id,'101',id);
+    commands.tool(caller(receipt.value.operation_id),'create_task',{request:'Independently deliver '+endpoint,criteria:['Return verified work to this group'],endpoint});
+    const retryFrom=async text=>{const {receipt:r}=await quiet(text);commands.tool(caller(r.value.operation_id),'manage_task',{task_id:deliveryTask,action:'retry'});};
     const origin=f.h.store.get('SELECT * FROM task_origins WHERE conversation_id=?',chat.id);assert.ok(origin);deliveryTask=origin.task_id;assert.equal(origin.executor_role,role);
     await until(()=>executing||f.h.store.get('SELECT error_code FROM tasks WHERE id=?',origin.task_id)?.error_code,v=>!!v,120000);
     assert.ok(executing,JSON.stringify(f.h.store.all('SELECT content FROM task_logs WHERE task_id=?',origin.task_id)));
@@ -73,8 +74,7 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
     if(changed){
       assert.equal(ended.status,'retry_wait',ended.error_code);assert.equal(ended.error_code,'acceptance_context_changed');
       const state=await (await fetch(gh+'/fixture/state')).json();assert.equal(state.requests.filter(r=>r.method!=='GET'&&r.path.includes('/git/')).length,writesBefore);
-      const retry=await post(f.h,f.id,inGroup('Retry publication after the policy changed','ou_bob'));
-      assert.equal((await until(()=>f.h.store.get('SELECT * FROM channel_inbox WHERE id=?',retry.value.operation_id),r=>r&&['completed','failed'].includes(r.state),120000)).state,'completed');
+      await retryFrom('Retry publication after the policy changed');
       ended=await until(()=>f.h.store.get('SELECT * FROM tasks WHERE id=?',origin.task_id),r=>['pr_opened','failed','waiting_permission','waiting_configuration','needs_replan'].includes(r.status),120000);
       assert.equal(JSON.parse(ended.result).validation.command,'node -e "process.exit(0)"');
     }
@@ -82,8 +82,7 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
       assert.equal(ended.status,'retry_wait',JSON.stringify({task:ended,logs:f.h.store.all('SELECT content FROM task_logs WHERE task_id=?',origin.task_id)}));assert.equal(ended.phase,'publish');assert.equal(qaReads,1);
       const executionCount=f.h.store.get('SELECT count(*) n FROM task_runs WHERE task_id=? AND role=?',origin.task_id,role).n;
       for(const [n,status] of [[1,'waiting_publication'],[2,'pr_opened']]){
-        const retry=await post(f.h,f.id,inGroup('Retry publication '+n,'ou_bob'));
-        assert.equal((await until(()=>f.h.store.get('SELECT * FROM channel_inbox WHERE id=?',retry.value.operation_id),r=>r&&['completed','failed'].includes(r.state),120000)).state,'completed');
+        await retryFrom('Retry publication '+n);
         ended=await until(()=>f.h.store.get('SELECT * FROM tasks WHERE id=?',origin.task_id),r=>r.status===status||['failed','waiting_permission','waiting_configuration','needs_replan'].includes(r.status),120000);
         assert.equal(ended.status,status,JSON.stringify(f.h.store.all('SELECT content FROM task_logs WHERE task_id=?',origin.task_id)));
       }
