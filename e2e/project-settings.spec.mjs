@@ -116,6 +116,8 @@ test('member read failures replace previous grants and project admins cannot tra
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } }), member = await context.newPage();
     try {
       await login(member, f, '/#/projects/101/members', 'project-member', password);
+      await expect(member.locator('.project-nav a')).toHaveCount(12);
+      await expect(member.locator('.project-nav').getByRole('link',{name:'成员',exact:true})).toHaveCount(1);
       await expect(member.locator('.project-member-list')).toContainText('project-member');
       await expect(member.getByLabel('添加项目管理员', { exact: true })).toHaveCount(0);
       await expect(member.locator('#project-page')).toContainText('不能再转授权');

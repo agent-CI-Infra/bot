@@ -16,7 +16,8 @@ async function renderSchedules(panel, project) {
   function revoked(error) {
     // Channel audience failures invalidate the destination, while project read authority may still be valid.
     if (error.code?.startsWith('channel_') || ![401,403].includes(error.status) || !live()) return false;
-    accessLost = true; scheduleViews.delete(project); panel.replaceChildren(note('计划访问权限已失效，请按当前授权重新进入。')); return true;
+    accessLost = true; scheduleViews.delete(project);
+    panel.replaceChildren(note(error.code === 'capability_forbidden' ? '当前账号没有计划管理权限，请联系项目管理员核对授权。' : '计划访问权限已失效，请按当前授权重新进入。')); return true;
   }
   const target = { project_id: project }, endpoint = '/api/management';
   const read = (operation, args = {}) => api(endpoint + '/query', 'POST', { operation, target, arguments: args });
