@@ -49,6 +49,9 @@ test('the shared shell groups projects by organization and keeps the selected pr
     // the project comes from the new read instead of the page session's first answer.
     let snapshotReads = 0;
     page.on('request', request => { if (/\/api\/installations\?repository_id=101$/.test(request.url())) snapshotReads += 1; });
+    // The sync answers here, so the assertion tests the order of the clear rather than the harness's missing installation
+    // client: before the answer the cache still holds the old row, after it the bar reads the project again.
+    await page.route('**/api/installations/sync', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ results: [] }) }));
     await picker.selectOption('');
     await expect(page.locator('#sync')).toBeVisible();
     await page.locator('#sync').click();
