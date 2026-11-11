@@ -38,7 +38,7 @@ for (const width of [390, 1440]) test(`configuration recovery returns to the sam
     mkdirSync('.tmp/inbox-recovery-226/previews', { recursive: true });
     await open(page).click(); await page.screenshot({ path: `.tmp/inbox-recovery-226/previews/inbox-recovery-${width}.png` });
     await detail(page).getByRole('button', { name: '重试', exact: true }).click();
-    await expect(detail(page).locator('#task-badges')).toContainText('排队');
+    await expect(detail(page).locator('#task-badges')).toContainText('待执行');
     await detail(page).getByRole('button', { name: '关闭', exact: true }).click();
     await expect(item(page)).toHaveCount(0); await expect(page.getByRole('button', { name: '刷新待处理', exact: true })).toBeFocused();
     await expect(page).toHaveURL(/#\/inbox\/all\/50$/);
