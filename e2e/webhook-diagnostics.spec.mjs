@@ -21,6 +21,8 @@ test('webhook list and detail separate reception, signature and processing outco
   await h.hook(a.path, a.secret, 'delivery-disabled', { ...opened, issue: { number: 3, title: 'Disabled' } });
   await admin('/api/repositories/101/policy', 'PATCH', { enabled: true });
   await h.hook(a.path, 'wrong-secret', 'delivery-bad-signature', opened);
+  // A delivery to an endpoint this account does not have is archived before any signature check: it is unchecked, not failed.
+  await h.hook('/hooks/github/' + a.id + '/' + 'f'.repeat(48), a.secret, 'delivery-unknown-endpoint', opened);
 
   await page.goto(h.admin);
   await page.getByLabel('用户名', { exact: true }).fill('administrator');
@@ -29,7 +31,7 @@ test('webhook list and detail separate reception, signature and processing outco
   await page.goto(h.admin + '/#/events');
 
   const row = key => page.locator(`#rows [data-delivery-key="${key}"]`), facet = (key, kind) => row(key).locator(`[data-delivery-facet="${kind}"]`);
-  await expect(page.locator('#rows [data-delivery-record]')).toHaveCount(6);
+  await expect(page.locator('#rows [data-delivery-record]')).toHaveCount(7);
 
   // Processed success: reception and signature are positive, processing says a task was created.
   await expect(facet('delivery-success', 'reception')).toHaveText('已接收');
@@ -67,6 +69,10 @@ test('webhook list and detail separate reception, signature and processing outco
   await expect(dialog.locator('[data-detail-section="reception"]')).toContainText('已接收');
   await expect(dialog.locator('[data-detail-section="signature"]')).toContainText('签名有效');
   await expect(dialog.locator('[data-detail-section="processing"]')).toContainText('已创建');
+  // The archived review_outcome is computed before the Manager decides, so it cannot be printed as a conclusion here:
+  // a created task must not sit next to "not_trigger" or any other raw archive code.
+  await expect(dialog.locator('[data-detail-section="processing"]')).not.toContainText('归档结论');
+  await expect(dialog.locator('[data-detail-section="processing"]')).not.toContainText('not_trigger');
   await expect(dialog.locator('[data-detail-section="dispatch"]')).toContainText('新建任务');
   await expect(dialog.locator('[data-detail-section="dispatch"]')).toContainText(/reason|原因/);
   await expect(dialog.locator('[data-delivery-id]')).toHaveText('delivery-success');
@@ -84,11 +90,18 @@ test('webhook list and detail separate reception, signature and processing outco
   await expect(dialog.locator('[data-detail-section="processing"]')).toContainText('未处理');
   await expect(dialog.locator('[data-detail-section="processing"]')).not.toContainText('已创建');
 
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click();
+  await expect(facet('delivery-unknown-endpoint', 'signature')).toHaveText('未验签');
+  await row('delivery-unknown-endpoint').getByRole('button', { name: '查看详情', exact: true }).click();
+  // Unchecked is not a failed verification: the endpoint was unknown, so the signature check never ran.
+  await expect(dialog.locator('[data-detail-section="signature"]')).toContainText('验签没有执行');
+  await expect(dialog.locator('[data-detail-section="signature"]')).not.toContainText('未通过验签');
+
   // The same facts stay readable at 390px without horizontal scrolling.
   await page.setViewportSize({ width: 390, height: 844 });
   await dialog.getByRole('button', { name: '关闭', exact: true }).click();
   await page.reload();
-  await expect(page.locator('#rows [data-delivery-record]')).toHaveCount(6);
+  await expect(page.locator('#rows [data-delivery-record]')).toHaveCount(7);
   await expect(facet('delivery-bad-signature', 'signature')).toHaveText('签名无效');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

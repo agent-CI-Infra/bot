@@ -36,6 +36,8 @@ export class ManagementService {
   readonly extensions = new Map<string,ManagementExtension>();
   // A trusted transport rechecks its persisted source when a deferred command resumes in Web.
   sourceGuard?: (command: Row) => void;
+  /** Called inside the creating transaction when a task.create command (direct or after approval) creates a task. */
+  taskCreated?: (command: Row, task: string) => void;
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
   knowledgeRead?: (actor:ActorContext,project:string,id:string,revision?:number,versions?:boolean,baseline?:string)=>Promise<Json>;
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
@@ -311,6 +313,7 @@ export class ManagementService {
           result=this.tasks.api(user,action==='contract'?'PATCH':'POST',new URL('http://local'+url),body)!;
           if(!result)fail(409,'task_operation_unavailable');
           result={...result,task_url:result.id?'/api/tasks/'+result.id:'/api/tasks/'+target.task_id};
+          if(action==='create'&&result.id)this.taskCreated?.(row,String(result.id));
         }else return fail(409,operation.replaceAll('.','_')+'_not_registered');
         this.finish(id,'succeeded',result);
       });

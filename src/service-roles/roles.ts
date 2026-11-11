@@ -13,7 +13,12 @@ export const repositoryAssistant = 'repository-assistant';
 export interface ServiceBudget { currency: 'USD' | 'CNY'; limit_amount: number }
 
 const now = () => new Date().toISOString();
-const serviceItems = permissionItems.filter(item => (servicePermissionIds as readonly string[]).includes(item.id));
+// Service roles reach projects only through their Managers, so delegation reads differently than for a project's work roles
+// (which delegate to a named role). Only the wording changes; the item id, modes and stored values are shared.
+const serviceWording: Record<string, { name: string; description: string }> = {
+  delegation: { name: '派活', description: '经项目的 Manager 新建任务、修改任务（追加说明、修改目标与验收条件）或取消任务；不能指定或直接指挥某个执行角色。' },
+};
+export const serviceItems = permissionItems.filter(item => (servicePermissionIds as readonly string[]).includes(item.id)).map(item => ({ ...item, ...serviceWording[item.id] }));
 /** A new custom role starts with the repository assistant's permissions: read the chat and GitHub, no task access, no delegation. */
 export const repositoryAssistantPermissions: RolePermissions = { conversation_history: 'read', github: 'read', project_tasks: 'none', delegation: 'deny' };
 const builtins = [

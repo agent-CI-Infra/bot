@@ -298,3 +298,116 @@ test('a disabled binding stops answering and history import; a bound service rol
   assert.equal((await f.admin('/api/service-roles/' + custom.id, 'DELETE', { expected_revision: role.revision })).status, 200);
   assert.equal((await f.admin('/api/channels/service-bindings')).value.bindings[0].service_role.name, null);
 });
+
+const contract = { goal: '群聊卡片的“登录后台查看”链接可以点击', scope: ['static/channels.js'], criteria: ['链接在桌面和手机上都能打开'], endpoint: '合入修复 PR' };
+test('delegation hands work to a project only through its Manager: create, change and cancel tasks, never steer a role; results return to the group', async t => {
+  const f = await fixture(t); assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
+  const binding = f.h.store.get('SELECT * FROM channel_service_bindings');
+  let script, tools, system;
+  f.modelState.respond = async (body, res) => { tools = body.tools.map(tool => tool.function.name); system = body.messages[0].content; return script(body, res, observations(body)); };
+  // deny (the repository assistant's default): no task tools, and the prompt says so.
+  script = (body, res, seen) => seen.length ? say(res, '不能派活。') : call(res, 'create_project_task', { repository: repo(101), request: '修复卡片链接', contract });
+  await done(f, await post(f.h, f.id, groupMessage('帮忙建个任务修复卡片链接')));
+  assert.ok(!tools.includes('create_project_task')); assert.equal(observations(f.requests.at(-1))[0].error, 'tool_not_allowed');
+  assert.match(system, /cannot create, delegate or assign work/);
+  // allow: a new task goes to the project team through the management service, as the binding principal.
+  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'none', delegation: 'allow' } });
+  const before = f.h.store.get('SELECT count(*) n FROM tasks').n;
+  script = (body, res, seen) => seen.length ? say(res, '已交给 Manager。') : call(res, 'create_project_task', { repository: repo(101), request: '修复群聊卡片链接无法点击的问题', contract });
+  const created = await post(f.h, f.id, groupMessage('帮忙建个任务修复卡片链接'));
+  assert.equal((await done(f, created)).state, 'completed');
+  for (const name of ['create_project_task', 'list_project_tasks', 'read_project_task', 'manage_project_task', 'start_own_task']) assert.ok(tools.includes(name), name);
+  for (const name of ['delegate_role', 'delegate_roles', 'create_task']) assert.ok(!tools.includes(name), name);
+  assert.match(system, /only through its Manager/); assert.match(system, /never choose which role executes/);
+  const receipt = observations(f.requests.at(-1))[0];
+  assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt)); assert.equal(receipt.repository, repo(101));
+  assert.equal(f.h.store.get('SELECT count(*) n FROM tasks').n, before + 1);
+  const command = f.h.store.get('SELECT * FROM management_commands WHERE id=?', receipt.id), task = f.h.store.get('SELECT * FROM tasks WHERE id=?', receipt.result.id);
+  assert.equal(command.operation, 'task.create'); assert.equal(command.principal_id, binding.principal_id); assert.equal(command.channel, 'im');
+  assert.equal(command.source_message, 'feishu:' + created.value.operation_id);
+  assert.equal(task.repository_id, '101');
+  // No executor was chosen: the task is the project's own work, linked back to this group.
+  assert.equal(f.h.store.get('SELECT source_kind FROM task_origins WHERE task_id=?', task.id).source_kind, 'operator');
+  assert.ok(!f.h.store.get('SELECT executor_role FROM task_origins WHERE task_id=?', task.id).executor_role);
+  assert.deepEqual({ ...f.h.store.get('SELECT binding_id,chat_id,source_message FROM channel_service_tasks WHERE task_id=?', task.id) },
+    { binding_id: binding.id, chat_id: f.chat.id, source_message: created.value.operation_id });
+  // Change the task as a whole: an instruction and a new contract are allowed; pausing needs project_tasks write.
+  script = (body, res, seen) => !seen.length ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
+    : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'instructions', instruction: '优先修手机端', expected_revision: seen[0].revision })
+    : seen.length === 2 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'pause', expected_revision: seen[0].revision }) : say(res, '已补充说明。');
+  await done(f, await post(f.h, f.id, groupMessage('补充：优先修手机端，然后先暂停')));
+  const [, instruction, pause] = observations(f.requests.at(-1));
+  assert.equal(instruction.state, 'succeeded', JSON.stringify(instruction)); assert.equal(instruction.operation, 'task.instructions');
+  assert.equal(pause.error, 'operation_not_allowed'); assert.notEqual(f.h.store.get('SELECT status FROM tasks WHERE id=?', task.id).status, 'paused');
+  script = (body, res, seen) => !seen.length ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
+    : seen.length === 1 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'contract', contract: { ...contract, criteria: ['链接在桌面和手机上都能打开', '有回归测试'] }, expected_revision: seen[0].revision })
+    : seen.length === 2 ? call(res, 'read_project_task', { repository: repo(101), task_id: task.id })
+    : seen.length === 3 ? call(res, 'manage_project_task', { repository: repo(101), task_id: task.id, operation: 'cancel', expected_revision: seen[2].revision })
+    : say(res, '已修改验收条件并取消。');
+  await done(f, await post(f.h, f.id, groupMessage('加上回归测试的要求，然后取消吧')));
+  const [, changed, , cancelled] = observations(f.requests.at(-1));
+  assert.equal(changed.state, 'succeeded', JSON.stringify(changed)); assert.equal(changed.operation, 'task.contract');
+  assert.equal(cancelled.state, 'succeeded', JSON.stringify(cancelled)); assert.equal(cancelled.operation, 'task.cancel');
+  assert.equal(f.h.store.get('SELECT status FROM tasks WHERE id=?', task.id).status, 'cancelled');
+  // The finished task reports back to the group that created it, and that report joins only this binding's context.
+  const report = await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('已取消') && JSON.stringify(s.content).includes(repo(101))));
+  assert.match(JSON.stringify(report.content), /修复群聊卡片链接|卡片/);
+  // The local Feishu fixture names each sent message remote-<position>; read the scope of this report, not of earlier replies.
+  const remote = 'remote-' + (f.wire.sent.indexOf(report) + 1);
+  const scoped = await until(() => f.h.store.get('SELECT * FROM channel_message_scopes WHERE chat_id=? AND message_id=?', f.chat.id, remote));
+  assert.equal(scoped.project_id, 'binding:' + binding.id); assert.equal(scoped.fence, f.service.serviceBindings.fence(f.chat.id));
+  // A group without delegation can no longer create or resume the work it delegated, and its tasks stop at the next source check.
+  const event = f.h.store.secrets.open(f.h.store.get('SELECT payload FROM channel_inbox WHERE id=?', created.value.operation_id).payload, 'channel-event:' + created.value.operation_id);
+  f.service.serviceBindings.guardCommand(binding, command, event);
+  assert.doesNotThrow(() => assertManagedExecution(f.h.store, f.h.store.get('SELECT * FROM tasks WHERE id=?', task.id)));
+  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'write', delegation: 'deny' } });
+  assert.throws(() => f.service.serviceBindings.guardCommand(binding, command, event), { code: 'channel_service_permission_revoked' });
+  assert.throws(() => assertManagedExecution(f.h.store, f.h.store.get('SELECT * FROM tasks WHERE id=?', task.id)), { code: 'channel_service_delegation_revoked' });
+});
+
+test('a group assistant works a side question in its own task with the same tools; only the conclusion returns and a changed scope hides it', async t => {
+  const f = await fixture(t); assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
+  const binding = f.h.store.get('SELECT * FROM channel_service_bindings');
+  const own = body => body.messages[0].content.includes('one of your own independent tasks');
+  const ownBodies = [];
+  let main;
+  f.modelState.respond = async (body, res) => {
+    const seen = observations(body);
+    if (own(body)) {
+      ownBodies.push(body);
+      return seen.length ? say(res, 'admin-fixture-101 有 1 个未关闭的 PR：#7 Bind group assistants。') : call(res, 'github_read', { repository: repo(101), path: '/pulls?state=open' });
+    }
+    return main(body, res, seen);
+  };
+  main = (body, res, seen) => !seen.length ? call(res, 'start_own_task', { title: '整理未关闭的 PR', instruction: '列出 bot 仓库未关闭的 PR' }) : say(res, '整理好了：' + seen[0].conclusion);
+  const roleRequests = () => f.h.store.get("SELECT count(*) n FROM model_requests WHERE service_role_id='repository-assistant' AND repository_id IS NULL").n;
+  const billed = roleRequests();
+  assert.equal((await done(f, await post(f.h, f.id, groupMessage('有哪些未关闭的 PR？')))).state, 'completed');
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('整理好了') && JSON.stringify(s.content).includes('#7')));
+  // The own task had the turn's tools minus its own-task tools, and a context of its own.
+  const inner = ownBodies[0];
+  assert.ok(inner.tools.some(t => t.function.name === 'github_read'));
+  assert.ok(!inner.tools.some(t => ['start_own_task', 'continue_own_task', 'list_own_tasks'].includes(t.function.name)));
+  assert.equal(JSON.parse(inner.messages[1].content).instruction, '列出 bot 仓库未关闭的 PR');
+  const row = f.h.store.get('SELECT * FROM service_role_own_tasks');
+  assert.equal(row.owner_kind, 'channel'); assert.equal(row.owner_id, binding.id); assert.equal(row.principal_id, binding.principal_id);
+  assert.equal(row.state, 'completed'); assert.equal(row.rounds, 1); assert.ok(!row.history.includes('#7'), 'history is sealed');
+  // Billed to the service role like the turn itself: main turn requests plus the own task's two.
+  assert.ok(roleRequests() >= billed + 4);
+  // Continue it later: it sees its earlier round; listing shows the latest conclusion.
+  main = (body, res, seen) => !seen.length ? call(res, 'list_own_tasks', {}) : seen.length === 1 ? call(res, 'continue_own_task', { task_id: seen[0].own_tasks[0].task_id, instruction: '再看看有没有草稿 PR' })
+    : say(res, '补充：' + seen[1].conclusion);
+  assert.equal((await done(f, await post(f.h, f.id, groupMessage('再看看有没有草稿？')))).state, 'completed');
+  const [listed, continued] = observations(f.requests.at(-1));
+  assert.equal(listed.own_tasks[0].title, '整理未关闭的 PR'); assert.match(listed.own_tasks[0].last_conclusion, /#7/);
+  assert.equal(continued.round, 2);
+  const second = ownBodies.at(-1);
+  assert.match(JSON.parse(second.messages[1].content).own_task.previous_rounds[0].conclusion, /#7/);
+  assert.equal(f.h.store.get('SELECT rounds FROM service_role_own_tasks').rounds, 2);
+  // A changed role permission changes the group's fence: the old own task is no longer visible or continuable.
+  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'read', delegation: 'deny' } });
+  main = (body, res, seen) => !seen.length ? call(res, 'list_own_tasks', {}) : seen.length === 1 ? call(res, 'continue_own_task', { task_id: row.id, instruction: '继续' }) : say(res, '没有可继续的独立任务。');
+  assert.equal((await done(f, await post(f.h, f.id, groupMessage('继续刚才的独立任务')))).state, 'completed');
+  const [hidden, refused] = observations(f.requests.at(-1));
+  assert.deepEqual(hidden.own_tasks, []); assert.equal(refused.error, 'own_task_not_found');
+});

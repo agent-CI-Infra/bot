@@ -13,6 +13,8 @@ const audienceTtl = 5 * 60_000;
 export class ChannelEmployees {
   private readonly pending = new Map<string, Promise<void>>();
   private stopped = false;
+  /** Set by the channel service: tasks a group binding delegated are checked against that binding (one source guard per store). */
+  bindingGuard?: (origin: Row) => void;
   constructor(readonly store: Store, readonly adapter: (connector: Row, guard: () => void) => FeishuAdapter) {
     taskSourceGuard(store, origin => this.guardOrigin(origin));
   }
@@ -159,6 +161,7 @@ export class ChannelEmployees {
   guardOrigin(origin: Row): void {
     const grant = this.store.get('SELECT * FROM channel_employee_grants WHERE principal_id=?', origin.principal_id ?? '');
     if (!grant) {
+      this.bindingGuard?.(origin);
       const chat=origin.conversation_id&&this.store.get("SELECT * FROM channel_chats WHERE id=? AND chat_type='p2p'",origin.conversation_id);
       // A task a private chat created before #301 stays bound to that chat's owner and source message.
       if(chat)this.guardPersonal(chat.id,origin.principal_id,origin.source_message);

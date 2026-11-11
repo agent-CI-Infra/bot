@@ -20,7 +20,7 @@
 4. **发布与检查**：在飞书发布版本、设置可用范围并完成必要审核，再检查机器人信息；检查自动同步保存机器人身份。商店应用先保存连接配置、接收 app_ticket，再完成此检查，未获取机器人身份时拒绝处理消息和卡片。检查只证明凭据和机器人信息可读，不证明消息或卡片回调已经送达。
 5. **绑定与试用**：每位用户完成个人双端绑定，在私聊直接发送“你好”或“我能管理哪些项目”，收到助手回复后才完成接入；此页可查看收件和发送状态。群聊的项目范围不在这里设置，而是在「身份与权限 → 飞书群聊助手」为每个群绑定服务角色和项目范围。结果卡片只带“登录后台查看”链接，不再有回调按钮；较早版本发出的“刷新执行状态”按钮点击后提示已过期。
 
-卡片是默认功能。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息仅加入企业自建应用的权限 JSON：
+卡片是默认功能。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息和包含机器人消息的权限仅加入企业自建应用的权限 JSON：
 
 | 权限 | 用途 |
 | --- | --- |
@@ -29,11 +29,14 @@
 | `im:message:send_as_bot` | 以机器人身份发送消息、发送和更新交互卡片 |
 | `im:message.reactions:write_only` | 在正在处理的原消息下添加表情，回复送达后删除 |
 | `cardkit:card:write` | 创建与更新卡片 |
-| `im:message.group_msg` | 接收全量群消息并读取机器人可见群历史，属于需审批的敏感权限 |
+| `im:message.group_msg` | 接收群内用户消息，并满足群历史读取接口的额外权限要求；不包含其他机器人的实时消息 |
+| `im:message.group_msg.include_bot:read` | 企业自建应用接收群内用户及其他机器人的消息，不推送本机器人自己发送的消息；商店应用不申请 |
 | `im:message:readonly` | 读取机器人所在会话的可见历史及接收撤回事件 |
 | `im:chat.members:bot_access` | 接收机器人进群、移出事件 |
 | `im:chat.members:read` | 判断当前 bot 是否在群中并完整分页核验维护人及来源成员；保存群聊助手绑定时必需，缺少时保存返回 `channel_audience_permission_required` |
 | `tenant:tenant:readonly` | 企业自建应用自动获取安装 tenant_key；保存连接前需开通并发布生效 |
+
+这两项群消息权限用途不同：根据[接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)，`im:message.group_msg` 只推送用户消息，`include_bot:read` 还推送其他机器人消息，且当前仅支持企业自建应用。企业自建连接同时申请两项，因为[获取会话历史消息](https://open.feishu.cn/document/server-docs/im-v1/message/list)仍明确要求 `im:message.group_msg` 与消息读取权限；新增的事件权限不替代历史接口权限。机器人消息安静进入本地记录，后续用户 @ 时可作为上下文，消息来源仍保留为 bot/app；机器人消息本身不触发模型或业务操作。当前机器人的群回复通过本地发送记录保留，不能依赖接收事件回传。
 
 **权限检查**：连接列表每次打开或刷新时，服务端用该连接的应用身份调用飞书[查询租户授权状态](https://open.feishu.cn/api-explorer?project=application&resource=scope&apiName=list&version=v6)（`GET /open-apis/application/v6/scopes`，不需要额外权限），把返回的应用身份权限与上表比对：`grant_status` 为 1 的算已开通，其他状态算已申请但未审核或未发布，用户身份的同名授权不算。全部开通时显示“所需的 N 项均已开通”；有缺少时逐项列出权限和用途，标出已申请待审核的项，并给出两种补齐方式：在飞书「权限管理 → 批量导入/导出」导入完整权限 JSON（已开通的不受影响），或打开飞书权限页 `https://open.feishu.cn/app/<App ID>/auth?q=<缺少的权限>`，一次申请缺少的全部权限。补齐后仍须创建并发布新版本、通过必要审核，再回到连接列表刷新。向导「应用凭据」和「发布与检查」两步的检查也显示同样结果。查询失败时只提示暂时无法自动检查，不影响凭据和机器人检查的结论。
 
@@ -107,9 +110,25 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 - `list_projects`：当前可用的仓库全名和 GitHub 链接，不返回内部 ID；
 - `conversation_history`：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
 - `github: read`：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
-- `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等、组织审批策略和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和审批后恢复时都重新核对绑定、来源消息、角色权限和授权者权限。
+- `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等、组织审批策略和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和审批后恢复时都重新核对绑定、来源消息、角色权限和授权者权限；
+- `delegation: allow`（派活）：`create_project_task` 在范围内的仓库新建任务，参数为需求和交付约定（目标、范围、验收条件、终点）；同时提供 `list_project_tasks`、`read_project_task` 和 `manage_project_task` 的追加说明、修改约定（`task.contract`）与取消。见下文「派活」；
+- 独立任务：`start_own_task`、`continue_own_task`、`list_own_tasks`，不受权限项控制，见[服务角色](service-roles.md#独立任务)。
 
-派活、服务角色自己的独立任务和群内审批不在当前版本中。
+#### 派活
+
+服务角色只能经项目的 Manager 间接派活：新建的任务与控制台创建的任务相同，交给项目团队、由 Manager 规划和分派；不能指定执行角色，也不能直接操作某个角色的运行。群里提交的任务命令按操作检查服务角色的权限：
+
+| 操作 | 需要 |
+| --- | --- |
+| 新建任务 `task.create`、修改约定 `task.contract` | `delegation: allow` |
+| 追加说明 `task.instructions`、取消 `task.cancel` | `delegation: allow` 或 `project_tasks: write` |
+| 暂停 `task.pause`、重试 `task.retry` | `project_tasks: write` |
+
+新建任务经 `ManagementService.submit('task.create')` 以绑定的 principal 提交：服务端读取当前项目版本作为 `expected_revision`，幂等键由群、来源消息和工具调用生成；授权者对该仓库须仍有 `config.write` 和 `tasks.write`；组织审批策略、审计和回执与控制台一致。任务创建时（包括审批后执行时）记入 `channel_service_tasks`，关联到这条绑定和来源消息。任务完成、提交 PR、取消或失败时，结果发回原群；入队和发送前复核绑定仍启用、授权者仍能读该仓库以及任务的来源权限。结果消息记在本绑定的范围内，并带上当时的群围栏，之后的回答可以引用它；绑定或权限变化后不再进入上下文。
+
+任务执行期间，任务引擎每次复核来源时也检查这条绑定：绑定仍是该群当前且启用的绑定、服务角色仍是 `delegation: allow`、授权者对该仓库仍有 `config.write` 和 `tasks.write`；任一不满足就停止后续步骤（`channel_service_delegation_revoked` 或 `channel_service_scope_paused`）。
+
+群内不另设审批入口：群助手在权限内的操作直接执行。只有受信任的组织策略 `management_policies.approval_operations` 把某个操作列为需审批时，命令才进入“等待审批”，助手在群里如实说明尚未执行，由有 `grants.manage` 的人在控制台处理，与私聊一致。
 
 #### 旧群员工的迁移
 
@@ -155,7 +174,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 验证
 
-`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、任务读写与撤权、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
+`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、任务读写与撤权、经 Manager 派活（新建、追加说明、修改约定、取消，不能暂停或指定角色）与结果回群、撤销派活后停止任务、群聊助手的独立任务与围栏变化后隐藏、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
 
 `e2e/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
 

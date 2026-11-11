@@ -162,6 +162,17 @@ function projectStatus() {
   const permission = installed?.access_gaps?.length ? [permissionBadge(installed)] : [];
   return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...permission, ...(current.environment ? [projectEnvironmentState()] : [])];
 }
+// A background permission check answers with the whole snapshot row for every repository. This header drew its own read
+// earlier, so it has to take that answer too; otherwise one screen shows the old grant next to the bar's new one. Only the
+// header is redrawn: re-reading the page would discard what the reader has already typed into the settings forms.
+function applyInstalledRow(row) {
+  if (!row || !current || String(row.id) !== String(current.id) || projectRoute()?.id !== String(current.id)) return false;
+  current.installed = { ...(current.installed || {}), ...row };
+  const title = document.querySelector('#project-page .project-head .title-group'), name = title?.querySelector('h1');
+  if (!name) return false;
+  title.replaceChildren(name, ...projectStatus());
+  return true;
+}
 function projectEnvironmentState() {
   const observed=current.environment?.observation;
   const known=observed?.status==='available'&&Object.hasOwn(states,observed.state)&&!current.environmentReadError;
