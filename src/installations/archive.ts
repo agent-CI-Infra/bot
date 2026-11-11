@@ -6,7 +6,7 @@ export const installationContractVersion = 1;
 export interface InstallationRef { github_host: string; app_id: string; installation_id: string }
 export type InstallationStatus = 'active' | 'pending_sync' | 'suspended' | 'deleted';
 export interface InstallationSnapshot extends Json {
-  contract_version: 1; installation: InstallationRef;
+  contract_version: 1; installation: InstallationRef; account_id: string | null;
   target: { id: string | null; type: string | null; login: string | null };
   status: InstallationStatus; completeness: 'pending' | 'stale' | 'error' | 'complete';
   repository_selection: 'all' | 'selected' | null; permissions: Record<string, string>; events: string[];
@@ -147,6 +147,8 @@ export function installationSnapshot(store: Store, ref: string): InstallationSna
   const created = store.get("SELECT id,sender,requester FROM installation_events WHERE installation_ref=? AND event='installation' AND action='created' ORDER BY rowid LIMIT 1", ref);
   // A creation actor and requester are recorded facts, not an independent approval record.
   return { contract_version: installationContractVersion, installation: { github_host: row.github_host, app_id: row.app_id, installation_id: row.installation_id },
+    // The owning console account, from the row itself; a historical row with no recorded owner stays null.
+    account_id: row.account_id ? String(row.account_id) : null,
     target: { id: row.target_id, type: row.target_type, login: row.target_login }, status: row.status,
     completeness: row.completeness, repository_selection: row.repository_selection, permissions: JSON.parse(row.permissions), events: JSON.parse(row.events),
     projection_version: row.revision, scope_version: row.scope_version, permissions_version: row.permissions_version,
@@ -170,7 +172,7 @@ export class InstallationArchive {
     const access = await this.authorize(sessionRef, ref);
     // Installation-wide permissions/evidence are visible only after verifying the whole target account.
     if (access.repository_ids !== null) return fail(403, 'installation_target_access_required');
-    return installationSnapshot(this.store, installationRef(ref)) || { contract_version: 1, installation: ref,
+    return installationSnapshot(this.store, installationRef(ref)) || { contract_version: 1, installation: ref, account_id: null,
       target: { id: access.target_id, type: null, login: null }, status: 'pending_sync', completeness: 'pending',
       repository_selection: null, permissions: {}, events: [], projection_version: 0, scope_version: 0, permissions_version: 0,
       last_success_at: null, error: null, execution_blocked: true,

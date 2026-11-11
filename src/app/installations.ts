@@ -21,7 +21,7 @@ export type PermissionGap = ReturnType<typeof missingPermissions>;
 export interface Access { state: 'gone' | 'limited' | 'full'; reason: string; missing: PermissionGap }
 const gone = (reason: string): Access => ({ state: 'gone', reason, missing: [] });
 const reachable = (missing: PermissionGap): Access => ({ state: missing.length ? 'limited' : 'full', reason: missing.length ? 'permissions_insufficient' : 'accessible', missing });
-const PERMISSIONS_FRESH_MS = 10 * 60_000;
+export const PERMISSIONS_FRESH_MS = 10 * 60_000;
 
 const granted = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? JSON.stringify(value) : null;
 // What the account was granted against what the bot needs; null while the grant has not been read. An App compares the
