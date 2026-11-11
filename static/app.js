@@ -115,8 +115,12 @@ function deliveryDetail(value){
   // row that did create one (a task is created for an event whose review_outcome still says not_trigger). It never adds
   // anything the archive outcome above does not already say, so it stays out of the page rather than being explained. 
   processing.append(element('h3','处理'), facts(rows));
+  // The created task is the point of the row, so its name opens the task instead of printing a dead label (#357).
   if((event.tasks||[]).length){ const tasks=element('ul','','delivery-tasks');
-    for(const task of event.tasks)tasks.append(element('li',`${kindLabels[task.kind]||task.kind} #${task.object_number} · ${task.status}`)); processing.append(tasks); }
+    for(const task of event.tasks){ const item=element('li','');
+      item.append(button(`${kindLabels[task.kind]||task.kind} #${task.object_number} · 查看任务`,()=>openTask(task.id).catch(error),'quiet linkish'),
+        element('span',' · '+task.status,'muted')); tasks.append(item); }
+    processing.append(tasks); }
   nodes.push(processing);
   const dispatch=element('section','','detail-section'); dispatch.dataset.detailSection='dispatch'; dispatch.append(element('h3','Manager 分派'));
   if((event.dispatch||[]).length)for(const item of event.dispatch){
