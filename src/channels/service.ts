@@ -1,6 +1,6 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, restrictActor, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize, resolvePrincipalActor, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { ManagementAgent } from '../management/agent.js';
 import { managementFailure, managementStates, serviceFailure } from '../management/presentation.js';
@@ -20,10 +20,12 @@ import { assertManagedExecution, taskAuthorizationFence } from '../tasks/managem
 import type { Manager } from '../projects/service.js';
 import { TaskError } from '../agent/common.js';
 import { ChannelReactions } from './reactions.js';
+import { ChannelMedia, MediaTurn } from './media.js';
+import { markdownPosts } from './format.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
-  elements: [{ tag: 'div', text: { tag: 'plain_text', content: value.length>12000?value.slice(0,11880)+'\n内容较长，此卡片仅显示前段；请登录后台查看完整记录。':value } },
+  elements: [{ tag: 'div', text: { tag: 'plain_text', content: value } },
     ...(link ? [{ tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '登录后台查看' }, url: link },
       ...(token ? [{ tag: 'button', text: { tag: 'plain_text', content: '刷新执行状态' }, value: { token } }] : [])] }] : [])] });
 export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longConnections?: boolean; manager?: Manager; githubUrl?: string; }
@@ -31,6 +33,7 @@ export interface ChannelOptions { origin?: string; fetch?: ChannelFetch; longCon
 export class ChannelService {
   readonly bindings: ChannelBindings;
   readonly ledger: ChannelLedger;
+  readonly media: ChannelMedia;
   readonly historySync: ChannelHistorySync;
   readonly employees: ChannelEmployees;
   readonly serviceBindings: ChannelServiceBindings;
@@ -45,10 +48,11 @@ export class ChannelService {
   constructor(readonly store: Store, readonly management: ManagementAgent, readonly options: ChannelOptions = {}) {
     this.bindings = new ChannelBindings(store, e => this.source(e));
     this.ledger = new ChannelLedger(store);
+    this.media = new ChannelMedia(store,this.ledger,(chat,guard)=>this.adapter(this.connector(chat.connector_id),guard));
     this.reactions = new ChannelReactions(store, (c, guard) => this.adapter(c, guard), e => this.source(e));
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
     this.serviceBindings = new ChannelServiceBindings(store, this.employees);
-    this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl);
+    this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl,this.media);
     this.schedules = new ChannelSchedules(store, this);
     // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
     this.employees.bindingGuard = origin => this.serviceBindings.guardTask(origin);
@@ -62,6 +66,16 @@ export class ChannelService {
       const chat=store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id);
       if(!chat||chat.context_revision!==source.context_revision)fail(409,'conversation_source_changed');
       this.employees.guardPersonal(chat!.id,actor.principal_id,source.id);
+    };
+    management.mediaTurn=(actor,conversation,input,computers,guard)=>{
+      const source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(input.source_message).replace(/^feishu:/,''),conversation);
+      if(!source)return;
+      const event=store.secrets.open(source.payload,'channel-event:'+source.id) as unknown as ChannelEvent;
+      const chat=store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',event.connector_id,event.chat_id);
+      if(!chat||event.chat_type!=='p2p')return;
+      const fence=digest(JSON.stringify([actor.principal_id,actor.authorization_revision,chat.context_revision,event.connector_revision]));
+      return new MediaTurn(this.media,chat.id,event.message_id,()=>{guard();this.source(event);this.employees.guardPersonal(chat.id,actor.principal_id,source.id);},computers,
+        project=>{this.management.service.scope(actor,project);},undefined,fence);
     };
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
@@ -248,7 +262,7 @@ export class ChannelService {
     // Reading is independent of speaking. A delayed message still belongs in the local ledger.
     const ambient=event.chat_type==='group'&&this.store.get(`SELECT 1 FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1
       AND (b.participation='all' OR (b.participation='questions' AND ?=1))`,event.provider,event.app_id,event.installation_tenant,event.chat_id,/[?？]\s*$/.test(event.content)?1:0);
-    const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.message_type === 'text' && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
+    const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
     const id = randomId(), state = actionable ? 'queued' : 'completed';
     this.store.transaction(() => {
       this.store.run('INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,?,?)',
@@ -344,9 +358,10 @@ export class ChannelService {
     this.serviceBindings.assertUsable(binding);
     if (!this.serviceBindings.reachable(binding, project, ['tasks.read'])) fail(403, 'channel_service_scope_paused');
   }
-  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string): string {
+  private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string, resources: string[] = []): string {
     const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key); if (previous) return previous.id;
-    const id = randomId(), delivery: ChannelDelivery = { receive_id: direct ? e.actor_id : e.chat_id, receive_id_type: direct ? 'open_id' : 'chat_id', content, ...(update ? { message_id: update } : {}) };
+    const id = randomId(), delivery: ChannelDelivery = { receive_id: direct ? e.actor_id : e.chat_id, receive_id_type: direct ? 'open_id' : 'chat_id', content, resources,format_version:2,
+      ...(!direct&&e.thread_id&&e.message_id?{reply_to:e.message_id,reply_in_thread:true}:{}),...(update ? { message_id: update } : {}) };
     this.store.run('INSERT INTO channel_outbox(id,connector_id,idempotency_key,source_event,payload,state,next_attempt,created_at) VALUES(?,?,?,?,?,?,?,?)', id, e.connector_id, key, source ?? null,
       this.store.secrets.seal({ event: {...e,content:'',raw_content:''}, delivery, protection }, 'channel-outbox:' + id), registered ? 'registered' : 'queued', Date.now(), Date.now());
     return id;
@@ -417,7 +432,8 @@ export class ChannelService {
       this.store.run('UPDATE channel_sessions SET conversation_id=?,context_revision=?,connector_revision=? WHERE id=?',String(conversation),revision,e.connector_revision,session.id);
       session=this.store.get('SELECT * FROM channel_sessions WHERE id=?',session.id)!;
     }
-    const message=this.management.send(actor,session.conversation_id,{content,source_message:'feishu:'+row.id});
+    const request=content.length>14000?content.slice(0,14000)+'\n[长消息的其余内容保存在本地消息账本；请用 read_message_text 分页读取当前消息，不能只根据此节选回答。]':content;
+    const message=this.management.send(actor,session.conversation_id,{content:request,source_message:'feishu:'+row.id});
     this.store.run('UPDATE channel_sessions SET last_message_at=? WHERE id=?',e.created_at,session.id);
     this.store.run("UPDATE channel_inbox SET state='submitted',conversation_id=?,message_id=?,context_revision=? WHERE id=?",session.conversation_id,String(message.id),revision,row.id);
   }
@@ -439,8 +455,8 @@ export class ChannelService {
     if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
     this.store.run('UPDATE channel_inbox SET conversation_id=? WHERE id=?',chat.id,row.id);
     const result=await this.serviceSessions.run({chat,binding,source_message:row.id,event:e,request:content,allowSilence:!e.addressed});
-    if(result.message.trim())this.queue(e,card(result.message),row.id+':business-result',row.id,{kind:'service_binding',chat_id:chat.id,binding_id:binding.id,
-      binding_revision:binding.revision,source_message:row.id,source_fence:result.fence,turn_id:result.id});
+    if(result.message.trim()||result.attachments?.length)this.queue(e,card(result.message),row.id+':business-result',row.id,{kind:'service_binding',chat_id:chat.id,binding_id:binding.id,
+      binding_revision:binding.revision,source_message:row.id,source_fence:result.fence,resource_fence:result.fence,turn_id:result.id},false,false,undefined,result.attachments);
     this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
   }
   private async result(row: Row): Promise<void> {
@@ -454,8 +470,10 @@ export class ChannelService {
     this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
     const message=this.store.get('SELECT * FROM management_messages WHERE id=?',row.message_id)!;
     if(message.authorization_revision!==actor.authorization_revision||session.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
+    const selected=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='attachments' ORDER BY sequence DESC LIMIT 1",row.message_id);
+    const attachments=m.state==='completed'&&selected?JSON.parse(selected.data):{};
     this.queue(e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
-      personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id});
+      personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,resource_fence:attachments.fence??''},false,false,undefined,attachments.resource_ids??[]);
     this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);
   }
   private async deliver(row: Row): Promise<void> {
@@ -490,17 +508,17 @@ export class ChannelService {
         if(protection.turn_id){const turn=this.store.get('SELECT * FROM role_conversation_turns WHERE id=?',protection.turn_id);
           if(turn?.state!=='completed'||turn.fence!==protection.source_fence||this.businessFence(this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!)!==turn.fence)fail(409,'conversation_source_changed');}
       };
-      guard();const remote=await this.adapter(c,guard).send(delivery,digest(row.id));
-      // A private timer's result is a personal reply: it is not part of any group's context.
-      if(protection.kind==='channel_schedule'&&!protection.binding_id){if(!this.stopped)this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);return;}
-      if(!this.stopped)this.store.transaction(()=>{this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);
+      guard();const remote=await this.sendParts(row,event,delivery,protection,guard,(remote,part)=>{
+        if(protection.kind==='channel_schedule'&&!protection.binding_id)return;
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
-        const content=String(delivery.content.elements?.[0]?.text?.content??'');
-        this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:'interactive',content,raw_content:JSON.stringify(delivery.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:'',thread_id:event.thread_id,deleted:false},'live');
-        // A delegated task's result joins the group's own context under the binding, until the group's fence changes.
+        const content=part.message_type==='post'?String((part.content.zh_cn as any)?.content?.[0]?.[0]?.text??''):part.message_type==='image'?'[图片附件]':part.message_type==='file'?'[文件附件]':String((part.content.elements as any)?.[0]?.text?.content??'');
+        this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:part.message_type??'interactive',content,raw_content:JSON.stringify(part.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:event.root_id??'',thread_id:event.thread_id,deleted:false},'live');
         const fence=protection.kind==='service_task'?this.serviceBindings.fence(chat.id):protection.source_fence;
         this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
-      });return;
+      });
+      // A private timer's result is a personal reply: it is not part of any group's context.
+      if(protection.kind==='channel_schedule'&&!protection.binding_id){if(!this.stopped)this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);return;}
+      if(!this.stopped)this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);return;
     }
     const actor = protection ? await this.actor(event) : undefined;
     const guard = () => {
@@ -519,8 +537,73 @@ export class ChannelService {
       }
     };
     guard();
-    const adapter = this.adapter(c, guard), remote = delivery.message_id ? await adapter.update(delivery) : await adapter.send(delivery, digest(row.id));
+    const adapter = this.adapter(c, guard), remote = delivery.message_id ? await adapter.update(delivery) : await this.sendParts(row,event,delivery,protection,guard);
     if (!this.stopped) this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?", remote, row.id);
+  }
+  /** One durable receipt and UUID per text chunk/resource. Uploading again is safe; sending an unknown part outside its dedup window is not. */
+  private async sendParts(row:Row,event:ChannelEvent,delivery:ChannelDelivery,protection:Json|undefined,guard:()=>void,record?:(remote:string,part:ChannelDelivery)=>void):Promise<string>{
+    const store=this.store;
+    if(!store.get('SELECT 1 FROM channel_outbox_parts WHERE outbox_id=?',row.id))store.transaction(()=>{
+      const parts:{delivery:ChannelDelivery;resource_id?:string;legacy?:boolean}[]=[];
+      const elements=delivery.content.elements as any[]|undefined;
+      // A pre-upgrade send may already have reached Feishu with the old UUID and interactive payload.
+      if(row.attempts>0&&delivery.format_version!==2){parts.push({delivery:{...delivery,resources:undefined,message_type:'interactive'},legacy:true});}
+      else if(elements?.some(el=>el.tag==='action'&&el.actions?.some((a:any)=>a.value))){parts.push({delivery:{...delivery,resources:undefined,message_type:'interactive'}});}
+      else{
+        let value=String(elements?.[0]?.text?.content??'');
+        for(const el of elements??[])for(const action of el.actions??[])if(typeof action.url==='string'&&/^https?:\/\//.test(action.url))value+='\n\n[登录后台查看]('+action.url+')';
+        for(const content of markdownPosts(value,this.options.origin))parts.push({delivery:{...delivery,resources:undefined,content,message_type:'post'}});
+      }
+      for(const id of delivery.resources??[])parts.push({delivery:{...delivery,resources:undefined,content:{}},resource_id:id});
+      parts.forEach((part,i)=>store.run('INSERT INTO channel_outbox_parts(outbox_id,part,payload,first_attempt) VALUES(?,?,?,?)',row.id,i,store.secrets.seal(part,'channel-outbox-part:'+row.id+':'+i),part.legacy?row.created_at:null));
+    });
+    let last='';
+    for(const part of store.all('SELECT * FROM channel_outbox_parts WHERE outbox_id=? ORDER BY part',row.id)){
+      if(part.state==='sent'){last=part.remote_id;continue;}
+      guard();
+      const payload=store.secrets.open(part.payload,'channel-outbox-part:'+row.id+':'+part.part) as any, next=payload.delivery as ChannelDelivery;
+      const checkResource=()=>{
+        guard();const resource=store.get('SELECT * FROM channel_resources WHERE id=?',payload.resource_id);
+        const chat=resource&&store.get('SELECT * FROM channel_chats WHERE id=?',resource.chat_id);
+        if(!resource||!chat||chat.connector_id!==event.connector_id||chat.chat_id!==event.chat_id||chat.app_id!==event.app_id||chat.installation_tenant!==event.installation_tenant)fail(403,'channel_resource_scope_changed');
+        const message=store.get('SELECT deleted,sensitive FROM channel_messages WHERE chat_id=? AND message_id=?',resource!.chat_id,resource!.message_id);
+        if(!message||message.deleted||message.sensitive)fail(403,'channel_resource_unavailable');
+        if(resource!.kind==='artifact'&&resource!.fence!==protection?.resource_fence)fail(403,'channel_resource_scope_changed');
+        if(resource!.project_id){
+          if(event.chat_type==='group'){
+            const binding=this.serviceBindings.active(chat!.id);if(!binding||!this.serviceBindings.reachable(binding,resource!.project_id,['tasks.read']))fail(403,'channel_resource_scope_changed');
+          }else{
+            const actor=resolvePrincipalActor(store,String(protection?.principal_id),null,undefined,'im');
+            this.management.service.scope(actor,resource!.project_id);
+          }
+        }
+        if(event.chat_type==='group'){
+          const scopes=protection?.binding_id?[bindingScope(String(protection.binding_id))]:[];
+          if(!(this.ledger.query(chat!.id,{message_id:resource!.message_id,limit:1},scopes,String(protection?.source_fence??'')).messages as Json[]).length)fail(403,'channel_resource_scope_changed');
+        }
+        return resource!;
+      };
+      if(payload.resource_id){
+        const resource=checkResource();
+        if(!next.message_type){
+          const file=await this.media.bytes(resource,()=>{checkResource();});
+          const key=await this.adapter(this.source(event),()=>{checkResource();}).upload(file.data,file.name,file.mime,file.image);
+          checkResource();next.message_type=file.image?'image':'file';next.content={ [file.image?'image_key':'file_key']:key };
+          store.run('UPDATE channel_outbox_parts SET payload=? WHERE outbox_id=? AND part=?',store.secrets.seal(payload,'channel-outbox-part:'+row.id+':'+part.part),row.id,part.part);
+        }
+      }
+      // Feishu's UUID only deduplicates for one hour. After that, an unknown send needs human reconciliation, never a fresh UUID.
+      if(part.first_attempt&&Date.now()-part.first_attempt>55*60_000)fail(409,'channel_delivery_unknown');
+      store.run("UPDATE channel_outbox_parts SET state='sending',first_attempt=coalesce(first_attempt,?) WHERE outbox_id=? AND part=?",Date.now(),row.id,part.part);
+      const check=()=>{guard();if(payload.resource_id)checkResource();};
+      last=await this.adapter(this.source(event),check).send(next,digest(payload.legacy?row.id:row.id+':'+part.part));
+      if(this.stopped)fail(409,'channel_stopped');
+      store.transaction(()=>{
+        store.run("UPDATE channel_outbox_parts SET state='sent',remote_id=? WHERE outbox_id=? AND part=?",last,row.id,part.part);
+        record?.(last,next);
+      });
+    }
+    return last;
   }
   async tick(): Promise<void> {
     if (this.stopped) return;
@@ -548,6 +631,16 @@ export class ChannelService {
           const retry = error instanceof HttpError && error.status >= 500 && row.attempts < 4;
           this.store.run('UPDATE channel_outbox SET state=?,last_error=?,next_attempt=? WHERE id=?', retry ? 'retry' : 'failed', errorCode(error), Date.now() + 1000 * 2 ** Math.min(row.attempts, 6), row.id);
           this.store.run('UPDATE channel_connectors SET last_error=? WHERE id=?', errorCode(error), row.connector_id);
+          if(!retry){
+            const payload=this.store.secrets.open(row.payload,'channel-outbox:'+row.id) as any;
+            if(payload.delivery.resources?.length){
+              const code=errorCode(error),notice=code==='channel_resource_permission_required'?'附件未全部送达。请管理员在控制台飞书连接设置中补齐图片与文件权限，并在飞书发布生效后重新请求发送。'
+                :code==='channel_delivery_unknown'?'部分消息或附件的送达结果无法确认，自动重发已停止。请管理员核对原会话与控制台的逐项发送记录，避免重复发送。'
+                :code==='channel_resource_too_large'?'附件超过大小限制：接收最多 20 MiB，发送图片最多 10 MiB、文件最多 30 MiB。已确认送达的部分会保留，请缩小附件后重新请求。'
+                :'附件发送未全部确认；已确认送达的部分会保留。请先核对原会话和控制台发送记录，再处理剩余附件，避免重复发送。';
+              this.queue(payload.event,card(notice),row.id+':delivery-notice',row.source_event,payload.protection);
+            }
+          }
         }
       }
       // Notification only: tasks are created/claimed/run by the existing task service and engine.

@@ -12,6 +12,7 @@ import { managementFailure } from './presentation.js';
 import { ServiceComputers, ServiceRepositories, serviceRepositoryTools, serviceComputerTools, serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
 import { permitsManagement, githubReadScopes } from '../roles/permissions.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
+import { mediaTools, type MediaTurn } from '../channels/media.js';
 
 const now=()=>new Date().toISOString();
 // Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
@@ -21,6 +22,7 @@ export class ManagementAgent {
   readonly active=new Map<string,{controller:AbortController;work:Promise<void>}>();
   // A transport can invalidate its own persisted context, including when it is reopened from Web.
   sourceGuard?:(actor:ActorContext,conversation:string)=>void;
+  mediaTurn?:(actor:ActorContext,conversation:string,input:Json,computers:ServiceComputers,guard:()=>void)=>MediaTurn|undefined;
   readonly own:OwnTasks;
   constructor(readonly store:Store,readonly service:ManagementService){
     this.own=new OwnTasks(store);
@@ -117,7 +119,8 @@ export class ManagementAgent {
       const project=this.store.all('SELECT id,full_name FROM repositories').find(r=>r.id===selected||r.full_name===selected);
       if(!project)fail(404,'repository_not_found');this.service.scope(actor,project!.id);return project!;
     },()=>githubReadScopes(JSON.parse(serviceRole(this.store,managementAssistant)!.permissions)),this.service.githubUrl);
-    const tools=[...managementTools,...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(this.service.computer?serviceComputerTools:[])];
+    const media=this.mediaTurn?.(actor,conversation,input,resources,()=>{assertCurrent(actor);this.conversation(base,conversation);});
+    const tools=[...managementTools,...ownTaskTools,...serviceMemoryTools,...serviceRepositoryTools,...(this.service.computer?serviceComputerTools:[]),...(media?mediaTools:[])];
     let ownHost:OwnTaskHost|undefined;
     const execute=async(name:string,args:any,callId:string):Promise<any>=>{
       // Providers may reuse a tool id in later model turns. Progress needs an id unique to this invocation.
@@ -125,7 +128,8 @@ export class ManagementAgent {
       await guard();this.event(id,'tool_call',{name,call_id:eventCallId,arguments:args});
       let result:any;
       try{
-        if(serviceRepositoryTools.some(t=>t.function.name===name))result=await repositories.execute(name,args);
+        if(media&&mediaTools.some(t=>t.function.name===name))result=await media.execute(name,args);
+        else if(serviceRepositoryTools.some(t=>t.function.name===name))result=await repositories.execute(name,args);
         else if(serviceComputerTools.some(t=>t.function.name===name))result=await resources.execute(name,args);
         else if(serviceMemoryTools.some(t=>t.function.name===name))result=serviceMemory(this.store,{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},name,args);
         else if(ownTaskNames.includes(name)){
@@ -170,15 +174,17 @@ export class ManagementAgent {
           prompt:JSON.stringify(context),tools,
           adapter:async({request})=>{
             ownHost={owner:{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},
-              system,tools:()=>tools,request,execute,check:guard,redact:value=>redactor.text(value),clean:value=>value};
-            const messages:any[]=[{role:'system',content:system},{role:'user',content:JSON.stringify(context)}];
+              system,tools:()=>tools,request:async(body,label)=>{media?.addImages(body.messages as any[]);return request(body,label).catch(error=>{if(media)media.modelError(error,body.messages as any[]);throw error;});},execute,check:guard,redact:value=>redactor.text(value),clean:value=>value};
+            const messages:any[]=[{role:'system',content:system+(media?'\nThis Feishu message may contain real attachments: call list_message_resources, then read_message_resource or view_message_image to inspect them. Binary or large inputs need import_message_resource and computer tools. Use attach_message_resource, attach_workspace_file or create_reply_file to send actual attachments with your final answer. Never invent paths or resource IDs; selecting an attachment is not delivery.':'')},{role:'user',content:JSON.stringify(context)}];
             // One query per project across many projects is normal (#333): results share a budget per batch and older ones
             // fold away, so the conversation stays within the model's context however many calls the model makes.
             const transcript=new ToolTranscript(messages,chatContextBytes);
             for(let turn=0;turn<16;turn++){
               await guard();this.event(id,'model_start',{turn});
+              media?.addImages(messages);
               const body={messages,tools,tool_choice:'auto'};transcript.fit(body);
-              const {value,request_log_id}=await request(body,'turn:'+turn,async delta=>{if(delta?.content){await guard();this.event(id,'text',{delta:redactor.text(delta.content),provisional:true});}});
+              const {value,request_log_id}=await request(body,'turn:'+turn,async delta=>{if(delta?.content){await guard();this.event(id,'text',{delta:redactor.text(delta.content),provisional:true});}})
+                .catch(error=>{if(media)media.modelError(error,messages);throw error;});
               this.event(id,'model_request',{request_log_id});
               const message=value?.choices?.[0]?.message;
               if(!message)fail(502,'management_model_invalid');
@@ -202,7 +208,8 @@ export class ManagementAgent {
             }fail(502,'management_turn_limit');
           }});
       }
-      await guard();this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});
+      await guard();if(media?.attachments.length)this.event(id,'attachments',{resource_ids:media.attachments,fence:media.fence});
+      this.store.run("UPDATE management_messages SET state='completed',updated_at=? WHERE id=?",now(),id);this.event(id,'done',{state:'completed'});
     }catch(error){
       const stopped=this.store.get('SELECT state FROM management_messages WHERE id=?',id)?.state==='stopped';
       if(!stopped){

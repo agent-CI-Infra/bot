@@ -10,6 +10,8 @@ export function transport() {
   const sent = [], state = { sendFailures: 0, reactionRequests: [], reactions: [], reactionHandler: null, reactionSequence: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', currentAppName: null, applicationCode: 0, applicationId: null, tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
     audienceRequests: [], audience: null, inChat: true, profileRequests: [], profileGate: null, profileCode: 0, profileOpenId: null, profileName: '张小明', scopeCode: 0, scopes: null, scopeRequests: 0,
     members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
+  state.resourceRequests=[];state.uploads=[];state.resources=new Map();state.mediaHandler=null;state.sendHandler=null;state.lostSendResponses=0;
+  const receipts=new Map();
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
       state.authStarted++;
@@ -29,6 +31,18 @@ export function transport() {
       }
       if (init.method === 'DELETE') { state.reactions = state.reactions.filter(r => r.reaction_id !== reaction || r.message !== message); return Response.json({ code: 0, data: {} }); }
       return Response.json({ code: 0, data: { items: state.reactions.filter(r => r.message === message), has_more: false } });
+    }
+    if(url.includes('/resources/')){
+      state.resourceRequests.push({url,init});
+      if(state.mediaHandler){const response=await state.mediaHandler(url,init);if(response)return response;}
+      const file=state.resources.get(decodeURIComponent(new URL(url).pathname.split('/').at(-1)));
+      return file?new Response(file.data,{headers:{'Content-Type':file.mime,'Content-Disposition':'attachment'}}):Response.json({code:234001},{status:404});
+    }
+    if(url.endsWith('/im/v1/images')||url.endsWith('/im/v1/files')){
+      const image=url.endsWith('/images'),blob=init.body.get(image?'image':'file');
+      state.uploads.push({url,image,name:blob.name,mime:blob.type,data:Buffer.from(await blob.arrayBuffer()),fields:[...init.body.keys()]});
+      if(state.mediaHandler){const response=await state.mediaHandler(url,init);if(response)return response;}
+      return Response.json({code:0,data:{[image?'image_key':'file_key']:'uploaded-'+state.uploads.length}});
     }
     if (state.sendFailures && ['POST', 'PATCH'].includes(init.method) && url.includes('/im/v1/messages')) {
       state.sendFailures--; return Response.json({ code: 999, msg: 'fixture failure' }, { status: 503 });
@@ -60,8 +74,13 @@ export function transport() {
       if (state.audience) return state.audience(new URL(url));
       return Response.json({ code: 0, data: url.endsWith('/is_in_chat') ? { is_in_chat: state.inChat } : { items: state.members, has_more: false } });
     }
-    const request = JSON.parse(init.body); sent.push({ url, method: init.method, ...request, content: JSON.parse(request.content) });
-    return Response.json({ code: 0, data: { message_id: 'remote-' + sent.length } });
+    const request = JSON.parse(init.body);
+    if(receipts.has(request.uuid))return Response.json({code:0,data:{message_id:receipts.get(request.uuid)}});
+    if(state.sendHandler){const response=await state.sendHandler(url,init,request);if(response)return response;}
+    sent.push({ url, method: init.method, ...request, content: JSON.parse(request.content) });
+    const remote='remote-'+sent.length;receipts.set(request.uuid,remote);
+    if(state.lostSendResponses){state.lostSendResponses--;throw new Error('fixture_response_lost_after_accept');}
+    return Response.json({ code: 0, data: { message_id: remote } });
   } };
 }
 export async function connector(admin, override = {}) {
@@ -138,7 +157,7 @@ export function cardEvent(token, message = 'remote-1', actor = 'ou_alice', chat 
   const e = envelope(); e.header.event_type = 'card.action.trigger';
   e.event = { operator: { open_id: actor, tenant_key: 'actor-tenant' }, context: { open_chat_id: chat, open_message_id: message }, action: { value: { token } } }; return e;
 }
-export const cardToken = sent => sent?.content.elements.flatMap(e => e.actions ?? []).find(a => a.value?.token)?.value.token;
+export const cardToken = sent => sent?.content.elements?.flatMap(e => e.actions ?? []).find(a => a.value?.token)?.value.token;
 export { digest };
 /** A model that takes one step per request: each step is [tool, args], a final answer string, or a function of
  * (earlier tool results, the request context) returning either. It serves the management assistant and group assistants. */

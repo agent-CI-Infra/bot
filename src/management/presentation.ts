@@ -7,6 +7,10 @@ const stepFault=/^(management|service)_turn_limit$/;
 
 /** Public explanations contain no request data; detailed codes remain in the authenticated trace. */
 export function managementFailure(code:string):string {
+  if(code==='channel_image_model_unsupported')return '当前模型拒绝了本次图片输入，未能查看图片。请选择支持图片输入的模型，或使用已授权项目的电脑工具处理。';
+  if(code==='channel_resource_permission_required')return '飞书应用缺少图片与文件权限，请管理员在控制台飞书连接设置中导入完整权限，并在飞书发布生效后重试。';
+  if(code==='channel_resource_too_large')return '附件超过本次处理的大小限制，请缩小文件后重试；较大的图片可通过项目电脑处理。';
+  if(code==='channel_image_model_limit'||code==='channel_image_format_unsupported'||code==='channel_binary_requires_computer')return '此附件需要通过已授权项目的电脑工具处理，当前模型不能直接查看。';
   if(code==='service_role_model_not_configured')return '管理助手尚未配置模型，请超级管理员在控制台「全局设置 → 服务角色」中为它选择共享模型。';
   if(code==='service_role_budget_exhausted')return '管理助手的用量预算已用完，请超级管理员在「全局设置 → 服务角色」中检查预算。';
   if(code==='service_role_budget_usage_unknown')return '管理助手有无法计价的用量，预算无法核对，已暂停调用；请超级管理员在「全局设置 → 服务角色」中检查模型价格和预算。';
@@ -25,6 +29,7 @@ export function managementFailure(code:string):string {
 }
 /** What a group sees when its assistant cannot answer: who can fix it and where, without request data or internal IDs. */
 export function serviceFailure(code:string,role:string):string {
+  if(/^channel_(resource|image|binary)/.test(code))return managementFailure(code);
   if(code==='service_role_model_not_configured')return `群助手「${role}」尚未配置模型，请超级管理员在控制台「全局设置 → 服务角色」中为它选择共享模型。`;
   if(code==='service_role_budget_exhausted')return `群助手「${role}」的用量预算已用完，请超级管理员在「全局设置 → 服务角色」中检查预算。`;
   if(code==='service_role_budget_usage_unknown')return `群助手「${role}」有无法计价的用量，预算无法核对，已暂停调用；请超级管理员在「全局设置 → 服务角色」中检查模型价格和预算。`;

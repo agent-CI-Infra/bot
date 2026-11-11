@@ -2,6 +2,7 @@ import type { Row, Store } from '../storage/database.js';
 import { digest, fail, randomId, type Json } from '../core/security.js';
 import { traceClean } from '../tasks/trace.js';
 import type { ChannelEvent, StoredMessage } from './types.js';
+import { mediaStorage, mergeResources, resourceMetadata } from './media.js';
 
 export function ledgerStorage(store: Store): void {
   store.db.exec(`
@@ -36,6 +37,7 @@ export function ledgerStorage(store: Store): void {
   if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'context_revision')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 1');
   if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'type_verified')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN type_verified INTEGER NOT NULL DEFAULT 0');
   if (!store.all('PRAGMA table_info(channel_message_scopes)').some(c => c.name === 'fence')) store.db.exec('ALTER TABLE channel_message_scopes ADD COLUMN fence TEXT');
+  mediaStorage(store);
 }
 
 export interface MessageQuery {
@@ -123,6 +125,7 @@ export class ChannelLedger {
       old && message.deleted ? old.message_type : data.message_type, old && message.deleted ? old.created_at : data.created_at,
       Math.max(data.updated_at, old?.updated_at ?? 0), Date.now(), source, data.parent_id || old?.parent_id || '',
       data.root_id || old?.root_id || '', data.thread_id || old?.thread_id || '', Number(data.deleted), Number(sensitive(data)), sealed);
+    mergeResources(this.store, chat, data, sensitive(data));
     if (old || this.store.get('SELECT 1 FROM channel_chat_summaries WHERE chat_id=? AND through_time>=?', chat.id, data.created_at)) {
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', chat.id);
       this.store.run('UPDATE channel_chats SET context_revision=context_revision+1 WHERE id=?', chat.id);
@@ -209,6 +212,9 @@ export class ChannelLedger {
         if(payload.event?.chat_id===chat.chat_id&&payload.event?.app_id===chat.app_id&&payload.event?.installation_tenant===chat.installation_tenant&&
           (payload.protection?.turn_id||payload.protection?.personal_chat===id||payload.event.created_at<before)){
           payload.event={...payload.event,content:'',raw_content:''};payload.delivery.content={elements:[{tag:'div',text:{tag:'plain_text',content:'本地保留范围已清理。'}}]};
+          payload.delivery.resources=[];
+          for(const part of this.store.all('SELECT part,state FROM channel_outbox_parts WHERE outbox_id=?',row.id))this.store.run('UPDATE channel_outbox_parts SET payload=?,state=? WHERE outbox_id=? AND part=?',
+            this.store.secrets.seal({},'channel-outbox-part:'+row.id+':'+part.part),part.state==='sent'?'sent':'failed',row.id,part.part);
           this.store.run('UPDATE channel_outbox SET payload=?,state=?,last_error=? WHERE id=?',this.store.secrets.seal(payload,'channel-outbox:'+row.id),row.state==='sent'?'sent':'failed','history_cleaned',row.id);
         }
       }
@@ -216,9 +222,11 @@ export class ChannelLedger {
   }
   private view(row:Row):Json {
     const payload=this.store.secrets.open(row.payload,'channel-message:'+row.chat_id+':'+row.message_id);
+    // Older ledgers kept authenticated raw references only. Materialize their metadata on an authorized local read.
+    if(!row.deleted&&!row.sensitive)mergeResources(this.store,{id:row.chat_id},payload as unknown as StoredMessage,false);
     return {message_id:row.message_id,sender_id:row.sender_id,sender_tenant:row.sender_tenant,sender_type:row.sender_type,message_type:row.message_type,
       created_at:row.created_at,updated_at:row.updated_at,parent_id:row.parent_id,root_id:row.root_id,thread_id:row.thread_id,deleted:!!row.deleted,sensitive:!!row.sensitive,
-      content:row.deleted?'[消息已撤回]':row.sensitive?'[敏感消息已隐藏]':String(payload.content),resources:row.deleted||row.sensitive?null:traceClean(payload.raw_content),resource_state:row.message_type==='text'?'text':'metadata_only'};
+      content:row.deleted?'[消息已撤回]':row.sensitive?'[敏感消息已隐藏]':String(payload.content),resources:row.deleted||row.sensitive?null:this.store.all("SELECT * FROM channel_resources WHERE chat_id=? AND message_id=? AND kind='incoming' ORDER BY id",row.chat_id,row.message_id).map(resource=>resourceMetadata(this.store,resource)),resource_state:row.message_type==='text'?'text':'scoped_resources'};
   }
   private visibility(projects?:string[],fence?:string):{sql:string;args:string[]} {
     if(projects===undefined&&fence===undefined)return {sql:'',args:[]};

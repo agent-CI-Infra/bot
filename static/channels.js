@@ -383,14 +383,14 @@ async function channelDiagnostics(c, panel) {
   if (operations.some(op => op.reaction_error === 'channel_reaction_permission_required'))
     view.append(note('处理中表情暂不可用：请在飞书开通应用身份权限 im:message.reactions:write_only，并发布新版本。普通消息回复不受影响。'));
   else if (operations.some(op => op.reaction_error)) view.append(note('部分处理中表情添加或清理未成功，可在收件诊断中查看；普通消息回复继续处理。'));
-  for (const d of deliveries.slice(0, 10)) view.append(note(`发送 ${d.id} · ${d.state} · 尝试 ${d.attempts}${d.last_error ? ' · ' + d.last_error : ''}`));
+  for (const d of deliveries.slice(0, 10)) view.append(note(`发送 ${d.id} · ${d.state} · 尝试 ${d.attempts}${d.parts?.length ? ' · 已送达 ' + d.parts.filter(p => p.state === 'sent').length + '/' + d.parts.length + ' 项' : ''}${d.last_error === 'channel_delivery_unknown' ? ' · 部分送达结果待核对，已停止自动重发' : d.last_error ? ' · ' + d.last_error : ''}`));
   panel.append(view);
   await channelHistory(c, panel);
 }
 
 async function channelHistory(connector, panel) {
   const section = card('本地消息与历史同步'), { chats } = await api('/api/channels/chats?connector_id=' + connector.id);
-  section.append(note('搜索只读取本地密封消息库，不向飞书回源。同步完成仅代表已遍历平台返回的可见范围，不能证明入群前历史或所有编辑均可见。附件当前仅保存资源引用，尚未下载或解析。'));
+  section.append(note('搜索只读取本地密封消息库，不向飞书回源。同步完成仅代表已遍历平台返回的可见范围，不能证明入群前历史或所有编辑均可见。图片和文件按消息保存来源；获授权助手读取时才下载，撤回和清理后不可再访问。'));
   if (!chats.length) section.append(note('尚未收到此应用的会话事件。机器人进群或首次收到消息后会建立本地记录。'));
   const form = element('form', '', 'project-form');
   const select = channelSelect(form, '本地会话', 'chat', chats.map(c => [c.id, `${c.chat_type === 'group' ? '群' : '私信'} ${c.chat_id}`]));
@@ -416,7 +416,7 @@ async function channelHistory(connector, panel) {
       for (const m of result.messages) {
         const item = element('article', '', 'channel-binding');
         item.append(element('strong', `${m.sender_id || '未知发送者'} · ${m.message_type}`), note(new Date(m.created_at).toLocaleString() + ' · ' + m.message_id),
-          element('p', m.content || '仅保存附件或资源引用，未解析'), ...(m.thread_id ? [note('话题 ' + m.thread_id)] : [])); results.append(item);
+          element('p', m.content || '此消息没有可显示的文本'), ...(m.resources || []).map(r => note(`附件：${r.name} · ${{pending:'待下载',ready:'可用',failed:'读取失败'}[r.state] || r.state}${r.size === null ? '' : ' · ' + r.size + ' 字节'}${r.mime ? ' · ' + r.mime : ''}${r.error ? ' · ' + r.error : ''}`)), ...(m.thread_id ? [note('话题 ' + m.thread_id)] : [])); results.append(item);
       }
       next.hidden = !result.has_more;
     } catch (err) { status.textContent = err.message; } finally { queryButton.disabled = !chats.length; }

@@ -16,9 +16,10 @@ async function web(f,content,client=f.admin){const conversation=(await client('/
 const sent=(f,id)=>until(()=>f.wire.sent.find(s=>JSON.stringify(s.content).includes(id)));
 
 test('multi-project greetings use the shared management agent and private history shows the actual answer',async t=>{
-  const f=await channelFixture(t);
+  const f=await channelFixture(t);let channel=true;
   f.modelState.respond=async(body,res)=>{
-    assert.deepEqual(body.tools.map(t=>t.function.name),['management_query','management_command','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task','search_role_memory','read_role_memory','remember_role_memory','github_read','github_search','read_job_log']);
+    assert.deepEqual(body.tools.map(t=>t.function.name),['management_query','management_command','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task','search_role_memory','read_role_memory','remember_role_memory','github_read','github_search','read_job_log',
+      ...(channel?['list_message_resources','read_message_text','read_message_resource','view_message_image','import_message_resource','attach_message_resource','attach_workspace_file','create_reply_file']:[])]);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
     assert.match(body.messages[0].content,/No project is preselected/);
     reply(res,'你好！可以按项目名称查询任务和管理配置。');
@@ -29,7 +30,7 @@ test('multi-project greetings use the shared management agent and private histor
   const chat=f.h.store.get("SELECT id FROM channel_chats WHERE chat_id='oc_private'");
   const view=await f.admin('/api/channels/chats/'+chat.id+'/conversation');
   assert.equal(view.value.mode,'management');assert.equal(view.value.turns[0].request,'你好');assert.match(view.value.turns[0].reply,/你好！/);
-  const w=await web(f,'你好');assert.equal(w.history.messages[0].state,'completed');
+  channel=false;const w=await web(f,'你好');assert.equal(w.history.messages[0].state,'completed');
   assert.ok(!JSON.stringify(f.wire.sent).includes('/chat /project'));assert.equal(f.h.store.get('SELECT count(*) n FROM management_commands WHERE source_message LIKE \'feishu:%\' OR source_message=\'fixture-web\'').n,0);
 });
 

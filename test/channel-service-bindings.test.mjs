@@ -81,7 +81,8 @@ test('the repository assistant answers any member across its repositories withou
   const message = groupMessage('bot 仓库最近有哪些未关闭的 PR？顺便解释一下 src/channels/service.ts 的作用'), receipt = await post(f.h, f.id, message);
   const row = await done(f, receipt); assert.equal(row.state, 'completed', row.error);
   const answer = await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('#7 Bind group assistants')));
-  assert.equal(answer.content.elements.length, 1, 'a group answer carries no console login button');
+  assert.equal(answer.msg_type, 'post', 'a group answer is native rich text');
+  assert.ok(!JSON.stringify(answer.content).includes('登录后台查看'));
   const last = f.requests.at(-1), seen = observations(last);
   assert.deepEqual(seen[0].projects.map(p => p.repository), [repo(101), repo(102)]);
   assert.ok(seen[0].projects.every(p => !('id' in p) && p.url === 'https://github.com/' + p.repository));

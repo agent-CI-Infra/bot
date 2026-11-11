@@ -178,6 +178,22 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     const asked=String(input.path||''),target=asked.startsWith('../context/')?await contextPath(asked.slice(11)):await path(asked),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
     try{return {content:await handle.readFile('utf8')};}finally{await handle.close();}
   }
+  // Snapshot one regular private-workspace file; later chunks read this immutable blob, never a live mutable path.
+  if(input.type==='workspace_export'){
+    const target=await path(input.path),handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
+    let data;
+    try{
+      const info=await handle.stat(),max=30*1024*1024;
+      if(!info.isFile())throw new Error('artifact_regular_file_required');
+      if(info.size<1||info.size>max)throw new Error('artifact_size_limit');
+      const buffer=Buffer.alloc(info.size+1);let size=0;
+      while(size<buffer.length){const part=await handle.read(buffer,size,buffer.length-size,size);if(!part.bytesRead)break;size+=part.bytesRead;}
+      if(size!==info.size)throw new Error('artifact_changed');data=buffer.subarray(0,size);
+    }finally{await handle.close();}
+    const sha=createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex'),cache=root+'/blob-'+sha;
+    try{await writeFile(cache,data,{flag:'wx',mode:0o600});}catch(error){if(error.code!=='EEXIST')throw error;}
+    return {sha,size:data.length};
+  }
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
   if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id});
   if(input.type==='workspace_finalize'){

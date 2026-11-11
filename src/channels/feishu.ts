@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders } from 'node:http';
 import type { Row } from '../storage/database.js';
 import { fail, HttpError, object, text, type Json } from '../core/security.js';
 import type { ChannelAdapter, ChannelDelivery, ChannelEvent, HistoryPage, StoredMessage } from './types.js';
+import { postText } from './format.js';
 
 export type ChannelFetch = typeof fetch;
 export class ChannelRateLimitError extends HttpError {
@@ -19,6 +20,7 @@ export const FEISHU_SCOPES: readonly { scope: string; purpose: string; enterpris
   { scope: 'im:message.p2p_msg:readonly', purpose: '接收私聊消息' },
   { scope: 'im:message.group_at_msg:readonly', purpose: '接收群内 @ 机器人的消息' },
   { scope: 'im:message:send_as_bot', purpose: '发送消息与更新卡片' },
+  { scope: 'im:resource', purpose: '获取与上传消息中的图片和文件' },
   { scope: 'im:message.reactions:write_only', purpose: '添加与删除消息处理中表情' },
   { scope: 'cardkit:card:write', purpose: '创建与更新卡片' },
   { scope: 'im:message.group_msg', purpose: '接收群内用户消息、读取群历史（敏感权限）' },
@@ -92,17 +94,17 @@ export class FeishuAdapter implements ChannelAdapter {
     const actorTenant = sender.sender_type === 'user' ? text(sender.tenant_key) : String(sender.tenant_key ?? '');
     const mentions = Array.isArray(message.mentions) ? message.mentions as any[] : [];
     const addressed = message.chat_type === 'p2p' || mentions.some(m => m.id?.open_id === this.connector.bot_open_id);
-    const raw = text(message.content, 200000), messageType = text(message.message_type, 80);
+    const raw = text(message.content_v2 ?? message.content, 200000), messageType = text(message.message_type, 80);
     let content = '';
     try { content = messageText(messageType, raw); } catch { return fail(400, 'channel_message_invalid'); }
-    for (const m of mentions) if (m.id?.open_id === this.connector.bot_open_id && typeof m.key === 'string') content = content.replaceAll(m.key, '').trim();
+    for (const m of mentions) if (typeof m.key === 'string') content = content.replaceAll(m.key, m.id?.open_id === this.connector.bot_open_id ? '' : '@' + String(m.name ?? m.id?.open_id ?? '用户')).trim();
     return { ...base, actor_tenant: actorTenant, actor_id: text(id.open_id ?? id.app_id), chat_id: text(message.chat_id),
       chat_type: message.chat_type as 'p2p' | 'group', message_id: text(message.message_id), thread_id: String(message.thread_id ?? ''),
       parent_id: String(message.parent_id ?? ''), root_id: String(message.root_id ?? ''), created_at: eventTime(message.create_time),
       updated_at: eventTime(message.update_time ?? message.create_time), kind: 'message', content, raw_content: raw,
       message_type: messageType, sender_type: String(sender.sender_type ?? 'unknown'), addressed: addressed && sender.sender_type === 'user' && id.open_id !== this.connector.bot_open_id };
   }
-  private async api(path: string, init: RequestInit, authenticated = true): Promise<any> {
+  private async api(path: string, init: RequestInit, authenticated = true, binary = false): Promise<any> {
     let token = '';
     if (authenticated) {
       let data: any;
@@ -118,13 +120,20 @@ export class FeishuAdapter implements ChannelAdapter {
     try {
       this.guard();
       const r = await this.request('https://open.feishu.cn/open-apis' + path, { ...init, redirect: 'error', signal: AbortSignal.timeout(15000),
-        headers: { 'Content-Type': 'application/json', ...(authenticated ? { Authorization: 'Bearer ' + token } : {}) } });
+        headers: { ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(authenticated ? { Authorization: 'Bearer ' + token } : {}) } });
+      if (binary && r.ok) return r;
       const data = await r.json().catch(error => { if (r.status === 429) return {}; throw error; }) as any;
       if (r.status === 429 || [99991400, 99991401].includes(data.code)) {
         const retry = r.headers.get('retry-after') ?? '1';
         const delay = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
         throw new ChannelRateLimitError(Number.isFinite(delay) ? Math.min(3600000, Math.max(1000, delay)) : 1000);
       }
+      if ((binary || init.body instanceof FormData) && (!r.ok || data.code !== 0)) {
+        if (r.status === 403 || [99991672, 230027].includes(data.code)) fail(403, 'channel_resource_permission_required');
+        if (r.status === 404 || [230011, 234001].includes(data.code)) fail(404, 'channel_resource_unavailable');
+        fail(r.status >= 500 ? 502 : 400, 'channel_resource_rejected');
+      }
+      if (binary) fail(502, 'channel_resource_invalid');
       if (path.includes('/reactions') && (!r.ok || data.code !== 0)) {
         if ([230110, 231003, 231004].includes(data.code)) fail(404, 'channel_reaction_not_found');
         if (r.status === 403 || data.code === 99991672) fail(403, 'channel_reaction_permission_required');
@@ -148,9 +157,42 @@ export class FeishuAdapter implements ChannelAdapter {
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }
   }
   async send(delivery: ChannelDelivery, key: string): Promise<string> {
-    const data = await this.api('/im/v1/messages?receive_id_type=' + delivery.receive_id_type, { method: 'POST',
-      body: JSON.stringify({ receive_id: delivery.receive_id, msg_type: 'interactive', content: JSON.stringify(delivery.content), uuid: key.slice(0, 50) }) });
+    const path = delivery.reply_to ? '/im/v1/messages/' + encodeURIComponent(delivery.reply_to) + '/reply' : '/im/v1/messages?receive_id_type=' + delivery.receive_id_type;
+    const data = await this.api(path, { method: 'POST',
+      body: JSON.stringify({ ...(delivery.reply_to ? { reply_in_thread: !!delivery.reply_in_thread } : { receive_id: delivery.receive_id }), msg_type: delivery.message_type ?? 'interactive', content: JSON.stringify(delivery.content), uuid: key.slice(0, 50) }) });
     return text(data.data?.message_id);
+  }
+  async download(message: string, key: string, type: 'image' | 'file', maxBytes: number): Promise<{ data: Buffer; mime: string }> {
+    const response = await this.api('/im/v1/messages/' + encodeURIComponent(message) + '/resources/' + encodeURIComponent(key) + '?type=' + type, { method: 'GET' }, true, true) as Response;
+    const reader = response.body?.getReader();
+    if (!reader) return fail(502, 'channel_resource_empty');
+    const chunks: Uint8Array[] = []; let size = 0;
+    try {
+      if (Number(response.headers.get('content-length')) > maxBytes) fail(413, 'channel_resource_too_large');
+      for (;;) {
+        this.guard(); const part = await reader.read(); if (part.done) break;
+        size += part.value.length; if (size > maxBytes) fail(413, 'channel_resource_too_large'); chunks.push(part.value);
+      }
+      this.guard(); if (!size) fail(400, 'channel_resource_empty');
+      const data=Buffer.concat(chunks),mime=String(response.headers.get('content-type') ?? 'application/octet-stream').split(';')[0]!.toLowerCase();
+      if(mime==='application/json'&&!response.headers.has('content-disposition')&&data.length<64000){
+        let error:any;try{error=JSON.parse(data.toString('utf8'));}catch{}
+        if([99991672,230027].includes(error?.code))fail(403,'channel_resource_permission_required');
+        if([234001,230011].includes(error?.code))fail(404,'channel_resource_unavailable');
+        if(error?.code&&typeof error.msg==='string')fail(400,'channel_resource_rejected');
+      }
+      return {data,mime};
+    } catch(error){if(error instanceof HttpError)throw error;return fail(502,'channel_resource_download_failed');}
+    finally { await reader.cancel().catch(() => {}); }
+  }
+  async upload(data: Buffer, name: string, mime: string, image: boolean): Promise<string> {
+    if (!data.length || data.length > (image ? 10 : 30) * 1024 * 1024) fail(413, 'channel_resource_too_large');
+    const body = new FormData();
+    if (image) body.set('image_type', 'message');
+    else { body.set('file_type', 'stream'); body.set('file_name', name); }
+    body.set(image ? 'image' : 'file', new Blob([new Uint8Array(data)], { type: mime }), name);
+    const result = await this.api('/im/v1/' + (image ? 'images' : 'files'), { method: 'POST', body });
+    return text(result.data?.[image ? 'image_key' : 'file_key']);
   }
   async addProcessingReaction(message: string): Promise<string> {
     const data = await this.api('/im/v1/messages/' + encodeURIComponent(message) + '/reactions', { method: 'POST',
@@ -190,7 +232,7 @@ export class FeishuAdapter implements ChannelAdapter {
     const data = result.data;
     if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean' || data.has_more && typeof data.page_token !== 'string') fail(502, 'channel_history_invalid');
     const items: StoredMessage[] = data.items.map((item: any) => {
-      const raw = String(item.body?.content ?? ''), messageType = text(item.msg_type, 80);
+      const raw = String(item.body?.content_v2 ?? item.body?.content ?? ''), messageType = text(item.msg_type, 80);
       let content = '';
       if (!item.deleted) { try { content = messageText(messageType, raw); } catch { fail(502, 'channel_history_invalid'); } }
       return { message_id: text(item.message_id), sender_id: String(item.sender?.id ?? ''), sender_tenant: String(item.sender?.tenant_key ?? ''),
@@ -276,20 +318,12 @@ export class FeishuAdapter implements ChannelAdapter {
 }
 
 function messageText(type: string, raw: string): string {
-  if (!['text', 'post', 'file', 'audio', 'media'].includes(type)) return '';
+  if (!['text', 'post', 'image', 'file', 'audio', 'media'].includes(type)) return '[暂不支持的消息类型：' + type + ']';
   const data = object(JSON.parse(raw));
   if (type === 'text') return String(data.text ?? '');
-  if (type !== 'post') return String(data.file_name ?? '');
-  const parts: string[] = [];
-  const walk = (node: any): void => {
-    if (Array.isArray(node)) { for (const item of node) walk(item); return; }
-    if (!node || typeof node !== 'object') return;
-    for (const [key, value] of Object.entries(node)) {
-      if (['text', 'title'].includes(key) && typeof value === 'string') parts.push(value);
-      else if (typeof value === 'object') walk(value);
-    }
-  };
-  walk(data); return parts.join('\n');
+  if (type === 'image') return '[图片附件]';
+  if (type !== 'post') return '[附件：' + String(data.file_name ?? type) + ']';
+  return postText(data);
 }
 
 function eventTime(value: unknown): number {

@@ -77,7 +77,7 @@ test('unbound participants and threads share one logical conversation; quiet mes
   }
   assert.equal(f.requests.length,0);
   const first=await post(f.h,f.id,inGroup('What did the group decide?','ou_bob'));const state=await complete(f,first);assert.equal(state.state,'completed',state.error);
-  await until(()=>f.wire.sent.find(s=>s.content.elements?.[0]?.text?.content==='Recorded local answer'));
+  await until(()=>f.wire.sent.find(s=>s.content.zh_cn?.content?.[0]?.[0]?.text==='Recorded local answer'));
   const request=JSON.parse(f.requests.at(-1).messages[1].content);
   assert.equal(request.conversation_id,f.chat.id);assert.ok(JSON.stringify(request.context).includes('use local green'));assert.ok(JSON.stringify(request.context).includes('Agreed with the first decision'));
   const next=inGroup('Continue with that conclusion','ou_alice');next.event.message.thread_id='another-thread';
