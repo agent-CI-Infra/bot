@@ -47,6 +47,9 @@ export class ChannelService {
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
     this.serviceBindings = new ChannelServiceBindings(store, this.employees);
     this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl);
+    // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
+    this.employees.bindingGuard = origin => this.serviceBindings.guardTask(origin);
+    management.service.taskCreated = (command, task) => this.serviceBindings.linkTask(command, task);
     this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.syncGuard(chat));
     management.sourceGuard=(actor,conversation)=>{
       const source=store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND context_revision IS NOT NULL ORDER BY rowid DESC LIMIT 1',conversation);
@@ -462,9 +465,17 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
-    if(['employee','personal_conversation','service_binding'].includes(protection?.kind)){
+    if(['employee','personal_conversation','service_binding','service_task'].includes(protection?.kind)){
       const guard=()=>{
         this.source(event);if(this.stopped)fail(409,'channel_stopped');
+        if(protection.kind==='service_task'){
+          const binding=this.serviceBindings.get(protection.chat_id);
+          if(!binding||binding.id!==protection.binding_id)fail(409,'conversation_source_changed');
+          this.serviceBindings.assertUsable(binding!);
+          if(!this.serviceBindings.reachable(binding!,protection.project_id,['tasks.read']))fail(403,'channel_service_scope_paused');
+          const task=this.store.get('SELECT * FROM tasks WHERE id=?',protection.task_id);if(!task)fail(404,'task_not_found');this.resultAuthority(task!);
+          return;
+        }
         if(protection.kind==='service_binding'){
           const binding=this.serviceBindings.get(protection.chat_id);
           if(!binding||binding.id!==protection.binding_id||binding.revision!==protection.binding_revision)fail(409,'conversation_source_changed');
@@ -487,7 +498,9 @@ export class ChannelService {
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=String(delivery.content.elements?.[0]?.text?.content??'');
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:'interactive',content,raw_content:JSON.stringify(delivery.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:'',thread_id:event.thread_id,deleted:false},'live');
-        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,protection.kind==='service_binding'?bindingScope(protection.binding_id):protection.project_id,protection.source_fence);
+        // A delegated task's result joins the group's own context under the binding, until the group's fence changes.
+        const fence=protection.kind==='service_task'?this.serviceBindings.fence(chat.id):protection.source_fence;
+        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
       });return;
     }
     const actor = protection ? await this.actor(event) : undefined;
@@ -542,6 +555,8 @@ export class ChannelService {
       // The outbox key is the receipt for each result revision, including across process restarts.
       for(const event of this.store.all('SELECT * FROM channel_task_results WHERE id>(SELECT sequence FROM channel_result_cursor WHERE id=1) ORDER BY id LIMIT 50')){
         try{this.store.transaction(()=>{
+        const link=this.store.get('SELECT * FROM channel_service_tasks WHERE task_id=?',event.task_id);
+        if(link){try{this.serviceTaskResult(link);}catch(error){if(!(error instanceof HttpError||error instanceof TaskError))throw error;}finally{this.store.run('UPDATE channel_result_cursor SET sequence=? WHERE id=1',event.id);}return;}
         const task=this.store.get(`SELECT t.*,o.conversation_id,o.principal_id,o.source_message FROM tasks t JOIN task_origins o ON o.task_id=t.id
           JOIN channel_chats c ON c.id=o.conversation_id WHERE t.id=? AND c.state='active' AND t.status IN ('completed','succeeded','pr_opened','cancelled','failed')`,event.task_id);
         try{
@@ -561,6 +576,26 @@ export class ChannelService {
         });}catch{break;/* Queue failure rolls back the cursor; the next tick retries the same event. */}
       }
     } finally { this.busy = false; }
+  }
+  /** A task a group delegated reports back to that group, only while the binding may still see its repository. */
+  private serviceTaskResult(link:Row):void{
+    const task=this.store.get("SELECT * FROM tasks WHERE id=? AND status IN ('completed','succeeded','pr_opened','cancelled','failed')",link.task_id);
+    const chat=this.store.get("SELECT * FROM channel_chats WHERE id=? AND state='active'",link.chat_id);
+    if(!task||!chat)return;
+    const key='service-task-result:'+task.id+':'+digest(JSON.stringify([task.status,task.result,task.error_code,this.store.get('SELECT revision FROM task_records WHERE task_id=?',task.id)?.revision]));
+    if(this.store.get('SELECT 1 FROM channel_outbox WHERE idempotency_key=?',key))return;
+    const binding=this.serviceBindings.get(chat.id);
+    if(!binding||binding.id!==link.binding_id)return;
+    this.serviceBindings.assertUsable(binding);
+    if(!this.serviceBindings.reachable(binding,task.repository_id,['tasks.read']))return;
+    this.resultAuthority(task);
+    const receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',link.source_message);if(!receipt)return;
+    const original=this.store.secrets.open(receipt.payload,'channel-event:'+link.source_message) as unknown as ChannelEvent,c=this.connector(chat.connector_id);
+    const name=this.store.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??task.repository_id;
+    const state=({completed:'已完成',succeeded:'已完成',pr_opened:'已提交 PR',cancelled:'已取消',failed:'失败'} as Record<string,string>)[task.status]??task.status;
+    let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
+    this.queue({...original,connector_id:c.id,connector_revision:c.revision},card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board'),
+      key,link.source_message,{kind:'service_task',chat_id:chat.id,binding_id:binding.id,project_id:task.repository_id,task_id:task.id,source_message:link.source_message});
   }
   private resultAuthority(task:Row):void{
     assertManagedExecution(this.store,task);

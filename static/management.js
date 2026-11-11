@@ -335,7 +335,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   }
   function toolStep(value, data, sequence) {
     const box = element('details', '', 'management-step'), summary = element('summary', '', 'management-step-summary');
-    const operation = data.arguments?.operation, caption = managementOperationLabels[operation] ?? operation ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
+    // The assistant's own independent tasks (#312) are named by their title; the inner queries and commands show as their own steps.
+    const own = { start_own_task: '独立任务', continue_own_task: '继续独立任务', list_own_tasks: '查看独立任务' }[data.name];
+    const operation = data.arguments?.operation, caption = own ? own + (data.arguments?.title ? '：' + data.arguments.title : '')
+      : managementOperationLabels[operation] ?? operation ?? (data.name === 'management_command' ? '执行操作' : '查询事实');
     const indicator = element('span', '', 'management-step-indicator'); indicator.setAttribute('aria-hidden', 'true');
     const state = element('span', '', 'management-step-status'), detail = element('div', '', 'management-step-detail');
     summary.append(indicator, element('span', caption, 'management-step-caption'), state); box.append(summary, detail); value.stepsBody.append(box);
@@ -438,9 +441,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     } else if (row.type === 'tool_result') {
       const receipt = data.result;
       const step = currentTurn.steps.find(item => data.call_id ? item.id === data.call_id : item.name === data.name && item.state === 'running') ?? toolStep(currentTurn, data, row.sequence);
-      setStepState(step, receipt.operation ? receipt.state : 'succeeded');
+      const ownStep = ['start_own_task', 'continue_own_task', 'list_own_tasks'].includes(step.name);
+      setStepState(step, receipt.operation ? receipt.state : ownStep && receipt.error ? 'failed' : 'succeeded');
       if (receipt.operation) commandReceipt(replies, receipt, step, next => { setStepState(step, next.state); paintTurn(currentTurn); });
-      else output(step.detail, '查询事实', receipt, true);
+      else output(step.detail, ownStep ? '独立任务结果' : '查询事实', receipt, true);
       currentTurn.stage = '正在整理结果';
       if (receipt.id && receipt.operation) toolsDirty = true;
       onActivity(!!active, true);

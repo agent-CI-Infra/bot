@@ -1,8 +1,8 @@
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, invalidate, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
-import { managementAssistant, repositoryAssistant, serviceRole } from '../service-roles/roles.js';
-import { permissionItems, servicePermissionIds, type RolePermissions } from '../roles/permissions.js';
+import { managementAssistant, repositoryAssistant, serviceItems, serviceRole } from '../service-roles/roles.js';
+import type { RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
 import type { ChannelEvent } from './types.js';
@@ -19,6 +19,18 @@ const participations = ['mentions', 'questions', 'all'];
 // it never holds configuration, grant, knowledge or schedule capabilities.
 const bindingCapabilities = ['tasks.read', 'tasks.write'];
 const terminal = (error: unknown) => error instanceof HttpError && error.status < 500;
+/**
+ * Which management commands a group may submit. Delegation hands work to a project only through its Manager: creating a task,
+ * changing its contract, adding an instruction or cancelling it, never choosing or steering a role. project_tasks write keeps
+ * its own controls over other roles' tasks (pause, retry, cancel, instructions).
+ */
+export function serviceCommandAllowed(permissions: RolePermissions, operation: string): boolean {
+  const delegate = permissions.delegation === 'allow', manage = permissions.project_tasks === 'write';
+  if (operation === 'task.create' || operation === 'task.contract') return delegate;
+  if (operation === 'task.cancel' || operation === 'task.instructions') return delegate || manage;
+  if (operation === 'task.pause' || operation === 'task.retry') return manage;
+  return false;
+}
 
 export function serviceBindingStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS channel_service_bindings(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL UNIQUE REFERENCES channel_chats(id),
@@ -29,7 +41,14 @@ export function serviceBindingStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS channel_service_turns(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,binding_id TEXT NOT NULL,binding_revision INTEGER NOT NULL,
       service_role_id TEXT NOT NULL,source_message TEXT NOT NULL,fence TEXT NOT NULL,state TEXT NOT NULL,reply TEXT,error TEXT,
       tool_calls INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(chat_id,source_message));
-    CREATE INDEX IF NOT EXISTS channel_service_turn_scope ON channel_service_turns(chat_id,created_at);`);
+    CREATE INDEX IF NOT EXISTS channel_service_turn_scope ON channel_service_turns(chat_id,created_at);
+    -- Tasks a group created through delegation, so their results return to that group (and only while it may still see them).
+    CREATE TABLE IF NOT EXISTS channel_service_tasks(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,binding_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,source_message TEXT NOT NULL,command_id TEXT NOT NULL,created_at INTEGER NOT NULL);
+    CREATE TRIGGER IF NOT EXISTS channel_service_task_result AFTER UPDATE OF status,result,error_code ON tasks
+      WHEN NEW.status IN ('completed','succeeded','pr_opened','cancelled','failed') AND (OLD.status<>NEW.status OR OLD.result IS NOT NEW.result OR OLD.error_code IS NOT NEW.error_code)
+      AND EXISTS(SELECT 1 FROM channel_service_tasks WHERE task_id=NEW.id) BEGIN
+      INSERT INTO channel_task_results(task_id) VALUES(NEW.id); END;`);
   migrateEmployees(store);
 }
 /** Once: a group with enabled legacy employees gets one repository assistant binding over the same projects, each keeping its
@@ -143,9 +162,27 @@ export class ChannelServiceBindings {
     const chat = this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', event.provider, event.app_id, event.installation_tenant, event.chat_id);
     if (!chat || chat.id !== current.chat_id || command.source_conversation !== chat.id) fail(403, 'channel_service_source_mismatch');
     this.employees.currentMessage(chat!, event);
-    if (this.permissions(current).project_tasks !== 'write') fail(403, 'channel_service_permission_revoked');
+    if (!serviceCommandAllowed(this.permissions(current), command.operation)) fail(403, 'channel_service_permission_revoked');
     const capability = commands[command.operation]?.capability ?? 'tasks.write';
     if (!this.reachable(current, command.project_id, ['tasks.read', capability])) fail(403, 'channel_service_scope_paused');
+  }
+  /** Links a task a group's delegation created to that group, at creation or after an approved command executes. */
+  linkTask(command: Row, task: string): void {
+    const binding = this.store.get('SELECT * FROM channel_service_bindings WHERE principal_id=?', command.principal_id);
+    if (!binding || command.operation !== 'task.create') return;
+    this.store.run('INSERT OR IGNORE INTO channel_service_tasks VALUES(?,?,?,?,?,?)', task, binding.id, binding.chat_id,
+      String(command.source_message).replace(/^feishu:/, ''), command.id, Date.now());
+  }
+  /**
+   * A delegated task keeps running only while its group may still delegate there: the binding is current and enabled, its role
+   * still allows delegation, and the grantor still holds the repository. Checked whenever the task engine rechecks a task's source.
+   */
+  guardTask(origin: Row): void {
+    const binding = this.store.get('SELECT * FROM channel_service_bindings WHERE principal_id=?', origin.principal_id ?? '');
+    if (!binding) return;
+    const current = this.assertUsable(binding);
+    if (this.permissions(current).delegation !== 'allow') fail(403, 'channel_service_delegation_revoked');
+    if (!this.reachable(current, origin.project_id, ['tasks.read', 'tasks.write'])) fail(403, 'channel_service_scope_paused');
   }
   /** platform.manage, the configurator, or someone holding config.write over the whole current scope. */
   private manageable(actor: ActorContext, binding: Row): boolean {
@@ -259,7 +296,7 @@ export class ChannelServiceBindings {
     let platform = false; try { authorize(actor, 'platform.manage'); platform = true; } catch (error) { if (!terminal(error)) throw error; }
     const bindings = this.store.all('SELECT * FROM channel_service_bindings ORDER BY created_at,id').filter(b => platform || chats.some(c => c.id === b.chat_id) ||
       b.configured_by === actor.principal_id || this.grants(b).some(g => g.grantor_id === actor.principal_id));
-    const items = permissionItems.filter(item => (servicePermissionIds as readonly string[]).includes(item.id));
+    const items = serviceItems;
     return { bindings: bindings.map(b => ({ ...this.view(b), can_manage: this.manageable(actor, b) })), chats,
       service_roles: this.store.all('SELECT * FROM service_roles WHERE enabled=1 AND permissions IS NOT NULL ORDER BY builtin DESC,created_at,id')
         .map(r => ({ id: r.id, name: r.name, responsibility: r.responsibility, permissions: JSON.parse(r.permissions), builtin: !!r.builtin, recommended: r.id === repositoryAssistant })),
