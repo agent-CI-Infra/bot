@@ -2,6 +2,9 @@ import { identityProjection } from '../identity/storage.js';
 import { syncEventFilters } from '../work/settings.js';
 import { projectActivityColumns, projectActivityJoin } from './project-activity.js';
 import { projectListPage } from './project-list.js';
+import { PERMISSIONS_FRESH_MS, permissionGap } from './installations.js';
+import { missingEvents } from '../github/client.js';
+import { accessGaps } from './access.js';
 import { createPrivateKey } from 'node:crypto';
 import { Store, type Row } from '../storage/database.js';
 import { type Actor, repository, scope, superAdmin } from './auth.js';
@@ -65,13 +68,48 @@ function installedOrganizations(store: Store): Json[] {
   return [...groups.values()].map(group => ({ ...group, owner_login: group.owner_login || name(group.repositories[0]!).split('/')[0]!,
     repositories: group.repositories.sort((a, b) => name(a).localeCompare(name(b))) })).sort((a, b) => a.owner_login.localeCompare(b.owner_login));
 }
+// What the account detail page needs about one installation, from the last listing GitHub returned: the repositories it
+// still covers and what the grant is short of. An unread grant stays null, and an installation GitHub removed is kept as
+// history (`installed: false`) instead of disappearing from the account.
+function accountInstallations(store: Store, row: Row, now: number): Json[] {
+  const groups = new Map<string, { installation_id: string; owner_login: string; installed: boolean; repositories: number;
+    permissions: string | null; events: string | null; permissions_at: string | null }>();
+  for (const seen of store.all(`SELECT installation_id,owner_login,installed,permissions,events,permissions_at
+    FROM installed_repositories WHERE account_id=? AND installation_id IS NOT NULL ORDER BY installation_id`, row.id)) {
+    const id = String(seen.installation_id), group = groups.get(id) ?? { installation_id: id, owner_login: '', installed: false,
+      repositories: 0, permissions: null, events: null, permissions_at: null };
+    groups.set(id, group);
+    group.owner_login ||= String(seen.owner_login || '');
+    group.repositories += Number(seen.installed) ? 1 : 0;
+    group.installed ||= !!Number(seen.installed);
+    // A listing without permissions keeps the grant read before, so the first one present is the newest reading here.
+    group.permissions ??= seen.permissions as string | null;
+    group.events ??= seen.events as string | null;
+    group.permissions_at ??= seen.permissions_at as string | null;
+  }
+  return [...groups.values()].sort((a, b) => a.installation_id.localeCompare(b.installation_id)).map(installation => {
+    let events: unknown = null; try { events = installation.events ? JSON.parse(installation.events) : null; } catch { events = null; }
+    return { installation_id: installation.installation_id, owner_login: installation.owner_login,
+      installed: installation.installed, repositories: installation.repositories,
+      missing_permissions: permissionGap(String(row.type), installation.permissions),
+      missing_events: events === null ? null : missingEvents(events),
+      // The same gaps as the repository rows, with the features each one stops: an unread grant stays null.
+      access_gaps: accessGaps(String(row.type), installation.permissions, installation.events),
+      permissions_checked_at: installation.permissions_at,
+      permissions_stale: !installation.permissions_at || events === null || now - Date.parse(installation.permissions_at) > PERMISSIONS_FRESH_MS };
+  });
+}
 function accountView(store: Store, row: Row): Json {
   const secret = store.secrets.open(row.credentials, `account:${row.id}`);
   return { id: row.id, name: row.name, type: row.type, app_id: row.app_id,
     credentials_configured: !!(secret.private_key || secret.token), created_at: row.created_at,
     endpoints: store.all('SELECT id,secret FROM endpoints WHERE account_id=?', row.id).map(e => ({
       id: e.id, webhook_path: `/hooks/github/${row.id}/${e.id}`,
-      secret_configured: !!store.secrets.open(e.secret, `endpoint:${e.id}`).value })) };
+      secret_configured: !!store.secrets.open(e.secret, `endpoint:${e.id}`).value })),
+    // The account's own installations, always a list so an empty one is stated rather than left out.
+    installations: accountInstallations(store, row, Date.now()),
+    // Projects (the console's registered repositories) that were started on this account.
+    project_count: Number(store.get('SELECT count(*) AS n FROM repositories WHERE account_id=?', row.id)!.n) };
 }
 function credential(type: string, value: unknown): string {
   const result = text(value, 32768).replaceAll('\\n', '\n');
@@ -205,12 +243,14 @@ export async function management(store: Store, user: Actor, method: string, url:
         return { deleted: true, id };
       });
     }
+    // Revoking only reports the outcome: the sealed account is empty now, and the console re-reads the account when it
+    // needs the rest. No credential value, installation listing or webhook path rides along with the revocation.
     if (path === `/api/accounts/${id}/credentials/revoke` && method === 'POST') {
       fields(body, []);
       return store.transaction(() => {
         store.run('UPDATE accounts SET credentials=? WHERE id=?', store.secrets.seal({}, `account:${id}`), id);
         store.audit(user.id, 'account.credentials_revoked', id);
-        return { account: accountView(store, store.get('SELECT * FROM accounts WHERE id=?', id)!) };
+        return { revoked: true };
       });
     }
     if (path === `/api/accounts/${id}/endpoints` && method === 'POST') {

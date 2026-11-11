@@ -424,3 +424,28 @@ test('the archive view displays evidence and unknowns without credentials or a f
   for (const expected of ['agent-test-zone', 'installer', 'requester', '批准者未知']) assert.ok(text.includes(expected), text);
   assert.ok(!text.includes('PRIVATE KEY')); assert.ok(!text.includes('fixture-install-77'));
 });
+
+test('the archive attributes each installation to the account that owns it, without widening who may read it', async t => {
+  const f = await fixture(t); await f.hook('owner', created()); await f.sync().sync(f.a.id);
+  // The owning account is the row's own column, so the installation card can name the account it belongs to.
+  const list = await f.admin('/api/installations/archive');
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.value.installations.map(row => row.account_id), [f.a.id]);
+  assert.equal((await f.admin(f.archiveUrl)).value.installation.account_id, f.a.id);
+  // A historical row with no recorded owner says null; it is never attributed to whichever account is nearest.
+  f.h.store.run("UPDATE github_installations SET account_id='' WHERE ref=?", key);
+  assert.equal(f.snapshot().account_id, null);
+  assert.deepEqual((await f.admin('/api/installations/archive')).value.installations.map(row => row.account_id), [null]);
+  // New attribution field changes no gate: signed-out callers and ordinary members still cannot read the archive.
+  const signedOut = await f.h.client()('/api/installations/archive');
+  assert.equal(signedOut.status, 401);
+  assert.ok(!JSON.stringify(signedOut.value).includes(f.a.id));
+  const pass = testPassword(), member = f.h.client();
+  await f.admin('/api/users', 'POST', { username: 'archive-member', password: pass, repository_ids: ['101'] });
+  await member('/api/auth/login', 'POST', { username: 'archive-member', password: pass });
+  for (const path of ['/api/installations/archive', f.archiveUrl]) {
+    const denied = await member(path);
+    assert.equal(denied.status, 403, path);
+    assert.ok(!JSON.stringify(denied.value).includes(f.a.id), path);
+  }
+});
