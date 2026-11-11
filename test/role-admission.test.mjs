@@ -105,7 +105,7 @@ test('只读 observer 不占角色容量，超额也不拒绝', async t => {
   await Promise.all([first, second]);
 });
 
-test('未配置上限的项目走原路径：不加查询、不写容量字段、不产生新停止原因', async t => {
+test('未配置上限的项目走原路径：不计数运行行、不写容量字段、不产生新停止原因', async t => {
   const f = await fixture(t, { count: 1, project: 'other', name: 'fixture/other' });
   const run = runRole(f.spec(f.tasks[0]), 'dev', 'assign-a', 'capacity-fixture');
   await f.waitRunning('dev', 1);
