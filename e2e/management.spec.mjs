@@ -103,7 +103,8 @@ test('project chat links select the project, and a delayed old read cannot repla
     await page.goto(f.h.admin + '/#/projects/101/management');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
-    await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
+    // The chat address has no settings section of its own: it keeps the project and opens its first page underneath.
+    await expect(page).toHaveURL(/#\/projects\/101\/overview$/);
     const scope = page.getByLabel('当前管理作用域'), message = page.getByLabel('管理消息', { exact: true }), feed = page.getByRole('log', { name: '管理会话记录' });
     await expect(scope).toHaveValue('project:101'); await expect(feed).toContainText('environment_not_ready');
     await message.fill('101 的草稿');

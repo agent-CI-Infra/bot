@@ -55,7 +55,7 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
     await expect(more.getByRole('heading', { name: '更多功能', exact: true })).toBeVisible();
     for (const group of ['工作区', '分析与身份', '平台管理']) await expect(more.getByRole('heading', { name: group, exact: true })).toBeVisible();
     for (const entry of ['项目总览', '基本设置', '机器配置', '模型', '发版本', '项目知识', '外部执行', '成员', '运行状态', '用量与成本', '身份与权限'])
-      await expect(more.getByRole('link', { name: new RegExp('^' + entry) })).toBeVisible();
+      await expect(more.getByRole('link', { name: new RegExp('^' + entry) }).first()).toBeVisible();
     expect(await more.locator('a').evaluateAll(ns => ns.every(n => n.getAttribute('href')?.startsWith('#')))).toBe(true);
     mkdirSync('.tmp/nav-shell', { recursive: true });
     for (const [width, name] of [[390, 'more-390'], [768, 'more-768']]) {

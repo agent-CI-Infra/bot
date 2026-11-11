@@ -149,7 +149,9 @@ async function route() {
   if (/^#\/channels(?:\/|$)/.test(location.hash)) history.replaceState(null, '', '#/identity/feishu');
   // A project chat link keeps the project context; the top-level management address is a page of its own.
   const chatProject = /^#\/projects\/([^/]+)\/management$/.exec(location.hash)?.[1];
-  if (chatProject) history.replaceState(null, '', `#/projects/${chatProject}/basic`);
+  // The project chat trigger has no settings section of its own: keep the project, open its first page underneath,
+  // so a shared or reloaded address does not silently become 基本设置.
+  if (chatProject) history.replaceState(null, '', `#/projects/${chatProject}/overview`);
   const legacy = legacyOnboardingAddress.exec(location.hash);
   if (legacy) history.replaceState(null, '', '#/settings/onboarding/' + ([0, 1, 3, 4, 5, 6][Number(legacy[1] || 0)] ?? 0));
   // Accounts and users were tabs of their own; their old addresses open the matching settings section.
