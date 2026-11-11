@@ -13,7 +13,8 @@ export async function managementFixture(t,options={}) {
   }
   const requests=[],modelState={gate:null,failure:0};
   const provider=createServer(async(req,res)=>{
-    let raw='';for await(const b of req)raw+=b;const body=JSON.parse(raw);requests.push(body);
+    // Whole-body decoding: a multibyte character may be split across chunks.
+    const chunks=[];for await(const b of req)chunks.push(b);const body=JSON.parse(Buffer.concat(chunks).toString());requests.push(body);
     if(modelState.gate)await modelState.gate;
     if(modelState.respond){await modelState.respond(body,res);return;}
     if(modelState.failure){res.writeHead(modelState.failure,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'Fixture model failure'}}));return;}

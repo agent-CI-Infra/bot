@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { managementFixture, query, command, settled } from './management-fixture.mjs';
-import { managerSection } from './helpers.mjs';
+import { managerSection, repository } from './helpers.mjs';
 import { resolveActor, resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { ManagementService } from '../dist/management/service.js';
 import { ManagementAgent } from '../dist/management/agent.js';
@@ -237,4 +237,49 @@ test('management and the roles console share V2 configuration, revision errors a
   assert.equal(stale.status,409);assert.equal(stale.value.error,'role_configuration_conflict');assert.equal(stale.value.field,'expected_revision');
   const invalid=await admin('/api/repositories/101/roles','PUT',{expected_revision:current.revision,enabled:true,roles:[{role_id:'manager',harness_ref:{id:'unregistered'}}]});
   assert.equal(invalid.status,400);assert.equal(invalid.value.error,'unknown_role_harness');assert.equal(invalid.value.field,'roles.manager.harness_ref.id');
+});
+
+test('one model message may query ten projects at once; unknown tools and malformed arguments come back to the model and large results stay bounded (#333)',async t=>{
+  const {h,admin,a,requests,modelState}=await managementFixture(t);
+  for(const id of ['103','104','105','106','107','108','109'])await repository(admin,a.id,id);
+  const projects=h.store.all('SELECT id FROM repositories ORDER BY id').map(r=>r.id),time=new Date().toISOString();assert.equal(projects.length,10);
+  // Twenty failed tasks with long Chinese summaries per project: every list_tasks result is larger than its share.
+  for(const project of projects)for(let n=0;n<20;n++)h.store.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,error_code,created_at,updated_at) VALUES(?,?,'task.request','failed','prepare',?,'environment_not_ready',?,?)",
+    project+'-'+n,project,'项目电脑没有启动，任务等待环境'.repeat(40),time,time);
+  const conversation=(await admin('/api/management/conversations','POST',{scope:'platform'})).value.conversation.id;
+  modelState.respond=async(body,res)=>{
+    const message=body.messages.some(m=>m.role==='tool')?{role:'assistant',content:'10 个项目都有失败的任务，主要原因是项目电脑没有启动。'}
+      :{role:'assistant',content:null,tool_calls:[...projects.map(id=>({id:'call-'+id,type:'function',function:{name:'management_query',arguments:JSON.stringify({operation:'list_tasks',target:{project_id:id},arguments:{limit:20}})}})),
+        {id:'call-unknown',type:'function',function:{name:'drop_everything',arguments:'{}'}},{id:'call-broken',type:'function',function:{name:'management_query',arguments:'{broken'}},
+        {id:'call-invalid',type:'function',function:{name:'management_query',arguments:JSON.stringify({operation:'no_such_query',target:{},arguments:{}})}}]};
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:12,completion_tokens:6}}));
+  };
+  const sent=(await admin('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'many-projects',content:'汇总我所有项目里失败的任务'})).value;
+  const result=await settled(admin,conversation,sent.id);
+  assert.equal(result.messages.find(m=>m.id===sent.id).state,'completed',JSON.stringify(result.events.filter(e=>e.type==='error')));
+  assert.ok(result.events.some(e=>e.type==='reply'&&/10 个项目/.test(e.data.text)));
+  assert.equal(result.events.filter(e=>e.type==='tool_result').length,10,'every project was queried');
+  // The second request answers all thirteen calls: the model can correct unknown tools and malformed arguments.
+  const second=requests.at(-1),tools=second.messages.filter(m=>m.role==='tool'),seen=Object.fromEntries(tools.map(m=>[m.tool_call_id,JSON.parse(m.content)]));
+  assert.equal(tools.length,13);
+  assert.equal(seen['call-unknown'].error,'tool_not_allowed');assert.equal(seen['call-broken'].error,'invalid_arguments');assert.equal(seen['call-invalid'].error,'invalid_management_arguments');
+  for(const id of projects){assert.equal(seen['call-'+id].truncated,true,id);assert.ok(Buffer.byteLength(tools.find(m=>m.tool_call_id==='call-'+id).content)<=256*1024/10+512,id);}
+  assert.ok(tools.reduce((sum,m)=>sum+Buffer.byteLength(m.content),0)<=256*1024+13*512,'the batch stays within its budget');
+  assert.ok(Buffer.byteLength(JSON.stringify(second))<384*1024,'the follow-up request stays well inside the model context');
+});
+
+test('long earlier answers stay bounded in the history the management assistant continues from (#333)',async t=>{
+  const {h,admin,requests,modelState}=await managementFixture(t);
+  const conversation=(await admin('/api/management/conversations','POST',{scope:'platform'})).value.conversation.id;
+  let answer='很长的回答'.repeat(4000);
+  modelState.respond=async(body,res)=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{role:'assistant',content:answer}}],usage:{prompt_tokens:12,completion_tokens:6}}));};
+  for(let n=0;n<20;n++){const sent=(await admin('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'long-'+n,content:'说明一下第 '+n+' 个问题'})).value;await settled(admin,conversation,sent.id);}
+  answer='好的。';
+  const sent=(await admin('/api/management/conversations/'+conversation+'/messages','POST',{source_message:'after-long',content:'继续'})).value;await settled(admin,conversation,sent.id);
+  const context=JSON.parse(requests.at(-1).messages[1].content);
+  assert.ok(context.history.length>=1&&context.history.length<20);assert.ok(context.earlier_rounds_omitted>0);
+  assert.equal(context.history.at(-1).request.content,'说明一下第 19 个问题','the latest rounds stay');
+  assert.ok(context.history.every(m=>m.reply.length===4000&&m.reply_truncated===true));
+  assert.ok(Buffer.byteLength(JSON.stringify(context.history))<=96*1024);
+  assert.equal(h.store.get("SELECT count(*) n FROM management_messages WHERE conversation_id=? AND state='completed'",conversation).n,21);
 });

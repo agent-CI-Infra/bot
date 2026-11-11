@@ -2,6 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
 import { traceClean } from '../tasks/trace.js';
+import { boundedBatch, chatContextBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
 
 // A service role's own independent tasks (#312): it works one question through in a separate context, with the same tools
 // and permissions as the conversation that started it, and only the conclusion returns to that conversation. They are not
@@ -22,7 +23,8 @@ const suffix = '\n\nYou are now working on one of your own independent tasks, se
 
 /** Whose task it is. A changed fence (authorization or binding scope) hides older tasks, like the host's own history. */
 export interface OwnTaskOwner { service_role_id: string; kind: 'management' | 'channel'; owner_id: string; principal_id: string; fence: string }
-/** What the host lends a task: its system prompt, tools and executor, model request, guard and output cleaning. */
+/** What the host lends a task: its system prompt, tools and executor, model request, guard and output cleaning (redaction;
+ * the task bounds each result itself). */
 export interface OwnTaskHost {
   owner: OwnTaskOwner; system: string; tools: () => Json[];
   request: (body: Json, label: string) => Promise<{ value?: any }>;
@@ -87,14 +89,16 @@ export class OwnTasks {
     const tools = () => host.tools().filter(t => !ownTaskNames.includes((t as any).function.name));
     const messages: any[] = [{ role: 'system', content: host.system + suffix },
       { role: 'user', content: JSON.stringify({ own_task: { title: row.title, previous_rounds: previous }, instruction: request }) }];
+    const transcript = new ToolTranscript(messages, chatContextBytes);
     for (let step = 0; step < steps; step++) {
       await host.check();
-      const offered = tools();
-      const { value } = await host.request({ messages, tools: offered, tool_choice: offered.length ? 'auto' : 'none' }, 'own:' + row.id + ':' + round + ':' + step);
+      const offered = tools(), body = { messages, tools: offered, tool_choice: offered.length ? 'auto' : 'none' };
+      transcript.fit(body);
+      const { value } = await host.request(body, 'own:' + row.id + ':' + round + ':' + step);
       const message = value?.choices?.[0]?.message;
       if (!message) fail(502, 'own_task_model_invalid');
       const calls = message.tool_calls ?? [];
-      if (!Array.isArray(calls) || calls.length > 8) fail(502, 'own_task_model_invalid');
+      if (toolCallsProblem(calls)) fail(502, 'own_task_model_invalid');
       if (!calls.length) {
         const conclusion = host.redact(String(message.content ?? '')).slice(0, 8000);
         if (!conclusion.trim()) fail(502, 'own_task_reply_invalid');
@@ -104,14 +108,13 @@ export class OwnTasks {
         return { task_id: row.id, title: row.title, state: 'completed', round: round + 1, conclusion };
       }
       messages.push(traceClean(message));
+      const results: unknown[] = [];
       for (const call of calls) {
-        if (call?.type !== 'function' || typeof call.id !== 'string') fail(502, 'own_task_model_invalid');
-        const name = String(call.function?.name);
-        let args: unknown; try { args = JSON.parse(call.function?.arguments ?? '{}'); } catch { args = null; }
-        const result = !tools().some(t => (t as any).function.name === name) ? { error: 'tool_not_allowed' }
-          : await host.execute(name, args, 'own:' + row.id + ':' + round + ':' + step + ':' + call.id);
-        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(host.clean(result)) });
+        const name = call.function.name;
+        results.push(host.clean(!tools().some(t => (t as any).function.name === name) ? { error: 'tool_not_allowed' }
+          : await host.execute(name, toolArguments(call), 'own:' + row.id + ':' + round + ':' + step + ':' + call.id)));
       }
+      boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
     }
     return fail(502, 'own_task_turn_limit');
   }

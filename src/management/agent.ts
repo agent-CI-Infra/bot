@@ -4,6 +4,7 @@ import { digest, fail, HttpError, randomId, type Json } from '../core/security.j
 import { runAgent } from '../agent/runtime.js';
 import { Redactor, TaskError } from '../agent/common.js';
 import { traceClean } from '../tasks/trace.js';
+import { boundedBatch, chatContextBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
 import { managementTools, obj, str, validate } from './catalog.js';
 import { ManagementService, parameterHash } from './service.js';
 import { checkServiceRoleBudget, managementAssistant, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
@@ -11,6 +12,8 @@ import { managementFailure } from './presentation.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 
 const now=()=>new Date().toISOString();
+// Recent rounds continue the conversation; each earlier answer and the history as a whole stay bounded (#333).
+const historyReplyChars=4000,historyBytes=96*1024;
 /** Conversation transport state is separate from business tasks. Submitted commands outlive the browser connection. */
 export class ManagementAgent {
   readonly active=new Map<string,{controller:AbortController;work:Promise<void>}>();
@@ -69,8 +72,11 @@ export class ManagementAgent {
       reply:this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply' ORDER BY sequence DESC LIMIT 1",m.id)?.data,
       operations:this.store.all('SELECT id,operation,target,state FROM management_commands WHERE source_conversation=? AND source_message=?',conversation,m.source_message)
         .map(op=>({...op,target:JSON.parse(op.target)})),
-    })).map(m=>({...m,reply:m.reply?JSON.parse(m.reply).text:undefined}));
-    return {scope:row.scope,request,history};
+    })).map(m=>{const reply=m.reply?String(JSON.parse(m.reply).text??''):undefined;
+      return {...m,reply:reply?.slice(0,historyReplyChars),...(reply&&reply.length>historyReplyChars?{reply_truncated:true}:{})};});
+    // The history has a budget of its own: the oldest rounds give way first, so long answers cannot crowd out this request.
+    let omitted=0;while(history.length>1&&Buffer.byteLength(JSON.stringify(history))>historyBytes){history.shift();omitted++;}
+    return {scope:row.scope,request,history,...(omitted?{earlier_rounds_omitted:omitted}:{})};
   }
   send(base:ActorContext,conversationId:string,input:Json):Json{
     validate(obj({source_message:{...str,maxLength:240},content:{...str,maxLength:16000},query:managementTools[0]!.function.parameters,command:managementTools[1]!.function.parameters},['source_message']),input);
@@ -148,21 +154,33 @@ export class ManagementAgent {
             ownHost={owner:{service_role_id:managementAssistant,kind:'management',owner_id:conversation,principal_id:actor.principal_id,fence:String(actor.authorization_revision)},
               system,tools:()=>managementTools,request,execute,check:guard,redact:value=>redactor.text(value),clean:value=>value};
             const messages:any[]=[{role:'system',content:system},{role:'user',content:JSON.stringify(context)}];
+            // One query per project across many projects is normal (#333): results share a budget per batch and older ones
+            // fold away, so the conversation stays within the model's context however many calls the model makes.
+            const transcript=new ToolTranscript(messages,chatContextBytes),tools=[...managementTools,...ownTaskTools];
             for(let turn=0;turn<16;turn++){
               await guard();this.event(id,'model_start',{turn});
-              const {value,request_log_id}=await request({messages,tools:[...managementTools,...ownTaskTools],tool_choice:'auto'},'turn:'+turn,async delta=>{if(delta?.content){await guard();this.event(id,'text',{delta:redactor.text(delta.content),provisional:true});}});
+              const body={messages,tools,tool_choice:'auto'};transcript.fit(body);
+              const {value,request_log_id}=await request(body,'turn:'+turn,async delta=>{if(delta?.content){await guard();this.event(id,'text',{delta:redactor.text(delta.content),provisional:true});}});
               this.event(id,'model_request',{request_log_id});
               const message=value?.choices?.[0]?.message;
               if(!message)fail(502,'management_model_invalid');
-              const calls=message.tool_calls??[];if(!Array.isArray(calls)||calls.length>8)fail(502,'management_model_invalid');
+              const calls=message.tool_calls??[];if(toolCallsProblem(calls))fail(502,'management_model_invalid');
               if(!calls.length){if(typeof message.content!=='string')fail(502,'management_model_invalid');this.event(id,'reply',{text:redactor.text(message.content),authority:'advisory; see tool receipts'});return;}
               messages.push(traceClean(message));
+              const results:unknown[]=[];
               for(const call of calls){
-                if(call.type!=='function'||typeof call.id!=='string'||![...managementTools,...ownTaskTools].some(t=>t.function.name===call.function?.name))fail(403,'tool_not_allowed');
-                let args:any;try{args=JSON.parse(call.function.arguments);}catch{fail(400,'invalid_management_arguments');}
-                const result=await execute(call.function.name,args,call.id);
-                messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
+                // An unknown tool or malformed arguments are the model's to correct, so they return as observations; a refusal,
+                // conflict or failed command still ends the turn with its code, as the user's authoritative answer.
+                const args=toolArguments(call);let result:any;
+                if(!tools.some(t=>t.function.name===call.function.name))result={error:'tool_not_allowed'};
+                else if(args===null||typeof args!=='object'||Array.isArray(args))result={error:'invalid_arguments',detail:'Tool arguments must be a JSON object.'};
+                else try{result=await execute(call.function.name,args,call.id);}catch(error){
+                  if(!(error instanceof HttpError&&error.status===400))throw error;
+                  await guard();result={error:error.code};
+                }
+                results.push(result);
               }
+              boundedBatch(results).forEach((result,i)=>messages.push({role:'tool',tool_call_id:calls[i].id,content:JSON.stringify(result)}));
             }fail(502,'management_turn_limit');
           }});
       }
