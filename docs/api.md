@@ -68,7 +68,7 @@
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
 | `/api/costs` | GET | 授权范围内的统计。参数 `timezone` 为浏览器的 IANA 时区（省略时兼容 UTC，无效时返回 400 `invalid_statistics_timezone`），`from,to` 为该时区的 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。模型费用和 token 按 `requested_at` 的本地日、项目聚合；费用最多 5000 个日期／项目分组，超限要求缩小范围。返回 `days,summary,prices,timezone,collection_started_at,tasks`；`tasks` 独立聚合，不占费用分组配额。不返回模型密钥或原始请求 |
 | `/hooks/github/:account/:endpoint` | POST | 按已登记入口验签和归档，不需要登录会话 |
-项目电脑详情另外返回 `observation:{status,checked_at,state}`：`available` 表示 manager 已响应，`unavailable` 表示读取失败，`absent` 表示 manager 没有该电脑记录；后两者的 `state` 为 null。`environment.state` 继续是持久生命周期记录，读取失败不会将它改写成停止；`checked_at` 是核验完成时间，不是心跳。
+项目电脑详情另外返回 `observation:{status,checked_at,state}`：`available` 表示本次取得电脑状态，`unavailable` 表示连接/协议读取失败，`absent` 表示 manager 没有该电脑记录，`recovering` 表示 manager 明确返回恢复栅栏，`error` 表示 manager 回应了其他错误；没有取得电脑状态时 `state` 为 null，原始错误正文不返回。`environment.state` 继续是持久生命周期记录，读取失败不会将它改写成停止；`checked_at` 是核验完成时间，不是心跳。
 
 
 `GET /api/tasks/:id/logs` 默认按时间顺序返回最近 100 条日志。`limit` 为 1–100，`before` 向前读取更早页，`after` 向后读取新增页，两种游标不能同时提供。游标取响应 `log_page.first_sequence` 或 `last_sequence`，以日志追加序号为准，不依赖可能相同的时间戳；`has_older` 和 `has_newer` 表示当前读取方向是否还有下一页。客户端加载历史页后保留最早游标，轮询新增页时继续使用已读取的最大序号。每个请求都重新核对任务所属项目的权限，历史模型日志的私有字段在读取投影中过滤，新的 Pi 日志在保存前统一移除私有字段。

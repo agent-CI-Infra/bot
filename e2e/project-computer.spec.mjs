@@ -1,14 +1,15 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
+import { fail } from '../dist/core/security.js';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
 
 async function fixture() {
-  const state={offline:false,absent:false,metricsFail:false,stats:{running:true,cpu_percent:0,memory_bytes:1048576,memory_limit_bytes:2147483648,pids:3},computer:{cpus:2,memory_mb:2048,pids:512,tmp_mb:512,
+  const state={offline:false,absent:false,recovering:false,responseError:false,liveState:'ready',metricsFail:false,stats:{running:true,cpu_percent:0,memory_bytes:1048576,memory_limit_bytes:2147483648,pids:3},computer:{cpus:2,memory_mb:2048,pids:512,tmp_mb:512,
     defaults:{cpus:2,memory_mb:2048,pids:512,tmp_mb:512},inherited:['cpus','memory_mb','pids','tmp_mb'],packages:[],env:{},setup_script:'',network_policy:'internal, no egress',
     image:'approved/project-computer@sha256:'+'a'.repeat(64),build:{state:'ready',output:'Public package build output'},setup:{state:'succeeded',exit_code:0,output:'Public initialization output',generation:1}}};
   const manager={async call(_method,path){const id=path.split('/')[3];if(path.endsWith('/stats')){if(state.metricsFail)throw new Error('metrics_unavailable');return {...state.stats,sampled_at:state.stats.sampled_at||new Date().toISOString()};}
-    if(state.offline)throw new Error('manager_unavailable');if(state.absent)return null;
-    return {repository_id:id,generation:1,state:'ready',desired:'ready',revision:1,computer:structuredClone(state.computer)};}};
+    if(state.offline)throw new Error('manager_unavailable');if(state.recovering)fail(503,'manager_not_ready');if(state.responseError)fail(403,'private_response_detail');if(state.absent)return null;
+    return {repository_id:id,generation:1,state:state.liveState,desired:'ready',revision:1,computer:structuredClone(state.computer)};}};
   const h=await harness(undefined,manager),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');
   for(const [id,status] of [['active','running'],['queued-old','queued'],['queued-new','queued']])h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101','task.request',?,?)",id,status,id);
   h.store.run("INSERT INTO task_claims VALUES('active','101','fixture-claim',?)",new Date().toISOString());
@@ -23,7 +24,7 @@ const card=(page,name)=>page.locator('#machine-status .side-card').filter({has:p
 test('computer state, real zero metrics and the same activity records stay readable across six widths',async({page})=>{
   const f=await fixture(),errors=[];page.on('pageerror',err=>errors.push(err.message));
   try{
-    await login(page,f);await expect(card(page,'实时资源')).toContainText('0%');await expect(card(page,'机器')).toContainText('不是电脑心跳');
+    await login(page,f);await expect(card(page,'实时资源')).toContainText('0%');await expect(card(page,'机器')).toContainText('不是电脑心跳');await expect(card(page,'机器')).toContainText('2 CPU · 内存 2048 MB · 进程 512 个 · /tmp 512 MB');
     await expect(card(page,'运行与排队记录')).toContainText('运行任务记录1排队任务记录2');
     mkdirSync('.tmp/project-computer-231',{recursive:true});
     for(const width of [320,390,768,1024,1440,1920]){await page.setViewportSize({width,height:1000});await page.evaluate(()=>scrollTo(0,0));
@@ -89,4 +90,23 @@ test('permission loss clears all previous computer data and a late successful re
     await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();await expect(page.getByRole('heading',{name:'项目电脑暂不可访问',exact:true})).toBeVisible();
     release();await page.unrouteAll({behavior:'wait'});await expect(page.locator('#machine-status')).toHaveCount(0);await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveCount(0);
   }finally{release();await f.close();}
+});
+
+
+test('manager recovery and answered errors remain distinct from an outage across the header and project overview',async({page})=>{
+  const f=await fixture();
+  try{await login(page,f);
+    f.state.recovering=true;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
+    await expect(card(page,'机器')).toContainText('manager_not_ready');await expect(card(page,'机器')).not.toContainText('暂不可达');
+    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('管理服务恢复中');
+    f.state.recovering=false;f.state.responseError=true;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
+    await expect(card(page,'机器')).toContainText('manager_read_failed');await expect(card(page,'机器')).not.toContainText('private_response_detail');
+    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑状态未知');
+    f.state.responseError=false;f.state.liveState='future_state';await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
+    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑状态未知');
+    await expect(page.locator('#computer-action-1')).toBeDisabled();
+    f.state.offline=true;await page.evaluate(()=>{location.hash='#/projects/101/basic';});
+    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑待核验');
+    await expect(page.locator('.project-body [data-project-environment-state]')).toHaveText('电脑待核验');
+  }finally{await f.close();}
 });
