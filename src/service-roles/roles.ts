@@ -173,6 +173,8 @@ export function deleteServiceRole(store: Store, userId: string, id: string, inpu
     if (!current) return fail(404, 'service_role_not_found');
     if (current.builtin) return fail(409, 'builtin_service_role_required');
     if (current.revision !== expected) return fail(409, 'service_role_revision_conflict', 'expected_revision');
+    // A group still bound to the role would lose its assistant silently; the maintainer rebinds or disables it first.
+    if (store.get('SELECT 1 FROM channel_service_bindings WHERE service_role_id=? AND enabled=1', id)) return fail(409, 'service_role_in_use');
     // The usage ledger keeps service_role_id: past requests stay attributed to the deleted role.
     store.run('DELETE FROM service_roles WHERE id=?', id);
     store.audit(userId, 'service_role.deleted', id);

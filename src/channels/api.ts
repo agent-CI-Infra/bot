@@ -10,15 +10,22 @@ export class ChannelApi {
     const store = this.service.store, path = url.pathname;
     assertCurrent(actor);
     if (path === '/api/channels/employees' && method === 'GET') return this.service.employees.list(actor);
+    if (path === '/api/channels/service-bindings' && method === 'GET') return this.service.serviceBindings.list(actor);
+    const binding = /^\/api\/channels\/chats\/([a-f0-9]{48})\/service-binding$/.exec(path);
+    if (binding && method === 'PUT') {
+      const result = await this.service.serviceBindings.configure(actor, binding[1]!, input);
+      if (input.enabled) this.service.ledger.resync(binding[1]!);
+      return result;
+    }
     const employee = /^\/api\/channels\/chats\/([a-f0-9]{48})\/employee$/.exec(path);
     const personal=/^\/api\/channels\/chats\/([a-f0-9]{48})\/personal-role$/.exec(path);
     if(personal&&method==='PUT')return this.service.employees.configurePersonal(actor,personal[1]!,input);
     const conversation=/^\/api\/channels\/chats\/([a-f0-9]{48})\/conversation$/.exec(path);
     if(conversation&&method==='GET')return this.service.conversationView(actor,conversation[1]!,Number(url.searchParams.get('offset')??0));
+    // Legacy employees can only be disabled; a group now binds a service role (#312).
     if (employee && method === 'PUT') {
-      const result = await this.service.employees.configure(actor, employee[1]!, input);
-      if (input.enabled) this.service.ledger.resync(employee[1]!);
-      return result;
+      if (input.enabled !== false) return fail(410, 'channel_employee_retired');
+      return this.service.employees.configure(actor, employee[1]!, input);
     }
     if (path === '/api/channels/chats' && method === 'GET') {
       authorize(actor, 'platform.manage');
@@ -29,7 +36,7 @@ export class ChannelApi {
     const local = /^\/api\/channels\/chats\/([a-f0-9]{48})\/(messages|sync|retention)$/.exec(path);
     if (local) {
       // Project access alone does not authorize reading a group's messages or personal chats.
-      if (local[2] === 'messages' && method === 'GET' || local[2] === 'sync' && method === 'POST') this.service.employees.authorizeHistory(actor, local[1]!);
+      if (local[2] === 'messages' && method === 'GET' || local[2] === 'sync' && method === 'POST') this.service.authorizeHistory(actor, local[1]!);
       else authorize(actor, 'platform.manage');
       const id = local[1]!, chat = store.get('SELECT * FROM channel_chats WHERE id=?', id);
       if (!chat) return fail(404, 'channel_chat_not_found');
@@ -37,7 +44,7 @@ export class ChannelApi {
         const query = Object.fromEntries(url.searchParams);
         fields(query, ['message_id', 'sender_id', 'reply_to', 'thread_id', 'from', 'to', 'keyword', 'cursor', 'limit']);
         let projects:string[]|undefined;
-        try{authorize(actor,'platform.manage');}catch{projects=this.service.employees.visibleProjects(id,actor);}
+        try{authorize(actor,'platform.manage');}catch{projects=this.service.visibleScopes(id,actor);}
         return this.service.ledger.query(id, { ...query, ...Object.fromEntries(['from', 'to', 'limit'].filter(k => query[k] !== undefined).map(k => [k, Number(query[k])])) },projects);
       }
       if (local[2] === 'sync' && method === 'POST') {

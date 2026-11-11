@@ -27,6 +27,7 @@ import { scheduleStorage } from '../schedules/storage.js';
 import { taskManagementStorage } from '../tasks/management.js';
 import { conversationStorage } from '../roles/conversation-storage.js';
 import { serviceRoleStorage } from '../service-roles/roles.js';
+import { serviceBindingStorage } from '../channels/service-bindings.js';
 
 export type Row = Record<string, any>;
 export class Store {
@@ -200,6 +201,8 @@ export class Store {
     channelStorage(this);
     conversationStorage(this);
     serviceRoleStorage(this);
+    // Group bindings reference service roles and migrate legacy group employees once (#312).
+    serviceBindingStorage(this);
     scheduleStorage(this);
     // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
     migrateWorkflows(this);

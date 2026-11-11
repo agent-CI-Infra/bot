@@ -8,7 +8,8 @@ import type { ChannelEvent } from './types.js';
 
 const capabilities = ['tasks.read', 'tasks.manage_own', 'knowledge.read', 'knowledge.write'];
 const audienceTtl = 5 * 60_000;
-/** Durable authorization only. Business tasks still use TaskCommands and the existing scheduler. */
+/** Legacy group employees (before service role bindings, #312), Feishu identities and group membership snapshots.
+ * New groups bind a service role instead (service-bindings.ts); an employee grant now only authorizes the tasks it created. */
 export class ChannelEmployees {
   private readonly pending = new Map<string, Promise<void>>();
   private stopped = false;
@@ -28,6 +29,8 @@ export class ChannelEmployees {
       .find(r => (!binding || r.id === binding) && String(r.connector).endsWith(':' + chat.app_id) && (!r.expires_at || r.expires_at > Date.now()));
     if (!row) return fail(403, 'external_binding_required'); return row;
   }
+  /** The principal's active Feishu identity for this chat's application. */
+  feishuIdentity(chat: Row, principal: string): Row { return this.binding(chat, principal); }
   private maintainer(grant: Row, chat: Row): Row {
     const actor = resolvePrincipalActor(this.store, grant.maintainer_id, null, grant.project_id, 'service');
     authorize(actor, 'config.write', { project_id: grant.project_id });
@@ -51,6 +54,8 @@ export class ChannelEmployees {
   private member(chat: Row, id: string, tenant: string): void {
     if (!this.audience(chat).some(m => m.id === id && m.tenant === tenant)) fail(403, 'channel_employee_member_required');
   }
+  /** Against the last verified member snapshot; call verify() first for a fresh one. */
+  assertMember(chat: Row, id: string, tenant: string): void { this.member(chat, id, tenant); }
   async verify(id: string, force = false): Promise<void> {
     const existing = this.pending.get(id); if (existing) return existing;
     const chat = this.chat(id);
@@ -128,7 +133,7 @@ export class ChannelEmployees {
     return current;
   }
   /** The original accepted envelope fixes the real sender; neither tool args nor task input can replace it. */
-  private currentMessage(chat:Row,event:ChannelEvent):void{
+  currentMessage(chat:Row,event:ChannelEvent):void{
     const current=this.store.get('SELECT * FROM channel_messages WHERE chat_id=? AND message_id=?',chat.id,event.message_id);
     if(!current||current.deleted||current.sensitive)return fail(403,'channel_source_message_unavailable');
     const payload=this.store.secrets.open(current.payload,'channel-message:'+chat.id+':'+event.message_id);
@@ -216,11 +221,22 @@ export class ChannelEmployees {
       return {conversation_id:id,role_id:role,revision:(previous?.revision??0)+1};
     });
   }
+  /** Groups the actor can pick: an active chat of an enabled app where the actor's bound Feishu identity has spoken. */
+  selectableChats(actor: ActorContext): Row[] {
+    const identities = this.store.all("SELECT connector,external_actor,external_tenant FROM external_identities WHERE principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active' AND (expires_at IS NULL OR expires_at>?)", actor.principal_id, Date.now());
+    return this.store.all("SELECT h.id,h.chat_id,h.app_id,h.installation_tenant,c.app_name FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.chat_type='group' AND h.state='active' AND c.enabled=1 AND h.app_id=c.app_id AND h.installation_tenant=c.installation_tenant")
+      .filter(chat => identities.some(i => String(i.connector).endsWith(':' + chat.app_id) && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND sender_id=? AND sender_tenant=?', chat.id, i.external_actor, i.external_tenant)));
+  }
+  /** Legacy employee grants the actor maintains. They no longer receive messages; they only authorize tasks they already created. */
+  legacy(actor: ActorContext): Json[] {
+    return this.store.all('SELECT * FROM channel_employee_grants WHERE maintainer_id=? ORDER BY created_at', actor.principal_id).map(g => ({ ...g, capabilities: JSON.parse(g.capabilities),
+      state: g.enabled ? 'active' : 'disabled', conversation_id: g.chat_id, open_tasks: this.store.get(`SELECT count(*) n FROM task_origins o JOIN tasks t ON t.id=o.task_id
+        WHERE o.principal_id=? AND t.status NOT IN ('completed','succeeded','pr_opened','cancelled','failed','superseded')`, g.principal_id)!.n,
+      full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', g.project_id)?.full_name ?? g.project_id }));
+  }
   list(actor: ActorContext): Json {
     assertCurrent(actor);
-    const identities = this.store.all("SELECT connector,external_actor,external_tenant FROM external_identities WHERE principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active' AND (expires_at IS NULL OR expires_at>?)", actor.principal_id, Date.now());
-    const chats = this.store.all("SELECT h.id,h.chat_id,h.app_id,h.installation_tenant,c.app_name FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.chat_type='group' AND h.state='active' AND c.enabled=1 AND h.app_id=c.app_id AND h.installation_tenant=c.installation_tenant")
-      .filter(chat => identities.some(i => String(i.connector).endsWith(':' + chat.app_id) && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND sender_id=? AND sender_tenant=?', chat.id, i.external_actor, i.external_tenant)));
+    const chats = this.selectableChats(actor);
     return { employees: this.store.all('SELECT * FROM channel_employee_grants WHERE maintainer_id=? ORDER BY created_at', actor.principal_id).map(g => {
       let state = g.enabled ? 'active' : 'disabled', error = null;
       if (g.enabled) try { this.assertGrant(g); } catch (e) { state = 'paused'; error = (e as any).code ?? 'channel_employee_unavailable'; }
@@ -232,8 +248,11 @@ export class ChannelEmployees {
   /** Refresh authority, never run business work. Queries themselves perform no provider reads. */
   async tick(): Promise<void> {
     if (this.stopped) return;
+    // Legacy grants only authorize tasks they already created; a group with no open legacy task needs no membership polling.
     for (const row of this.store.all(`SELECT DISTINCT g.chat_id FROM channel_employee_grants g LEFT JOIN channel_audiences a ON a.chat_id=g.chat_id
-      WHERE g.enabled=1 AND (a.verified_until IS NULL OR a.verified_until<?) AND (a.checked_at IS NULL OR a.checked_at<?)`, Date.now() + 60_000, Date.now() - 30_000)) {
+      WHERE g.enabled=1 AND (a.verified_until IS NULL OR a.verified_until<?) AND (a.checked_at IS NULL OR a.checked_at<?)
+      AND EXISTS(SELECT 1 FROM task_origins o JOIN tasks t ON t.id=o.task_id WHERE o.principal_id=g.principal_id
+        AND t.status NOT IN ('completed','succeeded','pr_opened','cancelled','failed','superseded'))`, Date.now() + 60_000, Date.now() - 30_000)) {
       try { await this.verify(row.chat_id, true); } catch { /* A failed check keeps the last snapshot unusable. */ }
     }
   }

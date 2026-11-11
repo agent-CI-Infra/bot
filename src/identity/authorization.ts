@@ -102,7 +102,9 @@ export function assertCurrent(actor: ActorContext): void {
   // Installation projections are also checked below; a worker need not have consumed an event yet.
   if (revision(store, actor.principal_id) !== actor.authorization_revision) fail(409, 'authorization_changed');
   const principal = store.get('SELECT kind,maintenance,project_id,tenant_id FROM principals WHERE id=?', actor.principal_id);
-  if (principal?.kind === 'service' && (!principal.maintenance || !store.get('SELECT 1 FROM identity_projects WHERE project_id=? AND tenant_id=?', principal.project_id, principal.tenant_id))) fail(403, 'service_paused');
+  // A project service principal stays inside its project. A group binding's principal spans several projects
+  // (project_id NULL); each of its scoped grants is still checked against its own project or organization.
+  if (principal?.kind === 'service' && (!principal.maintenance || principal.project_id !== null && !store.get('SELECT 1 FROM identity_projects WHERE project_id=? AND tenant_id=?', principal.project_id, principal.tenant_id))) fail(403, 'service_paused');
   if (trusted.session && !store.get('SELECT 1 FROM sessions WHERE token_hash=? AND expires_at>?', trusted.session, Date.now())) fail(401, 'login_required');
 }
 export function authorize(actor: ActorContext, capability: string, resource: { tenant_id?: string | null; project_id?: string } = {}): void {
