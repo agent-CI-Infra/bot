@@ -61,6 +61,15 @@ async function loadCosts(version) {
   if(data.summary.unpriced_requests)body.append(element('p',`有 ${data.summary.unpriced_requests} 次请求缺少单价或完整用量，`+(tokenMode?'当前按已记录的 token 绘图。':'未计入柱状图金额。占比仅针对已计价费用。'),'cost-incomplete'));
   body.append(element('p','统计开始于 '+timestamp(data.collection_started_at)+'；此前未记录的用量与费用无法补算。','cost-note'));
   body.append(element('p','范围：费用和 token 只统计经控制面代理的模型请求，任务只统计控制面自己的任务；不含外部执行端自行发起的模型调用及项目容器内其他服务。','cost-note'));
+  // #357 acceptance 1: costs are never converted or summed across currencies, but one currency's total was still
+  // readable as the whole bill. The same answer already carries the other currency's request count for exactly this
+  // filter (`other_currencies` excludes both the shown currency and unpriced rows with no currency), so the hint costs
+  // no extra read and cannot be inflated by rows that have no currency at all.
+  const other = data.other_currencies?.find(item => item.currency && item.currency !== data.currency);
+  if (other?.requests) {
+    const note = element('p', `这个筛选下还有 ${other.requests} 次请求属于另一币种（${other.currency}），未计入本页金额；切换币种可分别查看。`, 'cost-note');
+    note.dataset.otherCurrency = ''; body.append(note);
+  }
   if(data.tasks)renderTaskStatistics(body,data);
   const byProject=new Map(),byDate=new Map();
   for(let time=Date.parse(data.from+'T00:00:00Z');time<=Date.parse(data.to+'T00:00:00Z');time+=86400000)byDate.set(new Date(time).toISOString().slice(0,10),{cost:0,requests:0,unpriced_requests:0,usage_missing_requests:0,rows:[]});
