@@ -69,7 +69,8 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await expect(next).toHaveText('独立 QA 正在新的上下文里验收候选 cand12345678。');
     await expect(side.locator('.task-fact')).toHaveCount(5);
     await expect(side.locator('.task-fact h4')).toHaveText(['目标', '候选', '证据', '验收', '发布']);
-    await expect(side.locator('.task-execution')).toContainText('原来的执行器：这个任务没有经过主控，由项目电脑里的 Pi 进程直接执行。');
+    await expect(side.locator('.task-execution')).toContainText('没有读取到主控记录；实际 Agent 和模型以运行记录为准。');
+    await expect(side.locator('.task-execution')).not.toContainText('Pi 进程');
     await expect(side.locator('.task-execution')).not.toContainText('委派记录');
     await page.screenshot({ path: `${out}/task-original-executor.png` });
     // The dialog's close event arrives after the click; open the next task once it has.
@@ -106,7 +107,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
       JSON.stringify({ type: 'model', step: n, content: `Step ${n}: read the redirect handler and the tests around it before deciding what to report.` }), now);
     await page.evaluate(() => openTask('logged'));
     await expect(page.locator('#timeline .step-model')).toHaveCount(30);
-    await expect(next).toHaveText('执行器（项目电脑里的 Pi 进程）正在处理：Compare the redirect handler with the issue and reply');
+    await expect(next).toHaveText('执行器正在处理：Compare the redirect handler with the issue and reply');
     const banner = await page.locator('#task-next').boundingBox();
     expect(banner.y).toBeGreaterThanOrEqual(0); expect(banner.y + banner.height).toBeLessThanOrEqual(900);
     expect(await page.evaluate(() => [document.documentElement.scrollWidth, document.getElementById('task-next').scrollWidth <= document.getElementById('task-next').clientWidth])).toEqual([390, true]);

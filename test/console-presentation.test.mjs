@@ -32,15 +32,16 @@ function taskPage(t, task, roles, handoffs = []) {
     facts: () => page.$('task-side').querySelectorAll('.task-fact').map(part => part.dataset.fact) };
 }
 
-test('a task without role coordination says it ran on the original executor, and that independent QA still accepts it', async t => {
+test('missing role records do not invent an executor, and independent QA remains a separate fact', async t => {
   const task = { id: 't1', repository_id: '101', kind: 'development.issue', object_number: 7, status: 'running', phase: 'model', attempt: 1, structured: record() };
   const view = taskPage(t, task, { instances: [], assignments: [], runs: [], snapshots: {} }); await view.open();
-  assert.equal(view.next(), '执行器（项目电脑里的 Pi 进程）正在处理：Run the auth tests');
+  assert.equal(view.next(), '执行器正在处理：Run the auth tests');
   // Goal, candidate, evidence, acceptance and publication, in that order, each from the task's own record.
   assert.deepEqual(view.facts(), ['目标', '候选', '证据', '验收', '发布']);
   const side = view.side();
   assert.match(side, /Keep the query string on the login redirect/); assert.match(side, /The redirect keeps \?next=/);
-  assert.match(side, /原来的执行器：这个任务没有经过主控/); assert.match(side, /独立 QA\n有候选后验收/);
+  assert.match(side, /没有读取到主控记录；实际 Agent 和模型以运行记录为准/); assert.match(side, /独立 QA\n有候选后验收/);
+  assert.doesNotMatch(side, /Pi 进程/, 'an absent runtime record cannot identify the executor');
   assert.doesNotMatch(side, /委派记录/, 'no delegation is invented for a task that had none');
   assert.equal(view.page.run("[...document.querySelectorAll('#task-side .side-card h3')].some(h => h.textContent === '任务契约与交付验收')"), false);
 });
