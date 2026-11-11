@@ -122,8 +122,37 @@ export class ChannelApi {
       else authorize(actor, 'platform.manage');
       return JSON.parse(row.receipt);
     }
+    const profile = /^\/api\/channels\/bindings\/([a-f0-9]{48})\/name$/.exec(path);
+    if (profile && method === 'POST') {
+      fields(input, []);
+      const identity = store.get("SELECT * FROM external_identities WHERE id=? AND principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active'", profile[1]!, actor.principal_id);
+      if (!identity) return fail(404, 'identity_not_found');
+      const c = store.get("SELECT * FROM channel_connectors WHERE id||':'||app_id=? AND provider='feishu' AND enabled=1", identity.connector);
+      if (!c) return fail(403, 'channel_connector_inactive');
+      // An installation token cannot look up another enterprise's external users.
+      if (identity.external_tenant !== c.installation_tenant) return fail(403, 'channel_user_name_unavailable');
+      const guard = () => {
+        assertCurrent(actor);
+        const current = this.service.connector(c.id);
+        if (current.revision !== c.revision) fail(409, 'channel_configuration_changed');
+        if (!store.get("SELECT 1 FROM external_identities WHERE id=? AND principal_id=? AND provider='feishu' AND host=? AND status='active' AND connector=? AND external_tenant=? AND external_actor=?",
+          identity.id, actor.principal_id, identity.host, identity.connector, identity.external_tenant, identity.external_actor)) fail(403, 'external_binding_required');
+      };
+      let name: string;
+      try { name = await this.service.adapter(c, guard).userName(identity.external_actor); }
+      catch (error) {
+        if (!(error instanceof HttpError) || !['channel_delivery_rejected', 'channel_delivery_failed', 'channel_auth_failed', 'channel_rate_limited'].includes(error.code)) throw error;
+        return fail(502, 'channel_user_name_unavailable');
+      }
+      store.transaction(() => { guard(); store.run('UPDATE external_identities SET display_name=? WHERE id=?', name, identity.id); });
+      return { id: identity.id, display_name: name };
+    }
     if (path === '/api/channels/bindings' && method === 'GET') return {
-      bindings: store.all("SELECT id,provider,connector,external_tenant,external_actor,display_name,status,verified_at FROM external_identities WHERE principal_id=? AND provider='feishu'", actor.principal_id),
+      bindings: store.all(`SELECT e.id,e.provider,e.connector,e.external_tenant,e.external_actor,e.display_name,e.status,e.verified_at,
+        c.app_name,c.tenant_name,c.enabled AS connection_enabled,
+        CASE WHEN e.status='active' AND e.host='open.feishu.cn' AND c.enabled=1 AND e.external_tenant=c.installation_tenant THEN 1 ELSE 0 END AS can_read_name
+        FROM external_identities e LEFT JOIN channel_connectors c ON c.id||':'||c.app_id=e.connector
+        WHERE e.principal_id=? AND e.provider='feishu'`, actor.principal_id),
       pending: this.service.bindings.pending(actor.principal_id),
       // Public identifiers let users bind before receiving any project grants.
       applications: store.all('SELECT id,app_id,app_name,tenant_name FROM channel_connectors WHERE enabled=1').map(c => ({ ...c,

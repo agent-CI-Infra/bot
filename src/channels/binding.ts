@@ -87,7 +87,9 @@ export class ChannelBindings {
     return this.store.all('SELECT * FROM channel_bind_requests WHERE principal_id=? AND consumed_at IS NULL AND expires_at>?', principal, Date.now()).map(row => {
       const e = this.store.secrets.open(row.subject, 'channel-bind:' + row.challenge_hash) as unknown as ChannelEvent;
       const binding = this.store.secrets.open(row.binding_ref, 'channel-challenge:' + row.challenge_hash);
+      const app = this.store.get('SELECT app_name,tenant_name FROM channel_connectors WHERE id=? AND app_id=? AND installation_tenant=?', row.connector_id, e.app_id, e.installation_tenant);
       return { provider: 'feishu', app_id: e.app_id, installation_tenant: e.installation_tenant, actor_tenant: e.actor_tenant,
+        app_name: app?.app_name || '', tenant_name: app?.tenant_name || '',
         open_id: e.actor_id, confirmation: binding.confirmation, expires_at: row.expires_at,
         account: { id: principal, username: this.store.get('SELECT username FROM users WHERE id=?', principal)?.username || principal } };
     });

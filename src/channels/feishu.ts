@@ -189,6 +189,15 @@ export class FeishuAdapter implements ChannelAdapter {
     this.guard();
     return { tenant_key: text(tenant.tenant_key), tenant_name: typeof tenant.name === 'string' ? tenant.name.trim().slice(0, 200) : '' };
   }
+  async userName(openId: string): Promise<string> {
+    const data = await this.api('/contact/v3/users/' + encodeURIComponent(openId) + '?user_id_type=open_id', { method: 'GET' });
+    const user = data.data?.user;
+    const name = [user?.name, user?.nickname, user?.en_name].find(value => typeof value === 'string' && value.trim());
+    if (user?.open_id !== openId || !name) fail(502, 'channel_user_name_unavailable');
+    this.guard();
+    // The directory response may contain contact details; only retain the verified subject's display name.
+    return name.trim().slice(0, 200);
+  }
   async update(delivery: ChannelDelivery): Promise<string> {
     const id = text(delivery.message_id);
     await this.api('/im/v1/messages/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ content: JSON.stringify(delivery.content) }) });
