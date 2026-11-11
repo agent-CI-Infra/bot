@@ -129,7 +129,7 @@ function checkMatrix(harness: (typeof harnesses)[number], profile: { api: string
 }
 
 /** Pins one skill bundle source to its exact files: path, sha256 and size, plus the stored contents. */
-function pinSkill(s: Store, repositoryId: string, input: any, index: number) {
+function pinSkill(s: Store, repositoryId: string, input: any, index: number, previous?: { id: string; revision: number }) {
   const field = `skills[${index}]`;
   if (!input || typeof input !== 'object' || Array.isArray(input)) invalid('invalid_skill_bundle', field);
   if (Object.keys(input).some(k => !['id', 'source'].includes(k))) invalid('unknown_field', field);
@@ -147,9 +147,17 @@ function pinSkill(s: Store, repositoryId: string, input: any, index: number) {
     if (typeof source.commit !== 'string' || !/^[a-f0-9]{40}$/.test(source.commit)) invalid('invalid_skill_source', field + '.source.commit');
     if (!Array.isArray(source.paths) || !source.paths.length || source.paths.length > 32 || source.paths.some((p: any) => typeof p !== 'string')) invalid('invalid_skill_source', field + '.source.paths');
     const cached = s.hasTable('repository_rule_sources') ? s.get('SELECT sha,files FROM repository_rule_sources WHERE repository_id=?', repositoryId) : undefined;
-    if (!cached || cached.sha !== source.commit) fail(409, 'skill_source_commit_unavailable', field + '.source.commit');
-    const available = JSON.parse(cached!.files);
-    for (const path of source.paths) { if (!/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path) || !Object.hasOwn(available, path)) invalid('skill_file_not_found', field + '.source.paths'); files.push({ path, content: available[path] }); }
+    if (!cached || cached.sha !== source.commit) {
+      // Re-saving an unchanged pinned source must not follow a moving rule cache. Only this configuration's exact
+      // existing bundle may supply those old files; a new id, path or commit still requires the matching cache.
+      const stored = previous && previous.id === input.id ? s.get('SELECT source,files FROM skill_bundle_revisions WHERE repository_id=? AND id=? AND revision=?', repositoryId, previous.id, previous.revision) : undefined;
+      const saved = stored ? JSON.parse(String(stored.source)) : null;
+      if (!saved || saved.type !== 'repository' || saved.commit !== source.commit || JSON.stringify([...saved.paths].sort()) !== JSON.stringify([...source.paths].sort())) fail(409, 'skill_source_commit_unavailable', field + '.source.commit');
+      files = JSON.parse(String(stored!.files)).map((file: { path: string; content: string }) => ({ path: file.path, content: file.content }));
+    } else {
+      const available = JSON.parse(cached.files);
+      for (const path of source.paths) { if (!/^\.agents\/skills\/(?:[^/]+\/)+SKILL\.md$/.test(path) || !Object.hasOwn(available, path)) invalid('skill_file_not_found', field + '.source.paths'); files.push({ path, content: available[path] }); }
+    }
     descriptor = { type: 'repository', path_root: '.agents/skills', commit: source.commit, paths: [...source.paths].sort() };
   } else if (source.type === 'inline') {
     if (!Array.isArray(source.files) || !source.files.length || source.files.length > 16) invalid('invalid_skill_source', field + '.source.files');
@@ -177,7 +185,7 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
   // Skill bundles first: a role may reference a bundle saved in this same request.
   const skillInput = input.skills ?? [];
   if (!Array.isArray(skillInput) || skillInput.length > 16) invalid('invalid_skill_bundles', 'skills');
-  const pinned = skillInput.map((value: any, index: number) => pinSkill(s, repositoryId, value, index));
+  const pinned = skillInput.map((value: any, index: number) => pinSkill(s, repositoryId, value, index, current.skills.find(bundle => bundle.id === value?.id)));
   if (new Set(pinned.map((b: any) => b.id)).size !== pinned.length) invalid('duplicate_skill_bundle', 'skills');
   const added: any[] = [];
   const skills = input.skills === undefined ? current.skills : pinned.map((bundle: any) => {

@@ -358,3 +358,9 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:12px;padding:4px 10px}
 .audit-filters button[aria-pressed=true]{border-color:#16636b;color:#16636b;background:#e8f3f4}
+
+
+/* A single mounted skill editor shares the role draft and save bar. */
+.skill-catalog-layout{display:grid;grid-template-columns:minmax(180px,240px) minmax(0,1fr);gap:16px;align-items:start}.skill-catalog-sidebar{min-width:0;display:grid;gap:10px}.skill-catalog-sidebar label{display:grid;gap:6px}.skill-catalog-sidebar input{min-width:0;width:100%;box-sizing:border-box}.skill-catalog-nav{display:grid;gap:6px;max-height:55vh;overflow:auto}.skill-catalog-nav button{white-space:normal;text-align:left;overflow-wrap:anywhere}.skill-catalog-nav button[aria-pressed=true]{border-color:var(--color-brand,#2563eb);background:var(--color-brand-weak,#eff6ff)}
+.skill-catalog-editor{min-width:0;margin:0}.skill-saved-facts{min-width:0;overflow-wrap:anywhere}.skill-saved-facts code{overflow-wrap:anywhere;word-break:break-all}.skill-saved-facts .facts{min-width:0}.skill-catalog-editor fieldset{min-width:0}.skill-catalog-editor input,.skill-catalog-editor textarea,.skill-catalog-editor select{max-width:100%;box-sizing:border-box}
+@media(max-width:767px){.skill-catalog-layout{grid-template-columns:minmax(0,1fr)}.skill-catalog-nav{max-height:200px}.skill-workspace>.skill-catalog-layout>.card{padding:12px}}
