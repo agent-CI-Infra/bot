@@ -107,7 +107,7 @@ for (const width of [1440, 390]) test(`an unrefreshed default branch stays unkno
       refreshes++;
       if (refreshes === 1) return route.fulfill({ status: 503, json: { error: 'fixture_refresh_unavailable' } });
       new RuleService(f.h.store).cache('101', 'b'.repeat(40), { '.bot/computer.yaml': 'cpus: 1.5\n' });
-      await route.fulfill({ status: 200, json: { ok: true } });
+      await route.fulfill({ status: 201, json: { ok: true } });
     });
     await page.setViewportSize({ width, height: 844 }); await login(page, f);
     const form = page.locator('.machine-config-card'), read = page.getByRole('button', { name: '重新读取电脑配置', exact: true });
