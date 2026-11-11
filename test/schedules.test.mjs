@@ -473,6 +473,8 @@ test('subscription preview preserves save validation, project authority and owne
   const f = await fixture(t), spec = {name:'本人订阅',destination_id:f.destination,events:['ci.failed','ci.recovered'],projects:['101'],aggregate_ms:300000,timezone:'Asia/Shanghai',enabled:true};
   const saved = await command(f,'notification.register',{subscription:spec}); assert.equal(saved.value.state,'succeeded');
   assert.equal((await query(f,'list_subscriptions')).subscriptions[0].editable,true);
+  assert.equal((await query(f,'list_subscriptions',{id:saved.value.result.subscription.id})).subscriptions[0].id,saved.value.result.subscription.id);
+  assert.equal((await query(f,'list_subscriptions',{id:saved.value.result.subscription.id},f.admin,'102')).subscriptions.length,0);
   const observer = await f.member('subscription-observer',{repository_ids:['101']});
   assert.equal((await query(f,'list_subscriptions',{},observer.client)).subscriptions[0].editable,false);
   for (const change of [{projects:['101','102']},{quiet_start:'22:00'},{quiet_start:'22:00',quiet_end:'22:00'},{timezone:'Invalid/Zone'}]) {

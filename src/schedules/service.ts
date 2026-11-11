@@ -332,7 +332,8 @@ export class ScheduleService {
     }
     if (operation === 'list_schedules' || operation === 'list_subscriptions') {
       const table = operation === 'list_schedules' ? 'schedules' : 'notification_subscriptions';
-      const rows = this.store.all(`SELECT * FROM ${table} WHERE project_id=? ORDER BY created_at DESC,id LIMIT ? OFFSET ?`, project, limit + 1, offset), more = rows.length > limit; rows.splice(limit);
+      const exact = operation === 'list_subscriptions' && args.id;
+      const rows = this.store.all(`SELECT * FROM ${table} WHERE project_id=?${exact ? ' AND id=?' : ''} ORDER BY created_at DESC,id LIMIT ? OFFSET ?`, project, ...(exact ? [args.id] : []), limit + 1, offset), more = rows.length > limit; rows.splice(limit);
       return { revision, [operation === 'list_schedules' ? 'schedules' : 'subscriptions']: rows.map(r => operation === 'list_schedules' ? this.view(r) : { ...this.subscriptionView(r), editable: r.principal_id === actor.principal_id && r.state !== 'deleted' }), next_offset: more ? offset + limit : null };
     }
     if (operation === 'list_schedule_destinations') {
