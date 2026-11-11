@@ -808,8 +808,10 @@ export class TaskEngine {
       if(workspace&&task.phase==='model'&&controlled(this.store,task,'development')&&task.kind.startsWith('development.')&&task.workspace_id){try{await checkpoint(this.store,task,workspace);}catch(saved){records.history(id,'checkpoint_fault',{phase:'role_failure_recovery',code:(saved as any).code||'snapshot_failed'});}}
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
+      // A capacity wait never started a run, so it keeps its attempt and its workspace; everything else in the model phase
+      // starts the next attempt on a new one.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        state!=='waiting_coordination'&&task.kind!=='task.request'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
+        state!=='waiting_coordination'&&task.kind!=='task.request'&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
         // An operation left over from an interrupted run conflicts with the same key again; a new attempt has new keys.
         ['execution_interrupted','tool_operation_conflict'].includes(failure.code)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);

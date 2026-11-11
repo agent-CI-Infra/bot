@@ -7,6 +7,7 @@ import { runAgent,type AgentSpec } from '../agent/runtime.js';
 import { environmentProfiles } from './catalog.js';
 import { TaskToolGateway,gatewayToolNames,gatewayCapabilities } from './gateway.js';
 import { roleRunProtocol,validateCandidateRef,contentHash,protocolRecovery,type Budget,type CandidateRef,type RunContext,type RunEvent } from './protocol.js';
+import { roleCapacity } from './board.js';
 import { admitRun,allocateLease,appendRunEvent,assertLease,budgetExceeded,buildRunContext,inputCandidate,instanceUsage,issueRunToken,leaseCurrent,planRecovery,recordCheckpoint,revokeRunTokens,runBudget,runEvents,scopeUsage,sourceRef,touchRunToken,verifyRunToken,type EnvironmentFacts } from './role-run.js';
 import { randomId } from '../core/security.js';
 import { traceEvent,endRun } from '../tasks/trace.js';
@@ -251,6 +252,12 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const bind=(runId:string)=>{
    // prepare/start may overlap before either run binds. Recheck after this run row exists, with no await before lease allocation.
    const same=s.get("SELECT id FROM task_runs WHERE role_instance_id=? AND status='running' AND id<>?",instance.id,runId);if(same)stop('role_run_already_active','retry_wait');
+   // The authoritative capacity check: this run's row exists now, so the count includes it, and the count and this
+   // decision have no await between them. Admission already refused an obviously full role before anything was
+   // provisioned; this closes the window where two runs admitted before either bound. The row this attempt created is
+   // closed first, so a refused run holds no slot.
+   const capacity=roleCapacity(s,String(task.repository_id),role,snapshot.kind,runId);
+   if(capacity&&capacity.running>=capacity.limit){endRun(s,{id:runId,task_id:task.id} as Row,'stopped','role_capacity');stop('role_capacity','retry_wait',`${role}：本项目该角色的并发上限 ${capacity.limit} 已满（${capacity.running} 个运行中）；本次不启动，任务排队重试，不消耗尝试次数。`);}
    const conflict=(snapshot.kind==='writer'||snapshot.kind==='observer')&&s.get("SELECT r.id FROM task_runs r JOIN role_snapshots p ON p.id=r.role_snapshot WHERE r.task_id=? AND r.id<>? AND r.status='running' AND (json_extract(p.snapshot,'$.kind')='writer' OR (?='writer' AND json_extract(p.snapshot,'$.kind')='observer'))",task.id,runId,snapshot.kind);if(conflict)stop('candidate_writer_busy','retry_wait');
    const lease=allocateLease(s,task.id,scope,runId,typeof task.claim_token==='string'?task.claim_token:null),previous=options.recover?.previous_run_id??lease.previous_run_id;
    const ctx=buildRunContext(s,{task,scope,run_id:runId,lease_epoch:lease.epoch,...(previous?{resume_from_run_id:previous}:{}),instance,role,snapshot,snapshot_id:resolved.id,candidate:candidate.ref});
