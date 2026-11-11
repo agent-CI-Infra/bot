@@ -237,7 +237,10 @@ function deployment() {
   const state = {
     onboarding: { public_address: { origin: 'https://hooks.example.com', checked_at: '2026-10-27T00:00:00.000Z' },
       tunnel: { available: true, token_configured: true, origin: 'http://webhook:8791', state: 'connected', routes: [] },
-      app: { account_id: 'a1', app_id: '123', slug: 'first-app', installations: 1, webhook_url: 'https://old.example.com/hooks/github/a1/e1' }, model_id: 'm1' },
+      app: { account_id: 'a1', app_id: '123', slug: 'first-app', installations: 1, webhook_url: 'https://old.example.com/hooks/github/a1/e1' }, model_id: 'm1',
+      // 公网接入页的只读登录卡读的就是这一次 /api/onboarding 的 github_login，不另外取接口。
+      github_login: { enabled: true, client_id: 'Iv1.console', secret_configured: true, origin: 'https://hooks.example.com', origin_source: 'public_address',
+        callback_url: 'https://hooks.example.com/auth/github/callback', account_id: null, application_type: 'github_app', migration_required: true, source: 'wizard' } },
     accounts: [{ id: 'a1', name: 'First App', type: 'github_app', app_id: '123', credentials_configured: true, endpoints: [{ webhook_path: '/hooks/github/a1/e1' }] },
       { id: 'a2', name: 'Second App', type: 'github_app', app_id: '456', credentials_configured: true, endpoints: [] },
       { id: 'b1', name: 'Token account', type: 'bot_account', app_id: null, credentials_configured: false, endpoints: [] }],
@@ -286,7 +289,11 @@ test('global settings change the wizard settings and shared models without a pro
   assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '常规');
   assert.match(text(section('当前运行版本')), /v9\.9\.9/);
   assert.equal(String(section('同时运行的任务').querySelector('input').value), '2');
-  await open('access'); assert.deepEqual(cards(), ['公网 HTTPS 地址', 'Cloudflare Tunnel']);
+  await open('access'); assert.deepEqual(cards(), ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']);
+  // 登录配置在这页只读，值来自同一次 /api/onboarding；没有输入框，只有一条去向导第 3 步的链接。
+  assert.match(text(section('GitHub 登录（只读）')), /Iv1\.console/);
+  assert.match(text(section('GitHub 登录（只读）')), /控制台向导保存/);
+  assert.equal(section('GitHub 登录（只读）').querySelectorAll('input, select, textarea, button').length, 0);
   // One-time wizard steps stay in the wizard: nothing here creates an App or installs one.
   assert.ok(!panel.querySelectorAll('button').some(b => /创建|安装|跳过|manifest/i.test(b.textContent)));
 
