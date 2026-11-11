@@ -167,7 +167,11 @@ async function renderOnboarding(request,panel,feedback=''){
   const rootPanel=panel,address=location.hash;
   const data=await api('/api/onboarding'),{models}=await api('/api/models');if(request!==renderVersion||location.hash!==address)return;
   const count=data.readiness?.installation_count,installations=Number.isSafeInteger(count)&&count>=0?count:null;
-  const step=addressedStep();if(step!==onboardingStep)onboardingTunnel=null;onboardingStep=step;
+  const step=addressedStep();
+  // Read every dependency before replacing the live panel, so conflict-recovery errors keep their controls attached.
+  const installed=step===6?await api('/api/installations'):null;
+  if(request!==renderVersion||location.hash!==address)return;
+  if(step!==onboardingStep)onboardingTunnel=null;onboardingStep=step;
   const progress=onboardingProgress(data),intro=element('div','','onboarding-intro'),layout=element('div','','onboarding-layout'),content=element('div','','onboarding-content');
   intro.append(element('h2','接入向导'),note('配置会分别保存。可随时返回已完成步骤；浏览步骤不会自动启用项目或开始任务。'));
   panel.replaceChildren(intro,layout);$('count').textContent=`第 ${onboardingStep+1} / ${onboardingSteps.length} 步`;
@@ -227,7 +231,6 @@ async function renderOnboarding(request,panel,feedback=''){
     const missing=progress.slice(0,6).map((item,index)=>({...item,index})).filter(item=>!item.ready);
     if(missing.length){const gaps=card('接入尚未完成');gaps.append(note('以下必需配置仍待补齐。可以继续查看或返回项目，当前状态不会标记为已完成。'));for(const item of missing)gaps.append(button(`前往第 ${item.index+1} 步：${onboardingSteps[item.index]}`,()=>wizardNext(item.index)));panel.append(gaps);}
     const projects=card('选择项目开始检视'),sync=button('同步已安装仓库',async()=>{sync.disabled=true;sync.textContent='正在同步安装范围…';try{const result=await api('/api/installations/sync','POST',{});if(result.results.some(r=>r.error))throw new Error('安装同步失败：'+result.results.filter(r=>r.error).map(r=>r.error).join('，'));await render();}catch(e){error(e);}finally{sync.disabled=false;sync.textContent='同步已安装仓库';}});projects.append(sync);
-    const installed=await api('/api/installations');if(request!==renderVersion)return;
     for(const repo of installed.repositories){
       const row=element('div','','row');row.append(element('p',repo.full_name),...installedBadges(repo));
       if(repo.registered)row.append(button('打开项目设置',()=>openProject(repo.id)));

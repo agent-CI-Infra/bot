@@ -88,12 +88,12 @@ test('the installation step uses current effective installations instead of the 
   } finally { await f.close(); }
 });
 
-test('a failed readiness reload after a completion conflict stays unknown and retries without another completion write', async ({ page }) => {
+for(const endpoint of ['onboarding','installations'])test(`a failed ${endpoint} reload after a completion conflict stays unknown and retries without another completion write`, async ({ page }) => {
   const f = await identityFixture(); let failure = false, writes = 0;
   try {
     const { model } = await readyWizard(f); await localLogin(page, f, '/#/settings/onboarding/6');
     const finish = page.getByRole('button', { name: '完成向导', exact: true }); await expect(finish).toBeEnabled();
-    await page.route('**/api/onboarding', route => failure ? route.fulfill({ status: 503, json: { error: 'status_unavailable' } }) : route.continue());
+    await page.route('**/api/'+endpoint, route => failure ? route.fulfill({ status: 503, json: { error: 'status_unavailable' } }) : route.continue());
     await page.route('**/api/onboarding/complete', route => { writes++; return route.continue(); });
     f.h.store.run('UPDATE models SET api_key=NULL WHERE id=?', model.id); failure = true; await finish.click();
     await expect(page.getByRole('heading', { name: '接入状态待重新核验', exact: true })).toBeVisible();
@@ -109,13 +109,13 @@ test('a failed readiness reload after a completion conflict stays unknown and re
   } finally { await f.close(); }
 });
 
-test('a readiness response after a completion conflict cannot replace a page opened in the meantime', async ({ page }) => {
+for(const endpoint of ['onboarding','installations'])test(`a ${endpoint} response after a completion conflict cannot replace a page opened in the meantime`, async ({ page }) => {
   const f = await identityFixture(); let release = () => {}, requested = false;
   try {
     const { model } = await readyWizard(f); await localLogin(page, f, '/#/settings/onboarding/6');
     const finish = page.getByRole('button', { name: '完成向导', exact: true }); await expect(finish).toBeEnabled();
     const gate = new Promise(resolve => { release = resolve; });
-    await page.route('**/api/onboarding', async route => { const response = await route.fetch(); requested = true; await gate; await route.fulfill({ response }); });
+    await page.route('**/api/'+endpoint, async route => { const response = await route.fetch(); requested = true; await gate; await route.fulfill({ response }); });
     f.h.store.run('UPDATE models SET api_key=NULL WHERE id=?', model.id); await finish.click(); await expect.poll(() => requested).toBe(true);
     await page.evaluate(() => { location.hash = '#/projects'; }); await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
     release(); await page.unrouteAll({ behavior: 'wait' });
