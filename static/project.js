@@ -289,6 +289,22 @@ function basicSection() {
   }
   const danger = card('危险区'); danger.classList.add('project-danger');
   danger.append(note('禁用会停止新任务、中止正在执行的任务并停止虚拟电脑，保留现有数据；删除会清除本系统项目数据，且仍须通过服务端的实时检查。'));
+  // The sentence above states the policy; this line says what it costs right now. A failed read says so instead of
+  // showing zero, because "nothing is in flight" and "cannot tell" lead an administrator to different decisions.
+  const impact = element('p', '', 'muted'); impact.dataset.projectDangerTasks = ''; impact.setAttribute('role', 'status');
+  impact.textContent = '正在读取推进中的任务…';
+  danger.append(impact, consoleLink(`#/projects/${id}/overview/active`, '查看推进中的任务', '打开总览里同一范围的任务记录'));
+  api(`/api/tasks?${new URLSearchParams({ repository_id: id, summary: '1', group: 'active', limit: '1' })}`).then(data => {
+    if (current !== target) return;
+    const active = data.summary?.active;
+    if (!Number.isSafeInteger(active)) throw new Error('任务计数格式无法识别');
+    impact.textContent = active ? `当前 ${active} 项任务在推进中；禁用会中止其中正在执行的任务，已有数据保留。`
+      : '当前没有推进中的任务；禁用后不再处理新的 Issue／PR。';
+  }).catch(() => {
+    if (current !== target) return;
+    impact.classList.add('view-error');
+    impact.textContent = '暂时无法读取推进中的任务数；禁用会中止正在执行的任务，这里不按零处理。可用“刷新项目设置”重试。';
+  });
   if (me.role === 'super_admin') {
     const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
     const change = button(policy.enabled ? '禁用项目' : '启用项目', async () => {
