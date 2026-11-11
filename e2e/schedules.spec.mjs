@@ -189,3 +189,17 @@ test('common time presets and manager instructions persist while unsupported rel
   await expect.poll(async()=>(await read(f,'list_schedules')).schedules[0].spec.workflow).toBe('release.scheduled');await page.getByLabel('编辑计划',{exact:true}).selectOption(plan.id);await expect(page.getByRole('button',{name:'立即运行一次',exact:true})).toBeDisabled();await expect(page.getByRole('region',{name:'项目计划列表'})).toContainText('未支持，不表示可执行');
  }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
 });
+
+
+test('a missing schedules capability is explained as missing authority rather than expired project access',async({page})=>{
+ const f=await environment();
+ try{
+  await login(page,f);
+  await page.route('**/api/management/query',async route=>{if(route.request().postDataJSON().operation==='list_schedules')await route.fulfill({status:403,json:{error:'capability_forbidden'}});else await route.continue();});
+  await page.getByRole('button',{name:'刷新定时与通知',exact:true}).click();
+  await expect(page.getByText('当前账号没有计划管理权限，请联系项目管理员核对授权。',{exact:true})).toBeVisible();
+  await expect(page.getByText('计划访问权限已失效，请按当前授权重新进入。',{exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'保存计划',exact:true})).toHaveCount(0);
+  expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
+ }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
+});
