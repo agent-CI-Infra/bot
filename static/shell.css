@@ -54,6 +54,10 @@ body.console-ready main { margin: 0 0 0 var(--console-rail); padding: 20px 28px 
 .console-more-link { margin-top: 12px; }
 .console-location { display: flex; align-items: center; gap: 12px; min-height: 32px; margin-bottom: 16px; font-size: 13px; color: var(--color-text-muted); }
 .console-location > span + span::before { content: '/'; padding-right: 12px; color: #a5b0be; }
+/* The permission state is a badge, not a breadcrumb: no slash before it, and nothing at all while the project has no gap. */
+.console-location > span.console-permission::before { content: none; }
+.console-location .console-permission:empty { display: none; }
+.console-location .console-permission .status { white-space: normal; }
 .console-ready .project-body { grid-template-columns: minmax(0, 1fr); }
 .console-ready .project-head { padding: 20px 24px; }
 .console-ready .project-head h1 { font-size: 26px; }
