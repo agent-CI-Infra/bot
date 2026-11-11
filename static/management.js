@@ -30,6 +30,19 @@ const managementOperationLabels = {
   'task.adopt-config': '采用新执行配置', 'workflow.update': '更新工作配置', 'manager.update': '更新 Manager 配置',
   'project.update': '更新项目配置', 'roles.update': '更新角色', 'rules.update': '更新规则', 'configuration.pr': '创建配置 PR'
 };
+// A decision and its result are two different facts: "approved" never means "executed", and a decided command takes no second decision.
+const managementCommandStates = {
+  awaiting_approval: ['等待批准', '等待批准。批准只代表审批通过，执行结果会在批准后单独回执。'],
+  pending: ['已批准，等待执行', '已批准，等待执行。批准不等于已执行，结果出来后会更新这条回执。'],
+  executing: ['执行中', '执行中，结果出来后会更新这条回执。'],
+  succeeded: ['已执行', '已执行。下方是这次操作的执行回执。'],
+  rejected: ['已拒绝', '已拒绝，命令未执行。'],
+  failed: ['执行失败', '执行失败，命令未完成。原因见下方回执。'],
+  unknown: ['结果待确认', '结果待确认。对账回读之前不会再次执行。'],
+  expired: ['审批已过期或目标配置已变化', '这次审批无法通过：可能已经过期，或目标配置在批准之前被改动，命令未执行。请重新提交这条操作。'],
+  not_operator: ['未执行：只有发起人可以执行', '只有这条命令的发起人可以执行它；命令保持原状态，没有执行。']
+};
+const managementCommandState = state => managementCommandStates[state] ?? [state, '当前状态：' + state];
 // One authenticated chat surface survives page navigation. Minimizing it never cancels a submitted command.
 let managementChat = null;
 function syncManagementChat() {
@@ -332,6 +345,68 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     const step = { id: data.call_id ?? 'legacy-' + sequence, box, detail, status: state, name: data.name, state: 'running' };
     value.steps.push(step); setStepState(step, 'running'); paintTurn(value); return step;
   }
+  // The event log keeps a receipt as it stood when the call ran, so every rendered receipt re-reads its command before
+  // telling the person what is true now; a decided receipt never offers a second decision.
+  function commandReceipt(parent, receipt, step, onState = () => {}) {
+    const box = element('details', '', 'management-observation management-receipt'), summary = element('summary', ''), body = element('div', '', 'management-receipt-body');
+    box.open = true; box.append(summary, body); parent.append(box);
+    const view = { box, step, receipt, decided: false, busy: false };
+    const repaint = next => {
+      if (next) view.receipt = { ...view.receipt, ...next };
+      const value = view.receipt;
+      // A failed approval carries its own server reason; name the one the console can explain instead of a bare failure.
+      const shown = value.state === 'failed' && value.result?.error === 'command_operator_required' ? 'not_operator' : value.state;
+      const [caption, explanation] = managementCommandState(shown);
+      box.dataset.state = value.state;
+      summary.replaceChildren(element('strong', '操作 ' + (managementOperationLabels[value.operation] ?? value.operation)), element('span', ' · ' + caption, 'management-receipt-state'));
+      body.replaceChildren(element('p', explanation, 'management-receipt-note'), element('p', '发起人 ' + value.principal_id + ' · 项目 ' + value.project_id + ' · 更新于 ' + timestamp(value.updated_at), 'management-receipt-meta'), element('p', '具体变更：' + (managementOperationLabels[value.operation] ?? value.operation) + '（目标 ' + (value.target?.task_id ?? value.target?.workflow_id ?? value.project_id ?? '—') + '）', 'management-receipt-change'));
+      if (value.result?.notice) body.append(element('p', String(value.result.notice)));
+      if (value.before_revision) body.append(note('版本 ' + value.before_revision.slice(0, 12) + ' → ' + (value.after_revision ?? value.before_revision).slice(0, 12)));
+      if (value.arguments) { const args = element('details', ''); args.append(element('summary', '查看请求参数'), element('pre', JSON.stringify(value.arguments, null, 2))); body.append(args); }
+      if (value.result?.diff) { const diff = element('details', ''); diff.append(element('summary', '查看配置差异'), element('pre', JSON.stringify(value.result.diff, null, 2))); body.append(diff); }
+      if (value.result?.pr_url) body.append(link(value.result.pr_url, '查看配置 PR（待合入）'));
+      const links = element('p', ''); links.append(link('/api/management/commands/' + value.id, '命令回执'));
+      if (value.project_id) links.append(' · ', link('#/projects/' + value.project_id + '/roles', '配置'), ' · ', link('#/projects/' + value.project_id + '/activity', '任务'));
+      body.append(links);
+      const taskId = value.target?.task_id ?? (value.operation === 'task.create' ? value.result?.id : null);
+      if (taskId) body.append(button('查看任务', () => openTask(taskId), 'quiet'));
+      if (value.result?.rollback && !['awaiting_approval', 'rejected', 'expired'].includes(value.state)) body.append(button('按原值回滚', () => submit({ command: value.result.rollback }), 'quiet'));
+      if (['unknown', 'executing'].includes(value.state)) body.append(button('对账并回读', reconcile, 'quiet'));
+      if (value.state === 'awaiting_approval' && !view.decided) { const approve = button('批准此版本', decide, 'quiet'); approve.disabled = view.busy; body.append(approve); }
+      const details = element('details', ''); details.append(element('summary', '原始事实与回执'), element('pre', JSON.stringify(value, null, 2))); body.append(details);
+      onState(value);
+    };
+    view.paint = repaint;
+    // A re-read is read-only: it may repaint the card but never repeats a command.
+    const refresh = () => view.receipt.id ? api(endpoint + '/commands/' + view.receipt.id, 'GET').then(next => {
+      if (next && !view.decided && panel.isConnected && me?.id === user) repaint(next);
+    }).catch(() => { /* Keep the recorded receipt when the re-read fails. */ }) : Promise.resolve();
+    async function decide() {
+      if (view.busy || view.decided || !view.receipt.id) return;
+      view.busy = true; repaint();
+      let next = null, failure = null;
+      try { next = await api(endpoint + '/commands/' + view.receipt.id + '/approval', 'POST', { parameter_hash: view.receipt.parameter_hash, expected_revision: view.receipt.expected_revision, decision: 'approve' }); }
+      catch (err) { failure = err; }
+      view.busy = false;
+      // Older console builds only put the server error code in the message, so read either shape.
+      const reason = failure ? failure.code ?? String(failure.message).replace(/^\d+ · /, '') : null;
+      // Only a server decision ends the decision. A network error, 403 or 5xx leaves the card as it was, keeps the
+      // button and keeps the re-read alive, so a transient failure never turns into a page reload.
+      if (next) { view.decided = true; repaint(next); }
+      else if (reason === 'approval_stale') { view.decided = true; repaint({ state: 'expired' }); }
+      else { repaint(); if (failure) showError(failure); void refresh(); }
+    }
+    async function reconcile() {
+      if (view.busy || !view.receipt.id) return;
+      view.busy = true; repaint();
+      try { repaint(await api(endpoint + '/commands/' + view.receipt.id + '/resume', 'POST', {})); }
+      catch (err) { showError(err); }
+      finally { view.busy = false; repaint(); }
+    }
+    repaint();
+    void refresh();
+    return view;
+  }
   const output = (parent, label, value, receipt = false) => {
     const box = element(receipt ? 'details' : 'article', '', 'management-observation' + (receipt ? ' management-receipt' : ' management-answer'));
     box.append(element(receipt ? 'summary' : 'strong', label));
@@ -346,13 +421,6 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       } else if (value.projects) for (const project of value.projects) box.append(element('p', project.full_name + ' · ' + (project.enabled ? '已启用' : '已停用') + (project.configuration_gaps.length ? ' · 待补：' + project.configuration_gaps.join('、') : '')));
       else if (value.tasks) for (const task of value.tasks) box.append(element('p', task.task.summary + ' · ' + (states[task.task.status]?.[0] ?? task.task.status)));
       else if (value.workflows) for (const workflow of value.workflows) box.append(element('p', workflow.name + ' · 生效来源：' + (layerNames[workflow.prompt.source] ?? workflow.prompt.source) + ' · 版本 ' + workflow.prompt.version.slice(0, 12)));
-      else if (value.operation) {
-        box.open = true;
-        box.append(element('p', value.result?.notice ?? (value.state === 'succeeded' ? '操作已执行，可回读当前状态。' : value.state === 'awaiting_approval' ? '组织策略要求有权用户批准这个参数与版本。' : '操作未成功：' + (value.result?.error ?? value.state))));
-        if (value.before_revision) box.append(note('版本 ' + value.before_revision.slice(0, 12) + ' → ' + (value.after_revision ?? value.before_revision).slice(0, 12)));
-        if (value.result?.diff) { const diff = element('details', ''); diff.append(element('summary', '查看配置差异'), element('pre', JSON.stringify(value.result.diff, null, 2))); box.append(diff); }
-        if (value.result?.pr_url) box.append(link(value.result.pr_url, '查看配置 PR（待合入）'));
-      }
       const details = element('details', ''); details.append(element('summary', '原始事实与回执'), element('pre', JSON.stringify(value, null, 2))); box.append(details);
     }
     parent.append(box); return box;
@@ -371,27 +439,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       const receipt = data.result;
       const step = currentTurn.steps.find(item => data.call_id ? item.id === data.call_id : item.name === data.name && item.state === 'running') ?? toolStep(currentTurn, data, row.sequence);
       setStepState(step, receipt.operation ? receipt.state : 'succeeded');
-      const box = output(step.detail, receipt.operation ? `操作 ${receipt.operation} · ${receipt.state}` : '查询事实', receipt, true);
+      if (receipt.operation) commandReceipt(replies, receipt, step, next => { setStepState(step, next.state); paintTurn(currentTurn); });
+      else output(step.detail, '查询事实', receipt, true);
       currentTurn.stage = '正在整理结果';
-      if (receipt.id && receipt.operation) {
-        toolsDirty = true;
-        const links = element('p', ''); links.append(link('/api/management/commands/' + receipt.id, '命令回执'));
-        if (receipt.project_id) links.append(' · ', link('#/projects/' + receipt.project_id + '/roles', '配置'), ' · ', link('#/projects/' + receipt.project_id + '/activity', '任务'));
-        box.append(links);
-        const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? receipt.result?.id : null);
-        if (taskId) box.append(button('查看任务', () => openTask(taskId), 'quiet'));
-        if (receipt.result?.rollback) box.append(button('按原值回滚', () => submit({ command: receipt.result.rollback }), 'quiet'));
-        const updateReceipt = next => {
-          setStepState(step, next.state); paintTurn(currentTurn);
-          output(step.detail, '更新回执', next, true);
-        };
-        if (['unknown', 'executing'].includes(receipt.state)) box.append(button('对账并回读', async () => {
-          try { updateReceipt(await api(endpoint + '/commands/' + receipt.id + '/resume', 'POST', {})); } catch (err) { showError(err); }
-        }, 'quiet'));
-        if (receipt.state === 'awaiting_approval') box.append(button('批准此版本', async () => {
-          try { updateReceipt(await api(endpoint + '/commands/' + receipt.id + '/approval', 'POST', { parameter_hash: receipt.parameter_hash, expected_revision: receipt.expected_revision, decision: 'approve' })); } catch (err) { showError(err); }
-        }, 'quiet'));
-      }
+      if (receipt.id && receipt.operation) toolsDirty = true;
       onActivity(!!active, true);
     } else if (row.type === 'reply') {
       const item = answer(currentTurn); item.text = data.text; item.node.classList.remove('management-stream'); queueMarkdown(item); currentTurn.provisional = null;

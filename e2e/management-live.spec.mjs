@@ -158,8 +158,8 @@ test('a completed reply does not label an operation successful while its receipt
     await expect(feed.locator('.management-turn-state')).toHaveText('等待审批');
     await expect(feed.locator('.management-progress > summary')).toHaveText('执行进展 · 1/2 步完成');
     await expect(step.locator('.management-step-status')).toHaveText('等待审批');
-    await step.locator('.management-step-summary').click();
-    await step.getByRole('button', { name: '批准此版本', exact: true }).click();
+    // The receipt is a card in the conversation, not inside the collapsed step, so the decision is visible where it is made.
+    await feed.getByRole('button', { name: '批准此版本', exact: true }).click();
     await expect(step.locator('.management-step-status')).toHaveText('已完成');
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成');
     await expect(feed.locator('.management-progress > summary')).toHaveText('执行进展 · 2/2 步完成');

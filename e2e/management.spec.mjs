@@ -22,7 +22,7 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await page.screenshot({path:'.tmp/management-164/query-desktop.png',fullPage:true});
     // The model submits a versioned command; the page and the Manager API see the resulting Manager section.
     await message.fill('更新任务默认提示词');await page.getByRole('button',{name:'发送',exact:true}).click();
-    await expect(feed).toContainText('操作 workflow.update · succeeded');
+    await expect(feed).toContainText('操作 更新工作配置 · 已执行');
     await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     const configured=(await query(admin,'get_effective_config',{project_id:'101'})).value;
     expect(configured.workflows.find(w=>w.id==='review.issue').prompt.effective).toBe('Inspect evidence and cite the original logs.');
@@ -33,14 +33,14 @@ test('management UI, direct API and model tools agree on real persisted query, c
     await page.getByRole('button',{name:'返回对话',exact:true}).click();
     // Pause from chat, then read the same state with direct and existing APIs.
     await message.fill('暂停这个任务');await page.getByRole('button',{name:'发送',exact:true}).click();
-    await expect(feed).toContainText('操作 task.pause · succeeded');await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
+    await expect(feed).toContainText('操作 暂停任务 · 已执行');await expect(page.getByRole('button',{name:'停止',exact:true})).toBeHidden();
     expect((await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value.task.status).toBe('paused');expect((await admin('/api/tasks/blocked')).value.task.status).toBe('paused');
     const writes=h.store.get('SELECT count(*) n FROM management_commands').n;
-    await page.reload();await expect(page).toHaveURL(/#\/management$/);await expect(feed).toContainText('操作 task.pause · succeeded');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
+    await page.reload();await expect(page).toHaveURL(/#\/management$/);await expect(feed).toContainText('操作 暂停任务 · 已执行');expect(h.store.get('SELECT count(*) n FROM management_commands').n).toBe(writes);
     // Explicit UI form shares the task command handler and updates the same persisted state.
     await page.getByRole('button',{name:'快捷操作',exact:true}).click();
     await page.getByLabel('管理任务',{exact:true}).selectOption('blocked');await page.getByRole('button',{name:'重试任务',exact:true}).click();
-    await expect(feed).toContainText('操作 task.retry · succeeded');expect((await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value.task.status).toBe('queued');
+    await expect(feed).toContainText('操作 重试任务 · 已执行');expect((await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value.task.status).toBe('queued');
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({path:'.tmp/management-164/task-mobile.png',fullPage:true});
     const audit=(await query(admin,'list_audit',{project_id:'101'})).value.audit;
