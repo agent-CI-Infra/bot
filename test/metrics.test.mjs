@@ -88,6 +88,21 @@ test('costs count the requests priced in the other currency instead of dropping 
   assert.deepEqual(result.other_currencies,[{currency:'CNY',requests:1}]);
   assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,6);
 });
+test('other_currencies counts exactly the rows the totals count, never a service-role request',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'currency-project');
+  usageRequest(h.store,'currency-project',model.id,{cost:2,id:'usd-project'});
+  usageRequest(h.store,'currency-project',model.id,{currency:'CNY',cost:20,id:'cny-project'});
+  // Service roles work outside any project, so their requests carry no repository and the totals drop them.
+  usageRequest(h.store,'currency-project',model.id,{currency:'CNY',cost:20,id:'cny-assistant'});
+  h.store.run("UPDATE model_requests SET repository_id=NULL WHERE rowid=(SELECT max(rowid) FROM model_requests)");
+  const query='/api/costs?from=2026-10-22&to=2026-10-23';
+  const usd=(await admin(query)).value;
+  assert.equal(usd.summary.requests,1);
+  assert.deepEqual(usd.other_currencies,[{currency:'CNY',requests:1}]);
+  const cny=(await admin(query+'&currency=CNY')).value;
+  assert.equal(cny.summary.requests,1);
+  assert.deepEqual(cny.other_currencies,[{currency:'USD',requests:1}]);
+});
 test('costs return distinct saved prices within the selected scope, without inventing prices for unpriced requests',async t=>{
   const {h,admin,model}=await fixture(t);metricTask(h.store,'prices');metricTask(h.store,'other-prices','202');
   usageRequest(h.store,'prices',model.id,{cost:2,id:'price-a',usage:{prompt_tokens:1000,completion_tokens:20,prompt_cache_hit_tokens:750}});
