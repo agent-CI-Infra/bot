@@ -1,14 +1,14 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { randomId } from '../dist/core/security.js';
-import { channelFixture, envelope, post, finished, group, inGroup } from '../test/channel-fixture.mjs';
+import { channelFixture, bindFixture, privateChat, boundGroup, registerDestination } from '../test/channel-fixture.mjs';
 
 async function environment() {
   let now = Date.now(), worker;
   const f = await channelFixture(undefined, { schedules: { automatic: false, clock: () => now }, onSchedules: s => { worker = s; } });
   now = Date.now(); f.worker = worker; f.advance = ms => { now += ms; };
-  const result = await post(f.h, f.id, envelope('/project 101 /destination')); await finished(f.h, result.value.operation_id);
-  f.destination = f.h.store.get("SELECT id FROM channel_outbox WHERE state='registered'").id;
+  // Destinations are registered in the console (#312).
+  f.destination = await registerDestination(f.admin, await privateChat(f));
   await f.service.tick(); return f;
 }
 async function login(page, f, username = 'administrator', password = f.password) {
@@ -63,24 +63,23 @@ test('user personal schedule pauses after revocation and its queued report never
     writeFileSync('.tmp/schedules-166/revocation-evidence.json', JSON.stringify({ schedule, delivery, sends_before: before, sends_after: f.wire.sent.length }, null, 2));
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
-test('user group destination rejects private project content at preview and before delivery', async ({ page }) => {
+test('a group destination stops at preview and before delivery once its binding no longer reaches the project', async ({ page }) => {
   test.setTimeout(90000); const f = await environment(); mkdirSync('.tmp/schedules-166', { recursive: true });
   try {
-    await group(f.admin, f.id);
-    const registered = await post(f.h, f.id, inGroup('/project 101 /destination')); await finished(f.h, registered.value.operation_id); await f.service.tick();
-    const groupDestination = f.h.store.all("SELECT * FROM channel_outbox WHERE state='registered'").find(r => f.h.store.secrets.open(r.payload, 'channel-outbox:' + r.id).event.chat_type === 'group').id;
+    const chat = await boundGroup(f, ['101']), groupDestination = await registerDestination(f.admin, chat); await f.service.tick();
     await login(page, f); await page.getByLabel('计划目的地', { exact: true }).selectOption(groupDestination);
     await page.getByRole('button', { name: '保存计划', exact: true }).click(); await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedules').n).toBe(1);
     const plan = (await read(f, 'list_schedules')).schedules[0];
     await page.getByLabel('编辑计划', { exact: true }).selectOption(plan.id); await page.getByRole('button', { name: '立即运行一次', exact: true }).click();
     await expect.poll(() => f.h.store.get('SELECT count(*) n FROM schedule_occurrences').n).toBe(1); f.worker.dispatch(f.worker.claimOccurrence());
-    f.h.store.run("UPDATE installed_repositories SET private=1 WHERE repository_id='101'"); f.h.store.run("UPDATE channel_group_scopes SET sensitivity='public' WHERE project_id='101'");
+    const binding = f.h.store.get('SELECT revision FROM channel_service_bindings');
+    expect((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: binding.revision })).status).toBe(200);
     await page.getByLabel('编辑计划', { exact: true }).selectOption(plan.id); await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: 'channel_group_scope_required' })).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: 'channel_service_scope_paused' })).toBeVisible();
     const before = f.wire.sent.length; await f.worker.tick(); const delivery = f.h.store.get('SELECT id,state,last_error FROM notification_outbox');
     expect(delivery.state).toBe('blocked'); expect(f.wire.sent.length).toBe(before);
-    await page.screenshot({ path: '.tmp/schedules-166/group-private-rejected.png', fullPage: true });
-    writeFileSync('.tmp/schedules-166/group-scope-evidence.json', JSON.stringify({ delivery, sends_before: before, sends_after: f.wire.sent.length, preview_error: 'channel_group_scope_required' }, null, 2));
+    await page.screenshot({ path: '.tmp/schedules-166/group-scope-rejected.png', fullPage: true });
+    writeFileSync('.tmp/schedules-166/group-scope-evidence.json', JSON.stringify({ delivery, sends_before: before, sends_after: f.wire.sent.length, preview_error: 'channel_service_scope_paused' }, null, 2));
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
@@ -92,9 +91,10 @@ test('an administrator previews and saves a maintainer handover after the projec
     f.h.store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service','101','github.com:10','project maintainers')", service);
     f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
       VALUES(?,?,'github.com:10','101','project','service',?,'explicit_delegation',?,'schedule','fixture approval',?)`, randomId(), service, capabilities, f.principal, Date.now());
-    await group(f.admin, f.id);
-    const registered = await post(f.h, f.id, inGroup('/project 101 /destination')); await finished(f.h, registered.value.operation_id);
-    const destination = f.h.store.all("SELECT * FROM channel_outbox WHERE state='registered'").find(r => f.h.store.secrets.open(r.payload, 'channel-outbox:' + r.id).event.chat_type === 'group').id;
+    // The group is bound by a maintainer who stays; the departing owner's authority does not carry the group's scope.
+    const keeper = await f.member('group-keeper-browser', { repository_ids: ['101'] });
+    bindFixture(f.h, f.id, keeper.id, 'ou_keeper'); f.wire.state.members.push({ member_id_type: 'open_id', member_id: 'ou_keeper', tenant_key: 'actor-tenant' });
+    const destination = await registerDestination(f.admin, await boundGroup(f, ['101'], 'oc_group', keeper.client));
     await login(page, f); await page.getByLabel('执行身份类型', { exact: true }).selectOption('project');
     await page.getByLabel('项目服务身份', { exact: true }).selectOption(service); await page.getByLabel('项目维护人', { exact: true }).selectOption(f.principal);
     await page.getByLabel('计划目的地', { exact: true }).selectOption(destination); await page.getByRole('button', { name: '保存计划', exact: true }).click();

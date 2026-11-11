@@ -81,9 +81,10 @@ test('global administrator connects an app through the wizard, resumes it and se
     await expect(page.getByRole('status').filter({ hasText: '凭据已验证' })).toContainText('尚未验证事件投递');
     expect(f.h.store.get('SELECT last_received_at FROM channel_connectors WHERE id=?', c.id).last_received_at).toBe(null);
     await page.getByRole('button', { name: '进入绑定与试用' }).click();
-    await expect(page.getByRole('heading', { name: '连接健康与群接收范围' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
     await expect(page.getByText('尚未收到', { exact: true })).toBeVisible();
-    await expect(page.getByText('必须点击返回卡片上的', { exact: false })).toContainText('确认收到更新结果后才完成接入');
+    await expect(page.getByText('绑定后直接在私聊发送', { exact: false })).toContainText('确认收到助手回复后才完成接入');
+    await expect(page.getByText('/project', { exact: false })).toHaveCount(0);
     await page.getByRole('link', { name: '前往个人飞书身份绑定' }).click();
     await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
     await expect(page.getByRole('button', { name: '消息渠道', exact: true })).toHaveCount(0);
@@ -219,25 +220,16 @@ test('enterprise long connections require callback configuration as well as mess
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
-test('a global connection can map groups to projects from either GitHub organization', async ({ page }) => {
+test('the trial step sends group scope to the group assistant binding instead of a per-project group form', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
   try {
     const id = await connector(f.admin);
-    await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
-    await expect(page.getByRole('heading', { name: '飞书应用连接', exact: true })).toBeVisible();
-    await page.evaluate(() => api('/api/identity/tenant', 'POST', { tenant_id: 'github.com:10' }));
-    await page.reload();
-    await expect(page.getByText('全局共用 · 启用', { exact: false })).toBeVisible();
-    // Return to all organizations before selecting a project belonging to the other one.
-    await page.evaluate(() => api('/api/identity/tenant', 'POST', { tenant_id: null }));
-    await page.goto(f.h.admin + '/#/settings/feishu/' + id + '/4');
-    await page.getByRole('combobox', { name: '项目', exact: true }).selectOption('201');
-    await page.getByLabel('群 chat_id').fill('oc_cross_org');
-    await page.getByLabel('允许的敏感级别').selectOption('private');
-    await page.getByLabel('我已核实群受众（授权一小时；成员变更即失效）').check();
-    await page.getByRole('button', { name: '批准或更新群范围' }).click();
-    await expect(page.getByText('oc_cross_org → 项目 201', { exact: false })).toBeVisible();
-    expect(f.h.store.get('SELECT project_id FROM channel_group_scopes WHERE connector_id=?', id).project_id).toBe('201');
+    await page.goto(f.h.admin + '/#/settings/feishu/' + id + '/4'); await login(page, f.h, f.password);
+    await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '批准或更新群范围' })).toHaveCount(0);
+    await expect(page.getByLabel('群 chat_id')).toHaveCount(0);
+    await expect(page.getByText('在「身份与权限 → 飞书群聊助手」为该群选择服务角色和项目范围', { exact: false })).toBeVisible();
+    expect((await f.admin('/api/channels/connectors/' + id + '/groups')).status).toBe(404);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 

@@ -5,7 +5,13 @@ import { identityFixture } from './identity-fixture.mjs';
 import { session } from '../dist/app/auth.js';
 import { resolveActor, authorize, invalidate } from '../dist/identity/authorization.js';
 import { ChannelConnections } from '../dist/channels/connections.js';
-import { channelFixture, transport, connector, envelope, post, until, finished, bindFixture, directQuery, group, inGroup, cardEvent, cardToken, digest, credentials } from './channel-fixture.mjs';
+import { channelFixture, transport, connector, envelope, post, until, finished, bindFixture, inGroup, cardEvent, cardToken, digest, credentials, scriptedModel, managementOutcome, privateChat, boundGroup, registerDestination, repositoryAssistant } from './channel-fixture.mjs';
+
+// Private chats are the management assistant and groups are their bound service role (#312): no message text is a command.
+const read = (project = '101', task = 'blocked') => ['management_query', { operation: 'get_task', target: { project_id: project, task_id: task }, arguments: {} }];
+const readNamed = (done, context) => { const m = /(\d+)\/(\w+)/.exec(String(context.request)); return read(m[1], m[2]); };
+const ask = (project = '101', task = 'blocked') => `看看 ${project}/${task} 任务的进展`;
+const noProjects = '当前账户没有可访问的项目';
 import { managerSection } from './helpers.mjs';
 
 test('Feishu verifies raw signatures, decryption and app/tenant before persisting all delivered messages independently of addressing', async t => {
@@ -22,7 +28,7 @@ test('Feishu verifies raw signatures, decryption and app/tenant before persistin
   assert.equal(h.store.get('SELECT count(*) n FROM channel_messages').n, 3);
   const challenge = await post(h, id, { type: 'url_verification', challenge: 'fixture-challenge', token: credentials.verification_token }, { encrypted: true });
   assert.deepEqual(challenge.value, { challenge: 'fixture-challenge' });
-  const data = envelope(directQuery()), result = await post(h, id, data, { encrypted: true });
+  const data = envelope(ask()), result = await post(h, id, data, { encrypted: true });
   assert.equal(result.status, 200); assert.equal(result.value.state, 'queued');
   assert.equal(h.store.get('SELECT event_id FROM channel_inbox WHERE id=?', result.value.operation_id).event_id, data.header.event_id);
   assert.equal((await finished(h, result.value.operation_id)).state, 'completed');
@@ -35,7 +41,7 @@ test('Feishu verifies raw signatures, decryption and app/tenant before persistin
 test('HTTP acknowledges a slow model promptly, duplicate events/messages execute a management write only once, and Web reads the same receipt', async t => {
   const f = await channelFixture(t), { h, id, admin, wire, modelState } = f;
   let release; modelState.gate = new Promise(r => { release = r; }); t.after(() => release());
-  const data = envelope('/project 101 修改提示词'), start = performance.now(), result = await post(h, id, data);
+  const data = envelope('修改 Issue 检视的提示词'), start = performance.now(), result = await post(h, id, data);
   assert.ok(performance.now() - start < 1000);
   await until(() => f.requests.length);
   assert.equal(h.store.get('SELECT state FROM channel_inbox WHERE id=?', result.value.operation_id).state, 'submitted');
@@ -111,8 +117,10 @@ test('dual-end binding supports optional browser-bound GitHub login; forwarding,
   const noGrantCode = service.bindings.pending(unprivileged.result.principal_id)[0].confirmation, before = h.store.get('SELECT count(*) n FROM scoped_grants').n;
   await service.bindings.confirm({ ...unprivilegedEvent, event_id: 'unprivileged-confirm' }, noGrantCode);
   assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, before);
-  const noPermission = await post(h, id, envelope(directQuery(), { sender: { tenant_key: 'external-tenant', sender_id: { open_id: 'ou_unprivileged' } } }));
-  assert.equal((await finished(h, noPermission.value.operation_id)).error, 'capability_forbidden');
+  const noPermission = await post(h, id, envelope(ask(), { sender: { tenant_key: 'external-tenant', sender_id: { open_id: 'ou_unprivileged' } } }));
+  assert.equal((await finished(h, noPermission.value.operation_id)).state, 'completed');
+  await until(() => wire.sent.some(s => JSON.stringify(s.content).includes(noProjects)));
+  assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 0);
   const late = service.bindings.begin({ ...event, actor_id: 'ou_expired' }); service.bindings.associateOAuth(late.challenge, 'late-state');
   await service.bindings.githubAuthenticated('late-state', unprivilegedSession.token);
   const lateCode = service.bindings.pending(unprivileged.result.principal_id).find(p => p.open_id === 'ou_expired').confirmation;
@@ -128,7 +136,7 @@ test('dual-end binding supports optional browser-bound GitHub login; forwarding,
 });
 
 test('local accounts bind without GitHub configuration and Feishu access follows only their effective project grants', async t => {
-  const { h, id, service, member, admin } = await channelFixture(t);
+  const f = await channelFixture(t), { h, id, service, member, admin } = f;
   const local = await member('local-feishu', { repository_ids: ['101'] });
   assert.equal((await h.client()('/api/auth/github/status')).value.enabled, false);
   assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE principal_id=? AND provider='github'", local.id).n, 0);
@@ -149,22 +157,24 @@ test('local accounts bind without GitHub configuration and Feishu access follows
   await service.bindings.confirm({ ...event, event_id: 'local-confirm' }, pending.confirmation);
   assert.equal(h.store.get("SELECT principal_id FROM external_identities WHERE provider='feishu' AND external_actor='ou_local'").principal_id, local.id);
   assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, grants);
-  const message = project => envelope(directQuery(project, project === '101' ? 'blocked' : 'foreign'), { sender: { sender_id: { open_id: 'ou_local' } } });
+  scriptedModel(f, [readNamed, '已读取任务事实。']);
+  const message = project => envelope(ask(project, project === '101' ? 'blocked' : 'foreign'), { sender: { sender_id: { open_id: 'ou_local' } } });
   const allowed = await post(h, id, message('101'));
   assert.equal((await finished(h, allowed.value.operation_id)).state, 'completed');
-  const denied = await post(h, id, message('201'));
-  assert.equal((await finished(h, denied.value.operation_id)).error, 'capability_forbidden');
+  const denied = await post(h, id, message('201')); await finished(h, denied.value.operation_id);
+  assert.equal(managementOutcome(h, denied.value.operation_id).error, 'capability_forbidden');
   assert.equal((await admin('/api/project-admin-assignments', 'PUT', { user_id: local.id, repository_ids: [], organization_ids: [] })).status, 200);
   const revokedAccess = await post(h, id, message('101'));
-  assert.equal((await finished(h, revokedAccess.value.operation_id)).error, 'capability_forbidden');
+  assert.equal((await finished(h, revokedAccess.value.operation_id)).state, 'completed'); assert.equal(managementOutcome(h, revokedAccess.value.operation_id).error, null);
+  await until(() => f.wire.sent.some(s => JSON.stringify(s.content).includes(noProjects)));
   assert.equal(h.store.get("SELECT status FROM external_identities WHERE provider='feishu' AND external_actor='ou_local'").status, 'active');
   const unprivileged = await member('local-no-grants', { repository_ids: [] });
   const noGrantsEvent = { ...event, actor_id: 'ou_local_no_grants', event_id: 'no-grants-start' }, noGrants = service.bindings.begin(noGrantsEvent);
   await service.bindings.authenticate(noGrants.challenge, session(h.store, unprivileged.id).token);
   const code = service.bindings.pending(unprivileged.id)[0].confirmation;
   await service.bindings.confirm({ ...noGrantsEvent, event_id: 'no-grants-confirm' }, String(code));
-  const blocked = await post(h, id, envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_local_no_grants' } } }));
-  assert.equal((await finished(h, blocked.value.operation_id)).error, 'capability_forbidden');
+  const blocked = await post(h, id, envelope(ask(), { sender: { sender_id: { open_id: 'ou_local_no_grants' } }, message: { chat_id: 'oc_no_grants' } }));
+  assert.equal((await finished(h, blocked.value.operation_id)).state, 'completed'); assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 0);
   assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n, 0);
 });
 
@@ -190,8 +200,8 @@ test('a private-chat authentication code binds in the console once, requires a s
   assert.equal((await local.client(route, 'POST', input)).value.error, 'binding_replayed');
   assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, grants);
   assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n, 0);
-  const denied = await post(h, id, envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_code' } } }));
-  assert.equal((await finished(h, denied.value.operation_id)).error, 'capability_forbidden');
+  const denied = await post(h, id, envelope(ask(), { sender: { sender_id: { open_id: 'ou_code' } } }));
+  assert.equal((await finished(h, denied.value.operation_id)).state, 'completed'); assert.equal(managementOutcome(h, denied.value.operation_id).message, 'completed');
   const e = service.adapter(service.connector(id)).normalize(envelope('/bind', { sender: { sender_id: { open_id: 'ou_code' } } }));
   const conflict = service.bindings.begin(e);
   assert.equal((await admin(route, 'POST', { code: conflict.code, connector_id: id })).value.error, 'external_identity_conflict');
@@ -251,16 +261,20 @@ test('platform binding claims fence concurrent accounts, revoked sessions and di
 test('the same open_id never crosses app or actor tenant, and adding a bot or self-asserting admin cannot authorize writes', async t => {
   const f = await channelFixture(t), { h, id, admin } = f;
   const second = await connector(admin, { app_id: 'cli_other' });
-  for (const [connectorId, data] of [[second, envelope(directQuery(), { header: { app_id: 'cli_other' } })], [id, envelope(directQuery(), { sender: { tenant_key: 'other-tenant' } })]]) {
+  for (const [connectorId, data] of [[second, envelope(ask(), { header: { app_id: 'cli_other' } })], [id, envelope(ask(), { sender: { tenant_key: 'other-tenant' } })]]) {
     const r = await post(h, connectorId, data); assert.equal((await finished(h, r.value.operation_id)).error, 'external_binding_required');
   }
   const noMember = await f.member('unprivileged-im', { repository_ids: [] }); bindFixture(h, id, noMember.id, 'ou_owner');
-  const r = await post(h, id, envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_owner' }, is_admin: true } }));
-  assert.equal((await finished(h, r.value.operation_id)).error, 'capability_forbidden');
+  const r = await post(h, id, envelope(ask(), { sender: { sender_id: { open_id: 'ou_owner' }, is_admin: true } }));
+  assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
+  await until(() => f.wire.sent.some(s => JSON.stringify(s.content).includes(noProjects)));
   const web = await noMember.client('/api/management/query', 'POST', { operation: 'get_task', target: { project_id: '101', task_id: 'blocked' }, arguments: {} });
   assert.equal(web.value.error, 'capability_forbidden');
+  // Old structured syntax is plain text now: it neither runs the embedded query nor lends its fields any authority.
   const forged = '/project 101 /query ' + JSON.stringify({ operation: 'list_tasks', target: { project_id: '101' }, arguments: {}, admin: true, tenant_id: 'github.com:20' });
-  const attempt = await post(h, id, envelope(forged)); assert.equal((await finished(h, attempt.value.operation_id)).state, 'failed');
+  const attempt = await post(h, id, envelope(forged, { sender: { sender_id: { open_id: 'ou_owner' } } })); await finished(h, attempt.value.operation_id);
+  assert.equal(managementOutcome(h, attempt.value.operation_id).input.content, forged);
+  assert.equal(h.store.get("SELECT count(*) n FROM management_events WHERE type='tool_call'").n, 0);
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 0);
 });
 
@@ -269,176 +283,147 @@ test('one global connection serves authorized projects in different organization
   h.store.run("UPDATE installed_repositories SET owner_id='20',owner_login='second-fixture' WHERE repository_id='201'");
   const member = await f.member('multi-org-im', { repository_ids: ['101', '201'] });
   bindFixture(h, id, member.id, 'ou_multi');
-  const send = (project, task) => post(h, id, envelope(directQuery(project, task), { sender: { sender_id: { open_id: 'ou_multi' } } }));
+  scriptedModel(f, [readNamed, '已读取任务事实。']);
+  const send = (project, task) => post(h, id, envelope(ask(project, task), { sender: { sender_id: { open_id: 'ou_multi' } }, message: { chat_id: 'oc_multi' } }));
   for (const [project, task] of [['101', 'blocked'], ['201', 'foreign']]) {
     const r = await send(project, task); assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
   }
-  const denied = await send('102', 'blocked'); assert.equal((await finished(h, denied.value.operation_id)).error, 'capability_forbidden');
-  const event = service.adapter(service.connector(id)).normalize(envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_multi' } } }));
-  const actor = await service.actor(event, '201');
-  assert.equal(actor.tenant_id, 'github.com:20');
-  assert.throws(() => authorize(actor, 'tasks.read', { project_id: '101' }), /tenant_forbidden/);
-  const firstOrg = await f.member('first-org-config', { organization_ids: ['10'] });
-  assert.equal((await group(firstOrg.client, id, { project_id: '201' })).status, 403);
-  const secondOrg = await f.member('second-org-config', { organization_ids: ['20'] });
-  const rejected = await post(h, id, inGroup(directQuery('201', 'foreign'), 'ou_multi'));
-  assert.equal((await finished(h, rejected.value.operation_id)).error, 'channel_group_scope_required');
-  const approved = await group(secondOrg.client, id, { project_id: '201' }); assert.equal(approved.status, 200);
-  assert.equal((await secondOrg.client('/api/channels/operations/' + approved.value.operation_id)).status, 200);
-  assert.equal((await firstOrg.client('/api/channels/operations/' + approved.value.operation_id)).status, 403);
-  const accepted = await post(h, id, inGroup(directQuery('201', 'foreign'), 'ou_multi'));
-  assert.equal((await finished(h, accepted.value.operation_id)).state, 'completed');
-  const unapproved = await post(h, id, inGroup(directQuery('101', 'blocked'), 'ou_multi'));
-  assert.equal((await finished(h, unapproved.value.operation_id)).error, 'channel_group_scope_required');
-  const token = member.client.cookie().split('=')[1];
-  const destination = service.enqueue(resolveActor(h.store, token, { project_id: '201' }), event, '201', 'multi-org-destination');
+  const denied = await send('102', 'blocked'); await finished(h, denied.value.operation_id);
+  assert.equal(managementOutcome(h, denied.value.operation_id).error, 'capability_forbidden');
+  const event = service.adapter(service.connector(id)).normalize(envelope(ask(), { sender: { sender_id: { open_id: 'ou_multi' } } }));
+  const actor = await service.actor(event);
+  assert.equal(actor.tenant_id, null); authorize(actor, 'tasks.read', { project_id: '201' });
+  assert.throws(() => authorize(actor, 'tasks.read', { project_id: '102' }), /capability_forbidden/);
+  // A group without a binding answers only with how to bind it; old /project text runs nothing there.
+  const before = h.store.get('SELECT count(*) n FROM management_messages').n;
+  const unbound = await post(h, id, inGroup('/project 201 /query ' + JSON.stringify({ operation: 'get_task', target: { project_id: '201', task_id: 'foreign' }, arguments: {} }), 'ou_multi'));
+  assert.equal((await finished(h, unbound.value.operation_id)).state, 'completed');
+  await until(() => f.wire.sent.some(s => s.receive_id === 'oc_group' && JSON.stringify(s.content).includes('本群尚未绑定群聊助手')));
+  assert.equal(h.store.get('SELECT count(*) n FROM management_messages').n, before);
+  // The member registers this private chat for project 201 in the console; schedules then offer it.
+  const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_multi'");
+  const destination = await registerDestination(member.client, chat, '201');
   const destinations = await member.client('/api/management/query', 'POST', { operation: 'list_schedule_destinations', target: { project_id: '201' }, arguments: {} });
-  assert.ok(destinations.value.destinations.some(d => d.id === destination.operation_id));
+  assert.ok(destinations.value.destinations.some(d => d.id === destination));
+  assert.equal((await member.client('/api/channels/chats/' + chat.id + '/destinations', 'POST', { project_id: '102' })).value.error, 'capability_forbidden');
   h.store.run('DELETE FROM project_admin_assignments WHERE user_id=? AND repository_id=?', member.id, '201');
   invalidate(h.store, member.id, 'test-project-revoked');
-  const revoked = await send('201', 'foreign'); assert.equal((await finished(h, revoked.value.operation_id)).error, 'capability_forbidden');
+  const revoked = await send('201', 'foreign'); await finished(h, revoked.value.operation_id);
+  assert.equal(managementOutcome(h, revoked.value.operation_id).error, 'capability_forbidden');
   assert.equal((await admin('/api/channels/setup')).value.connectors.length, 1);
 });
 
-test('group scope rejects private facts, limits result fields, isolates each sender and invalidates on audience changes', async t => {
-  const f = await channelFixture(t), { h, id, admin, wire, principal } = f;
-  h.store.run("UPDATE installed_repositories SET private=1 WHERE repository_id='101'");
-  const rejected = await post(h, id, inGroup(directQuery()));
-  assert.equal((await finished(h, rejected.value.operation_id)).error, 'channel_group_scope_required');
-  assert.equal(h.store.get('SELECT count(*) n FROM management_messages').n, 0);
-  assert.equal((await group(admin, id, { sensitivity: 'public' })).status, 200);
-  const publicOnly = await post(h, id, inGroup(directQuery())); assert.equal((await finished(h, publicOnly.value.operation_id)).error, 'channel_group_scope_required');
-  assert.equal((await group(admin, id, { expected_revision: 1, fields: ['summary'] })).status, 200);
-  const accepted = await post(h, id, inGroup(directQuery())); assert.equal((await finished(h, accepted.value.operation_id)).state, 'completed');
-  await until(() => wire.sent.some(s => s.receive_id === 'ou_alice'));
-  const publicReplies = wire.sent.filter(s => s.receive_id === 'oc_group');
-  for (const reply of publicReplies) assert.doesNotMatch(JSON.stringify(reply.content), /Inspect task facts|Project computer is stopped|environment_not_ready|blocked|agent-test-zone/);
-  assert.ok(wire.sent.some(s => s.receive_id === 'ou_alice' && JSON.stringify(s.content).includes('environment_not_ready')));
-  bindFixture(h, id, principal, 'ou_bob');
-  const bob = await post(h, id, inGroup(directQuery(), 'ou_bob')); await finished(h, bob.value.operation_id);
-  const sessions = h.store.all('SELECT * FROM channel_sessions WHERE chat_id=\'oc_group\''); assert.equal(sessions.length, 2); assert.notEqual(sessions[0].conversation_id, sessions[1].conversation_id);
-  const changed = envelope(); changed.header.event_type = 'im.chat.member.user.added_v1'; changed.event = { chat_id: 'oc_group' };
-  assert.equal((await post(h, id, changed)).status, 200);
-  assert.equal(h.store.get('SELECT audience_verified_until FROM channel_group_scopes').audience_verified_until, 0);
-  const after = await post(h, id, inGroup(directQuery())); assert.equal((await finished(h, after.value.operation_id)).error, 'channel_group_scope_required');
-  assert.equal((await group(admin, id, { expected_revision: 1 })).value.error, 'channel_revision_conflict');
+test('destinations are registered in the console by the private chat owner or a manager of the group binding, and can be revoked', async t => {
+  const f = await channelFixture(t), { h, admin, wire } = f;
+  const own = await privateChat(f);
+  const id = await registerDestination(admin, own);
+  assert.equal(await registerDestination(admin, own), id, 'one registration per chat, project and registrant');
+  const listed = (await admin('/api/channels/destinations')).value.destinations;
+  assert.deepEqual(listed.map(d => [d.chat_id, d.chat_type, d.project_id, d.full_name]), [[own.id, 'p2p', '101', 'agent-test-zone/admin-fixture-101']]);
+  // Someone else's private chat cannot be registered, even by another member with the project.
+  const member = await f.member('destination-member', { repository_ids: ['101'] }); bindFixture(h, f.id, member.id, 'ou_member');
+  assert.equal((await member.client('/api/channels/chats/' + own.id + '/destinations', 'POST', { project_id: '101' })).value.error, 'channel_destination_forbidden');
+  // A group needs an enabled binding whose scope reaches the project; its registration is not tied to a speaker.
+  const groupChat = await boundGroup(f, ['101']);
+  assert.equal((await admin('/api/channels/chats/' + groupChat.id + '/destinations', 'POST', { project_id: '102' })).value.error, 'channel_service_scope_paused');
+  const groupDestination = await registerDestination(admin, groupChat);
+  const payload = h.store.secrets.open(h.store.get('SELECT payload FROM channel_outbox WHERE id=?', groupDestination).payload, 'channel-outbox:' + groupDestination);
+  assert.equal(payload.event.chat_type, 'group'); assert.equal(payload.event.actor_id, ''); assert.ok(payload.protection.binding_id);
+  // Registration sends nothing; only the registrant or a platform manager can revoke, and the key is released.
+  const sent = wire.sent.length; await f.service.tick(); assert.equal(wire.sent.length, sent);
+  assert.equal((await member.client('/api/channels/destinations/' + id, 'DELETE', {})).value.error, 'capability_forbidden');
+  assert.equal((await admin('/api/channels/destinations/' + id, 'DELETE', {})).value.state, 'revoked');
+  assert.equal(h.store.get('SELECT state FROM channel_outbox WHERE id=?', id).state, 'revoked');
+  assert.notEqual(await registerDestination(admin, own), id);
+  assert.deepEqual(h.store.all("SELECT action FROM audit WHERE action LIKE 'channel.destination.%' ORDER BY created_at").map(a => a.action),
+    ['channel.destination.registered', 'channel.destination.registered', 'channel.destination.revoked', 'channel.destination.registered']);
 });
 
-test('natural requests use management while explicit linking retains owner, project and ordering checks', async t => {
+test('private chat text is natural language: /project, /query, /command, /link and /chat start no special flow', async t => {
   const f = await channelFixture(t), { h, id, admin, service, principal } = f;
   const plain = await post(h, id, envelope('看看当前任务')); await finished(h, plain.value.operation_id);
   assert.equal(h.store.get('SELECT count(*) n FROM management_messages').n, 1);
-  const one = await post(h, id, envelope(directQuery())); const row = await finished(h, one.value.operation_id);
-  const e = service.adapter(service.connector(id)).normalize(envelope()), actor = await service.actor(e, '101');
-  const webConversation = (await admin('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
-  service.link(actor, e, '101', webConversation);
-  assert.equal(h.store.get("SELECT conversation_id FROM channel_sessions WHERE project_id='101'").conversation_id, webConversation);
-  const otherProject = (await admin('/api/management/conversations', 'POST', { scope: 'project:102' })).value.conversation.id;
-  assert.throws(() => service.link(actor, e, '101', otherProject), /scope_forbidden|project_mismatch/);
-  const member = await f.member('private-conversation', { repository_ids: ['101'] });
-  const foreign = (await member.client('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
-  assert.throws(() => service.link(actor, e, '101', foreign), /conversation_not_found/);
-  const older = envelope(directQuery(), { message: { create_time: String(Date.now() - 5000) } });
-  const old = await post(h, id, older); assert.equal((await finished(h, old.value.operation_id)).error, 'channel_message_out_of_order');
-  const mismatch = await post(h, id, envelope('/project 101 /query ' + JSON.stringify({ operation: 'get_task', target: { project_id: '201', task_id: 'foreign' }, arguments: {} })));
-  assert.equal((await finished(h, mismatch.value.operation_id)).error, 'project_scope_mismatch');
-  assert.equal(principal, (await admin('/api/auth/me')).value.id); assert.ok(row.conversation_id);
-  const second = await connector(admin, { app_id: 'cli_same_message_id' }); bindFixture(h, second, principal, 'ou_alice', 'actor-tenant', 'cli_same_message_id');
-  const e2 = service.adapter(service.connector(second)).normalize(envelope('link origin', { header: { app_id: 'cli_same_message_id' } }));
-  service.link(await service.actor(e2, '101'), e2, '101', webConversation);
   const target = { project_id: '101', task_id: 'blocked' };
-  for (const [connectorId, app] of [[id, 'cli_fixture'], [second, 'cli_same_message_id']]) {
-    const request = '/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target, arguments: { instruction: 'From ' + app }, expected_revision: service.management.service.revision(target) });
-    const r = await post(h, connectorId, envelope(request, { header: { app_id: app }, message: { message_id: 'same-provider-message-id' } }));
-    const written = await finished(h, r.value.operation_id); assert.equal(written.state, 'completed'); assert.equal(written.conversation_id, webConversation);
+  for (const text of ['/project 101 /query ' + JSON.stringify({ operation: 'get_task', target, arguments: {} }),
+    '/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target, arguments: { instruction: 'x' }, expected_revision: service.management.service.revision(target) }),
+    '/project 101 /link ' + 'a'.repeat(48), '/project 101 /destination', '/chat 你好']) {
+    const r = await post(h, id, envelope(text)); await finished(h, r.value.operation_id);
+    const outcome = managementOutcome(h, r.value.operation_id);
+    assert.deepEqual(Object.keys(outcome.input).sort(), ['content', 'source_message']); assert.equal(outcome.input.content, text);
   }
-  assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 2);
+  assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 0);
+  assert.deepEqual(h.store.all('SELECT DISTINCT project_id FROM channel_sessions').map(r => r.project_id), ['']);
+  assert.equal(h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n, 0);
+  const older = envelope(ask(), { message: { create_time: String(Date.now() - 5000) } });
+  const old = await post(h, id, older); assert.equal((await finished(h, old.value.operation_id)).error, 'channel_message_out_of_order');
+  // The same provider message id under two applications stays two sources, each with its own command.
+  const second = await connector(admin, { app_id: 'cli_same_message_id' }); bindFixture(h, second, principal, 'ou_alice', 'actor-tenant', 'cli_same_message_id');
+  scriptedModel(f, [read(), done => ['management_command', { operation: 'task.instructions', target, arguments: { instruction: 'Inspect again.' }, expected_revision: done[0].revision }], '已追加。']);
+  for (const [connectorId, app] of [[id, 'cli_fixture'], [second, 'cli_same_message_id']]) {
+    const r = await post(h, connectorId, envelope('给 blocked 任务追加检查要求', { header: { app_id: app }, message: { message_id: 'same-provider-message-id' } }));
+    assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
+  }
+  assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im' AND state='succeeded'").n, 2);
 });
 
-test('cards revalidate actual clicker, message, operation version, expiry, replay, binding and current authorization', async t => {
+test('result cards carry no refresh action, a click on an older card is answered as stale, and unbinding stops the chat', async t => {
   const f = await channelFixture(t), { h, id, wire, admin } = f;
-  async function write() {
-    const sentBefore = wire.sent.length;
-    const target = { project_id: '101', task_id: 'blocked' }, revision = f.service.management.service.revision(target);
-    const input = '/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target, arguments: { instruction: 'Inspect current logs.' }, expected_revision: revision });
-    const r = await post(h, id, envelope(input)); await finished(h, r.value.operation_id);
-    return until(() => wire.sent.slice(sentBefore).findLast(s => cardToken(s)), v => !!v);
-  }
-  const message = await write(), token = cardToken(message), remote = 'remote-' + (wire.sent.indexOf(message) + 1);
-  const wrong = await post(h, id, cardEvent(token, remote, 'ou_bob')); assert.equal((await finished(h, wrong.value.operation_id)).error, 'channel_card_operator_mismatch');
-  const changed = await post(h, id, cardEvent(token, 'unrelated-message')); assert.equal((await finished(h, changed.value.operation_id)).error, 'channel_card_message_mismatch');
-  const valid = await post(h, id, cardEvent(token, remote)); assert.equal((await finished(h, valid.value.operation_id)).state, 'completed');
-  await until(() => wire.sent.some(s => s.method === 'PATCH'));
-  const replay = await post(h, id, cardEvent(token, remote)); assert.equal((await finished(h, replay.value.operation_id)).error, 'channel_card_stale');
-  const second = await write(), token2 = cardToken(second), remote2 = 'remote-' + (wire.sent.indexOf(second) + 1);
-  h.store.run('UPDATE channel_cards SET expires_at=0 WHERE token_hash=?', digest(token2));
-  const expired = await post(h, id, cardEvent(token2, remote2)); assert.equal((await finished(h, expired.value.operation_id)).error, 'channel_card_stale');
-  const third = await write(), token3 = cardToken(third), remote3 = 'remote-' + (wire.sent.indexOf(third) + 1);
-  const op = h.store.get('SELECT operation_id FROM channel_cards WHERE token_hash=?', digest(token3)).operation_id;
-  h.store.run("UPDATE management_commands SET state='failed' WHERE id=?", op);
-  const stale = await post(h, id, cardEvent(token3, remote3)); assert.equal((await finished(h, stale.value.operation_id)).error, 'channel_card_stale');
+  const target = { project_id: '101', task_id: 'blocked' };
+  scriptedModel(f, [read(), done => ['management_command', { operation: 'task.instructions', target, arguments: { instruction: 'Inspect current logs.' }, expected_revision: done[0].revision }], '已追加。']);
+  const r = await post(h, id, envelope('给 blocked 任务追加：检查当前日志')); await finished(h, r.value.operation_id);
+  const result = await until(() => wire.sent.find(s => JSON.stringify(s.content).includes('已执行')));
+  assert.equal(cardToken(result), undefined); assert.ok(JSON.stringify(result.content).includes('登录后台查看'));
+  const click = await post(h, id, cardEvent('legacy-card-token', 'remote-1'));
+  assert.equal((await finished(h, click.value.operation_id)).error, 'channel_card_stale');
+  assert.ok(!wire.sent.some(s => s.method === 'PATCH'));
   const identity = h.store.get("SELECT id FROM external_identities WHERE provider='feishu'");
   await admin('/api/identity/bindings/' + identity.id, 'DELETE', {});
-  const unlinked = await post(h, id, envelope(directQuery())); assert.equal((await finished(h, unlinked.value.operation_id)).error, 'external_binding_required');
+  const unlinked = await post(h, id, envelope(ask())); assert.equal((await finished(h, unlinked.value.operation_id)).error, 'external_binding_required');
 });
 
-test('external members use binding, project and group authorization without an enterprise list, and cards retain actor enterprise isolation', async t => {
-  const { h, id, wire, service, principal, admin } = await channelFixture(t);
+test('external members use their own binding and project authorization without an enterprise list; an unbound group only explains binding', async t => {
+  const f = await channelFixture(t), { h, id, wire, principal } = f;
   const external = content => envelope(content, { sender: { tenant_key: 'external-tenant' } });
-  const unbound = await post(h, id, external(directQuery()));
+  const unbound = await post(h, id, external(ask()));
   assert.equal((await finished(h, unbound.value.operation_id)).error, 'external_binding_required');
   const binding = await post(h, id, external('/bind'));
   assert.equal((await finished(h, binding.value.operation_id)).state, 'completed');
   bindFixture(h, id, principal, 'ou_alice', 'external-tenant');
-  const query = await post(h, id, external(directQuery()));
-  assert.equal((await finished(h, query.value.operation_id)).state, 'completed');
-  const externalGroup = () => { const data = inGroup(directQuery()); data.event.sender.tenant_key = 'external-tenant'; return data; };
-  const deniedGroup = await post(h, id, externalGroup());
-  assert.equal((await finished(h, deniedGroup.value.operation_id)).error, 'channel_group_scope_required');
-  await group(admin, id);
-  const allowedGroup = await post(h, id, externalGroup());
-  assert.equal((await finished(h, allowedGroup.value.operation_id)).state, 'completed');
-  const target = { project_id: '101', task_id: 'blocked' }, revision = service.management.service.revision(target);
-  const write = await post(h, id, external('/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target,
-    arguments: { instruction: 'Inspect external member evidence.' }, expected_revision: revision })));
+  const query = await post(h, id, external(ask())), answered = await finished(h, query.value.operation_id);
+  assert.equal(answered.state, 'completed', JSON.stringify(managementOutcome(h, query.value.operation_id)));
+  const externalGroup = inGroup(ask()); externalGroup.event.sender.tenant_key = 'external-tenant';
+  const group = await post(h, id, externalGroup);
+  assert.equal((await finished(h, group.value.operation_id)).state, 'completed');
+  await until(() => wire.sent.some(s => s.receive_id === 'oc_group' && JSON.stringify(s.content).includes('本群尚未绑定群聊助手')));
+  const target = { project_id: '101', task_id: 'blocked' };
+  scriptedModel(f, [read(), done => ['management_command', { operation: 'task.instructions', target, arguments: { instruction: 'Inspect external member evidence.' }, expected_revision: done[0].revision }], '已追加。']);
+  const write = await post(h, id, external('给 blocked 任务追加外部成员证据检查'));
   assert.equal((await finished(h, write.value.operation_id)).state, 'completed');
-  const message = await until(() => wire.sent.find(s => cardToken(s))), token = cardToken(message), remote = 'remote-' + (wire.sent.indexOf(message) + 1);
-  // The same open_id bound to the same principal in another enterprise still cannot reuse this card.
-  const wrongTenant = await post(h, id, cardEvent(token, remote));
-  assert.equal((await finished(h, wrongTenant.value.operation_id)).error, 'channel_card_operator_mismatch');
-  const click = cardEvent(token, remote); click.event.operator.tenant_key = 'external-tenant';
-  const accepted = await post(h, id, click);
-  assert.equal((await finished(h, accepted.value.operation_id)).state, 'completed');
-  await until(() => wire.sent.some(s => s.method === 'PATCH' && s.url.endsWith('/' + remote)));
+  assert.equal(h.store.get("SELECT state FROM management_commands WHERE channel='im'").state, 'succeeded');
   assert.ok(h.store.all('SELECT actor_tenant FROM channel_sessions').every(row => row.actor_tenant === 'external-tenant'));
 });
 
-test('enterprise SDK accepts external member card callbacks, persists once and updates the original message', async t => {
+test('enterprise SDK persists an external member card callback once and answers an older card as stale', async t => {
   const { h, id, wire, service, principal } = await channelFixture(t);
   bindFixture(h, id, principal, 'ou_alice', 'external-tenant');
-  const target = { project_id: '101', task_id: 'blocked' }, revision = service.management.service.revision(target);
-  const result = await post(h, id, envelope('/project 101 /command ' + JSON.stringify({ operation: 'task.instructions', target,
-    arguments: { instruction: 'Inspect current logs.' }, expected_revision: revision }), { sender: { tenant_key: 'external-tenant' } }));
-  await finished(h, result.value.operation_id);
-  const message = await until(() => wire.sent.find(s => cardToken(s))), remote = 'remote-' + (wire.sent.indexOf(message) + 1);
   h.store.run("UPDATE channel_connectors SET transport='websocket' WHERE id=?", id);
   let dispatcher;
   const sockets = new ChannelConnections(service, () => ({ start: async options => { dispatcher = options.eventDispatcher; }, close() {},
     getConnectionStatus: () => ({ state: 'connected', reconnectAttempts: 0 }) }));
   t.after(() => sockets.close()); sockets.reconcile();
-  const click = cardEvent(cardToken(message), remote); click.event.operator.tenant_key = 'external-tenant';
+  const click = cardEvent('legacy-card-token', 'remote-legacy'); click.event.operator.tenant_key = 'external-tenant';
   const receipt = await dispatcher.invoke(click, { needCheck: false });
   assert.equal(receipt.state, 'queued');
   assert.equal((await dispatcher.invoke(click, { needCheck: false })).operation_id, receipt.operation_id);
-  assert.equal((await finished(h, receipt.operation_id)).state, 'completed');
-  await until(() => wire.sent.some(s => s.method === 'PATCH' && s.url.endsWith('/' + remote)));
+  assert.equal((await finished(h, receipt.operation_id)).error, 'channel_card_stale');
   assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox WHERE event_id=?', click.header.event_id).n, 1);
+  assert.ok(!wire.sent.some(s => s.method === 'PATCH'));
 });
 
 test('HTTP and enterprise SDK ingress share dedup; config CAS, outbox retries, current scope fences and registered notifications stay observable', async t => {
   const f = await channelFixture(t), { h, id, service, admin, wire } = f;
   assert.equal((await connector(admin, { app_id: 'cli_invalid_saas', application_type: 'saas', transport: 'websocket', enabled: false }).catch(e => ({ error: String(e) }))).error.includes('channel_transport_invalid'), true);
-  const event = envelope(directQuery()), first = await post(h, id, event); await finished(h, first.value.operation_id);
+  const event = envelope(ask()), first = await post(h, id, event); await finished(h, first.value.operation_id);
   // Toggle the trusted fixture row without opening a real socket; the public config rejects SaaS long connections.
   h.store.run("UPDATE channel_connectors SET transport='websocket',application_type='enterprise' WHERE id=?", id);
   let dispatcher, closed = false;
@@ -458,65 +443,60 @@ test('HTTP and enterprise SDK ingress share dedup; config CAS, outbox retries, c
   h.store.run('UPDATE channel_outbox SET next_attempt=0 WHERE id=?', queued.id);
   await until(() => h.store.get('SELECT state FROM channel_outbox WHERE id=?', queued.id).state, s => s === 'sent');
   assert.equal(h.store.get('SELECT attempts FROM channel_outbox WHERE id=?', queued.id).attempts, 2);
-  const e = service.adapter(service.connector(id)).normalize(envelope()), actor = await service.actor(e, '101');
-  const registration = service.enqueue(actor, e, '101', 'fixture-notification'); assert.equal(registration.state, 'registered'); assert.equal(registration.sent, false);
-  await service.tick(); assert.equal(h.store.get('SELECT state FROM channel_outbox WHERE id=?', registration.operation_id).state, 'registered');
+  const e = service.adapter(service.connector(id)).normalize(envelope()), actor = await service.actor(e);
+  const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_type='p2p'"), registration = await registerDestination(admin, chat);
+  await service.tick(); assert.equal(h.store.get('SELECT state FROM channel_outbox WHERE id=?', registration).state, 'registered');
   const uninstall = envelope(); uninstall.header.event_type = 'app.uninstalled'; uninstall.event = {};
   await post(h, id, uninstall);
   assert.throws(() => authorize(actor, 'tasks.read', { project_id: '101' }), /channel_connector_inactive/);
-  assert.equal((await post(h, id, envelope(directQuery()))).value.error, 'channel_connector_inactive');
+  assert.equal((await post(h, id, envelope(ask()))).value.error, 'channel_connector_inactive');
 });
 
-test('revocation while a model is waiting blocks new tools and queued group replies even when personal permission remains', async t => {
-  const f = await channelFixture(t), { h, admin, service, id, modelState, wire } = f;
-  await group(admin, id);
+test('revoking project access while a model is waiting blocks its command and reply', async t => {
+  const f = await channelFixture(t), { h, admin, id, modelState, wire } = f;
+  const member = await f.member('waiting-member', { repository_ids: ['101'] }); bindFixture(h, id, member.id, 'ou_waiting');
   let release; modelState.gate = new Promise(r => { release = r; }); t.after(() => release());
-  const r = await post(h, id, inGroup('/project 101 修改提示词'));
+  const r = await post(h, id, envelope('修改 Issue 检视的提示词', { sender: { sender_id: { open_id: 'ou_waiting' } }, message: { chat_id: 'oc_waiting' } }));
   await until(() => f.requests.length);
-  await group(admin, id, { expected_revision: 1, enabled: false, audience_verified_until: 0 });
+  assert.equal((await admin('/api/project-admin-assignments', 'PUT', { user_id: member.id, repository_ids: [] })).status, 200);
   modelState.gate = null; release();
   assert.equal((await finished(h, r.value.operation_id)).state, 'failed');
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 0);
-  const e = service.adapter(service.connector(id)).normalize(envelope());
-  authorize(await service.actor(e, '101'), 'config.write', { project_id: '101' });
   assert.ok(wire.sent.every(s => !JSON.stringify(s.content).includes('Inspect evidence')));
 });
 
-test('IM approval and revision conflicts retain the shared business outcome; member revocation invalidates an old card', async t => {
+test('IM approval and revision conflicts retain the shared business outcome; revoked access stops a later message', async t => {
   const f = await channelFixture(t), { h, admin, service, id, wire } = f;
   const target = { project_id: '101', workflow_id: 'review.issue' }, revision = service.management.service.revision(target);
-  const submit = async (op, expected = revision, actor = 'ou_alice') => {
-    const content = '/project 101 /command ' + JSON.stringify({ operation: op, target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: expected });
-    const r = await post(h, id, envelope(content, { sender: { sender_id: { open_id: actor } } })); return finished(h, r.value.operation_id);
+  const submit = async (expected = revision, actor = 'ou_alice', chat = 'oc_private') => {
+    scriptedModel(f, [['management_command', { operation: 'workflow.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: expected }], '已提交。']);
+    const r = await post(h, id, envelope('修改 Issue 检视提示词', { sender: { sender_id: { open_id: actor } }, message: { chat_id: chat } })); return finished(h, r.value.operation_id);
   };
-  const wrong = await submit('workflow.update', 'obsolete-revision');
+  const wrong = await submit('obsolete-revision');
   assert.equal(h.store.get('SELECT state FROM management_messages WHERE id=?', wrong.message_id).state, 'failed');
   const webConflict = await admin('/api/management/commands', 'POST', { operation: 'workflow.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: 'obsolete-revision', idempotency_key: 'web-conflict', source_conversation: 'web', source_message: 'web-conflict' });
   assert.equal(webConflict.value.error, 'management_revision_conflict');
   h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\"]')");
-  const pending = await submit('workflow.update'), op = h.store.get("SELECT * FROM management_commands WHERE channel='im'");
+  const pending = await submit(), op = h.store.get("SELECT * FROM management_commands WHERE channel='im'");
   assert.equal(op.state, 'awaiting_approval');
+  await until(() => wire.sent.some(s => JSON.stringify(s.content).includes('等待审批，尚未执行')));
   assert.equal((await admin('/api/management/commands/' + op.id)).value.state, 'awaiting_approval');
   assert.notEqual((await managerSection(admin,'101','review.issue')), 'Approved future prompt.');
   const approved = await admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
   assert.equal(approved.value.state, 'succeeded');
   assert.equal((await admin('/api/management/commands/' + op.id)).value.source_conversation, pending.conversation_id);
-  const member = await f.member('revoked-card-member', { repository_ids: ['101'] });
+  const member = await f.member('revoked-member', { repository_ids: ['101'] });
   bindFixture(h, id, member.id, 'ou_member');
-  const count = wire.sent.length; const memberOp = await submit('workflow.update', service.management.service.revision(target), 'ou_member');
-  const outgoing = await until(() => wire.sent.slice(count).find(s => s.receive_id === 'oc_private' && cardToken(s)));
-  const token = cardToken(outgoing), remote = 'remote-' + (wire.sent.indexOf(outgoing) + 1);
   await admin('/api/project-admin-assignments', 'PUT', { user_id: member.id, repository_ids: [] });
-  const clicked = await post(h, id, cardEvent(token, remote, 'ou_member')); assert.equal((await finished(h, clicked.value.operation_id)).error, 'capability_forbidden');
-  const message = await post(h, id, envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_member' } } }));
-  assert.equal((await finished(h, message.value.operation_id)).error, 'capability_forbidden');
-  assert.ok(memberOp.conversation_id);
+  const message = await post(h, id, envelope(ask(), { sender: { sender_id: { open_id: 'ou_member' } }, message: { chat_id: 'oc_member' } }));
+  assert.equal((await finished(h, message.value.operation_id)).state, 'completed');
+  await until(() => wire.sent.some(s => s.receive_id === 'oc_member' && JSON.stringify(s.content).includes(noProjects)));
 });
 
 test('durable ingress survives restart and a retried write keeps its original conversation and operation', async t => {
   const f = await channelFixture(t), { h, id, service } = f;
   service.close();
-  const data = envelope('/project 101 修改提示词'), accepted = await post(h, id, data);
+  const data = envelope('修改 Issue 检视的提示词'), accepted = await post(h, id, data);
   assert.equal(h.store.get('SELECT state FROM channel_inbox WHERE id=?', accepted.value.operation_id).state, 'queued');
   await h.stop(); await h.start();
   const completed = await finished(h, accepted.value.operation_id); assert.equal(completed.state, 'completed');
@@ -535,7 +515,7 @@ test('store apps persist verified v1 tickets and route one HTTP callback by inst
   const ticket = { ts: String(Date.now() / 1000), uuid: 'ticket-1', token: credentials.verification_token, type: 'event_callback', event: { type: 'app_ticket', app_id: 'cli_store', app_ticket: 'fixture-store-app-ticket' } };
   assert.equal((await post(h, id, ticket, { encrypted: true })).value.state, 'completed');
   assert.equal((await post(h, id, ticket)).value.duplicate, true);
-  const data = envelope(directQuery(), { header: { app_id: 'cli_store', tenant_key: 'second-install' } });
+  const data = envelope(ask(), { header: { app_id: 'cli_store', tenant_key: 'second-install' } });
   const r = await post(h, id, data); const row = await finished(h, r.value.operation_id);
   assert.equal(row.connector_id, other); assert.equal(row.state, 'completed');
   await until(() => wire.state.authRequests.some(a => a.tenant_key === 'second-install'));
@@ -545,49 +525,57 @@ test('store apps persist verified v1 tickets and route one HTTP callback by inst
   assert.ok(!readFileSync(h.database).includes(Buffer.from('fixture-store-app-ticket')));
   const uninstall = { ...ticket, uuid: 'legacy-uninstall', event: { type: 'app_uninstalled', app_id: 'cli_store', tenant_key: 'install-tenant' } };
   await post(h, id, uninstall); assert.equal(h.store.get('SELECT enabled FROM channel_connectors WHERE id=?', id).enabled, 0);
-  const next = await post(h, id, envelope(directQuery(), { header: { app_id: 'cli_store', tenant_key: 'second-install' } }));
+  const next = await post(h, id, envelope(ask(), { header: { app_id: 'cli_store', tenant_key: 'second-install' } }));
   assert.equal((await finished(h, next.value.operation_id)).state, 'completed');
 });
 
-test('Web approval cannot resume an IM operation after its group scope is revoked', async t => {
-  const f = await channelFixture(t), { h, id, admin, service } = f;
-  await group(admin, id);
-  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\"]')");
-  const target = { project_id: '101', workflow_id: 'review.issue' };
-  const message = '/project 101 /command ' + JSON.stringify({ operation: 'workflow.update', target, arguments: { prompt: 'Must remain unapplied.' }, expected_revision: service.management.service.revision(target) });
-  const r = await post(h, id, inGroup(message)); await finished(h, r.value.operation_id);
+test('Web approval cannot resume a group command after its service binding is disabled', async t => {
+  const f = await channelFixture(t), { h, admin } = f;
+  await repositoryAssistant(f, { project_tasks: 'write' });
+  const chat = await boundGroup(f, ['101']);
+  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"task.pause\"]')");
+  const repository = 'agent-test-zone/admin-fixture-101';
+  scriptedModel(f, [['read_project_task', { repository, task_id: 'blocked' }],
+    done => ['manage_project_task', { repository, task_id: 'blocked', operation: 'pause', expected_revision: done[0].revision }], '暂停已提交，等待审批。']);
+  const r = await post(h, f.id, inGroup('暂停 blocked 任务', 'ou_bob')); assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
   const op = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); assert.equal(op.state, 'awaiting_approval');
-  await group(admin, id, { expected_revision: 1, enabled: false, audience_verified_until: 0 });
+  assert.equal(op.source_conversation, chat.id);
+  const binding = h.store.get('SELECT * FROM channel_service_bindings');
+  assert.equal((await admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { enabled: false, expected_revision: binding.revision })).status, 200);
   const approved = await admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
-  assert.equal(approved.value.state, 'failed'); assert.equal(approved.value.result.error, 'channel_group_scope_required');
-  assert.notEqual((await managerSection(admin,'101','review.issue')), 'Must remain unapplied.');
+  assert.equal(approved.value.state, 'failed'); assert.ok(['principal_inactive', 'channel_service_binding_disabled'].includes(approved.value.result.error), approved.value.result.error);
+  assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status, 'waiting_environment');
 });
 
-test('the send fence rechecks group authorization after asynchronous token exchange', async t => {
-  const f = await channelFixture(t), { h, id, admin, wire } = f;
-  await group(admin, id, { fields: ['summary', 'status', 'operation', 'result'] });
+test('the send fence rechecks a group binding after asynchronous token exchange', async t => {
+  const f = await channelFixture(t), { h, admin, wire } = f;
+  await repositoryAssistant(f);
+  const chat = await boundGroup(f, ['101']);
+  scriptedModel(f, ['本群可以使用 admin-fixture-101。']);
   let release; wire.state.authGate = new Promise(r => { release = r; }); t.after(() => release());
-  const r = await post(h, id, inGroup(directQuery())); await finished(h, r.value.operation_id);
+  const r = await post(h, f.id, inGroup('你能看哪些仓库？', 'ou_bob')); await finished(h, r.value.operation_id);
   const sending = await until(() => h.store.get("SELECT * FROM channel_outbox WHERE source_event=? AND state='sending'", r.value.operation_id));
-  await group(admin, id, { expected_revision: 1, enabled: false, audience_verified_until: 0 });
+  const binding = h.store.get('SELECT * FROM channel_service_bindings');
+  assert.equal((await admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { enabled: false, expected_revision: binding.revision })).status, 200);
   wire.state.authGate = null; release();
   const failed = await until(() => h.store.get('SELECT * FROM channel_outbox WHERE id=?', sending.id), row => row.state === 'failed');
-  assert.equal(failed.last_error, 'channel_group_scope_required'); assert.equal(wire.sent.length, 0);
+  assert.equal(failed.last_error, 'conversation_source_changed'); assert.ok(!wire.sent.some(s => JSON.stringify(s.content).includes('本群可以使用')));
 });
 
 test('deferred extensions retain the IM source guard across asynchronous steps before any external write', async t => {
-  const f = await channelFixture(t), { h, id, admin, service } = f;
-  await group(admin, id);
+  const f = await channelFixture(t), { h, admin, service } = f;
   h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"knowledge.revise\"]')");
   let entered = false, release, writes = 0; const gate = new Promise(r => { release = r; }); t.after(() => release());
   service.management.service.extensions.delete('knowledge.revise'); // Replace the real adapter with an asynchronous failure fixture.
   service.management.service.register('knowledge.revise', { execute: async actor => {
     entered = true; await gate; service.management.service.scope(actor, '101', 'knowledge.write'); writes++; return { revised: true };
   }, reconcile: async () => null });
-  const target = { project_id: '101' }, input = '/project 101 /command ' + JSON.stringify({ operation: 'knowledge.revise', target, arguments: { id: 'fixture-document', revision: 1, body: 'Safe revision.' }, expected_revision: service.management.service.revision(target) });
-  const r = await post(h, id, inGroup(input)); await finished(h, r.value.operation_id);
+  const target = { project_id: '101' };
+  scriptedModel(f, [['management_command', { operation: 'knowledge.revise', target, arguments: { id: 'fixture-document', revision: 1, body: 'Safe revision.' }, expected_revision: service.management.service.revision(target) }], '已提交。']);
+  const r = await post(h, f.id, envelope('修订项目知识 fixture-document')); await finished(h, r.value.operation_id);
   const op = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); assert.equal(op.state, 'awaiting_approval');
   const approving = admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
-  await until(() => entered); await group(admin, id, { expected_revision: 1, enabled: false, audience_verified_until: 0 }); release();
-  const result = await approving; assert.equal(writes, 0); assert.equal(result.value.state, 'unknown'); assert.equal(result.value.result.error, 'channel_group_scope_required');
+  // The private chat's owner unbinds Feishu while the external step is in flight.
+  await until(() => entered); h.store.run("UPDATE external_identities SET status='revoked' WHERE provider='feishu'"); release();
+  const result = await approving; assert.equal(writes, 0); assert.equal(result.value.state, 'unknown'); assert.equal(result.value.result.error, 'external_binding_required');
 });

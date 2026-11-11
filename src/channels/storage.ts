@@ -2,6 +2,8 @@ import type { Store } from '../storage/database.js';
 import { ledgerStorage } from './ledger.js';
 
 export function channelStorage(store: Store): void {
+  // channel_group_scopes, channel_cards and channel_personal_roles served the retired /project chat commands (#312);
+  // existing rows are left in place and no longer read.
   ledgerStorage(store);
   store.db.exec(`
     CREATE TABLE IF NOT EXISTS channel_credentials(id TEXT PRIMARY KEY,sealed TEXT NOT NULL);
@@ -22,13 +24,6 @@ export function channelStorage(store: Store): void {
       subject TEXT NOT NULL,expires_at INTEGER NOT NULL,oauth_state TEXT,principal_id TEXT,session_ref TEXT,
       binding_ref TEXT,confirmation_hash TEXT,consumed_at INTEGER,identity_id TEXT);
     CREATE TABLE IF NOT EXISTS channel_oauth_links(state_hash TEXT PRIMARY KEY,challenge_hash TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS channel_group_scopes(id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,installation_tenant TEXT NOT NULL,
-      chat_id TEXT NOT NULL,project_id TEXT NOT NULL,fields TEXT NOT NULL,sensitivity TEXT NOT NULL,
-      audience_verified_until INTEGER NOT NULL,enabled INTEGER NOT NULL,revision INTEGER NOT NULL,
-      UNIQUE(connector_id,installation_tenant,chat_id,project_id));
-    CREATE TABLE IF NOT EXISTS channel_cards(token_hash TEXT PRIMARY KEY,connector_id TEXT NOT NULL,principal_id TEXT NOT NULL,
-      subject TEXT NOT NULL,project_id TEXT NOT NULL,operation_id TEXT NOT NULL,operation_version TEXT NOT NULL,
-      expires_at INTEGER NOT NULL,used_at INTEGER);
     CREATE TABLE IF NOT EXISTS channel_outbox(id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,idempotency_key TEXT NOT NULL UNIQUE,
       source_event TEXT,payload TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
       next_attempt INTEGER NOT NULL,last_error TEXT,remote_message_id TEXT,created_at INTEGER NOT NULL);
@@ -39,7 +34,6 @@ export function channelStorage(store: Store): void {
       principal_id TEXT NOT NULL UNIQUE,role_id TEXT NOT NULL,maintainer_id TEXT NOT NULL,binding_id TEXT NOT NULL,capabilities TEXT NOT NULL,
       enabled INTEGER NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL,UNIQUE(chat_id,project_id));
     CREATE TABLE IF NOT EXISTS channel_personal_owners(chat_id TEXT PRIMARY KEY REFERENCES channel_chats(id),principal_id TEXT NOT NULL,actor_id TEXT NOT NULL,actor_tenant TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS channel_personal_roles(chat_id TEXT NOT NULL REFERENCES channel_chats(id),project_id TEXT NOT NULL,role_id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(chat_id,project_id));
     CREATE TABLE IF NOT EXISTS channel_task_results(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE);
     CREATE TABLE IF NOT EXISTS channel_result_cursor(id INTEGER PRIMARY KEY CHECK(id=1),sequence INTEGER NOT NULL);
     INSERT OR IGNORE INTO channel_result_cursor VALUES(1,0);

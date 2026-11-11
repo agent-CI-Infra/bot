@@ -51,7 +51,7 @@ export async function connector(admin, override = {}) {
   if (result.status !== 201) throw new Error(JSON.stringify(result));
   return result.value.connector_id;
 }
-export function envelope(content = '/project 101 查询任务', overrides = {}) {
+export function envelope(content = '查询 blocked 任务的进展', overrides = {}) {
   const id = randomId(), now = Date.now();
   const data = JSON.parse(readFileSync(new URL('./fixtures/feishu-message.json', import.meta.url), 'utf8'));
   Object.assign(data.header, { event_id: id, create_time: String(now * 1000), token: credentials.verification_token });
@@ -89,10 +89,28 @@ export async function channelFixture(t, options = {}) {
   bindFixture(f.h, id, principal);
   return { ...f, wire, service, id, principal };
 }
-export const directQuery = (project = '101', task = 'blocked') => '/project ' + project + ' /query ' + JSON.stringify({ operation: 'get_task', target: { project_id: project, task_id: task }, arguments: {} });
-export async function group(admin, id, override = {}) {
-  return admin('/api/channels/connectors/' + id + '/groups', 'PUT', { chat_id: 'oc_group', project_id: '101', fields: ['summary', 'status', 'operation'], sensitivity: 'private',
-    audience_verified_until: Date.now() + 3500000, enabled: true, expected_revision: 0, ...override });
+/** A private chat owned by a bound user, as their first message leaves it, without running the assistant (the message is too old to act on). */
+export async function privateChat(f, actor = 'ou_alice', principal = f.principal, chat = 'oc_private') {
+  const quiet = envelope('earlier private message', { sender: { sender_id: { open_id: actor } }, message: { chat_id: chat, create_time: String(Date.now() - 3600000) } });
+  await post(f.h, f.id, quiet);
+  const row = f.h.store.get("SELECT * FROM channel_chats WHERE chat_type='p2p' AND chat_id=?", chat);
+  f.h.store.run('INSERT OR REPLACE INTO channel_personal_owners VALUES(?,?,?,?)', row.id, principal, actor, 'actor-tenant');
+  return row;
+}
+/** A group bound to the repository assistant over the given projects by the platform administrator (who is in the group). */
+export async function boundGroup(f, projects = ['101'], chat = 'oc_group', client = f.admin) {
+  const quiet = inGroup('Group discussion', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.chat_id = chat; await post(f.h, f.id, quiet);
+  const row = f.h.store.get('SELECT * FROM channel_chats WHERE chat_id=?', chat);
+  const revision = f.h.store.get('SELECT revision FROM channel_service_bindings WHERE chat_id=?', row.id)?.revision ?? 0;
+  const result = await client('/api/channels/chats/' + row.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: projects }, enabled: true, expected_revision: revision });
+  if (result.status !== 200) throw new Error(JSON.stringify(result.value));
+  return row;
+}
+/** Console registration of a notification destination (#312). */
+export async function registerDestination(client, chat, project = '101') {
+  const result = await client('/api/channels/chats/' + chat.id + '/destinations', 'POST', { project_id: project });
+  if (result.status !== 201) throw new Error(JSON.stringify(result.value));
+  return result.value.id;
 }
 export const inGroup = (content, actor = 'ou_alice') => envelope('@_user_1 ' + content, { sender: { sender_id: { open_id: actor } },
   message: { chat_id: 'oc_group', chat_type: 'group', mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }] } });
@@ -102,3 +120,27 @@ export function cardEvent(token, message = 'remote-1', actor = 'ou_alice', chat 
 }
 export const cardToken = sent => sent?.content.elements.flatMap(e => e.actions ?? []).find(a => a.value?.token)?.value.token;
 export { digest };
+/** A model that takes one step per request: each step is [tool, args], a final answer string, or a function of
+ * (earlier tool results, the request context) returning either. It serves the management assistant and group assistants. */
+export function scriptedModel(f, steps) {
+  f.modelState.respond = async (body, res) => {
+    const done = body.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
+    let step = steps[done.length] ?? '已完成。';
+    if (typeof step === 'function') step = step(done, JSON.parse(body.messages[1].content));
+    const message = typeof step === 'string' ? { role: 'assistant', content: step }
+      : { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + done.length, type: 'function', function: { name: step[0], arguments: JSON.stringify(step[1]) } }] };
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 12, completion_tokens: 4 } }));
+  };
+}
+/** A private message's management outcome: the inbox row, its management message state and the error event code, if any. */
+export function managementOutcome(h, inbox) {
+  const row = h.store.get('SELECT * FROM channel_inbox WHERE id=?', inbox), message = row?.message_id ? h.store.get('SELECT * FROM management_messages WHERE id=?', row.message_id) : null;
+  const error = message ? h.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1", message.id) : null;
+  return { state: row?.state, error: row?.error ?? (error ? JSON.parse(error.data).error : null), message: message?.state ?? null, input: message ? JSON.parse(message.input) : null };
+}
+/** Give the repository assistant the shared fixture model and, optionally, other permission items. */
+export async function repositoryAssistant(f, permissions) {
+  const role = (await f.admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
+  const result = await f.admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: role.revision, model_id: f.assistantModel.id, ...(permissions ? { permissions } : {}) });
+  if (result.status !== 200) throw new Error(JSON.stringify(result.value));
+}
