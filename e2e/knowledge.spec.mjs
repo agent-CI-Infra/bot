@@ -91,9 +91,21 @@ test('binary downloads keep raw bytes and useful previews share the console layo
     const raw=Buffer.from([0,255,254,10,65]);await writeFile(f.notesRoot+'/101/binary.data',raw);
     await f.login();await exact(page,'binary.data').click();await expect(page.locator('.knowledge-content')).toContainText('这种格式无法在此预览或编辑');await expect(exact(page,'编辑文件')).toHaveCount(0);
     const promise=page.waitForEvent('download');await exact(page,'下载文件').click();expect(await readFile(await(await promise).path())).toEqual(raw);
-    await exact(page,'← 返回目录').click();await panel(page).getByRole('button',{name:'▱ 指南',exact:true}).click();await exact(page,'项目约定.md').click();await mkdir('docs/images',{recursive:true});
-    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'docs/images/console-knowledge-desktop.png',fullPage:true});
-    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'docs/images/console-knowledge-mobile.png',fullPage:true});
+    await exact(page,'← 返回目录').click();await panel(page).getByRole('button',{name:'▱ 指南',exact:true}).click();await exact(page,'项目约定.md').click();await mkdir('.tmp/knowledge-files-232/previews',{recursive:true});
+    await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/knowledge-files-232/previews/console-knowledge-desktop.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'.tmp/knowledge-files-232/previews/console-knowledge-mobile.png',fullPage:true});
     await exact(page,'历史版本').click();await expect(page.getByRole('complementary',{name:'文件历史'})).toBeVisible();await exact(page,'v1').click();await expect(page.locator('.knowledge-content')).toContainText('验证与交付');expect((await f.admin(base+'/'+encodeURIComponent(file.id))).value.file.revision).toBe(1);expect(f.errors).toEqual([]);
   }finally{await f.close();}
+});
+
+test('a saved editor waits for the authoritative file read before exposing its next actions',async({page})=>{
+  const f=await fixture(page);let release;
+  try{
+    const file=(await f.admin('/api/repositories/101/knowledge-files','POST',{name:'refresh.txt',content:'before'})).value.file;
+    await f.login();await exact(page,'refresh.txt').click();await exact(page,'编辑文件').click();await page.getByLabel('内容',{exact:true}).fill('after');
+    const gate=new Promise(resolve=>{release=resolve;});let seen;const waiting=new Promise(resolve=>{seen=resolve;});
+    await page.route('**/knowledge-files/'+encodeURIComponent(file.id),async route=>{if(route.request().method()==='GET'){seen();await gate;}await route.continue();});
+    await exact(page,'保存文件').click();await waiting;await expect(page.locator('.knowledge-editor')).toHaveCount(1);await expect(exact(page,'重命名或移动')).toHaveCount(0);release();
+    await expect(page.locator('.knowledge-content')).toContainText('after');await page.getByText('更多操作',{exact:true}).click();await exact(page,'重命名或移动').click();await expect(page.getByRole('dialog')).toBeVisible();expect(f.errors).toEqual([]);
+  }finally{release?.();await f.close();}
 });

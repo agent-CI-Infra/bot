@@ -440,7 +440,7 @@ for (const kind of ['review.pr', 'actions.failures']) test(`Native ${kind} write
   const workspace = new Workspace(f.s, manager, task, f.spec.redactor, async () => {}, () => {});
   assert.equal((await agentLoop(f.s, task, workspace, f.spec.redactor, async () => {}, { mode: 'review', materials: [] })).summary, finish.summary);
   const observed = results(f.requests.filter(body => !isController(body)).at(-1).messages);
-  assert.deepEqual(observed, [{ written: true }, { error: 'invalid_note_name' }, { error: 'review_repository_write_forbidden' }, { error: 'github_read_token_unavailable' }]);
+  assert.deepEqual(observed, [{ written: true }, { error: 'invalid_note_path' }, { error: 'review_repository_write_forbidden' }, { error: 'github_read_token_unavailable' }]);
   assert.equal(await readFile(join(root, 'notes/review-notes.md'), 'utf8'), 'Review notes.');
   assert.deepEqual(requests.map(({ type, path, offset, final, mode }) => ({ type, path, offset, final, mode })), [
     { type: 'workspace_write', path: '../notes/review-notes.md', offset: 0, final: true, mode: '100644' },
