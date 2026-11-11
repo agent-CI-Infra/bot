@@ -80,6 +80,7 @@ function syncConsoleShell() {
   $('console-location').hidden = !signedIn;
   if (!signedIn || consoleOwner !== me.id) {
     if (typeof resetTaskCreation === 'function') resetTaskCreation();
+    if (typeof resetGateOnboarding === 'function') resetGateOnboarding();
     if (typeof resetBoard === 'function') resetBoard();
     consoleOwner = me?.id || null; consoleProject = null; consoleNavSignature = ''; consolePositions.clear(); consoleRouteKey = null;
     $('console-secondary-nav').replaceChildren(); $('console-page').replaceChildren();

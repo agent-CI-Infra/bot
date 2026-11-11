@@ -33,7 +33,7 @@ test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，�
     await page.locator('#rows [data-repository-id="101"]').getByRole('button', { name: '接入门禁', exact: true }).click();
     const dialog = page.locator('#quickstart-view');
     await expect(dialog.getByRole('heading', { name: '接入门禁 · octo/hello', exact: true })).toBeVisible();
-    // The five lanes come first, fully visible, before any conversation, branch or PR exists.
+    // The four lanes come first, fully visible, before any conversation, branch or PR exists.
     for (const lane of ['pr-ready', 'pr-merge', 'daily', 'release']) await expect(dialog.locator('#gate-onboarding-lanes dt', { hasText: new RegExp(`^${lane}$`) })).toBeVisible();
     await expect(dialog.locator('#gate-onboarding-lanes').getByText(/^合入门禁，确保多个 PR 合在一起不会互相影响：有 merge queue 时在队列里对合并结果先跑 pr-ready 再跑这一层；没有 merge queue 时在合入默认分支后/)).toBeVisible();
     await expect(dialog.getByText(/你确认之前，不会创建分支或 PR/)).toBeVisible();
@@ -71,7 +71,7 @@ test('接入门禁先介绍各 lane，再和 agent 按仓库事实定方案，�
     await expect(dialog.locator('#gate-onboarding-plan-title')).toHaveText('门禁方案 · 第 3 版');
     // Still nothing in the repository: no branch, no file, no PR.
     expect(writes(f.state)).toEqual([]);
-    await dialog.locator('#gate-onboarding-preview summary').click();
+    await expect(dialog.locator('#gate-onboarding-preview')).toHaveAttribute('open','');
     await expect(dialog.locator('#gate-onboarding-files')).toContainText('在 pull_request、merge_group、workflow_dispatch 上运行');
     await page.screenshot({ path: '.tmp/gate-onboarding-chat-desktop.png' });
     await page.setViewportSize({ width: 390, height: 844 });
@@ -145,7 +145,7 @@ test('已有 CI 的仓库：把门禁 job 并入已有 ci.yml 前先看到改动
     const place = dialog.getByLabel('门禁 job 放在');
     await expect(place).toHaveValue('.github/workflows/ci-gates.yml');
     await place.selectOption('.github/workflows/ci.yml');
-    await dialog.locator('#gate-onboarding-preview summary').click();
+    await expect(dialog.locator('#gate-onboarding-preview')).toHaveAttribute('open','');
     const files = dialog.locator('#gate-onboarding-files');
     await expect(files).toContainText('按表单里当前的内容（含未发送的修改）将提交');
     await expect(files.getByRole('heading', { name: '.github/workflows/ci.yml（修改）' })).toBeVisible();

@@ -481,3 +481,24 @@ test('opening 接入门禁 shows the lanes first and creates nothing until the p
   assert.equal(page.$('gate-onboarding-ready').textContent, '项目还没有启动');
   assert.equal(page.$('gate-onboarding-start').disabled, true);
 });
+
+test('a form preview identifies its saved plan and repository basis without persisting unsent edits',async t=>{
+  const f=await fixture(t),session=await f.open(),plan={...session.plan,install:['printf current-preview']};
+  const result=await f.admin(`/api/gate-onboarding/${session.id}/preview`,'POST',{plan});assert.equal(result.status,201);
+  assert.deepEqual(result.value.basis,{revision:session.revision,head_sha:session.facts.head_sha,merge_queue:session.merge_queue.state});
+  assert.equal((await f.session(session.id)).revision,session.revision);assert.deepEqual((await f.session(session.id)).plan,session.plan);
+});
+
+test('background gate creation stops repository writes when its initiating authorization changes after token issue',async t=>{
+  const f=await fixture(t),session=await f.open();let allowed=true,issued;
+  const request=f.gate.request.bind(f.gate);
+  f.gate.request=async(method,path,token,body)=>{
+    const result=await request(method,path,token,body);
+    if(method==='POST'&&path.endsWith('/access_tokens')&&body?.permissions?.workflows==='write'){issued=result.token;allowed=false;}
+    return result;
+  };
+  f.h.store.withAuthorizationGuard(()=>{if(!allowed)throw new Error('fixture_authorization_withdrawn');},()=>f.gate.confirm(session.id,session.revision));
+  for(let attempt=0;attempt<500&&f.gate.get(session.id).busy;attempt++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(issued,'the authorization changes only after an allowed token issue');assert.equal(f.gate.get(session.id).busy,false);
+  assert.deepEqual(writes(f.state),[]);assert.ok(f.state.revoked.includes(issued),'cleanup still revokes the token');assert.equal(f.gate.get(session.id).pr_url,null);
+});
