@@ -155,7 +155,7 @@ async function renderExternal(params,request){
   if(!clients.length)projects.append(element('p','尚未配置外部客户端，请到项目设置 → 外部执行添加。','muted'));panel.append(projects);
   if(clients.length){
     const list=externalGroup('外部客户端');
-    for(const c of clients)list.append(externalRow(c.name,`${repositories.find(r=>r.id===c.repository_id)?.full_name||'仓库 '+c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,c.enabled?'已启用':'已停用',[button('删除',()=>deleteExternalClient(c),'quiet destructive')]));
+    for(const c of clients)list.append(externalRow(c.name,`${repositories.find(r=>r.id===c.repository_id)?.full_name||'仓库 '+c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,c.enabled?'已启用':'已停用',[externalClientLink(c),...(me.role==='super_admin'?[button('删除',()=>deleteExternalClient(c),'quiet destructive')]:[])]));
     panel.append(list);
   }
 }
@@ -177,12 +177,13 @@ function externalGrantGroup(grants){
   for(const g of grants)group.append(externalRow(g.id,`客户端 ${g.client_id} · 创建 ${timestamp(g.created_at)}${g.expires_at?' · 到期 '+timestamp(g.expires_at):''}`,({issuing:'签发中',issued:'已签发',failed:'失败',revoked:'已撤销'})[g.state]||g.state));
   if(!grants.length)group.append(element('p','暂无签发记录','muted'));return group;
 }
-function externalDeliveryGroup(repositoryId,deliveries){
+function externalDeliveryGroup(repositoryId,deliveries,editable=true){
   const group=externalGroup('最近转发（最多 100 条）');
-  for(const d of deliveries)group.append(externalRow(d.id,`创建 ${timestamp(d.created_at)} · 尝试 ${d.attempts} 次${d.http_status?' · HTTP '+d.http_status:''}${d.error?' · '+d.error:''}`,({pending:'待投递',sending:'投递中',retry:'等待重试',succeeded:'已送达',failed:'失败',cancelled:'已取消'})[d.state]||d.state,d.state==='failed'?[button('重试',async()=>{try{await externalProjectApi(repositoryId,'/deliveries/'+d.id+'/retry','POST',{});await route();}catch(e){error(e);}})]:[]));
+  for(const d of deliveries)group.append(externalRow(d.id,`创建 ${timestamp(d.created_at)} · 尝试 ${d.attempts} 次${d.http_status?' · HTTP '+d.http_status:''}${d.error?' · '+d.error:''}`,({pending:'待投递',sending:'投递中',retry:'等待重试',succeeded:'已送达',failed:'失败',cancelled:'已取消'})[d.state]||d.state,editable&&d.state==='failed'?[button('重试',async()=>{try{await externalProjectApi(repositoryId,'/deliveries/'+d.id+'/retry','POST',{});await route();}catch(e){error(e);}})]:[]));
   if(!deliveries.length)group.append(element('p','暂无转发记录','muted'));return group;
 }
 function externalClientDetail(client,data){
+  const editable=current.canConfigure===true;
   const ownSubscriptions=data.subscriptions.filter(row=>row.client_id===client.id),ids=new Set(ownSubscriptions.map(row=>row.id));
   const deliveries=data.deliveries.filter(row=>ids.has(row.subscription_id)),grants=data.grants.filter(row=>row.client_id===client.id);
   // Grants use epoch milliseconds; deliveries use ISO strings. Normalize once before filtering or comparing either source.
@@ -192,43 +193,44 @@ function externalClientDetail(client,data){
   const identity=externalGroup('客户端详情'),actions=element('div','','actions');identity.classList.add('external-client-identity');
   identity.append(element('h3',client.name),facts([['客户端 ID',client.id],['绑定项目',current.repository.full_name],['认证方式',client.auth_type==='private_key_jwt'?'个人电脑 · 公钥签名':'GitHub Actions OIDC'],
     ['认证状态',!client.enabled?'已停用':client.auth_type==='private_key_jwt'&&!client.key_configured?'待登记公钥':'已启用'],['客户端配置版本',client.version],['创建时间',timestamp(client.created_at)]]));
-  actions.append(externalClientToggle(client));
+  if(editable)actions.append(externalClientToggle(client));
   if(client.auth_type==='private_key_jwt'){
     identity.append(facts([['公钥状态',client.key_configured?'已登记':'待登记'],['公钥指纹 SHA256',client.key_fingerprint||'未提供']]));
     if(client.public_key)identity.append(collapsible('已登记公钥（公开信息）',client.public_key));
-    actions.append(button(client.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(client)));
+    if(editable)actions.append(button(client.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(client)));
   }else{
     const captions={audience:'Audience',subject:'Subject',repository:'工作流仓库',repository_id:'不可变仓库 ID',owner_id:'组织 ID',workflow_ref:'Workflow ref',ref:'分支 ref'};
     identity.append(facts(Object.entries(captions).map(([key,caption])=>[caption,client.trust[key]||'未提供'])));
   }
-  actions.append(button('删除',()=>deleteExternalClient(client),'quiet destructive'));identity.append(actions);
+  if(editable)actions.append(button('删除',()=>deleteExternalClient(client),'quiet destructive'));identity.append(actions);
   const capabilities=externalGroup('接入能力与运行记录');
   capabilities.append(facts([['协议能力','单仓库 GitHub 临时授权、事件轮询与 Webhook 转发'],['令牌权限',externalTokenPermissions],['Agent 与模型版本','未提供记录'],['运行隔离核验','未提供记录'],['项目转发订阅',ownSubscriptions.length]]),
     note('认证启用表示允许按当前身份规则请求授权。这里没有执行环境心跳、模型运行或隔离验证结果。'),
     note(records.length?`已读取范围内最新记录：${records[0].kind} · ${timestamp(records[0].created_at)}。`:'当前已读取记录中暂无活动，无法据此判断执行端在线状态。'),
     note('下方分别从当前项目最近最多 100 条授权和转发中筛选此客户端，不代表完整历史或最后一次实际执行。'));
-  const grid=element('div','','external-client-detail');grid.append(identity,capabilities,externalGrantGroup(grants),externalDeliveryGroup(client.repository_id,deliveries));return grid;
+  const grid=element('div','','external-client-detail');grid.append(identity,capabilities,externalGrantGroup(grants),externalDeliveryGroup(client.repository_id,deliveries,editable));return grid;
 }
 function externalSection(){
-  const repositoryId=current.id,{clients,subscriptions,deliveries,grants,settings}=current.external;
+  const repositoryId=current.id,{clients,subscriptions,deliveries,grants,settings}=current.external,editable=current.canConfigure===true;
   const mutate=async(path,body)=>{const result=await externalProjectApi(repositoryId,path,'PATCH',body);await route();if(result.signing_secret)externalSecret(result.signing_secret);};
   const intro=externalGroup('当前项目的外部执行');
   intro.append(element('p','客户端只授权当前仓库，固定权限为 '+externalTokenPermissions+'。Webhook 推送和事件轮询可同时使用。','muted'),element('p','兑换地址：'+audienceCaption(settings.token_audience||'',settings.token_audience_source),'muted'),externalPublicKeyGuide(current.item?clients.filter(row=>row.id===current.item):clients,settings.token_audience||'',{expanded:!current.item}));
+  if(!editable)intro.append(note('当前身份仅可查看本项目的外部执行记录；配置客户端、公钥和转发订阅或重试转发，需要联系具有项目配置权限的管理员。'));
   if(current.item){
     const client=clients.find(row=>row.id===current.item),back=consoleLink(`#/projects/${repositoryId}/external`,'返回客户端列表');
     return [intro,back,client?externalClientDetail(client,current.external):consoleState('找不到此外部客户端','客户端可能已删除，或不属于当前项目。请返回列表重新读取。',{tone:'error'})];
   }
-  const group=externalGroup('客户端',button('新增客户端',()=>addClient(repositoryId)));
-  for(const c of clients){const actions=[externalClientLink(c),externalClientToggle(c)];if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));actions.push(button('删除',()=>deleteExternalClient(c),'quiet destructive'));
+  const group=externalGroup('客户端',...(editable?[button('新增客户端',()=>addClient(repositoryId))]:[]));
+  for(const c of clients){const actions=[externalClientLink(c)];if(editable){actions.push(externalClientToggle(c));if(c.auth_type==='private_key_jwt')actions.push(button(c.key_configured?'更换公钥':'登记公钥',()=>registerPublicKey(c)));actions.push(button('删除',()=>deleteExternalClient(c),'quiet destructive'));}
     const pending=c.auth_type==='private_key_jwt'&&!c.key_configured,row=externalRow(c.name,`仓库 ${c.repository_id} · ${c.auth_type==='private_key_jwt'?'公钥签名':'GitHub Actions OIDC'} · ID ${c.id}`,pending?'待登记公钥':c.enabled?'已启用':'已停用',actions);
     if(c.key_fingerprint)row.querySelector('.row-content').append(element('p','公钥指纹 SHA256 '+c.key_fingerprint));
     if(pending)row.querySelector('.row-content').append(element('p','旧客户端凭据已停用，请在个人电脑生成密钥后登记公钥。'));group.append(row);
   }
   if(!clients.length)group.append(element('p','尚未配置外部客户端','muted'));
-  const subs=externalGroup('Webhook 转发订阅',button('新增转发订阅',()=>editSubscription(repositoryId,clients)));
-  for(const s of subscriptions)subs.append(externalRow(s.name,`${s.url} · ${s.filters.events.join(',')} / ${s.filters.actions.join(',')||'全部动作'}${s.filters.exclude_drafts?' · 排除草稿':''}`,s.enabled?'已启用':'已停用',[
-    button('编辑',()=>editSubscription(repositoryId,clients,s)),button(s.enabled?'停用':'启用',()=>mutate('/subscriptions/'+s.id,{enabled:!s.enabled}).catch(error))]));
+  const subs=externalGroup('Webhook 转发订阅',...(editable?[button('新增转发订阅',()=>editSubscription(repositoryId,clients))]:[]));
+  for(const s of subscriptions)subs.append(externalRow(s.name,`${s.url} · ${s.filters.events.join(',')} / ${s.filters.actions.join(',')||'全部动作'}${s.filters.exclude_drafts?' · 排除草稿':''}`,s.enabled?'已启用':'已停用',editable?[
+    button('编辑',()=>editSubscription(repositoryId,clients,s)),button(s.enabled?'停用':'启用',()=>mutate('/subscriptions/'+s.id,{enabled:!s.enabled}).catch(error))]:[]));
   if(!subscriptions.length)subs.append(element('p','尚未配置转发订阅','muted'));
-  const records=externalDeliveryGroup(repositoryId,deliveries),tokens=externalGrantGroup(grants);
+  const records=externalDeliveryGroup(repositoryId,deliveries,editable),tokens=externalGrantGroup(grants);
   return [intro,group,subs,records,tokens];
 }

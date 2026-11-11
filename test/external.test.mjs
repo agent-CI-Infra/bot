@@ -183,3 +183,51 @@ test('key or audience changes during upstream issuance prevent returning the tok
  const changed=await h.exchange(c.client.id,replacement.privateKey);assert.equal(changed.status,502);assert.equal(changed.value.token,undefined);assert.ok([...h.github.tokens.values()].every(t=>t.revoked));
  assert.ok(h.store.all('SELECT state FROM external_grants').every(g=>g.state==='failed'));
 });
+
+test('read-only project visibility cannot mutate external clients, subscriptions or forwarding through either URL form',async t=>{
+ const h=await externalFixture(t),client=await h.client(),password=testPassword();
+ const sub=(await h.admin('/api/external/subscriptions','POST',{client_id:client.client.id,name:'Original subscription',url:'https://receiver.invalid/hook',filters:{events:['issues'],actions:[],exclude_drafts:false}})).value.subscription;
+ await h.hook(h.a.path,h.a.secret,'readonly-forward',{repository:{id:101},action:'opened',issue:{number:1}});
+ const delivery=h.store.get('SELECT id FROM external_deliveries');h.store.run("UPDATE external_deliveries SET state='failed'");
+ const created=await h.admin('/api/users','POST',{username:'external-reader',password,repository_ids:[]});assert.equal(created.status,201);
+ const principal=h.store.get('SELECT id FROM principals WHERE user_id=?',created.value.user.id).id,tenant=h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
+ assert.equal((await h.admin('/api/identity/grants','POST',{principal_id:principal,tenant_id:tenant,project_id:'101',capabilities:['tasks.read','tasks.write']})).status,201);
+ const reader=h.managementClient();await reader('/api/auth/login','POST',{username:'external-reader',password});
+ assert.equal((await reader('/api/repositories/101')).value.can_configure,false);
+ const tables=['external_clients','external_subscriptions','external_deliveries','audit'],before=tables.map(table=>h.store.all('SELECT * FROM '+table));
+ for(const base of ['/api/external','/api/repositories/101/external']){
+  for(const resource of ['clients','subscriptions','deliveries','grants'])assert.equal((await reader(base+'/'+resource)).status,200);
+  const attempts=[
+   ['/clients','POST',{repository_id:'101',name:'Refused',auth_type:'private_key_jwt',public_key:client.publicKey}],
+   ['/clients/'+client.client.id,'PATCH',{enabled:false}],
+   ['/clients/'+client.client.id,'PATCH',{public_key:client.publicKey}],
+   ['/clients/'+client.client.id,'DELETE',{confirm:true}],
+   ['/subscriptions','POST',{client_id:client.client.id,name:'Refused',url:'https://receiver.invalid/hook',filters:{events:['issues'],actions:[],exclude_drafts:false}}],
+   ['/subscriptions/'+sub.id,'PATCH',{enabled:false,rotate_secret:true}],
+   ['/deliveries/'+delivery.id+'/retry','POST',{}]
+  ];
+  for(const [path,method,body] of attempts)assert.equal((await reader(base+path,method,body)).status,403,base+path);
+ }
+ assert.deepEqual(tables.map(table=>h.store.all('SELECT * FROM '+table)),before,'refused writes cannot change data, pending forwards or audit');
+});
+
+test('external configuration authority is checked against each stored resource project, including legacy resource URLs',async t=>{
+ const h=await externalFixture(t),own=await h.client(),other=await h.client('202'),password=testPassword();
+ const created=await h.admin('/api/users','POST',{username:'external-scoped-configurer',password,repository_ids:[]});
+ const principal=h.store.get('SELECT id FROM principals WHERE user_id=?',created.value.user.id).id;
+ for(const [project,capabilities] of [['101',['tasks.read','config.write']],['202',['tasks.read']]]){
+  const tenant=h.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',project).tenant_id;
+  assert.equal((await h.admin('/api/identity/grants','POST',{principal_id:principal,tenant_id:tenant,project_id:project,capabilities})).status,201);
+ }
+ const configurer=h.managementClient();await configurer('/api/auth/login','POST',{username:'external-scoped-configurer',password});
+ for(const base of ['/api/external','/api/repositories/101/external']){
+  assert.equal((await configurer(base+'/clients/'+own.client.id,'PATCH',{enabled:false})).status,200);
+  assert.equal((await configurer(base+'/clients/'+own.client.id,'PATCH',{enabled:true})).status,200);
+ }
+ assert.equal((await configurer('/api/external/clients/'+other.client.id,'PATCH',{enabled:false})).status,403);
+ assert.equal((await configurer('/api/external/clients/'+other.client.id,'DELETE',{confirm:true})).status,403);
+ assert.equal(h.store.get('SELECT enabled FROM external_clients WHERE id=?',other.client.id).enabled,1);
+ const sub=await configurer('/api/external/subscriptions','POST',{client_id:own.client.id,name:'Allowed',url:'https://receiver.invalid/hook',filters:{events:['issues'],actions:[],exclude_drafts:false}});assert.equal(sub.status,201);
+ assert.ok((await configurer('/api/external/subscriptions/'+sub.value.subscription.id,'PATCH',{rotate_secret:true})).value.signing_secret);
+ assert.equal((await configurer('/api/external/subscriptions/'+sub.value.subscription.id)).value.signing_secret,undefined);
+});

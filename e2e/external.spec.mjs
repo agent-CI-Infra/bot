@@ -22,6 +22,30 @@ async function visibleButton(page,button){
 }
 async function cleanup(h){await h.stop();await new Promise(resolve=>h.github.server.close(resolve));rmSync(h.directory,{recursive:true,force:true});}
 
+test('read-only project access keeps client records readable without offering configuration or forward retries',async({page})=>{
+  const h=await externalFixture(),errors=[];page.on('pageerror',error=>errors.push(error.message));
+  try{
+    const client=await h.client(),password=testPassword();
+    await h.admin('/api/repositories/101/external/subscriptions','POST',{client_id:client.client.id,name:'Read-only forward',url:'https://receiver.invalid/hook',filters:{events:['issues'],actions:[],exclude_drafts:false}});
+    await h.hook(h.a.path,h.a.secret,'reader-forward',{repository:{id:101},action:'opened',issue:{number:1}});h.store.run("UPDATE external_deliveries SET state='failed'");
+    const created=await h.admin('/api/users','POST',{username:'external-reader-ui',password,repository_ids:[]});
+    const principal=h.store.get('SELECT id FROM principals WHERE user_id=?',created.value.user.id).id,tenant=h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
+    expect((await h.admin('/api/identity/grants','POST',{principal_id:principal,tenant_id:tenant,project_id:'101',capabilities:['tasks.read']})).status).toBe(201);
+    await login(page,h,'external-reader-ui',password);await project(page,h);
+    const panel=page.locator('#project-page'),mutations=()=>panel.getByRole('button',{name:/^(新增客户端|新增转发订阅|编辑|停用|启用|更换公钥|登记公钥|删除|重试)$/});
+    await expect(panel).toContainText('当前身份仅可查看本项目');await expect(panel).toContainText('Read-only forward');await expect(mutations()).toHaveCount(0);
+    await page.getByRole('link',{name:'查看客户端 '+client.client.name+' 的认证与活动详情',exact:true}).click();
+    await expect(panel.locator('.external-client-detail')).toContainText(client.client.id);await expect(mutations()).toHaveCount(0);
+    mkdirSync('.tmp/external-authority-231/previews',{recursive:true});
+    for(const width of [390,1440]){await page.setViewportSize({width,height:900});await noOverflow(page);await page.screenshot({path:`.tmp/external-authority-231/previews/readonly-${width}.png`,fullPage:true});}
+    const refused=await page.evaluate(async id=>{try{await api('/api/external/clients/'+id,'PATCH',{enabled:false});return 200;}catch(error){return error.status;}},client.client.id);
+    expect(refused).toBe(403);expect(h.store.get('SELECT enabled FROM external_clients WHERE id=?',client.client.id).enabled).toBe(1);
+    await page.goto(h.adminBase+'/#/external');await expect(page.locator('#external-panel')).toContainText(client.client.name);
+    await expect(page.locator('#external-panel').getByRole('button',{name:'删除',exact:true})).toHaveCount(0);
+    await expect(page.locator('#external-panel').getByRole('link',{name:'查看客户端 '+client.client.name+' 的认证与活动详情',exact:true})).toBeVisible();expect(errors).toEqual([]);
+  }finally{await cleanup(h);}
+});
+
 test('client details keep their own identity and bounded records across refresh, history and six widths',async({page})=>{
   const h=await externalFixture(),errors=[];page.on('pageerror',error=>errors.push(error.message));
   try{
