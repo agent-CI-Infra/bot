@@ -40,9 +40,10 @@ export function roleConcurrency(store: Store, repositoryId: string): Record<stri
 }
 
 /**
- * The limit that applies to one role run, and how many runs hold it right now. `null` means this project set no limit for
- * the role, and then nothing is queried: a project that never configured a limit keeps exactly the path it had before
- * admission existed. Observer runs never take a slot — reviewers, testers and the parallel read-only delegates of
+ * The limit that applies to one role run, and how many other runs hold it right now (`exclude` is the calling run).
+ * `null` means this project configured no limit for the role and no run rows are counted, so such a project keeps the
+ * behaviour it had before admission existed; the policy and settings reads that resolve the limit still happen inside
+ * the transaction. Observer runs never take a slot — reviewers, testers and the parallel read-only delegates of
  * `delegate_roles` run beside the writer — so an observer is never refused for capacity.
  */
 export function roleCapacity(store: Store, repositoryId: string, role: string, kind: string, exclude?: string): { limit: number; running: number } | null {
@@ -50,8 +51,8 @@ export function roleCapacity(store: Store, repositoryId: string, role: string, k
   return store.transaction(() => {
     const limit = roleConcurrency(store, repositoryId)[role] ?? null;
     if (limit === null) return null;
-    // Counting and deciding happen in one transaction; the caller that inserts the run row does so without an await in
-    // between, so two runs of this control plane cannot both read the last free slot.
+    // Only the count happens inside this transaction; the caller compares it. The caller's own run row, inserted by
+    // `beginRun` with no await between that insert and this call, is the other runs' evidence that the slot is taken.
     const running = Number(store.get(`SELECT count(*) n FROM task_runs r JOIN tasks t ON t.id=r.task_id
       WHERE t.repository_id=? AND r.role=? AND r.status='running' AND r.id<>?`, repositoryId, role, exclude ?? '')?.n ?? 0);
     return { limit, running };
