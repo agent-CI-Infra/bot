@@ -161,6 +161,15 @@ function knowledgeSection() {
     }
     tools.append(actionButton('刷新文件', refresh)); main.append(tools);
     if (!listing) { main.append(note('文件列表尚未读取成功。')); return; }
+    // A file saved under a name the current contract cannot address still sits on the volume. Nothing here renames or
+    // deletes it: the page names what it left out, so a short list never reads as a complete one.
+    const quarantined = state.trash ? [] : listing.quarantined || [];
+    if (quarantined.length) {
+      const readable = path => String(path).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, c => '\\u' + c.codePointAt(0).toString(16).padStart(4, '0'));
+      const panel = element('details', '', 'knowledge-quarantined'); panel.append(element('summary', `另有 ${quarantined.length} 个无法打开的旧文件（名字含控制字符）`));
+      const items = element('ul'); for (const row of quarantined) items.append(element('li', `${readable(row.path)} · 名字含控制字符，无法打开`));
+      panel.append(items); main.append(panel);
+    }
     const rows = element('ul', '', 'knowledge-file-list');
     if (!state.query && !state.trash) for (const path of listing.directories.filter(path => path && (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '') === state.directory)) {
       const row = element('li'); row.append(actionButton('▱ ' + path.split('/').at(-1), () => directory(path)), note('文件夹')); rows.append(row);
