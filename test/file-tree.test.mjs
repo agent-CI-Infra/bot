@@ -138,3 +138,9 @@ test('unsupported binary bytes stay exact, list beside text files, and cannot be
   assert.deepEqual(await readFile(join(root,'binary.data')),raw);
   await tree.delete(binary.id,1,'user:a');const restored=await tree.restore(binary.id,1,2,'user:a');assert.equal(restored.revision,3);assert.deepEqual(Buffer.from(restored.download_base64,'base64'),raw);assert.deepEqual(await readFile(join(root,'binary.data')),raw);
 });
+
+test('explicit restore creates a new revision even when the chosen historical content equals the current bytes',async t=>{
+  const {tree}=await fixture(t),file=await tree.create('a.txt','same');await tree.move(file.id,'b.txt',1,'user:a');
+  const restored=await tree.restore(file.id,1,2,'user:b');assert.equal(restored.revision,3);assert.equal(restored.content,'same');
+  const latest=(await tree.versions(file.id)).versions[0];assert.equal(latest.operation,'restore');assert.equal(latest.restored_from,1);assert.equal(latest.actor,'user:b');
+});

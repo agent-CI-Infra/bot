@@ -589,10 +589,13 @@ $('access-form').addEventListener('submit', async event => {
 });
 // Signing out returns to the default page, so whoever signs in next does not land on the previous user's page; the wizard
 // keeps its address (onboarding.js resets it to the first step).
-$('logout').addEventListener('click', async () => { try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; tab = 'projects'; if (!onboardingAddress.test(location.hash)) history.replaceState(null, '', location.pathname); repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').replaceChildren(); await start(); } catch (err) { error(err); } });
+$('logout').addEventListener('click', async () => {
+  if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave(true)) return;
+  try { await api('/api/auth/logout', 'POST', {}); renderVersion++; me = null; tab = 'projects'; if (!onboardingAddress.test(location.hash)) history.replaceState(null, '', location.pathname); repositories=[];accounts=[]; $('rows').replaceChildren();$('detail-body').replaceChildren(); await start(); } catch (err) { error(err); } });
 // The address is written without waiting for hashchange, so the page switches in the same click; back and forward still
 // fire hashchange and draw the page they return to.
-$('tabs').addEventListener('click', event => { const name = event.target.dataset.tab; if (!name) return;
+$('tabs').addEventListener('click', async event => { const name = event.target.dataset.tab; if (!name) return;
+  if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave()) return;
   if (name === 'management') { void openManagementPage(projectRoute()?.id || null).catch(error); return; }
   if (location.hash !== tabAddresses[name]) history.pushState(null, '', tabAddresses[name]); offset = 0; route().catch(error); });
 $('refresh').addEventListener('click', () => start().catch(error));

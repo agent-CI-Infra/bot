@@ -25,7 +25,7 @@ function parseEnv(text) {
   return env;
 }
 // A section may name one item inside it (older workflow addresses did, e.g. #/projects/<id>/workflows/review.pr).
-function projectRoute() { const m = /^#\/projects\/([1-9]\d*)(?:\/([a-z]+)(?:\/([\w.-]+))?)?$/.exec(location.hash); return m ? { id: m[1], section: m[2] || 'basic', item: m[3] || null } : null; }
+function projectRoute() { const m = /^#\/projects\/([1-9]\d*)(?:\/([a-z]+)(?:\/([\w.-]+))?)?$/.exec(location.hash.split('?')[0]); return m ? { id: m[1], section: m[2] || 'basic', item: m[3] || null } : null; }
 function openProject(id, section = 'basic') { location.hash = `#/projects/${id}/${section}`; }
 function field(label, control) { const wrap = element('label', label); wrap.append(control); return wrap; }
 function input(name, value, attributes = {}) { const el = document.createElement('input'); el.name = name; el.value = value ?? ''; Object.assign(el, attributes); return el; }
@@ -124,7 +124,7 @@ async function renderProject(route) {
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
   if (current?.id !== route.id) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
-  try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) page.replaceChildren(element('p', err.message, 'view-error')); return; }
+  try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) { if ([401,403].includes(err.status) && typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); page.replaceChildren(element('p', err.message, 'view-error')); } return; }
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   // A newly granted or externally created project may not be in the list loaded at login.
@@ -1024,62 +1024,4 @@ function modelsSection() {
     tableCell(row, '模型选择', taskModelEditor(definition.kind, definition.title, current.policy, current.models, definition)); body.append(row);
   }
   section.append(table); return [projectDefaultModelCard(current.policy, current.models), section, ...modelManagementSections()];
-}
-
-function knowledgeSection() {
-  const endpoint = `/api/repositories/${current.id}/knowledge-files`, section = card('项目知识');
-  const list = element('div', ''), detail = element('div', ''), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
-  const query = input('knowledge_query', '', { placeholder: '按文件名搜索' }), deleted = checkbox('knowledge_deleted', false, '显示已删除文件');
-  const run = fn => async () => { try { message.textContent = ''; await fn(); } catch (error) { message.textContent = error.message; } };
-  const refresh = async () => {
-    const data = await api(endpoint + '?' + new URLSearchParams({ query: query.value, include_deleted: deleted.querySelector('input').checked ? '1' : '0' }));
-    const rows = element('ul', '', 'history knowledge-list');
-    for (const file of data.files) {
-      const row = element('li', ''); row.append(button(file.name, run(() => show(file.id))), note(`版本 ${file.revision} · ${file.bytes < 1024 ? file.bytes + ' B' : bytes(file.bytes)}${file.deleted ? ' · 已删除' : ''}`)); rows.append(row);
-    }
-    list.replaceChildren(data.files.length ? rows : note('还没有文件。可以直接新建，内容和格式由你决定。'));
-  };
-  const show = async (id, revision) => {
-    const { file } = await api(endpoint + '/' + encodeURIComponent(id) + (revision === undefined ? '' : '?revision=' + revision));
-    const { versions } = await api(endpoint + '/' + encodeURIComponent(id) + '/versions');
-    const box = card(file.name), history = document.createElement('select'); history.setAttribute('aria-label', '历史版本');
-    for (const version of versions) history.add(new Option(`版本 ${version.revision} · ${version.created_at || ''}${version.deleted ? ' · 删除' : ''}`, String(version.revision)));
-    history.value = String(file.revision); history.addEventListener('change', run(() => show(id, Number(history.value))));
-    box.append(field('历史版本', history));
-    if (file.deleted) box.append(note('文件已删除。选择删除前的版本即可恢复。'));
-    else if (file.content === null) box.append(note('暂时无法读取文件原文，请稍后重试。'));
-    else {
-      const body = textarea('knowledge_content', file.content, { rows: 18, spellcheck: false, className: 'code' });
-      if (!file.historical && !file.readonly) {
-        const initial = body.value;
-        const form = settingsForm('编辑文件', [field('内容', body)], async () => {
-          await api(endpoint + '/' + encodeURIComponent(id), 'PUT', { content: body.value === initial ? file.content : body.value, expected_revision: file.current_revision });
-        }, { after: async () => { await refresh(); await show(id); } }); box.append(form);
-      } else { body.readOnly = true; box.append(field('内容', body)); }
-      const actions = element('div', '', 'actions');
-      actions.append(button('下载文件', () => { const url = URL.createObjectURL(new Blob([file.content], { type: 'text/plain;charset=utf-8' })), link = document.createElement('a'); link.href = url; link.download = file.name; link.click(); URL.revokeObjectURL(url); }));
-      if (file.historical && !file.readonly) actions.append(button('恢复此版本', run(async () => {
-        await api(endpoint + '/' + encodeURIComponent(id) + '/restore', 'POST', { revision: file.revision, expected_revision: file.current_revision }); await refresh(); await show(id);
-      })));
-      if (file.historical) box.append(note('恢复会保留已有历史。'));
-      if (file.readonly) box.append(note('此文件来自仓库，正文修改仍通过仓库 PR 完成。'));
-      if (!file.historical && !file.current_deleted) actions.append(button('删除文件', run(async () => {
-        if (!await askConfirm({ title: `删除 ${file.name}？`, body: ['文件将从当前列表移除，历史版本仍可恢复。'], action: '删除', danger: true })) return;
-        await api(endpoint + '/' + encodeURIComponent(id), 'DELETE', { expected_revision: file.current_revision }); await refresh(); await show(id);
-      }), 'quiet destructive'));
-      box.append(actions);
-    }
-    detail.replaceChildren(box);
-  };
-  const create = () => {
-    const name = input('knowledge_filename', '', { required: true, placeholder: '例如 repository.md 或 commands.txt' }), content = textarea('knowledge_content', '', { rows: 18, spellcheck: false, className: 'code' });
-    let created;
-    const form = settingsForm('新建文件', [field('文件名', name), field('内容', content)], async () => {
-      created = (await api(endpoint, 'POST', { name: name.value, content: content.value })).file;
-    }, { after: async () => { await refresh(); await show(created.id); } });
-    form.append(button('取消', () => detail.replaceChildren())); detail.replaceChildren(form);
-  };
-  const actions = element('div', '', 'actions'); actions.append(field('搜索文件', query), button('搜索', run(refresh)), deleted, button('新建文件', create));
-  deleted.querySelector('input').addEventListener('change', run(refresh));
-  section.append(note('自由保存项目文件，每次修改保留版本历史。'), actions, list, detail, message); void run(refresh)(); return [section];
 }

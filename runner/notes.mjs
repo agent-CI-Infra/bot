@@ -198,7 +198,14 @@ export class Notes {
     return this.lockedFile(name, async (index, check) => {
       this.expected(index, expectedRevision); const target = await this.view(index, revision);
       if (target.deleted) throw new Error('invalid_note_revision');
-      await this.atomic(this.root + '/' + name, target.binary?await this.blob(target.sha256,true):target.content, check); return this.view(await this.observe(name, actor, check));
+      const before=index.value.versions.at(-1).revision;
+      await this.atomic(this.root + '/' + name, target.binary?await this.blob(target.sha256,true):target.content, check);
+      index=await this.observe(name,actor,check);
+      const last=index.value.versions.at(-1);
+      // Restoring is an explicit operation, even when the chosen bytes equal the current file.
+      if(last.revision===before)index.value.versions.push({...last,revision:before+1,created_at:new Date().toISOString(),actor});
+      Object.assign(index.value.versions.at(-1),{operation:'restore',restored_from:revision});
+      await this.atomic(index.path,JSON.stringify(index.value),check);return this.view(index);
     }, true);
   }
   async read(name) { const file = await this.file(name);if(file.binary)throw new Error('unsupported_note_format'); if (file.deleted) throw Object.assign(new Error('ENOENT: note_not_found'), { code: 'ENOENT' }); return { content: file.content }; }
