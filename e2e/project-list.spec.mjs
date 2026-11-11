@@ -49,6 +49,7 @@ test('项目按所有者分组，筛选和每页 50 条分页保持项目完整�
       if (label === 'desktop' || label === 'mobile') await page.screenshot({path: `.tmp/project-org-groups/installed-${label}.png`, fullPage: true});
     }
     await row('101').getByRole('switch', {name: / 看板$/, exact: false}).click();
+    await page.getByRole('dialog', {name: '关闭公开看板？', exact: true}).getByRole('button', {name: '关闭公开看板', exact: true}).click();
     await expect(row('101').getByRole('status')).toHaveText('看板已关闭；不再公开展示');
     await row('101').getByRole('button', {name: '设置', exact: true}).click(); await expect(page).toHaveURL(/#\/projects\/101\/basic$/);
     await page.getByRole('link', {name: '← 全部项目', exact: true}).click();

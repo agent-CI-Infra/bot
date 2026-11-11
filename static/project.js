@@ -271,9 +271,7 @@ function basicSection() {
     const status = element('p', '', 'muted'), feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'status');
     const toggle = button('', async () => {
       const enabled = !installed.board_enabled;
-      if (!await askConfirm({ title: enabled ? '开启公开看板？' : '关闭公开看板？',
-        body: [enabled ? '允许无需登录访问单仓看板及 Dashboard 汇总，包括私有仓显式公开的看板数据。' : '保存后停止对外提供本项目看板。',
-          '公开内容由看板采集服务生成，不开放管理端任务日志、身份、提示词或成本。'], action: enabled ? '开启公开看板' : '关闭公开看板', danger: enabled })) return;
+      if (!await confirmBoardVisibility(repository, enabled)) return;
       toggle.disabled = true; feedback.textContent = '正在保存公开设置…';
       try {
         const { board } = await api(`/api/installations/${id}/board`, 'PATCH', { enabled });
