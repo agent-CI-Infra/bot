@@ -28,6 +28,9 @@ export function dispatchStorage(store: Store) {
     CREATE INDEX IF NOT EXISTS dispatch_events_due ON dispatch_events(state,next_run_at);
     CREATE INDEX IF NOT EXISTS dispatch_events_repository ON dispatch_events(repository_id,created_at);
     CREATE INDEX IF NOT EXISTS dispatch_events_object ON dispatch_events(repository_id,object_type,object_number);
+    CREATE TABLE IF NOT EXISTS dispatch_retries(id TEXT PRIMARY KEY,event_id TEXT NOT NULL REFERENCES dispatch_events(id) ON DELETE CASCADE,
+      requested_at TEXT NOT NULL,previous_attempts INTEGER NOT NULL,previous_error TEXT);
+    CREATE INDEX IF NOT EXISTS dispatch_retries_event ON dispatch_retries(event_id);
     CREATE TABLE IF NOT EXISTS task_events(task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,event_id TEXT NOT NULL,relation TEXT NOT NULL,
       created_at TEXT NOT NULL,PRIMARY KEY(task_id,event_id));
     CREATE INDEX IF NOT EXISTS task_events_event ON task_events(event_id);
