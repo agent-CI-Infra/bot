@@ -584,6 +584,11 @@ function modelAddress(model) {
   if (model.endpoints && !model.endpoints.has_v1) { const flag = badge('地址不含 /v1', 'warning'); flag.title = modelV1Warning; address.append(' ', flag); }
   return address;
 }
+// A work type's name inside a model row: the console's own work-type table first (the same names this page uses for the
+// same kinds), then the shared labels, then the id itself, so a kind nobody can name is never given another's name.
+// `workflow.*` is lazy configuration rather than a kind the engine resolves, so it keeps its id instead of borrowing
+// 通用回复: the model a work type runs on is looked up by work type id (`reply`, `manager`, …), not by a legacy prefix.
+const workTypeName = kind => { const id = String(kind); return builtInTasks.find(task => task.kind === id)?.title || kindLabels[id] || id; };
 // A model inside its provider group: the name, and `extra` badges such as the wizard's default.
 function modelLabel(model, extra = []) {
   const label = element('span', model.model_name, 'model-address');
@@ -599,8 +604,12 @@ function modelConnectionFacts(model) {
   else box.append(element('span', '未定价 · 不按 0 估算', 'model-price'));
   if (policy?.model_id === model.id) box.append(badge('项目默认', 'success'));
   try {
-    const uses = Object.entries(policy ? taskModelMap(policy) : {}).filter(([, id]) => id === model.id).length;
-    if (uses) box.append(element('span', `${uses} 个工作类型显式使用`, 'muted'));
+    // #230: name the work types, not just how many. Two models each holding one type both read "1 个工作类型显式使用",
+    // which tells nobody which setting to change; the id is printed for a kind the console has no name for.
+    const kinds = Object.entries(policy ? taskModelMap(policy) : {}).filter(([, id]) => id === model.id).map(([kind]) => workTypeName(kind));
+    // Only a page bound to a project holds that project's policy. The shared model list in global settings has no
+    // project policy in hand, so stating "nobody explicitly" there would name an absence the page cannot see.
+    if (policy) box.append(element('span', kinds.length ? `工作类型显式使用：${kinds.join('、')}（不继承项目默认）` : '没有被工作类型显式指定', 'muted'));
   } catch { box.append(element('span', '工作类型模型配置未能解析', 'muted')); }
   // Which projects reference this model, from the list route's `used_by`. The absence is stated: a model nobody uses
   // can be deleted without a migration, so "nobody" is information, not an empty cell.
