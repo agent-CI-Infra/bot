@@ -27,6 +27,7 @@
 | `im:message.p2p_msg:readonly` | 接收用户私聊消息 |
 | `im:message.group_at_msg:readonly` | 接收群内 @ 机器人的消息 |
 | `im:message:send_as_bot` | 以机器人身份发送消息、发送和更新交互卡片 |
+| `im:message.reactions:write_only` | 在正在处理的原消息下添加表情，回复送达后删除 |
 | `cardkit:card:write` | 创建与更新卡片 |
 | `im:message.group_msg` | 接收全量群消息并读取机器人可见群历史，属于需审批的敏感权限 |
 | `im:message:readonly` | 读取机器人所在会话的可见历史及接收撤回事件 |
@@ -135,6 +136,8 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 事件按连接与 event_id 持久去重，消息再按 message_id 去重。合法消息不因发送者、类型、是否 @ 或原发送时间而丢弃；HTTP 与 SDK 在同一事务提交 inbox、本地账本、同步发现和必要的安全失效，再返回成功，数据库失败返回失败。记录与业务处理分开：当前个人管理入口只处理新鲜的用户文本、私聊及群内 @；bot、附件、未 @ 和过期消息安静入库，不重放旧命令。原管理入口仍拒绝逆序业务写入。模型和业务执行由独立 worker 执行，慢模型不阻塞回调。
 
 重启不会重放已提交的管理消息：管理服务标记中断，需要查看原会话/回执；尚未提交的收件继续处理。发送 outbox 独立保存 `queued`、`sending`、`retry`、`sent`、`failed`、尝试次数和稳定错误码，网络失败指数退避，使用相同 Feishu uuid 对账重发。连接/身份/范围失效为终止失败。所有发送内容和入站正文密封保存，SDK 原始日志关闭，访问令牌只在服务端调用期间使用。
+
+收到需要处理的新用户文本后，独立 worker 在原消息下添加 `Typing` 表情，表示请求已收到并正在处理；模型完成但回复尚在发送或重试时继续保留，卡片实际送达后移除。群助手决定保持安静、处理终止或发送最终失败时也会清理。重复投递不重复添加，安静入库的消息、历史同步、机器人消息与卡片事件不添加。表情请求不阻塞回调、模型或发送队列；添加和清理状态按收件持久保存，重启或添加响应丢失后用[获取消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/list)查询本应用的 `Typing` 表情恢复，不删除其他人的表情。该查询使用已有的 `im:message:readonly` 权限，新增的写入权限须由飞书应用管理员开通并发布。缺权限或平台拒绝时保留 `reaction_state` / `reaction_error` 诊断，消息照常处理；网络故障和限流退避重试，平台永久拒绝时无法保证移除。接口依据：[添加消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create)、[删除消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/delete)、[表情文案说明](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce)。
 
 通知目的地在控制台登记（#312），不再由聊天指令登记：私聊由本人在「身份与权限 → 我的飞书私信会话」选择项目登记，要求本人是这个私聊的绑定主人，并对该项目有 `schedules.manage` 和读取权限；群聊由能管理该群聊助手绑定的人（配置人、超级管理员或对全部范围有配置权限者）在群聊助手处登记，项目必须在绑定当前可达的范围内。每个私聊或群、项目和登记人只保留一条登记，可以撤销；撤销后定时计划和事件订阅在下次检查时停止。接口为 `POST /api/channels/chats/:id/destinations`、`GET /api/channels/destinations`、`DELETE /api/channels/destinations/:id`，写入审计 `channel.destination.*`。[持久化调度模块](schedules.md) 消费这些登记，负责定时日报、事件订阅及可靠发送；登记不表示送达。每次发送前重新检查：私聊目的地核对接收人的读取权限和飞书绑定，群聊目的地核对群绑定仍启用且范围仍覆盖该项目。较早用聊天指令登记的私聊目的地继续有效；群目的地也改按上述绑定规则检查。
 

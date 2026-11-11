@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
 import { identityFixture } from '../test/identity-fixture.mjs';
-import { transport, connector, envelope, post, finished, credentials, bindFixture } from '../test/channel-fixture.mjs';
+import { transport, connector, envelope, post, finished, credentials, bindFixture, until } from '../test/channel-fixture.mjs';
 import { harness, setup } from '../test/helpers.mjs';
 import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
 
@@ -11,6 +11,28 @@ async function login(page, h, password, username = 'administrator') {
   await page.getByLabel('用户名', { exact: true }).fill(username); await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '登录', exact: true }).click();
 }
+test('missing reaction permission gives an administrator an actionable hint on desktop and mobile', async ({ page }) => {
+  const wire = transport(), h = await harness(null, undefined, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
+  try {
+    const { admin, password } = await setup(h), id = await connector(admin);
+    wire.state.scopes = FEISHU_SCOPES.filter(s => s.scope !== 'im:message.reactions:write_only').map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
+    wire.state.reactionHandler = request => request.method === 'POST' ? Response.json({ code: 99991672 }, { status: 403 }) : undefined;
+    const receipt = await post(h, id, envelope('/identity'));
+    await finished(h, receipt.value.operation_id);
+    await until(() => h.store.get('SELECT state FROM channel_reactions WHERE source_event=?', receipt.value.operation_id)?.state === 'failed');
+    await page.goto(h.admin + '/#/settings/feishu'); await login(page, h, password);
+    await expect(page.getByRole('group', { name: 'cli_fixture', exact: true }).getByLabel('飞书权限检查')).toContainText('im:message.reactions:write_only');
+    await page.getByRole('link', { name: '连接诊断与收发记录' }).click();
+    await expect(page.getByText('处理中表情暂不可用：', { exact: false })).toContainText('im:message.reactions:write_only');
+    await expect(page.getByText('处理中表情暂不可用：', { exact: false })).toContainText('普通消息回复不受影响');
+    mkdirSync(output, { recursive: true });
+    for (const [name, width, height] of [['desktop', 1440, 1100], ['mobile', 390, 844]]) {
+      await page.setViewportSize({ width, height });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: output + '/processing-reaction-permission-' + name + '.png', fullPage: true });
+    }
+  } finally { await h.stop(); rmSync(h.directory, { recursive: true, force: true }); }
+});
 test('global administrator connects an app through the wizard, resumes it and sees credential and revision failures', async ({ page }) => {
   test.setTimeout(90000);
   const wire = transport(), h = await harness(null, undefined, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
@@ -24,7 +46,7 @@ test('global administrator connects an app through the wizard, resumes it and se
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('saas');
     await expect(page.getByLabel('事件接收方式')).toHaveValue('http');
     const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
-    expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write',
+    expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'im:message.reactions:write_only', 'cardkit:card:write',
       'im:message.group_msg', 'im:message:readonly', 'im:chat.members:bot_access', 'im:chat.members:read']);
     expect(scopes.scopes.user).toEqual([]);
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');

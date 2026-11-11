@@ -19,6 +19,7 @@ export const FEISHU_SCOPES: readonly { scope: string; purpose: string; enterpris
   { scope: 'im:message.p2p_msg:readonly', purpose: '接收私聊消息' },
   { scope: 'im:message.group_at_msg:readonly', purpose: '接收群内 @ 机器人的消息' },
   { scope: 'im:message:send_as_bot', purpose: '发送消息与更新卡片' },
+  { scope: 'im:message.reactions:write_only', purpose: '添加与删除消息处理中表情' },
   { scope: 'cardkit:card:write', purpose: '创建与更新卡片' },
   { scope: 'im:message.group_msg', purpose: '接收全量群消息、读取群历史（敏感权限，需审批）' },
   { scope: 'im:message:readonly', purpose: '读取会话历史、接收撤回事件' },
@@ -123,6 +124,12 @@ export class FeishuAdapter implements ChannelAdapter {
         const delay = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
         throw new ChannelRateLimitError(Number.isFinite(delay) ? Math.min(3600000, Math.max(1000, delay)) : 1000);
       }
+      if (path.includes('/reactions') && (!r.ok || data.code !== 0)) {
+        if ([230110, 231003, 231004].includes(data.code)) fail(404, 'channel_reaction_not_found');
+        if (r.status === 403 || data.code === 99991672) fail(403, 'channel_reaction_permission_required');
+        if (r.status >= 400 && r.status < 500 || [231001, 231002].includes(data.code)) fail(403, 'channel_reaction_rejected');
+        fail(502, 'channel_reaction_unavailable');
+      }
       if (path.startsWith('/im/v1/messages?') && init.method === 'GET' && (!r.ok || data.code !== 0)) {
         const permanent = r.status === 403 || [230002, 230006, 230013, 230027, 230073, 231203, 231204, 99991672].includes(data.code);
         throw new ChannelHistoryError(({ 230002: 'channel_bot_not_in_chat', 230006: 'channel_bot_disabled', 230013: 'channel_chat_out_of_scope',
@@ -143,6 +150,33 @@ export class FeishuAdapter implements ChannelAdapter {
     const data = await this.api('/im/v1/messages?receive_id_type=' + delivery.receive_id_type, { method: 'POST',
       body: JSON.stringify({ receive_id: delivery.receive_id, msg_type: 'interactive', content: JSON.stringify(delivery.content), uuid: key.slice(0, 50) }) });
     return text(data.data?.message_id);
+  }
+  async addProcessingReaction(message: string): Promise<string> {
+    const data = await this.api('/im/v1/messages/' + encodeURIComponent(message) + '/reactions', { method: 'POST',
+      body: JSON.stringify({ reaction_type: { emoji_type: 'Typing' } }) });
+    if (typeof data.data?.reaction_id !== 'string' || !data.data.reaction_id) fail(502, 'channel_reaction_unavailable');
+    return data.data.reaction_id;
+  }
+  async removeProcessingReaction(message: string, reaction: string): Promise<void> {
+    await this.api('/im/v1/messages/' + encodeURIComponent(message) + '/reactions/' + encodeURIComponent(reaction), { method: 'DELETE' });
+  }
+  /** Recover an add whose response was lost; never adopt or delete another user's reaction. */
+  async findProcessingReaction(message: string): Promise<string | undefined> {
+    const seen = new Set<string>(); let token = '';
+    for (;;) {
+      const query = new URLSearchParams({ reaction_type: 'Typing', page_size: '50' });
+      if (token) query.set('page_token', token);
+      const data = (await this.api('/im/v1/messages/' + encodeURIComponent(message) + '/reactions?' + query, { method: 'GET' })).data;
+      if (!data || !Array.isArray(data.items) || typeof data.has_more !== 'boolean') fail(502, 'channel_reaction_unavailable');
+      const own = data.items.find((item: any) => item.operator?.operator_type === 'app' && item.operator.operator_id === this.connector.app_id && item.reaction_type?.emoji_type === 'Typing');
+      if (own) {
+        if (typeof own.reaction_id !== 'string' || !own.reaction_id) fail(502, 'channel_reaction_unavailable');
+        return own.reaction_id;
+      }
+      if (!data.has_more) return;
+      if (typeof data.page_token !== 'string' || !data.page_token || seen.has(data.page_token)) fail(502, 'channel_reaction_unavailable');
+      token = data.page_token; seen.add(token);
+    }
   }
   async history(job: Row): Promise<HistoryPage> {
     // Feishu's maximum is 50 per page, not a cap on total history. Threads do not support time boundaries.

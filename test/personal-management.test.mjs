@@ -190,7 +190,8 @@ test('personal delivery rechecks permission after asynchronous Feishu authentica
   let release;f.wire.state.authGate=new Promise(r=>release=r);t.after(()=>release());
   f.modelState.respond=async(body,res)=>reply(res,'Protected private project fact');
   const receipt=await post(f.h,f.id,envelope('查询任务',{sender:{sender_id:{open_id:'ou_delivery'}},message:{chat_id:'oc_delivery'}}));
-  await until(()=>f.wire.state.authStarted);
+  // Receipt reactions also exchange tokens; revoke only once the protected reply itself is waiting to send.
+  await until(()=>f.h.store.get('SELECT state FROM channel_outbox WHERE source_event=?',receipt.value.operation_id)?.state==='sending');
   await f.admin('/api/project-admin-assignments','PUT',{user_id:member.id,repository_ids:[]});f.wire.state.authGate=null;release();
   const outbox=await until(()=>f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?',receipt.value.operation_id),r=>r?.state==='failed');
   assert.equal(outbox.last_error,'authorization_changed');assert.ok(!JSON.stringify(f.wire.sent).includes('Protected private project fact'));

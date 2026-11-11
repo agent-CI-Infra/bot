@@ -18,6 +18,7 @@ import { roleConfiguration } from '../roles/definition.js';
 import { assertManagedExecution, taskAuthorizationFence } from '../tasks/management.js';
 import type { Manager } from '../projects/service.js';
 import { TaskError } from '../agent/common.js';
+import { ChannelReactions } from './reactions.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
@@ -33,6 +34,7 @@ export class ChannelService {
   readonly employees: ChannelEmployees;
   readonly serviceBindings: ChannelServiceBindings;
   readonly serviceSessions: ChannelServiceSessions;
+  readonly reactions: ChannelReactions;
   private readonly business = new Map<string,Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
@@ -41,6 +43,7 @@ export class ChannelService {
   constructor(readonly store: Store, readonly management: ManagementAgent, readonly options: ChannelOptions = {}) {
     this.bindings = new ChannelBindings(store, e => this.source(e));
     this.ledger = new ChannelLedger(store);
+    this.reactions = new ChannelReactions(store, (c, guard) => this.adapter(c, guard), e => this.source(e));
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
     this.serviceBindings = new ChannelServiceBindings(store, this.employees);
     this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl);
@@ -84,8 +87,8 @@ export class ChannelService {
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
     this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); void this.employees.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
   }
-  close(): void { this.stopped = true; this.serviceSessions.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
-  async drain():Promise<void>{await Promise.allSettled([...this.business.values()]);}
+  close(): void { this.stopped = true; this.reactions.close(); this.serviceSessions.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
+  async drain():Promise<void>{await Promise.allSettled([...this.business.values(),this.reactions.drain()]);}
   /** Console readers of a chat's local history: platform managers, its binding's managers, the personal owner or a legacy maintainer. */
   authorizeHistory(actor:ActorContext,id:string):void{
     if(this.serviceBindings.canView(actor,id))return;
@@ -243,6 +246,8 @@ export class ChannelService {
         id, c.id, event.event_id, event.kind === 'message' ? 'message:' + event.message_id : event.kind + ':' + event.event_id,
         this.store.secrets.seal(event, 'channel-event:' + id), state, Date.now());
       this.ledger.accept(event);
+      if (actionable && event.kind === 'message')
+        this.store.run("INSERT INTO channel_reactions(source_event,state) VALUES(?,'pending')", id);
       if (['audience_changed', 'bot_removed', 'chat_archived', 'uninstalled'].includes(event.kind)) {
         for (const chat of this.store.all(`SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? ${event.chat_id ? 'AND chat_id=?' : ''}`,
           event.provider, event.app_id, event.installation_tenant, ...(event.chat_id ? [event.chat_id] : []))) this.employees.invalidate(chat.id, event.kind);
@@ -506,7 +511,9 @@ export class ChannelService {
     if (!this.stopped) this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?", remote, row.id);
   }
   async tick(): Promise<void> {
-    if (this.stopped || this.busy) return; this.busy = true;
+    if (this.stopped) return;
+    void this.reactions.tick().catch(() => {});
+    if (this.busy) return; this.busy = true;
     try {
       for (const row of this.store.all("SELECT * FROM channel_inbox WHERE state IN ('queued','submitted') ORDER BY created_at,rowid LIMIT 50")) {
         if (this.stopped) return;
