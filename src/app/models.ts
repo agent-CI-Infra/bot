@@ -34,6 +34,24 @@ function usageByModel(store: Store, user: Actor, ids: string[]): Record<string, 
   }
   return usage;
 }
+/** Explicit references in current saved configurations, never historical role revisions or run snapshots. */
+function rolesUsingModel(store: Store, user: Actor, id: string): Json[] {
+  const visible = scope(user, 'r.id');
+  const rows = store.all(`SELECT r.id repository_id,r.full_name,json_extract(role.value,'$.role_id') role_id,
+    json_extract(role.value,'$.name') name,json_extract(role.value,'$.enabled') enabled,
+    json_extract(config.value,'$.enabled') configuration_enabled
+    FROM repositories r JOIN settings config ON config.key='roles:'||r.id
+    JOIN json_each(CASE WHEN json_extract(config.value,'$.schema')=2 THEN json_extract(config.value,'$.roles') ELSE '[]' END) role
+    WHERE json_extract(role.value,'$.model_profile_ref.model_id')=? AND ${visible.sql}
+    ORDER BY r.id,role_id`, id, ...visible.args);
+  const result: Json[] = rows.map(row => ({ type: 'project_role', repository_id: row.repository_id, full_name: row.full_name,
+    role_id: row.role_id, name: row.name, enabled: !!row.enabled, configuration_enabled: !!row.configuration_enabled }));
+  // A detail read must not bootstrap or migrate platform roles just to describe their existing model references.
+  if (user.role === 'super_admin' && store.get("SELECT 1 FROM sqlite_master WHERE type='table' AND name='service_roles'"))
+    for (const role of store.all('SELECT id,name,enabled FROM service_roles WHERE model_id=? ORDER BY id', id))
+      result.push({ type: 'service_role', repository_id: null, role_id: role.id, name: role.name, enabled: !!role.enabled });
+  return result;
+}
 // Routes are appended to the URL text, so a query or fragment, even an empty "?" or "#", would swallow the route and
 // leave the requested path to whoever wrote the URL. Such a URL never reached a model route, so it is refused.
 function apiUrl(value: unknown): string {
@@ -128,6 +146,9 @@ export async function models(store: Store, user: Actor, method: string, url: URL
       const usedScope = scope(user, 'p.repository_id');
       model.used_by = store.all(`SELECT p.repository_id,r.full_name FROM policies p JOIN repositories r ON r.id=p.repository_id
         WHERE (p.model_id=? OR EXISTS(SELECT 1 FROM json_each(p.task_models) WHERE value=?)) AND ${usedScope.sql} ORDER BY p.repository_id`, id, id, ...usedScope.args);
+      model.role_used_by = rolesUsingModel(store, user, id);
+      model.onboarding_default = user.role === 'super_admin' && row.repository_id === null
+        && store.get("SELECT json_extract(value,'$') id FROM settings WHERE key='onboarding.model' AND json_valid(value)")?.id === id;
     }
     return { model };
   }
