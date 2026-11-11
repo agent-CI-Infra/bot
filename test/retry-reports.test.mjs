@@ -46,7 +46,7 @@ for(const action of ['continue_retry','investigate'])test(`Native Manager reads 
  const f=setup(t);for(let n=1;n<=3;n++)recordRetryFailure(f.s,f.task,action==='investigate'?{group:'merge_checks',occurrence:'head:'+n,code:'pull_request_checks_failed',detail:JSON.stringify({sha:'a'.repeat(40),check_runs:[{id:123,name:'Install packages',status:'completed',conclusion:'failure'}]})}:failure(n));const report=pendingRetryReport(f.s,'t');
  f.s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'native'}}));
  const requests=[];const server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);requests.push(body);
-  const input=JSON.parse(body.messages[1].content);
+  const input=JSON.parse(body.messages[1].content);if(action==='investigate')assert.ok(body.tools.some(t=>t.function.name==='read_ci_evidence'));
   const message=requests.length===1?call('read_task_record',{ref:report.failure_ref}):action==='investigate'&&requests.length===2?call('read_task_record',{ref:input.ci_evidence_refs.at(-1)}):call('submit_retry_decision',{action,reason:'Read the retained failure and choose the next action'});
   res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message}]}));
  });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close();});

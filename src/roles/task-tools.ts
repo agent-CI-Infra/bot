@@ -33,7 +33,7 @@ export async function taskToolServer<T>(spec:AgentSpec<T>){
      spec.screen?.(name,args);
      const started=traceEvent(spec.store,spec.task.id,'tool_started',{name,call_id:String(id),arguments:spec.redactor.clean(args),transport:'mcp'},spec.task.trace_run_id,'harness');
      let observation:any;
-     try{if(name===spec.finish?.name){const validated=await spec.finish!.validate(args);await spec.guard();spec.runAccess?.check(token);if(!active)throw new Error('harness_run_closed');result=validated;submitted=true;observation={submitted:true};}else observation=await spec.execute?.(name,args);}
+     try{if(spec.finish&&(spec.finish.names??[spec.finish.name]).includes(name)){const validated=await spec.finish!.validate(args,name);await spec.guard();spec.runAccess?.check(token);if(!active)throw new Error('harness_run_closed');result=validated;submitted=true;observation={submitted:true};}else observation=await spec.execute?.(name,args);}
      catch(error){const feedback=spec.repairInvalid?.(error);if(!feedback)throw error;observation={error:'invalid_submission',message:spec.redactor.text(feedback)};}
      const clean=spec.redactor.clean(observation??null);
      traceEvent(spec.store,spec.task.id,'tool_observation',{name,observation:clean},spec.task.trace_run_id,'tool',[started]);return clean;

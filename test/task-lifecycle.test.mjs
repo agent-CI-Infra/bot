@@ -57,7 +57,7 @@ test('all five decisions map to explicit task states, for code and non-code arti
   const id=String(i);create(id);records.contract(id,contract);const c=submit(records,id);
   const verdict={...pass,outcome,...(outcome==='pass'?{}:{gaps:['A specific missing observation'],core_complete:false})};
   records.decide(id,c.id,c.revision,verdict);
-  assert.equal(store.get('SELECT status FROM tasks WHERE id=?',id).status,outcome==='pass'?'completed':outcome==='needs_human'?'needs_replan':'queued');
+  assert.equal(store.get('SELECT status FROM tasks WHERE id=?',id).status,outcome==='pass'?'completed':'queued');
  }
 });
 const residual={key:'accessibility',description:'Missing accessible label in optional export panel',evidence:'Browser inspection at export button',impact:'Keyboard discoverability',nonblocking_reason:'Core requested flow is complete; export polish is independent',goal:'Label the export button',criteria:['Accessible name exposed in browser']};
@@ -85,15 +85,15 @@ test('core gaps, missing mandatory evidence and unacceptable risk cannot pass wi
  assert.throws(()=>validateVerdict({...pass,outcome:'pass_with_issues'}),/residual_mismatch/);
  assert.throws(()=>validateVerdict({...pass,outcome:'return',gaps:[]}),/gap_required/);
 });
-test('no-progress and bounded remediation stop explicitly while unrelated tasks remain runnable',t=>{
+test('three rejected candidates report to Manager while all tasks remain runnable',t=>{
  const {store,records,create}=fixture(t);create('a');create('other');
  const verdict={...pass,outcome:'return',core_complete:false,gaps:['Requirement missing']};
- for(let i=0;i<3;i++){const c=submit(records,'a','v'+i);const a=records.decide('a',c.id,c.revision,verdict);assert.equal(a.exhausted,i===2);}
- assert.equal(store.get("SELECT error_code FROM tasks WHERE id='a'").error_code,'acceptance_no_progress');assert.equal(store.get("SELECT status FROM tasks WHERE id='other'").status,'queued');
+ for(let i=0;i<3;i++){const c=submit(records,'a','v'+i);const a=records.decide('a',c.id,c.revision,verdict);assert.equal(a.exhausted,false);}
+ assert.equal(store.get("SELECT status FROM tasks WHERE id='a'").status,'queued');assert.equal(store.get("SELECT count(*) n FROM task_history WHERE type='retry_report'").n,1);assert.equal(store.get("SELECT status FROM tasks WHERE id='other'").status,'queued');
 });
-test('repeated identical rejected candidate has a finite exit',t=>{
+test('repeated identical rejected candidates remain repairable',t=>{
  const {store,records,create}=fixture(t);create('a');const c=submit(records,'a');const v={...pass,outcome:'insufficient_evidence',required_evidence_complete:false,gaps:['missing raw output']};
- records.decide('a',c.id,c.revision,v);assert.equal(records.decide('a',c.id,c.revision,v).exhausted,true);assert.equal(store.get("SELECT status FROM tasks WHERE id='a'").status,'needs_replan');
+ records.decide('a',c.id,c.revision,v);assert.equal(records.decide('a',c.id,c.revision,v).exhausted,false);assert.equal(store.get("SELECT status FROM tasks WHERE id='a'").status,'queued');
 });
 test('restart persists task contract, candidate, project facts, progress, acceptance and residual identity',t=>{
  const dir=mkdtempSync(join(tmpdir(),'bot-task-record-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));

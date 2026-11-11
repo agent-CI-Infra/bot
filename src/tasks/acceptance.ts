@@ -119,7 +119,7 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
     records.history(task.id,'acceptance_fault',{evaluation_id:evaluationId,candidate_id:candidate.id,elapsed_ms:Date.now()-start,code:(error as any).code||'runtime_fault'});
     if(['acceptance_output_invalid','agent_turn_limit','acceptance_budget_exhausted'].includes((error as any).code)){
       const failures=store.get("SELECT count(*) n FROM task_history WHERE task_id=? AND type='acceptance_fault' AND json_extract(data,'$.candidate_id')=? AND json_extract(data,'$.code') IN ('acceptance_output_invalid','agent_turn_limit','acceptance_budget_exhausted')",task.id,candidate.id)?.n||0;
-      if(failures>=3)return stop('acceptance_unavailable','needs_replan','独立验收连续三次未能产生有效结论，候选与故障记录已保留；需要检查验收配置后重试。');
+      if(failures>=3)return stop('acceptance_unavailable','needs_replan','独立验收未能产生有效结论，候选与故障记录已保留；交回 Manager 决定恢复方法。');
     }
     if((error as any).code==='agent_turn_limit')return stop('acceptance_output_invalid','retry_wait','独立验收达到本轮工具预算，候选已保留，自动重新验收。');
     throw error;

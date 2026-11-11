@@ -325,7 +325,7 @@ test('the project controller runs on the Pi harness, delegates by references and
   // The controller session is its own restricted workspace with only control-plane tools.
   const [session] = [...runner.spaces.values()].filter(sp => sp.parsed);
   assert.notEqual(session.id, workspace.task.workspace_id);
-  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_coordination', 'read_managed_task', 'read_playbook', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'select_playbooks', 'set_task_priority', 'wait_for_tasks']);
+  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'finish_coordination', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_coordination', 'read_managed_task', 'read_playbook', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'select_playbooks', 'set_task_priority', 'wait_for_tasks']);
   assert.deepEqual(session.parsed.control_tools.sort(), session.parsed.tools.map(t => t.function.name).sort());
   assert.deepEqual(session.parsed.capabilities.workspace, { read: false, write: false, notes: false, shell: false });
   for (const body of f.requests.filter(isController)) for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance']) assert.ok(!body.tools.some(t => t.function.name === name));
@@ -610,4 +610,19 @@ test('explicit V2 apply continues a pinned task at a checkpoint and keeps the ap
   f.put({roles:[{role_id:'reviewer',persona_prompt:'Future defaults only.'}]});
   assert.equal((await runRole(f.spec,'reviewer')).instance_id,result.instance_id);
   assert.equal(f.s.get('SELECT config_revision FROM role_instances WHERE id=?',result.instance_id).config_revision,applied.revision);
+});
+
+for (const action of ['continue','wait','needs_help']) test(`Manager can finish ${action} without nominating or publishing`,async t=>{
+ const f=await fixture(t,()=>call('finish_coordination',{action,reason:'Investigation is complete; no delivery intended',help_from:'project owner',resume_condition:'CI account budget restored',delay_seconds:30}));f.put({roles:[{role_id:'manager',harness_ref:{id:'native'}}]});
+ await assert.rejects(runTeam(f.spec,{prepare:async()=>{}}),error=>error.code===(action==='needs_help'?'manager_needs_help':'manager_deferred')&&error.state===(action==='needs_help'?'needs_help':'retry_wait'));
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='manager_disposition'").n,1);
+ assert.equal(f.s.get("SELECT status FROM task_runs WHERE role='manager' ORDER BY rowid DESC LIMIT 1").status,'succeeded');
+});
+
+test('Manager final reserved turn still permits non-delivery disposition instead of forcing nomination',async t=>{
+ const f=await fixture(t,(body,n)=>n<32?call('read_task_history',{limit:1}):call('finish_coordination',{action:'continue',reason:'Preserve investigation and continue later',delay_seconds:30}));f.put({roles:[{role_id:'manager',harness_ref:{id:'native'}}]});
+ await assert.rejects(runTeam(f.spec,{prepare:async()=>{}}),e=>e.code==='manager_deferred');
+ assert.equal(f.requests.at(-1).tool_choice,'auto');assert.ok(f.requests.at(-1).tools.some(t=>t.function.name==='finish_coordination'));
+ assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='delivery_nominated'").n,0);
 });

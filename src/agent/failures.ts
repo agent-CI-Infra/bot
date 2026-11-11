@@ -26,7 +26,7 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     'bot_rule_too_large','too_many_bot_skills','invalid_bot_rule_file','invalid_rule_content','invalid_bot_label','invalid_bot_computer',
     'release_file_invalid','release_tag_invalid','release_sensitive_body','release_notes_too_large','release_empty_repository','release_ci_unsuccessful',
     'actions_scan_window_overflow','actions_report_sensitive','pr_contributing_contract_missing','pr_release_config_invalid','pr_release_category_required'] },
-  task_changed: { label:'任务条件已变化', codes:['task_coordination_requested','task_coordination_pending','coordination_source_cancelled','coordination_claim_revoked','role_revision_checkpoint','harness_cancelled','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
+  task_changed: { label:'任务条件已变化', codes:['manager_deferred','manager_needs_help','task_coordination_requested','task_coordination_pending','coordination_source_cancelled','coordination_claim_revoked','role_revision_checkpoint','harness_cancelled','team_no_progress','role_nomination_stale','acceptance_publication_changed','acceptance_context_changed','checkpoint_context_changed','acceptance_return','acceptance_insufficient_evidence','acceptance_needs_human','acceptance_no_progress','object_closed_or_draft','pull_request_head_changed','branch_head_changed','branch_disappeared',
     'task_claim_revoked','task_actor_permission_revoked','release_actor_permission_revoked','repository_policy_disabled','review_requires_human_decision','issue_needs_replan','development_not_approved',
     'base_branch_changed','bot_branch_history_changed','revision_scope_unconfirmed','pr_head_pending','bot_pr_identity_changed',
     'bot_pr_author_changed','bot_pr_head_repository_changed','bot_pr_branch_changed','bot_pr_ownership_unconfirmed',
@@ -79,6 +79,9 @@ export function failureCause(code: string, state?: string): FailureCause {
 // repository content, a changed task, a GitHub write whose outcome is unconfirmed, a request GitHub refused.
 const selfHealing = new Set<FailureCause>(['external','model','environment','bot']);
 export function automaticState(code: string, state: string): string {
+  if(state==='needs_help')return state;
+  if(['stage_budget_exhausted','role_budget_exhausted'].includes(code))return 'retry_wait';
+  if(state==='needs_replan')return ['development_not_approved','actions_development_not_approved'].includes(code)?'waiting_permission':'retry_wait';
   // A provider that refused the request itself (HTTP 4xx other than 408/429) answers the same again, like a GitHub 4xx.
   if (/^model_http_4\d\d$/.test(code) && failureCause(code, state) === 'model') return state;
   return state === 'failed' && selfHealing.has(failureCause(code, state)) ? 'retry_wait' : state;
@@ -94,7 +97,7 @@ const environmentFailures = new Set(['execution_interrupted','workspace_init_fai
 // configuration/PR-head waits and manager availability checks keep polling on their own schedule.
 // Waits the control plane ends by itself once the outside condition clears: they are not failed attempts, so they do not
 // consume the retry burst. A role at its concurrency limit is one of them — nothing about the run was tried.
-const capacityWaits = new Set(['github_rate_limited','role_capacity']);
+const capacityWaits = new Set(['manager_deferred','github_rate_limited','role_capacity']);
 export function isAttemptFailure(code: string|null|undefined, state: string) {
   return state==='retry_wait'&&!capacityWaits.has(code||'')||state==='waiting_environment'&&environmentFailures.has(code||'');
 }

@@ -10,7 +10,7 @@ import {acceptanceFixture} from './acceptance-fixture.mjs';
 import {TaskRecords} from '../dist/tasks/service.js';
 
 test('live C replay: published PR QA return resumes real Manager/Dev and passes fresh QA',{
- skip:!process.env.BOT_C_REPLAY_RUNTIME,timeout:600000
+ skip:!process.env.BOT_C_REPLAY_RUNTIME,timeout:Number(process.env.BOT_C_REPLAY_TIMEOUT_MS)||600000
 },async t=>{
  const root=process.env.BOT_C_REPLAY_RUNTIME;mkdirSync(root,{recursive:true});
  const raw=readFileSync(process.env.BOT_C_REPLAY_KEY),key=raw.length===32?raw:Buffer.from(raw.toString().trim(),'hex');
@@ -24,6 +24,8 @@ test('live C replay: published PR QA return resumes real Manager/Dev and passes 
   // Seed the already published, historically accepted PR; every subsequent QA is the real evaluator.
   evaluate:async(n,...args)=>n===1?acceptanceFixture(...args):evaluateDelivery(...args)
  });
+ const snapshot=()=>{try{h.s.db.exec('PRAGMA wal_checkpoint(FULL)');copyFileSync(join(h.root,'control.sqlite'),join(root,'control.sqlite'));chmodSync(join(root,'control.sqlite'),0o600);writeFileSync(join(root,'progress.json'),JSON.stringify({at:new Date().toISOString(),tasks:h.s.all('SELECT status,phase,error_code FROM tasks'),runs:h.s.all('SELECT role,status FROM task_runs'),requests:h.counts()}));}catch{}};
+ const timer=setInterval(snapshot,30000);t.after(()=>{clearInterval(timer);snapshot();});
  new TaskRecords(h.s).contract('t',{goal:'Return the product of a.txt and b.txt clamped to [0,2], preserving unrelated features.',scope:['calc.cjs and relevant tests'],criteria:['Any numeric inputs produce Math.max(0, Math.min(2, a*b)); include negative and above-limit cases','Preserve unrelated files and pass node check.cjs'],endpoint:'reviewable_pull_request',source:{kind:'request'},completeness:'explicit'});
  try{
   h.engine.tick();await Promise.all(h.engine.active.values());let task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify(task));const first=JSON.parse(task.result);

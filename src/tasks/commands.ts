@@ -142,7 +142,7 @@ export class TaskCommands {
     fields(input,[]);const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,match[1]!,...filter.args);
     if(!task)return fail(404,'task_not_found');
     if(this.hooks.active?.(task.id)||['queued','running','preparing','implementing','validating','publishing','result_ready'].includes(task.status))fail(409,'task_already_running');
-    if(!['paused','waiting_coordination','failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status))fail(409,'task_not_retryable');
+    if(!['paused','waiting_coordination','failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan','needs_help'].includes(task.status))fail(409,'task_not_retryable');
     this.store.transaction(()=>{
       // A publish-phase task restarts only when re-planning it cannot strand a branch or PR it already wrote.
       const wrote=!!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id);

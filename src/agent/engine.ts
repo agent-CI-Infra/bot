@@ -39,6 +39,8 @@ import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
 import { currentOperation, Workspace } from './workspace.js';
+import {roleBackendWorkspace} from '../roles/workspace.js';
+import {recoverWithManager} from '../roles/manager-recovery.js';
 import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
@@ -129,6 +131,12 @@ export class TaskEngine {
       if(this.active.has(request.task_id)||this.merging.has(request.task_id))continue;
       this.store.run('UPDATE task_merge_requests SET next_run_at=? WHERE task_id=?',Date.now()+15000,request.task_id);
       const work=this.continueMerge(request).finally(()=>this.merging.delete(request.task_id));this.merging.set(request.task_id,work);
+    }
+    for(const parked of this.store.all("SELECT * FROM tasks WHERE status='needs_replan' AND error_code NOT IN ('base_branch_changed','development_not_approved','actions_development_not_approved')")){
+      if(this.active.has(parked.id))continue;
+      const input=JSON.parse(parked.input||'{}');
+      this.store.run("UPDATE tasks SET status='queued',phase='prepare',input=?,next_run_at=0 WHERE id=? AND status='needs_replan'",JSON.stringify({...input,manager_feedback:{code:parked.error_code,detail:'Legacy parked task: review original records before deciding how to continue. Existing candidates and effects are retained.'}}),parked.id);
+      traceEvent(this.store,parked.id,'manager_recovery_queued',{previous_status:'needs_replan',code:parked.error_code},null,'framework');
     }
     const checkpoint=Date.now();pruneReviewSessions(this.store,checkpoint);
     this.store.run('UPDATE task_metrics SET runtime_ms=runtime_ms+max(0,?-active_since),active_since=? WHERE active_since IS NOT NULL',checkpoint,checkpoint);
@@ -265,6 +273,7 @@ export class TaskEngine {
       redactor.add(config.key);await this.share(task.repository_id);
       attemptRun=beginRun(this.store,task,'attempt',{phase:task.phase,kind:task.kind,model:{id:config.id,name:config.model,version:config.version},policy:this.store.get('SELECT * FROM policies WHERE repository_id=?',task.repository_id)});task.trace_run_id=attemptRun?.id;
       const repo=this.store.get('SELECT * FROM repositories WHERE id=?',task.repository_id)!;
+      await recoverWithManager(this.store,task,guard,redactor,async()=>{if(task.kind==='task.request')return {request:JSON.parse(task.input||'{}').request,contract:records.get(id).contract};const reader=new GitHub(this.store,repo,redactor,guard,this.githubUrl);await reader.connect(false,undefined,{contents:'read',issues:'read',pull_requests:'read'});return reader.object(task.kind,task.object_number);},async(instance,resolved)=>{if(resolved.snapshot.harness.id!=='pi')return;const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment','Manager backend is waiting for the configured project computer.');return roleBackendWorkspace(new Workspace(this.store,this.manager,{...task,generation:environment.generation},redactor,guard,log))(instance,resolved);});
       // A task waiting for its computer retries every few seconds, so it checks the computer before it asks GitHub for
       // anything: four such tasks once used up their installation's hourly GitHub quota while their computer was down.
       let environment:any=null;
@@ -367,7 +376,7 @@ export class TaskEngine {
         if(['pass','pass_with_issues'].includes(verdict.outcome)){records.stage(id,candidate.id,candidate.revision,verdict,token,{policy_hash:policyHash});return {ok:true};}
         const result=records.decide(id,candidate.id,candidate.revision,verdict,'running',false,token);
         if((result as any).coordination_requested)stop('task_coordination_requested','waiting_coordination',String((result as any).coordination_requested));
-        if(verdict.outcome==='needs_human'||result.exhausted)stop(result.exhausted?'acceptance_no_progress':'acceptance_needs_human','needs_replan',verdict.reason+' '+verdict.gaps.join('; '));
+        if(verdict.outcome==='needs_human')traceEvent(this.store,id,'qa_help_suggestion',{reason:verdict.reason,gaps:verdict.gaps},task.trace_run_id,'role:qa');
         // Continue this same execution when called as a tool; a finished report retries with explicit feedback.
         this.store.run("UPDATE tasks SET status='running',phase=? WHERE id=?",task.phase,id);
         return {error:`acceptance_${verdict.outcome}`,reason:verdict.reason,gaps:verdict.gaps};
@@ -791,17 +800,20 @@ export class TaskEngine {
       // A GitHub rate limit is waited out until its window resets (the task resumes then, a few seconds apart from others
       // waiting for the same window); it does not use up the five automatic retries.
       const limited=failure.code==='github_rate_limited';
-      const state=automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
+      if((failure.state==='needs_replan'||['stage_budget_exhausted','role_budget_exhausted'].includes(failure.code))&&!['development_not_approved','actions_development_not_approved'].includes(failure.code)){const saved=JSON.parse(current?.input||'{}');update({input:JSON.stringify({...saved,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),at:new Date().toISOString()}})});}
+      const managerFault=this.store.get("SELECT role,status FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid DESC LIMIT 1",id);
+      const managerRetry=failure.state==='needs_replan'||managerFault?.role===roleConfig(this.store,task).controller.role&&managerFault?.status==='fault';
+      const state=managerRetry&&failure.state==='failed'? 'retry_wait':automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
       const previousCode=current?.retry_error_code||current?.error_code;
       const retries=counted?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:retrying?Number(current?.retry_count||0):0;
       // Once in the slow cycle, a task never starts another burst. Its slots stay relative to its own entry time,
       // including after a restart or a different transient failure. Conditions and rate limits preserve the burst
       // and cycle but use their own wait, so a computer becoming ready need not wait for an eight-hour slot.
-      const cycle=retrying?(current?.retry_cycle_started_at??(counted&&retries>=5?now:null)):null;
+      const cycle=managerRetry?null:retrying?(current?.retry_cycle_started_at??(counted&&retries>=5?now:null)):null;
       // The same stop again waits twice as long as the last time, up to a cap; a different stop starts over. Automatic
       // retries back off too (5 s, 15 s, 45 s, 135 s), so a GitHub or model outage of a few minutes is outlasted.
       const waits=current?.error_code===failure.code?Number(current?.wait_count||0)+1:0,grow=(base:number,cap:number)=>Math.min(base*2**waits,cap);
-      const delay=limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
+      const delay=failure.code==='manager_deferred'?Math.max(5000,failure.retryAfterMs??30000):limited?(failure.retryAfterMs??grow(60000,15*60000))+Math.floor(Math.random()*5000)
         :counted&&cycle!=null?cycle+(Math.floor(Math.max(0,now-cycle)/retryCycleMs)+1)*retryCycleMs-now
         :state==='waiting_configuration'?grow(30000,30*60000):state==='retry_wait'?Math.min(5000*3**(retries-1),300000):grow(5000,5*60000);
       // The module of event work hears that its task ended without a result (a waiting or retried task has not ended).
@@ -816,7 +828,7 @@ export class TaskEngine {
       // A capacity wait never started a run, so it keeps its attempt and its workspace; everything else in the model phase
       // starts the next attempt on a new one.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        state!=='waiting_coordination'&&task.kind!=='task.request'&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
+        state!=='waiting_coordination'&&state!=='needs_help'&&task.kind!=='task.request'&&failure.code!=='role_capacity'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
         // An operation left over from an interrupted run conflicts with the same key again; a new attempt has new keys.
         ['execution_interrupted','tool_operation_conflict'].includes(failure.code)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);

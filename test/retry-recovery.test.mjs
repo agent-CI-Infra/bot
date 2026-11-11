@@ -99,9 +99,9 @@ const conditions=[
   ['head','development.pr','superseded','pull_request_head_changed'],
   ['policy','review.issue','cancelled','repository_policy_disabled'],
   ['policy','development.issue','cancelled','repository_policy_disabled'],
-  ['goal','development.issue','needs_replan','issue_needs_replan'],
+  ['goal','development.issue','retry_wait','issue_needs_replan'],
   // Who is assigned is the Manager's judgement when it starts development, not a recheck (except for Actions reports).
-  ['label','development.issue','needs_replan','development_not_approved'],
+  ['label','development.issue','waiting_permission','development_not_approved'],
   ['owner','development.pr','waiting_permission','bot_pr_author_changed'],
   ['bot_pr_closed','development.issue','cancelled','object_closed_or_draft'],
 ];

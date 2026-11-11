@@ -102,6 +102,7 @@ test('ordinary tasks run single/multiple guides, correct invalid paths, and resu
    store.run("UPDATE tasks SET status='running',workspace_id=NULL,generation=NULL,attempt=attempt+1 WHERE id=?",id);await engine.run(id,'claim');
    assert.ok(restoredLateWrite);assert.ok(store.get("SELECT 1 FROM task_history WHERE task_id=? AND type='checkpoint_restored'",id));
   }
+  if(store.get('SELECT status FROM tasks WHERE id=?',id).status==='queued')await engine.run(id,'claim');
   const result=records.get(id);assert.equal(result.progress.status,'completed',JSON.stringify(store.all('SELECT content FROM task_logs WHERE task_id=?',id)));
   assert.equal(result.selections.length,mode==='multiple'?2:1);assert.equal(result.acceptance.outcome,mode==='multiple'?'pass_with_issues':'pass');
   if(['return','insufficient_evidence'].includes(mode)){
