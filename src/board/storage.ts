@@ -14,6 +14,8 @@ export function boardStorage(store: Store): void {
     CREATE INDEX IF NOT EXISTS board_number_recent ON board_objects(object_number,last_seen DESC);
     CREATE INDEX IF NOT EXISTS board_task_object ON tasks(repository_id,object_number,kind,created_at DESC);
     CREATE INDEX IF NOT EXISTS board_task_latest ON tasks(repository_id,object_number,kind,coalesce(nullif(updated_at,''),created_at) DESC,created_at DESC);
+    -- Everything the board needs from a task (see latestTasks in api.ts), so card lists never read a tasks row.
+    CREATE INDEX IF NOT EXISTS board_task_cover ON tasks(kind,repository_id,object_number,updated_at,created_at,status,id);
     CREATE TABLE IF NOT EXISTS board_fields(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),name TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS board_options(id TEXT PRIMARY KEY,field_id TEXT NOT NULL REFERENCES board_fields(id) ON DELETE CASCADE,
       name TEXT NOT NULL,position INTEGER NOT NULL,UNIQUE(field_id,name),UNIQUE(field_id,id));

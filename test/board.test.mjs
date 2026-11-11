@@ -193,14 +193,33 @@ test('repository, execution and workflow dimensions include releases without lea
   assert.ok(visible.value.cards.filter(c=>c.card_type==='release').every(c=>c.repository_id==='101'));
   assert.ok(!JSON.stringify(visible.value).includes('v9.9.9'));
 });
-test('one-time backfill recovers historical tasks and deliveries and uses indexed object task lookups',async t=>{
+test('one-time backfill recovers historical tasks and deliveries',async t=>{
   const {h,admin,a}=await fixture(t);boardFixtures(h.store);
   await h.hook(a.path,a.secret,'backfill',{repository:{id:101},issue:{number:60,title:'Historical delivery'}});
   h.store.db.exec("DELETE FROM settings WHERE key='board_projection_v1'; DELETE FROM board_objects");
   await h.stop();await h.start();
   assert.equal((await admin('/api/board/cards')).value.cards.length,10);
-  const plan=h.store.all("EXPLAIN QUERY PLAN SELECT id FROM tasks WHERE repository_id=? AND object_number=? AND kind=? ORDER BY coalesce(nullif(updated_at,''),created_at) DESC,created_at DESC,rowid DESC LIMIT 1",'101',3,'review.issue');
-  assert.ok(plan.some(r=>r.detail.includes('board_task_latest')));
+});
+
+// Production: a tasks row stores the task input (about 1 MB on average) before updated_at and result, so the card list,
+// which read those columns from each object's newest review and development task, walked the input of every task it
+// showed or counted (0.8 s with a warm cache, 9 s with a cold one, four times per request).
+test('the card list reads tasks through the covering index; only the page reads development results',async t=>{
+  const {h,admin}=await fixture(t);boardFixtures(h.store);
+  const seen=[],all=h.store.all.bind(h.store),get=h.store.get.bind(h.store);
+  h.store.all=(sql,...args)=>{seen.push(sql);return all(sql,...args);};h.store.get=(sql,...args)=>{seen.push(sql);return get(sql,...args);};
+  try{assert.equal((await admin('/api/board/cards')).status,200);}finally{h.store.all=all;h.store.get=get;}
+  const lists=seen.filter(sql=>/WITH latest AS MATERIALIZED/.test(sql));
+  assert.equal(lists.length,4,'cards, object totals, column counts and work counts');
+  for(const sql of lists){
+    const plan=h.store.all('EXPLAIN QUERY PLAN '+sql).map(r=>r.detail),tasks=plan.filter(d=>/^(SCAN|SEARCH) t\b|^(SCAN|SEARCH) tasks\b/.test(d));
+    assert.ok(tasks.some(d=>/COVERING INDEX board_task_cover/.test(d)),plan.join(' | '));
+    // No task row by primary key per card; general tasks (no object) read their summary from the row, not via the input.
+    assert.ok(!plan.some(d=>/sqlite_autoindex_tasks_1/.test(d)),plan.join(' | '));
+    assert.ok(tasks.every(d=>/board_task_cover/.test(d)),plan.join(' | '));
+  }
+  const results=seen.filter(sql=>/\bresult\b/.test(sql)&&/FROM tasks/.test(sql));
+  assert.equal(results.length,1);assert.match(results[0],/WHERE id IN \(/);
 });
 
 test('saved views restore object scope and filters, column totals cover all pages and permission scopes',async t=>{
