@@ -46,8 +46,11 @@ export function traceStorage(store:Store){
     for(const [name,type] of Object.entries(columns))if(!existing.has(name))store.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
   }
   // Role runs read their own receipts and checkpoints by run (tool_observation, tool_started, role_run_checkpoint,
-  // memory_read). task_history_run starts with task_id, so those reads scanned the whole table (0.8 s each in production).
-  store.db.exec(`CREATE INDEX IF NOT EXISTS task_history_run_type ON task_history(run_id,type,id);`);
+  // memory_read), and a role's usage (budget checks, the usage recorded when a run ends) counts its runs' history and
+  // model requests. task_history_run starts with task_id, so those reads scanned the whole table (0.8 s each in
+  // production, about 4 s for one run's usage).
+  store.db.exec(`CREATE INDEX IF NOT EXISTS task_history_run_type ON task_history(run_id,type,id);
+    CREATE INDEX IF NOT EXISTS model_request_run ON model_requests(run_id);`);
   store.db.exec(`CREATE INDEX IF NOT EXISTS task_history_run ON task_history(task_id,run_id,id);
     DROP TRIGGER IF EXISTS trace_history_scope;
     CREATE TRIGGER trace_history_scope AFTER INSERT ON task_history BEGIN

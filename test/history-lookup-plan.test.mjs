@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Store } from '../dist/storage/database.js';
 import { latestRoleCandidate } from '../dist/roles/schedule.js';
-import { runEvents, toolReceipts } from '../dist/roles/role-run.js';
+import { runEvents, scopeUsage, toolReceipts } from '../dist/roles/role-run.js';
 import { queries } from '../dist/app/queries.js';
 
 // Production: latestRoleCandidate joined task_history on 'task_history:'||h.id, which cannot use the key, so every call
@@ -45,4 +45,24 @@ test('run receipts and the console event list are read through indexes, never by
   assert.match(page, /^SELECT id FROM deliveries/);
   assert.doesNotMatch(plan(page), /TEMP B-TREE|SCAN deliveries\b(?! USING)/, 'the page is read in index order');
   assert.match(rows, /WHERE id IN/);
+});
+
+// Production: when a role run ended, recording its usage counted the runs' tool observations, usage reports and external
+// usage with run_id IN (…) queries; each scanned task_history (0.86 s at 131k rows), about 4 s per ended run. Budget
+// checks during a run use the same queries.
+test('role usage reads history and model requests by run through indexes', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  store.db.exec('PRAGMA foreign_keys=OFF');
+  store.run("INSERT INTO task_runs(id,task_id,kind,attempt,revision,started_at,status,context_snapshot,config_snapshot,lease_scope) VALUES('run','task','role',1,1,?,'succeeded','{}','{}','scope')", new Date().toISOString());
+  const seen = [], all = store.all.bind(store), get = store.get.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push(sql); return get(sql, ...args); };
+  assert.equal(scopeUsage(store, 'scope').runs, 1);
+  store.all = all; store.get = get;
+  const reads = seen.filter(sql => /FROM (task_history|model_requests)\b/.test(sql));
+  assert.ok(reads.length >= 5, `usage queries seen: ${reads.length}`);
+  for (const sql of reads) {
+    const plan = store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
+    assert.doesNotMatch(plan, /\bSCAN (task_history|model_requests|[a-z])\b(?! USING)/, `${sql}\n${plan}`);
+  }
 });
