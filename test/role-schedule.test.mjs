@@ -402,3 +402,14 @@ test('two capacity refusals on one stage neither exhaust it nor pause the task, 
   assert.equal(dev().attempts, 1);
   assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'running');
 });
+
+test('a stopped stage row with no stop_reason still counts as an attempt', async t => {
+  const f = await fixture(t, { stages: [stage('dev', { writer: true, attempts: 2 })] });
+  f.plan(); f.assign('dev', 'dev-1');
+  const r = beginRun(f.s, f.spec().task, 'execution', {});
+  // `stopped` with a NULL reason is not a capacity wait: the null-safe filter must keep it in the attempt count.
+  f.s.run("UPDATE task_runs SET role='dev',assignment_id='dev-1',status='stopped',stop_reason=NULL WHERE id=?", r.id);
+  const dev = () => reconcileAssignments(f.s, 't').stages.find(s => s.stage_id === 'dev');
+  assert.equal(dev().attempts, 1);
+  assert.equal(dev().status, 'ready');
+});
