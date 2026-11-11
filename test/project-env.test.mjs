@@ -64,8 +64,9 @@ test('manager restart rechecks runner and kills uncertain work before becoming r
   assert.equal(f.projects.db.prepare('SELECT state FROM operations').get().state, 'interrupted');
 });
 test('environment API enforces project roles for unfiltered list, detail, start, stop and reset', async t => {
-  const rows = new Map(), operations = new Map();
+  const rows = new Map(), operations = new Map(); let down = false;
   const manager = { async call(method, path, input) {
+    if (down) throw new Error('manager_unavailable');
     const repo = path.split('/')[3], action = path.split('/')[4];
     if (method === 'PUT') rows.set(repo, { repository_id: repo, generation: 1, state: 'ready', desired: 'ready', revision: 1 });
     if (method === 'POST') {
@@ -94,6 +95,17 @@ test('environment API enforces project roles for unfiltered list, detail, start,
   const pendingId=id(); h.store.run("INSERT INTO environment_operations VALUES(?,'101','reset','{}','pending',NULL)", pendingId);
   assert.equal((await member('/api/environments/101/reset','POST',{ operation_id:id(),generation:2 })).status,409);
   assert.equal((await member('/api/environments')).value.environments[0].operation_pending,1);
+  // The detail says when it was read and whether the manager answered; a manager that cannot be reached is not a stopped
+  // computer, so the console must be able to tell the two apart.
+  const answered = (await member('/api/environments/101')).value.environment;
+  assert.equal(answered.reachable, true);
+  assert.ok(!Number.isNaN(Date.parse(answered.observed_at)), answered.observed_at);
+  down = true;
+  await h.projects.reconcile();
+  const unreachable = (await member('/api/environments/101')).value.environment;
+  assert.equal(unreachable.reachable, false);
+  assert.ok(!Number.isNaN(Date.parse(unreachable.observed_at)), unreachable.observed_at);
+  assert.equal(unreachable.state, 'unavailable');
 });
 
 test('the project computer spec is validated by the manager, survives restarts and is applied by recreating the container', async t => {

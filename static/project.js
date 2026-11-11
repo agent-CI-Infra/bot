@@ -476,10 +476,17 @@ function concurrencyForm() {
 function machineStatus() {
   const environment = current.environment; if (!environment) return [note('暂时读不到虚拟电脑状态。')];
   const env = environment.environment, pc = env.computer || {}, machine = card('机器'), lifecycle = element('div', '', 'actions');
-  machine.append(facts([['状态', state(env.state)], ['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
+  // Three facts decide how to read this card: whether the manager answered at all, when the answer was read, and what
+  // limits the computer has. `已停止` is a state the manager reported; `管理服务不可达` means there is no live answer.
+  const reachable = env.reachable !== false;
+  const stateCell = reachable ? (Object.hasOwn(states, env.state) ? state(env.state) : badge(`未知状态（${env.state}）`, 'warning')) : badge('管理服务不可达', 'danger');
+  machine.append(facts([['状态', stateCell], ['数据时间', timestamp(env.observed_at)], ['容器', pc.container],
+    ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
+    ['资源上限', pc.cpus ? `${pc.cpus} CPU · ${pc.memory_mb} MB 内存 · ${pc.pids} 进程 · /tmp ${pc.tmp_mb} MB` : null],
     ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null], ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null],
     ['资源', pc.resources_pending ? '全局默认资源已改，等没有任务运行时按新值重建' : null],
     ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', environmentFault(env.error)]]));
+  if (!reachable) machine.append(note('manager 读不到时这里显示的是最近保存的记录，不是实时状态；先看 docker compose -p bot logs manager，以及本页「故障」里 manager 连不上的原因。'));
   lifecycle.append(...environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error)); machine.append(lifecycle);
   return [machine, usageCard(), preparationCard(pc)];
 }

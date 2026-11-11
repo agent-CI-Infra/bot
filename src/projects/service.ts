@@ -205,7 +205,10 @@ export class ProjectService {
         exit_code: command.exit_code ?? null, timed_out: !!command.timed_out, error: command.error ?? null });
       if (commands.length >= 30) break;
     }
+    // `observed_at` is when this read happened; `reachable` says whether it is the manager's live state or the last saved
+    // record, so the console can tell "unreachable" from "stopped" and never shows a stale state as a measurement.
     return { environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer: live?.computer || null,
+        observed_at: new Date().toISOString(), reachable: !!live,
         operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
       running_tasks: this.store.all(`SELECT t.id,t.kind,t.status,t.phase,t.object_number,c.claimed_at FROM task_claims c JOIN tasks t ON t.id=c.task_id
         WHERE c.repository_id=? ORDER BY c.claimed_at,t.id`, id),
