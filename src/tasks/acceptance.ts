@@ -18,6 +18,18 @@ import { randomId } from '../core/security.js';
 export { acceptanceInstructions as acceptanceSystem } from '../roles/pool.js';
 import { acceptanceInstructions as acceptanceSystem } from '../roles/pool.js';
 const tool=(name:string,description:string,properties:any,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
+/** Issue execution keeps its file index under context; managed requests also use a top-level file map. */
+export function acceptanceContextFiles(...inputs:any[]):string[]{
+  const paths:string[]=[];
+  for(const input of inputs)for(const index of [input?.context_files,input?.context?.context_files]){
+    const names=Array.isArray(index)?index.map(file=>typeof file==='string'?file:file?.path):index&&typeof index==='object'?Object.keys(index):[];
+    for(const name of names)if(typeof name==='string'&&name)paths.push(name.startsWith('../context/')?name:'../context/'+name);
+  }
+  return [...new Set(paths)];
+}
+export const acceptanceRequirements=(completeness?:string)=>completeness==='explicit'
+ ?'The explicit contract defines this delivery. Use the listed original sources when needed to check its referenced requirements.'
+ :'This contract is a condensed summary, not the complete original requirements. Read the original request in context_files (object.json contains the full Issue/PR body) before judging completion. Its explicit behavior, boundary cases and compatibility requirements still apply even when omitted from the summary. Candidate claims and passing tests do not replace the original request. If a source is unavailable, report that fact rather than assuming the summary is complete.';
 export async function evaluateDelivery(store: Store, task: Row, workspace: Workspace, redactor: Redactor, guard:()=>Promise<void>, shell=true): Promise<Verdict> {
   const candidate=JSON.parse(store.get('SELECT candidate FROM task_records WHERE task_id=?',task.id)?.candidate??'null');
   const verdict=await evaluateCandidate(store,task,workspace,redactor,guard,shell);
@@ -33,6 +45,8 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
   assertRequiredStages(store,task.id,deliveryCandidate(candidate,task.kind));
   const related=relatedDeliveries(store,task);
   const parentContext=related.find(r=>r.description.relationship==='parent');
+  const contextFiles=acceptanceContextFiles(JSON.parse(task.input||'{}'),parentContext?JSON.parse(parentContext.row.input||'{}'):null);
+  if(parentContext)contextFiles.push('../context/parent-delivery.json','../context/related-deliveries.json');
   const tools=[tool('read_evidence','Read a paginated original observation by offered source or task_history:<id> belonging to this task; old observations retain their original version',{source:{type:'string'},offset:{type:'integer'},length:{type:'integer'}},['source']),tool('read_task_history','Read this task’s most recent factual observations and checkpoints; offset/next_offset page backward to older facts. Never executor conversation',{offset:{type:'integer'},limit:{type:'integer'}},[]),tool('read_file','Read raw artifact or repository text',{path:{type:'string'}},['path'])];
   if(related.length)tools.push(relatedArtifactTool);
   const hasMemory=!!store.get('SELECT 1 FROM project_memories WHERE repository_id=? LIMIT 1',task.repository_id);if(hasMemory)tools.push(...memoryTools.filter(t=>t.function.name!=='remember_project_memory'));
@@ -78,7 +92,9 @@ async function evaluateCandidate(store: Store, task: Row, workspace: Workspace, 
     }
     const model=roleExecutionModel(store,task,'qa');
     const {result:verdict}=await runRole({store,task,redactor,guard,model,maxOutputTokens:/^deepseek/i.test(model.model)?16384:8192,system:acceptanceSystem,
-      prompt:JSON.stringify({project_memory:hasMemory?new ProjectMemory(store).context({...task,active_role:'qa',head_sha:snapshot?.local_sha||task.head_sha}):undefined,contract:record.contract,scope_differences:record.scope_differences.map(d=>({...d,version_matches_candidate:candidate.artifacts.some(a=>a.version===d.source_version)})),revision:record.revision,project:record.project,candidate:boundedCandidate(candidate),previous_verification_evidence:previousVerificationEvidence(store,task.id,candidate),related_deliveries:related.map(r=>r.description),context_files:[...new Set([...Object.keys(parentContext?JSON.parse(parentContext.row.input||'{}').context_files||{}:{}),...Object.keys(sourceInput.context_files||{}),...(parentContext?['parent-delivery.json','related-deliveries.json']:[])])].map(p=>'../context/'+p),additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
+      prompt:JSON.stringify({project_memory:hasMemory?new ProjectMemory(store).context({...task,active_role:'qa',head_sha:snapshot?.local_sha||task.head_sha}):undefined,contract:record.contract,
+        requirements_instruction:acceptanceRequirements(record.contract.completeness),
+        scope_differences:record.scope_differences.map(d=>({...d,version_matches_candidate:candidate.artifacts.some(a=>a.version===d.source_version)})),revision:record.revision,project:record.project,candidate:boundedCandidate(candidate),previous_verification_evidence:previousVerificationEvidence(store,task.id,candidate),related_deliveries:related.map(r=>r.description),context_files:[...new Set(contextFiles)],additional_verification:additionalVerification?{...additionalVerification,output:String(additionalVerification.output||'').slice(-8000)}:undefined,previous_acceptance:record.pending||record.acceptance,prior_staged_residuals:store.all("SELECT data FROM task_history WHERE task_id=? AND type='acceptance_staged' AND json_array_length(json_extract(data,'$.residuals'))>0 ORDER BY id DESC LIMIT 1",task.id).map(row=>JSON.parse(row.data)),
         delivery_boundary:files?.kind==='code'?{stage:'pre_publication',remaining:'Framework creates or updates the PR after acceptance; judge candidate readiness, do not require an unpublished URL or claim it exists.'}:undefined,
         policy:{test_command:candidate.artifacts.some(a=>a.kind==='code')?store.get('SELECT test_command FROM policies WHERE repository_id=?',task.repository_id)?.test_command||null:null},workspace:'Candidate files are available at their original paths.'}),
       tools,requestPrefix:`acceptance:${evaluationId}:`,maxTurns:32,maxOutputChars:40000,finish:{name:'submit_acceptance',validate:validateDecision,finalizationMessage:'Verification tools are closed for this attempt. Use the inspected artifacts and versioned observations to submit_acceptance now. Do not invent proof or defer a missing core goal as a residual. Missing raw proof is insufficient_evidence; unresolved necessary authority is needs_human. If the evaluation itself cannot finish despite available evidence, submit evaluation_incomplete as an infrastructure fault. This concludes this one acceptance; no recursive acceptance is created.'},finalizationTools:['submit_acceptance'],

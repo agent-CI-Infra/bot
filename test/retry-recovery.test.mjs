@@ -32,7 +32,13 @@ test('a cached started receipt left by an older run cannot bypass the runner liv
 for(const kind of ['review.issue','development.issue'])for(const fault of ['transport','interrupted']){
   test(`${kind}: ${fault} after attempt 3 reaps the process and restarts with a fresh receipt, including eight-hour retries`,async t=>{
     let failing=true,requests=0;const starts=[],processes=new Map();
-    const model=createServer(async(req)=>{for await(const _ of req);requests++;req.socket.destroy();});
+    const model=createServer(async(req,res)=>{
+      let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);
+      if(body.tools?.some(t=>t.function.name==='submit_retry_decision')){
+        res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',tool_calls:[{id:'continue_retry',type:'function',function:{name:'submit_retry_decision',arguments:JSON.stringify({action:'continue_retry',reason:'Preserve this transport recovery test; keep retrying'})}}]}}]}));return;
+      }
+      requests++;req.socket.destroy();
+    });
     model.listen(0,'127.0.0.1');await once(model,'listening');t.after(()=>new Promise(resolve=>model.close(resolve)));
     const h=await emptyRepositoryFixture(t,{
       modelUrl:'http://127.0.0.1:'+model.address().port+'/v1',

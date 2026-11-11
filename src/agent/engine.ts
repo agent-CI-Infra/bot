@@ -8,6 +8,8 @@ import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions 
 import { TaskCommands } from '../tasks/commands.js';
 import { authorize, resolvePrincipalActor } from '../identity/authorization.js';
 import { recoverRoleCheckpoint } from '../roles/recovery.js';
+import {assessRetryReport} from '../roles/retries.js';
+import {recordRetryFailure,resolveExecutionRetries,retryNeedsInvestigation} from '../tasks/retries.js';
 import { controlled,roleConfig,roleExecutionModel } from '../roles/run.js';
 import { mergeApi } from '../roles/merge.js';
 import { roleApi } from '../roles/api.js';
@@ -329,6 +331,8 @@ export class TaskEngine {
         }
       };
       workspace=new Workspace(this.store,this.manager,task,redactor,guard,log);
+      await assessRetryReport(this.store,task,workspace,github,guard,redactor);
+      const investigateRetry=retryNeedsInvestigation(this.store,id);
       // Reuse a check only at the immediately following phase boundary in this run. A resumed run or a
       // ReviewUpdated loop starts without this credit and must read the current object before continuing.
       let validatedPhase:'model'|'publish'|undefined;
@@ -555,7 +559,7 @@ export class TaskEngine {
             computer:computerSummary(environment.computer),...managerContext(input)}};
         update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
         if(development&&input.integration)await restoreCheckpoint(this.store,task,workspace,ref.object.sha);
-        if(development&&input.integration&&!input.integration.conflicts?.length){
+        if(development&&input.integration&&!input.integration.conflicts?.length&&!investigateRetry&&!['return','insufficient_evidence'].includes(records.get(id).acceptance?.outcome)){
           // Clean three-way integration needs verification, not a fresh development loop.
           const integration=input.integration,prior=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
           const artifact=await workspace.artifact('integration-artifact:'+integration.id+':'+ref.object.sha);
@@ -670,7 +674,7 @@ export class TaskEngine {
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
           const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,summary:args.summary,change_title:args.change_title,test_command:args.test_command,release_label:args.release_label,
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
-            ...(input.integration?{publication_key:input.integration.id,integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
+            publication_key:input.publication_key||input.integration?.id,...(input.integration?{integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
           if(!development)return publishPullRequest();
           update({result:JSON.stringify(args),phase:'publish'});
@@ -755,12 +759,11 @@ export class TaskEngine {
         else {
           const published=await publishDevelopment();
           if('error' in published&&published.error){
-            if(this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",id))stop('acceptance_publication_changed','needs_replan','已部分发布的候选需要修订；保留现有 GitHub 成果，请根据验收缺口安排已有 PR 的修订。');
             const saved=JSON.parse(this.store.get('SELECT data FROM development_candidates WHERE task_id=?',id)!.data);
             const recovery={source_workspace_id:task.workspace_id,base_sha:saved.base_sha,revision:records.get(id).revision,sha:saved.local_sha,tree_sha:saved.tree_sha,created_at:new Date().toISOString()};
             records.atomic(()=>{
               const current=JSON.parse(this.store.get('SELECT input FROM tasks WHERE id=?',id)!.input);
-              this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({...current,recovery}),id);records.history(id,'artifact_checkpoint',recovery);
+              this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({...current,recovery,publication_key:'qa-revision:'+task.attempt}),id);records.history(id,'artifact_checkpoint',recovery);
               update({phase:'prepare',status:'queued',workspace_id:null,generation:null,messages:null,result:null,model_started:0,publication_started:0,attempt:task.attempt+1});
             });
             stop(String(published.error),'queued',String((published as any).reason||'独立验收要求修订或补证。'));
@@ -805,6 +808,7 @@ export class TaskEngine {
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))update({status:state,error_code:failure.code,retry_count:retries,wait_count:waits,
         retry_error_code:counted?failure.code:retrying?current?.retry_error_code??null:null,retry_cycle_started_at:cycle,
         rate_limit_bucket:limited?failure.bucket??null:null,next_run_at:now+delay});
+      if(counted&&current?.claim_token===token&&!['cancelled','superseded'].includes(current.status))recordRetryFailure(this.store,task,{group:'execution:'+failure.code,occurrence:attemptRun!.id,code:failure.code,detail:redactor.text(String(failure.detail||''))});
       if(workspace&&task.phase==='model'&&controlled(this.store,task,'development')&&task.kind.startsWith('development.')&&task.workspace_id){try{await checkpoint(this.store,task,workspace);}catch(saved){records.history(id,'checkpoint_fault',{phase:'role_failure_recovery',code:(saved as any).code||'snapshot_failed'});}}
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
@@ -824,7 +828,7 @@ export class TaskEngine {
       const last=previous?JSON.parse(previous.content):null,detail=redactor.clean(failure.detail);
       if(current?.error_code!==failure.code||last?.code!==failure.code||last?.state!==state||last?.retry_cycle_started_at!==(cycle??undefined)||(last?.detail_sha||sha(last?.detail||''))!==sha(detail||''))
         log({type:'fault',state,code:failure.code,...(cycle!=null?{retry_cycle_started_at:cycle}:{}),...(detail?{detail,detail_sha:sha(detail)}:{})});
-    }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);endRun(this.store,attemptRun,['completed','succeeded','pr_opened'].includes(current?.status)?'succeeded':'stopped',current?.error_code);}
+    }finally{const current=this.store.get('SELECT status,error_code FROM tasks WHERE id=?',id);if(['completed','succeeded','pr_opened'].includes(current?.status))resolveExecutionRetries(this.store,id);endRun(this.store,attemptRun,['completed','succeeded','pr_opened'].includes(current?.status)?'succeeded':'stopped',current?.error_code);}
   }
   // The command a running task is executing right now, with its output so far, read from the project computer.
   async live(user:Actor,id:string,url:URL):Promise<Json>{
