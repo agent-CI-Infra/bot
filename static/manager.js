@@ -14,7 +14,7 @@ const eventCaptions = [['actions.run_failed', '接收默认分支的 Actions 失
 const dispatchEventNames = { 'issue.opened': 'Issue 打开', 'issue.updated': 'Issue 更新', 'issue.mention': 'Issue 提及', 'issue.labeled': 'Issue 加标签', 'pull_request.opened': 'PR 打开',
   'pull_request.synchronize': 'PR 推送', 'pull_request.updated': 'PR 讨论', 'pull_request.mention': 'PR 提及', 'pull_request.labeled': 'PR 加标签', 'review.published': '检视发布',
   'release.manual': '发版本', 'actions.run_failed': 'Actions 失败', 'gate.manual': '接入门禁', 'schedule.due': '定时检查' };
-const decisionNames = { create: ['新建任务', 'success'], continue: ['续接任务', 'info'], ignore: ['不处理', ''] };
+const decisionNames = { create: ['新建任务', 'success'], continue: ['续接任务', 'info'], ignore: ['不分派任务', ''] };
 function managerSection(roles) {
   const id = current.id, holder = element('div', '', 'manager-page'), message = element('p', '', 'view-error');
   message.setAttribute('role', 'alert'); holder.append(note('正在读取 Manager 配置…'));
@@ -44,7 +44,7 @@ function managerPromptCard(manager, refresh) {
   const editor = textarea('prompt', draft.value, { rows: 24, spellcheck: false });
   editor.addEventListener('input', () => { draft.value = editor.value; draft.dirty = true; });
   editor.setAttribute('aria-label', 'Manager 提示词');
-  section.append(note('这是 Manager 实际读取的完整分派提示词。直接编辑整份内容，无需章节编号或特殊格式。它决定新建任务、续接任务或不处理；修改提示词不会增加工具或写入权限。'));
+  section.append(note('这是 Manager 实际读取的完整分派提示词。直接编辑整份内容，无需章节编号或特殊格式。它决定新建任务、续接任务或不再分派；分派中可使用角色已授权的工具，修改提示词不会增加权限。'));
   current.managerEditor = { editor, initial: manager.prompt.content };
   const submit = element('button', '保存 Manager 提示词'); submit.type = 'submit';
   form.append(field('完整提示词', editor), message, submit);
@@ -72,7 +72,7 @@ async function managerChanged() {
 function eventFiltersCard(manager, refresh) {
   const section = card('交给 Manager 的事件'), form = document.createElement('form'), message = element('p', '', 'view-error'), events = manager.events;
   section.dataset.overviewAnchor = 'manager-events'; form.className = 'project-form'; message.setAttribute('role', 'alert');
-  section.append(note(`草稿、已关闭的对象、bot 自己写的内容和仓库外人员的评论始终不会交给 Manager。这里关掉的事件同样不会到达 Manager，也不会产生分派调用；开着的事件每个都调用一次 Manager 模型。提到 bot 指评论里写了 ${manager.mention_names.map(name => '@' + name).join('、') || '（部署关闭了提及）'}。`));
+  section.append(note(`草稿、已关闭的对象、bot 自己写的内容和仓库外人员的评论始终不会交给 Manager。这里关掉的事件同样不会到达 Manager，也不会产生分派调用；被接收的事件各进入一次 Manager 分派，分派中可以进行多轮模型和工具调用。提到 bot 指评论里写了 ${manager.mention_names.map(name => '@' + name).join('、') || '（部署关闭了提及）'}。`));
   const boxes = element('div', '', 'manager-events');
   for (const [key, caption] of eventCaptions) boxes.append(checkbox('event:' + key, events[key], caption));
   const labels = (key, caption) => field(caption, input(key, events[key].join(', '), { placeholder: '逗号分隔；留空表示加标签不交给 Manager' }));
@@ -106,7 +106,7 @@ function dispatchCard() {
     control.value = filters[name]; form.append(field(label, control)); return control;
   };
   choose('state', '分派状态', [['', '全部状态'], ['pending', '等待或自动重试'], ['dispatching', 'Manager 处理中'], ['failed', '等待人工重试'], ['decided', '已决定']]);
-  choose('decision', '分派结果', [['', '全部结果'], ['create', '新建任务'], ['continue', '续接任务'], ['ignore', '不处理']]);
+  choose('decision', '分派结果', [['', '全部结果'], ['create', '新建任务'], ['continue', '续接任务'], ['ignore', '不分派任务']]);
   const type = input('type', filters.type, { placeholder: '例如 issue.opened', maxLength: 80 }); form.append(field('事件类型', type));
   for (const [key, label] of [['from', '开始时间（含）'], ['until', '结束时间（不含）']]) {
     let value = ''; if (filters[key] && Number.isFinite(Date.parse(filters[key]))) { const d = new Date(filters[key]); value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
@@ -115,7 +115,7 @@ function dispatchCard() {
   const apply = element('button', '应用分派筛选'); apply.type = 'submit';
   const refresh = button('重新读取分派', () => void load(false)), more = button('更早的分派', () => void load(true)), count = note('尚未读取，分派状态未知。'); more.hidden = true;
   form.append(apply);
-  section.append(note('筛选事件收到的时间；时间按本机时区 ' + Intl.DateTimeFormat().resolvedOptions().timeZone + ' 输入。等待和读取失败不能当作不处理。'), form, element('div', '', 'actions'), message, count, list, more);
+  section.append(note('筛选事件收到的时间；时间按本机时区 ' + Intl.DateTimeFormat().resolvedOptions().timeZone + ' 输入。这里显示最终任务分派，工具操作需结合已保存理由核对。等待或读取失败时，最终决定仍未知。'), form, element('div', '', 'actions'), message, count, list, more);
   form.nextElementSibling.append(refresh);
   const dialog = document.createElement('dialog'); dialog.className = 'dispatch-detail'; dialog.setAttribute('aria-label', '分派详情');
   const detailMessage = element('p', '', 'view-error'), body = element('div', '', 'dispatch-detail-body'), footer = element('div', '', 'actions'); detailMessage.setAttribute('role', 'alert');
@@ -178,7 +178,7 @@ function dispatchCard() {
     if (event.error) body.lastChild.append(element('p', '最近失败：' + event.error.code + (event.error.detail ? ' · ' + event.error.detail : ''), 'view-error'));
     if (event.state === 'pending' && event.next_run_at) body.lastChild.append(note('下次允许自动尝试：' + timestamp(new Date(event.next_run_at).toISOString())));
     const tasks = group('关联任务');
-    if (!value.tasks.length) tasks.append(note(event.state === 'decided' && event.decision === 'ignore' ? 'Manager 决定不处理，没有关联任务。' : '当前没有可读取的关联任务；分派结果不等于任务已完成。'));
+    if (!value.tasks.length) tasks.append(note(event.state === 'decided' && event.decision === 'ignore' ? '本次没有关联的新建或续接任务。工具操作应结合已保存理由与实际记录核对。' : '当前没有可读取的关联任务；分派结果不等于任务已完成。'));
     for (const task of value.tasks) tasks.append(button(`${task.relation === 'created' ? '新建' : '续接'} · ${task.kind} · ${task.id.slice(0, 8)} · ${task.status}`, () => { dialog.close(); if (live()) openTask(task.id); }));
     const history = group('人工重试记录', note('重试沿用同一事件编号，原决定的幂等约束继续生效；只有失败状态可以请求人工重试。这里显示最近 50 条人工重试，不表示任务一定成功。'));
     if (!value.retries.length) history.append(note('没有人工重试记录。'));
