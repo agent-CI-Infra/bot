@@ -6,7 +6,7 @@ import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
-  const sent = [], state = { sendFailures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', currentAppName: null, applicationCode: 0, applicationId: null, tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
+  const sent = [], state = { sendFailures: 0, reactionRequests: [], reactions: [], reactionHandler: null, reactionSequence: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', currentAppName: null, applicationCode: 0, applicationId: null, tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
     audienceRequests: [], audience: null, inChat: true, profileRequests: [], profileGate: null, profileCode: 0, profileOpenId: null, profileName: '张小明', scopeCode: 0, scopes: null, scopeRequests: 0,
     members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
   return { sent, state, fetch: async (url, init) => {
@@ -16,6 +16,18 @@ export function transport() {
       const auth = JSON.parse(init.body); state.authRequests.push({ url, tenant_key: auth.tenant_key, app_id: auth.app_id });
       if (url.endsWith('/app_access_token')) return Response.json({ code: 0, app_access_token: 'fixture-app-access-token' });
       return Response.json({ code: state.authCode, tenant_access_token: 'fixture-only-access-token', msg: 'fixture-feishu-app-secret' });
+    }
+    if (url.includes('/reactions')) {
+      const path = new URL(url).pathname.split('/'), message = decodeURIComponent(path[5]), reaction = path[7] && decodeURIComponent(path[7]);
+      const request = { url, method: init.method, message, reaction, ...(init.body ? JSON.parse(init.body) : {}) };
+      state.reactionRequests.push(request);
+      if (state.reactionHandler) { const response = await state.reactionHandler(request); if (response) return response; }
+      if (init.method === 'POST') {
+        const item = { message, reaction_id: 'reaction-' + ++state.reactionSequence, operator: { operator_type: 'app', operator_id: 'cli_fixture' }, reaction_type: request.reaction_type };
+        state.reactions.push(item); return Response.json({ code: 0, data: item });
+      }
+      if (init.method === 'DELETE') { state.reactions = state.reactions.filter(r => r.reaction_id !== reaction || r.message !== message); return Response.json({ code: 0, data: {} }); }
+      return Response.json({ code: 0, data: { items: state.reactions.filter(r => r.message === message), has_more: false } });
     }
     if (state.sendFailures && ['POST', 'PATCH'].includes(init.method) && url.includes('/im/v1/messages')) {
       state.sendFailures--; return Response.json({ code: 999, msg: 'fixture failure' }, { status: 503 });

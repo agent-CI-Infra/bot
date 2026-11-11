@@ -105,7 +105,7 @@ async function renderFeishuSetup(panel, request) {
         '在“权限管理 → 批量导入/导出”一次导入下方当前应用类型的完整权限 JSON，包含消息收发、卡片、群历史和群成员核验；企业自建另含获取企业信息。保存连接后，连接列表会自动检查这些权限是否已开通。成员变更和应用生命周期事件按订阅界面的提示开通所需权限。',
         '记录“凭证与基础信息”里的 App ID、App Secret。HTTP 接收还需“事件与回调 → 加密策略”里的 Verification Token 和 Encrypt Key。']),
       permissions, installationNote,
-      note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。已有应用也需补齐并发布新版本。历史读取使用 im:message:readonly，群历史还需要 im:message.group_msg。缺权限会显示同步受阻；不会宣称已同步全部历史。'),
+      note('卡片是默认功能：cardkit:card:write 用于创建与更新卡片，im:message:send_as_bot 用于发送和更新机器人消息卡片；还必须在后续“回调配置”添加 card.action.trigger，权限导入不会自动订阅回调。收到消息后的处理中表情需要 im:message.reactions:write_only；已有应用也需补齐并发布新版本。历史读取使用 im:message:readonly，群历史还需要 im:message.group_msg。缺权限会显示同步受阻；不会宣称已同步全部历史。'),
       note('长连接不需要公网事件地址；身份绑定仍需用户浏览器能够访问控制台并登录平台，可使用本地账户或 GitHub 登录。HTTP 必须使用飞书可访问的公网 HTTPS 地址。'),
       channelLink('#/settings/access', '配置公网 HTTPS 地址'), button('应用已准备，填写凭据', () => { feishuChoice = { id, application_type: application.value, transport: transport.value }; go(); }, ''));
   } else if (step === 1) {

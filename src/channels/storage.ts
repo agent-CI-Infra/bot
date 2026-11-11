@@ -16,6 +16,9 @@ export function channelStorage(store: Store): void {
       dedup_key TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,error TEXT,conversation_id TEXT,message_id TEXT,
       created_at INTEGER NOT NULL,UNIQUE(connector_id,event_id),UNIQUE(connector_id,dedup_key));
     CREATE INDEX IF NOT EXISTS channel_inbox_conversation ON channel_inbox(conversation_id);
+    CREATE TABLE IF NOT EXISTS channel_reactions(source_event TEXT PRIMARY KEY REFERENCES channel_inbox(id),
+      state TEXT NOT NULL,reaction_id TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,last_error TEXT);
+    CREATE INDEX IF NOT EXISTS channel_reactions_pending ON channel_reactions(state,next_attempt);
     CREATE TABLE IF NOT EXISTS channel_sessions(id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,installation_tenant TEXT NOT NULL,
       actor_tenant TEXT NOT NULL,actor_id TEXT NOT NULL,chat_id TEXT NOT NULL,thread_id TEXT NOT NULL,
       project_id TEXT NOT NULL,principal_id TEXT NOT NULL,conversation_id TEXT NOT NULL,last_message_at INTEGER NOT NULL DEFAULT 0,
