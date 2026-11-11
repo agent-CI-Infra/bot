@@ -44,6 +44,32 @@ test('项目导航只列真实页面，管理对话的深链不丢页，移动�
       await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
+    // Tablet edge: 768 is already the desktop shell (side rail), 767 is the phone shell with the bottom bar.
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await expect(page.locator('#console-sidebar')).toBeVisible();
+    await expect(page.locator('#console-mobile-nav')).toBeHidden();
+    await page.setViewportSize({ width: 767, height: 1024 });
+    await expect(page.locator('#console-mobile-nav')).toBeVisible();
+    // Keyboard: Tab moves through the project entries in order and the focused entry draws a focus ring.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(h.admin + '/#/projects/101/overview');
+    await expect(current).toHaveText('项目总览');
+    const first = nav.getByRole('link', { name: '项目总览', exact: true }), second = nav.getByRole('link', { name: '基本设置', exact: true });
+    await first.focus(); await page.keyboard.press('Tab');
+    await expect(second).toBeFocused();
+    await expect(second).toBeInViewport();
+    const ring = await second.evaluate(node => { const s = getComputedStyle(node); return [s.outlineStyle, s.outlineWidth, s.boxShadow]; });
+    expect(ring[0] !== 'none' && parseFloat(ring[1]) > 0 || ring[2] !== 'none').toBe(true);
+    // Escape closes the floating chat and puts focus back on the entry that opened it.
+    await nav.getByRole('link', { name: '管理对话', exact: true }).click();
+    await expect(page.locator('#management-chat')).toBeVisible();
+    const message = page.getByLabel('管理消息', { exact: true });
+    await expect(message).toBeVisible(); await message.focus();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#management-chat')).toBeHidden();
+    // The chat's own launcher takes focus back, so the keyboard is never dropped somewhere invisible.
+    await expect(page.locator('#management-launcher')).toBeVisible();
+    await expect(page.locator('#management-launcher')).toBeFocused();
     // The phone keeps four bottom entries and every destination behind 更多, grouped, with touch-sized targets.
     await page.setViewportSize({ width: 390, height: 844 });
     const bottom = page.locator('#console-mobile-nav a');
