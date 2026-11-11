@@ -59,11 +59,11 @@ function knowledgeSection() {
   };
   const act = action => async () => { if (busy) return; try { await action(); } catch (error) { failure(error, refresh, epoch); } };
   const actionButton = (label, action, className = 'quiet') => { const b = button(label, act(action), className); b.disabled = busy; return b; };
-  async function loadDirectory() {
+  async function loadDirectory(repaint = true) {
     const token = ++epoch; status.replaceChildren(note('正在读取文件…'));
     try {
       const data = await api(endpoint + '?' + new URLSearchParams({ directory: state.directory, query: state.query, deleted_only: state.trash ? '1' : '0' }));
-      if (!live(token)) return false; listing = data; status.replaceChildren(); draw(); return true;
+      if (!live(token)) return false; listing = data; status.replaceChildren(); if (repaint) draw(); return true;
     } catch (error) { failure(error, loadDirectory, token); return false; }
   }
   async function loadFile(id, revision = null) {
@@ -84,7 +84,7 @@ function knowledgeSection() {
   }
   async function refresh() {
     if (editing && knowledgeUnsaved()) { status.replaceChildren(note('当前有未保存草稿；请先保存或取消编辑。')); return; }
-    if (!await loadDirectory()) return; if (state.file && listing) await loadFile(state.file, state.revision); if (state.screen === 'history' && selected) await loadVersions();
+    if (!await loadDirectory(!state.file)) return; if (state.file && listing) await loadFile(state.file, state.revision); if (state.screen === 'history' && selected) await loadVersions();
   }
   async function directory(path, trash = false) {
     if (!await leave()) return; capture(); editing = false; knowledgeEditor = null; state.directory = path; state.query = ''; state.trash = trash; state.file = null; state.revision = null; state.screen = 'directory'; selected = null; versions = null;
@@ -93,7 +93,7 @@ function knowledgeSection() {
   }
   async function openFile(id, revision = null) {
     if (!await leave()) return; capture(); editing = false; knowledgeEditor = null; selected = null;
-    state.file = id; state.revision = revision; state.screen = 'preview'; routeState(); draw(); await loadFile(id, revision);
+    state.moreOpen = false; state.file = id; state.revision = revision; state.screen = 'preview'; routeState(); draw(); await loadFile(id, revision);
     if (live(epoch) && !revision && state.drafts.has(id)) { editing = true; draw(); }
   }
   async function historyView() {
@@ -194,6 +194,7 @@ function knowledgeSection() {
     }));
     if (!editing && !file.historical && !file.readonly) {
       const more = element('details', '', 'knowledge-more'), summary = element('summary', '更多操作'), menu = element('div', '', 'actions');
+      more.open = !!state.moreOpen; more.addEventListener('toggle', () => { if (more.isConnected) state.moreOpen = more.open; });
       if (file.can_move) menu.append(actionButton('重命名或移动', moveDialog));
       if (!file.deleted) menu.append(actionButton('删除文件', async () => {
         if (!await askConfirm({ title: `删除 ${file.name}？`, body: ['删除后可在已删除文件中查阅和恢复历史。'], action: '删除', danger: true })) return;
