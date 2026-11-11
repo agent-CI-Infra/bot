@@ -70,6 +70,7 @@ function boardSetFilter(field,value) {
   boardState.mobileColumn=null;
   boardState.filters=boardState.filters.filter(f=>f.field!==field);
   if(value!==''&&value!==undefined&&value!==false)boardState.filters.push({field,value});
+  if(field==='repository_id'&&$('board-create-task'))$('board-create-task').href='#/new-task'+(value?'/'+value:'');
   boardDirty();
 }
 function boardConditions() { return boardState.filters.filter(f=>f.value!==''&&f.value!==undefined); }
@@ -148,7 +149,7 @@ function boardShell() {
   const save=boardButton('保存视图',boardSave,'board-menu-item');save.id='board-save';
   const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';more.panel.append(views.label,save);
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
-  const create=consoleLink('#/new-task'+(repo?'/'+repo:''),'新建任务');create.classList.add('board-create-task');
+  const create=consoleLink('#/new-task'+(repo?'/'+repo:''),'新建任务');create.id='board-create-task';create.classList.add('board-create-task');
   arrangement.append(groups,more.menu,element('span','','board-spacer'),status,create,boardButton('刷新',()=>boardLoadCards()));
   toolbar.append(filters,chips,arrangement);
   const mobile=boardSelect('当前分组',[],'');mobile.label.className='board-mobile-group';mobile.select.id='board-mobile-group';

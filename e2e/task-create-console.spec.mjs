@@ -20,6 +20,23 @@ async function fill(page) {
 }
 const createCount = f => f.h.store.get("SELECT count(*) n FROM management_commands WHERE operation='task.create'").n;
 
+test('the mobile board keeps a compact new-task entry and carries the current project into the form', async ({ page }) => {
+  const f = await fixture();
+  try {
+    await login(page, f); await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => { location.hash = '#/board'; });
+    await expect(page.locator('#board-columns')).toBeVisible();
+    await page.locator('.board-filter-details > summary').click();
+    await page.getByRole('group', { name: '仓库', exact: true }).locator('button[data-value="101"]').click();
+    await page.locator('.board-filter-details > summary').click();
+    const entry = page.getByRole('link', { name: '新建任务', exact: true });
+    await expect(entry).toHaveAttribute('href', '#/new-task/101'); await expect(entry).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight)).toBe(true);
+    await entry.click(); await expect(page.getByLabel('任务项目', { exact: true })).toHaveValue('101');
+    await expect(page.getByRole('button', { name: '提交任务', exact: true })).toBeEnabled();
+  } finally { await f.close(); }
+});
+
 test('new task uses a real management receipt, persists the contract and opens the task with its existing retry action', async ({ page }) => {
   const f = await fixture(), errors = []; page.on('pageerror', err => errors.push(err.message));
   try {
