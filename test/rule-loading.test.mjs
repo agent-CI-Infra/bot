@@ -76,7 +76,7 @@ test('an uncached repository marks its provisional computer sources as needing r
   assert.equal(unread.needs_refresh,true);assert.equal(unread.sha,null);
   assert.equal(unread.computer_sources.cpus,'console');assert.equal(unread.computer.cpus,2);
   const refreshed=await f.admin('/api/repositories/101/rules/refresh','POST',{});
-  assert.equal(refreshed.status,200,JSON.stringify(refreshed.value));
+  assert.equal(refreshed.status,201,refreshed.value.error);
   const read=refreshed.value.rules;
   assert.equal(read.needs_refresh,false);assert.equal(read.sha,sha);
   assert.equal(read.computer_sources.cpus,'repository');assert.equal(read.computer.cpus,1.5);
