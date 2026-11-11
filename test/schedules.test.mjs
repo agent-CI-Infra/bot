@@ -488,3 +488,28 @@ test('subscription preview preserves save validation, project authority and owne
   assert.equal(invalid.status,403); assert.equal(f.h.store.get('SELECT count(*) n FROM notification_subscriptions').n,1);
   assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n,0);
 });
+
+test('subscription preview authorizes a chosen private chat without registering it and saving reuses one registration', async t => {
+  const f = await fixture(t), chat = await privateChat(f, undefined, undefined, 'oc_subscription_preview');
+  const spec = {name:'Direct chat subscription',destination_id:'chat:'+chat.id,events:['task.failed'],projects:['101'],aggregate_ms:300000,timezone:'UTC',enabled:true};
+  const registered = () => f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n;
+  const before = registered(), preview = await query(f,'preview_subscription',{subscription:spec});
+  assert.equal(preview.destination.id,spec.destination_id); assert.equal(preview.destination.type,'p2p'); assert.equal(preview.destination.chat_id,chat.chat_id);
+  assert.equal(registered(),before); assert.equal(f.h.store.get('SELECT count(*) n FROM notification_subscriptions').n,0);
+  const saved = await command(f,'notification.register',{subscription:spec}); assert.equal(saved.value.state,'succeeded');
+  const subscription = saved.value.result.subscription; assert.ok(!subscription.spec.destination_id.startsWith('chat:')); assert.equal(registered(),before+1);
+  await query(f,'preview_subscription',{subscription:{...spec,destination_id:subscription.spec.destination_id}}); assert.equal(registered(),before+1);
+  const again = await command(f,'subscription.update',{id:subscription.id,revision:1,subscription:{...spec,name:'Same chosen chat'}}); assert.equal(again.value.state,'succeeded'); assert.equal(registered(),before+1);
+  const other = await f.member('foreign-subscription-owner',{repository_ids:['101']}), foreign = await privateChat(f,'ou_foreign_subscription',other.id,'oc_foreign_subscription');
+  const denied = await f.admin('/api/management/query','POST',{operation:'preview_subscription',target,arguments:{subscription:{...spec,destination_id:'chat:'+foreign.id}}});
+  assert.equal(denied.status,403); assert.equal(denied.value.error,'schedule_destination_unavailable'); assert.equal(registered(),before+1);
+});
+test('subscription group previews stop after binding revocation and create no destination or subscription', async t => {
+  const f = await fixture(t), chat = await boundGroup(f,['101'],'oc_subscription_group');
+  const spec = {name:'Scoped group events',destination_id:'chat:'+chat.id,events:['ci.failed'],projects:['101'],aggregate_ms:60000,timezone:'UTC',enabled:true};
+  const registered = () => f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n;
+  const before = registered(), preview = await query(f,'preview_subscription',{subscription:spec}); assert.equal(preview.destination.type,'group'); assert.equal(registered(),before);
+  f.h.store.run('UPDATE channel_service_bindings SET enabled=0,revision=revision+1 WHERE chat_id=?',chat.id);
+  const denied = await f.admin('/api/management/query','POST',{operation:'preview_subscription',target,arguments:{subscription:spec}});
+  assert.equal(denied.status,403); assert.equal(denied.value.error,'schedule_destination_unavailable'); assert.equal(registered(),before); assert.equal(f.h.store.get('SELECT count(*) n FROM notification_subscriptions').n,0);
+});

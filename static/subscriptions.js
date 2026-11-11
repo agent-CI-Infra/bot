@@ -26,7 +26,7 @@ function renderSubscriptionEditor(host, { project, destinations, read, command, 
   for(const [key,label] of Object.entries(labels)){const input=document.createElement('input');input.type='checkbox';input.setAttribute('aria-label',label);checks[key]=input;eventFields.append(field(label,input));}
   const preview=element('div','','subscription-preview');preview.setAttribute('aria-label','事件订阅时间预览');
   const errorBox=element('p','','view-error');errorBox.setAttribute('role','alert');
-  const panes=[['events','事件与范围',[field('订阅名称',name),eventFields]],['time','聚合与静默',[field('聚合窗口分钟',aggregate),field('订阅时区（IANA）',zone),field('静默开始',start),field('静默结束',end)]],['destination','接收方',[field('订阅目的地',destination),consoleLink('#/identity','核验通知目的地与受众')]],['confirm','确认与预览',[field('启用事件订阅',enabled),preview]]];
+  const panes=[['events','事件与范围',[field('订阅名称',name),eventFields]],['time','聚合与静默',[field('聚合窗口分钟',aggregate),field('订阅时区（IANA）',zone),field('静默开始',start),field('静默结束',end)]],['destination','接收方',[field('订阅目的地',destination),consoleLink('#/identity','管理会话绑定和范围'),note('从已绑定的私聊或你能管理、覆盖本项目的群中选择；预览只说明时间，不会发送通知。')]],['confirm','确认与预览',[field('启用事件订阅',enabled),preview]]];
   const steps=element('div','','subscription-steps');form.prepend(steps);
   for(const [key,label,children] of panes){const pane=element('section','','subscription-pane');pane.dataset.step=key;pane.append(element('h5',label),...children);fields.append(pane);const step=button(label,()=>{model.step=key;form.dataset.step=key;for(const node of steps.children)node.setAttribute('aria-current',node===step?'step':'false');},'quiet');step.dataset.step=key;step.setAttribute('aria-current',key===(model.step||'events')?'step':'false');steps.append(step);}
   form.dataset.step=model.step||'events';
