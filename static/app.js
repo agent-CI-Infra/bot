@@ -206,6 +206,9 @@ async function start() {
 }
 // The generic list renderer still understands task rows; their old top-level addresses now select a board category.
 const taskKinds = { reviews: 'review', developments: 'development' }, listTabs = ['projects','events','external'];
+// Console pages are drawn by static/shell.js (renderConsolePage). They are not tabs of the generic list, and no list
+// read may ever build /api/<tab> from them: #/more would become GET /api/more, an endpoint that does not exist (#365).
+const consoleTabs = ['more', 'inbox', 'new-task'];
 // Wizard steps live inside global settings; old top-level addresses are normalized by route().
 const onboardingAddress = /^#\/settings\/onboarding(?:\/([0-6]))?$/;
 const legacyOnboardingAddress = /^#onboarding(?:\/(\d+))?$/;
@@ -241,10 +244,11 @@ async function route() {
   // The sample page issues no fetch of its own - every panel is constant markup - so a client-side role check is
   // the whole gate. If it ever reads server data, it needs a server-side gate first: hiding a route is not one.
   if (next === 'design' && me.role !== 'super_admin') next = 'projects';
+  const resolved = next;
   if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
-  const consolePage = ['more', 'inbox', 'new-task'].includes(tab);
+  const consolePage = consoleTabs.includes(tab);
   const sample = !target && tab === 'design', samplePage = $('design-page');
   page.hidden = !target; samplePage.hidden = !sample; list.hidden = !!target || tab === 'management' || consolePage || sample;
   $('console-page').hidden = !consolePage;
@@ -252,6 +256,9 @@ async function route() {
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
   document.body.classList.toggle('board-mode', !target && tab === 'board');
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
+  // A second address can arrive while the first one is still loading (a hash change during a list read): the newer
+  // route owns the page, so this one stops before it can redraw it from the address it no longer represents.
+  if (resolved !== tab) return;
   if (consolePage) {
     if (typeof leaveManagementPage === 'function') leaveManagementPage();
     await renderConsolePage(renderVersion);
@@ -282,6 +289,12 @@ function projectListAddress(hidden = false, params = listParams()) {
   return (me.role !== 'super_admin' ? '/api/repositories' : hidden ? '/api/installations/hidden' : '/api/installations') + '?' + params;
 }
 async function render(quiet = false) {
+  // The list renderer never owns a console page. This is the second line of defence for #365: even when a stale route
+  // reaches here after `tab` has moved to #/more, it must not turn that tab name into an API path.
+  if (consoleTabs.includes(tab)) return;
+  // The list this call belongs to. A hash change can land while a read below is still in flight; the call must finish
+  // the list it started for, or step aside, and never re-point its own address at whatever `tab` became (#365).
+  const pageTab = tab;
   const request=++renderVersion, taskTab = !!taskKinds[tab];
   $('page-title').textContent = titles[tab];
   document.querySelectorAll('[data-tab]').forEach(el => el.setAttribute('aria-current', el.dataset.tab === tab ? 'page' : 'false'));
@@ -313,6 +326,7 @@ async function render(quiet = false) {
     // What a check just returned is not checked again here, even if part of it is still stale.
     staleIntegrations = !checked && integrations.some(item => item.stale);
   }
+  if (tab !== pageTab || consoleTabs.includes(tab)) return;
   const endpoint = taskTab ? 'tasks' : tab === 'projects' ? 'repositories' : tab;
   const address = tab === 'projects' ? projectListAddress(hiddenView, params) : `/api/${endpoint}${listTabs.includes(tab) ? '?' + params : ''}`;
   let result;try{result=await api(address);}finally{if(request===renderVersion)$('rows').removeAttribute('aria-busy');}
