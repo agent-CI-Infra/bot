@@ -8,7 +8,7 @@ import type { ManagementCommand, ManagementService } from '../management/service
 import { parameterHash } from '../management/service.js';
 import { validate } from '../management/catalog.js';
 import { planSchema, schedulingCommands, subscriptionSchema } from './schema.js';
-import { localParts, nextTime, parseCron, previewTimes } from './time.js';
+import { localParts, nextTime, parseCron, previewTimes, quietUntil } from './time.js';
 import { defaultLimits, type Plan, type SubscriptionSpec, type TriggerHandler, type ActionUsage } from './types.js';
 import { budgetScopes, reserve } from './budget.js';
 import { ReportService } from './report.js';
@@ -270,18 +270,24 @@ export class ScheduleService {
       this.store.run('INSERT INTO schedule_operations VALUES(?,?,?)', key, project, JSON.stringify(result)); return result;
     });
   }
+  private validateSubscription(actor: ActorContext, project: string, input: unknown, register = true) {
+    validate(subscriptionSchema, input); const spec = input as SubscriptionSpec;
+    // Each project has an independent authorization and subscription cursor.
+    if (spec.projects.length !== 1 || spec.projects[0] !== project) fail(400, 'subscription_project_scope_required');
+    localParts(this.clock(), spec.timezone);
+    if (!!spec.quiet_start !== !!spec.quiet_end || [spec.quiet_start, spec.quiet_end].some(v => v !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) || spec.quiet_start && spec.quiet_start === spec.quiet_end) fail(400, 'invalid_subscription_quiet_hours');
+    const previewChat = !register && spec.destination_id.startsWith('chat:');
+    spec.destination_id = this.chosen(actor, project, spec.destination_id, register);
+    // Chosen chats are authorized above; a read-only preview must not materialize a registration.
+    const event = previewChat ? this.channels.employees.chat(spec.destination_id.slice(5)) : this.destination(spec.destination_id, project).event;
+    return { spec, destination: { id: spec.destination_id, type: event.chat_type, chat_id: event.chat_id } };
+  }
   private subscriptionCommand(actor: ActorContext, project: string, operation: string, args: any, key: string): Json {
     const old = args.id ? this.store.get('SELECT * FROM notification_subscriptions WHERE id=? AND project_id=?', args.id, project) : undefined;
     if (args.id && !old) fail(404, 'subscription_not_found');
     if (old && (old.principal_id !== actor.principal_id || old.revision !== args.revision || old.state === 'deleted')) fail(409, 'subscription_revision_conflict');
     if (operation === 'notification.register' || operation === 'subscription.update') {
-      validate(subscriptionSchema, args.subscription); const spec = args.subscription as SubscriptionSpec;
-      // Each subscription is project scoped. Multiple projects require separate independently authorized subscriptions.
-      if (spec.projects.length !== 1 || spec.projects[0] !== project) fail(400, 'subscription_project_scope_required');
-      localParts(this.clock(), spec.timezone);
-      if (!!spec.quiet_start !== !!spec.quiet_end || [spec.quiet_start, spec.quiet_end].some(v => v !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) || spec.quiet_start && spec.quiet_start === spec.quiet_end) fail(400, 'invalid_subscription_quiet_hours');
-      spec.destination_id = this.chosen(actor, project, spec.destination_id);
-      this.destination(spec.destination_id, project); const id = old?.id ?? randomId(), now = this.clock();
+      const { spec } = this.validateSubscription(actor, project, args.subscription); const id = old?.id ?? randomId(), now = this.clock();
       if (old) this.store.run('UPDATE notification_subscriptions SET spec=?,revision=revision+1,state=?,reason=NULL,updated_at=? WHERE id=?', JSON.stringify(spec), spec.enabled ? 'active' : 'paused', now, id);
       else this.store.run(`INSERT INTO notification_subscriptions(id,tenant_id,project_id,principal_id,spec,revision,state,reason,event_cursor,created_at,updated_at) VALUES(?,?,?,?,?,1,?,NULL,?,?,?)`, id,
         this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id, project, actor.principal_id, JSON.stringify(spec),
@@ -316,10 +322,18 @@ export class ScheduleService {
         report_preview_at: this.clock(),
         report: plan.workflow === 'report.daily' ? this.reports.render(project, this.clock(), plan.timezone, Number(plan.parameters.window_ms ?? 86400000)) : null };
     }
+    if (operation === 'preview_subscription') {
+      const { spec, destination } = this.validateSubscription(actor, project, args.subscription, false), now = this.clock();
+      const aggregationEnds = now + spec.aggregate_ms;
+      // This is a hypothetical single event at the server's current time, not a saved trigger or delivery.
+      return { revision, subscription: spec, preview_at: now, event_received_at: now, aggregation_ends_at: aggregationEnds,
+        first_send_at: spec.enabled ? quietUntil(spec, aggregationEnds) : null, timezone: spec.timezone,
+        destination, hypothetical: true };
+    }
     if (operation === 'list_schedules' || operation === 'list_subscriptions') {
       const table = operation === 'list_schedules' ? 'schedules' : 'notification_subscriptions';
       const rows = this.store.all(`SELECT * FROM ${table} WHERE project_id=? ORDER BY created_at DESC,id LIMIT ? OFFSET ?`, project, limit + 1, offset), more = rows.length > limit; rows.splice(limit);
-      return { revision, [operation === 'list_schedules' ? 'schedules' : 'subscriptions']: rows.map(r => operation === 'list_schedules' ? this.view(r) : this.subscriptionView(r)), next_offset: more ? offset + limit : null };
+      return { revision, [operation === 'list_schedules' ? 'schedules' : 'subscriptions']: rows.map(r => operation === 'list_schedules' ? this.view(r) : { ...this.subscriptionView(r), editable: r.principal_id === actor.principal_id && r.state !== 'deleted' }), next_offset: more ? offset + limit : null };
     }
     if (operation === 'list_schedule_destinations') {
       const destinations: Json[] = this.store.all("SELECT id,created_at FROM channel_outbox WHERE state='registered'").flatMap(r => {

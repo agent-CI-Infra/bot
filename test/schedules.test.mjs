@@ -455,3 +455,34 @@ test('event diagnostics retain saved observations and never label them with a ne
   assert.equal(changed.origin.name, null); assert.equal(changed.origin.timezone, null);
   assert.equal(changed.origin.revision, 1); assert.deepEqual(changed.payload.events, first.payload.events);
 });
+
+test('subscription preview uses the same quiet-hour parser across a DST fold and persists no trigger or delivery', async t => {
+  const f = await fixture(t);
+  f.advance(Date.parse('2026-11-01T05:55:00Z') - f.now());
+  const spec = { name:'静默窗口',destination_id:f.destination,events:['task.failed'],projects:['101'],aggregate_ms:600000,timezone:'America/New_York',quiet_start:'01:00',quiet_end:'02:00',enabled:true };
+  const counts = () => Object.fromEntries(['notification_subscriptions','notification_outbox','schedule_occurrences','schedule_events','schedule_audit','management_commands'].map(table=>[table,f.h.store.get(`SELECT count(*) n FROM ${table}`).n]));
+  const before = counts(), preview = await query(f,'preview_subscription',{subscription:spec});
+  assert.equal(preview.hypothetical,true); assert.equal(preview.event_received_at,f.now());
+  assert.equal(preview.aggregation_ends_at,Date.parse('2026-11-01T06:05:00Z'));
+  assert.equal(preview.first_send_at,Date.parse('2026-11-01T07:00:00Z'));
+  assert.equal(preview.destination.type,'p2p'); assert.equal(preview.subscription.projects[0],'101');
+  assert.equal((await query(f,'preview_subscription',{subscription:{...spec,enabled:false}})).first_send_at,null);
+  assert.deepEqual(counts(),before);
+});
+test('subscription preview preserves save validation, project authority and owner-only edit information', async t => {
+  const f = await fixture(t), spec = {name:'本人订阅',destination_id:f.destination,events:['ci.failed','ci.recovered'],projects:['101'],aggregate_ms:300000,timezone:'Asia/Shanghai',enabled:true};
+  const saved = await command(f,'notification.register',{subscription:spec}); assert.equal(saved.value.state,'succeeded');
+  assert.equal((await query(f,'list_subscriptions')).subscriptions[0].editable,true);
+  const observer = await f.member('subscription-observer',{repository_ids:['101']});
+  assert.equal((await query(f,'list_subscriptions',{},observer.client)).subscriptions[0].editable,false);
+  for (const change of [{projects:['101','102']},{quiet_start:'22:00'},{quiet_start:'22:00',quiet_end:'22:00'},{timezone:'Invalid/Zone'}]) {
+    const result = await f.admin('/api/management/query','POST',{operation:'preview_subscription',target,arguments:{subscription:{...spec,...change}}});
+    assert.equal(result.status,400,JSON.stringify(result.value));
+  }
+  const denied = await f.member('subscription-no-project');
+  assert.equal((await denied.client('/api/management/query','POST',{operation:'preview_subscription',target,arguments:{subscription:spec}})).status,403);
+  f.h.store.run("UPDATE channel_outbox SET state='blocked' WHERE id=?",f.destination);
+  const invalid = await f.admin('/api/management/query','POST',{operation:'preview_subscription',target,arguments:{subscription:spec}});
+  assert.equal(invalid.status,403); assert.equal(f.h.store.get('SELECT count(*) n FROM notification_subscriptions').n,1);
+  assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n,0);
+});

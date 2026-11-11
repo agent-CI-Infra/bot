@@ -1,6 +1,6 @@
 import { fail, type Json } from '../core/security.js';
 import { str, obj } from './catalog-base.js';
-import { planSchema, schedulingCommands } from '../schedules/schema.js';
+import { planSchema, subscriptionSchema, schedulingCommands } from '../schedules/schema.js';
 
 export { str, obj } from './catalog-base.js';
 const bool = { type: 'boolean' }, integer = { type: 'integer', minimum: 0 };
@@ -23,9 +23,9 @@ export const commands: Record<string, { capability: string; arguments: Json; des
   'knowledge.revise': { capability: 'knowledge.write', arguments: obj({ id: str, revision: integer, body: str, reason:str, catalog:{type:'object'}, action:{type:'string',enum:['accept','reject','archive','conflict','revoke','restore','merge']}, evidence:strings, supersedes:strings, run_id:str }, ['id','revision']), description: '按精确 revision 修订知识目录或正文，或附证据复核候选；文档晋升通过项目知识页核验合入。' },
   ...schedulingCommands,
 };
-export const schedulingQueries = ['list_schedules','list_subscriptions','list_occurrences','list_notification_deliveries','list_schedule_audit','list_schedule_destinations','preview_schedule'];
+export const schedulingQueries = ['list_schedules','list_subscriptions','list_occurrences','list_notification_deliveries','list_schedule_audit','list_schedule_destinations','preview_schedule','preview_subscription'];
 export const queries = ['list_projects','list_tasks','get_task','get_effective_config','get_usage','list_audit','get_capabilities','search_knowledge','read_knowledge','knowledge_versions', ...schedulingQueries] as const;
-export const querySchema = obj({ operation: { type:'string', enum: queries }, target: obj({ project_id: str, task_id: str, workflow_id: str }), arguments: obj({ offset: integer, limit: { type:'integer',minimum:1,maximum:100 }, section: { type:'string',enum:['detail','logs','runs','events','roles','source'] }, source: str, query: str, id:str, revision:{type:'integer',minimum:1}, baseline:str, plan: planSchema, schedule_id: str }) }, ['operation','target','arguments']);
+export const querySchema = obj({ operation: { type:'string', enum: queries }, target: obj({ project_id: str, task_id: str, workflow_id: str }), arguments: obj({ offset: integer, limit: { type:'integer',minimum:1,maximum:100 }, section: { type:'string',enum:['detail','logs','runs','events','roles','source'] }, source: str, query: str, id:str, revision:{type:'integer',minimum:1}, baseline:str, plan: planSchema, subscription: subscriptionSchema, schedule_id: str }) }, ['operation','target','arguments']);
 export const commandSchema = obj({ operation: { type:'string',enum:Object.keys(commands) }, target: targetSchema, arguments: { type:'object' }, expected_revision: str,
   idempotency_key: { ...str,maxLength:240 }, source_conversation: { ...str,maxLength:240 }, source_message: { ...str,maxLength:240 } }, ['operation','target','arguments','expected_revision','idempotency_key','source_conversation','source_message']);
 
