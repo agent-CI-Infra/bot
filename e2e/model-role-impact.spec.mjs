@@ -51,6 +51,7 @@ test('shared deletion names service roles and onboarding without changing them o
   const { h, admin, model } = await prepared(page, true);
   try {
     const roles = h.store.all('SELECT * FROM service_roles');
+    await expect(page.getByText('部署共享模型可供项目和平台服务角色选用。', { exact: false })).toContainText('工作类型与项目角色的显式引用保留为不可用');
     await row(page).getByRole('button', { name: '删除', exact: true }).click();
     await expect(dialog(page)).toContainText('管理助手（management-assistant）');
     await expect(dialog(page)).toContainText('仓库问答助手（repository-assistant）');
