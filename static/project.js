@@ -923,9 +923,13 @@ async function auditNames() {
   // A failed read is not remembered: the card's own retry has to be able to fill the names for this sign-in.
   catch { return new Map(); }
 }
+const AUDIT_PAGE = 20;
 function auditSection() {
   const section = card('操作记录（审计）'), id = current.id, body = element('div', ''); section.id = 'project-audit';
   section.append(note('这张表记录谁在什么时候、对哪个对象做了什么：账号、项目、动作、对象、时间；它不记录结果——成功与否要看对应的任务、配置差异或管理回执。最多显示最近 100 条。'), body);
+  // #357 acceptance 5: one answer, two read-only controls. The filter chips and the "load more" step both work on the
+  // rows this card already read — no cursor, no second request — so a long audit list stops being one undifferentiated
+  // wall, and the count printed under the chips always describes exactly the rows on screen.
   const load = async () => {
     body.replaceChildren(note('正在读取操作记录'));
     try {
@@ -933,17 +937,40 @@ function auditSection() {
       // A late answer must not repaint a project the reader already left.
       if (!current || current.id !== id || !section.isConnected) return;
       if (!audit.length) { body.replaceChildren(note('这个项目还没有操作记录。')); return; }
-      const list = element('ul', '', 'history');
-      for (const row of audit) {
+      const rows = audit.map(row => {
         const item = element('li', ''), left = element('div', ''); item.dataset.auditRow = row.action;
         left.append(element('code', row.action), document.createTextNode(' '), auditActor(row, names));
-        const object = auditObject(row);
         // Say the object cannot be opened instead of guessing a target this row does not prove.
-        left.append(document.createTextNode(' '), object || element('span', '无法关联', 'muted'));
+        left.append(document.createTextNode(' '), auditObject(row) || element('span', '无法关联', 'muted'));
         item.append(left, element('span', timestamp(row.created_at), 'muted'), element('code', row.resource_id, 'muted wide-cell'));
-        list.append(item);
-      }
-      body.replaceChildren(list);
+        return item;
+      });
+      const counts = new Map();
+      for (const row of audit) counts.set(row.action, (counts.get(row.action) || 0) + 1);
+      const actions = [...counts.keys()].sort();
+      let filter = '*', shown = AUDIT_PAGE;
+      const filters = element('div', '', 'audit-filters');
+      filters.setAttribute('role', 'group'); filters.setAttribute('aria-label', '按动作筛选操作记录');
+      const count = element('p', '', 'muted'); count.setAttribute('aria-live', 'polite'); count.dataset.auditCount = '';
+      const list = element('ul', '', 'history');
+      const more = button('', () => { shown += AUDIT_PAGE; paint(); });
+      const chips = [['*', `全部动作 ${audit.length}`]].concat(actions.map(action => [action, `${action} ${counts.get(action)}`]));
+      const chipEls = chips.map(([key, caption]) => {
+        const chip = button(caption, () => { filter = key; shown = AUDIT_PAGE; paint(); });
+        chip.dataset.auditFilter = key; return chip;
+      });
+      filters.append(...chipEls);
+      const paint = () => {
+        const matching = filter === '*' ? rows : rows.filter((_, index) => audit[index].action === filter);
+        const visible = matching.slice(0, shown), rest = matching.length - visible.length;
+        list.replaceChildren(...visible);
+        for (const [index, chip] of chipEls.entries()) chip.setAttribute('aria-pressed', chips[index][0] === filter ? 'true' : 'false');
+        if (rest > 0) { more.textContent = `加载更多（还有 ${rest} 条）`; if (!more.isConnected) body.append(more); }
+        else more.remove();
+        count.textContent = filter === '*' && !rest ? `已显示全部 ${audit.length} 条` : `已显示 ${visible.length} / ${audit.length} 条`;
+      };
+      body.replaceChildren(filters, count, list);
+      paint();
     } catch (err) {
       body.replaceChildren(consoleState('操作记录读取失败', err.status === 403 ? '需要本项目的配置权限才能读这张表。' : err.message, { tone: 'error', retry: load }));
     }
