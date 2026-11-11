@@ -163,14 +163,16 @@ function onboardingProgress(data){
     {ready:!!configured,text:configured?'接入配置齐全':'仍有必需配置待补齐'},
   ];
 }
-async function renderOnboarding(request,panel){
-  const data=await api('/api/onboarding'),{models}=await api('/api/models');if(request!==renderVersion)return;
+async function renderOnboarding(request,panel,feedback=''){
+  const rootPanel=panel,address=location.hash;
+  const data=await api('/api/onboarding'),{models}=await api('/api/models');if(request!==renderVersion||location.hash!==address)return;
+  const count=data.readiness?.installation_count,installations=Number.isSafeInteger(count)&&count>=0?count:null;
   const step=addressedStep();if(step!==onboardingStep)onboardingTunnel=null;onboardingStep=step;
   const progress=onboardingProgress(data),intro=element('div','','onboarding-intro'),layout=element('div','','onboarding-layout'),content=element('div','','onboarding-content');
   intro.append(element('h2','接入向导'),note('配置会分别保存。可随时返回已完成步骤；浏览步骤不会自动启用项目或开始任务。'));
   panel.replaceChildren(intro,layout);$('count').textContent=`第 ${onboardingStep+1} / ${onboardingSteps.length} 步`;
   const nav=element('nav','','wizard-steps onboarding-progress');nav.setAttribute('aria-label','接入步骤');onboardingSteps.forEach((title,index)=>{const item=element('div','','onboarding-step'),b=button(`${index+1}. ${title}`,()=>wizardNext(index)),status=element('small',progress[index].text);item.dataset.ready=String(progress[index].ready);if(index===onboardingStep)b.setAttribute('aria-current','step');item.append(b,status);nav.append(item);});layout.append(nav,content);panel=content;
-  if(data.installation_skipped||data.app&&!data.app.installations)panel.append(element('p','尚未确认 App 安装。可以继续配置模型和规则；安装并启用项目之前，仓库检视不会开始。','wizard-notice'));
+  if(data.installation_skipped||data.app&&installations===0)panel.append(element('p','尚未确认 App 安装。可以继续配置模型和规则；安装并启用项目之前，仓库检视不会开始。','wizard-notice'));
   const next=()=>panel.append(button('下一步',()=>wizardNext(Math.min(onboardingStep+1,6)),''));
   if(onboardingStep===0){
     panel.append(note('需要你拥有的公网域名。这个 HTTPS 地址是 Bot 唯一的入口：控制台、用户登录、GitHub App 回调和 Webhook 都经它到达本机业务端口 8791，不需要第二个域名或端口。检查会核对当前实例的一次性凭证，拒绝 HTTP、重定向、其他实例和私网地址。'));
@@ -210,7 +212,7 @@ async function renderOnboarding(request,panel){
   }else if(onboardingStep===2){
     panel.append(githubLoginForm(data.github_login, data.app));next();
   }else if(onboardingStep===3){
-    const install=card('安装到目标账号');if(data.app){install.append(facts([['App',data.app.slug],['App ID',data.app.app_id],['已确认安装数',data.app.installations||0]]),link(data.app.install_url,'在 GitHub 选择账号','button-link'),button('重新检查安装',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:data.app.account_id});await api('/api/installations/sync','POST',{});await start();}catch(e){error(e);}}));}else install.append(note('尚未选择 App。可以返回第 2 步使用已登记的账号，或准备 manifest 后由你在 GitHub 确认。'));
+    const install=card('安装到目标账号');if(data.app){install.append(facts([['App',data.app.slug],['App ID',data.app.app_id],['当前有效安装数',installations===null?'未知（状态未提供）':String(installations)]]),note('统计来自当前安装记录，暂停、卸载或范围尚未同步的安装不计入。'),link(data.app.install_url,'在 GitHub 选择账号','button-link'),button('重新检查安装',async()=>{try{await api('/api/onboarding/use-app','POST',{account_id:data.app.account_id});await api('/api/installations/sync','POST',{});await start();}catch(e){error(e);}}));}else install.append(note('尚未选择 App。可以返回第 2 步使用已登记的账号，或准备 manifest 后由你在 GitHub 确认。'));
     install.append(button('暂时跳过安装',async()=>{await api('/api/onboarding/installation','POST',{skip:true});wizardNext(4);}));panel.append(install);if(data.app)panel.append(accountInstallationForm(),note('安装到其他组织或个人账号要求 App 为公开，且你拥有相应安装权限；最终由 GitHub 校验。安装完成后点「重新检查安装」，再到第 7 步同步并启动仓库。'));next();
   }else if(onboardingStep===4){
     const shared=models.filter(model=>!model.repository_id&&model.key_configured),list=card('使用已配置的模型');for(const model of shared){const row=element('div','','row');row.append(modelAddress(model),button('选用此模型',async()=>{await api('/api/onboarding/model','POST',{model_id:model.id});wizardNext(5);}));list.append(row);}if(shared.length)panel.append(list);
@@ -237,7 +239,25 @@ async function renderOnboarding(request,panel){
     }
     projects.append(note('这里包括已安装但尚未启动的仓库。未看到新仓时点击同步。自动开发默认关闭，在对应项目的「开发」中单独开启；尚未安装时不开始检视。'));
     const actions=element('div','','actions'),message=element('p','','view-error');message.setAttribute('role','alert');
-    const finish=button('完成向导',async()=>{finish.disabled=true;message.textContent='';try{await api('/api/onboarding/complete','POST',{});history.replaceState(null,'','#/projects');await start();}catch(err){message.textContent=err.message.includes('onboarding_incomplete')?'接入配置已变化，请重新检查步骤状态并补齐缺项。':err.message;finish.disabled=false;}},'');
+    message.textContent=feedback;
+    const current=()=>request===renderVersion&&location.hash===address&&rootPanel.isConnected;
+    let refreshing=false;
+    const refreshReadiness=async()=>{
+      if(!current()||refreshing)return;refreshing=true;finish.disabled=true;message.textContent='接入配置已变化，正在重新读取状态…';
+      try{await renderOnboarding(request,rootPanel,'接入配置已变化，已重新读取状态，请补齐缺项。');}
+      catch(err){if(current()){
+        for(const item of nav.children){item.dataset.ready='unknown';item.querySelector('small').textContent='状态待重新核验';}
+        summary.replaceChildren(element('h3','接入状态待重新核验'),note('配置已变化，目前无法确认最新状态。请重新读取后继续。'));
+        message.textContent='接入配置已变化，状态读取失败：'+err.message+'。请重新读取后继续。';
+        let retry=actions.querySelector('[data-readiness-retry]');
+        if(!retry){retry=button('重新读取接入状态',async()=>{retry.disabled=true;await refreshReadiness();});retry.dataset.readinessRetry='';actions.append(retry);}retry.disabled=false;
+      }}finally{refreshing=false;}
+    };
+    const finish=button('完成向导',async()=>{
+      if(finish.disabled)return;finish.disabled=true;message.textContent='';
+      try{await api('/api/onboarding/complete','POST',{});if(!current())return;history.replaceState(null,'','#/projects');await start();}
+      catch(err){if(!current())return;if(err.message.includes('onboarding_incomplete'))await refreshReadiness();else{message.textContent=err.message;finish.disabled=false;}}
+    },'');
     finish.disabled=missing.length>0;actions.append(finish,consoleLink('#/projects','返回项目，稍后继续'));panel.append(projects,actions,message);
   }
   nav.querySelector('[aria-current=step]')?.scrollIntoView({block:'nearest',inline:'nearest'});
