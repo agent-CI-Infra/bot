@@ -1,12 +1,10 @@
 import { mkdir, realpath, readdir, open, rename, unlink, rm, chmod, stat, lstat, utimes, writeFile, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { randomBytes, createHash } from 'node:crypto';
+import { noteComponent, withNoteDirectory, withNoteParent } from './note-path.mjs';
 
 const internal = name => name.startsWith('.write-') || name.startsWith('.expired-');
-export function noteName(value) {
-  if (typeof value !== 'string' || !value || /[/\\\0]/.test(value) || ['.','..','.git'].includes(value.toLowerCase()) || internal(value)) throw new Error('invalid_note_name');
-  return value;
-}
+export const noteName = noteComponent;
 // A filesystem lock coordinates the manager and every task process on the same mounted volume.
 // A lease recovers writers killed during stop/reset. An expired writer must still own its lease before committing.
 async function locked(root, run) {
@@ -30,10 +28,14 @@ async function locked(root, run) {
   try { return await run(check); } finally { clearInterval(timer); if (await owns()) await rm(lock, { recursive: true }); }
 }
 export class Notes {
-  constructor(root) { this.root = root; }
+  constructor(root, { canonicalRoot = root, check } = {}) { this.root = root; this.canonicalRoot = canonicalRoot; this.lockCheck = check; }
+  async withLock(run) {
+    if (!this.lockCheck) return locked(this.root, run);
+    await this.lockCheck(); return run(this.lockCheck);
+  }
   async directory() {
     if (await mkdir(this.root, { recursive: true, mode: 0o770 })) await chmod(this.root, 0o770);
-    if (await realpath(this.root) !== this.root) throw new Error('invalid_notes_directory');
+    if (await realpath(this.root) !== this.canonicalRoot) throw new Error('invalid_notes_directory');
   }
   async list() {
     await this.directory(); const files = [];
@@ -47,46 +49,55 @@ export class Notes {
   }
   async state(name) {
     try {
-      const handle = await open(this.root + '/' + name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try { const info = await handle.stat(); if (!info.isFile()) throw new Error('invalid_note_file'); return { content: await handle.readFile('utf8'), deleted: false }; }
-      finally { await handle.close(); }
+      return await withNoteParent(this.root, name, async path => {
+        const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try { const info = await handle.stat(); if (!info.isFile()) throw new Error('invalid_note_file'); return { content: await handle.readFile('utf8'), deleted: false }; }
+        finally { await handle.close(); }
+      }, { canonicalRoot: this.canonicalRoot });
     } catch (error) { if (error.code === 'ENOENT') return { content: null, deleted: true }; throw error; }
   }
   async historyRoot() {
     const root = this.root + '/.write-history';
-    for (const path of [root, root + '/blobs']) {
-      await mkdir(path, { recursive: true, mode: 0o770 });
-      if (await realpath(path) !== path) throw new Error('invalid_notes_history');
-    }
+    try { await withNoteDirectory(this.root, '.write-history/blobs', () => {}, { create: true, internal: true, canonicalRoot: this.canonicalRoot }); }
+    catch (error) { if (error.message === 'invalid_note_path') throw new Error('invalid_notes_history'); throw error; }
     return root;
   }
   async index(name) {
     const root = await this.historyRoot(), path = root + '/' + createHash('sha256').update(name).digest('hex') + '.json';
     try {
-      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try {
-        if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history');
-        const value = JSON.parse(await handle.readFile('utf8'));
-        if (value.schema !== 1 || value.name !== name || !Array.isArray(value.versions)) throw new Error('invalid_notes_history');
-        return { path, value };
-      } finally { await handle.close(); }
+      return await withNoteParent(this.root, path.slice(this.root.length + 1), async target => {
+        const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history');
+          const value = JSON.parse(await handle.readFile('utf8'));
+          if (value.schema !== 1 || value.name !== name || !Array.isArray(value.versions)) throw new Error('invalid_notes_history');
+          return { path, value };
+        } finally { await handle.close(); }
+      }, { internal: true, canonicalRoot: this.canonicalRoot });
     } catch (error) { if (error.code === 'ENOENT') return { path, value: { schema: 1, name, versions: [] } }; throw error; }
   }
   async atomic(path, content, check) {
-    const temp = this.root + '/.write-' + randomBytes(12).toString('hex');
-    const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o660);
-    try { await handle.chmod(0o660); await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
-    try { await check(); await rename(temp, path); } finally { await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+    if (!path.startsWith(this.root + '/')) throw new Error('invalid_note_path');
+    const options = { internal: true, canonicalRoot: this.canonicalRoot };
+    return withNoteParent(this.root, '.write-' + randomBytes(12).toString('hex'), async temp => {
+      const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o660);
+      try { await handle.chmod(0o660); await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
+      try { await withNoteParent(this.root, path.slice(this.root.length + 1), async target => { await check(); await rename(temp, target); }, options); }
+      finally { await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
+    }, options);
   }
   async blob(sha) {
     if (!/^[a-f0-9]{64}$/.test(sha)) throw new Error('invalid_notes_history');
-    const handle = await open((await this.historyRoot()) + '/blobs/' + sha, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    try {
-      if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history');
-      const content = await handle.readFile('utf8');
-      if (createHash('sha256').update(content).digest('hex') !== sha) throw new Error('invalid_notes_history');
-      return content;
-    } finally { await handle.close(); }
+    await this.historyRoot();
+    return withNoteParent(this.root, '.write-history/blobs/' + sha, async target => {
+      const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history');
+        const content = await handle.readFile('utf8');
+        if (createHash('sha256').update(content).digest('hex') !== sha) throw new Error('invalid_notes_history');
+        return content;
+      } finally { await handle.close(); }
+    }, { internal: true, canonicalRoot: this.canonicalRoot });
   }
   // Old files and shell edits enter history when next observed; a crashed writer's complete file is recovered too.
   async observe(name, actor, check) {
@@ -104,7 +115,7 @@ export class Notes {
   }
   async lockedFile(name, run, writing = false) {
     noteName(name); await this.directory();
-    try { return await locked(this.root, async check => run(await this.observe(name, 'filesystem', check), check)); }
+    try { return await this.withLock(async check => run(await this.observe(name, 'filesystem', check), check)); }
     catch (error) { if (writing && error.code === 'ELOOP') throw new Error('invalid_note_file'); throw error; }
   }
   expected(index, revision) {
@@ -122,12 +133,16 @@ export class Notes {
   async versions(name) { return this.lockedFile(name, async index => { if (!index.value.versions.length) throw Object.assign(new Error('ENOENT: note_not_found'), { code: 'ENOENT' }); return { versions: [...index.value.versions].reverse(), current_revision: index.value.versions.at(-1).revision }; }); }
   async files(includeDeleted = false) {
     await this.directory();
-    return locked(this.root, async check => {
+    return this.withLock(async check => {
       const names = new Set((await this.list()).map(f => f.name));
-      for (const entry of await readdir(await this.historyRoot())) {
+      await this.historyRoot();
+      const histories = await withNoteDirectory(this.root, '.write-history', path => readdir(path), { internal: true, canonicalRoot: this.canonicalRoot });
+      for (const entry of histories) {
         if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue;
-        const handle = await open(this.root + '/.write-history/' + entry, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-        try { if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history'); const value = JSON.parse(await handle.readFile('utf8')); noteName(value.name); if (entry !== createHash('sha256').update(value.name).digest('hex') + '.json') throw new Error('invalid_notes_history'); names.add(value.name); } finally { await handle.close(); }
+        await withNoteParent(this.root, '.write-history/' + entry, async target => {
+          const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          try { if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history'); const value = JSON.parse(await handle.readFile('utf8')); noteName(value.name); if (entry !== createHash('sha256').update(value.name).digest('hex') + '.json') throw new Error('invalid_notes_history'); names.add(value.name); } finally { await handle.close(); }
+        }, { internal: true, canonicalRoot: this.canonicalRoot });
       }
       const files = [];
       for (const name of names) { const index = await this.observe(name, 'filesystem', check), version = index.value.versions.at(-1); if (version && (includeDeleted || !version.deleted)) files.push({ name, ...version }); }
@@ -163,3 +178,5 @@ export class Notes {
   async write(name, content) { await this.saveFile(name, content); return { written: true }; }
   async delete(name) { await this.removeFile(name); return { deleted: true }; }
 }
+
+export { locked as withNotesLock };
