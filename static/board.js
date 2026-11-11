@@ -148,7 +148,8 @@ function boardShell() {
   const save=boardButton('保存视图',boardSave,'board-menu-item');save.id='board-save';
   const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';more.panel.append(views.label,save);
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
-  arrangement.append(groups,more.menu,element('span','','board-spacer'),status,boardButton('刷新',()=>boardLoadCards()));
+  const create=consoleLink('#/new-task'+(repo?'/'+repo:''),'新建任务');create.classList.add('board-create-task');
+  arrangement.append(groups,more.menu,element('span','','board-spacer'),status,create,boardButton('刷新',()=>boardLoadCards()));
   toolbar.append(filters,chips,arrangement);
   const mobile=boardSelect('当前分组',[],'');mobile.label.className='board-mobile-group';mobile.select.id='board-mobile-group';
   mobile.select.addEventListener('change',()=>{boardState.mobileColumn=mobile.select.value;boardRenderCards();});

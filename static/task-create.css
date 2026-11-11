@@ -1,0 +1,13 @@
+.task-create-page { max-width: 1180px; margin: 0 auto; }
+.task-create-page > label { max-width: 580px; margin-bottom: 24px; }
+.task-create-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 24px; align-items: start; }
+.task-create-form, .task-create-receipt { padding: 24px; border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); min-width: 0; }
+.task-create-form fieldset { display: grid; gap: 20px; min-width: 0; padding: 0; border: 0; }
+.task-create-form :is(textarea, select) { width: 100%; max-width: 100%; }
+.task-create-form textarea { min-height: 80px; resize: vertical; }
+.task-create-feedback { margin: 16px 0; overflow-wrap: anywhere; color: var(--color-danger, #a82a35); }
+.task-create-layout :is(.card, .side-card) { margin: 0; min-width: 0; }
+.task-create-receipt { margin-top: 24px; overflow-wrap: anywhere; }
+.task-create-receipt:empty { display: none; }
+.board-create-task { min-height: 44px; padding: 8px 12px; }
+@media (max-width: 850px) { .task-create-layout { grid-template-columns: minmax(0, 1fr); } .task-create-form, .task-create-receipt { padding: 18px; } }

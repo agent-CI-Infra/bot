@@ -36,6 +36,7 @@ function consoleGroups() {
   const id = consoleScope(), repo = repositories.find(r => String(r.id) === id);
   const groups = [{ title: '工作区', items: [
     ['#/projects', '全部项目', '查看有权访问的项目'], ['#/board', '任务看板', '任务状态、角色与运行证据'],
+    ['#/new-task' + (repo ? '/' + id : ''), '新建任务', '填写需求、验收条件和交付类型'],
     ['#/inbox' + (repo ? '/' + id : ''), '待处理', '配置、权限、环境与失败事项'],
     ['#/management', '管理对话', '实时回答、执行进展与命令回执']
   ] }];
@@ -60,6 +61,7 @@ function syncConsoleShell() {
   $('console-mobile-nav').hidden = !signedIn;
   $('console-location').hidden = !signedIn;
   if (!signedIn || consoleOwner !== me.id) {
+    if (typeof resetTaskCreation === 'function') resetTaskCreation();
     consoleOwner = me?.id || null; consoleProject = null; consoleNavSignature = ''; consolePositions.clear(); consoleRouteKey = null;
     $('console-secondary-nav').replaceChildren(); $('console-page').replaceChildren();
   }
@@ -139,7 +141,8 @@ async function renderConsoleInbox(request) {
   } finally { body.removeAttribute('aria-busy'); }
 }
 async function renderConsolePage(request) {
-  if (tab === 'more') renderConsoleMore(); else await renderConsoleInbox(request);
+  if (tab === 'new-task') await renderNewTask(request);
+  else if (tab === 'more') renderConsoleMore(); else await renderConsoleInbox(request);
 }
 // Keep only position/focus metadata in memory: never persist field values, passwords or credentials.
 function rememberConsolePosition() {

@@ -6,6 +6,8 @@
 
 项目列表 `GET /api/repositories`、`GET /api/installations` 和 `GET /api/installations/hidden` 支持 `repository_id,account_id,owner_id` 筛选；先应用权限和筛选，再按原顺序分页。传入 `limit` 或 `offset` 时每页默认 50 条、上限 100 条，`offset` 默认 0；不传分页参数时保留完整列表响应，供其他页面使用。项目页和任务数刷新固定请求当前页的 50 条，再按 `owner_id` 分组展示；分组不改变权限或筛选。
 
+管理查询 `get_effective_config` 的 `task_creation:{allowed,reason}` 是当前身份、项目、安装、预算与凭据条件的只读预检。`allowed:true` 不授予代码或 PR 写入；提交 `task.create` 时仍执行原有版本、授权与软件交付检查。
+
 | 路径 | 方法 | 功能和范围 |
 | --- | --- | --- |
 | `/healthz` | GET | 业务端口的数据库健康检查 |

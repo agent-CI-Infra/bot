@@ -115,9 +115,12 @@ export class ManagementService {
     const rules=await this.rules.view(project),work=await workCompatibility(this.store,this.rules,project),manager=await managerView(this.store,this.rules,project);
     const sources={sha:rules.sha,updated_at:rules.updated_at,needs_refresh:rules.needs_refresh};
     this.scope(actor,project);
+    let taskCreation:{allowed:boolean;reason:string|null}={allowed:true,reason:null};
+    try{this.check(actor,{operation:'task.create',target:{project_id:project},arguments:{}});}
+    catch(error){if(!(error instanceof HttpError||error instanceof TaskError))throw error;taskCreation={allowed:false,reason:error.code};}
     const roles=roleApi(this.store,this.user(actor),'GET',new URL('http://local/api/repositories/'+project+'/roles'),{}) as {configuration:any;preview:{error?:string}[]};
     // manager is the project's flow definition; workflows lists the work types in the shape older clients read.
-    return traceClean({project_id:project,revision:this.revision({project_id:project}),manager:{prompt:manager.prompt,work:manager.work,events:manager.events,migration:manager.migration},
+    return traceClean({project_id:project,revision:this.revision({project_id:project}),task_creation:taskCreation,manager:{prompt:manager.prompt,work:manager.work,events:manager.events,migration:manager.migration},
       workflows:work.map(w=>({...w,
       prompt:{...w.prompt,version:w.prompt.source==='repository'?sources.sha:parameterHash(w.prompt.effective),layers:w.prompt.layers.map((l:any)=>({...l,version:l.source==='repository'?sources.sha:parameterHash(l.content)}))},
       model:{...w.model,source:w.model.id||w.model.default_id?'console':'builtin',version:this.store.get('SELECT version FROM models WHERE id=?',w.model.id||w.model.default_id)?.version??null}})),
