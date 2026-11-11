@@ -9,6 +9,7 @@ import { queueWebhook, enqueue } from '../dist/review/queue.js';
 import { taskPermissions } from '../dist/tasks/configuration.js';
 import { workPermissions } from '../dist/work/settings.js';
 import { roleConfiguration, saveConfiguration } from '../dist/roles/definition.js';
+import { managerDecision } from '../dist/dispatch/manager.js';
 
 // These tests ask the Manager for real: events wait for its model call instead of the rule decider other tests use.
 configureDispatch(null);
@@ -19,7 +20,8 @@ const head = 'a'.repeat(40);
 const tasks = h => h.store.all('SELECT * FROM tasks ORDER BY created_at,rowid');
 const events = h => h.store.all('SELECT * FROM dispatch_events ORDER BY created_at,rowid');
 
-// A project with a Manager model served by a local fixture; `state.decide(input, round)` answers each dispatch call.
+// A project with a Manager model served by a local fixture; `state.decide(input, round)` answers each dispatch call, or
+// `state.message(body)` gives the whole assistant message (for a Manager that uses other tools first).
 async function fixture(t) {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await admin('/api/repositories/101/policy', 'PATCH', { review_enabled: true });
@@ -28,7 +30,7 @@ async function fixture(t) {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = JSON.parse(raw); requests.push(body);
     if (state.status !== 200) { res.writeHead(state.status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'fixture outage' } })); return; }
     const input = JSON.parse(body.messages[1].content), round = body.messages.filter(m => m.role === 'tool').length;
-    const message = { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + round, type: 'function', function: { name: 'dispatch', arguments: JSON.stringify(state.decide(input, round)) } }] };
+    const message = state.message ? state.message(body, input) : { role: 'assistant', content: null, tool_calls: [{ id: 'call-' + round, type: 'function', function: { name: 'dispatch', arguments: JSON.stringify(state.decide(input, round)) } }] };
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 20, completion_tokens: 8 } }));
   });
   provider.listen(0, '127.0.0.1'); await once(provider, 'listening');
@@ -232,6 +234,74 @@ test('events of one object are decided one at a time, so updates that arrive tog
   assert.deepEqual([events(f.h).at(-1).decision, events(f.h).at(-1).reason], ['ignore', '对象已关闭或转为草稿，事件不再分派。']);
 });
 
+test('the Manager comments on and labels the event Issue before dispatching; it writes only there, and a retried dispatch repeats no write', async t => {
+  const f = await fixture(t), github = { requests: [], comments: [], labels: [] };
+  // The event's repository on a local GitHub: the bot account reads the repository and the Issue, and writes to it.
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const path = new URL(req.url, 'http://fixture').pathname, body = raw ? JSON.parse(raw) : null; github.requests.push(`${req.method} ${path}`);
+    const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
+    if (path === '/repositories/101') return send({ id: 101, owner: { id: 10 }, full_name: 'fixture/project-101', default_branch: 'main' });
+    if (path === '/repos/fixture/project-101/issues/5' && req.method === 'GET') return send({ ...issue, html_url: 'https://github.example/fixture/project-101/issues/5' });
+    if (path === '/repos/fixture/project-101/issues/5/comments' && req.method === 'POST') { github.comments.push(body); return send({ id: 900 + github.comments.length, body: body.body, html_url: 'https://github.example/c/' + github.comments.length }, 201); }
+    if (path === '/repos/fixture/project-101/issues/5/labels' && req.method === 'POST') { github.labels.push(body); return send(body.labels.map(name => ({ name }))); }
+    send({ message: 'Not Found' }, 404);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const dispatcher = new Dispatcher(f.h.store, (store, context) => managerDecision(store, context, `http://127.0.0.1:${server.address().port}`));
+  const run = async () => { dispatcher.tick(); await dispatcher.idle(); };
+  const call = (name, args, id) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+  let attempt = 0;
+  f.state.message = (body, input) => {
+    const step = body.messages.filter(m => m.role === 'assistant').length;
+    if (step === 0) return { role: 'assistant', content: null, tool_calls: [
+      call('github_write', { method: 'POST', path: '/issues/5/comments', key: 'ask-author', body: { body: 'Thanks @alice: which file loses its last line?' } }, 'w1'),
+      call('github_write', { method: 'POST', path: '/issues/5/labels', key: 'triage', body: { labels: ['needs-info'] } }, 'w2')] };
+    if (step === 1) return { role: 'assistant', content: null, tool_calls: [
+      call('github_write', { repository: 'fixture/other', method: 'POST', path: '/issues', key: 'elsewhere', body: { title: 'Elsewhere' } }, 'w3'),
+      call('github_write', { method: 'POST', path: '/repos/fixture/other/issues', key: 'elsewhere-2', body: { title: 'Elsewhere' } }, 'w4')] };
+    // The first attempt decides invalidly twice (an option that was never offered), so the event is dispatched again.
+    const option = attempt === 0 ? 'invented' : input.options.create.find(o => o.work === 'review.issue').id;
+    return { role: 'assistant', content: null, tool_calls: [call('dispatch', { decision: 'create', option_ids: [option], reason: '已请作者补充信息，先检视' }, 'd' + step)] };
+  };
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'manager-writes');
+  await run();
+  assert.equal(events(f.h)[0].state, 'pending'); assert.equal(tasks(f.h).length, 0);
+  const first = f.requests.slice();
+  // A normal agent turn: the Manager's own tools, then dispatch.
+  assert.ok(['github_write', 'dispatch'].every(name => first[0].tools.some(tool => tool.function.name === name))); assert.equal(first[0].tool_choice, 'auto');
+  const results = first[2].messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content));
+  assert.deepEqual(results.slice(0, 2).map(r => [r.html_url, r.status]), [['https://github.example/c/1', 201], [undefined, 200]]);
+  assert.deepEqual(results[1].result, ['needs-info']);
+  // No other repository: the tool takes no repository, and a path cannot name one.
+  assert.deepEqual(results.slice(2).map(r => r.error), ['invalid_arguments', 'github_write_route_unsupported']);
+  assert.equal(github.comments.length, 1); assert.match(github.comments[0].body, /^Thanks &#64;alice: which file loses its last line\?\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
+  assert.deepEqual(github.labels, [{ labels: ['needs-info'] }]);
+  // Dispatched again: the earlier writes are listed, the same keys answer from the ledger and GitHub sees nothing new.
+  attempt = 1; f.h.store.run('UPDATE dispatch_events SET next_run_at=0'); const writes = github.requests.filter(r => !r.startsWith('GET')).length;
+  await run();
+  const retried = f.requests.slice(first.length), made = JSON.parse(retried[0].messages[1].content).github;
+  assert.equal(made.repository, 'fixture/project-101');
+  assert.deepEqual(made.writes_made.map(w => [w.key, w.method, w.path, w.state]), [['ask-author', 'POST', '/issues/5/comments', 'sent'], ['triage', 'POST', '/issues/5/labels', 'sent']]);
+  assert.ok(retried[1].messages.filter(m => m.role === 'tool').slice(0, 2).every(m => JSON.parse(m.content).replayed === true));
+  assert.equal(github.requests.filter(r => !r.startsWith('GET')).length, writes);
+  assert.equal(events(f.h)[0].state, 'decided'); assert.equal(tasks(f.h)[0].kind, 'review.issue');
+  // Every call is audited with who asked; the refused ones too.
+  const ledger = f.h.store.all('SELECT * FROM github_writes ORDER BY rowid');
+  assert.deepEqual(ledger.filter(row => row.state === 'sent').map(row => [row.key, row.status]), [['ask-author', 201], ['triage', 200]]);
+  assert.ok(ledger.every(row => row.scope === 'dispatch:' + events(f.h)[0].id && JSON.parse(row.actor).role === 'manager' && row.repository_id === '101'));
+  assert.equal(ledger.filter(row => row.state === 'refused').length, 2, 'the path naming another repository, once per attempt (a repository argument is invalid before any record)');
+  assert.equal(f.h.store.get("SELECT count(*) n FROM audit WHERE user_id='role:manager' AND action='github.write.sent'").n, 2);
+  // A Manager whose role only reads is not offered the tool.
+  saveConfiguration(f.h.store, '101', { expected_revision: roleConfiguration(f.h.store, '101').revision, enabled: false, roles: [{ role_id: 'manager', permissions: { github_issues: 'read', github_pull_requests: 'read', github_contents: 'read' } }] }, 'fixture');
+  f.state.message = null; f.state.decide = () => ({ decision: 'ignore', option_ids: [], reason: '无需处理' });
+  queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue: { ...issue, number: 6 }, sender: alice }, 'read-only-manager');
+  await run();
+  assert.ok(!f.requests.at(-1).tools.some(tool => tool.function.name === 'github_write'));
+  assert.ok(f.requests.at(-1).tools.some(tool => tool.function.name === 'github_read'));
+});
+
 test('upgrading moves workflows into the Manager and project configuration once, with a record', async t => {
   const h = await harness(t), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   await h.stop();
@@ -259,7 +329,8 @@ test('upgrading moves workflows into the Manager and project configuration once,
   assert.deepEqual(JSON.parse(policy.event_filters)['pull_request.labels'], ['docs']);
   assert.deepEqual(JSON.parse(policy.rule_overrides), { '.bot/rules/issue-review.md': 'Review issues briefly.' });
   const work = JSON.parse(policy.work_settings);
-  assert.deepEqual(work['review.pr'].writes, ['reply', 'labels', 'issue']); assert.deepEqual(work.reply, { enabled: true, writes: ['reply'], events: ['pull_request.labeled'], version: 0 });
+  // Filing an Issue is no longer a review write: it became github_write, governed by the role (#381).
+  assert.deepEqual(work['review.pr'].writes, ['reply', 'labels']); assert.deepEqual(work.reply, { enabled: true, writes: ['reply'], events: ['pull_request.labeled'], version: 0 });
   // Each object work type is offered only on the events that used to start it.
   assert.deepEqual(work['review.pr'].events, ['pull_request.opened', 'pull_request.mention']);
   assert.deepEqual(work['review.issue'].events, ['issue.opened', 'issue.mention', 'issue.updated']);

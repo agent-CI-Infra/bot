@@ -13,7 +13,7 @@ import { roleConfiguration } from '../dist/roles/definition.js';
 import { defaultPermissions, migratePermissions, permissionTools, updatePermissions } from '../dist/roles/permissions.js';
 import { assertManagedExecution, assertTaskRole, assertTaskExternalEffect, roleTaskCaller, taskToolAllowed, taskManagementTools } from '../dist/tasks/management.js';
 import { runRole } from '../dist/roles/run.js';
-import { reportTaskIssue } from '../dist/tasks/issues.js';
+import { taskGithubWrite } from '../dist/tasks/github-write.js';
 import { Redactor } from '../dist/agent/common.js';
 import { recordEvent, applyDecision } from '../dist/dispatch/store.js';
 
@@ -109,13 +109,13 @@ test('a source role cannot lend GitHub writes, commands, subagents or another ro
   const task = s.get('SELECT * FROM tasks WHERE id=?', create(caller()).id);
   assert.equal(taskToolAllowed(s, task, 'reviewer', 'write_file'), false);
   assert.equal(taskToolAllowed(s,task,'reviewer','start_agent'),true);
-  for (const name of ['create_issue', 'create_pull_request', 'run_command', 'delegate_role']) assert.equal(taskToolAllowed(s, task, 'reviewer', name), false, name);
+  for (const name of ['github_write', 'run_command', 'delegate_role']) assert.equal(taskToolAllowed(s, task, 'reviewer', name), false, name);
   assert.throws(() => assertTaskRole(s, task, 'manager'), { code: 'task_delegation_forbidden' });
-  assert.throws(() => assertTaskExternalEffect(s, task, 'issue'), { code: 'task_external_write_forbidden' });
-  assert.throws(() => assertTaskExternalEffect(s, task, 'comment'), { code: 'task_external_write_forbidden' });
+  // A PR is a framework delivery (#381): the project's work type decides, and this task's work type has no PR write.
+  assert.throws(() => assertTaskExternalEffect(s, task, 'pull_request'), { code: 'task_external_write_forbidden' });
   assertTaskRole(s, task, 'qa'); assert.equal(taskToolAllowed(s, task, 'qa', 'submit_acceptance'), true);
-  save('reviewer', { issues: 'allow' });
-  assert.equal(taskToolAllowed(s, task, 'reviewer', 'create_issue'), false, 'old request ceiling is retained');
+  save('reviewer', { github_issues: 'write' });
+  assert.equal(taskToolAllowed(s, task, 'reviewer', 'github_write'), false, 'old request ceiling is retained');
 });
 
 test('a persisted principal ceiling cannot acquire later knowledge grants through recovery or a derived task', t => {
@@ -139,7 +139,7 @@ test('a delegated role cannot escape a live ancestor permission ceiling by creat
   const childCaller = roleTaskCaller(s, 'r', 'dev', { source_task_id: parent, guard() {} });
   const child = commands.tool(childCaller, 'create_task', { request: 'Nested task', criteria: ['Keep root authority'] }).id;
   const task = s.get('SELECT * FROM tasks WHERE id=?', child);
-  assertManagedExecution(s, task); assert.equal(taskToolAllowed(s, task, 'dev', 'create_issue'), false);
+  assertManagedExecution(s, task); assert.equal(taskToolAllowed(s, task, 'dev', 'github_write'), false);
   save('reviewer', { delegation: 'deny' });
   assert.throws(() => assertManagedExecution(s, task), { code: 'task_delegation_forbidden' });
   save('reviewer', { delegation: 'allow', task_management: 'none' });
@@ -195,35 +195,50 @@ test('real model role tools create the same durable task with a pinned caller, w
   assert.ok(taskManagementTools.every(t => t.function.parameters.additionalProperties === false));
 });
 
-test('allowed Issue publishing uses Publisher idempotency and unknown reconciliation, never adds a development label', async t => {
+test('github_write from a task files an Issue once per key, escapes mentions, redacts secrets and follows the live role', async t => {
   const { s, save, caller, create } = fixture(t); let writes = 0, failOnce = true; const issues = [], requests = [];
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk; const body = raw ? JSON.parse(raw) : null;
     const path = new URL(req.url, 'http://fixture').pathname; requests.push({ method: req.method, path, body });
-    const send = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)); };
-    if (path === '/user') return send({ id: 9, login: 'fixture-bot' });
+    const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     if (path === '/repositories/r') return send({ id: 'r', owner: { id: '10' }, full_name: 'fixture/r', default_branch: 'main' });
-    if (path === '/repos/fixture/r/issues' && req.method === 'GET') return send(issues);
     if (path === '/repos/fixture/r/issues' && req.method === 'POST') {
-      writes++; const issue = { ...body, number: writes, html_url: 'https://example.invalid/issues/' + writes, user: { id: 9 } }; issues.push(issue);
-      if (failOnce) { failOnce = false; req.socket.destroy(); return; } return send(issue);
+      writes++; const issue = { ...body, number: writes, state: 'open', html_url: 'https://example.invalid/issues/' + writes, user: { id: 9 } }; issues.push(issue);
+      if (failOnce) { failOnce = false; req.socket.destroy(); return; } return send(issue, 201);
     }
-    res.writeHead(404); send({});
+    send({ message: 'Not Found' }, 404);
   }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => new Promise(r => { server.close(r); server.closeAllConnections(); }));
-  save('reviewer', { issues: 'allow' }); s.run("UPDATE policies SET work_settings=? WHERE repository_id='r'", JSON.stringify({ 'task.request': { writes: ['issue'] } }));
-  const task = s.get('SELECT * FROM tasks WHERE id=?', create(caller(), 'Report Issue').id), url = 'http://127.0.0.1:' + server.address().port, args = { key: 'report-1', title: 'Observed defect', body: 'Report to @maintainer' };
-  await assert.rejects(reportTaskIssue(s, task, args, new Redactor(), async () => {}, url), { code: 'github_response_unknown' });
-  assert.equal(s.get('SELECT state FROM github_effects WHERE task_id=?', task.id).state, 'unknown');
-  assert.equal((await reportTaskIssue(s, task, args, new Redactor(), async () => {}, url)).number, 1);
-  assert.equal((await reportTaskIssue(s, task, args, new Redactor(), async () => {}, url)).number, 1); assert.equal(writes, 1);
-  assert.deepEqual(Object.keys(issues[0]).sort(), ['body', 'html_url', 'number', 'title', 'user']); assert.ok(issues[0].body.includes('&#64;maintainer'));
-  assert.equal(queueWebhook(s, 'r', 'issues', { action: 'opened', issue: { ...issues[0], state: 'open' }, sender: { id: 9, type: 'User', login: 'fixture-bot' } }, 'echo'), 0);
-  assert.equal(s.get("SELECT count(*) n FROM dispatch_events WHERE delivery_id='echo'").n, 0);
-  await assert.rejects(reportTaskIssue(s, task, { ...args, title: 'Changed intent' }, new Redactor(), async () => {}, url), { code: 'task_issue_key_conflict' });
-  const before = requests.length; save('reviewer', { issues: 'deny' });
-  await assert.rejects(reportTaskIssue(s, task, args, new Redactor(), async () => {}, url), { code: 'task_external_write_forbidden' });
+  save('reviewer', { github_issues: 'write' });
+  const task = s.get('SELECT * FROM tasks WHERE id=?', create(caller(), 'Report Issue').id), url = 'http://127.0.0.1:' + server.address().port;
+  const write = taskGithubWrite(s, task, new Redactor(), async () => {}, url), body = { title: 'Observed\ndefect', body: 'Report to @maintainer; seen with fixture-bot-token.' };
+  // An answer that never arrived: the key is held as unknown and never sent again.
+  const lost = await write({ method: 'POST', path: '/issues', key: 'report-1', body });
+  assert.equal(lost.error, 'github_response_unknown'); assert.match(lost.instruction, /new key/);
+  assert.equal((await write({ method: 'POST', path: '/issues', key: 'report-1', body })).error, 'github_write_unknown'); assert.equal(writes, 1);
+  const filed = await write({ method: 'POST', path: '/issues', key: 'report-2', body });
+  assert.deepEqual([filed.number, filed.html_url, filed.status, filed.replayed], [2, 'https://example.invalid/issues/2', 201, undefined]);
+  assert.deepEqual(await write({ method: 'POST', path: '/issues', key: 'report-2', body }), { ...filed, replayed: true }); assert.equal(writes, 2);
+  // People's text: mentions escaped, the title on one line; every known credential redacted.
+  assert.equal(issues[1].title, 'Observed defect'); assert.match(issues[1].body, /^Report to &#64;maintainer; seen with \[REDACTED\]\.\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
+  assert.equal(queueWebhook(s, 'r', 'issues', { action: 'opened', issue: { ...issues[1], state: 'open' }, sender: { id: 9, type: 'User', login: 'fixture-bot' } }, 'echo'), 0);
+  assert.equal((await write({ method: 'POST', path: '/issues', key: 'report-2', body: { ...body, title: 'Changed intent' } })).error, 'github_write_key_conflict');
+  // Who, where and what, for every call.
+  const ledger = s.all('SELECT * FROM github_writes WHERE scope=? ORDER BY rowid', 'task:' + task.id);
+  assert.deepEqual(ledger.map(row => [row.key, row.state, row.status]), [['report-1', 'unknown', null], ['report-2', 'sent', 201]]);
+  assert.deepEqual(JSON.parse(ledger[1].actor), { kind: 'task', role: 'reviewer', task_id: task.id });
+  assert.ok(ledger.every(row => row.repository_id === 'r' && row.method === 'POST' && row.path === '/issues' && /^[a-f0-9]{64}$/.test(row.request_digest)));
+  assert.deepEqual(s.all("SELECT action FROM audit WHERE action LIKE 'github.write.%' ORDER BY rowid").map(row => row.action), ['github.write.unknown', 'github.write.sent']);
+  // Unsupported routes and other resources are refused before anything reaches GitHub; so is a revoked permission.
+  const before = requests.length;
+  assert.equal((await write({ method: 'POST', path: '/releases', key: 'release', body: { tag_name: 'v1' } })).error, 'github_write_route_unsupported');
+  assert.equal((await write({ method: 'PUT', path: '/contents/a.md', key: 'file', body: { message: 'm', content: 'YQ==' } })).error, 'github_resource_forbidden');
+  for (const path of ['/issues?x=1', '/../repos/other/issues', 'https://api.github.com/repos/other/x/issues', '/issues/%2e%2e/1'])
+    assert.equal((await write({ method: 'POST', path, key: 'bad', body })).error, 'invalid_arguments', path);
+  save('reviewer', { github_issues: 'read' });
+  assert.equal((await write({ method: 'POST', path: '/issues', key: 'report-3', body })).error, 'github_resource_forbidden');
   assert.equal(requests.length, before);
+  assert.equal(s.get("SELECT count(*) n FROM github_writes WHERE state='refused'").n, 3);
 });
 
 test('software request endpoint is explicit, defaults off and intersects fixed source, executor and project writes',async t=>{
@@ -239,7 +254,9 @@ test('software request endpoint is explicit, defaults off and intersects fixed s
   const task=s.get('SELECT * FROM tasks WHERE id=?',id);assert.equal(JSON.parse(task.input).contract.endpoint,'reviewable_pull_request');assertRequestPullRequest(s,task);
   await assert.rejects(publishRequestPullRequest(s,task,new Redactor(),async()=>{},()=>{},'http://127.0.0.1:1'),{code:'acceptance_required'});
   assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',id).executor_role,'reviewer');
-  save('reviewer',{pull_request:'deny',delegation:'allow'});
+  // The PR is a framework delivery (#381): revoking the executor's PR permission changes nothing, losing code edits does.
+  save('reviewer',{pull_request:'deny',delegation:'allow'});assertRequestPullRequest(s,task);
+  save('reviewer',{repository:'none'});
   assert.throws(()=>assertRequestPullRequest(s,task),{code:'task_pull_request_forbidden'});
   assert.throws(()=>create(caller(),'Delegation cannot lend PR authority',{endpoint:'reviewable_pull_request',executor_role:'dev'}),{code:'task_pull_request_forbidden'});
   const report=create(caller(),'A report still does not ask for publication',{execute:false}).id;

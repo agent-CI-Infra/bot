@@ -1,6 +1,7 @@
 import { type Store } from '../storage/database.js';
 import { stop } from './common.js';
 import { pricingFor } from '../metrics/accounting.js';
+import { githubWriteTool } from '../github/write.js';
 // Exact task-profile overrides are trusted administrator configuration, never model/tool input.
 // Keep invalid/deleted overrides visible: falling back would silently change the user's chosen model.
 export function selectedModel(store: Store, repositoryId: string, taskKind?: string) {
@@ -37,7 +38,8 @@ export function modelEndpoints(url:string){
 const fn=(name:string,description:string,properties:Record<string,unknown>,required:string[])=>({type:'function',function:{name,description,parameters:{type:'object',properties,required,additionalProperties:false}}});
 const string={type:'string'};
 // The tools a workspace agent gets follow its trusted capabilities: a tool its work type does not allow is not offered.
-// Each configured write is a platform tool; the control plane performs it (see writeCatalog).
+// Each configured write is a platform tool; the control plane performs it (see writeCatalog). github_write is offered to
+// every work type and kept only where the executing role may write to GitHub (#381).
 export function tools(profile: { workspaceWrite: boolean; completion: 'review' | 'publication' | 'reply' | 'event'; read?: boolean; shell?: boolean; notes?: boolean; github?: boolean; writes?: string[] }){
   const development = profile.completion === 'publication', allow = (flag?: boolean) => flag !== false;
   const writes = profile.writes ?? (development ? ['code', 'pull_request'] : profile.completion === 'review' ? ['reply', 'labels'] : ['reply']);
@@ -53,7 +55,7 @@ export function tools(profile: { workspaceWrite: boolean; completion: 'review' |
     fn('create_pull_request',(development?'Create or update the bot pull request from the working tree now.':'Publish the working-tree changes as a bot pull request now: a new one when the task is an Issue, or an update of this bot\'s own pull request. It does not end the task; finish as usual afterwards.')+' test_command records a command you already ran; only the project policy command is run by the control plane. On validation_failed, fix the problem and call again. Remove generated files before calling',
       {summary:string,test_command:string,change_title:{type:'string',description:'Concise code-change subject only. No review passphrase or review template.'},
         release_label:{type:'string',description:'For openJiuwen-ai/sciencediscovery: choose exactly one release:* category using current CONTRIBUTING.md, .github/release.yml and .agents/skills/create-github-pr/SKILL.md. Category follows the change, not its author. Other repositories may omit this.'}},['summary','test_command','change_title']));
-  if(writes.includes('issue'))result.push(fn('create_issue','File a new Issue in this repository as the bot. The control plane creates it (once per call) and escapes @ mentions; it returns the Issue number and URL',{title:string,body:string},['title','body']));
+  result.push(githubWriteTool);
   // Development ends with its PR; an event workflow ends with its own finishing tool (eventTools).
   if(development||profile.completion==='event')return result;
   // A custom workflow replies: a summary comment and findings, without the Issue authorization fields of a review.

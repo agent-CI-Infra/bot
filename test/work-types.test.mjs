@@ -90,23 +90,27 @@ test('reading is open to every work type; writes are chosen per work type within
   }
   const put = (id, writes) => saveManager(admin, '101', { work: { [id]: { writes } } });
   // Refused: dropping a locked write, a PR without code, a write the work type cannot have, an unknown work type.
-  for (const [id, writes] of [['review.pr', ['labels']], ['review.pr', ['reply', 'pull_request']], ['review.pr', ['reply', 'actions_rerun']], ['development.issue', ['code']], ['release.notes', ['reply']]])
+  // Filing an Issue is a delivery only of Actions failure handling; elsewhere it is github_write, governed by the role (#381).
+  for (const [id, writes] of [['review.pr', ['labels']], ['review.pr', ['reply', 'pull_request']], ['review.pr', ['reply', 'actions_rerun']], ['review.pr', ['reply', 'issue']], ['development.issue', ['code']], ['release.notes', ['reply']], ['release.notes', ['release_notes', 'issue']]])
     assert.equal((await put(id, writes)).value.error, 'invalid_work_writes', id + ' ' + writes);
   assert.equal((await saveManager(admin, '101', { work: { 'custom.abc': { enabled: true } } })).value.error, 'unknown_work_type');
-  assert.equal((await put('review.pr', ['reply', 'code', 'pull_request', 'issue'])).status, 200);
+  assert.equal((await put('review.pr', ['reply', 'code', 'pull_request'])).status, 200);
   const permissions = workPermissions(h.store, '101', 'review.pr');
-  assert.deepEqual(permissions.writes, ['reply', 'code', 'pull_request', 'issue']); assert.equal(permissions.workspace.write, true);
-  assert.deepEqual(writeOptions('review.pr').map(option => [option.id, option.locked]), [['reply', true], ['labels', false], ['code', false], ['pull_request', false], ['issue', false]]);
+  assert.deepEqual(permissions.writes, ['reply', 'code', 'pull_request']); assert.equal(permissions.workspace.write, true);
+  assert.deepEqual(writeOptions('review.pr').map(option => [option.id, option.locked]), [['reply', true], ['labels', false], ['code', false], ['pull_request', false]]);
+  assert.deepEqual(writeOptions('actions.failures').map(option => [option.id, option.tool]), [['issue', 'report_failure'], ['actions_rerun', 'rerun_failed_run']]);
   let profile = workspaceProfile('review.pr', {}, permissions), names = profile.tools.map(tool => tool.function.name);
-  for (const name of ['read_file', 'run_command', 'write_file', 'start_agent', 'github_read_token', 'create_pull_request', 'create_issue', 'finish_review']) assert.ok(names.includes(name), name);
+  // github_write is in every profile; the acting role's permissions decide whether it is kept.
+  for (const name of ['read_file', 'run_command', 'write_file', 'start_agent', 'github_read_token', 'create_pull_request', 'github_write', 'finish_review']) assert.ok(names.includes(name), name);
+  assert.ok(!names.includes('create_issue'));
   // Without the labels write the review cannot hand over labels.
   assert.equal(profile.tools.find(tool => tool.function.name === 'finish_review').function.parameters.properties.labels, undefined);
-  assert.deepEqual([profile.capabilities.workspace.write, profile.capabilities.github.publication, profile.capabilities.writes], [true, 'pull_request', ['reply', 'code', 'pull_request', 'issue']]);
+  assert.deepEqual([profile.capabilities.workspace.write, profile.capabilities.github.publication, profile.capabilities.writes], [true, 'pull_request', ['reply', 'code', 'pull_request']]);
   // Saved writes that no longer fit fall back leniently: locked kept, a PR without code dropped.
-  h.store.run("UPDATE policies SET work_settings=? WHERE repository_id='101'", JSON.stringify({ 'review.pr': { writes: ['pull_request', 'actions_rerun'] } }));
+  h.store.run("UPDATE policies SET work_settings=? WHERE repository_id='101'", JSON.stringify({ 'review.pr': { writes: ['pull_request', 'actions_rerun', 'issue'] } }));
   assert.deepEqual(workPermissions(h.store, '101', 'review.pr').writes, ['reply']);
   profile = workspaceProfile('review.pr', {}, workPermissions(h.store, '101', 'review.pr')); names = profile.tools.map(tool => tool.function.name);
-  for (const name of ['create_pull_request', 'create_issue']) assert.ok(!names.includes(name), name);
+  for (const name of ['create_pull_request', 'create_issue', 'report_failure']) assert.ok(!names.includes(name), name);
   // write_file writes project notes only: the checkout stays read-only.
   assert.match(profile.tools.find(tool => tool.function.name === 'write_file').function.description, /project note at \.\.\/notes\/<name> only/);
   assert.equal(profile.capabilities.workspace.write, false);
@@ -115,7 +119,8 @@ test('reading is open to every work type; writes are chosen per work type within
   // The runner still refuses what the capabilities refuse, whatever tool the model names.
   assert.equal(toolCapabilityError({ capabilities: { ...profile.capabilities, workspace: { ...profile.capabilities.workspace, shell: false } } }, 'run_command'), 'shell_not_allowed');
   assert.equal(toolCapabilityError({ capabilities: { ...profile.capabilities, agents: false } }, 'start_agent'), 'agents_not_allowed');
-  assert.equal(toolCapabilityError({ capabilities: profile.capabilities }, 'create_issue'), 'write_not_allowed');
+  assert.equal(toolCapabilityError({ capabilities: profile.capabilities }, 'report_failure'), 'write_not_allowed');
+  assert.equal(toolCapabilityError({ capabilities: profile.capabilities }, 'github_write'), null, 'the control plane checks github_write against the role');
   assert.equal(toolCapabilityError({ capabilities: profile.capabilities }, 'create_pull_request'), 'publication_not_allowed');
 });
 

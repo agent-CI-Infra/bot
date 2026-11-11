@@ -16,6 +16,7 @@ import {pruneTasks} from '../runner/store.mjs';
 import {estimateTokens} from '../runner/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
 import {subagentSystem} from '../dist/agent/runtime.js';
 import {TaskRecords} from '../dist/tasks/service.js';
+import {roleConfiguration,saveConfiguration} from '../dist/roles/definition.js';
 
 const text=message=>typeof message.content==='string'?message.content:message.content.map(block=>block.text||'').join('');
 const actor={type:'User',login:'alice',id:5};
@@ -454,20 +455,18 @@ test('an update arriving after prepare but before the first request refreshes bo
   assert.equal(d.h.store.get('SELECT count(*) n FROM tasks').n,1);
 });
 
-test('real Pi forwards a write tool to the control plane: create_issue files one Issue and the review still finishes',async t=>{
+test('real Pi forwards github_write to the control plane: a role with Issues write files one Issue and the review still finishes',async t=>{
   const filed=[];
-  const d=await live(t,{model:async(request,n)=>n===1?{body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('create_issue',{title:'Follow-up for @alice',body:'Track the docs; ping @alice.'})]}}]}}:undefined,
+  const d=await live(t,{model:async(request,n)=>n===1?{body:{choices:[{message:{role:'assistant',content:null,tool_calls:[call('github_write',{method:'POST',path:'/issues',key:'docs-follow-up',body:{title:'Follow-up for @alice',body:'Track the docs; ping @alice.'}})]}}]}}:undefined,
     github:async(path,send,_res,body)=>{if(path.endsWith('/issues')&&body?.title){filed.push(body);send({number:77,html_url:'https://github.invalid/issues/77',user:{id:999}},201);return true;}return false;}});
-  // Issue reviews may file Issues once an administrator gives the work type the issue write in the project configuration.
-  assert.equal((await saveManager(d.h.admin,'101',{work:{'review.issue':{writes:['reply','labels','issue']}}})).status,200);
-  // A task keeps the configuration pinned when it was queued; the fixture's review was queued before this grant, so drop
-  // its snapshot to start it as a review queued afterwards.
+  // Direct writes follow the executing role's GitHub permissions (#381); the built-in dev role only reads until it is given Issues write.
+  saveConfiguration(d.h.store,'101',{expected_revision:roleConfiguration(d.h.store,'101').revision,enabled:false,roles:[{role_id:'dev',permissions:{github_issues:'write'}}]},'fixture');
   d.h.store.run('DELETE FROM task_execution_configs WHERE task_id=?',d.h.taskId);
   const [task]=await d.run();
   assert.equal(task.status,'succeeded',JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   assert.equal(filed.length,1);assert.match(filed[0].body,/ping &#64;alice/);assert.doesNotMatch(filed[0].title,/@/);
   // Pi received the control plane's answer as the tool result, then finished the review as usual.
   assert.match(JSON.stringify(d.requests[1].messages),/"number\\":77/);
-  assert.ok(d.requests[0].tools.some(tool=>tool.function.name==='create_issue'));
-  assert.equal(d.h.store.get("SELECT count(*) n FROM github_effects WHERE kind='issue' AND state='sent'").n,1);
+  assert.ok(d.requests[0].tools.some(tool=>tool.function.name==='github_write'));
+  assert.equal(d.h.store.get("SELECT count(*) n FROM github_writes WHERE state='sent'").n,1);
 });

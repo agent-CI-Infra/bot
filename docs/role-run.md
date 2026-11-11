@@ -52,7 +52,7 @@ RoleRun 是一个 assignment 在 `task_runs` 里的一次执行尝试，不是�
 
 任务归属约束与 principal 授权相交：`tasks.manage_own` 可单独授予，已有 `tasks.write` 包含此窄能力，旧授权无需回填。角色来源除工具快照外还固定当时实际具备的 principal 项目能力；恢复和知识读取使用这个上限，后来增加授权不会扩大旧任务。关联子任务逐层检查来源链，根角色的委派、任务管理或工具权限撤销后，不能通过新角色／新 task_id 延续已撤销能力。
 
-普通事项的项目写入集合默认为空；明确允许 `issue` 且来源和执行角色均有 Issue 权限时，才提供 `create_issue`。写入使用既有 Publisher 副作用账本与未知结果对账，稳定 key 重试不会重复建单；不添加开发标签或分派开发。Issue 能力不授予 PR、分支、评论或配置写入，软件交付可在同一 create_task 显式选 reviewable_pull_request 终点；项目需另行允许普通事项 code／pull_request 写集合（默认仍空）且开发开关打开，来源和执行者分别有文件／PR 能力。它与普通 report 共用任务／角色实例／调度／预算，默认本人执行；换人仍要委派。候选、项目测试、独立 QA、Publisher、unknown 对账均沿用原机制，QA 与发布之间权限或策略变化会停止推进；无 Issue 来源不生成关闭编号。
+普通事项的项目写入集合默认为空。执行角色和来源角色（以及群聊绑定的服务角色）都对相应 GitHub 资源有写权限时，才提供 `github_write`，例如用 `POST /issues` 提报 Issue；key 按任务去重，重试不会重复建单，不添加开发标签或分派开发，见[共享 Agent 后端](agent-runtime.md#github-写入github_write)。软件交付可在同一 create_task 显式选 reviewable_pull_request 终点；项目需另行允许普通事项 code／pull_request 写集合（默认仍空）且开发开关打开，来源和执行者都要能修改代码。PR 本身是框架交付，不需要角色的 GitHub 写权限。它与普通 report 共用任务／角色实例／调度／预算，默认本人执行；换人仍要委派。候选、项目测试、独立 QA、Publisher、unknown 对账均沿用原机制，QA 与发布之间权限或策略变化会停止推进；无 Issue 来源不生成关闭编号。
 
 角色读取任务事实、原始记录、证据、项目知识以及提出经验候选，都经 `TaskToolGateway.call(token, request)`。服务端每次复核令牌绑定与有效期、当前 epoch、run 仍在运行、项目与租户、发起人的当前授权（人发起的任务按 `tasks.read`/`knowledge.read`/`knowledge.write`）、角色当前策略（`roleAuthority`）。工具：
 

@@ -205,23 +205,16 @@ export function assertTaskRole(store: Store, task: Row, role: string): void {
   if (fixed.delegation !== 'allow' || current?.delegation !== 'allow') fail(403, 'task_delegation_forbidden');
   }
 }
+/**
+ * A framework delivery (#381): review conclusions, a PR from the tested candidate, labels, merges. It keeps its own flow and is
+ * governed by the project work type's writes, which decide whether the task offers it at all; the executing role needs no
+ * direct GitHub write. The task lineage must still be valid, and a task a role created must have been given the write it
+ * publishes explicitly (a role cannot lend a PR to a task the project did not allow one).
+ */
 export function assertTaskExternalEffect(store: Store, task: Row, kind: string): void {
   const origin=assertManagedExecution(store,task);
-  const policies=taskRolePolicies(store,task);
-  const pr=String(task.kind).endsWith('.pr');
-  const allowed=(p:RolePermissions)=>kind==='issue'?resourceAllowed(p,'issues','create')
-    :kind==='branch'||kind==='pull_request'?resourceAllowed(p,'contents','publish')&&resourceAllowed(p,'pull_requests','create')
-    :kind==='comment'?resourceAllowed(p,pr?'pull_requests':'issues','reply')
-    :kind==='label'?resourceAllowed(p,pr?'pull_requests':'issues','labels')
-    :kind==='review'?resourceAllowed(p,'pull_requests','reply')
-    :kind==='resolve'?resourceAllowed(p,'pull_requests','reply')&&resourceAllowed(p,'contents','publish')
-    :['merge','merge_queue','dequeue'].includes(kind)?resourceAllowed(p,'contents','publish'):false;
-  if(policies.some(p=>!allowed(p)))fail(403,'task_external_write_forbidden');
-  if(!origin||origin.source_kind!=='role')return;
-  const tool=kind==='issue'?'create_issue':['branch','pull_request'].includes(kind)?'create_pull_request':null;
-  const role=String(task.active_role??origin.executor_role),current=roleOf(store,task.repository_id,role);
-  if(tool&&(!current||!permitsTool(current.permissions,tool)||!taskToolAllowed(store,task,role,tool)||
-    !taskPermissions(store,task).writes.includes(kind==='issue'?'issue':'pull_request')))fail(403,'task_external_write_forbidden');
+  if(!origin||origin.source_kind!=='role'||!['issue','branch','pull_request'].includes(kind))return;
+  if(!taskPermissions(store,task).writes.includes(kind==='issue'?'issue':'pull_request'))fail(403,'task_external_write_forbidden');
 }
 
 /** Live source and executor policies also constrain framework effects, not just model-facing tools. */
@@ -245,6 +238,12 @@ export function taskRolePolicies(store:Store,task:Row):RolePermissions[]{
     }
   }
   return result;
+}
+/** The role acting for a task right now: the running role run, otherwise the task's active or executor role. */
+export function taskActingRole(store:Store,task:Row):string{
+  const context=executingPolicy.getStore();
+  if(context?.store===store&&context.task===String(task.id))return context.role;
+  return String(task.active_role??managedTaskOrigin(store,String(task.id))?.executor_role??'dev');
 }
 export function taskReadScopes(store:Store,task:Row):string[]{
   const policies=taskRolePolicies(store,task);

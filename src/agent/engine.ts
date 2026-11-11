@@ -33,7 +33,8 @@ import { Publisher, assertOwnedPR } from '../github/publisher.js';
 import { releaseCategory } from '../github/release-label.js';
 import { testEvidence, reviewLanguage, promptedBy, type DevelopmentWait } from '../github/text.js';
 import { assigneesOf, developmentReady, reviewRequestsCode, sameLabel, reviewNewHead } from '../review/queue.js';
-import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsReport, actionsSourceIssue, publicText } from '../actions/safety.js';
+import { actionsConfigurationError, actionsDevelopmentAllowed, actionsIssueAssigned, actionsReport, actionsSourceIssue } from '../actions/safety.js';
+import { taskGithubWrite } from '../tasks/github-write.js';
 import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
@@ -52,6 +53,7 @@ import { workEnabled, workActive, eventFilters } from '../work/settings.js';
 import { eventWork } from '../work/events.js';
 import { recordEvent } from '../dispatch/store.js';
 import { Dispatcher } from '../dispatch/worker.js';
+import { managerDecision } from '../dispatch/manager.js';
 // The modules that own event work register it when loaded.
 import '../releases/observe.js';
 import '../releases/notes.js';
@@ -104,7 +106,7 @@ export class TaskEngine {
   readonly rules:RuleService;readonly coordinator:CoordinationWorker;
   // Decides the Manager events in the background; a decided event's new tasks start on the next tick.
   readonly dispatcher:Dispatcher;
-  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,undefined,()=>queueMicrotask(()=>this.tick()));}
+  constructor(readonly store:Store,readonly manager:Manager,readonly githubUrl?:string,readonly gitCache?:GitCache,readonly evaluate=evaluateDelivery){this.rules=new RuleService(store,manager,githubUrl);this.coordinator=new CoordinationWorker(store,manager);this.dispatcher=new Dispatcher(store,(s,context)=>managerDecision(s,context,githubUrl),()=>queueMicrotask(()=>this.tick()));}
   // The running tasks of one repository, for callers that must wait until they have stopped.
   working(repositoryId:string):Promise<void>[]{return [...this.running.get(repositoryId)||[]].map(id=>this.active.get(id)).filter((work):work is Promise<void>=>!!work);}
   start(){
@@ -630,16 +632,15 @@ export class TaskEngine {
         if(validatedPhase!=='model')await validate();
         validatedPhase=undefined;
         log({type:'phase',phase:'model',mode:development?'development':'review',detail:`Agent 开始执行：${development?'开发':'检视'}…`});
-        // create_issue: a new Issue the task files, once per tool call, with mentions escaped and secrets removed.
-        // Event work's own write tools (Actions rerun and report) come from its module; it reports through them.
+        // github_write: a direct write the acting role's GitHub permissions allow (#381), keyed per task so a retried attempt
+        // never writes twice. Event work's own write tools (Actions rerun and report) come from its module.
         input.context={...input.context,acceptance_feedback:records.get(id).acceptance};
         const platform:PlatformTools={...(event?.tools?.(this.store,task,input,writes,eventState)??{})};
-        if(writes.includes('issue')&&task.kind!=='actions.failures')platform.create_issue=async(callId,args)=>{
-          if(typeof args?.title!=='string'||!args.title.trim()||args.title.length>256||typeof args.body!=='string'||args.body.length>60000)return {error:'create_issue_invalid',message:'title (up to 256 characters) and body are required.'};
-          const safe=(text:string)=>publicText(text,redactor).replace(/@/g,'&#64;');
-          const issue=await new Publisher(this.store,github,task,validate,undefined,log).issue('issue:'+callId,safe(args.title).replace(/[\r\n]+/g,' ').trim(),safe(args.body));
-          log({type:'published',outputs:[{html_url:issue.html_url,issue:issue.number}]});
-          return {number:issue.number,html_url:issue.html_url};
+        const write=taskGithubWrite(this.store,task,redactor,guard,this.githubUrl);
+        platform.github_write=async(_callId,args)=>{
+          const result=await write(args);
+          if(result?.html_url&&!result.replayed)log({type:'published',outputs:[{html_url:result.html_url,...(result.number?{number:result.number}:{})}]});
+          return result;
         };
         result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,taskPermissions(this.store,task).github,()=>taskReadScopes(this.store,task)),writes.includes('pull_request')?async(requestId,args)=>{
           // Any task other than development may publish one PR, while the project's development switch is on,

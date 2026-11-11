@@ -19,8 +19,9 @@ export function assertRequestPullRequest(store: Store, task: Row): void {
   if(!writes.includes('code')||!writes.includes('pull_request'))stop('task_pull_request_forbidden','waiting_permission','项目未显式允许普通事项修改代码并交付 PR。');
   if(origin?.executor_role){
     const executor=roleConfiguration(store,task.repository_id).roles.find(r=>r.role_id===origin.executor_role&&r.enabled);
-    if(!executor||!['write_file','create_pull_request'].every(name=>permitsTool(executor.permissions,name)&&taskToolAllowed(store,task,executor.role_id,name)))
-      stop('task_pull_request_forbidden','waiting_permission','来源和执行角色必须均具备代码与 PR 能力；任务管理或委派不能增加写权限。');
+    // The PR itself is a framework delivery (#381); the executor still has to be able to change the code it delivers.
+    if(!executor||!(permitsTool(executor.permissions,'write_file')&&taskToolAllowed(store,task,executor.role_id,'write_file')))
+      stop('task_pull_request_forbidden','waiting_permission','执行角色必须能修改虚拟电脑中的代码；任务管理或委派不能增加这项能力。');
   }
   assertTaskExternalEffect(store,task,'pull_request');
 }

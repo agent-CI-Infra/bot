@@ -22,11 +22,12 @@ async function github(t) {
     const send = (value, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     let match;
     if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/installation$/.exec(path))) return send({ id: 55, account: { id: match[1].endsWith('201') ? 20 : 10, login: 'agent-test-zone' },
-      permissions: { contents: 'read', issues: 'read', pull_requests: 'read', actions: 'read', checks: 'read', statuses: 'read', metadata: 'read' } });
+      permissions: { contents: 'read', issues: 'write', pull_requests: 'read', actions: 'read', checks: 'read', statuses: 'read', metadata: 'read' } });
     if (path === '/app/installations/55/access_tokens') return send({ token: 'fixture-read-token-' + state.requests.length, expires_at: new Date(Date.now() + 3600000).toISOString(), permissions: body.permissions }, 201);
     if (path === '/installation/token') return send({});
     if ((match = /^\/repositories\/(\d+)$/.exec(path))) return send({ id: Number(match[1]), full_name: 'agent-test-zone/admin-fixture-' + match[1], owner: { id: match[1] === '201' ? 20 : 10 }, default_branch: 'main' });
     if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/pulls$/.exec(path))) return send(state.pulls[match[1]] ?? []);
+    if ((match = /^\/repos\/agent-test-zone\/(admin-fixture-\d+)\/issues$/.exec(path)) && req.method === 'POST') return send({ id: 4400, number: 44, title: body.title, body: body.body, state: 'open', html_url: `https://github.com/agent-test-zone/${match[1]}/issues/44` }, 201);
     if (path === '/repos/agent-test-zone/admin-fixture-101/contents/src/channels/service.ts') return send({ type: 'file', encoding: 'base64', content: Buffer.from('export class ChannelService {}').toString('base64') });
     send({ message: 'unexpected fixture request ' + path }, 404);
   });
@@ -473,4 +474,42 @@ test('a group timer hands work to the Manager like a message would; the task is 
     idempotency_key: 'cancel-scheduled-task', source_conversation: 'web', source_message: 'cancel-scheduled-task' });
   assert.equal(cancel.value.state, 'succeeded', JSON.stringify(cancel.value));
   await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('已取消') && JSON.stringify(s.content).includes(repo(101))));
+});
+
+test('a group assistant whose role writes Issues files one in a repository in scope with github_write; with read the tool is not offered and a forced call is refused (#381)', async t => {
+  const f = await fixture(t), offered = [];
+  assert.equal((await f.bind()).status, 200);
+  await f.setRole({ permissions: { github_issues: 'write' } });
+  const write = (repository, key) => ['github_write', { repository, method: 'POST', path: '/issues', key, body: { title: 'Parser drops the last line', body: 'Reported in the group by @carol.' } }];
+  f.modelState.respond = async (body, res) => {
+    offered.push(body.tools.map(tool => tool.function.name));
+    const seen = observations(body);
+    if (seen.length === 0) return call(res, ...write(repo(101), 'group-report'));
+    if (seen.length === 1) return call(res, ...write(repo(201), 'elsewhere'));
+    return say(res, '已提报 Issue #44。');
+  };
+  const row = await done(f, await post(f.h, f.id, groupMessage('bot 帮我把这个问题提报成 Issue')));
+  assert.equal(row.state, 'completed', row.error);
+  const seen = observations(f.requests.at(-1));
+  assert.equal(seen[0].repository, repo(101), JSON.stringify(seen[0])); assert.deepEqual([seen[0].result.number, seen[0].result.status], [44, 201]);
+  assert.equal(seen[1].error, 'repository_out_of_scope');
+  assert.ok(offered[0].includes('github_write'));
+  // The write token carries exactly Issues write for this repository, and is revoked after the call.
+  const posted = f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/issues'));
+  assert.equal(posted.length, 1); assert.equal(posted[0].path, '/repos/agent-test-zone/admin-fixture-101/issues');
+  assert.match(posted[0].body.body, /^Reported in the group by &#64;carol\.\n\n<!-- dept-bot-write:[a-f0-9]{24} -->$/);
+  const minted = f.gh.state.requests.filter(r => r.path.endsWith('/access_tokens')).map(r => r.body.permissions);
+  assert.ok(minted.some(p => JSON.stringify(p) === JSON.stringify({ issues: 'write', metadata: 'read' })));
+  assert.ok(minted.every(p => Object.entries(p).every(([name, level]) => level === 'read' || name === 'issues')));
+  const ledger = f.h.store.get("SELECT * FROM github_writes WHERE state='sent'"), actor = JSON.parse(ledger.actor);
+  assert.deepEqual([ledger.repository_id, ledger.method, ledger.path, ledger.status, ledger.html_url], ['101', 'POST', '/issues', 201, 'https://github.com/agent-test-zone/admin-fixture-101/issues/44']);
+  assert.deepEqual([actor.kind, actor.service_role_id, actor.conversation_id], ['service', 'repository-assistant', f.chat.id]); assert.ok(actor.grantor_id);
+  // With Issues read only, the tool is not offered and a call the model makes anyway is refused before GitHub.
+  await f.setRole({ permissions: { github_issues: 'read' } }); offered.length = 0;
+  f.modelState.respond = async (body, res) => { offered.push(body.tools.map(tool => tool.function.name)); return observations(body).length ? say(res, '不能提报。') : call(res, ...write(repo(101), 'again')); };
+  const second = await done(f, await post(f.h, f.id, groupMessage('bot 再提报一个')));
+  assert.equal(second.state, 'completed', second.error);
+  assert.ok(!offered[0].includes('github_write'));
+  assert.equal(observations(f.requests.at(-1))[0].error, 'tool_not_allowed');
+  assert.equal(f.gh.state.requests.filter(r => r.method === 'POST' && r.path.endsWith('/issues')).length, 1);
 });

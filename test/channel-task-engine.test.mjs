@@ -40,7 +40,8 @@ for(const scenario of ['report','reviewable_pull_request','revoked_after_qa','po
         if(!names.includes('read_file'))return send('read_file',{path:software?'feature.mjs':'calc.mjs'});
         assert.ok(body.messages.some(m=>m.role==='tool'&&m.content.includes(software?'verified = true':'export const add')));qaReads++;
         assert.equal((await (await fetch(gh+'/fixture/state')).json()).prs.length,before,'no publication before independent acceptance');
-        if(revoked)roleApi(f.h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:roleConfiguration(f.h.store,'101').revision,enabled:false,roles:[{role_id:role,permissions:{pull_request:'deny'}}]});
+        // The PR is a framework delivery (#381): what stops it is the executor losing code edits, not a GitHub write it never needed.
+        if(revoked)roleApi(f.h.store,{id:f.principal,role:'super_admin',repositories:[]},'PUT',new URL('http://local/api/repositories/101/roles'),{expected_revision:roleConfiguration(f.h.store,'101').revision,enabled:false,roles:[{role_id:role,permissions:{computer:'deny'}}]});
         if(changed&&qaReads===1)f.h.store.run("UPDATE policies SET test_command=? WHERE repository_id='101'",'node -e "process.exit(0)"');
         return send('submit_acceptance',pass);
       }

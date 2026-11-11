@@ -1,11 +1,11 @@
 import type { Store, Row } from '../storage/database.js';
 import { randomId } from '../core/security.js';
 import { TaskError } from '../agent/common.js';
-import { applyDecision, dispatchContext, decideImmediately, onDispatchEvent, InvalidDecision, type Decision, type DispatchContext, type CreateOption, dispatchHook } from './store.js';
+import { applyDecision, dispatchContext, decideImmediately, onDispatchEvent, InvalidDecision, dispatchLeaseMs, type Decision, type DispatchContext, type CreateOption, dispatchHook } from './store.js';
 import { managerDecision } from './manager.js';
 
 export type Decider = (store: Store, context: DispatchContext) => Promise<Decision>;
-const leaseMs = 5 * 60000, maxAttempts = 8;
+const leaseMs = dispatchLeaseMs, maxAttempts = 8;
 // A failed attempt waits 5 s, 15 s, 45 s … up to 10 minutes. A model that cannot be reached or is not configured is retried
 // until it can; other failures (an invalid decision, a runtime fault) are marked failed for a person after eight attempts.
 const backoff = (attempts: number) => Math.min(5000 * 3 ** Math.max(0, attempts - 1), 10 * 60000);

@@ -111,6 +111,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 - `list_projects`：当前可用的仓库全名和 GitHub 链接，不返回内部 ID；
 - 当前会话（默认可用）：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
 - GitHub 各资源的读取权限：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
+- GitHub 资源的读写权限：`github_write`，同样带 `repository` 参数（#381）。只写绑定范围内、且配置绑定的人当前仍能写任务（`tasks.write`）的仓库，每次调用前后都重新核对；只读时不提供这个工具，模型硬调也被拒绝。key 在本轮回答内去重，写入以服务角色和本群会话记审计，细节见[共享 Agent 后端](agent-runtime.md#github-写入github_write)；
 - `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和对账恢复时都重新核对绑定、来源消息、角色权限和授权者权限；
 - `delegation: allow`（派活）：`create_project_task` 在范围内的仓库新建任务，参数为需求和交付约定（目标、范围、验收条件、终点）。其他角色的任务访问和修改由 `project_tasks` 控制；旧派活配置附带的任务控制保留为待迁移的原操作集合。见下文「派活」；
 - 独立任务：`start_own_task`、`continue_own_task`、`list_own_tasks`，不受权限项控制，见[服务角色](service-roles.md#独立任务)。

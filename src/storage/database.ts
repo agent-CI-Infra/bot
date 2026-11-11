@@ -17,6 +17,7 @@ import { actionsStorage } from '../actions/storage.js';
 import { workStorage } from '../work/settings.js';
 import { migrateWorkflows } from '../work/migration.js';
 import { dispatchStorage } from '../dispatch/store.js';
+import { githubWriteStorage } from '../github/write.js';
 import { gateOnboardingStorage } from '../projects/gate-storage.js';
 import { installationStorage } from '../installations/storage.js';
 import { identityStorage } from '../identity/storage.js';
@@ -189,6 +190,7 @@ export class Store {
     metricsStorage(this);
     workStorage(this);
     dispatchStorage(this);
+    githubWriteStorage(this);
     gateOnboardingStorage(this);
     taskStorage(this);
     priorityStorage(this);

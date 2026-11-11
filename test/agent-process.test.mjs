@@ -17,6 +17,7 @@ import { resolveRules } from '../dist/rules/service.js';
 import { Redactor, TaskError } from '../dist/agent/common.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { Publisher } from '../dist/github/publisher.js';
+import { roleConfiguration, saveConfiguration } from '../dist/roles/definition.js';
 import { server as githubFixture } from './fixtures/agent-server.mjs';
 import { agentOperation, waitingAgent } from '../runner/agent.mjs';
 
@@ -256,7 +257,8 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
 
 // Run the control-plane publication path against real Git objects and a local GitHub fixture.
 // The manager substitutes for the project computer; no deployment or external API is used.
-// custom: run a reply task with these writes instead of development; it files an Issue, opens the PR and replies.
+// custom: run a reply task with these writes instead of development; it files an Issue (github_write, when custom.issue),
+// opens the PR and replies. custom.permissions: the executing dev role's saved permissions.
 async function developmentHarness(t, { policy = '', change = true, validationResult, repair = true, faults, custom, acceptor = acceptanceFixture } = {}) {
   githubFixture.listen(0, '127.0.0.1'); await once(githubFixture, 'listening');
   t.after(() => new Promise(resolve => { githubFixture.close(resolve); githubFixture.closeAllConnections(); }));
@@ -277,7 +279,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
     else if (r.type === 'workspace_agent_poll') {
       if (custom && terminal) value = { state: 'completed', result: { summary: 'Opened a fix for the addition.', findings: [] } };
       else if (terminal) value = { state: 'completed', result: { ...args, ...terminal } };
-      else if (custom?.writes.includes('issue') && !filed) value = { state: 'running', repository_tool: { id: 'f'.repeat(48), name: 'create_issue', arguments: { title: 'Follow-up: @someone document add', body: 'Ask @someone to document add.' } } };
+      else if (custom?.issue && !filed) value = { state: 'running', repository_tool: { id: 'f'.repeat(48), name: 'github_write', arguments: { method: 'POST', path: '/issues', key: 'follow-up', body: { title: 'Follow-up: @someone document add', body: 'Ask @someone to document add.' } } } };
       else {
         if (!started) { started = true; if (change) write('calc.mjs', revision ? 'export const add = (a, b) => Number(a) + Number(b);\n' : 'export const add = (a, b) => a + b;\n'); }
         ids[step] ||= randomBytes(24).toString('hex');
@@ -321,6 +323,7 @@ async function developmentHarness(t, { policy = '', change = true, validationRes
   } };
   const h = await harness(t, manager), { admin } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
   repoDirectory = join(h.directory, 'repo'); mkdirSync(repoDirectory);
+  if (custom?.permissions) saveConfiguration(h.store, '101', { expected_revision: roleConfiguration(h.store, '101').revision, enabled: false, roles: [{ role_id: 'dev', permissions: custom.permissions }] }, 'fixture');
   await fetch(endpoint + '/fixture/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ github_token: a.token }) });
   if (faults) await fetch(endpoint + '/fixture/faults', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(faults) });
   const model = (await admin('/api/models', 'POST', { repository_id: '101', api_url: 'https://model.invalid/v1', api_key: 'publication-fixture-key', model_name: 'fixture' })).value.model;
@@ -361,20 +364,32 @@ test('create_pull_request with empty policy never reruns agent evidence and retu
   assert.deepEqual(state.trees.at(-1), { repository_id: 101, base_tree: d.candidate.source_tree, entries: 1 });
 });
 
-test('a reply task with the Issue and PR writes files an Issue, opens a bot PR and still finishes with its reply', async t => {
-  const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request', 'issue'] } });
+test('a reply task whose role writes Issues files one with github_write, opens a bot PR and still finishes with its reply', async t => {
+  const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request'], issue: true, permissions: { github_issues: 'write' } } });
   assert.equal(d.task.status, 'succeeded', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
   const state = await fetch(d.endpoint + '/fixture/state').then(r => r.json()), result = JSON.parse(d.task.result);
-  // create_issue: one Issue, mentions escaped, answered to the agent.
+  // github_write POST /issues: one Issue, mentions escaped, GitHub's useful answer returned to the agent and audited.
   const issue = state.issues.at(-1); assert.match(issue.body, /Ask &#64;someone/); assert.doesNotMatch(issue.title, /@/);
-  assert.deepEqual(d.toolReplies, [{ number: issue.number, html_url: issue.html_url }]);
+  assert.equal(d.toolReplies.length, 1); assert.equal(d.toolReplies[0].number, issue.number); assert.equal(d.toolReplies[0].html_url, issue.html_url); assert.equal(d.toolReplies[0].status, 201);
+  const ledger = d.h.store.get('SELECT * FROM github_writes WHERE scope=?', 'task:' + d.task.id);
+  assert.deepEqual([ledger.method, ledger.path, ledger.state, ledger.status, ledger.html_url, JSON.parse(ledger.actor).role], ['POST', '/issues', 'sent', 201, issue.html_url, 'dev']);
+  assert.ok(d.h.store.get("SELECT 1 FROM audit WHERE action='github.write.sent' AND repository_id='101' AND resource_id LIKE 'POST /issues 201%'"));
   // create_pull_request did not end the task: the PR is in its result and the reply was posted after it.
   assert.deepEqual(d.replies, [{ pr: result.pull_request }]); assert.equal(state.prs.at(-1).number, result.pull_request.number);
   assert.equal(d.h.store.get('SELECT source_task_id FROM bot_pull_requests').source_task_id, d.task.id);
   assert.match(state.comments.at(-1).body, /Opened a fix for the addition\./);
   // No development-result comment and no development task: only what the workflow asked for.
-  assert.deepEqual(d.h.store.all('SELECT kind FROM github_effects ORDER BY rowid').map(row => row.kind), ['issue', 'branch', 'pull_request', 'comment']);
+  assert.deepEqual(d.h.store.all('SELECT kind FROM github_effects ORDER BY rowid').map(row => row.kind), ['branch', 'pull_request', 'comment']);
   assert.equal(d.h.store.get("SELECT count(*) n FROM tasks WHERE kind LIKE 'development.%'").n, 0);
+});
+
+test('a reply task whose role only reads is not offered github_write: a forced call is refused, and its PR and reply are still delivered', async t => {
+  const d = await developmentHarness(t, { custom: { writes: ['reply', 'code', 'pull_request'], issue: true } });
+  assert.equal(d.task.status, 'succeeded', JSON.stringify(d.h.store.all('SELECT content FROM task_logs')));
+  assert.deepEqual(d.toolReplies, [{ error: 'write_not_allowed' }]);
+  assert.equal(d.h.store.get('SELECT count(*) n FROM github_writes').n, 0);
+  // The framework deliveries need no role write (#381): the read-only executor's PR and reply are published.
+  assert.deepEqual(d.h.store.all('SELECT kind FROM github_effects ORDER BY rowid').map(row => row.kind), ['branch', 'pull_request', 'comment']);
 });
 
 test('a reply task cannot open a PR while the project development switch is off, and keeps going', async t => {

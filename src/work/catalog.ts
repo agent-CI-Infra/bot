@@ -8,9 +8,10 @@ import { defaults } from '../rules/service.js';
 // What runs when is no longer configured per work type: every event that passes the control plane's filters is offered
 // to the project Manager, which creates a task of one of these types, continues an existing task, or does nothing.
 // Reading is never restricted: every agent may read its workspace, run commands, write project notes, start independent
-// agents and read everything on GitHub with a read-only token. Writing is per work type: each write is a platform tool
-// the agent calls when it needs to (see writeCatalog), and the control plane performs it. The agent never holds a token
-// that can write, and neither the Manager prompt nor event content can add a write.
+// agents and read everything on GitHub with a read-only token. A work type's writes are its framework deliveries: each is a
+// platform tool the agent calls (see writeCatalog), and the control plane performs it whatever the executing role's GitHub
+// permission (#381). Direct writes go through github_write and follow the acting role's GitHub permissions instead. The
+// agent never holds a token that can write, and neither the Manager prompt nor event content can add a write.
 // Control-plane conditions (a person's development label, tests before publication, release source checks, the single
 // Actions rerun) live in those tools and in the modules that own them; a work type chooses its writes, never those conditions.
 
@@ -30,7 +31,7 @@ export const writeCatalog: WriteDefinition[] = [
   { id: 'labels', title: '加分类标签', tool: 'finish_review', detail: '在回复里给出分类标签；控制面只加仓库里已有、对象上还没有的标签，从不加检视标签和开发标签。' },
   { id: 'code', title: '修改工作区代码', tool: 'write_file', detail: '只改这次任务的检出，不直接写 GitHub。' },
   { id: 'pull_request', title: '开或更新 bot PR', tool: 'create_pull_request', detail: '控制面固定快照、跑项目测试命令，通过后才推 bot 分支、开或更新 PR；检视和通用回复还要求项目的开发开关打开，只能在 Issue 上开新 PR 或更新 bot 自己的 PR。' },
-  { id: 'issue', title: '提报 Issue', tool: 'create_issue', detail: '控制面以 bot 身份新建一个 Issue，正文里的 @ 提及会被转义。' },
+  { id: 'issue', title: '提报 Issue', tool: 'report_failure', detail: '登记失败的 job、类别和引用的日志行；控制面核验引用确实是失败 step 打印的，再新建或评论 Issue，同一失败只报一次。' },
   { id: 'actions_rerun', title: '重跑失败的 Actions 运行', tool: 'rerun_failed_run', detail: '登记后由控制面执行：每个原始运行最多重跑一次，只重跑支持 workflow_dispatch 的运行。' },
   { id: 'release_notes', title: '写发行说明', tool: 'finish_release_notes', detail: '交出已核验来源的分组；控制面核验每个来源恰好出现一次，再写出正文。' },
   { id: 'gate_plan', title: '提交门禁方案', tool: 'submit_gate_plan', detail: '交出回复和门禁方案；控制面核对后显示在接入门禁对话里，人看过将提交的文件并确认后，才由控制面开门禁 PR。' }
@@ -38,16 +39,18 @@ export const writeCatalog: WriteDefinition[] = [
 const writeIds = writeCatalog.map(write => write.id);
 type Base = 'review' | 'development' | 'reply' | 'release.observe' | 'release.notes' | 'actions' | 'gate' | 'request';
 // Which writes a work type can be given, which it starts with and which it cannot drop (the write that ends its task).
+// Filing an Issue is a delivery only for Actions failure handling (report_failure); elsewhere it is a direct write through
+// github_write, governed by the role (#381).
 const writeSets: Record<Base, { options: string[]; defaults: string[]; locked: string[] }> = {
-  review: { options: ['reply', 'labels', 'code', 'pull_request', 'issue'], defaults: ['reply', 'labels'], locked: ['reply'] },
-  development: { options: ['code', 'pull_request', 'issue'], defaults: ['code', 'pull_request'], locked: ['code', 'pull_request'] },
-  reply: { options: ['reply', 'labels', 'code', 'pull_request', 'issue'], defaults: ['reply'], locked: [] },
-  'release.observe': { options: ['issue'], defaults: [], locked: [] },
-  'release.notes': { options: ['release_notes', 'issue'], defaults: ['release_notes'], locked: [] },
+  review: { options: ['reply', 'labels', 'code', 'pull_request'], defaults: ['reply', 'labels'], locked: ['reply'] },
+  development: { options: ['code', 'pull_request'], defaults: ['code', 'pull_request'], locked: ['code', 'pull_request'] },
+  reply: { options: ['reply', 'labels', 'code', 'pull_request'], defaults: ['reply'], locked: [] },
+  'release.observe': { options: [], defaults: [], locked: [] },
+  'release.notes': { options: ['release_notes'], defaults: ['release_notes'], locked: [] },
   actions: { options: ['actions_rerun', 'issue'], defaults: ['actions_rerun', 'issue'], locked: [] },
   gate: { options: ['gate_plan'], defaults: ['gate_plan'], locked: ['gate_plan'] },
-  // Ordinary tasks remain free of writes by default; Issue/PR delivery needs explicit project and source-role grants.
-  request: { options: ['code', 'pull_request', 'issue'], defaults: [], locked: [] }
+  // Ordinary tasks remain free of writes by default; PR delivery needs the project's explicit grant.
+  request: { options: ['code', 'pull_request'], defaults: [], locked: [] }
 };
 export const githubScopes = ['contents', 'issues', 'pull_requests', 'actions', 'checks', 'statuses', 'metadata'];
 
@@ -79,7 +82,7 @@ export const workTypes: WorkType[] = [
   { id: 'gate.onboarding', name: '接入门禁', base: 'gate', object: 'repository', kinds: ['gate.onboarding'], section: 'gate.onboarding', defaultEnabled: true,
     description: '在「接入门禁」对话里分析仓库、设计各 lane 的门禁命令并回答问题；人确认方案后，控制面才开门禁 PR。' },
   { id: 'task.request', name: '普通事项与定时检查', base: 'request', object: 'schedule', kinds: ['task.request'], section: 'schedule', defaultEnabled: true,
-    description: '处理直接创建的普通事项或 Manager 接受的定时检查。默认不写 GitHub；提报 Issue 或交付 PR 需项目与来源角色分别显式允许；PR 仍经测试及独立 QA。' }
+    description: '处理直接创建的普通事项或 Manager 接受的定时检查。默认不写 GitHub；交付 PR 需项目显式允许，仍经测试及独立 QA；执行角色有 GitHub 写权限时可以用 github_write 直接写，例如提报 Issue。' }
 ];
 export const workType = (id: string) => workTypes.find(work => work.id === id);
 /** The work type a task belongs to: reply tasks (including those of former custom workflows) are one work type. */
@@ -105,11 +108,10 @@ export const sections: SectionDefinition[] = [
 ];
 export const section = (id: string) => sections.find(entry => entry.id === id);
 
-/** The writes a work type can be given: each with its tool (Actions failure handling reports through report_failure) and whether it is locked. */
+/** The writes a work type can be given: each with its tool and whether it is locked. */
 export function writeOptions(id: string) {
-  const base = workType(id)?.base ?? 'reply', set = writeSets[base];
-  return writeCatalog.filter(write => set.options.includes(write.id)).map(write => ({ ...write, ...(write.id === 'issue' && base === 'actions' ? { tool: 'report_failure',
-    detail: '登记失败的 job、类别和引用的日志行；控制面核验引用确实是失败 step 打印的，再新建或评论 Issue，同一失败只报一次。' } : {}), locked: set.locked.includes(write.id) }));
+  const set = writeSets[workType(id)?.base ?? 'reply'];
+  return writeCatalog.filter(write => set.options.includes(write.id)).map(write => ({ ...write, locked: set.locked.includes(write.id) }));
 }
 const setOf = (id: string) => writeSets[workType(id)?.base ?? 'reply'];
 export const defaultWrites = (id: string) => writeIds.filter(write => setOf(id).defaults.includes(write));
