@@ -626,7 +626,7 @@ function sharedModelsBody(view) {
     item.append(modelLabel(model, model.id === view.onboarding.model_id ? [badge('默认', 'info')] : []), modelActions(model, result, refreshSettingsModels), result); return item;
   };
   const list = shared.length ? providerList(shared, row, refreshSettingsModels) : element('p', '还没有部署共享模型。', 'muted');
-  return [note('不属于任何仓库、所有项目都能选用的模型。项目在「模型」页选用；服务角色也从这里选模型。删除后，选用它的项目和服务角色改回「不使用模型」，已有成本记录保留。'), list,
+  return [note('部署共享模型可供项目和平台服务角色选用。删除后，项目默认和服务角色模型清空；工作类型与项目角色的显式引用保留为不可用。已有请求和成本记录保留。'), list,
     providerCreate(null, refreshSettingsModels)];
 }
 async function refreshSettingsModels(notice) {
