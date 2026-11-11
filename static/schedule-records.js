@@ -50,7 +50,7 @@ function renderScheduleRecords(host, { project, read, invalidate }) {
     if (current && ['failed','rejected'].includes(current.state)) receipt.append(note(current.result?.error || current.state), button('关闭失败回执并刷新记录', () => {
       if (!live()) return; delete pending.envelope; delete pending.receipt; showReceipt(); void load(false);
     }, 'quiet'));
-    else receipt.append(note(current?.state === 'awaiting_approval' ? '等待现有组织策略审批，尚未补发。' : '尚未确认执行结果；请核对原回执。'), button(current ? '刷新通知补发回执' : '核对同一次通知补发', () => send(true), 'quiet'));
+    else receipt.append(note('尚未确认执行结果；请核对原回执。'), button(current ? '刷新通知补发回执' : '核对同一次通知补发', () => send(true), 'quiet'));
     for (const control of receipt.querySelectorAll('button')) control.disabled = !!pending.sending;
   }
   async function send(check = false) {
