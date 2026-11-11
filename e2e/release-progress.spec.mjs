@@ -32,3 +32,13 @@ test('access loss clears previews and records before an older successful preflig
   await expect(page.locator('.release-preview')).toBeEmpty();await expect(page.locator('.release-record')).toHaveCount(0);await expect(page.getByRole('button',{name:'确认打标签',exact:true})).toBeDisabled();await expect(page.getByText('stale candidate',{exact:true})).toHaveCount(0);
  }finally{release?.();for(const close of cleanup.reverse())await close();}
 });
+
+test('a published Release with an intentionally empty body is still shown as an existing Release',async({page})=>{
+ const cleanup=[],f=await releaseFixture({after:fn=>cleanup.push(fn)});
+ try{
+  f.state.runs=[run()];f.state.jobs=[{id:1,run_id:800,run_attempt:1,name:'release',status:'completed',conclusion:'success'}];const created=await f.create();for(let i=0;i<4;i++)await f.service.worker.process(created.value.release.id);
+  let record=(await f.admin(f.endpoint)).value.releases[0];const saved=await f.admin(f.endpoint+'/'+record.id+'/draft','PATCH',{body:'',revision:record.revision,body_revision:record.body_revision});expect(saved.status).toBe(200);record=saved.value.release;
+  const published=await f.admin(f.endpoint+'/'+record.id+'/publish','POST',{revision:record.revision,body_revision:record.body_revision});expect(published.status).toBe(201);expect(published.value.release.stage).toBe('published');
+  await login(page,f);await expect(page.locator('.release-process')).toContainText('已记录 Release');await expect(page.locator('.release-process')).not.toContainText('尚未生成');
+ }finally{for(const close of cleanup.reverse())await close();}
+});

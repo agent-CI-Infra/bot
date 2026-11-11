@@ -67,7 +67,7 @@ function releaseProcess(record) {
   const proof = record.ci_success, matches = proof?.run_id != null && record.run_id != null && Number.isSafeInteger(proof.attempt) && proof.attempt > 0 && String(proof.run_id) === String(record.run_id) && proof.attempt === record.run_attempt && record.run?.status === 'completed' && record.run?.conclusion === 'success';
   const points = [['目标提交', record.target_sha ? '已冻结' : '未提供'], ['版本标签', record.stage === 'tagging' || record.failure_step === 'tagging' ? '待创建或查证' : record.tag_object_sha ? '已记录' : '未确认'],
     ['Release 检查', matches ? `run ${proof.run_id} / attempt ${proof.attempt} 已通过` : record.expected_attempt > (record.run_attempt || 0) ? `等待 attempt ${record.expected_attempt}` : record.run ? `${record.run.status} · ${record.run.conclusion || '等待结果'}` : '等待运行'],
-    ['说明与草稿', record.stage === 'draft' ? '草稿待确认' : record.stage === 'preparing_notes' ? '准备发行说明' : record.body ? '已有正文' : '尚未生成'],
+    ['说明与草稿', record.stage === 'draft' ? '草稿待确认' : record.stage === 'preparing_notes' ? '准备发行说明' : record.body ? '已有正文' : record.release_url ? '已记录 Release' : '尚未生成'],
     ['正式发布', record.stage === 'published' ? record.prerelease ? '已人工发布预发布版' : '已人工发布稳定版' : record.stage === 'externally_published' ? '外部已发布' : '尚未正式发布']];
   const steps = element('ol', '', 'release-process'); steps.setAttribute('aria-label', '发布过程');
   for (const [label, value] of points) { const item = element('li'); item.append(element('strong', label), element('span', value)); steps.append(item); } return steps;
