@@ -13,6 +13,7 @@ import { actionsWebhook } from '../actions/storage.js';
 import { archiveInstallationEvent, isInstallationControlEvent } from '../installations/archive.js';
 import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { invalidate } from '../identity/authorization.js';
+import { pruneRejectedArchive, rejectionHeaders, rejectionSummary } from './delivery-audit.js';
 
 export async function ingest(
   store: Store,
@@ -69,10 +70,15 @@ export async function ingest(
     const appControl = isInstallationControlEvent(event) && store.get("SELECT 1 FROM accounts WHERE id=? AND type='github_app'", accountId);
     const response = status === 200 ? { ok: true, record_id: id, duplicate, tasks_created: 0 }
       : { ok: false, error: outcome, record_id: id };
+    // A refused request is archived as a bounded digest; only an accepted one keeps its body for replay and audit.
+    const accepted = status === 200;
+    if (!accepted) pruneRejectedArchive(store, Date.now());
+    const archivedPayload = !accepted ? rejectionSummary(outcome, bytes, !complete)
+      : appControl ? Buffer.from(JSON.stringify({ installation_evidence_archived: true, event, action })) : bytes;
     store.run(`INSERT INTO deliveries(id,account_id,endpoint_id,repository_id,delivery_id,event,route,status,duplicate,received_at,
       http_status,request_headers,payload,body_complete,response) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, endpoint ? accountId : null,
       endpoint ? endpointId : null, owner?.id || null, deliveryId, event, route, outcome, Number(duplicate), new Date().toISOString(),
-      status, JSON.stringify(safeHeaders), appControl && status === 200 ? Buffer.from(JSON.stringify({ installation_evidence_archived: true, event, action })) : bytes, Number(complete), JSON.stringify(response));
+      status, JSON.stringify(accepted ? safeHeaders : rejectionHeaders(headers)), archivedPayload, Number(complete), JSON.stringify(response));
     if (status === 200 && !duplicate) store.run('INSERT INTO processed_deliveries VALUES(?,?,?)', accountId, endpointId, deliveryId);
     if (status === 200 && !duplicate && payload) boardWebhook(store, accountId, event, payload);
     if (status === 200 && !duplicate && payload && event === 'github_app_authorization' && action === 'revoked') {

@@ -66,6 +66,8 @@ export class Store {
       CREATE INDEX IF NOT EXISTS delivery_repo_time ON deliveries(repository_id,received_at);
       -- The console lists the latest deliveries; without this the list sorted every archived payload (30k rows, ~700 MB).
       CREATE INDEX IF NOT EXISTS delivery_time ON deliveries(received_at,id);
+      -- Refused deliveries are pruned by status and age on every rejection; without this the prune scans every accepted row.
+      CREATE INDEX IF NOT EXISTS delivery_status_time ON deliveries(status,received_at);
       CREATE TABLE IF NOT EXISTS processed_deliveries(account_id TEXT NOT NULL, endpoint_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
         PRIMARY KEY(account_id,endpoint_id,delivery_id));
       CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES repositories(id), kind TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL);

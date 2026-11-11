@@ -11,6 +11,7 @@ import { withTaskMetrics } from '../metrics/accounting.js';
 import { workTypes } from '../work/catalog.js';
 import { explainFailure } from '../agent/failures.js';
 import { taskGroupSQL } from './project-activity.js';
+import { rejectedArchiveState } from './delivery-audit.js';
 // Faults are classified when read, so logs written before a cause existed are explained the same way.
 function faultCause(log:Record<string,any>){
   if(!String(log.content).startsWith('{"type":"fault"'))return log;
@@ -54,7 +55,10 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     const page = store.all(`SELECT id FROM deliveries WHERE ${clauses.join(' AND ')} ORDER BY received_at DESC,id DESC LIMIT ? OFFSET ?`, ...args, limit, offset).map(row => row.id);
     const rows = new Map(store.all(`SELECT *, (SELECT full_name FROM repositories WHERE id=deliveries.repository_id) AS full_name
       FROM deliveries WHERE id IN (${page.map(() => '?').join(',') || 'NULL'})`, ...page).map(row => [row.id, row]));
-    return { events: page.map(id => rows.get(id)!).map(row=>{const {payload,response,request_headers,...safe}=row;return {...safe,...deliveryResult(store,row),...deliveryDiagnosis(store,row)};}) };
+    return { events: page.map(id => rows.get(id)!).map(row=>{const {payload,response,request_headers,...safe}=row;return {...safe,...deliveryResult(store,row),...deliveryDiagnosis(store,row)};}),
+      // What the refused archive holds and the bounds it enforces, for the global operator only: a scoped list must not
+      // turn a project's page into an all-platform count.
+      ...(user.role === 'super_admin' && !user.context?.tenant_id ? { rejected_archive: rejectedArchiveState(store) } : {}) };
   }
   const event = /^\/api\/events\/([^/]+)$/.exec(path);
   if (event) {
