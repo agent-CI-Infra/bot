@@ -1,4 +1,5 @@
 import { latestRoleCandidate } from './schedule.js';
+import { eventHistory, historyOrder } from './role-run.js';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {Workspace} from '../agent/workspace.js';
 import {randomId} from '../core/security.js';
@@ -37,7 +38,7 @@ async function observerSnapshot(workspace:Workspace) {
  const pinned=latestRoleCandidate(workspace.store,workspace.task.id);
  if(workspace.store.get('SELECT 1 FROM task_stage_plans WHERE task_id=?',workspace.task.id)){
   if(pinned?.kind==='code')return {local_sha:pinned.commit_sha,tree_sha:pinned.tree_hash};
-  const row=workspace.store.get("SELECT h.data FROM role_run_events e JOIN task_runs r ON r.id=e.run_id JOIN task_history h ON 'task_history:'||h.id=e.history_ref WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev' AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id) ORDER BY h.id DESC LIMIT 1",workspace.task.id);
+  const row=workspace.store.get(`SELECT h.data FROM role_run_events e JOIN task_runs r ON r.id=e.run_id JOIN task_history h ON ${eventHistory} WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev' AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id) ORDER BY ${historyOrder} DESC LIMIT 1`,workspace.task.id);
   const snapshot=row?JSON.parse(row.data).data.source_snapshot:null;if(snapshot)return {local_sha:snapshot.commit_sha,tree_sha:snapshot.tree_hash};
  }
  return workspace.artifact('role-source:'+randomId());
