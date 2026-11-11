@@ -168,3 +168,24 @@ test('a failed initial schedule read reports unknown state and recovers without 
   await expect(page.getByRole('status').filter({hasText:'数量及状态未知'})).toBeVisible();await expect(page.getByRole('button',{name:'保存计划',exact:true})).toHaveCount(0);fail=false;await page.getByRole('button',{name:'重新读取计划上下文',exact:true}).click();await expect(page.getByRole('button',{name:'保存计划',exact:true})).toBeVisible();expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
  }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
 });
+
+test('running a saved plan preserves an unrelated unsaved edit in its form',async({page})=>{
+ const f=await environment();
+ try{
+  await login(page,f);await page.getByRole('button',{name:'保存计划',exact:true}).click();await expect.poll(()=>f.h.store.get('select count(*) n from schedules').n).toBe(1);
+  const plan=(await read(f,'list_schedules')).schedules[0];await page.getByLabel('编辑计划',{exact:true}).selectOption(plan.id);await page.getByLabel('计划名称',{exact:true}).fill('keep this unsaved name');
+  await page.getByRole('button',{name:'立即运行一次',exact:true}).click();await expect.poll(()=>f.h.store.get('select count(*) n from schedule_occurrences').n).toBe(1);
+  await expect(page.getByLabel('计划名称',{exact:true})).toHaveValue('keep this unsaved name');expect((await read(f,'list_schedules')).schedules[0].spec.name).toBe(plan.spec.name);
+  await page.getByLabel('编辑计划',{exact:true}).selectOption('');await expect(page.getByRole('dialog')).toContainText('未保存修改');await page.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();await expect(page.getByLabel('计划名称',{exact:true})).toHaveValue('keep this unsaved name');
+ }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
+});
+
+test('common time presets and manager instructions persist while unsupported release plans cannot run',async({page})=>{
+ const f=await environment();
+ try{
+  await login(page,f);await page.getByRole('combobox',{name:'执行内容',exact:true}).selectOption('manager.check');await page.getByLabel('定时检查内容',{exact:true}).fill('Inspect blocked work without changing its scope');await page.getByLabel('常用触发时间',{exact:true}).selectOption('0 18 * * *');
+  await page.getByRole('button',{name:'保存计划',exact:true}).click();await expect.poll(()=>f.h.store.get('select count(*) n from schedules').n).toBe(1);let plan=(await read(f,'list_schedules')).schedules[0];expect(plan.spec.cron).toBe('0 18 * * *');expect(plan.spec.parameters.instruction).toBe('Inspect blocked work without changing its scope');expect(f.h.store.get('select count(*) n from schedule_occurrences').n).toBe(0);
+  await page.getByLabel('编辑计划',{exact:true}).selectOption(plan.id);await expect(page.getByLabel('定时检查内容',{exact:true})).toHaveValue(plan.spec.parameters.instruction);await page.getByRole('combobox',{name:'执行内容',exact:true}).selectOption('release.scheduled');await page.getByRole('button',{name:'保存计划',exact:true}).click();
+  await expect.poll(async()=>(await read(f,'list_schedules')).schedules[0].spec.workflow).toBe('release.scheduled');await page.getByLabel('编辑计划',{exact:true}).selectOption(plan.id);await expect(page.getByRole('button',{name:'立即运行一次',exact:true})).toBeDisabled();await expect(page.getByRole('region',{name:'项目计划列表'})).toContainText('未支持，不表示可执行');
+ }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
+});

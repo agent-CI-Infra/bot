@@ -65,7 +65,9 @@ async function renderSchedules(panel, project) {
   async function finish() {
     if (!live()) return;
     if (state.receipt?.state === 'succeeded') {
-      state.envelope = null; state.receipt = null; state.fields = null; state.sending = false;
+      // Running, pausing or changing a subscription does not save the plan form. Keep unrelated/newer edits.
+      if (['schedule.register','schedule.update','schedule.delete'].includes(state.envelope?.operation) && state.fields === state.submittedFields) state.fields = null;
+      state.envelope = null; state.receipt = null; state.sending = false; state.submittedFields = null;
       await renderSchedules(container, project);
     }
   }
@@ -88,7 +90,7 @@ async function renderSchedules(panel, project) {
     const key = 'console-schedule:' + crypto.randomUUID();
     state.envelope = { operation, target, arguments: args, expected_revision: revision,
       idempotency_key: key, source_conversation: 'console:schedules', source_message: key };
-    state.receipt = null; state.uncertain = false; await send();
+    state.receipt = null; state.uncertain = false; state.submittedFields = state.fields; await send();
   };
   const select = (label, options) => {
     const input = document.createElement('select'); input.setAttribute('aria-label', label); input.dataset.scheduleField = label;
@@ -203,6 +205,7 @@ async function renderSchedules(panel, project) {
   const capture = () => Object.fromEntries(controls().map(node=>[node.dataset.scheduleField,{value:node.value,checked:node.checked}]));
   if (state.selected) { chosen.value=state.selected; fill(); }
   if (state.fields) for (const node of controls()) { const value=state.fields[node.dataset.scheduleField]; if (value) { node.value=value.value; if(node.type==='checkbox')node.checked=value.checked; } }
+  dirty=!!state.fields;
   form.addEventListener('input',event=>{if(event.target===chosen)return;dirty=true;state.fields=capture();updateMeta();++activePreview;parsed.textContent='表单已修改，请重新预览当前时间和计划。';});
   form.addEventListener('change',event=>{if(event.target!==chosen){dirty=true;state.fields=capture();updateMeta();++activePreview;}});
   const previewBox=element('aside','','schedule-time-preview');previewBox.setAttribute('aria-label','触发时间预览');
