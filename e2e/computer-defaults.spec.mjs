@@ -6,6 +6,7 @@ import { Projects } from '../manager/projects.mjs';
 import { ManagerError } from '../manager/docker.mjs';
 import { FakeDocker } from '../test/fake-docker.mjs';
 import { fail } from '../dist/core/security.js';
+import { RuleService } from '../dist/rules/service.js';
 
 const mib = 1024 * 1024;
 test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建；项目留空的资源跟随默认', async ({ page }) => {
@@ -27,6 +28,7 @@ test('全局设置修改虚拟电脑默认资源，空闲电脑按新值重建�
   const h = await harness(undefined, manager), errors = []; page.on('pageerror', e => errors.push(e.message));
   try {
     const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    new RuleService(h.store).cache('101', 'a'.repeat(40), {});
     for (let i = 0; i < 2; i++) await h.projects.reconcile();
     await page.goto(h.admin + '/#/settings/general'); await page.getByLabel('用户名', { exact: true }).fill('administrator');
     await page.getByLabel('密码', { exact: true }).fill(password); await page.getByRole('button', { name: '登录', exact: true }).click();

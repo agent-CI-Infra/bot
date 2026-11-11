@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { fail } from '../dist/core/security.js';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
+import { RuleService } from '../dist/rules/service.js';
 
 async function fixture() {
   const state={offline:false,absent:false,recovering:false,responseError:false,liveState:'ready',metricsFail:false,stats:{running:true,cpu_percent:0,memory_bytes:1048576,memory_limit_bytes:2147483648,pids:3},computer:{cpus:2,memory_mb:2048,pids:512,tmp_mb:512,
@@ -11,6 +12,7 @@ async function fixture() {
     if(state.offline)throw new Error('manager_unavailable');if(state.recovering)fail(503,'manager_not_ready');if(state.responseError)fail(403,'private_response_detail');if(state.absent)return null;
     return {repository_id:id,generation:1,state:state.liveState,desired:'ready',revision:1,computer:structuredClone(state.computer)};}};
   const h=await harness(undefined,manager),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');
+  for(const id of ['101','202'])new RuleService(h.store).cache(id,'a'.repeat(40),{});
   for(const [id,status] of [['active','running'],['queued-old','queued'],['queued-new','queued']])h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,'101','task.request',?,?)",id,status,id);
   h.store.run("INSERT INTO task_claims VALUES('active','101','fixture-claim',?)",new Date().toISOString());
   return {h,admin,password,state,close:async()=>{await h.stop();rmSync(h.directory,{recursive:true,force:true});}};

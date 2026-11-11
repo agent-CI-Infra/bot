@@ -96,3 +96,36 @@ test('an unread rule source prevents saving until an explicit read succeeds', as
     await expect(configField(page, '内存（MB）')).toContainText('已保存来源：仓库文件');
   } finally { await f.close(); }
 });
+
+for (const width of [1440, 390]) test(`an unrefreshed default branch stays unknown until explicit recovery at ${width}px`, async ({ page }) => {
+  const f = await fixture();
+  try {
+    f.h.store.run('DELETE FROM repository_rule_sources WHERE repository_id=?', '101');
+    let refreshes = 0, configures = 0;
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/environments/101/configure')) configures++; });
+    await page.route('**/api/repositories/101/rules/refresh', async route => {
+      refreshes++;
+      if (refreshes === 1) return route.fulfill({ status: 503, json: { error: 'fixture_refresh_unavailable' } });
+      new RuleService(f.h.store).cache('101', 'b'.repeat(40), { '.bot/computer.yaml': 'cpus: 1.5\n' });
+      await route.fulfill({ status: 200, json: { ok: true } });
+    });
+    await page.setViewportSize({ width, height: 844 }); await login(page, f);
+    const form = page.locator('.machine-config-card'), read = page.getByRole('button', { name: '重新读取电脑配置', exact: true });
+    await expect(form).toContainText('尚未读取默认分支文件，不能确认仓库覆盖关系');
+    await expect(form.locator('.machine-config-origin')).toHaveCount(8);
+    for (const origin of await form.locator('.machine-config-origin').allTextContents()) {
+      expect(origin).toContain('来源暂未读取'); expect(origin).not.toContain('已保存来源');
+    }
+    await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled();
+    await expect(form.getByRole('button', { name: '保存', exact: true })).toHaveCount(0);
+    await expect(read).toBeEnabled();
+    await read.click(); await expect(form.getByRole('alert').filter({ hasText: 'fixture_refresh_unavailable' })).toBeVisible();
+    await expect(page.getByLabel('CPU（核）', { exact: true })).toBeDisabled(); expect(refreshes).toBe(1); expect(configures).toBe(0);
+    mkdirSync('.tmp/machine-config-231/previews', { recursive: true });
+    await page.screenshot({ path: `.tmp/machine-config-231/previews/machine-unread-${width}.png`, fullPage: true });
+    await read.click(); await expect(page.getByLabel('CPU（核）', { exact: true })).toBeEnabled();
+    await expect(page.getByLabel('CPU（核）', { exact: true })).toHaveValue('1.5');
+    await expect(configField(page, 'CPU（核）')).toContainText('已保存来源：仓库文件');
+    expect(refreshes).toBe(2); expect(configures).toBe(0); expect(f.manager.projects.own('101').cpus).toBe(3);
+  } finally { await f.close(); }
+});
