@@ -12,6 +12,30 @@ import { workTypes } from '../work/catalog.js';
 import { explainFailure } from '../agent/failures.js';
 import { taskGroupSQL } from './project-activity.js';
 import { rejectedArchiveState } from './delivery-audit.js';
+// A delivery body and a management receipt reach the console, so a credential in either one must not leave the server.
+// A key whose name is exactly one of these loses its value at every depth, in objects and in array elements; nothing is
+// inferred from a value's shape, so a field this list does not name is returned exactly as it was stored.
+const credentialKey = /^(?:token|secret|password|authorization|cookie|private_key)$/i;
+export function redactEgress(value: any): any {
+  if (Array.isArray(value)) return value.map(redactEgress);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, credentialKey.test(key) ? '[redacted]' : redactEgress(item)]));
+  return value;
+}
+// A webhook body is stored as the text the sender sent: only a body that actually carries a named key is re-encoded, so
+// every other body keeps its exact bytes. A body that parses but cannot be walked to the end (a nesting deep enough to
+// exhaust the stack, say) is not returned raw: that would hand the caller the credential this exit exists to remove,
+// so it comes back as a placeholder instead. Only a parse failure returns the raw text, because text that is not JSON
+// cannot carry a named field.
+const redactionFailed = JSON.stringify({redacted:true,reason:'redaction_failed'});
+const redactedBody = (raw: string) => {
+  let value: any;
+  try { value = JSON.parse(raw); } catch { return raw; }
+  if (!value || typeof value !== 'object') return raw;
+  try {
+    const clean = redactEgress(value);
+    return JSON.stringify(clean) !== JSON.stringify(value) ? JSON.stringify(clean) : raw;
+  } catch { return redactionFailed; }
+};
 // Faults are classified when read, so logs written before a cause existed are explained the same way.
 function faultCause(log:Record<string,any>){
   if(!String(log.content).startsWith('{"type":"fault"'))return log;
@@ -64,8 +88,8 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   if (event) {
     const row = store.get(`SELECT * FROM deliveries WHERE id=? AND ${filter.sql}`, event[1]!, ...filter.args);
     if (!row) return fail(404, 'event_not_found');
-    return { event: { ...row, request_headers: JSON.parse(row.request_headers),
-      payload: Buffer.from(row.payload).toString('utf8'), response: JSON.parse(row.response), ...deliveryResult(store,row), ...deliveryDiagnosis(store,row) } };
+    return { event: { ...row, request_headers: redactEgress(JSON.parse(row.request_headers)),
+      payload: redactedBody(Buffer.from(row.payload).toString('utf8')), response: redactEgress(JSON.parse(row.response)), ...deliveryResult(store,row), ...deliveryDiagnosis(store,row) } };
   }
   if (path === '/api/tasks') {
     const clauses=[filter.sql],args=[...filter.args];
