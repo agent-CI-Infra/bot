@@ -37,7 +37,7 @@ test('控制台按 Manager、角色、任务三层展示：没开协调时走原
     await page.reload();await expect(managerPicker).toHaveValue('native');
     await managerPicker.selectOption('pi');
     await page.getByRole('button',{name:'保存角色配置',exact:true}).click();
-    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置');
+    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
     await expect(managerPicker).toHaveValue('pi');
     await expect(page.locator('[data-work-type]')).toHaveCount(0);
     await expect(page.locator('textarea[name=role_configuration]')).toHaveCount(0);
