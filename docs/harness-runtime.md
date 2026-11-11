@@ -82,7 +82,7 @@ ACP 支持 loadSession 时优先恢复原 session，并抑制加载回放；失�
 
 ## 验证与限制
 
-`test/codex-harness.test.mjs` 用 app-server 协议替身（`test/fixtures/codex-app-server.mjs`，不是 Codex）验证握手顺序、工具核对、内建工具关闭与运行中拦截、分片、重复/未知事件、10 种服务器请求的答复、失败/断流/中断与迟到结果、改路由与拦截在宽限期内停止并回收、恢复、仅对缺失 thread 重建且不换模型、对账、无用量 turn 计为未知、绑定前被拒不重复计量、版本/模型/工具/归属不符和启动配置限制。`test/harness.test.mjs` 使用协议测试替身验证 MCP、持久化恢复、重建、角色隔离、QA 新会话、私有内容过滤、取消、进程退出及未提交结果；`test/roles.test.mjs` 验证现有 Native/Process 与协调/验收边界。经 ACP 桥接的真实 Codex 与 OpenToday 证据见 [Issue #176 验收](issue-176-acceptance.md)；直接驱动 `codex app-server` 的真实 CLI 记录与仍未完成的验收项见 [Issue #171 验收](issue-171-acceptance.md)。
+`test/codex-harness.test.mjs` 用 app-server 协议替身（`test/fixtures/codex-app-server.mjs`，不是 Codex）验证握手顺序、工具核对、内建工具关闭与运行中拦截、分片、重复/未知事件、10 种服务器请求的答复、失败/断流/中断与迟到结果、改路由与拦截在宽限期内停止并回收、恢复、仅对缺失 thread 重建且不换模型、对账、无用量 turn 计为未知、绑定前被拒不重复计量、版本/模型/工具/归属不符和启动配置限制。`test/harness.test.mjs` 使用协议测试替身验证 MCP、持久化恢复、重建、角色隔离、QA 新会话、私有内容过滤、取消、进程退出及未提交结果；`test/roles.test.mjs` 验证现有 Native/Process 与协调/验收边界。经 ACP 桥接的真实 Codex 与 OpenToday 验收记录在 Issue #176，直接驱动 `codex app-server` 的真实 CLI 记录与仍未完成的验收项在 Issue #171。
 
 第一版不提供完整隔离、权限代理、精确计费、跨 Harness 会话转换、执行中追加输入或自动故障接管；其后的 [RoleRun 协议](role-run.md) 在同一会话之上补充了版本化输入、租约 epoch、运行令牌、任务工具网关、准入、每运行容器、预算和恢复模式，内置驱动仍不声明隔离。Codex 的权限答复见上文。ACP permission request 对既有执行授权允许一次（无此选项则取消）；这是现有授权下的轻量运行方式，不是细粒度权限防线。远端 Agent 自有工具也不保证经 Bot 代理；验收以公共任务工具留下的实际证据为准。运行主机必须适合执行受信任的 Agent；不把部署共享 HOME 或管理员凭据作为默认配置。
 
