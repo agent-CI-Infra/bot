@@ -4,7 +4,19 @@ function costColor(id) { let hash=0;for(const char of id)hash=(hash*31+char.char
 function costControl(caption,control) { const label=element('label',caption);label.append(control);return label; }
 const costTokenFields=[['input_tokens','输入 token'],['output_tokens','输出 token'],['cached_input_tokens','缓存命中 token']];
 function addCostTokens(total,row) { for(const [key]of costTokenFields)if(row[key]!=null)total[key]=(total[key]??0)+row[key]; }
-function costTokenCells(row) { return costTokenFields.map(([key])=>element('td',metricNumber(row[key]))); }
+// A missing number is not a zero: a request without token counts is 未计量, and a partly covered total says so. A day
+// without any request has nothing to measure, so it stays — like the summary card above; 30 empty days are not gaps.
+function costTokenCells(row) { return costTokenFields.map(([key])=>{
+  if(row[key]==null)return element('td',row.requests?'未计量':'—');
+  return element('td',metricNumber(row[key])+(row.usage_missing_requests?'（不完整）':''));
+}); }
+// An unpriced request is not a zero cost either: 未定价 when nothing in the row is priced, 不完整 when only part is.
+function costCostCell(row,currency) {
+  // No request is an empty range, not an unknown cost: keep the zero amount the summary card also shows.
+  if(!row.requests)return element('td',money(row.cost||0,currency));
+  if(row.requests===row.unpriced_requests)return element('td','未定价');
+  return element('td',money(row.cost,currency)+(row.unpriced_requests?'（不完整）':''));
+}
 // Cached input is already included in input_tokens; never add it to the total again.
 function costChartValue(row,tokens) {
   if(!tokens)return row.cost||0;
@@ -35,21 +47,26 @@ async function loadCosts(version) {
   const summary=element('div','','cost-summary');
   // A recorded zero cost is priced; only the absence of priced requests switches the chart.
   const known=data.summary.requests-data.summary.unpriced_requests,tokenMode=known===0;
-  for(const [label,value]of [['已计价费用',known||!data.summary.requests?money(data.summary.cost,data.currency):'暂无可计价记录'],['模型请求',metricNumber(data.summary.requests)],['未计价请求',metricNumber(data.summary.unpriced_requests)],['用量不完整请求',metricNumber(data.summary.usage_missing_requests)]]){
+  const costItem=element('div','','cost-stat');costItem.dataset.metric='cost';
+  costItem.append(element('span','已计价费用','muted'),element('strong',known?money(data.summary.cost,data.currency):data.summary.requests?'未定价':money(data.summary.cost,data.currency)));
+  summary.append(costItem);
+  for(const [label,value]of [['模型请求',metricNumber(data.summary.requests)],['未计价请求',metricNumber(data.summary.unpriced_requests)],['用量不完整请求',metricNumber(data.summary.usage_missing_requests)]]){
     const item=element('div','','cost-stat');item.append(element('span',label,'muted'),element('strong',value));summary.append(item);
   }
   const tokens=element('div','','cost-token-summary');
-  for(const [key,label]of costTokenFields){const item=element('div','','cost-stat');item.append(element('span',label,'muted'),element('strong',metricNumber(data.summary[key])));tokens.append(item);}
+  for(const [key,label]of costTokenFields){const item=element('div','','cost-stat');item.dataset.metric=key;
+    const value=data.summary[key]==null?(data.summary.requests?'未计量':'—'):metricNumber(data.summary[key]);
+    item.append(element('span',label,'muted'),element('strong',value));tokens.append(item);}
   body.append(summary,tokens,element('p','输入包含缓存命中 token。— 表示没有可靠记录；用量不完整时仅汇总已记录的 token。','cost-note'),element('p','费用和 token 按请求发生时的浏览器本地日期汇总。费用按当时保存的模型单价估算；不同币种分别展示，不作汇率换算。币种筛选仅影响费用和 token，不影响任务统计。项目专属模型的单价在项目「模型」页配置；部署共享模型的单价在「全局设置 → 模型」配置。','cost-note'));
   if(data.summary.unpriced_requests)body.append(element('p',`有 ${data.summary.unpriced_requests} 次请求缺少单价或完整用量，`+(tokenMode?'当前按已记录的 token 绘图。':'未计入柱状图金额。占比仅针对已计价费用。'),'cost-incomplete'));
   body.append(element('p','统计开始于 '+timestamp(data.collection_started_at)+'；此前未记录的用量与费用无法补算。','cost-note'));
   body.append(element('p','范围：费用和 token 只统计经控制面代理的模型请求，任务只统计控制面自己的任务；不含外部执行端自行发起的模型调用及项目容器内其他服务。','cost-note'));
   if(data.tasks)renderTaskStatistics(body,data);
   const byProject=new Map(),byDate=new Map();
-  for(let time=Date.parse(data.from+'T00:00:00Z');time<=Date.parse(data.to+'T00:00:00Z');time+=86400000)byDate.set(new Date(time).toISOString().slice(0,10),{cost:0,requests:0,unpriced_requests:0,rows:[]});
+  for(let time=Date.parse(data.from+'T00:00:00Z');time<=Date.parse(data.to+'T00:00:00Z');time+=86400000)byDate.set(new Date(time).toISOString().slice(0,10),{cost:0,requests:0,unpriced_requests:0,usage_missing_requests:0,rows:[]});
   for(const row of data.days){
-    const day=byDate.get(row.date);day.cost+=row.cost||0;day.requests+=row.requests;day.unpriced_requests+=row.unpriced_requests;day.rows.push(row);addCostTokens(day,row);
-    const project=byProject.get(row.repository_id)||{...row,cost:0,requests:0,unpriced_requests:0,input_tokens:null,output_tokens:null,cached_input_tokens:null};project.cost+=row.cost||0;project.requests+=row.requests;project.unpriced_requests+=row.unpriced_requests;addCostTokens(project,row);byProject.set(row.repository_id,project);
+    const day=byDate.get(row.date);day.cost+=row.cost||0;day.requests+=row.requests;day.unpriced_requests+=row.unpriced_requests;day.usage_missing_requests=(day.usage_missing_requests||0)+row.usage_missing_requests;day.rows.push(row);addCostTokens(day,row);
+    const project=byProject.get(row.repository_id)||{...row,cost:0,requests:0,unpriced_requests:0,usage_missing_requests:0,input_tokens:null,output_tokens:null,cached_input_tokens:null};project.cost+=row.cost||0;project.requests+=row.requests;project.unpriced_requests+=row.unpriced_requests;project.usage_missing_requests=(project.usage_missing_requests||0)+row.usage_missing_requests;addCostTokens(project,row);byProject.set(row.repository_id,project);
   }
   const projects=[...byProject.values()].sort((a,b)=>(costChartValue(b,tokenMode)||0)-(costChartValue(a,tokenMode)||0)||a.full_name.localeCompare(b.full_name));
   const chart=element('section','','cost-chart-section');chart.append(element('h2',tokenMode?'每日 token · 按项目堆叠':'每日费用 · 按项目堆叠'));
@@ -70,11 +87,11 @@ async function loadCosts(version) {
   for(const project of projects){
     const row=document.createElement('tr'),name=element('td',''),dot=element('span','','cost-color');dot.style.backgroundColor=costColor(project.repository_id);name.append(dot,document.createTextNode(project.full_name));
     const amount=costChartValue(project,tokenMode),total=costChartValue(data.summary,tokenMode);
-    row.append(name,element('td',project.requests===project.unpriced_requests?'—':money(project.cost,data.currency)),element('td',amount!=null&&total>0?(amount/total*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
+    row.append(name,costCostCell(project,data.currency),element('td',amount!=null&&total>0?(amount/total*100).toFixed(1)+'%':'—'),...costTokenCells(project),element('td',String(project.unpriced_requests)));projectTable.body.append(row);
   }
   const breakdown=element('section','','cost-breakdown');breakdown.append(element('h2','项目占比'),projectTable.wrap);if(!projects.length)breakdown.append(element('p','暂无项目费用记录。','muted'));body.append(breakdown);
   const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）','已计价费用','模型请求',...costTokenFields.map(([,label])=>label),'未计价请求']);detail.append(element('summary','每日费用与 token 明细'));
-  for(const [date,day]of byDate){const row=document.createElement('tr');row.append(element('td',date),element('td',day.requests&&day.requests===day.unpriced_requests?'—':money(day.cost,data.currency)),element('td',String(day.requests)),...costTokenCells(day),element('td',String(day.unpriced_requests)));daily.body.append(row);}detail.append(daily.wrap);body.append(detail);
+  for(const [date,day]of byDate){const row=document.createElement('tr');row.append(element('td',date),costCostCell(day,data.currency),element('td',String(day.requests)),...costTokenCells(day),element('td',String(day.unpriced_requests)));daily.body.append(row);}detail.append(daily.wrap);body.append(detail);
 }
 // The four kinds every project has always get a row; any other work type that ran tasks in the range gets one by its name.
 const statisticsKinds=['review.issue','review.pr','development.issue','development.pr'];
