@@ -376,7 +376,30 @@ test('connection probes compare tenant grants with the one required scope list a
   assert.equal(h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id).revision, 1);
   // The wizard and connection settings render the same list the check uses; store apps omit the enterprise-only scope.
   assert.deepEqual((await admin('/api/channels/setup')).value.feishu_scopes, JSON.parse(JSON.stringify(FEISHU_SCOPES)));
-  assert.deepEqual(feishuScopes('saas'), feishuScopes('enterprise').filter(s => s !== 'tenant:tenant:readonly'));
+  assert.deepEqual(feishuScopes('saas'), feishuScopes('enterprise').filter(s => !['tenant:tenant:readonly', 'im:message.group_msg.include_bot:read'].includes(s)));
+});
+
+test('enterprise connections require the bot-inclusive tenant grant while preserving group history scopes', async t => {
+  const { admin, id, wire, h } = await channelFixture(t), includeBot = 'im:message.group_msg.include_bot:read';
+  assert.ok(feishuScopes('enterprise').includes(includeBot));
+  assert.ok(feishuScopes('enterprise').includes('im:message.group_msg'));
+  assert.ok(feishuScopes('enterprise').includes('im:message:readonly'));
+  assert.ok(!feishuScopes('saas').includes(includeBot));
+  wire.state.scopes = FEISHU_SCOPES.filter(s => s.scope !== includeBot).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
+  wire.state.scopes.push({ scope_name: includeBot, grant_status: 1, scope_type: 'user' });
+  assert.deepEqual((await probe(admin, id)).value.scopes.missing, [includeBot]);
+  wire.state.scopes.push({ scope_name: includeBot, grant_status: 2, scope_type: 'tenant' });
+  const pending = (await probe(admin, id)).value.scopes;
+  assert.deepEqual(pending.missing, [includeBot]); assert.deepEqual(pending.pending, [includeBot]);
+  wire.state.scopes.at(-1).grant_status = 1;
+  assert.deepEqual((await probe(admin, id)).value.scopes.missing, []);
+  const saas = await connector(admin, { app_id: 'cli_store_without_bot_scope', application_type: 'saas' });
+  const ticket = { ts: String(Date.now() / 1000), uuid: 'bot-scope-store-ticket', token: credentials.verification_token,
+    type: 'event_callback', event: { type: 'app_ticket', app_id: 'cli_store_without_bot_scope', app_ticket: 'fixture-store-ticket' } };
+  assert.equal((await post(h, saas, ticket)).status, 200);
+  wire.state.scopes = wire.state.scopes.filter(s => s.scope_name !== includeBot);
+  const storeCheck = (await probe(admin, saas)).value.scopes;
+  assert.ok(!storeCheck.required.includes(includeBot)); assert.deepEqual(storeCheck.missing, []);
 });
 
 test('the documented Feishu scope table lists exactly the required scopes', () => {

@@ -20,7 +20,7 @@
 4. **发布与检查**：在飞书发布版本、设置可用范围并完成必要审核，再检查机器人信息；检查自动同步保存机器人身份。商店应用先保存连接配置、接收 app_ticket，再完成此检查，未获取机器人身份时拒绝处理消息和卡片。检查只证明凭据和机器人信息可读，不证明消息或卡片回调已经送达。
 5. **绑定与试用**：每位用户完成个人双端绑定，在私聊直接发送“你好”或“我能管理哪些项目”，收到助手回复后才完成接入；此页可查看收件和发送状态。群聊的项目范围不在这里设置，而是在「身份与权限 → 飞书群聊助手」为每个群绑定服务角色和项目范围。结果卡片只带“登录后台查看”链接，不再有回调按钮；较早版本发出的“刷新执行状态”按钮点击后提示已过期。
 
-卡片是默认功能。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息仅加入企业自建应用的权限 JSON：
+卡片是默认功能。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息和包含机器人消息的权限仅加入企业自建应用的权限 JSON：
 
 | 权限 | 用途 |
 | --- | --- |
@@ -29,11 +29,14 @@
 | `im:message:send_as_bot` | 以机器人身份发送消息、发送和更新交互卡片 |
 | `im:message.reactions:write_only` | 在正在处理的原消息下添加表情，回复送达后删除 |
 | `cardkit:card:write` | 创建与更新卡片 |
-| `im:message.group_msg` | 接收全量群消息并读取机器人可见群历史，属于需审批的敏感权限 |
+| `im:message.group_msg` | 接收群内用户消息，并满足群历史读取接口的额外权限要求；不包含其他机器人的实时消息 |
+| `im:message.group_msg.include_bot:read` | 企业自建应用接收群内用户及其他机器人的消息，不推送本机器人自己发送的消息；商店应用不申请 |
 | `im:message:readonly` | 读取机器人所在会话的可见历史及接收撤回事件 |
 | `im:chat.members:bot_access` | 接收机器人进群、移出事件 |
 | `im:chat.members:read` | 判断当前 bot 是否在群中并完整分页核验维护人及来源成员；保存群聊助手绑定时必需，缺少时保存返回 `channel_audience_permission_required` |
 | `tenant:tenant:readonly` | 企业自建应用自动获取安装 tenant_key；保存连接前需开通并发布生效 |
+
+这两项群消息权限用途不同：根据[接收消息事件](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)，`im:message.group_msg` 只推送用户消息，`include_bot:read` 还推送其他机器人消息，且当前仅支持企业自建应用。企业自建连接同时申请两项，因为[获取会话历史消息](https://open.feishu.cn/document/server-docs/im-v1/message/list)仍明确要求 `im:message.group_msg` 与消息读取权限；新增的事件权限不替代历史接口权限。机器人消息安静进入本地记录，后续用户 @ 时可作为上下文，消息来源仍保留为 bot/app；机器人消息本身不触发模型或业务操作。当前机器人的群回复通过本地发送记录保留，不能依赖接收事件回传。
 
 **权限检查**：连接列表每次打开或刷新时，服务端用该连接的应用身份调用飞书[查询租户授权状态](https://open.feishu.cn/api-explorer?project=application&resource=scope&apiName=list&version=v6)（`GET /open-apis/application/v6/scopes`，不需要额外权限），把返回的应用身份权限与上表比对：`grant_status` 为 1 的算已开通，其他状态算已申请但未审核或未发布，用户身份的同名授权不算。全部开通时显示“所需的 N 项均已开通”；有缺少时逐项列出权限和用途，标出已申请待审核的项，并给出两种补齐方式：在飞书「权限管理 → 批量导入/导出」导入完整权限 JSON（已开通的不受影响），或打开飞书权限页 `https://open.feishu.cn/app/<App ID>/auth?q=<缺少的权限>`，一次申请缺少的全部权限。补齐后仍须创建并发布新版本、通过必要审核，再回到连接列表刷新。向导「应用凭据」和「发布与检查」两步的检查也显示同样结果。查询失败时只提示暂时无法自动检查，不影响凭据和机器人检查的结论。
 
