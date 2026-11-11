@@ -64,7 +64,9 @@ test('late file content cannot redraw a different project section',async({page})
   try{
     await f.admin('/api/repositories/101/knowledge-files','POST',{name:'late.txt',content:'private delayed content'});await f.login();
     const gate=new Promise(resolve=>{release=resolve;});await page.route('**/api/repositories/101/knowledge-files/*',async route=>{await gate;await route.continue();});
-    await exact(page,'late.txt').click();await page.locator('#console-secondary-nav').getByRole('link',{name:'项目总览',exact:true}).click();await expect(page).toHaveURL(/\/overview$/);release();
+    await exact(page,'late.txt').click();await page.locator('#console-secondary-nav').getByRole('link',{name:'项目总览',exact:true}).click();await expect(page).toHaveURL(/\/overview$/);
+    // Drain the delayed read before removing its backing project directory.
+    const delayedResponse=page.waitForResponse(response=>response.url().includes('/api/repositories/101/knowledge-files/'));release();await(await delayedResponse).finished();
     await expect(page.locator('.workspace-overview')).toBeVisible();await expect(page.locator('.knowledge-workspace')).toHaveCount(0);await expect(page.getByText('private delayed content',{exact:true})).toHaveCount(0);expect(f.errors).toEqual([]);
   }finally{release?.();await f.close();}
 });
