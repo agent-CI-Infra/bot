@@ -162,8 +162,13 @@ const managementTargetNames = { project_id: '项目', task_id: '任务', workflo
 // A command receipt has an address of its own (#235). It renders the one GET /api/management/commands/<id> the console
 // already exposes and nothing else, and it is read-only: no approval, retry or reconcile, so a bookmarked receipt can
 // never turn into a second execution.
-function hideManagementReceiptPage() {
+// #382: the same receipt address can be routed twice while the shell is still booting (a hashchange while the login
+// form's start() is finishing its own reads, then start()'s trailing route). The page keeps the id it has already read
+// so the second render does not issue a second GET; leaving for any other page clears it, so a later visit reads again.
+let receiptShownId = null, receiptLoading = null;
+function hideManagementReceiptPage(keepShown = false) {
   const page = document.getElementById('management-receipt-page'); if (page) page.hidden = true;
+  if (!keepShown) receiptShownId = null;
 }
 // The console's link() only builds absolute http(s) anchors, so a hash address or an API path needs a plain anchor:
 // a receipt page that looks like a link but is not one would be worse than no link at all.
@@ -183,11 +188,21 @@ function managementReceiptPage() {
 }
 async function renderManagementReceiptPage(id) {
   const page = managementReceiptPage(), nav = page.querySelector('.project-nav'), content = page.querySelector('.project-content');
+  // A completed render of this id is already on screen: show it instead of reading the same receipt again.
+  if (receiptShownId === id) { page.hidden = false; return; }
   page.hidden = false;
   const back = element('a', '返回管理对话'); back.href = '#/management'; nav.replaceChildren(back);
   content.replaceChildren(element('p', '正在加载命令回执…', 'muted'));
   let receipt;
-  try { receipt = await api('/api/management/commands/' + encodeURIComponent(id)); }
+  try {
+    // A read for this id that is still in flight is shared instead of started again.
+    const pending = receiptLoading?.id === id ? receiptLoading.promise : null;
+    if (pending) receipt = await pending;
+    else {
+      const load = { id }; load.promise = api('/api/management/commands/' + encodeURIComponent(id)); receiptLoading = load;
+      try { receipt = await load.promise; } finally { if (receiptLoading === load) receiptLoading = null; }
+    }
+  }
   catch (err) { if (!page.hidden) content.replaceChildren(element('p', '读不到这条回执：' + err.message, 'view-error')); return; }
   if (page.hidden) return;
   if (receipt.project_id) {
@@ -196,6 +211,7 @@ async function renderManagementReceiptPage(id) {
     nav.append(roles, activity);
   }
   content.replaceChildren(...managementReceiptBody(receipt));
+  receiptShownId = id;
   window.scrollTo(0, 0);
 }
 function managementReceiptBody(receipt) {
@@ -301,14 +317,14 @@ function managementReceiptBody(receipt) {
 }
 async function renderManagementPage() {
   const receipt = /^#\/management\/commands\/([a-f0-9]+)$/.exec(location.hash)?.[1];
-  if (receipt) { leaveManagementPage(); await renderManagementReceiptPage(receipt); return; }
+  if (receipt) { leaveManagementPage(receiptShownId === receipt); await renderManagementReceiptPage(receipt); return; }
   hideManagementReceiptPage();
   syncManagementChat(); const project = managementChat?.requestedProject || null;
   if (managementChat) managementChat.requestedProject = null;
   window.scrollTo(0, 0); await openManagementChat(project, { mode: 'page' });
 }
-function leaveManagementPage() {
-  hideManagementReceiptPage();
+function leaveManagementPage(keepReceipt = false) {
+  hideManagementReceiptPage(keepReceipt);
   const chat = managementChat; if (!chat || !(chat.mode === 'page' || chat.mode === 'fullscreen' && chat.fullscreenFrom === 'page')) return;
   chat.openVersion++; setManagementPresentation(chat, 'floating'); minimizeManagementChat(false);
 }
