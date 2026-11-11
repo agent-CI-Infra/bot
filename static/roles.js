@@ -84,53 +84,154 @@ function permissionEditor(permissions, items, change, prefix = '', fixed = false
 function rolePermissionEditor(role, state) {
   return permissionEditor(role.permissions, state.data.permission_items || [], () => markRoleDirty(state), role.role_id + ' ');
 }
+// Arrays of named records merge by identity; order-sensitive lists (tools, dependencies, files) stay atomic.
+// Undefined means removal. A conflicting removal cannot silently delete another editor's changes.
+function mergeRoleDraft(base, draft, latest, choices = {}) {
+  const conflicts = [], equal = (a, b) => JSON.stringify(a) === JSON.stringify(b), clone = value => structuredClone(value);
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const merge = (before, local, remote, path) => {
+    if (equal(local, before)) return clone(remote);
+    if (equal(remote, before) || equal(local, remote)) return clone(local);
+    const key = path.length === 1 && ({ roles: 'role_id', skills: 'id', required_stages: 'stage_id' })[path[0]];
+    if (key && [before, local, remote].every(value => Array.isArray(value) && value.every(row => object(row) && typeof row[key] === 'string'))) {
+      const maps = [before, local, remote].map(rows => new Map(rows.map(row => [row[key], row]))), rows = [];
+      for (const id of new Set([...remote.map(row => row[key]), ...local.map(row => row[key])])) {
+        const row = merge(...maps.map(map => map.get(id)), [...path, id]); if (row !== undefined) rows.push(row);
+      }
+      return rows;
+    }
+    if ([before, local, remote].every(object)) {
+      const merged = {};
+      for (const key of new Set([...Object.keys(before), ...Object.keys(local), ...Object.keys(remote)])) {
+        const value = merge(before[key], local[key], remote[key], [...path, key]); if (value !== undefined) merged[key] = value;
+      }
+      return merged;
+    }
+    const id = JSON.stringify(path), choice = choices[id];
+    conflicts.push({ id, path, before: clone(before), draft: clone(local), latest: clone(remote), resolved: ['draft', 'latest'].includes(choice) });
+    return clone(choice === 'draft' ? local : remote);
+  };
+  return { draft: merge(base, draft, latest, []), conflicts };
+}
+function editableRoleDraft(data, recommend = false) {
+  const config = data.configuration;
+  return { enabled: config.enabled, controller: structuredClone(config.controller),
+    roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind,
+      ...(recommend && !data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })),
+    skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) };
+}
+function roleComparison(state, redraw) {
+  const comparison = state.comparison, section = card('比较角色配置'), choices = {};
+  const local = structuredClone(state.draft); delete local.deleted_roles;
+  const merged = () => mergeRoleDraft(comparison.base, local, editableRoleDraft(comparison.latest), choices);
+  section.append(note(`草稿基于版本 ${state.data.configuration.revision}；服务器最新版本 ${comparison.latest.configuration.revision}。未重叠的修改会合并，重叠字段须逐项选择。此操作只更新草稿，仍需保存。`));
+  const status = note(''), apply = button('将修改应用到最新版本草稿', () => {
+    const now = structuredClone(state.draft); delete now.deleted_roles;
+    if (JSON.stringify(now) !== JSON.stringify(local)) { status.textContent = '草稿已变化，请重新读取最新版本并比较。'; apply.disabled = true; return; }
+    const result = merged(); if (result.conflicts.some(row => !row.resolved)) return;
+    const ids = new Set(result.draft.roles.map(role => role.role_id));
+    state.draft = { ...result.draft, deleted_roles: comparison.latest.configuration.roles.filter(role => !ids.has(role.role_id)).map(role => role.role_id) };
+    state.data = comparison.latest; state.base = editableRoleDraft(comparison.latest); state.conflict = false; state.comparison = null;
+    markRoleDirty(state); redraw();
+  });
+  const conflicts = merged().conflicts;
+  if (!conflicts.length) section.append(note('没有重叠修改：可以保留你的修改，同时保留服务器上其他人的更新。'));
+  for (const row of conflicts) {
+    const entry = element('fieldset', '', 'role-compare-field'); entry.append(element('legend', row.path.join(' › ') || '完整配置'));
+    const values = element('div', '', 'role-compare-values');
+    for (const [label, value] of [['原版本', row.before], ['你的草稿', row.draft], ['最新版本', row.latest]]) {
+      const column = element('div'); column.append(element('strong', label), element('pre', value === undefined ? '（已移除）' : JSON.stringify(value, null, 2))); values.append(column);
+    }
+    entry.append(values, field('处理 ' + row.path.join(' › '), roleSelect('处理 ' + row.path.join(' › '), '', [['', '选择处理方式'], ['draft', '使用我的修改'], ['latest', '采用最新值']], value => {
+      choices[row.id] = value; apply.disabled = merged().conflicts.some(row => !row.resolved);
+    }))); section.append(entry);
+  }
+  apply.disabled = conflicts.length > 0;
+  const localChanges = element('details'); localChanges.append(element('summary', '查看这份草稿与最新配置'));
+  for (const [label, value] of [['你的草稿', local], ['最新配置', editableRoleDraft(comparison.latest)]]) { localChanges.append(element('h4', label), element('pre', JSON.stringify(value, null, 2))); }
+  section.append(localChanges, status, apply); return section;
+}
 function rolesConsole() {
-  const id = current.id, holder = element('div', '', 'roles-page'), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
-  holder.append(note('正在读取角色配置…'));
-  void (async () => {
+  const target = current, id = target.id, token = renderToken, holder = element('div', '', 'roles-page'), message = element('p', '', 'view-error');
+  message.setAttribute('role', 'alert');
+  const live = () => current === target && renderToken === token && current.section === 'roles' && holder.isConnected;
+  let state, request = 0;
+  const failed = err => {
+    if (!live()) return;
+    if ([401, 403].includes(err.status)) { target.rolesDraft = null; state = null; holder.replaceChildren(note('当前身份无权读取或修改角色配置，已清空本页草稿。')); }
+    message.textContent = `${err.message}${err.field ? '（配置项：' + err.field + '）' : ''}`;
+  };
+  const compare = async () => {
+    if (!state || state.busy) return;
+    const revision = ++request; state.busy = true; draw(); message.textContent = '';
+    try {
+      const latest = await api(`/api/repositories/${id}/roles`);
+      if (!live() || revision !== request) return;
+      state.comparison = { base: state.base, latest }; state.conflict = true;
+    } catch (err) { failed(err); }
+    finally { if (state) state.busy = false; if (state) state.redraw?.(); }
+  };
+  const draw = () => {
+    if (!live() || !state) return;
+    state.redraw = draw;
+    holder.replaceChildren(); roleDraftStatus = null;
+    const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
+    for (const [key, title] of [['', '概览'], ...state.draft.roles.map(role => [role.role_id, roleLabel(role.role_id, role.name)])]) {
+      const item = element('a', title); item.href = `#/projects/${id}/roles${key ? '/' + key : ''}`;
+      if ((current.item || '') === key) item.setAttribute('aria-current', 'page'); nav.append(item);
+    }
+    const fields = element('fieldset', '', 'role-editor-fields'); fields.disabled = !!state.busy;
+    const role = state.draft.roles.find(role => role.role_id === current.item);
+    if (current.item && !role) fields.append(note('这个角色已不存在，请在概览选择角色。'));
+    else if (role) {
+      roleDraftStatus = note(roleVersionText(state)); roleDraftStatus.dataset.roleVersion = ''; fields.append(roleDraftStatus, roleSettingsCard(role, state, draw));
+      if (role.role_id === 'manager') fields.append(...managerSection(state.data));
+    } else fields.append(...roleOverviewCards(state, draw));
+    holder.append(nav, fields);
+    if (state.comparison) holder.append(roleComparison(state, draw));
+    const actions = element('div', '', 'actions role-save');
+    const status = note(state.busy ? '正在读取或保存…' : state.dirty ? '草稿未保存；运行中任务保留原有快照。' : '保存后影响新任务和后续委派；运行中任务保留原有快照。'); status.setAttribute('role', 'status');
+    const save = button('保存角色配置', async () => {
+      if (state.busy || state.conflict) return;
+      state.busy = true; draw(); message.textContent = '';
+      try {
+        const { required_stages, ...draft } = structuredClone(state.draft);
+        const stagesChanged = JSON.stringify(required_stages) !== JSON.stringify(state.data.configuration.required_stages || []);
+        await api(`/api/repositories/${id}/roles`, 'PUT', { ...draft, roles: draft.roles.map(({ kind, ...role }) => role), ...(stagesChanged ? { required_stages } : {}), expected_revision: state.data.configuration.revision });
+        // The result belongs to this project; navigating elsewhere must not clear that other project's draft.
+        if (target.rolesDraft === state) target.rolesDraft = null;
+        if (current === target && current.section === 'roles') await reloadWith('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
+      } catch (err) {
+        if (live() && err.code === 'role_configuration_conflict') { state.conflict = true; message.textContent = '角色配置已被别人修改。当前草稿仍保留，请读取最新版本并比较。'; }
+        else failed(err);
+      } finally { if (state) state.busy = false; if (state) state.redraw?.(); }
+    }); save.disabled = !!state.busy || !!state.conflict;
+    const compareButton = button('读取最新版本并比较', compare); compareButton.disabled = !!state.busy;
+    const discard = button('放弃草稿并刷新', async () => {
+      if (state.busy) return;
+      if (state.dirty && !await askConfirm({ title: '放弃未保存的角色修改？', body: ['刷新后读取服务器上的最新配置。'], action: '放弃并刷新' })) return;
+      if (!live()) return; target.rolesDraft = null; await read();
+    }); discard.disabled = !!state.busy;
+    actions.append(status, save, compareButton, discard); holder.append(actions);
+  };
+  const read = async () => {
+    const revision = ++request; holder.replaceChildren(note('正在读取角色配置…')); message.textContent = '';
     try {
       const data = await api(`/api/repositories/${id}/roles`);
-      if (current?.id !== id || current.section !== 'roles') return;
-      let state = current.rolesDraft;
+      if (!live() || revision !== request) return;
+      state = target.rolesDraft;
       if (!state || !state.dirty) {
-        const config = data.configuration;
-        state = { data, dirty: false, draft: { deleted_roles: [], enabled: config.enabled, controller: structuredClone(config.controller), roles: config.roles.map(role => ({ ...editableRole(role), kind: role.kind, ...(!data.configured ? { harness_ref: { id: data.recommended_backend || 'pi' } } : {}) })), skills: structuredClone(data.skill_inputs), required_stages: structuredClone(config.required_stages || []) } };
-        current.rolesDraft = state;
+        const base = editableRoleDraft(data);
+        state = { data, base, dirty: false, draft: { ...editableRoleDraft(data, true), deleted_roles: [] } }; target.rolesDraft = state;
       }
-      const draw = () => {
-        holder.replaceChildren(); roleDraftStatus = null;
-        const nav = element('nav', '', 'role-nav'); nav.setAttribute('aria-label', '角色列表');
-        for (const [key, title] of [['', '概览'], ...state.draft.roles.map(role => [role.role_id, roleLabel(role.role_id, role.name)])]) {
-          const item = element('a', title); item.href = `#/projects/${id}/roles${key ? '/' + key : ''}`;
-          if ((current.item || '') === key) item.setAttribute('aria-current', 'page'); nav.append(item);
-        }
-        holder.append(nav);
-        const role = state.draft.roles.find(role => role.role_id === current.item);
-        if (current.item && !role) holder.append(note('这个角色已不存在，请在概览选择角色。'));
-        else if (role) {
-          holder.append(roleSettingsCard(role, state, draw));
-          if (role.role_id === 'manager') holder.append(...managerSection(state.data));
-        } else holder.append(...roleOverviewCards(state, draw));
-        const actions = element('div', '', 'actions role-save');
-        const save = button('保存角色配置', async () => {
-          save.disabled = true; message.textContent = '';
-          try {
-            const { required_stages, ...draft } = state.draft;
-            const stagesChanged = JSON.stringify(required_stages) !== JSON.stringify(state.data.configuration.required_stages || []);
-            await api(`/api/repositories/${id}/roles`, 'PUT', { ...draft, roles: draft.roles.map(({ kind, ...role }) => role), ...(stagesChanged ? { required_stages } : {}), expected_revision: state.data.configuration.revision });
-            current.rolesDraft = null; await reloadWith('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
-          } catch (err) { message.textContent = /role_configuration_conflict/.test(err.message) ? '角色配置已被别人修改。请刷新读取最新版本，再应用你的修改。当前草稿仍保留。' : `${err.message}${err.field ? '（配置项：' + err.field + '）' : ''}`; }
-          finally { save.disabled = false; }
-        });
-        actions.append(save, button('放弃草稿并刷新', async () => {
-          if (state.dirty && !await askConfirm({ title: '放弃未保存的角色修改？', body: ['刷新后读取服务器上的最新配置。'], action: '放弃并刷新' })) return;
-          current.rolesDraft = null; await reloadProject();
-        })); holder.append(actions);
-      };
       draw();
-    } catch (err) { message.textContent = err.message; }
-  })();
-  return [holder, message];
+    } catch (err) {
+      if (!live() || revision !== request) return;
+      failed(err);
+      if (![401,403].includes(err.status)) holder.replaceChildren(note('角色配置读取失败，当前状态未知。保留的草稿尚未提交。'), button('重试读取角色配置', read));
+    }
+  };
+  holder.append(note('正在读取角色配置…')); void read(); return [holder, message];
 }
 function roleOverviewCards(state, redraw) {
   const { data, draft } = state, overview = card('角色概览'), { table, body } = projectTable(['角色', '启用', '职责', 'Agent 后端', '模型', '技能包', '预算', '权限控制'], '角色解析结果');
@@ -169,39 +270,52 @@ function roleSkillPicker(role, state) {
   return roleSelect(role.role_id + ' 技能包', role.skill_bundle_ref?.id || '', [['', '不绑定技能包'], ...state.draft.skills.map(bundle => [bundle.id, bundle.id])], id => { role.skill_bundle_ref = id ? { id } : null; markRoleDirty(state); });
 }
 function roleSettingsCard(role, state, redraw) {
-  const section = card(roleLabel(role.role_id, role.name) + ' 设置');
-  section.append(roleText('显示名称', role, 'name', state, { maxLength: 80 }), roleCheck('启用角色', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)),
-    roleText('职责', role, 'responsibility', state, { multiline: true, rows: 3, maxLength: 2000 }), field('Agent 后端', roleBackendPicker(role, state, redraw)), field('模型', roleModelPicker(role, state, redraw)));
+  const section = card(roleLabel(role.role_id, role.name) + ' 设置'), nav = element('nav', '', 'role-editor-nav');
+  nav.setAttribute('aria-label', '角色设置分区'); section.append(nav);
+  const group = (key, title) => {
+    const box = element('section', '', 'role-editor-group'), heading = element('h4', title); box.id = `role-${role.role_id}-${key}`; heading.tabIndex = -1;
+    const jump = button(title, () => { box.scrollIntoView({ block: 'start' }); heading.focus({ preventScroll: true }); }, 'quiet'); jump.setAttribute('aria-controls', box.id); nav.append(jump);
+    box.append(heading); section.append(box); return box;
+  };
+  const basic = group('basic', '基本信息');
+  basic.append(roleText('显示名称', role, 'name', state, { maxLength: 80 }), roleCheck('启用角色', role, 'enabled', state, ['controller', 'evaluator'].includes(role.kind)),
+    roleText('职责', role, 'responsibility', state, { multiline: true, rows: 3, maxLength: 2000 }));
+  const agent = group('agent', 'Agent 与模型');
+  agent.append(note('已保存配置的解析：' + roleModelText(state.data.preview.find(row => row.role === role.role_id))), note('下面是待保存的选择；修改不会重写运行中任务的模型快照。'), field('Agent 后端', roleBackendPicker(role, state, redraw)), field('模型', roleModelPicker(role, state, redraw)));
   const profile = role.model_profile_ref, backend = state.data.harnesses.find(entry => entry.id === role.harness_ref.id);
   if (profile) {
-    section.append(field('模型 API', roleSelect('模型 API', profile.api, (backend?.model_api || []).map(id => [id, id]), value => { profile.api = value; markRoleDirty(state); })),
+    agent.append(field('模型 API', roleSelect('模型 API', profile.api, (backend?.model_api || []).map(id => [id, id]), value => { profile.api = value; markRoleDirty(state); })),
       roleCheck('模型支持工具调用', profile, 'tool_calls', state), field('结构化输出方式', roleSelect('结构化输出方式', profile.structured_output, (backend?.structured_output || []).map(id => [id, id]), value => { profile.structured_output = value; markRoleDirty(state); })));
   }
+  const prompts = group('prompts', '提示词');
   const system = textarea('system_prompt', state.data.system_prompt, { rows: 6, readOnly: true }); system.setAttribute('aria-label', '系统提示词'); system.readOnly = true;
-  section.append(field('系统提示词', system), note('所有角色共用的系统背景、环境说明和基本行为准则。角色职责与任务记录规则在下面的提示词中直接修改。'));
-  section.append(roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 18, maxLength: 32000 }), note('这份提示词包含角色完整的职责与行为要求，可以全部修改或清空；系统不会再追加固定职责。'), button('恢复角色模板', async () => {
+  prompts.append(field('系统提示词', system), note('所有角色共用的系统背景、环境说明和基本行为准则。角色职责与任务记录规则在下面的提示词中直接修改。'));
+  prompts.append(roleText('角色提示词', role, 'persona_prompt', state, { multiline: true, rows: 18, maxLength: 32000 }), note('这份提示词包含角色完整的职责与行为要求，可以全部修改或清空；系统不会再追加固定职责。'), button('恢复角色模板', async () => {
     if (!await askConfirm({ title: '恢复角色模板？', body: ['当前角色提示词将替换为默认模板，保存后生效。'], action: '恢复模板' })) return;
     role.persona_prompt = (Object.hasOwn(state.data.role_templates, role.role_id) ? state.data.role_templates[role.role_id] : state.data.role_templates.observer); markRoleDirty(state); redraw();
   }));
-  section.append(field('技能包', roleSkillPicker(role, state)), rolePermissionEditor(role, state));
+  group('skills', '技能包').append(field('技能包', roleSkillPicker(role, state)));
+  group('permissions', '权限').append(rolePermissionEditor(role, state));
+  const runtime = group('runtime', '环境与输出');
   const environment = state.data.environment_profiles.filter(entry => entry.kinds.includes(role.kind));
-  section.append(field('运行环境', roleSelect('运行环境', role.environment_profile_ref.id, environment.map(entry => [entry.id, environmentLabels[entry.id] || entry.id, entry.isolation === 'run_container' && backend?.capabilities?.isolation !== 'run_environment']), id => { role.environment_profile_ref = { id }; markRoleDirty(state); })));
-  section.append(field('输出结果', roleSelect('输出结果', role.output_schema_ref.id, state.data.output_schemas.filter(entry => entry.kinds.includes(role.kind)).map(entry => [entry.id, outputLabels[entry.id] || entry.id]), id => { role.output_schema_ref = { id }; markRoleDirty(state); })));
-  section.append(field('预算方式', roleSelect('预算方式', role.budget_policy_ref.id, [['entry-default', '沿用任务限制'], ['bounded', '限制单次运行'], ['metered', '限制任务累计用量']], id => {
+  runtime.append(field('运行环境', roleSelect('运行环境', role.environment_profile_ref.id, environment.map(entry => [entry.id, environmentLabels[entry.id] || entry.id, entry.isolation === 'run_container' && backend?.capabilities?.isolation !== 'run_environment']), id => { role.environment_profile_ref = { id }; markRoleDirty(state); })));
+  runtime.append(field('输出结果', roleSelect('输出结果', role.output_schema_ref.id, state.data.output_schemas.filter(entry => entry.kinds.includes(role.kind)).map(entry => [entry.id, outputLabels[entry.id] || entry.id]), id => { role.output_schema_ref = { id }; markRoleDirty(state); })));
+  const budget = group('budget', '预算');
+  budget.append(field('预算方式', roleSelect('预算方式', role.budget_policy_ref.id, [['entry-default', '沿用任务限制'], ['bounded', '限制单次运行'], ['metered', '限制任务累计用量']], id => {
     const old = role.budget_policy_ref; role.budget_policy_ref = id === 'entry-default' ? { id } : { id, max_turns: old.max_turns || 32, max_output_tokens: old.max_output_tokens || 4096 }; markRoleDirty(state); redraw();
   })));
   if (role.budget_policy_ref.id !== 'entry-default') {
     for (const [key, title, min, max] of budgetFields.slice(0, role.budget_policy_ref.id === 'bounded' ? 2 : undefined)) {
       const control = input(key, role.budget_policy_ref[key] ?? '', { type: 'number', min, max, step: 1 });
-      section.append(field(title, roleBound(control, value => { if (value === '') delete role.budget_policy_ref[key]; else role.budget_policy_ref[key] = Number(value); }, state)));
+      budget.append(field(title, roleBound(control, value => { if (value === '') delete role.budget_policy_ref[key]; else role.budget_policy_ref[key] = Number(value); }, state)));
     }
     if (role.budget_policy_ref.id === 'metered') {
       const cost = role.budget_policy_ref.max_cost, amount = input('max_cost', cost?.amount || '', { type: 'number', min: 0.000001, max: 1000000, step: 'any' });
       const currency = roleSelect('预算币种', cost?.currency || 'USD', [['USD', '美元'], ['CNY', '人民币']], value => { if (role.budget_policy_ref.max_cost) role.budget_policy_ref.max_cost.currency = value; markRoleDirty(state); });
-      section.append(field('任务累计金额上限（留空不设置）', roleBound(amount, value => { if (value === '') delete role.budget_policy_ref.max_cost; else role.budget_policy_ref.max_cost = { amount: Number(value), currency: currency.value }; }, state)), field('预算币种', currency));
+      budget.append(field('任务累计金额上限（留空不设置）', roleBound(amount, value => { if (value === '') delete role.budget_policy_ref.max_cost; else role.budget_policy_ref.max_cost = { amount: Number(value), currency: currency.value }; }, state)), field('预算币种', currency));
     }
   }
-  if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) section.append(button('删除这个角色', async () => {
+  if (!(state.data.required_roles || ['manager', 'coordinator', 'qa']).includes(role.role_id)) group('danger', '删除角色').append(button('删除这个角色', async () => {
     const stages = state.draft.required_stages.filter(stage => stage.role_constraints.role_ids?.includes(role.role_id));
     if (stages.length) { await askConfirm({ title: '先调整任务阶段', body: ['这些阶段仍指定了该角色：' + stages.map(stage => stage.stage_id).join('、') + '。请在概览中修改阶段角色或移除阶段，再删除角色。'], action: '知道了' }); return; }
     if (!await askConfirm({ title: '删除角色 ' + role.name + '？', body: ['保存后该角色不再参与新任务，正在运行的角色也会停止使用工具。阶段要求如引用此角色，需要一并调整。'], action: '删除角色' })) return;
