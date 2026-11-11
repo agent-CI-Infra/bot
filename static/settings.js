@@ -340,11 +340,54 @@ function accountDetailBody(account, projects, redraw) {
     facts([['类型', isApp ? `GitHub App · App ID ${account.app_id}` : '用户 Token'],
       ['凭据', account.credentials_configured ? '凭据已配置' : '凭据已撤销，需要重新登记'],
       ['登记时间', account.created_at ? timestamp(account.created_at) : '未记录']]));
-  // Only registered projects are counted: an installation the account no longer lists is not a project of this console.
-  const projectSection = element('section', ''); projectSection.append(element('h4', `使用项目（${projects.length}）`));
-  if (!projects.length) projectSection.append(element('p', '这个账号还没有已登记的项目。', 'muted'));
+  // The count is the server's own registered-repository count; the names are the rows this page read alongside it.
+  const named = Number(account.project_count ?? projects.length), projectSection = element('section', '');
+  projectSection.append(element('h4', `使用项目（${named}）`));
+  if (!projects.length) projectSection.append(element('p', named ? `已登记 ${named} 个项目，但这一页没有读到它们的名字（安装列表可能分页），到项目页查看。` : '这个账号还没有已登记的项目。', 'muted'));
   else for (const project of projects) projectSection.append(element('p', project.full_name));
   nodes.push(projectSection);
+  // The installations this credential reaches come with the account view, so naming them adds no request of its own. An
+  // installation GitHub stopped listing stays as history, a grant that was never read says so instead of "no gaps", and a
+  // bot account states it has none at all because a user token does not go through an installation.
+  const installs = account.installations || [], installSection = element('section', '');
+  installSection.append(element('h4', `关联安装（${installs.length}）`));
+  if (!installs.length) installSection.append(element('p', isApp
+    ? '这个账号还没有关联的 GitHub 安装：同步安装列表后会出现，零仓库的安装也会保留。'
+    : '用户 Token 账号按 Token 所属用户的仓库权限访问，没有 GitHub 安装；关联安装只属于 GitHub App 账号。', 'muted'));
+  else {
+    const table = element('table', '', 'rule-table'), head = element('tr', ''), thead = document.createElement('thead'), tbody = document.createElement('tbody');
+    for (const caption of ['安装', '目标', '状态', '仓库', '缺什么', '会挡住什么']) head.append(element('th', caption));
+    thead.append(head); table.append(thead, tbody);
+    for (const installation of installs) {
+      const gaps = installation.access_gaps, row = element('tr', '');
+      const cell = (label, value) => { const td = element('td'); td.dataset.label = label; td.append(value); return td; };
+      // The installation number is the way into its archive, so the account page reaches the evidence it names.
+      const ref = ['github.com', account.app_id, installation.installation_id].map(encodeURIComponent).join('/');
+      row.append(cell('安装', settingsLink('#/settings/installations/' + ref, `安装 ${installation.installation_id}`)),
+        cell('目标', installation.owner_login || '待同步'),
+        cell('状态', installation.installed ? '仍在安装里' : 'GitHub 已移除，保留为历史'),
+        cell('仓库', `${Number(installation.repositories) || 0} 个`),
+        // A gap reading has two halves: the grant and the event table. The cell names whichever half is missing instead
+        // of calling a grant that was read "unread", and neither half is ever turned into "no gaps".
+        cell('缺什么', gaps === null ? (installation.permissions_checked_at ? '授权已读，事件表还没读，缺什么无法判断' : '授权未读取，缺什么无法判断')
+          : gaps.length ? gaps.map(gapWhat).join('；') : '没有缺口'),
+        cell('会挡住什么', gaps === null ? '不知道' : gaps.length ? [...new Set(gaps.flatMap(gap => gap.features.map(feature => featureNames[feature] || feature)))].join('、') : '不影响已开启的功能'));
+      tbody.append(row);
+    }
+    const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); installSection.append(wrap);
+    // Freshness is stated per account, and the reason for it is named: a grant read before a change at GitHub is stale,
+    // while a grant that was read without the event table is incomplete — the two need different words.
+    for (const installation of installs) if (installation.permissions_checked_at) {
+      const read = timestamp(installation.permissions_checked_at);
+      if (installation.access_gaps === null)
+        installSection.append(element('p', `安装 ${installation.installation_id} 的授权是 ${read} 读到的，但那一次没有读到事件表，缺什么要等事件表回来才能判断；同步一次安装列表再读。`, 'endpoint-warning'));
+      else if (installation.permissions_stale)
+        installSection.append(element('p', `安装 ${installation.installation_id} 的授权是 ${read} 读到的，之后可能在 GitHub 上改过；到「安装档案」重新同步再读一次。`, 'endpoint-warning'));
+    }
+    const unread = installs.filter(installation => !installation.permissions_checked_at);
+    if (unread.length) installSection.append(element('p', `安装 ${unread.map(installation => installation.installation_id).join('、')} 还没有读到授权，因此上面的「缺什么」不能当成「没有缺口」；同步一次安装列表再读。`, 'endpoint-warning'));
+  }
+  nodes.push(installSection);
   const endpointSection = element('section', ''); endpointSection.append(element('h4', `Webhook 入口（${(account.endpoints || []).length}）`));
   if (!(account.endpoints || []).length) endpointSection.append(element('p', '还没有 Webhook 入口。', 'muted'));
   else {
