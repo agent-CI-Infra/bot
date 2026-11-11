@@ -343,6 +343,15 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 }
 .project-content .computer-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 900px) { .project-content .computer-status-grid { grid-template-columns: minmax(0, 1fr); } }
+.machine-config-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,280px);gap:20px;align-items:start}
+.machine-config-fields,.machine-config-group{display:flex;flex-direction:column;gap:14px;min-width:0}
+.machine-config-group+.machine-config-group{border-top:1px solid var(--color-border);padding-top:20px;margin-top:6px}
+.machine-config-group h4,.machine-config-impact h4{margin:0;font-size:16px}
+.machine-config-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.machine-config-origin{color:var(--color-text-muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.machine-config-impact{display:flex;flex-direction:column;gap:12px;border:1px solid var(--color-border);border-radius:var(--radius-card);background:var(--color-surface-alt);padding:16px;min-width:0}
+.machine-config-draft{font-weight:600;overflow-wrap:anywhere}
+@media(max-width:1200px){.machine-config-layout{grid-template-columns:minmax(0,1fr)}.machine-config-impact{order:-1}}
 /* #238 webhooks: a delivery row carries reception, signature and processing as three independent badges, and the
    detail reads the same facts as labelled sections with the Manager dispatch and the collapsed raw request. */
 /* Desktop only: the narrow layout keeps the shared single-column row so a 390px page does not squeeze the text. */

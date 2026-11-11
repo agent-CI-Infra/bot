@@ -69,6 +69,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   // The existing manager computer is the console layer, not a new resource system.
   const allowed = computerKeys;
   const consoleComputer = Object.fromEntries(allowed.filter(key => computer[key] !== undefined).map(key => [key, computer[key]]));
+  const computerSources: Record<string, string> = Object.fromEntries(Object.keys(consoleComputer).map(key => [key, 'console']));
   let effectiveComputer = { ...consoleComputer };
   for (const [path, builtin] of Object.entries(defaults)) {
     const layers = [{ source: 'builtin', content: builtin }];
@@ -82,6 +83,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
         // Commands no longer have a time limit; files written for older versions may still set one, which is ignored.
         delete value.max_command_minutes;
         if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error();
+        for (const key of Object.keys(value)) computerSources[key] = Object.hasOwn(files, path) ? 'repository' : 'console';
         effectiveComputer = { ...consoleComputer, ...value }; effective = JSON.stringify(effectiveComputer, null, 2);
       } catch { return ruleError('invalid_bot_computer', `${Object.hasOwn(files, path) ? '仓库' : '控制台'}的 ${path} 不是映射，或写了不支持的字段（只支持 ${allowed.join('、')}）`); }
     }
@@ -89,7 +91,7 @@ export function resolveRules(policy: Row, files: Record<string, string>, compute
   }
   for (const [path, content] of Object.entries(files).filter(([path]) => skillPath(path))) rows.push({ path, source: 'repository', layers: [{ source: 'repository', content }], effective: content });
   const effective = (path: string) => rows.find(r => r.path === path)!.effective;
-  return { files: rows, computer: effectiveComputer, review_label: declaredLabel(effective('.bot/rules/labels.md'), 'review_label', '.bot/rules/labels.md'),
+  return { files: rows, computer: effectiveComputer, computer_sources: computerSources, review_label: declaredLabel(effective('.bot/rules/labels.md'), 'review_label', '.bot/rules/labels.md'),
     development_label: declaredLabel(effective('.bot/rules/issue-development.md'), 'development_label', '.bot/rules/issue-development.md') || defaultDevelopmentLabel };
 }
 // Automatic development needs this label on the Issue, applied by a person. A development rule without the line keeps

@@ -56,6 +56,18 @@ async function repositoryFixture(t,{stopModel=false}={}){
   return fixture;
 }
 
+test('computer field sources follow each repository key without relabelling inherited console values',()=>{
+  const consoleSpec={cpus:3,memory_mb:4096,egress:true,env:{MODE:'test'}};
+  const rules=resolveRules({}, {'.bot/computer.yaml':'memory_mb: 8192\ntmp_mb: null\n'}, consoleSpec);
+  assert.deepEqual(rules.computer,{...consoleSpec,memory_mb:8192,tmp_mb:null});
+  assert.deepEqual(rules.computer_sources,{cpus:'console',memory_mb:'repository',egress:'console',env:'console',tmp_mb:'repository'});
+  const cleared=resolveRules({}, {}, consoleSpec);
+  assert.equal(cleared.computer_sources.memory_mb,'console');
+  assert.equal(cleared.computer_sources.tmp_mb,undefined);
+  assert.deepEqual(resolveRules({},{}).computer_sources,{});
+  assert.deepEqual(consoleSpec,{cpus:3,memory_mb:4096,egress:true,env:{MODE:'test'}});
+});
+
 test('a label line ends with its line: an empty value is an empty label, never the next line',()=>{
   const rules=files=>resolveRules({},files);
   assert.equal(rules({'.bot/rules/issue-development.md':'development_label:\n# Issue development\n'}).development_label,'bot-develop');
