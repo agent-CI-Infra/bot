@@ -12,14 +12,32 @@ const consoleAttention = {
   needs_replan: ['需要重新规划', '查看验收缺口和已有产物，再决定下一步。']
 };
 function consoleInboxRoute() { return /^#\/inbox(?:\/(all|[1-9]\d*))?(?:\/(\d+))?$/.exec(location.hash); }
+// Same wording as the task detail (static/views.js): the list must not invent a second name for a level.
+const consolePriority = { P0: '紧急止损', P1: '核心阻塞', P2: '正常开发', P3: '非核心完善' };
+// How long an item has waited, from the state change the list is already sorted by; coarse on purpose, because the
+// exact second would imply a precision the record does not have.
+function waitedFor(iso) {
+  const started = Date.parse(iso); if (!Number.isFinite(started)) return null;
+  const minutes = Math.max(0, Math.round((Date.now() - started) / 60000));
+  if (minutes < 1) return '少于 1 分钟';
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60), restMinutes = minutes % 60;
+  if (hours < 24) return restMinutes ? `${hours} 小时 ${restMinutes} 分钟` : `${hours} 小时`;
+  const days = Math.floor(hours / 24), restHours = hours % 24;
+  return restHours ? `${days} 天 ${restHours} 小时` : `${days} 天`;
+}
 function consoleTaskRow(row, attention = false) {
   const item = element('article', '', 'console-attention-row'), text = element('div');
-  const guidance = attention && consoleAttention[row.status];
-  text.append(element('p', `${row.full_name || row.repository_id} · ${guidance?.[0] || projectTaskLabel(row)}`, 'eyebrow'), element('h2', row.summary || row.id));
+  const guidance = attention && consoleAttention[row.status], priority = row.priority || 'P2';
+  const level = consolePriority[priority] ? `${priority} ${consolePriority[priority]}` : priority;
+  // A waiting item says which level it is: P0 and P2 look alike otherwise, and the list is sorted by age, not urgency.
+  text.append(element('p', `${row.full_name || row.repository_id} · ${guidance?.[0] || projectTaskLabel(row)}${guidance ? ' · ' + level : ''}`, 'eyebrow'), element('h2', row.summary || row.id));
   if (guidance) text.append(element('p', guidance[1]));
   if (row.origin) text.append(element('p', taskOriginCaption(row.origin), 'muted'));
   if (row.error_code) text.append(element('p', row.error_code, 'muted'));
-  text.append(element('p', `更新于 ${timestamp(row.updated_at) || '未知时间'}`, 'muted'));
+  const waited = guidance ? waitedFor(row.updated_at) : null;
+  text.append(waited ? element('p', `已等待 ${waited}，最近状态变更于 ${timestamp(row.updated_at) || '未知时间'}`, 'muted')
+    : element('p', `更新于 ${timestamp(row.updated_at) || '未知时间'}`, 'muted'));
   const open = button('查看任务', () => openTask(row.id).catch(error)); open.dataset.attentionTask = row.id;
   item.dataset.taskId = row.id; item.append(text, state(row.status), open); return item;
 }
