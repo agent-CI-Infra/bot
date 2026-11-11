@@ -16,6 +16,7 @@ import { ReleaseService } from './releases/service.js';
 import { ActionsFailures } from './actions/service.js';
 import { GitHubLogin } from './identity/github-login.js';
 import { deploymentOrigin, loginCallbackPath } from './onboarding/public-url.js';
+import { StallMonitor } from './core/stalls.js';
 
 process.umask(0o077);
 const keyFile = process.env.BOT_MASTER_KEY_FILE;
@@ -63,9 +64,11 @@ const integrations = new IntegrationChecker(store, process.env.BOT_GITHUB_API_UR
 const gateOnboarding = new GateOnboarding(store, process.env.BOT_GITHUB_API_URL || undefined);
 const releases = new ReleaseService(store, process.env.BOT_GITHUB_API_URL); releases.start();
 const actionsFailures = new ActionsFailures(store, process.env.BOT_GITHUB_API_URL); actionsFailures.start();
+// Logs a blocked event loop with the requests in flight, and slow requests (see core/stalls.ts).
+const stalls = new StallMonitor(); stalls.start();
 const { server } = createControlPlane({ store, staticDirectory: resolve(import.meta.dirname, '../static'),
   secureCookies: process.env.BOT_COOKIE_SECURE === 'true', publicOrigin, projects, engine, repositoryConfigs, installations, external, onboarding, integrations, gateOnboarding, releases, boards,
-  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin });
+  imageTag: process.env.BOT_IMAGE_TAG, githubUrl: process.env.BOT_GITHUB_API_URL, githubLogin, stalls });
 // The only business listener: console, API, OAuth, App callbacks, webhooks, external executors and public boards.
 server.on('error', () => { console.error('listener failed'); process.exit(1); });
 server.listen(8791, '0.0.0.0', () => console.log('listening on 8791'));

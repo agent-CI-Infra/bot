@@ -65,6 +65,18 @@ test('network failures say whether it was a timeout, DNS, a reset, TLS or a refu
     assert.equal(error.code,'github_response_unknown');assert.match(error.detail,/连接被拒绝（ECONNREFUSED），写入结果尚未确认。$/);return true;});
 });
 
+test('a GitHub answer cut off while its body is read waits for retry like a failed request, never fails the task',async t=>{
+  // Production: the bot's thread was blocked while GitHub's answer arrived; the 30-second abort then hit the body read,
+  // escaped as an unknown runtime error and failed a development task in publication.
+  const server=createServer((req,res)=>{res.writeHead(200,{'Content-Type':'application/json','Content-Length':'1000'});res.write('{"number":');setTimeout(()=>res.destroy(),50);});
+  server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+  const github=new GitHub(null,{},new Redactor(),async()=>{},'http://127.0.0.1:'+server.address().port);github.token='ghs_fixture';github.fullName='octo/repo';
+  await assert.rejects(github.request('GET',github.path('/issues/1')),error=>{
+    assert.equal(error.code,'github_unavailable');assert.equal(error.state,'retry_wait');assert.match(error.detail,/^GitHub 请求 GET \/repos\/octo\/repo\/issues\/1 读取响应失败：/);return true;});
+  await assert.rejects(github.request('POST',github.path('/git/refs'),{}),error=>{
+    assert.equal(error.code,'github_response_unknown');assert.equal(error.state,'retry_wait');assert.match(error.detail,/写入结果尚未确认。$/);return true;});
+});
+
 test('a write GitHub answered with 500 pauses as unconfirmed, and 重试 sends it once GitHub still has no trace of it',async t=>{
   let fail=true;
   const h=await emptyRepositoryFixture(t,{github(path,send,res){
