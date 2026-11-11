@@ -179,7 +179,8 @@ test('runner writes and reads a large file in chunks, finalizes over 2000 files 
 
 test('failed task detail exposes redacted hash-mismatch reasons and preserves preparation logs',async t=>{
   const file=entry('src/fixture-key.txt',Buffer.from('expected')),h=await emptyRepositoryFixture(t,{files:[file]});h.setBranch('ready');
-  const task=await h.run();assert.equal(task.status,'failed');assert.equal(task.error_code,'repository_blob_limit_or_hash');
+  // A mismatching download is the bot's to retry (it can be a cut-off transfer); the reason stays visible meanwhile.
+  const task=await h.run();assert.equal(task.status,'retry_wait');assert.equal(task.error_code,'repository_blob_limit_or_hash');
   const {value:detail}=await h.admin('/api/tasks/'+h.taskId),{value:{logs}}=await h.admin('/api/tasks/'+h.taskId+'/logs');
   assert.match(detail.task.error_detail,/src\/\[REDACTED\]\.txt/);assert.match(detail.task.error_detail,/expected [a-f0-9]{40}, actual [a-f0-9]{40}/);
   assert.ok(!JSON.stringify(logs).includes('fixture-key'));assert.equal(logs.map(log=>JSON.parse(log.content)).filter(log=>log.type==='snapshot').length,1);

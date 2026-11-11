@@ -36,7 +36,7 @@ import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
 import { Workspace } from './workspace.js';
-import { isAttemptFailure } from './failures.js';
+import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
 import { repositoryConcurrency } from '../app/settings.js';
@@ -227,8 +227,13 @@ export class TaskEngine {
       if(!policy?.enabled||task.kind.startsWith('review.')&&!policy.review_enabled||task.kind.startsWith('development.')&&!policy.development_enabled)stop('repository_policy_disabled','cancelled',`仓库 ${task.repository_id} 已停用，或已关闭 ${task.kind} 类型任务。`);
       // A work type that was switched off in the project configuration stops its tasks the same way.
       if(task.kind!=='task.request'&&!workEnabled(this.store,task.repository_id,workOf(task as any)))stop('work_disabled','cancelled',`项目已关闭 ${workOf(task as any)} 这类工作。`);
-      const delivery=records.get(id);
-      if(current?.phase==='publish'&&(delivery.pending||delivery.acceptance))assertRequiredStages(this.store,id,deliveryCandidate(delivery.candidate,task.kind));
+      // The guard runs on every poll, tool call and streamed reply of every task: read only the columns this check needs, and
+      // only in publication. Building the whole record here (assignments, coordination, relations) took most of the
+      // control plane's CPU with ten tasks running.
+      if(current?.phase==='publish'){
+        const delivery=this.store.get('SELECT candidate,pending,acceptance FROM task_records WHERE task_id=?',id);
+        if(delivery&&(delivery.pending||delivery.acceptance))assertRequiredStages(this.store,id,deliveryCandidate(delivery.candidate?JSON.parse(delivery.candidate):null,task.kind));
+      }
       // An event that moved on (another run attempt, a release no longer waiting) ends its task at once.
       if(event)event.validate(this.store,current!,JSON.parse(current!.input||'{}'));
       if(task.generation){const environment=await this.manager.call('GET','/v1/projects/'+task.repository_id);if(!environment||environment.generation!==task.generation)stop('environment_generation_changed','waiting_environment',`项目电脑 generation 已变化：任务为 ${task.generation}，当前为 ${environment?.generation??'不存在'}。`);if(!['ready','busy'].includes(environment.state))stop('environment_not_ready','waiting_environment',`项目电脑尚未就绪，当前状态=${environment.state}。`);}
@@ -782,7 +787,7 @@ export class TaskEngine {
       // A GitHub rate limit is waited out until its window resets (the task resumes then, a few seconds apart from others
       // waiting for the same window); it does not use up the five automatic retries.
       const limited=failure.code==='github_rate_limited';
-      const state=failure.state,retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
+      const state=automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
       const previousCode=current?.retry_error_code||current?.error_code;
       const retries=counted?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:retrying?Number(current?.retry_count||0):0;
       // Once in the slow cycle, a task never starts another burst. Its slots stay relative to its own entry time,
@@ -804,7 +809,9 @@ export class TaskEngine {
       // release() reaps the agent. Its cached pi:start receipt describes that dead process, so every model-phase
       // failure must use a new workspace and operation namespace, for development as well as review at any attempt.
       if(current?.claim_token===token&&!['cancelled','superseded'].includes(current.status)&&!['cancelled','superseded'].includes(state)&&
-        state!=='waiting_coordination'&&task.kind!=='task.request'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||failure.code==='execution_interrupted'&&task.phase!=='publish')){
+        state!=='waiting_coordination'&&task.kind!=='task.request'&&(task.phase==='model'||replies(task.kind)&&task.phase==='publish'&&!task.publication_started||
+        // An operation left over from an interrupted run conflicts with the same key again; a new attempt has new keys.
+        ['execution_interrupted','tool_operation_conflict'].includes(failure.code)&&task.phase!=='publish')){
         if(replies(task.kind)&&!task.publication_started)this.store.run("DELETE FROM github_effects WHERE task_id=? AND state='pending'",id);
         log({type:'restart_attempt',preserved_workspace:task.workspace_id});
         update({phase:'prepare',workspace_id:null,generation:null,messages:null,result:null,model_started:0,review_update_cursor:0,publication_started:0,attempt:task.attempt+1});
