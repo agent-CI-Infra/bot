@@ -679,6 +679,14 @@ function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   side.append(taskRunHistoryCard(roles));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
   const info = card('任务');
+  // #238: a review task names the commit it inspected, so a reader can open that exact commit. The row appears only
+  // when the task kind is a review and the task actually recorded that sha; nothing is guessed from the head, the PR
+  // base or another task. A synchronous review of an Issue records one too, so the row is not tied to a pull request.
+  if (String(task.kind).startsWith('review.') && task.reviewed_sha) {
+    const reviewed = task.reviewed_sha, url = task.full_name ? 'https://github.com/' + task.full_name + '/commit/' + reviewed : null;
+    info.dataset.reviewedSha = reviewed;
+    info.append(facts([['检视提交', url ? link(url, reviewed) : reviewed]]));
+  }
   info.append(facts([['优先级', task.priority || 'P2'], ['入队序号', String(task.queue_seq ?? '—')], ['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
     [task.error_code==='repository_has_no_commit'?'等待原因':'故障', task.error_detail||(task.error_code==='pr_head_pending'?'PR 尚未指向刚推送的提交':ownershipErrors[task.error_code]||taskErrorText(task.error_code))],
     ['原因', task.error_code&&task.error_code!=='repository_has_no_commit'&&task.error_cause?faultSummary(task.error_code,task.error_cause):null], ['处理', task.error_code!=='repository_has_no_commit'?task.error_cause?.action:null], ['已推送提交',task.pushed_sha], ['创建', timestamp(task.created_at)], ['更新', timestamp(task.updated_at)]]));

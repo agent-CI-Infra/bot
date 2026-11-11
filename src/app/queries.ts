@@ -22,6 +22,9 @@ const publicTask=(row:Record<string,any>)=>({id:row.id,repository_id:row.reposit
   error_code:row.error_code,error_cause:explainFailure(row.error_code,row.status,row.error_detail,row.retry_cycle_started_at),retry_count:row.retry_count,
   retry_cycle_started_at:row.retry_cycle_started_at,next_run_at:row.next_run_at,pushed_sha:row.pushed_sha||null,attempt:row.attempt,result:row.result?JSON.parse(row.result):null,created_at:row.created_at,updated_at:row.updated_at});
 const taskOrigin=(store:Store,id:string)=>store.get('SELECT source_kind,source_role,executor_role,conversation_id,source_message,source_task_id FROM task_origins WHERE task_id=?',id)??null;
+// The commit a review task inspected, as the agent recorded it when the task was prepared. Read from the stored
+// input only: nothing is derived for a task that never recorded one, and no field is invented for another kind.
+const reviewedSha=(row:Record<string,any>)=>{try{const value=JSON.parse(row.input||'{}').context?.reviewed_sha;return typeof value==='string'&&/^[0-9a-f]{7,64}$/.test(value)?value:null}catch{return null}};
 
 function detailState(store:Store,id:string){
  const state=new TaskRecords(store).get(id),candidate=state.candidate;
@@ -138,7 +141,7 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
       return { logs, log_page: { has_older: ascending ? false : more, has_newer: ascending && more,
         first_sequence: rows[0]?.sequence ?? null, last_sequence: rows.at(-1)?.sequence ?? null } };
     }
-    return { task: {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
+    return { task: {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null,reviewed_sha:reviewedSha(row)},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
       // Why the Manager created or continued this task, with the events behind it.
       dispatch:taskDispatch(store,row.id) };
   }
