@@ -28,7 +28,7 @@ export async function developmentTeam(workspace:Workspace,system:string,prompt:s
    if(spaces.role==='dev'&&['write_file','run_command'].includes(name))await checkpoint(store,task,workspace);
    traceEvent(store,task.id,'execution_evidence',{name,role:spaces.role,version:snapshot.tree_sha,arguments:redactor.clean(args),result:redactor.clean(result)},spaces.runId,'role:'+spaces.role);return result;
   }};
-  const candidate=await runTeam(spec,{prepare:spaces.prepare,controller:spaces.controller,worker:spaces.worker,withRole:spaces.withRole,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated,entry:'development',writerSnapshot:async()=>{const snapshot=await spaces.current.artifact('role-collect:'+randomId());return {tree_sha:snapshot.tree_sha,local_sha:snapshot.local_sha};}}),published=await publish(randomId(),candidate);
+  const candidate=await runTeam(spec,{prepare:spaces.prepare,controller:spaces.controller,worker:spaces.worker,withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated,entry:'development',writerSnapshot:async()=>{const snapshot=await spaces.current.artifact('role-collect:'+randomId());return {tree_sha:snapshot.tree_sha,local_sha:snapshot.local_sha};}}),published=await publish(randomId(),candidate);
   if(published.pr||published.status==='no_changes')return {...candidate,...published};
   traceEvent(store,task.id,'team_feedback',{result:redactor.clean(published)},task.trace_run_id);
   prompt=JSON.stringify({original:prompt,publication_feedback:published,instruction:'Read persistent feedback, fix through the same dev instance, and nominate again.'});

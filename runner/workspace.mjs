@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { command,environment,workspaceTag } from './command.mjs';
 import {agentOperation} from './agent.mjs';
 import { git as storeGit, storeRoot } from './store.mjs';
+import {withWorkspaceLock} from './workspace-lock.mjs';
 import { Notes } from './notes.mjs';
 import { tasksDirectory, workspaceRoot as projectRoot } from './paths.mjs';
 
@@ -180,7 +181,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
   }
   // secret_env comes only from the agent process in this container; the manager forwards no such field.
   if(input.type==='workspace_command')return command(input.command,repo,input.timeout_ms,{outputFile:input.output_file,keepBackground:input.keep_background===true,secretEnv:input.secret_env,workspaceId:input.workspace_id});
-  if(input.type==='workspace_finalize'){
+  if(input.type==='workspace_finalize')return withWorkspaceLock(root+'/finalize.lock',async()=>{
     await git(['add','--all']);const tree=(await git(['write-tree'])).toString().trim();
     const raw=(await git(['ls-tree','-r','-l','-z',tree])).toString();const files=[];
     for(const row of raw.split('\0').filter(Boolean)){
@@ -194,7 +195,7 @@ export async function workspace(input,workspaceRoot=tasksDirectory,gitRoot=store
     // SQLite references must remain readable after Git's ordinary garbage collection.
     await git(['update-ref','refs/bot/artifacts/'+local,local]);
     return {tree_sha:tree,local_sha:local,files};
-  }
+  });
   if(input.type==='workspace_blob'){
     if(!/^[a-f0-9]{40}$/.test(input.sha||'')||!Number.isSafeInteger(input.offset)||input.offset<0)throw new Error('invalid_blob');
     const cache=root+'/blob-'+input.sha;
