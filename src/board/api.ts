@@ -19,9 +19,18 @@ const successes = "('pr_opened','succeeded','completed')";
 const attention = "('paused','failed','cancelled','waiting_configuration','waiting_permission','needs_replan','retry_wait')";
 const developing = "('queued','running','preparing','implementing','validating','publishing','waiting_pr_head','waiting_publication','waiting_environment','result_ready')";
 const taskTime = (alias: string) => `coalesce(nullif(${alias}.updated_at,''),${alias}.created_at)`;
-const taskJoin = (alias: string, family: string) => `LEFT JOIN tasks ${alias} ON ${alias}.id=(SELECT t.id FROM tasks t
-  WHERE t.repository_id=o.repository_id AND t.object_number=o.object_number AND t.kind='${family}.'||o.object_type
-  ORDER BY ${taskTime('t')} DESC,t.created_at DESC,t.rowid DESC LIMIT 1)`;
+// The newest task of each work type on each object, read from the covering index board_task_cover alone. A tasks row
+// stores the task input (about 1 MB on average in production) before updated_at and result, so reading those columns
+// from the row walks every overflow page of the input. Doing that for every card made the card list take 0.8 s with a
+// warm cache and 9 s with a cold one in production.
+const latestTasks = `latest AS MATERIALIZED (SELECT id,repository_id,object_number,kind,status,time FROM (
+    SELECT id,repository_id,object_number,kind,status,${taskTime('t')} AS time,row_number() OVER (
+      PARTITION BY repository_id,object_number,kind ORDER BY ${taskTime('t')} DESC,created_at DESC,rowid DESC) AS newest
+    FROM tasks t WHERE kind IN ('review.issue','review.pr','development.issue','development.pr','workflow.issue','workflow.pr')
+      AND object_number IS NOT NULL)
+  WHERE newest=1)`;
+const taskJoin = (alias: string, family: string) => `LEFT JOIN latest ${alias} ON ${alias}.repository_id=o.repository_id
+  AND ${alias}.object_number=o.object_number AND ${alias}.kind='${family}.'||o.object_type`;
 export const boardExecutionStatuses = [
   { id: 'running', name: '正在执行' }, { id: 'queued', name: '排队' }, { id: 'failed', name: '失败' },
   { id: 'completed', name: '已完成' }, { id: 'waiting', name: '等待处理' }, { id: 'other', name: '其他 / 未开始' },
@@ -127,11 +136,10 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     const objectSql = (family: 'review' | 'development') => {
       const task = family === 'review' ? 'r' : 'd';
       return `SELECT 'object' AS card_type,'${family}.'||o.object_type AS card_category,o.repository_id,o.object_type,o.object_number,
-        o.title,o.github_state,o.draft,coalesce(${taskTime(task)},o.last_seen) AS last_seen,repos.full_name,
+        o.title,o.github_state,o.draft,coalesce(${task}.time,o.last_seen) AS last_seen,repos.full_name,
         ${objectStage(family)} AS bot_stage,${execution(task+'.status')} AS execution_status,
         ${task}.id AS task_id,${task}.status AS task_status,r.id AS review_task_id,r.status AS review_status,
         d.id AS development_task_id,d.status AS development_status,
-        CASE WHEN json_valid(d.result) AND typeof(json_extract(d.result,'$.pr_number'))='integer' THEN json_extract(d.result,'$.pr_number') END AS development_pr_number,
         ${fieldValue},
         NULL AS release_id,NULL AS version,NULL AS release_stage,NULL AS release_url
         FROM board_objects o JOIN repositories repos ON repos.id=o.repository_id ${taskJoin('r','review')} ${taskJoin('d','development')}
@@ -139,20 +147,18 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
     };
     // A reply task answers on its object like a review, so its card moves through the review stages.
     const customSql = `SELECT 'object' AS card_type,'reply' AS card_category,o.repository_id,o.object_type,o.object_number,
-        o.title,o.github_state,o.draft,coalesce(${taskTime('c')},o.last_seen) AS last_seen,repos.full_name,
+        o.title,o.github_state,o.draft,coalesce(c.time,o.last_seen) AS last_seen,repos.full_name,
         CASE WHEN c.status IN ${attention} THEN 'attention' WHEN c.status IN ${successes} THEN 'reviewed'
           WHEN c.status<>'superseded' THEN 'reviewing' ELSE 'unreviewed' END AS bot_stage,${execution('c.status')} AS execution_status,
         c.id AS task_id,c.status AS task_status,NULL AS review_task_id,NULL AS review_status,NULL AS development_task_id,NULL AS development_status,
-        NULL AS development_pr_number,${fieldValue},NULL AS release_id,NULL AS version,NULL AS release_stage,NULL AS release_url
-        FROM (SELECT DISTINCT repository_id,object_number,kind FROM tasks WHERE kind IN ('workflow.issue','workflow.pr')) runs
-        JOIN board_objects o ON o.repository_id=runs.repository_id AND o.object_number=runs.object_number AND runs.kind='workflow.'||o.object_type
+        ${fieldValue},NULL AS release_id,NULL AS version,NULL AS release_stage,NULL AS release_url
+        FROM latest c JOIN board_objects o ON o.repository_id=c.repository_id AND o.object_number=c.object_number AND c.kind='workflow.'||o.object_type
         JOIN repositories repos ON repos.id=o.repository_id
-        JOIN tasks c ON c.id=(SELECT t.id FROM tasks t WHERE t.repository_id=runs.repository_id AND t.object_number=runs.object_number
-          AND t.kind=runs.kind ORDER BY ${taskTime('t')} DESC,t.created_at DESC,t.rowid DESC LIMIT 1)`;
+        WHERE c.kind IN ('workflow.issue','workflow.pr')`;
     const releaseSql = `SELECT 'release' AS card_type,'release' AS card_category,p.repository_id,'release' AS object_type,
       NULL AS object_number,p.version AS title,NULL AS github_state,0 AS draft,p.updated_at AS last_seen,repos.full_name,
       ${releaseStage} AS bot_stage,${releaseExecution} AS execution_status,NULL AS task_id,NULL AS task_status,
-      NULL AS review_task_id,NULL AS review_status,NULL AS development_task_id,NULL AS development_status,NULL AS development_pr_number,NULL AS field_value,
+      NULL AS review_task_id,NULL AS review_status,NULL AS development_task_id,NULL AS development_status,NULL AS field_value,
       p.id AS release_id,p.version AS version,p.stage AS release_stage,
       CASE WHEN json_valid(p.data) THEN json_extract(p.data,'$.release_url') END AS release_url
       FROM project_releases p JOIN repositories repos ON repos.id=p.repository_id`;
@@ -160,10 +166,10 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       t.summary AS title,NULL AS github_state,0 AS draft,${taskTime('t')} AS last_seen,repos.full_name,
       CASE WHEN t.status IN ${attention} THEN 'attention' WHEN t.status IN ${successes} THEN 'developed' ELSE 'developing' END AS bot_stage,
       ${execution('t.status')} AS execution_status,t.id AS task_id,t.status AS task_status,NULL AS review_task_id,NULL AS review_status,
-      NULL AS development_task_id,NULL AS development_status,NULL AS development_pr_number,NULL AS field_value,
+      NULL AS development_task_id,NULL AS development_status,NULL AS field_value,
       NULL AS release_id,t.id AS version,NULL AS release_stage,NULL AS release_url
       FROM tasks t JOIN repositories repos ON repos.id=t.repository_id WHERE t.kind='task.request'`;
-    const cte = `WITH work AS (${objectSql('review')} UNION ALL ${objectSql('development')} UNION ALL ${customSql} UNION ALL ${releaseSql} UNION ALL ${requestedSql})`;
+    const cte = `WITH ${latestTasks}, work AS (${objectSql('review')} UNION ALL ${objectSql('development')} UNION ALL ${customSql} UNION ALL ${releaseSql} UNION ALL ${requestedSql})`;
     // A built-in object workflow already names its object type, like the release process.
     const typed = !['release','task.request'].includes(category) && !objectWorkflows.includes(category);
     const access = scope(user,'w.repository_id');
@@ -194,8 +200,14 @@ export function boardApi(store: Store, user: Actor, method: string, url: URL, bo
       : group === 'execution_status' ? 'execution_status' : group === 'bot_stage' ? 'bot_stage' : "coalesce(field_value,'unassigned')";
     const columnCounts = Object.fromEntries(store.all(`SELECT ${column} id,count(*) n FROM (${selected.sql}) GROUP BY 1`,...selected.args).map(row=>[String(row.id),Number(row.n)]));
     const counts = store.get(`SELECT count(*) n,sum(card_type='release') releases FROM (${selected.sql})`,...selected.args)!;
-    const { name } = boardWorkflows(store,user);
-    return { cards: rows.slice(0,limit).map(row => ({ ...row, card_category_name: name(String(row.repository_id), String(row.card_category)),
+    const { name } = boardWorkflows(store,user), page = rows.slice(0,limit);
+    // A development's PR number lives in its task result, behind the input: read it for this page's cards only.
+    const developments = [...new Set(page.map(row => row.development_task_id).filter(Boolean).map(String))];
+    const prNumbers = new Map(developments.length ? store.all(`SELECT id,CASE WHEN json_valid(result) AND typeof(json_extract(result,'$.pr_number'))='integer'
+      THEN json_extract(result,'$.pr_number') END AS pr_number FROM tasks WHERE id IN (${developments.map(() => '?').join(',')})`, ...developments)
+      .map(row => [String(row.id), row.pr_number ?? null]) : []);
+    return { cards: page.map(row => ({ ...row, development_pr_number: row.development_task_id ? prNumbers.get(String(row.development_task_id)) ?? null : null,
+      card_category_name: name(String(row.repository_id), String(row.card_category)),
       origin:row.task_id?store.get('SELECT source_kind,source_role,executor_role,conversation_id,source_message FROM task_origins WHERE task_id=?',row.task_id)??null:null })), has_more: rows.length>limit, limit, offset,
       counts: { issue: totals.get('issue') || 0, pr: totals.get('pr') || 0 }, release_count: Number(counts.releases || 0),
       work_count: Number(counts.n), column_counts: columnCounts };
