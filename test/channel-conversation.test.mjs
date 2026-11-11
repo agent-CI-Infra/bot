@@ -88,6 +88,25 @@ test('unbound participants and threads share one logical conversation; quiet mes
   assert.ok(f.h.store.all('SELECT * FROM model_requests WHERE conversation_id=?',f.chat.id).every(r=>r.task_id===null&&r.repository_id===null&&r.service_role_id==='repository-assistant'&&r.source_message));
 });
 
+test('other bots are recorded without replies and their messages reach the next human mention',async t=>{
+  const f=await fixture(t,'all'),baseline=f.h.store.get('SELECT count(*) n FROM tasks').n;
+  for(const [type,id,content] of [['bot','ou_monitor_bot','Monitor: service latency is 80 ms'],['app','cli_release_bot','Release: deployment is complete']]){
+    const event=inGroup(content);
+    event.event.sender={sender_type:type,sender_id:type==='app'?{app_id:id}:{open_id:id}};
+    const receipt=await post(f.h,f.id,event);assert.equal((await complete(f,receipt)).state,'completed');
+    const message=f.service.ledger.query(f.chat.id,{message_id:event.event.message.message_id}).messages[0];
+    assert.equal(message.sender_type,type);assert.equal(message.sender_id,id);assert.ok(message.content.includes(content));
+  }
+  // Even an addressed bot message in participation=all is history only: it must not start a bot-to-bot loop.
+  assert.equal(f.requests.length,0);assert.equal(f.wire.sent.length,0);
+  const receipt=await post(f.h,f.id,inGroup('结合监控和发布机器人消息说明当前情况','ou_bob'));
+  assert.equal((await complete(f,receipt)).state,'completed');
+  const recent=JSON.parse(f.requests.at(-1).messages[1].content).context.recent_messages;
+  assert.ok(recent.some(m=>m.sender_type==='bot'&&m.content.includes('latency is 80 ms')));
+  assert.ok(recent.some(m=>m.sender_type==='app'&&m.content.includes('deployment is complete')));
+  assert.equal(f.h.store.get('SELECT count(*) n FROM tasks').n,baseline);
+});
+
 test('more than 100 local messages retain old source retrieval and a rolling source summary; misses never fetch Feishu',async t=>{
   const f=await fixture(t),now=Date.now();
   for(let i=0;i<145;i++)f.service.ledger.merge(f.chat,{message_id:'old-'+String(i).padStart(3,'0'),sender_id:i%2?'ou_alice':'ou_bob',sender_tenant:'actor-tenant',sender_type:'user',message_type:'text',content:i===0?'Old source: amber deployment':'Local discussion '+i,raw_content:'{}',created_at:now-86400000+i,updated_at:now-86400000+i,parent_id:'',root_id:'',thread_id:'thread-'+i%3,deleted:false},'history');
