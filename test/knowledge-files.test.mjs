@@ -165,3 +165,20 @@ test('a legacy knowledge title with a control character is folded into a usable 
  const file=list.value.files.find(entry=>entry.id==='m:'+id);
  assert.equal(file.name,'bad-title--'+id.slice(0,8)+'.md');assert.equal(file.path,file.name);
 });
+
+test('a legacy id that decodes to an internal name is an unknown file, not a forwarded name',async t=>{
+ const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const base='/api/repositories/101/knowledge-files',id=name=>'n:'+Buffer.from(name).toString('base64url');
+ // `.`, `..`, `.git` and the `.write-*`/`.expired-*` names are the manager's internal names. This route does not forward
+ // a name it already knows the manager refuses: the id is simply unknown here, so it reads 404 `note_not_found` like any
+ // other unknown id instead of surfacing the manager's 400 `invalid_note_id` for a name the caller never sent.
+ for(const name of ['.','..','.git','.GIT','.write-history','.expired-row']){
+  const read=await admin(base+'/'+encodeURIComponent(id(name)));
+  assert.deepEqual([read.status,read.value.error],[404,'note_not_found'],JSON.stringify(name));
+ }
+ const write=await admin(base+'/'+encodeURIComponent(id('.git')),'PUT',{content:'x',expected_revision:1});
+ assert.deepEqual([write.status,write.value.error],[404,'note_not_found']);
+ // An ordinary name is still forwarded: the manager's own answer is what the caller reads.
+ const ordinary=await admin(base+'/'+encodeURIComponent(id('missing.txt')));
+ assert.deepEqual([ordinary.status,ordinary.value.error],[404,'note_not_found']);
+});
