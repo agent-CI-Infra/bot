@@ -137,6 +137,10 @@ test('a group destination follows its binding: a queued report stops when the bi
   const f = await fixture(t), chat = await boundGroup(f), destination = await registerDestination(f.admin, chat);
   const listed = await query(f, 'list_schedule_destinations');
   assert.deepEqual(listed.destinations.map(d => d.type).sort(), ['group', 'p2p']);
+  // A preview may name a chat directly (#330); only saving registers it.
+  const registered = f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n;
+  const chosen = await f.admin('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan: f.plan({ destination_id: 'chat:' + chat.id }) } });
+  assert.equal(chosen.status, 201, JSON.stringify(chosen.value)); assert.equal(f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n, registered);
   await f.create(f.plan({ destination_id: destination })); f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
   // The maintainer narrows the group to another repository: project 101 is out of its scope now.
   const revision = f.h.store.get('SELECT revision FROM channel_service_bindings').revision;
@@ -146,8 +150,8 @@ test('a group destination follows its binding: a queued report stops when the bi
   assert.equal(preview.status, 403); assert.equal(preview.value.error, 'channel_service_scope_paused');
   await f.worker.tick(); assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'blocked'); assert.equal(f.wire.sent.length, before);
   assert.deepEqual((await query(f, 'list_schedule_destinations')).destinations.map(d => d.type), ['p2p']);
-  // Revoking a registration removes it from the choices; the registrant or a platform manager may revoke.
-  assert.equal((await f.admin('/api/channels/destinations/' + f.destination, 'DELETE', {})).value.state, 'revoked');
+  // An owner who unbinds Feishu takes the private chat out of the choices, registered or not.
+  f.h.store.run("UPDATE external_identities SET status='revoked' WHERE principal_id=?", f.principal);
   assert.deepEqual((await query(f, 'list_schedule_destinations')).destinations, []);
 });
 test('project service uses explicit minimum capabilities, survives creator departure and pauses when delegation or maintainer is revoked', async t => {

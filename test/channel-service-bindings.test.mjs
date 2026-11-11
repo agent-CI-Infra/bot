@@ -448,3 +448,28 @@ test('a group assistant reads ten repositories with one tool call each in a sing
   assert.ok(tools.reduce((sum, m) => sum + Buffer.byteLength(m.content), 0) <= 256 * 1024 + 11 * 512, 'the batch stays within its budget');
   assert.ok(Buffer.byteLength(JSON.stringify(second)) < 384 * 1024, 'the follow-up request stays well inside the model context');
 });
+
+test('a group timer hands work to the Manager like a message would; the task is linked to the group and its result returns there (#330)', async t => {
+  const f = await fixture(t); assert.equal((await f.bind()).status, 200);
+  await f.setRole({ permissions: { conversation_history: 'read', github: 'read', project_tasks: 'none', delegation: 'allow' } });
+  f.modelState.respond = async (body, res) => observations(body).length ? say(res, '已交给 Manager。') : call(res, 'create_project_task', { repository: repo(101), request: '修复群聊卡片链接无法点击的问题', contract });
+  const created = await f.admin('/api/channels/chats/' + f.chat.id + '/schedules', 'POST', { name: '每周派活', prompt: '把群聊卡片链接的修复交给 bot 仓库的项目团队。', timezone: 'Asia/Shanghai', cron: '0 10 * * 1' });
+  assert.equal(created.status, 201, JSON.stringify(created.value));
+  const before = f.h.store.get('SELECT count(*) n FROM tasks').n;
+  assert.equal((await f.admin('/api/channels/schedules/' + created.value.schedule.id + '/run', 'POST', {})).status, 201);
+  const run = await until(() => f.h.store.get('SELECT * FROM channel_schedule_runs'), r => r && r.state !== 'running');
+  assert.equal(run.state, 'completed', run.error);
+  // The timer run is the command's source, as a message would be: same binding principal, idempotency and receipt.
+  const receipt = observations(f.requests.at(-1))[0];
+  assert.equal(receipt.state, 'succeeded', JSON.stringify(receipt)); assert.equal(f.h.store.get('SELECT count(*) n FROM tasks').n, before + 1);
+  const command = f.h.store.get('SELECT * FROM management_commands WHERE id=?', receipt.id), binding = f.h.store.get('SELECT * FROM channel_service_bindings');
+  assert.equal(command.source_message, 'feishu:schedule:' + run.id); assert.equal(command.source_conversation, f.chat.id); assert.equal(command.principal_id, binding.principal_id);
+  assert.equal(f.h.store.get('SELECT chat_id FROM channel_service_tasks WHERE task_id=?', receipt.result.id).chat_id, f.chat.id);
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('定时任务「每周派活」') && JSON.stringify(s.content).includes('已交给 Manager')));
+  // The finished task reports back to the group although no message started it.
+  const task = receipt.result.id, current = (await f.admin('/api/management/query', 'POST', { operation: 'get_task', target: { project_id: '101', task_id: task }, arguments: {} })).value;
+  const cancel = await f.admin('/api/management/commands', 'POST', { operation: 'task.cancel', target: { project_id: '101', task_id: task }, arguments: {}, expected_revision: current.revision,
+    idempotency_key: 'cancel-scheduled-task', source_conversation: 'web', source_message: 'cancel-scheduled-task' });
+  assert.equal(cancel.value.state, 'succeeded', JSON.stringify(cancel.value));
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('已取消') && JSON.stringify(s.content).includes(repo(101))));
+});

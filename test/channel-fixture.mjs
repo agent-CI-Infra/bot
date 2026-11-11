@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { managementFixture } from './management-fixture.mjs';
 import { digest, randomId } from '../dist/core/security.js';
 import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
+import { resolvePrincipalActor } from '../dist/identity/authorization.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
@@ -103,6 +104,7 @@ export function bindFixture(h, id, principal, actor = 'ou_alice', tenant = 'acto
 export async function channelFixture(t, options = {}) {
   const wire = transport(); let service;
   const f = await managementFixture(t, store => ({ ...(typeof options === 'function' ? options(store) : options), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }, onChannels: s => { service = s; } }));
+  f.h.channels = service;
   const id = await connector(f.admin), principal = (await f.admin('/api/auth/me')).value.id;
   bindFixture(f.h, id, principal);
   return { ...f, wire, service, id, principal };
@@ -124,11 +126,11 @@ export async function boundGroup(f, projects = ['101'], chat = 'oc_group', clien
   if (result.status !== 200) throw new Error(JSON.stringify(result.value));
   return row;
 }
-/** Console registration of a notification destination (#312). */
+/** A project notification destination for a chat, registered for the client's user as a project's schedule panel does when that
+ * chat is chosen (#330); there is no separate registration endpoint any more. */
 export async function registerDestination(client, chat, project = '101') {
-  const result = await client('/api/channels/chats/' + chat.id + '/destinations', 'POST', { project_id: project });
-  if (result.status !== 201) throw new Error(JSON.stringify(result.value));
-  return result.value.id;
+  const h = client.harness, principal = (await client('/api/auth/me')).value.id;
+  return h.channels.registerDestination(resolvePrincipalActor(h.store, principal, null), chat.id, { project_id: project }).id;
 }
 export const inGroup = (content, actor = 'ou_alice') => envelope('@_user_1 ' + content, { sender: { sender_id: { open_id: actor } },
   message: { chat_id: 'oc_group', chat_type: 'group', mentions: [{ key: '@_user_1', id: { open_id: 'ou_bot' } }] } });

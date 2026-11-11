@@ -300,12 +300,13 @@ test('one global connection serves authorized projects in different organization
   assert.equal((await finished(h, unbound.value.operation_id)).state, 'completed');
   await until(() => f.wire.sent.some(s => s.receive_id === 'oc_group' && JSON.stringify(s.content).includes('本群尚未绑定群聊助手')));
   assert.equal(h.store.get('SELECT count(*) n FROM management_messages').n, before);
-  // The member registers this private chat for project 201 in the console; schedules then offer it.
+  // A project's schedule panel offers the member's own private chat directly (#330), only for projects the member may manage.
   const chat = h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_multi'");
+  const offered = project => member.client('/api/management/query', 'POST', { operation: 'list_schedule_destinations', target: { project_id: project }, arguments: {} });
+  assert.ok((await offered('201')).value.destinations.some(d => d.id === 'chat:' + chat.id));
   const destination = await registerDestination(member.client, chat, '201');
-  const destinations = await member.client('/api/management/query', 'POST', { operation: 'list_schedule_destinations', target: { project_id: '201' }, arguments: {} });
-  assert.ok(destinations.value.destinations.some(d => d.id === destination));
-  assert.equal((await member.client('/api/channels/chats/' + chat.id + '/destinations', 'POST', { project_id: '102' })).value.error, 'capability_forbidden');
+  assert.ok((await offered('201')).value.destinations.some(d => d.id === destination), 'a registered chat is listed by its registration');
+  assert.equal((await offered('102')).value.error, 'capability_forbidden');
   h.store.run('DELETE FROM project_admin_assignments WHERE user_id=? AND repository_id=?', member.id, '201');
   invalidate(h.store, member.id, 'test-project-revoked');
   const revoked = await send('201', 'foreign'); await finished(h, revoked.value.operation_id);
@@ -313,30 +314,38 @@ test('one global connection serves authorized projects in different organization
   assert.equal((await admin('/api/channels/setup')).value.connectors.length, 1);
 });
 
-test('destinations are registered in the console by the private chat owner or a manager of the group binding, and can be revoked', async t => {
+test('a project offers chats directly as destinations and registers a chosen one on save, only for its owner or a manager of the group binding (#330)', async t => {
   const f = await channelFixture(t), { h, admin, wire } = f;
   const own = await privateChat(f);
-  const id = await registerDestination(admin, own);
-  assert.equal(await registerDestination(admin, own), id, 'one registration per chat, project and registrant');
-  const listed = (await admin('/api/channels/destinations')).value.destinations;
-  assert.deepEqual(listed.map(d => [d.chat_id, d.chat_type, d.project_id, d.full_name]), [[own.id, 'p2p', '101', 'agent-test-zone/admin-fixture-101']]);
-  // Someone else's private chat cannot be registered, even by another member with the project.
+  const offered = async (client, project = '101') => (await client('/api/management/query', 'POST', { operation: 'list_schedule_destinations', target: { project_id: project }, arguments: {} })).value.destinations;
+  const save = async (client, destination, key) => {
+    const { revision } = (await client('/api/management/query', 'POST', { operation: 'list_subscriptions', target: { project_id: '101' }, arguments: {} })).value;
+    return client('/api/management/commands', 'POST', { operation: 'notification.register', target: { project_id: '101' }, expected_revision: revision, idempotency_key: key,
+      source_conversation: 'destination-test', source_message: key, arguments: { subscription: { name: 'Failures ' + key, destination_id: destination, events: ['task.failed'], projects: ['101'], aggregate_ms: 60000, timezone: 'UTC', enabled: true } } });
+  };
+  assert.deepEqual((await offered(admin)).map(d => [d.id, d.type, d.chat_id]), [['chat:' + own.id, 'p2p', own.chat_id]]);
+  // Saving with a chosen chat registers it once for this chat, project and registrant, and sends nothing.
+  const sent = wire.sent.length, first = await save(admin, 'chat:' + own.id, 'first'), second = await save(admin, 'chat:' + own.id, 'second');
+  assert.equal(first.value.state, 'succeeded', JSON.stringify(first.value));
+  const id = first.value.result.subscription.spec.destination_id;
+  assert.match(id, /^[a-f0-9]{48}$/); assert.equal(second.value.result.subscription.spec.destination_id, id, 'one registration per chat, project and registrant');
+  assert.deepEqual((await offered(admin)).map(d => d.id), [id], 'a registered chat is listed once, by its registration');
+  await f.service.tick(); assert.equal(wire.sent.length, sent);
+  // Someone else's private chat is neither offered nor accepted, even for a member with the project.
   const member = await f.member('destination-member', { repository_ids: ['101'] }); bindFixture(h, f.id, member.id, 'ou_member');
-  assert.equal((await member.client('/api/channels/chats/' + own.id + '/destinations', 'POST', { project_id: '101' })).value.error, 'channel_destination_forbidden');
-  // A group needs an enabled binding whose scope reaches the project; its registration is not tied to a speaker.
+  assert.ok(!(await offered(member.client)).some(d => d.id === 'chat:' + own.id));
+  assert.match(JSON.stringify((await save(member.client, 'chat:' + own.id, 'member')).value), /channel_destination_forbidden/);
+  // A group is offered for the projects its enabled binding reaches; its registration is not tied to a speaker.
   const groupChat = await boundGroup(f, ['101']);
-  assert.equal((await admin('/api/channels/chats/' + groupChat.id + '/destinations', 'POST', { project_id: '102' })).value.error, 'channel_service_scope_paused');
-  const groupDestination = await registerDestination(admin, groupChat);
+  assert.ok((await offered(admin)).some(d => d.id === 'chat:' + groupChat.id && d.type === 'group'));
+  assert.ok(!(await offered(admin, '102')).some(d => d.id === 'chat:' + groupChat.id), 'outside the binding scope the group is not offered');
+  const groupDestination = (await save(admin, 'chat:' + groupChat.id, 'group')).value.result.subscription.spec.destination_id;
   const payload = h.store.secrets.open(h.store.get('SELECT payload FROM channel_outbox WHERE id=?', groupDestination).payload, 'channel-outbox:' + groupDestination);
   assert.equal(payload.event.chat_type, 'group'); assert.equal(payload.event.actor_id, ''); assert.ok(payload.protection.binding_id);
-  // Registration sends nothing; only the registrant or a platform manager can revoke, and the key is released.
-  const sent = wire.sent.length; await f.service.tick(); assert.equal(wire.sent.length, sent);
-  assert.equal((await member.client('/api/channels/destinations/' + id, 'DELETE', {})).value.error, 'capability_forbidden');
-  assert.equal((await admin('/api/channels/destinations/' + id, 'DELETE', {})).value.state, 'revoked');
-  assert.equal(h.store.get('SELECT state FROM channel_outbox WHERE id=?', id).state, 'revoked');
-  assert.notEqual(await registerDestination(admin, own), id);
-  assert.deepEqual(h.store.all("SELECT action FROM audit WHERE action LIKE 'channel.destination.%' ORDER BY created_at").map(a => a.action),
-    ['channel.destination.registered', 'channel.destination.registered', 'channel.destination.revoked', 'channel.destination.registered']);
+  // The separate registration endpoints are gone.
+  assert.equal((await admin('/api/channels/destinations')).value.error, 'channel_endpoint_not_found');
+  assert.equal((await admin('/api/channels/chats/' + own.id + '/destinations', 'POST', { project_id: '101' })).value.error, 'channel_endpoint_not_found');
+  assert.deepEqual(h.store.all("SELECT action FROM audit WHERE action LIKE 'channel.destination.%' ORDER BY created_at").map(a => a.action), ['channel.destination.registered', 'channel.destination.registered']);
 });
 
 test('private chat text is natural language: /project, /query, /command, /link and /chat start no special flow', async t => {

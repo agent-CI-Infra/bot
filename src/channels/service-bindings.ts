@@ -157,11 +157,13 @@ export class ChannelServiceBindings {
     return scoped;
   }
   /** A management command submitted from a group: binding, source chat, role permission and grantor authority must still hold. */
-  guardCommand(binding: Row, command: Row, event: ChannelEvent): void {
+  guardCommand(binding: Row, command: Row, event?: ChannelEvent): void {
     const current = this.assertUsable(binding);
-    const chat = this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', event.provider, event.app_id, event.installation_tenant, event.chat_id);
+    // Without a message (a timer run of the group, checked by its caller) the command's own conversation is the group.
+    const chat = event ? this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', event.provider, event.app_id, event.installation_tenant, event.chat_id)
+      : this.store.get('SELECT * FROM channel_chats WHERE id=?', command.source_conversation);
     if (!chat || chat.id !== current.chat_id || command.source_conversation !== chat.id) fail(403, 'channel_service_source_mismatch');
-    this.employees.currentMessage(chat!, event);
+    if (event) this.employees.currentMessage(chat!, event);
     if (!serviceCommandAllowed(this.permissions(current), command.operation)) fail(403, 'channel_service_permission_revoked');
     const capability = commands[command.operation]?.capability ?? 'tasks.write';
     if (!this.reachable(current, command.project_id, ['tasks.read', capability])) fail(403, 'channel_service_scope_paused');

@@ -22,7 +22,7 @@ async function renderSchedules(panel, project) {
   const input = (label, value, type = 'text') => { const node = document.createElement('input'); node.type = type; node.value = value; node.setAttribute('aria-label', label); return node; };
   const destinationOptions = destinations.destinations.map(d => [d.id, (d.type === 'group' ? '群聊 ' : '私聊 ') + d.chat_id]);
   for (const s of plans.schedules) if (!destinationOptions.some(d => d[0] === s.spec.destination_id)) destinationOptions.push([s.spec.destination_id, '目的地已失效 · ' + s.spec.destination_id.slice(0, 8)]);
-  panel.append(note('通知目的地在「身份与权限」页登记：私聊在「我的飞书私信会话」，群聊在对应的群聊助手处（项目须在该群的范围内）。每次发送仍检查当前权限和范围。'));
+  panel.append(note('目的地可直接选择你本人已绑定的飞书私聊，或你能管理、且范围包含本项目的群；保存时自动登记，无需先到其他页面操作。每次发送仍检查当前权限和范围。'));
   const form = document.createElement('form'), chosen = select('编辑计划', [['', '新建计划'], ...plans.schedules.filter(s => s.state !== 'deleted').map(s => [s.id, s.spec.name + ' · ' + s.state])]);
   const name = input('计划名称', '项目日报'), kind = select('执行身份类型', [['personal', '个人计划'], ['project', '项目服务计划']]);
   const actor = select('项目服务身份', (destinations.services ?? []).map(s => [s.id, s.maintenance + ' · ' + s.id.slice(0, 8)]));
