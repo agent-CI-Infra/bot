@@ -43,16 +43,16 @@ test('retry reports are persisted at 3/6/9, survive a new Store/session/SHA, and
 
 const call=(name,args)=>({role:'assistant',tool_calls:[{id:Math.random().toString(36).slice(2),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
 for(const action of ['continue_retry','investigate'])test(`Native Manager reads retained failure evidence then chooses ${action}`,async t=>{
- const f=setup(t);for(let n=1;n<=3;n++)recordRetryFailure(f.s,f.task,action==='investigate'?{group:'merge_checks',occurrence:'head:'+n,code:'pull_request_checks_failed',detail:JSON.stringify({check_runs:[{id:123,name:'Install packages',status:'completed',conclusion:'failure'}]})}:failure(n));const report=pendingRetryReport(f.s,'t');
+ const f=setup(t);for(let n=1;n<=3;n++)recordRetryFailure(f.s,f.task,action==='investigate'?{group:'merge_checks',occurrence:'head:'+n,code:'pull_request_checks_failed',detail:JSON.stringify({sha:'a'.repeat(40),check_runs:[{id:123,name:'Install packages',status:'completed',conclusion:'failure'}]})}:failure(n));const report=pendingRetryReport(f.s,'t');
  f.s.run("INSERT INTO settings VALUES('roles:r',?)",JSON.stringify({enabled:true,harnesses:{manager:'native'}}));
  const requests=[];const server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw);requests.push(body);
   const input=JSON.parse(body.messages[1].content);
-  const message=requests.length===1?call('read_task_record',{ref:report.failure_ref}):action==='investigate'&&requests.length===2?call('read_task_record',{ref:input.ci_evidence_refs[0]}):call('submit_retry_decision',{action,reason:'Read the retained failure and choose the next action'});
+  const message=requests.length===1?call('read_task_record',{ref:report.failure_ref}):action==='investigate'&&requests.length===2?call('read_task_record',{ref:input.ci_evidence_refs.at(-1)}):call('submit_retry_decision',{action,reason:'Read the retained failure and choose the next action'});
   res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message}]}));
  });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();server.close();});
  f.s.run("INSERT INTO models(id,repository_id,api_url,model_name,api_key,updated_at) VALUES('m','r',?,'fixture',?,'now')",'http://127.0.0.1:'+server.address().port+'/v1',f.s.secrets.seal({value:'test'},'model:m'));
  f.s.run("INSERT INTO policies(repository_id,model_id,enabled) VALUES('r','m',1)");
- const github={request:async()=>({steps:[{name:'Install packages',conclusion:'failure'}]}),path:p=>p,jobLog:async()=>"Package liblz4-tool has no installation candidate"};
+ const github={fullName:'fixture/project',request:async(_m,p)=>p.includes('annotations')?[]:p.includes('/check-runs/')?{head_sha:'a'.repeat(40),details_url:'https://github.com/fixture/project/actions/runs/99/job/456',output:{summary:'Install packages'}}:{head_sha:'a'.repeat(40),steps:[{name:'Install packages',conclusion:'failure'}]},path:p=>p,jobLog:async()=>"Install packages: Package liblz4-tool has no installation candidate"};
  const investigate=await assessRetryReport(f.s,f.task,{store:f.s,task:f.task},github,async()=>{},new Redactor());
  assert.equal(investigate,action==='investigate');assert.equal(requests.length,action==='investigate'?3:2,JSON.stringify(f.s.all("SELECT data FROM task_history WHERE type='retry_notification_fault'")));
  assert.match(JSON.stringify(requests[1].messages),action==='investigate'?/Install packages/:/index is unmerged/);assert.equal(pendingRetryReport(f.s,'t'),undefined);
