@@ -272,7 +272,8 @@ export class ChannelApi {
     const c = store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!);
     if (!c) return fail(404, 'channel_connector_not_found');
     authorize(actor, 'platform.manage');
-    if (method === 'GET' && match[2] === 'outbox') return { deliveries: store.all('SELECT id,state,attempts,last_error,remote_message_id,created_at FROM channel_outbox WHERE connector_id=? ORDER BY created_at DESC LIMIT 100', c.id) };
+    if (method === 'GET' && match[2] === 'outbox') return { deliveries: store.all('SELECT id,state,attempts,last_error,remote_message_id,created_at FROM channel_outbox WHERE connector_id=? ORDER BY created_at DESC LIMIT 100', c.id)
+      .map(row=>({...row,parts:store.all('SELECT part,state,first_attempt,remote_id FROM channel_outbox_parts WHERE outbox_id=? ORDER BY part',row.id)})) };
     if (method === 'GET' && match[2] === 'events') return { operations: store.all(`SELECT i.id AS operation_id,i.state,i.error,i.conversation_id,i.message_id,i.created_at,
       r.state AS reaction_state,r.last_error AS reaction_error FROM channel_inbox i LEFT JOIN channel_reactions r ON r.source_event=i.id
       WHERE i.connector_id=? ORDER BY i.created_at DESC LIMIT 100`, c.id) };

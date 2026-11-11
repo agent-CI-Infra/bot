@@ -222,15 +222,23 @@ test('recalled messages clear their receipt and missing remote messages are alre
   await post(f.h, f.id, recall); retryNow(f, id); await cleared(f, id); release();
 });
 
-test('quiet, stale, non-text, bot and card events never receive an indicator', async t => {
+test('quiet text/images, stale, bot and card events never receive an indicator', async t => {
   const f = await channelFixture(t);
   const quiet = inGroup('Ordinary discussion'); quiet.event.message.mentions = [];
+  const quietImage=inGroup('');Object.assign(quietImage.event.message,{message_type:'image',content:'{"image_key":"img_quiet"}',mentions:[]});
   for (const data of [quiet, envelope('old', { message: { create_time: '1' } }), envelope('bot', { sender: { sender_type: 'app' } }),
-    envelope('', { message: { message_type: 'image', content: '{}' } }), cardEvent('obsolete-card')]) {
+    quietImage, cardEvent('obsolete-card')]) {
     const receipt = await post(f.h, f.id, data); assert.equal(receipt.status, 200); await finished(f.h, receipt.value.operation_id);
   }
   assert.equal(f.h.store.get('SELECT count(*) n FROM channel_reactions').n, 0);
   assert.equal(f.wire.state.reactionRequests.length, 0);
+});
+
+test('an actionable private image gets a processing indicator until its reply is delivered',async t=>{
+  const f=await channelFixture(t);scriptedModel(f,['附件请求已记录。']);const release=blockModel(t,f);
+  const data=envelope('',{message:{message_type:'image',content:'{"image_key":"img_actionable"}'}}),receipt=await post(f.h,f.id,data),id=receipt.value.operation_id;
+  await active(f,id);release();await delivered(f,id);await cleared(f,id);
+  assert.equal(f.wire.state.reactionRequests.filter(r=>r.method==='POST'&&r.message===data.event.message.message_id).length,1);
 });
 
 test('group assistant answers and deliberate silence both clear their original message indicator', async t => {

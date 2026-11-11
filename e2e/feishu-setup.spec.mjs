@@ -46,7 +46,7 @@ test('global administrator connects an app through the wizard, resumes it and se
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('saas');
     await expect(page.getByLabel('事件接收方式')).toHaveValue('http');
     const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
-    expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'im:message.reactions:write_only', 'cardkit:card:write',
+    expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'im:resource', 'im:message.reactions:write_only', 'cardkit:card:write',
       'im:message.group_msg', 'im:message:readonly', 'im:chat.members:bot_access', 'im:chat.members:read']);
     expect(scopes.scopes.user).toEqual([]);
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
@@ -157,13 +157,13 @@ test('connection list refreshes current app names even when bot metadata is stal
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: output + '/connections-mobile.png', fullPage: true });
     // A partly configured app lists what is missing, links Feishu's request page for exactly those scopes and offers the full import JSON.
-    wire.state.scopes = FEISHU_SCOPES.filter(s => !['im:message.group_msg', 'im:message.group_msg.include_bot:read', 'im:chat.members:read'].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
+    wire.state.scopes = FEISHU_SCOPES.filter(s => !['im:resource', 'im:message.group_msg', 'im:message.group_msg.include_bot:read', 'im:chat.members:read'].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
     await row.getByRole('button', { name: '刷新应用信息与权限' }).click();
-    await expect(grants).toContainText('缺少 3 项');
-    await expect(grants.getByRole('listitem')).toHaveText([/^im:message\.group_msg · /, /^im:message\.group_msg\.include_bot:read · 接收群内用户及其他机器人消息/, /^im:chat\.members:read · 核验群成员/]);
+    await expect(grants).toContainText('缺少 4 项');
+    await expect(grants.getByRole('listitem')).toHaveText([/^im:resource · 获取与上传消息中的图片和文件/, /^im:message\.group_msg · /, /^im:message\.group_msg\.include_bot:read · 接收群内用户及其他机器人消息/, /^im:chat\.members:read · 核验群成员/]);
     const request = new URL(await grants.getByRole('link', { name: '在飞书开通缺少的权限' }).getAttribute('href'));
     expect(request.origin + request.pathname).toBe('https://open.feishu.cn/app/cli_fixture/auth');
-    expect(request.searchParams.get('q')).toBe('im:message.group_msg,im:message.group_msg.include_bot:read,im:chat.members:read');
+    expect(request.searchParams.get('q')).toBe('im:resource,im:message.group_msg,im:message.group_msg.include_bot:read,im:chat.members:read');
     expect(JSON.parse(await grants.getByLabel('完整权限 JSON').inputValue()).scopes.tenant).toEqual(FEISHU_SCOPES.map(s => s.scope));
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: output + '/connections-mobile-missing-scopes.png', fullPage: true });

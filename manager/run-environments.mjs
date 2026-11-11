@@ -18,7 +18,7 @@ const mib = 1024 * 1024, id48 = /^[a-f0-9]{48}$/;
 const bounds = { cpus: [0.25, 8], memory_mb: [256, 16384], pids: [64, 4096], tmp_mb: [16, 4096], workspace_mb: [64, 16384], timeout_ms: [10_000, 24 * 3600_000] };
 export const runDefaults = { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 256, workspace_mb: 2048, timeout_ms: 3600_000 };
 // Runner operations a run container accepts; all of them act on the run's own workspace id.
-const runTypes = ['health', 'command', 'read', 'write', 'workspace_init', 'workspace_checkout', 'workspace_read', 'workspace_write', 'workspace_command', 'workspace_snapshot', 'workspace_finalize', 'workspace_blob', 'git_have', 'git_pack', 'git_import', 'git_export', 'reap'];
+const runTypes = ['health', 'command', 'read', 'write', 'workspace_init', 'workspace_checkout', 'workspace_read','workspace_export', 'workspace_write', 'workspace_command', 'workspace_snapshot', 'workspace_finalize', 'workspace_blob', 'git_have', 'git_pack', 'git_import', 'git_export', 'reap'];
 // keep_background lets a role keep a process (a test server) beyond one command; the container ends with the run anyway.
 const runKeys = ['type', 'command', 'path', 'content', 'timeout_ms', 'keep_background', 'workspace_id', 'base64', 'offset', 'final', 'mode', 'snapshot', 'sha', 'tree_sha', 'pack_id', 'commits'];
 export function validateRun(input) {

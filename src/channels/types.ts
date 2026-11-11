@@ -11,7 +11,9 @@ export interface ChannelEvent {
 }
 export interface ChannelDelivery {
   receive_id: string; receive_id_type: 'chat_id' | 'open_id'; content: Json;
-  message_id?: string;
+  message_id?: string; message_type?: 'interactive' | 'post' | 'image' | 'file'; reply_to?: string; reply_in_thread?: boolean;
+  resources?: string[];
+  format_version?: 2;
 }
 export interface ChannelAdapter {
   readonly capabilities: { messages: boolean; cards: boolean; update: boolean; group_history: boolean };

@@ -223,7 +223,7 @@ test('HTTP and SDK commit inbox, non-text/quiet/bot messages and sync discovery 
   assert.equal(h.store.get('SELECT count(*) n FROM channel_inbox').n, before);
   h.store.db.exec('DROP TRIGGER ledger_disk_full');
   const accepted = await dispatcher.invoke(envelope('', { message: { message_type: 'file', content: '{"file_key":"file_fixture"}' } }), { needCheck: false });
-  assert.equal(accepted.state, 'completed');
+  assert.equal(accepted.state, 'queued');
 });
 
 test('official history protocol uses max pages and thread containers; queries make zero provider requests including on misses', async t => {

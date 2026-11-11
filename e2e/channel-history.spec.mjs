@@ -12,6 +12,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       for (let i = 0; i < 125; i++) {
         const e = envelope(`discussion ${String(i).padStart(3, '0')}`, { sender: { sender_id: { open_id: 'user-' + i % 3 } },
           message: { chat_id: 'oc_continuous', chat_type: 'group', thread_id: i % 2 ? 'omt_fixture' : '', create_time: String(Date.now() - (130 - i) * 86400000) } });
+        if(i===0)Object.assign(e.event.message,{message_type:'post',content:JSON.stringify({title:'',content:[[{tag:'text',text:'discussion 000'}],[{tag:'img',image_key:'img_browser_fixture'}]]})});
         expect((await post(h, id, e)).status).toBe(200);
       }
       const secret = envelope('确认绑定 fixture-private-confirmation', { message: { chat_id: 'oc_continuous', chat_type: 'group' } });
@@ -23,6 +24,8 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await expect(page.getByRole('heading', { name: '本地消息与历史同步' })).toBeVisible();
       const results = page.getByLabel('本地消息搜索结果');
       await expect(results).toContainText('discussion 000'); await expect(results.locator('article')).toHaveCount(50);
+      await expect(results).toContainText('附件：image-1 · 待下载');
+      expect(wire.state.resourceRequests).toHaveLength(0);
       await page.getByRole('button', { name: '读取下一页本地消息' }).click();
       await expect(results.locator('article')).toHaveCount(100);
       await page.getByRole('button', { name: '读取下一页本地消息' }).click();

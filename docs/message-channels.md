@@ -20,13 +20,14 @@
 4. **发布与检查**：在飞书发布版本、设置可用范围并完成必要审核，再检查机器人信息；检查自动同步保存机器人身份。商店应用先保存连接配置、接收 app_ticket，再完成此检查，未获取机器人身份时拒绝处理消息和卡片。检查只证明凭据和机器人信息可读，不证明消息或卡片回调已经送达。
 5. **绑定与试用**：每位用户完成个人双端绑定，在私聊直接发送“你好”或“我能管理哪些项目”，收到助手回复后才完成接入；此页可查看收件和发送状态。群聊的项目范围不在这里设置，而是在「身份与权限 → 飞书群聊助手」为每个群绑定服务角色和项目范围。结果卡片只带“登录后台查看”链接，不再有回调按钮；较早版本发出的“刷新执行状态”按钮点击后提示已过期。
 
-卡片是默认功能。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息和包含机器人消息的权限仅加入企业自建应用的权限 JSON：
+富文本与图片、文件是默认能力；交互卡片继续支持。所需权限只在服务端 `FEISHU_SCOPES`（`src/channels/feishu.ts`）维护一份，经 `GET /api/channels/setup` 的 `feishu_scopes` 下发：向导第 1 步和连接列表里的完整权限 JSON、连接的自动权限检查都由它生成。下表与它逐项一致，`test/channel-setup.test.mjs` 会核对。JSON 按当前应用类型生成，包含以下应用身份权限，个人身份权限为空；获取企业信息和包含机器人消息的权限仅加入企业自建应用的权限 JSON：
 
 | 权限 | 用途 |
 | --- | --- |
 | `im:message.p2p_msg:readonly` | 接收用户私聊消息 |
 | `im:message.group_at_msg:readonly` | 接收群内 @ 机器人的消息 |
 | `im:message:send_as_bot` | 以机器人身份发送消息、发送和更新交互卡片 |
+| `im:resource` | 获取与上传消息中的图片和文件；已有连接也需导入完整权限并发布生效 |
 | `im:message.reactions:write_only` | 在正在处理的原消息下添加表情，回复送达后删除 |
 | `cardkit:card:write` | 创建与更新卡片 |
 | `im:message.group_msg` | 接收群内用户消息，并满足群历史读取接口的额外权限要求；不包含其他机器人的实时消息 |
@@ -153,9 +154,23 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 去重、恢复和发送队列
 
-事件按连接与 event_id 持久去重，消息再按 message_id 去重。合法消息不因发送者、类型、是否 @ 或原发送时间而丢弃；HTTP 与 SDK 在同一事务提交 inbox、本地账本、同步发现和必要的安全失效，再返回成功，数据库失败返回失败。记录与业务处理分开：当前个人管理入口只处理新鲜的用户文本、私聊及群内 @；bot、附件、未 @ 和过期消息安静入库，不重放旧命令。原管理入口仍拒绝逆序业务写入。模型和业务执行由独立 worker 执行，慢模型不阻塞回调。
+事件按连接与 event_id 持久去重，消息再按 message_id 去重。合法消息不因发送者、类型、是否 @ 或原发送时间而丢弃；HTTP 与 SDK 在同一事务提交 inbox、本地账本、资源元数据、同步发现和必要的安全失效，再返回成功，数据库失败返回失败。新鲜的用户文本、post、图片及文件在已绑定私聊或符合群助手发言范围时进入助手；不支持的类型明确提示。bot、未满足发言条件和过期消息安静入库，不重放旧命令。原管理入口仍拒绝逆序业务写入。模型和业务执行由独立 worker 执行，慢模型不阻塞回调。
 
-重启不会重放已提交的管理消息：管理服务标记中断，需要查看原会话/回执；尚未提交的收件继续处理。发送 outbox 独立保存 `queued`、`sending`、`retry`、`sent`、`failed`、尝试次数和稳定错误码，网络失败指数退避，使用相同 Feishu uuid 对账重发。连接/身份/范围失效为终止失败。所有发送内容和入站正文密封保存，SDK 原始日志关闭，访问令牌只在服务端调用期间使用。
+重启不会重放已提交的管理消息：管理服务标记中断，需要查看原会话/回执；尚未提交的收件继续处理。发送 outbox 独立保存 `queued`、`sending`、`retry`、`sent`、`failed`、尝试次数和稳定错误码；每段文本及每个附件另有持久化进度、上传 key、固定 uuid、首次发送时间与远端 message_id。网络失败指数退避，重启只继续未成功的项，已送达文本与附件不重复。飞书[发送接口](https://open.feishu.cn/document/server-docs/im-v1/message/create)的 uuid 只在一小时内去重：本系统留出五分钟余量，超过 55 分钟仍未知的项终止为 `channel_delivery_unknown`，须管理员对照原会话与连接诊断逐项核对，不能用新 uuid 自动重发。旧版本已开始发送的卡片保留原内容及原 uuid。连接/身份/范围失效为终止失败。所有发送内容和入站正文密封保存，SDK 原始日志关闭，访问令牌只在服务端调用期间使用。
+
+## Markdown、图片与文件
+
+普通回复使用原生 `post` 的 `md` 段落，保留标题、段落、粗体、斜体、删除线、行内与围栏代码、嵌套/有序/任务列表、引用、链接、表格和分隔线。带操作回调的旧卡片仍走交互卡片接口。依据[消息内容结构](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json)，CommonMark/GFM 的 Setext 标题转换为 ATX 标题，缩进代码转围栏；原始 HTML 显示为文本，模型不能注入原生提及，Mermaid 显示源码并说明不能绘图。邮箱及其他非 HTTP(S) 链接显示文字。Markdown 图片 URL 显示普通链接，绝不由服务端抓取，也不接受模型伪造的飞书 image_key。以 `/` 开头的应用链接补上当前控制台入口，协议相对链接不采用。
+
+富文本请求按 UTF-8 与双重 JSON 转义后的字节数保守分段，保持低于飞书 30 KB 请求体限制，不截断完整回复；普通块优先保持完整，单个超大代码/表格等块以原文纯文本分段。文本先发，选中的附件按工具选择顺序逐项发送；有话题 ID 时所有项回复原消息并设置 `reply_in_thread`。入站优先读取 `content_v2`，兼容原 `content`，保留 post 的段落、文本样式、链接、提及、代码、分隔线和图片占位。原始长消息留在账本，用 `read_message_text` 分页读取，私聊模型首段会明确提示内容未完整载入。
+
+独立 image/file、audio/media 的文件资源及 post 内图片（包括 `md` 中的飞书图片 key）与来源消息一起持久化。`list_message_resources` 只列出本会话可见消息的资源 ID、来源 message_id、安全文件名、MIME、大小和状态，不暴露远端 key。`read_message_resource` 首次读取才调用[获取消息资源](https://open.feishu.cn/document/server-docs/im-v1/message/get-2)，始终使用已认证消息的 message_id 与 key，不使用只能读取机器人自传图片的图片下载接口，也不接受 URL、宿主路径或另一个会话的资源替换。入站流式读取上限为本系统的 20 MiB，长度头与实际流都检查；空文件、权限缺失、超限和下载失败有稳定错误码。
+
+UTF-8 文本可分页读取；PNG/JPEG/GIF/WebP 可通过 `view_message_image` 提供真实图片输入给支持图片的模型，每次最多一张、每张最多 512 KiB，以适配现有 2 MiB 模型请求上限。不支持图片输入的模型会明确报提供方错误，不声称看过图片。其他二进制及较大图片通过 `import_message_resource` 进入已授权项目的私有工作区，再由角色允许的电脑工具处理；没有电脑权限或可用项目时明确说明不能解析，不把文件名当作已读内容。
+
+`attach_message_resource` 选择本会话授权资源，`create_reply_file` 生成 UTF-8 附件，`attach_workspace_file` 从当前私有项目工作区快照一个常规文件并选择发送；后者按内容哈希读取固定字节，拒绝宿主路径、路径穿越和符号链接。选择只是待发送，不是送达回执。每次回复最多 20 个附件。图片经[上传图片](https://open.feishu.cn/document/server-docs/im-v1/image/create)后作为原生 image 消息预览，其余文件经[上传文件](https://open.feishu.cn/document/server-docs/im-v1/file/create)后作为可下载的 file 消息发送；图片采用本系统保守的 10 MiB 上限、文件 30 MiB，空文件拒绝。大于图片上限或非支持图片格式改用文件；尺寸/编码不被飞书接受时保留明确失败诊断，不承诺平台可预览任意文件。
+
+资源字节加密保存在来源消息的账本中；撤回删除对应资源，延迟历史不能恢复，保留清理级联删除资源并清除衍生发送载荷。下载、复制、模型调用、上传和发送前后都复核连接、身份、来源消息、群绑定/受众和项目权限；失效立即阻断后续步骤。上传 key 仅存在加密发件箱内，工具和模型不接触应用密钥。部分发送失败在控制台显示已送达项数及逐项回执；权限缺失或最终失败会在仍有权回复时通知原会话，已经送达的项不撤销或重发。自动测试使用飞书与模型协议夹具和真实本地 runner；这不代表真实飞书应用或外部图片模型已完成联调。
 
 收到需要处理的新用户文本后，独立 worker 在原消息下添加 `Typing` 表情，表示请求已收到并正在处理；模型完成但回复尚在发送或重试时继续保留，卡片实际送达后移除。群助手决定保持安静、处理终止或发送最终失败时也会清理。重复投递不重复添加，安静入库的消息、历史同步、机器人消息与卡片事件不添加。表情请求不阻塞回调、模型或发送队列；添加和清理状态按收件持久保存，重启或添加响应丢失后用[获取消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/list)查询本应用的 `Typing` 表情恢复，不删除其他人的表情。该查询使用已有的 `im:message:readonly` 权限，新增的写入权限须由飞书应用管理员开通并发布。缺权限或平台拒绝时保留 `reaction_state` / `reaction_error` 诊断，消息照常处理；网络故障和限流退避重试，平台永久拒绝时无法保证移除。接口依据：[添加消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create)、[删除消息表情回复](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/delete)、[表情文案说明](https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce)。
 
@@ -171,7 +186,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 本地消息账本与历史同步
 
-`channel_chats` 使用 `provider + app_id + installation_tenant + chat_id` 唯一标识群或私信；连接凭据轮换不创建新记录。它不直接拼接旧 `channel_sessions` 中的个人管理会话。原文和资源引用密封保存于 `channel_messages`，按会话和 message_id 合并实时/历史版本。较旧页面不覆盖较新内容，实时版本优先于同版本历史，撤回 tombstone 不被补读复活；消息变更使本地派生摘要失效。绑定串及可识别凭据在查询中隐藏，附件当前只保留元数据和资源引用，没有下载或解析能力。
+`channel_chats` 使用 `provider + app_id + installation_tenant + chat_id` 唯一标识群或私信；连接凭据轮换不创建新记录。它不直接拼接旧 `channel_sessions` 中的个人管理会话。原文和资源引用密封保存于 `channel_messages`，按会话和 message_id 合并实时/历史版本。较旧页面不覆盖较新内容，实时版本优先于同版本历史，撤回 tombstone 不被补读复活；消息变更使本地派生摘要失效。绑定串及可识别凭据在查询中隐藏；附件资源与消息一起保存，授权读取时下载并加密缓存，查询本身不触发下载。
 
 机器人入群或首次接触会话时持久建立 `channel_sync_jobs`。入群只发送固定记录说明，不调用业务模型或生成项目授权。同步单页使用官方最大值 50，固定升序和 chat 查询时间上界，持续分页直到 `has_more=false`；没有产品总条数上限。普通对话群的 thread 回复需要单独分页，发现 thread 后建立同一主聊天下的作业。飞书 thread 查询不支持时间范围，因此诊断保留这一限制。每页内容、发现的 thread、游标、完成区间同事务提交；过期租约可恢复，活跃租约不可抢占，重复或循环游标停止并报诊断。
 
