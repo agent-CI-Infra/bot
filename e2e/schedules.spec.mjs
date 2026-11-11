@@ -26,7 +26,7 @@ test('user previews and creates a timezone-aware daily report, then explicitly r
   try {
     await page.setViewportSize({ width: 1440, height: 1100 }); await login(page, f);
     await page.getByLabel('计划名称', { exact: true }).fill('每日项目证据');
-    await page.getByLabel('计划时区', { exact: true }).fill('Asia/Shanghai'); await page.getByLabel('Cron 表达式', { exact: true }).fill('0 9 * * *');
+    await page.getByLabel('计划时区', { exact: true }).fill('Asia/Shanghai'); await page.getByText('高级时间规则（Cron / 固定周期）',{exact:true}).click(); await page.getByLabel('Cron 表达式', { exact: true }).fill('0 9 * * *');
     await page.getByRole('button', { name: '预览日报计划', exact: true }).click();
     await expect(page.getByLabel('计划预览')).toContainText('Asia/Shanghai'); await expect(page.getByLabel('计划预览')).toContainText('缺数');
     await expect(page.getByLabel('计划预览')).toContainText('waiting_environment');
@@ -110,4 +110,61 @@ test('an administrator previews and saves a maintainer handover after the projec
     expect(JSON.parse(saved.grant_snapshot).capabilities).toEqual(original.grant_snapshot.capabilities);
     expect(f.h.store.get('SELECT capabilities FROM scoped_grants WHERE principal_id=?', service).capabilities).toBe(capabilities);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('a lost schedule write is reconciled with its original key and creates only one plan',async({page})=>{
+ const f=await environment(),keys=[];let lost=false;
+ try{
+  await login(page,f);await page.route('**/api/management/commands',async route=>{
+   const body=route.request().postDataJSON();if(body.operation!=='schedule.register'){await route.continue();return;}
+   keys.push(body.idempotency_key);if(!lost){lost=true;await route.fetch();await route.abort('failed');}else await route.continue();
+  });
+  await page.getByLabel('计划名称',{exact:true}).fill('one logical plan');await page.getByRole('button',{name:'保存计划',exact:true}).click();await expect(page.getByRole('button',{name:'核对同一次计划操作',exact:true})).toBeVisible();await expect(page.getByLabel('计划名称',{exact:true})).toBeDisabled();
+  await page.getByRole('button',{name:'核对同一次计划操作',exact:true}).click();await expect(page.getByRole('region',{name:'项目计划列表'})).toContainText('one logical plan');expect(f.h.store.get('select count(*) n from schedules').n).toBe(1);expect(keys.length).toBe(2);expect(keys[1]).toBe(keys[0]);
+ }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
+});
+
+test('a delayed preview cannot replace the current timezone or an edited form',async({page})=>{
+ const f=await environment();let release;
+ try{
+  await login(page,f);let entered;const seen=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+  await page.route('**/api/management/query',async route=>{
+   const body=route.request().postDataJSON();if(body.operation==='preview_schedule'&&body.arguments.plan.timezone==='Pacific/Auckland'){const response=await route.fetch();entered();await gate;await route.fulfill({response});}else await route.continue();
+  });
+  await page.getByLabel('计划时区',{exact:true}).fill('Pacific/Auckland');await page.getByRole('button',{name:'预览日报计划',exact:true}).click();await seen;await page.getByLabel('计划时区',{exact:true}).fill('UTC');await page.getByRole('button',{name:'预览日报计划',exact:true}).click();await expect(page.getByLabel('计划预览')).toContainText('时区：UTC');
+  const finished=page.waitForEvent('requestfinished',request=>request.url().endsWith('/query')&&request.postData()?.includes('Pacific/Auckland'));release();await finished;await page.evaluate(()=>new Promise(requestAnimationFrame));await expect(page.getByLabel('计划预览')).toContainText('时区：UTC');await expect(page.getByLabel('计划预览')).not.toContainText('Auckland');expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
+ }finally{release?.();await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
+});
+
+test('schedule editor steps and timezone preview stay reachable at six widths',async({page})=>{
+ const f=await environment(),errors=[];page.on('pageerror',error=>errors.push(error.message));
+ try{
+  await login(page,f);await page.goto(f.h.admin+'/#/projects/101/schedules');await expect(page.getByRole('region',{name:'项目计划列表'})).toBeVisible();mkdirSync('.tmp/schedule-editor-234/previews',{recursive:true});
+  for(const width of [320,390,768,1024,1440,1920]){
+   await page.setViewportSize({width,height:1000});if(width<=760)for(const name of ['执行内容','身份与维护人','触发时间','通知目的地','运行限制']){await page.getByRole('navigation',{name:'计划编辑步骤'}).getByRole('button',{name,exact:true}).click();await expect(page.locator('.schedule-editor-section').filter({has:page.getByRole('heading',{name,exact:true})})).toBeVisible();}
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),String(width)).toBe(true);if([390,1440].includes(width))await page.screenshot({path:'.tmp/schedule-editor-234/previews/'+width+'.png',fullPage:true});
+  }
+  expect(errors).toEqual([]);expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
+ }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
+});
+
+test('a schedule version conflict retains the draft and requires comparison before saving against the new version',async({page})=>{
+ const f=await environment();
+ try{
+  await login(page,f);await page.getByRole('button',{name:'保存计划',exact:true}).click();await expect.poll(()=>f.h.store.get('select count(*) n from schedules').n).toBe(1);
+  const before=await read(f,'list_schedules'),plan=before.schedules[0];await page.getByLabel('编辑计划',{exact:true}).selectOption(plan.id);await page.getByLabel('计划名称',{exact:true}).fill('my preserved draft');
+  const key=randomId(),receipt=await f.admin('/api/management/commands','POST',{operation:'schedule.update',target:{project_id:'101'},arguments:{id:plan.id,revision:plan.revision,plan:{...plan.spec,name:'another maintainer'}},expected_revision:before.revision,idempotency_key:key,source_conversation:'fixture',source_message:key});expect(receipt.value.state).toBe('succeeded');
+  await page.getByRole('button',{name:'保存计划',exact:true}).click();await expect(page.getByLabel('计划名称',{exact:true})).toHaveValue('my preserved draft');await expect(page.getByRole('button',{name:'保存计划',exact:true})).toBeDisabled();
+  await page.getByRole('button',{name:'刷新定时与通知',exact:true}).click();await expect(page.locator('.schedule-conflict')).toContainText('another maintainer');await expect(page.getByLabel('计划名称',{exact:true})).toHaveValue('my preserved draft');
+  await page.getByRole('button',{name:'比较后保留草稿并采用当前版本',exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'保留草稿',exact:true}).click();await page.getByRole('button',{name:'保存计划',exact:true}).click();await expect.poll(async()=>(await read(f,'list_schedules')).schedules[0].spec.name).toBe('my preserved draft');
+ }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
+});
+
+test('a failed initial schedule read reports unknown state and recovers without creating work',async({page})=>{
+ const f=await environment();let fail=true;
+ try{
+  await page.route('**/api/management/query',async route=>{if(fail&&route.request().postDataJSON().operation==='list_schedules')await route.fulfill({status:503,json:{error:'fixture_schedule_read_down'}});else await route.continue();});
+  await page.goto(f.h.admin+'/#/management');await page.getByLabel('用户名',{exact:true}).fill('administrator');await page.getByLabel('密码',{exact:true}).fill(f.password);await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByLabel('当前管理作用域').selectOption('project:101');await page.getByRole('button',{name:'快捷操作',exact:true}).click();
+  await expect(page.getByRole('status').filter({hasText:'数量及状态未知'})).toBeVisible();await expect(page.getByRole('button',{name:'保存计划',exact:true})).toHaveCount(0);fail=false;await page.getByRole('button',{name:'重新读取计划上下文',exact:true}).click();await expect(page.getByRole('button',{name:'保存计划',exact:true})).toBeVisible();expect(f.h.store.get('select count(*) n from schedules').n).toBe(0);
+ }finally{await f.close();rmSync(f.h.directory,{recursive:true,force:true});}
 });
