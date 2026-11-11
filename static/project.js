@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['overview', '项目总览'], ['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['external', '外部执行'], ['members', '成员'], ['activity', '运行状态']];
+const projectSections = [['overview', '项目总览'], ['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['release', '发版本'], ['schedules', '计划与通知'], ['knowledge', '项目知识'], ['external', '外部执行'], ['members', '成员'], ['activity', '运行状态']];
 // Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.
 const legacyProjectSections = { workflows: 'manager-prompt', tasks: '', review: '', development: '', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -197,7 +197,7 @@ function projectBody(section) {
     if (key === 'management') { const project = current.id; item.addEventListener('click', event => { event.preventDefault(); void openManagementChat(project).catch(error); }); }
   }
   if (current.flash) { const flash = element('p', current.flash, 'view-success flash'); flash.setAttribute('role', 'status'); content.append(flash); current.flash = null; }
-  content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
+  content.append(...({ overview: workspaceOverview, basic: basicSection, machine: machineSection, model: modelsSection, release: releaseSection, schedules: schedulesSection, knowledge: knowledgeSection, roles: rolesSection, external: externalSection, members: membersSection, activity: activitySection }[section])());
   body.append(nav, content); return body;
 }
 const patchPolicy = changes => Object.keys(changes).length ? api(`/api/repositories/${current.id}/policy`, 'PATCH', changes) : Promise.resolve();
@@ -1033,4 +1033,9 @@ function modelsSection() {
     tableCell(row, '模型选择', taskModelEditor(definition.kind, definition.title, current.policy, current.models, definition)); body.append(row);
   }
   section.append(table); return [projectDefaultModelCard(current.policy, current.models), section, ...modelManagementSections()];
+}
+function schedulesSection() {
+  const section=element('section'),id=current.id;
+  void renderSchedules(section,id).catch(error=>{if(section.isConnected)section.replaceChildren(note('计划暂不可读取：'+error.message));});
+  return [section];
 }

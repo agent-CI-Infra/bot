@@ -188,8 +188,8 @@ try {
     assert.ok((await page.locator('#rows').innerText()).includes('project-101'));assert.ok(!(await page.locator('#rows').innerText()).includes('project-202'));
     // The project page's machine section carries the computer's lifecycle actions.
     await page.locator('#rows .row').first().getByRole('button',{name:'设置',exact:true}).click();await page.locator('.project-nav').getByRole('link',{name:'机器配置',exact:true}).click();
-    // A project administrator sees ten categories, including overview, and cannot enter the members category.
-    const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),10);
+    // A project administrator sees eleven categories, including overview and schedules, and cannot enter the members category.
+    const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),11);
     assert.equal(await page.locator('.project-nav').getByRole('link',{name:'项目总览',exact:true}).count(),1);
     assert.equal(await page.locator('.project-nav').getByRole('link',{name:'成员',exact:true}).count(),0);
     await machine.getByRole('button',{name:'停止',exact:true}).click();await machine.locator('.status',{hasText:'已停止'}).waitFor();
