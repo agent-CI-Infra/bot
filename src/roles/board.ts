@@ -6,8 +6,9 @@ import { stageAllows, type StageDefinition } from './stage-policy.js';
 import { concurrencyBounds, defaultConcurrency, repositoryConcurrency } from '../app/settings.js';
 import { waitForReviewSatisfied } from '../tasks/readiness.js';
 
-// #228 contract B: a read-only projection of per-role occupancy and the queue. Nothing here admits or blocks a run;
-// `enforced` is part of the contract and stays false until the admission pull request (#228, second PR) lands.
+// #228 contract B: a read-only projection of per-role occupancy and the queue. This module still never admits or blocks
+// a run — admission lives in role-run.ts and reads its limits through `roleConcurrency` — but `enforced` now says whether
+// this project has a limit that admission actually honours, instead of being a constant that was true of no project.
 const maxRoles = 32;
 const maxReady = 100;
 const defaultReadyLimit = 50;
@@ -36,6 +37,25 @@ export function roleConcurrency(store: Store, repositoryId: string): Record<stri
     if (Number.isSafeInteger(limit) && (limit as number) >= concurrencyBounds[0] && (limit as number) <= concurrencyBounds[1]) limits[role] = limit as number;
   }
   return limits;
+}
+
+/**
+ * The limit that applies to one role run, and how many runs hold it right now. `null` means this project set no limit for
+ * the role, and then nothing is queried: a project that never configured a limit keeps exactly the path it had before
+ * admission existed. Observer runs never take a slot — reviewers, testers and the parallel read-only delegates of
+ * `delegate_roles` run beside the writer — so an observer is never refused for capacity.
+ */
+export function roleCapacity(store: Store, repositoryId: string, role: string, kind: string, exclude?: string): { limit: number; running: number } | null {
+  if (kind === 'observer') return null;
+  return store.transaction(() => {
+    const limit = roleConcurrency(store, repositoryId)[role] ?? null;
+    if (limit === null) return null;
+    // Counting and deciding happen in one transaction; the caller that inserts the run row does so without an await in
+    // between, so two runs of this control plane cannot both read the last free slot.
+    const running = Number(store.get(`SELECT count(*) n FROM task_runs r JOIN tasks t ON t.id=r.task_id
+      WHERE t.repository_id=? AND r.role=? AND r.status='running' AND r.id<>?`, repositoryId, role, exclude ?? '')?.n ?? 0);
+    return { limit, running };
+  });
 }
 
 /** Validates one PATCH body value against this project's role configuration and the shared project concurrency bounds. */
@@ -122,7 +142,8 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
       running, ready: mine.slice(0, limit).map(entry => ({ task_id: entry.task.id, object_number: entry.task.object_number, kind: entry.task.kind, queued_at: entry.task.created_at, position: entry.position })) };
   });
   const version = createHash('sha256').update(JSON.stringify({ revision: config.revision, updated_at: config.updated_at ?? null, stages: config.required_stages ?? [], limits })).digest('hex').slice(0, 16);
-  return { version, updated_at: config.updated_at ?? null, enforced: false,
+  // `enforced` describes this project, not the module: a project with no limit has nothing that can refuse a run.
+  return { version, updated_at: config.updated_at ?? null, enforced: Object.values(limits).some(limit => limit !== null),
     project: { task_concurrency: repositoryConcurrency(store, repositoryId), task_concurrency_default: defaultConcurrency(store) },
     unsupported, roles, ready_more: truncated };
 }

@@ -41,7 +41,9 @@ const causes: Record<FailureCause,{label:string,codes:string[]}> = {
     // The workflow assistant's run was stopped by the person who started it.
     'assistant_cancelled',
     // A RoleRun whose lease was taken over, whose fixed candidate changed, or a second run of one assignment.
-    'candidate_writer_busy','required_stages_incomplete','lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired'] },
+    'candidate_writer_busy','required_stages_incomplete','lease_epoch_stale','candidate_changed','role_run_already_active','run_token_revoked','run_token_expired',
+    // A role at its concurrency limit: nothing ran, so the queue retries it without spending an attempt.
+    'role_capacity'] },
   // The project's RoleDefinitionV2 configuration: a pinned reference became unusable, or an authority was withdrawn.
   role_configuration: { label:'角色配置', codes:['stage_budget_exhausted','stage_policy_changed','stage_retry_exhausted','stage_plan_stale','role_configuration_changed','unknown_role','role_disabled','unknown_role_harness','agent_backend_unavailable','harness_version_unavailable','harness_role_unsupported',
     'task_pull_request_forbidden','role_model_not_available','role_model_profile_changed','role_submission_forbidden','skill_bundle_unavailable','role_authority_revoked','harness_version_mismatch',
@@ -90,8 +92,11 @@ const environmentFailures = new Set(['execution_interrupted','workspace_init_fai
   'workspace_snapshot_mismatch','candidate_unavailable','candidate_blob_unavailable']);
 // waiting_environment covers both unmet conditions and failed attempts. Only the latter consume the retry burst;
 // configuration/PR-head waits and manager availability checks keep polling on their own schedule.
+// Waits the control plane ends by itself once the outside condition clears: they are not failed attempts, so they do not
+// consume the retry burst. A role at its concurrency limit is one of them — nothing about the run was tried.
+const capacityWaits = new Set(['github_rate_limited','role_capacity']);
 export function isAttemptFailure(code: string|null|undefined, state: string) {
-  return state==='retry_wait'&&code!=='github_rate_limited'||state==='waiting_environment'&&environmentFailures.has(code||'');
+  return state==='retry_wait'&&!capacityWaits.has(code||'')||state==='waiting_environment'&&environmentFailures.has(code||'');
 }
 const ended = new Set(['cancelled','superseded']);
 const retry = '改好后点「重试」。';
@@ -102,6 +107,7 @@ const codeActions: Record<string,string> = {
   stage_retry_exhausted:'这个阶段已达到有限重试上限。检查失败记录，修正阶段策略或运行环境后采用新配置继续。',
   stage_budget_exhausted:'这个阶段的累计预算已用尽，恢复运行不会重开预算。保留产物和证据，调整策略并采用新配置后继续。',
   candidate_writer_busy:'同一候选已有写者或只读检视运行。等待当前运行收集结束后继续，不同时修改被检视内容。',
+  role_capacity:'这个角色已达到项目设定的并发上限，任务在队列里等一个运行结束；不消耗尝试次数，也不要手动重试。',
   role_nomination_stages_incomplete:'主控需先读取阶段计划并委派尚未完成的必需阶段；提名不能替代阶段证据或 QA。',
   task_coordination_requested:'协调请求或显式任务依赖已持久化，框架会在结果可用后自动续接；不占用执行名额。',
   task_coordination_pending:'协调上下文已变化，读取通知并记录处理意见后重新提交给独立 QA；旧验收不会认证新上下文。',

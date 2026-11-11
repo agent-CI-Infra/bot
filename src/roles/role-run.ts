@@ -5,6 +5,7 @@ import { traceEvent, traceClean } from '../tasks/trace.js';
 import { roleRunProtocol, validateRunContext, validateEvent, validateCandidateRef, assertSecretFree, contentHash, protocolRecovery,
   type Budget, type CandidateRef, type CapabilityName, type HarnessCapabilities, type RecoveryMode, type RunContext, type RunEvent } from './protocol.js';
 import type { RoleSnapshot } from './definition.js';
+import { roleCapacity } from './board.js';
 /**
  * Control-plane side of the RoleRun protocol. The rows it adds hang off the existing task_runs (one row per execution
  * attempt), role_instances and role_assignments; nothing here queues or completes tasks.
@@ -306,9 +307,15 @@ export function admitRun(s: Store, input: { task: Row; role: string; kind: strin
   const facts = input.environmentFacts;
   provided.run_isolation = { ok: c.isolation === 'run_environment' && !!facts?.verified && facts.isolation === 'run_container', basis: `harness:${c.isolation ?? 'undeclared'};environment:${facts ? (facts.verified ? 'verified' : 'unverified') : 'none'}`, evidence: facts?.evidence ?? null };
   const required = [...new Set([...requiredCapabilities(input.kind, input.environment), ...(input.required ?? [])])], missing = required.filter(name => !provided[name]?.ok);
-  const admission = { protocol: roleRunProtocol.id, role: input.role, kind: input.kind, harness: `${input.harness.id}@${input.harness.version}`, environment: input.environment?.id ?? null, required, missing, provided: Object.fromEntries(required.map(name => [name, provided[name]])), admitted: !missing.length };
+  // A project that configured a per-role limit gets it read here; a project that did not set one pays no query and its
+  // admission record stays exactly the shape it had before admission existed.
+  const capacity = roleCapacity(s, String(input.task.repository_id), input.role, input.kind);
+  const admission = { protocol: roleRunProtocol.id, role: input.role, kind: input.kind, harness: `${input.harness.id}@${input.harness.version}`, environment: input.environment?.id ?? null, required, missing, provided: Object.fromEntries(required.map(name => [name, provided[name]])), admitted: !missing.length, ...(capacity ? { capacity } : {}) };
   if (input.record !== false) traceEvent(s, String(input.task.id), 'role_run_admission', admission, input.task.trace_run_id, 'framework');
   if (missing.length) stop('unsupported_capability', 'waiting_configuration', `${input.role}（${input.harness.id}）缺少能力：${missing.join('、')}；未启动运行，也不会换用其他执行后端。`);
+  // Capability comes first: an unadmittable run must not look like a capacity wait. A full role waits for a free slot
+  // instead of starting and holds no attempt: nothing ran, so the queue retries it as it is.
+  if (capacity && capacity.running >= capacity.limit) stop('role_capacity', 'retry_wait', `${input.role}：本项目该角色的并发上限 ${capacity.limit} 已满（${capacity.running} 个运行中）；本次不启动，任务排队重试，不消耗尝试次数。`);
   return admission;
 }
 
