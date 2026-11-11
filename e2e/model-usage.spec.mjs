@@ -65,3 +65,24 @@ test('模型行显示使用位置与单价，供应商组显示 Key 状态', asy
     expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
+
+// The usage line names projects, so it must line up with what the reader may see: someone who only administers 202 must
+// not learn that a shared model is also the default of 101 from this projection.
+test('使用位置只列调用者可见的项目', async () => {
+  const h = await harness(undefined, undefined);
+  try {
+    const { admin } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
+    const shared = (await admin('/api/models/provider', 'POST', { repository_id: null, api_url: 'http://127.0.0.1:8/v1', api_key: testPassword(), model_names: ['shared-model'] })).value.models[0];
+    assert.equal((await admin('/api/repositories/101/policy', 'PATCH', { model_id: shared.id })).status, 200);
+    assert.equal((await admin('/api/repositories/202/policy', 'PATCH', { model_id: shared.id })).status, 200);
+    const member = testPassword();
+    assert.equal((await admin('/api/users', 'POST', { username: 'model-member', password: member, repository_ids: ['202'] })).status, 201);
+    const reader = h.client();
+    assert.equal((await reader('/api/auth/login', 'POST', { username: 'model-member', password: member })).status, 200);
+    const listed = await reader('/api/models?repository_id=202');
+    assert.equal(listed.status, 200);
+    const model = listed.value.models.find(entry => entry.model_name === 'shared-model');
+    assert.deepEqual(model.used_by.map(project => project.full_name), ['fixture/project-202']);
+  } finally { await h.stop(); }
+});
