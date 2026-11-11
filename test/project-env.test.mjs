@@ -96,6 +96,21 @@ test('environment API enforces project roles for unfiltered list, detail, start,
   assert.equal((await member('/api/environments')).value.environments[0].operation_pending,1);
 });
 
+test('environment observation distinguishes an unreachable or absent manager record from the persisted lifecycle state', async t => {
+  let mode='available';const rows=new Map();
+  const manager={async call(method,path){const repo=path.split('/')[3];if(method==='PUT')rows.set(repo,{repository_id:repo,generation:1,state:'ready',desired:'ready',revision:1,computer:{image:'approved'}});
+    if(mode==='unavailable')throw new Error('PRIVATE_MANAGER_SECRET');return mode==='absent'?null:rows.get(repo)||null;}};
+  const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+  const before=h.store.get("SELECT state FROM project_environments WHERE repository_id='101'").state;
+  const ready=(await admin('/api/environments/101')).value;assert.equal(ready.observation.status,'available');assert.equal(ready.observation.state,'ready');
+  assert.ok(Number.isFinite(Date.parse(ready.observation.checked_at)));
+  for(const value of ['unavailable','absent']){mode=value;const response=await admin('/api/environments/101');assert.equal(response.status,200);
+    assert.equal(response.value.environment.state,before);assert.equal(response.value.observation.status,value);assert.equal(response.value.observation.state,null);
+    assert.equal(response.value.environment.computer,null);assert.ok(!JSON.stringify(response.value).includes('PRIVATE_MANAGER_SECRET'));
+    assert.equal(h.store.get("SELECT state FROM project_environments WHERE repository_id='101'").state,before);}
+  mode='available';assert.equal((await admin('/api/environments/101')).value.observation.state,'ready');
+});
+
 test('the project computer spec is validated by the manager, survives restarts and is applied by recreating the container', async t => {
   const f = fixture(t); await f.projects.register('101');
   const name = f.projects.names('101', 1).container, created = f.docker.created;

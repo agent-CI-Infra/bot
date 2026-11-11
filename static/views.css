@@ -321,3 +321,5 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
   .roles-page .project-table td { border:0; }
   .roles-page .project-table td::before { content:attr(data-label); display:block; font-weight:600; margin-bottom:.3rem; }
 }
+.project-content .computer-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 900px) { .project-content .computer-status-grid { grid-template-columns: minmax(0, 1fr); } }

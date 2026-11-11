@@ -192,7 +192,9 @@ export class ProjectService {
   async detail(id: string): Promise<Json> {
     const saved = this.store.get(`SELECT r.full_name,p.enabled,e.* FROM repositories r JOIN policies p ON p.repository_id=r.id
       LEFT JOIN project_environments e ON e.repository_id=r.id WHERE r.id=?`, id)!;
-    const live = await this.manager.call('GET', '/v1/projects/' + id).catch(() => null);
+    let observed = 'available';
+    const live = await this.manager.call('GET', '/v1/projects/' + id).catch(() => { observed = 'unavailable'; return null; });
+    if (!live && observed === 'available') observed = 'absent';
     const tasks = this.store.all(`SELECT id,kind,status,phase,object_number,generation,error_code,updated_at FROM tasks WHERE repository_id=?
       ORDER BY created_at DESC,id DESC LIMIT 20`, id);
     const commands: Json[] = [];
@@ -205,7 +207,8 @@ export class ProjectService {
         exit_code: command.exit_code ?? null, timed_out: !!command.timed_out, error: command.error ?? null });
       if (commands.length >= 30) break;
     }
-    return { environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer: live?.computer || null,
+    return { observation: { status: observed, checked_at: new Date().toISOString(), state: live?.state ?? null },
+      environment: { ...saved, repository_id: id, state: saved.state || (saved.enabled ? 'provisioning' : 'stopped'), computer: live?.computer || null,
         operation_pending: !!this.store.get("SELECT 1 FROM environment_operations WHERE repository_id=? AND state='pending'", id) },
       running_tasks: this.store.all(`SELECT t.id,t.kind,t.status,t.phase,t.object_number,c.claimed_at FROM task_claims c JOIN tasks t ON t.id=c.task_id
         WHERE c.repository_id=? ORDER BY c.claimed_at,t.id`, id),
