@@ -72,12 +72,18 @@ test('角色限额拒绝未知角色、越界数字与非对象', async t => {
   assert.equal((await policy(admin, { role_concurrency: { constructor: 1 } })).status, 400);
 });
 
-test('角色看板恒为只展示不拦截，同一配置版本下两次读取计数一致', async t => {
+test('角色看板本身仍只读，enforced 只在项目配置了限额时为 true，两次读取计数一致', async t => {
   const { admin } = await fixture(t);
+  // No limit configured: nothing can refuse a run, so the board says it is not enforced.
+  assert.equal((await board(admin)).value.enforced, false);
   await policy(admin, { role_concurrency: { dev: 2 } });
   const first = (await board(admin)).value, second = (await board(admin)).value;
-  assert.equal(first.enforced, false);
-  assert.equal(second.enforced, false);
+  // A configured limit is now an admission gate, so the board reports the truth instead of a module constant.
+  assert.equal(first.enforced, true);
+  assert.equal(second.enforced, true);
+  // Clearing every limit returns to the unenforced state.
+  await policy(admin, { role_concurrency: { dev: null } });
+  assert.equal((await board(admin)).value.enforced, false);
   assert.equal(first.version, second.version);
   const shape = view => view.roles.map(role => [role.role, role.limit, role.limit_source, role.running.length, role.ready.length]);
   assert.deepEqual(shape(first), shape(second));
@@ -171,7 +177,8 @@ test('删除角色会结束其限额生命周期，同名重建及重启后仍�
   const recreated = await putRoles({ expected_revision: removed.value.configuration.revision, roles: [{ role_id: 'dev' }] });
   assert.equal(recreated.status, 200, JSON.stringify(recreated.value));
   const beforeRestart = (await board(admin)).value;
-  assert.equal(beforeRestart.enforced, false);
+  // `reviewer` still carries a limit, so this project is still enforced; the recreated `dev` has none.
+  assert.equal(beforeRestart.enforced, true);
   assert.equal(beforeRestart.roles.find(role => role.role === 'dev').limit, null);
   assert.equal(beforeRestart.roles.find(role => role.role === 'dev').limit_source, 'unset');
   assert.equal(beforeRestart.roles.find(role => role.role === 'reviewer').limit, 4);
