@@ -29,10 +29,12 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
   // Keep the indexed timestamp bounds; the local date predicate removes the padding on either side.
   const since=new Date(Date.parse(start+'T00:00:00Z')-86400000).toISOString();
   const until=new Date(Date.parse(end+'T00:00:00Z')+2*86400000).toISOString();
-  const access=scope(user,'q.repository_id'),clauses=[access.sql,'q.requested_at>=?','q.requested_at<?',
-    'statistics_date(q.requested_at)>=?','statistics_date(q.requested_at)<=?','(q.currency=? OR q.currency IS NULL)'];
-  const args=[...access.args,since,until,start,end,currency];
-  const repo=url.searchParams.get('repository_id');if(repo){repository(store,user,repo);clauses.push('q.repository_id=?');args.push(repo);}
+  // One scope feeds every query: the totals, the historical prices and the per-currency counts below.
+  const access=scope(user,'q.repository_id'),scoped=[access.sql,'q.requested_at>=?','q.requested_at<?',
+    'statistics_date(q.requested_at)>=?','statistics_date(q.requested_at)<=?'];
+  const scopedArgs=[...access.args,since,until,start,end];
+  const repo=url.searchParams.get('repository_id');if(repo){repository(store,user,repo);scoped.push('q.repository_id=?');scopedArgs.push(repo);}
+  const clauses=[...scoped,'(q.currency=? OR q.currency IS NULL)'],args=[...scopedArgs,currency];
   const rows=store.all(`SELECT statistics_date(q.requested_at) date,q.repository_id,r.full_name,sum(q.cost) cost,count(*) requests,
     sum(CASE WHEN q.cost IS NULL THEN 1 ELSE 0 END) unpriced_requests,
     sum(CASE WHEN q.input_tokens IS NULL OR q.output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
@@ -45,6 +47,12 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
     FROM model_requests q WHERE ${clauses.join(' AND ')} AND q.currency IS NOT NULL
     AND q.input_per_million IS NOT NULL AND q.output_per_million IS NOT NULL AND q.cache_per_million IS NOT NULL
     ORDER BY q.model_name,q.currency,q.input_per_million,q.output_per_million,q.cache_per_million`,...args);
+  // The currency filter keeps one currency's requests and the unpriced ones, so the requests billed in the other
+  // currency would simply vanish from the page. Count them for the same scope and report them per currency; they are
+  // never converted into the selected currency or subtracted from anything.
+  const others=store.all(`SELECT q.currency currency,count(*) requests FROM model_requests q
+    WHERE ${scoped.join(' AND ')} AND q.currency IS NOT NULL AND q.currency<>? GROUP BY q.currency ORDER BY q.currency`,...scopedArgs,currency);
+  const otherCurrencies=others.map(row=>({currency:String(row.currency),requests:Number(row.requests)}));
   // Aggregate tasks separately, so the task rows never take from the cost query's 5,000-group budget. Every workflow runs
   // as a task, so every kind is counted: a custom workflow's tasks by the workflow they ran (its id), the others by kind.
   const taskAccess=scope(user,'t.repository_id'),taskClauses=[taskAccess.sql,
@@ -75,7 +83,7 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
   const order=(row:Row)=>{const at=workTypes.findIndex(w=>w.id===row.workflow);return at<0?workTypes.length:at;};
   const summaryRows=[...taskSummary.values()].sort((a,b)=>order(a)-order(b)||String(a.name).localeCompare(String(b.name)));
   return {from:start,to:end,currency,timezone,days:rows,tasks:{days:taskDays,summary:summaryRows,undated},
-    prices,
+    prices,other_currencies:otherCurrencies,
     collection_started_at:store.get("SELECT value FROM settings WHERE key='task_metrics_v1'")?.value||null,
     summary:{cost:rows.reduce((n,r)=>n+Number(r.cost||0),0),requests:rows.reduce((n,r)=>n+r.requests,0),
       unpriced_requests:rows.reduce((n,r)=>n+r.unpriced_requests,0),usage_missing_requests:rows.reduce((n,r)=>n+r.usage_missing_requests,0),

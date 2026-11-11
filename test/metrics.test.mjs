@@ -65,6 +65,29 @@ test('daily costs separate UTC dates, currencies, unknown charges and projects w
   for(const suffix of ['from=bad','from=2026-02-30','from=2020-01-01&to=2026-01-01','from=2026-10-24&to=2026-10-23','currency=EUR'])assert.equal((await admin('/api/costs?'+suffix)).status,400);
   const plan=h.store.all('EXPLAIN QUERY PLAN SELECT id FROM model_requests WHERE repository_id=? AND requested_at>=? AND requested_at<?','101','2026-10-22','2026-10-24');assert.ok(plan.some(r=>r.detail.includes('model_request_repo_date')));
 });
+test('costs count the requests priced in the other currency instead of dropping them from the total',async t=>{
+  const {h,admin,model}=await fixture(t);metricTask(h.store,'other-currency');metricTask(h.store,'other-project','202');
+  usageRequest(h.store,'other-currency',model.id,{cost:2,id:'usd-one'});
+  usageRequest(h.store,'other-currency',model.id,{cost:3,id:'usd-two',date:'2026-10-23'});
+  usageRequest(h.store,'other-currency',model.id,{currency:'CNY',cost:20,id:'cny-one'});
+  usageRequest(h.store,'other-currency',model.id,{currency:'CNY',cost:20,id:'cny-two',date:'2026-10-23'});
+  usageRequest(h.store,'other-currency',model.id,{priced:false,id:'unpriced'});
+  usageRequest(h.store,'other-project',model.id,{currency:'CNY',cost:20,id:'cny-other-project'});
+  const query='/api/costs?from=2026-10-22&to=2026-10-23';
+  // The selected currency keeps its total; the requests it leaves out are named per currency, so no request disappears.
+  let result=(await admin(query)).value;
+  assert.equal(result.currency,'USD');assert.equal(result.summary.requests,3);assert.equal(result.summary.unpriced_requests,1);
+  assert.deepEqual(result.other_currencies,[{currency:'CNY',requests:3}]);
+  result=(await admin(query+'&currency=CNY')).value;
+  assert.equal(result.summary.requests,4);assert.equal(result.summary.unpriced_requests,1);
+  assert.deepEqual(result.other_currencies,[{currency:'USD',requests:2}]);
+  // The extra counts honor the same scope as the totals: the project filter drops the other project's request.
+  result=(await admin(query+'&repository_id=101')).value;
+  assert.deepEqual(result.other_currencies,[{currency:'CNY',requests:2}]);
+  result=(await admin(query+'&repository_id=202')).value;
+  assert.deepEqual(result.other_currencies,[{currency:'CNY',requests:1}]);
+  assert.equal(h.store.get('SELECT count(*) n FROM model_requests').n,6);
+});
 test('costs return distinct saved prices within the selected scope, without inventing prices for unpriced requests',async t=>{
   const {h,admin,model}=await fixture(t);metricTask(h.store,'prices');metricTask(h.store,'other-prices','202');
   usageRequest(h.store,'prices',model.id,{cost:2,id:'price-a',usage:{prompt_tokens:1000,completion_tokens:20,prompt_cache_hit_tokens:750}});
