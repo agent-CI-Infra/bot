@@ -252,10 +252,11 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   const bind=(runId:string)=>{
    // prepare/start may overlap before either run binds. Recheck after this run row exists, with no await before lease allocation.
    const same=s.get("SELECT id FROM task_runs WHERE role_instance_id=? AND status='running' AND id<>?",instance.id,runId);if(same)stop('role_run_already_active','retry_wait');
-   // The authoritative capacity check: this run's row exists now, so the count includes it, and the count and this
-   // decision have no await between them. Admission already refused an obviously full role before anything was
-   // provisioned; this closes the window where two runs admitted before either bound. The row this attempt created is
-   // closed first, so a refused run holds no slot.
+   // Second capacity check: admission ran before this run bound, so two runs admitted against the same free slot can both
+   // reach here. `beginRun` has already inserted this run's own row as running; `exclude` leaves that row out, so
+   // `running` counts the other runs only and `others < limit` means the same as `total <= limit`. What makes the sequence
+   // safe is that both runs' rows are already visible to each other's SELECT, with no await in between. The row this
+   // attempt created is closed before the refusal is raised, so a refused run holds no slot.
    const capacity=roleCapacity(s,String(task.repository_id),role,snapshot.kind,runId);
    if(capacity&&capacity.running>=capacity.limit){endRun(s,{id:runId,task_id:task.id} as Row,'stopped','role_capacity');stop('role_capacity','retry_wait',`${role}：本项目该角色的并发上限 ${capacity.limit} 已满（${capacity.running} 个运行中）；本次不启动，任务排队重试，不消耗尝试次数。`);}
    const conflict=(snapshot.kind==='writer'||snapshot.kind==='observer')&&s.get("SELECT r.id FROM task_runs r JOIN role_snapshots p ON p.id=r.role_snapshot WHERE r.task_id=? AND r.id<>? AND r.status='running' AND (json_extract(p.snapshot,'$.kind')='writer' OR (?='writer' AND json_extract(p.snapshot,'$.kind')='observer'))",task.id,runId,snapshot.kind);if(conflict)stop('candidate_writer_busy','retry_wait');
