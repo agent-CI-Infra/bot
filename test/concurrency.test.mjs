@@ -352,7 +352,8 @@ test('global settings change the wizard settings and shared models without a pro
   assert.equal(page.run('reloads'), 0); assert.equal(page.run('current'), null);
 });
 
-test('TaskEngine runs an override-only review without a default model', {timeout: 5000}, async t => {
+// The deadline includes provisioning a full account/project/model fixture before exercising the engine.
+test('TaskEngine runs an override-only review without a default model', {timeout: 15000}, async t => {
   const f = await fixture(t);
   const model = f.h.store.get("SELECT model_id FROM policies WHERE repository_id='101'").model_id;
   await f.admin('/api/repositories/101/policy', 'PATCH', {model_id: null, task_models: {'review.issue': model}});
@@ -361,7 +362,7 @@ test('TaskEngine runs an override-only review without a default model', {timeout
   assert.equal(f.task(1).status, 'succeeded');
 });
 
-test('TaskEngine rejects a revoked override before workspace execution, even with a valid default', {timeout: 5000}, async t => {
+test('TaskEngine rejects a revoked override before workspace execution, even with a valid default', {timeout: 15000}, async t => {
   let chosen;
   const f = await fixture(t,{beforeQueue:async({admin})=>{
     chosen=(await admin('/api/models','POST',{repository_id:'101',api_url:'https://other.invalid/v1',api_key:testPassword(),model_name:'override'})).value.model;
