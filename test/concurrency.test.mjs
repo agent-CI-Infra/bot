@@ -261,7 +261,7 @@ function deployment() {
     if (path === '/api/onboarding/model') { onboarding.model_id = body.model_id; return [201, { model_id: body.model_id }]; }
     if (path === '/api/models/provider' && method === 'POST') { const model = { id:'m3',repository_id:body.repository_id,api_url:body.api_url,model_name:body.model_names[0],key_configured:true,version:1 }; state.models.push(model); return [201,{models:[model]}]; }
     const id = /^\/api\/models\/(\w+)$/.exec(path)?.[1], model = state.models.find(row => row.id === id);
-    if (model && method === 'GET') return [200, { model: { ...model, used_by: [{ repository_id: '101', full_name: 'fixture/one' }] } }];
+    if (model && method === 'GET') return [200, { model: { ...model, used_by: [{ repository_id: '101', full_name: 'fixture/one' }], role_used_by: [], onboarding_default: onboarding.model_id === id } }];
     if (model && method === 'PATCH') { Object.assign(model, { ...body, version: model.version + 1 }); return [200, { model }]; }
     if (model && method === 'DELETE') {
       state.models = state.models.filter(row => row !== model); if (onboarding.model_id === id) onboarding.model_id = null;
@@ -345,6 +345,7 @@ test('global settings change the wizard settings and shared models without a pro
   assert.match(text(section('部署共享模型')), /已保存模型名 renamed-model/);
   const deleting = buttons(row('renamed-model'), '删除')[0].listeners.click[0](); await settle();
   assert.match(view.querySelectorAll('p').map(node => node.textContent).join('\n'), /所有项目都不能再选/);
+  assert.match(view.querySelectorAll('p').map(node => node.textContent).join('\n'), /接入向导的默认模型/);
   assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one']);
   await confirm(deleting);
   assert.deepEqual(sent.at(-1), ['DELETE', '/api/models/m2', {}]);
