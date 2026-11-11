@@ -37,7 +37,9 @@ test('provider search, draft tests, pricing and conflict comparison share real s
     await editor.getByRole('button',{name:'读取最新版本并比较',exact:true}).click();await expect(editor.locator('.provider-comparison')).toContainText('alpha-updated');
     await expect(editor.getByLabel('API Key（留空保持不变）',{exact:true})).toHaveValue('');
     await editor.getByRole('button',{name:'保存',exact:true}).click();await expect(editor).toHaveCount(0);
-    expect((await own.locator('.model-address').allTextContents()).sort()).toEqual(['alpha-updated','beta','model-79']);
+    // #385: the list repaints once the save round-trip lands, so a one-shot allTextContents() could read a
+    // frame between the old and the new row. expect.poll re-reads until the rendered set is the expected one.
+    await expect.poll(async()=>(await own.locator('.model-address').allTextContents()).sort()).toEqual(['alpha-updated','beta','model-79']);
     const models=(await admin('/api/models')).value.models;expect(models.filter(m=>m.repository_id==='101').every(m=>m.api_url===origin+'/draft/v1')).toBe(true);expect(models.find(m=>m.model_name==='shared').api_url).toBe(origin+'/v1');
     await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'.tmp/model-console/models-desktop.png',fullPage:true});
     expect(await page.content()).not.toContain(key);
