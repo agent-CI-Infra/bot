@@ -8,6 +8,7 @@ import { type Actor, repository, scope } from './auth.js';
 import { deliveryResult } from '../review/delivery.js';
 import { fail, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
+import { workTypes } from '../work/catalog.js';
 import { explainFailure } from '../agent/failures.js';
 import { taskGroupSQL } from './project-activity.js';
 // Faults are classified when read, so logs written before a cause existed are explained the same way.
@@ -73,6 +74,16 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     // Review and development tasks are listed on separate pages.
     const priority=url.searchParams.get('priority');if(priority){if(!['P0','P1','P2','P3'].includes(priority))fail(400,'invalid_task_priority');clauses.push('priority=?');args.push(priority);}
     const kind=url.searchParams.get('kind');if(kind){if(!['review','development'].includes(kind))fail(400,'invalid_task_kind');clauses.push('kind LIKE ?');args.push(kind+'.%');}
+    // The work type a task belongs to (#238). It is the same identity the console shows and the Manager dispatches to,
+    // so the console can drill into one type without re-deriving the mapping. Combining with kind is an intersection.
+    const workflow=url.searchParams.get('workflow');
+    if(workflow){
+      const selected=workTypes.find(work=>work.id===workflow);
+      if(!selected)fail(400,'invalid_task_workflow');
+      // Former custom workflows run as the one 通用回复 work type (see workOf), so that id covers the whole kind prefix.
+      if(workflow==='reply')clauses.push("kind LIKE 'workflow.%'");
+      else {clauses.push(`kind IN (${selected!.kinds.map(()=>'?').join(',')})`);args.push(...selected!.kinds);}
+    }
     const group=url.searchParams.get('group');
     if(group && group!=='all' && !Object.hasOwn(taskGroupSQL,group)) fail(400,'invalid_task_group');
     if(attention && group && group!=='attention') fail(400,'conflicting_task_filters');
