@@ -141,3 +141,5 @@ docker compose up -d
 - [架构与行为](architecture.md)：权限模型、虚拟电脑生命周期、检视与开发数据流、当前限制
 - [管理 API](api.md)
 - [开发与验证](development.md)：代码结构、测试命令、Docker 验收、CI 与合入
+
+知识文件移动恢复出现 `note_move_uncertain` 时，本项目知识区会保持拒绝读写，不应手工清空 pending。停写、整卷备份与恢复步骤见[知识文件恢复](knowledge-recovery.md)。

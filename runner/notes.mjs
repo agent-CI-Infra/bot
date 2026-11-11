@@ -6,6 +6,8 @@ import { NoteCatalog } from './note-catalog.mjs';
 import { noteComponent, notePath, withNoteDirectory, withNoteParent } from './note-path.mjs';
 
 const internal = name => name.startsWith('.write-') || name.startsWith('.expired-');
+// An externally replaced file is unavailable on its own; it must not become a deletion revision or hide other files.
+const unavailableEntry = error => ['ELOOP','ENOTDIR','ENOENT'].includes(error.code) || ['invalid_note_file','invalid_note_path'].includes(error.message);
 export const noteName = noteComponent;
 // A filesystem lock coordinates the manager and every task process on the same mounted volume.
 // A lease recovers writers killed during stop/reset. An expired writer must still own its lease before committing.
@@ -50,12 +52,14 @@ export class Notes {
       for (const entry of await readdir(path, { withFileTypes: true })) {
         if (internal(entry.name)) continue;
         const relative = directory ? directory + '/' + entry.name : entry.name; notePath(relative);
-        if (entry.isDirectory()) { directories.push(relative); await visit(relative); continue; }
-        if (!entry.isFile()) throw new Error('invalid_note_file');
-        await withNoteParent(this.root, relative, async target => {
-          const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-          try { const info=await handle.stat(); if (!info.isFile()) throw new Error('invalid_note_file'); files.push({ name: relative, bytes: info.size }); } finally { await handle.close(); }
-        }, { canonicalRoot: this.canonicalRoot });
+        try {
+          if (entry.isDirectory()) { await visit(relative); directories.push(relative); continue; }
+          if (!entry.isFile()) continue;
+          await withNoteParent(this.root, relative, async target => {
+            const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+            try { const info=await handle.stat(); if (!info.isFile()) throw new Error('invalid_note_file'); files.push({ name: relative, bytes: info.size }); } finally { await handle.close(); }
+          }, { canonicalRoot: this.canonicalRoot });
+        } catch(error) { if (!unavailableEntry(error)) throw error; }
       }
     }, { canonicalRoot: this.canonicalRoot });
     await visit(''); return { files: files.sort((a,b)=>a.name.localeCompare(b.name)), directories };
@@ -171,7 +175,12 @@ export class Notes {
         }, { internal: true, canonicalRoot: this.canonicalRoot });
       }
       const files = [];
-      for (const name of names) { const index = await this.observe(name, 'filesystem', check), version = index.value.versions.at(-1); if (version && (includeDeleted || !version.deleted)) files.push({ id:index.row?.id,name, ...version }); }
+      for (const name of names) {
+        let index;
+        try { index = await this.observe(name, 'filesystem', check); } catch(error) { if (unavailableEntry(error)) continue; throw error; }
+        const version = index.value.versions.at(-1);
+        if (version && (includeDeleted || !version.deleted)) files.push({ id:index.row?.id,name, ...version });
+      }
       return { files: files.sort((a, b) => a.name.localeCompare(b.name)) };
     });
   }

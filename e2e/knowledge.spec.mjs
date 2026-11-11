@@ -109,3 +109,21 @@ test('a saved editor waits for the authoritative file read before exposing its n
     await expect(page.locator('.knowledge-content')).toContainText('after');await page.getByText('更多操作',{exact:true}).click();await exact(page,'重命名或移动').click();await expect(page.getByRole('dialog')).toBeVisible();expect(f.errors).toEqual([]);
   }finally{release?.();await f.close();}
 });
+
+test('a deleted file path cannot become a folder and the workspace remains usable after the conflict',async({page})=>{
+ const f=await fixture(page);
+ try{
+  const base='/api/repositories/101/knowledge-files',file=(await f.admin(base,'POST',{name:'reserved.txt',content:'old content'})).value.file;
+  await f.admin(base+'/'+encodeURIComponent(file.id),'DELETE',{expected_revision:1});await f.admin(base,'POST',{name:'healthy.txt',content:'still available'});await f.login();
+  await exact(page,'新建文件夹').click();const dialog=page.getByRole('dialog');await dialog.getByLabel('文件夹名称',{exact:true}).fill('reserved.txt');await dialog.getByRole('button',{name:'确认',exact:true}).click();await expect(dialog).toContainText('note_path_conflict');await expect(dialog.getByLabel('文件夹名称',{exact:true})).toHaveValue('reserved.txt');await dialog.getByRole('button',{name:'取消',exact:true}).click();
+  await exact(page,'healthy.txt').click();await expect(page.locator('.knowledge-content')).toContainText('still available');expect((await f.admin(base+'?deleted_only=1')).value.files[0].id).toBe(file.id);expect(f.errors).toEqual([]);
+ }finally{await f.close();}
+});
+
+test('an uncertain move explains why retries cannot unlock the project knowledge volume',async({page})=>{
+ const f=await fixture(page);
+ try{
+  await page.route('**/api/repositories/101/knowledge-files?*',route=>route.fulfill({status:409,json:{error:'note_move_uncertain'}}));await f.login();
+  await expect(page.locator('.knowledge-status')).toContainText('本项目知识区已暂停读写');await expect(page.locator('.knowledge-status')).toContainText('一致的完整知识卷');await exact(page,'重试读取').click();await expect(page.locator('.knowledge-status')).toContainText('重试不会解除此状态');expect(f.errors).toEqual([]);
+ }finally{await f.close();}
+});

@@ -52,8 +52,8 @@ test('traversal, internal paths, unsafe ids and symlinked directories never acce
   const {root,other,tree}=await fixture(t);
   for(const path of ['../other/a','/absolute','C:/absolute','a/../../b','.write-history/a','a/.git/b'])assert.throws(()=>tree.createDirectory(path),/invalid_note_path/);
   await assert.rejects(tree.read(legacy('../outside')),/invalid_note_id/);
-  await symlink(other,join(root,'redirect'));await assert.rejects(tree.list(),/invalid_note_file/);
-  await assert.rejects(tree.create('redirect/file','no'),/invalid_note_file/);assert.equal(await readFile(join(other,'sentinel'),'utf8'),'outside');
+  await symlink(other,join(root,'redirect'));assert.deepEqual((await tree.list()).files,[]);
+  await assert.rejects(tree.create('redirect/file','no'),/directory_not_found|invalid_note_path/);assert.equal(await readFile(join(other,'sentinel'),'utf8'),'outside');
 });
 
 test('invalid creation data does not reserve a filename, and an interrupted create remains retryable',async t=>{
@@ -143,4 +143,33 @@ test('explicit restore creates a new revision even when the chosen historical co
   const {tree}=await fixture(t),file=await tree.create('a.txt','same');await tree.move(file.id,'b.txt',1,'user:a');
   const restored=await tree.restore(file.id,1,2,'user:b');assert.equal(restored.revision,3);assert.equal(restored.content,'same');
   const latest=(await tree.versions(file.id)).versions[0];assert.equal(latest.operation,'restore');assert.equal(latest.restored_from,1);assert.equal(latest.actor,'user:b');
+});
+
+test('a directory cannot reserve the catalog path of a deleted file and unrelated operations remain available',async t=>{
+  const {tree}=await fixture(t),file=await tree.create('a.txt','one');await tree.delete(file.id,1);
+  await assert.rejects(tree.createDirectory('a.txt'),error=>error.message==='note_path_conflict'&&error.status===409);
+  const other=await tree.create('b.txt','other');assert.equal((await tree.read(other.id)).content,'other');
+  assert.equal((await tree.list({deletedOnly:true})).files[0].id,file.id);assert.equal((await tree.restore(file.id,1,2)).content,'one');
+});
+
+test('external directories and symlinks at catalog paths cannot block other files or fabricate deletion history',async t=>{
+  const {root,other,tree}=await fixture(t),file=await tree.create('a.txt','one'),healthy=await tree.create('b.txt','other');
+  await tree.delete(file.id,1);const catalog=JSON.parse(await readFile(join(root,'.write-history/file-tree.json'),'utf8')),row=catalog.files.find(row=>row.id===file.id);
+  const history=join(root,'.write-history',row.history_key+'.json'),before=await readFile(history,'utf8');
+  await mkdir(join(root,'a.txt'));assert.deepEqual((await tree.list({includeDeleted:true})).files.map(row=>row.id),[healthy.id]);
+  assert.equal((await tree.read(healthy.id)).content,'other');await assert.rejects(tree.read(file.id),/invalid_note_file/);await tree.deleteDirectory('a.txt');
+  assert.equal((await tree.restore(file.id,1,2)).revision,3);await rm(join(root,'a.txt'));await symlink(join(other,'sentinel'),join(root,'a.txt'));
+  assert.deepEqual((await tree.list()).files.map(row=>row.id),[healthy.id]);await assert.rejects(tree.save(file.id,'replace',3),/invalid_note_file/);
+  const versions=JSON.parse(await readFile(history,'utf8')).versions;assert.equal(versions.length,3);assert.equal(versions.at(-1).deleted,false);assert.equal(JSON.parse(before).versions.length,2);
+  assert.equal(await readFile(join(other,'sentinel'),'utf8'),'outside');await rm(join(root,'a.txt'));await tree.restore(file.id,1,4);
+  assert.equal((await tree.list()).files.length,2);
+});
+
+test('an uncertain move journal stays intact and fail-closed across manager and task entry points',async t=>{
+  const {root,tree}=await fixture(t),file=await tree.create('a.txt','one');await tree.create('b.txt','other');
+  const path=join(root,'.write-history/file-tree.json'),catalog=JSON.parse(await readFile(path,'utf8'));
+  catalog.pending={operation_id:'1'.repeat(24),file_id:file.id,from:'a.txt',to:'moved.txt',actor:'user:a',deleted:false,source:{dev:'0',ino:'0'}};
+  await rm(join(root,'a.txt'));await writeFile(join(root,'moved.txt'),'unknown replacement');await writeFile(path,JSON.stringify(catalog));
+  const before=await readFile(path,'utf8');for(const operation of [()=>tree.list(),()=>new Notes(root).files(),()=>new Notes(root).read('b.txt')])await assert.rejects(operation(),/note_move_uncertain/);
+  assert.equal(await readFile(path,'utf8'),before);assert.equal(await readFile(join(root,'moved.txt'),'utf8'),'unknown replacement');
 });
