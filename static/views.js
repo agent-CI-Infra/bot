@@ -153,12 +153,13 @@ const taskView = dialog('task-view', `<div class="view-head"><div class="title-g
 <div id="task-layout" class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">公开工作日志</h3><p class="muted">展示公开输出、工具调用与结果；执行阶段和验收结论按实际记录分别呈现。</p><div id="task-log-controls" class="task-log-controls"></div><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
 taskView.setAttribute('aria-labelledby', 'task-title');
 
-let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0;
+let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0, taskInboxOrigin = null;
 function resetTaskRendering() {
   renderedLogs = new Set(); liveCommand = null; snapshotProgress = null;
   delete $('task-actions').dataset.signature;
 }
 async function openTask(id) {
+  if (!taskView.open) taskInboxOrigin = typeof captureConsoleInbox === 'function' ? captureConsoleInbox(id) : null;
   taskReadVersion++; taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
   $('task-log-controls').replaceChildren();
   openTaskId = id; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer);
@@ -274,10 +275,14 @@ async function loadOlderTaskLogs(cache) {
 function renderTaskHeader(task) {
   $('task-title').textContent = task.object_number == null ? objectLabel(task) : `${modeLabels[task.kind] || task.kind} · ${objectLabel(task)}`;
   $('task-badges').replaceChildren(taskState(task), element('span', task.full_name || '仓库 ' + task.repository_id, 'muted'));
-  const actions = $('task-actions'), url = githubUrl(task), signature = `${task.id}:${task.status}:${url || ''}`;
+  const actions = $('task-actions'), url = githubUrl(task), destination = taskConfigurationDestination(task), signature = `${task.id}:${task.status}:${url || ''}:${destination?.section || ''}`;
   if (actions.childElementCount && actions.dataset.signature === signature) return;
   actions.dataset.signature = signature; actions.replaceChildren();
   if (url) actions.append(link(url, '在 GitHub 打开', 'button-link'));
+  if (destination) actions.append(button(destination.caption, () => {
+    if (typeof rememberInboxReturn === 'function') rememberInboxReturn(taskInboxOrigin, task.repository_id);
+    taskView.close(); openProject(task.repository_id, destination.section);
+  }));
   if (retryableStates.includes(task.status)) actions.append(button('重试', async event => {
     const retry = event.currentTarget; retry.disabled = true;
     try { await api('/api/tasks/' + task.id + '/retry', 'POST', {}); if(openTaskId===task.id){notice('task-error');notice('message');} }
@@ -286,6 +291,16 @@ function renderTaskHeader(task) {
     await refreshTask();
   }));
   actions.append(button('刷新任务', () => refreshTask()), button('关闭', () => taskView.close()));
+}
+// Route only configuration failures whose remedy belongs to a project page. An upstream outage or an unknown
+// failure must keep its recorded explanation rather than being presented as a model configuration problem.
+function taskConfigurationDestination(task) {
+  if (!task.repository_id || !['failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'paused'].includes(task.status)) return null;
+  if (task.error_cause?.cause === 'role_configuration') return { section: 'roles', caption: '打开角色配置' };
+  if (task.error_cause?.cause === 'environment') return { section: 'machine', caption: '检查项目电脑' };
+  if (['model_not_configured', 'task_models_invalid', 'model_not_available', 'model_configuration_changed', 'model_key_missing', 'model_authentication_failed'].includes(task.error_code))
+    return { section: 'model', caption: '打开项目模型配置' };
+  return null;
 }
 // The command running right now in the project computer, with its output streamed by byte offset.
 async function refreshLive(task, current = () => openTaskId === task.id && taskView.open) {
@@ -738,7 +753,11 @@ function resultCard(task) {
   return section;
 }
 
-taskView.addEventListener('close', () => { clearTimeout(taskTimer); openTaskId = null; taskReadVersion++; taskLogState = null; });
+taskView.addEventListener('close', () => {
+  const origin = taskInboxOrigin; taskInboxOrigin = null;
+  clearTimeout(taskTimer); openTaskId = null; taskReadVersion++; taskLogState = null;
+  if (origin && typeof refreshInboxAfterTask === 'function') void refreshInboxAfterTask(origin);
+});
 $('logout').addEventListener('click', () => { if (taskView.open) taskView.close(); });
 
 // Project automation switches update their own policy fields; board publication is independent.
