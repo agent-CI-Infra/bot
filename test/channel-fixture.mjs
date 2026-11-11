@@ -2,11 +2,12 @@ import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { managementFixture } from './management-fixture.mjs';
 import { digest, randomId } from '../dist/core/security.js';
+import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
   const sent = [], state = { sendFailures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', currentAppName: null, applicationCode: 0, applicationId: null, tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
-    audienceRequests: [], audience: null, inChat: true, profileRequests: [], profileGate: null, profileCode: 0, profileOpenId: null, profileName: '张小明',
+    audienceRequests: [], audience: null, inChat: true, profileRequests: [], profileGate: null, profileCode: 0, profileOpenId: null, profileName: '张小明', scopeCode: 0, scopes: null, scopeRequests: 0,
     members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
@@ -24,6 +25,11 @@ export function transport() {
       state.profileRequests.push(url); if (state.profileGate) await state.profileGate;
       return Response.json({ code: state.profileCode, data: { user: { open_id: state.profileOpenId ?? decodeURIComponent(new URL(url).pathname.split('/').at(-1)),
         name: state.profileName, email: 'must-not-expose-profile-email', mobile: 'must-not-expose-profile-phone' } }, msg: 'fixture-only-access-token' });
+    }
+    if (url.endsWith('/application/v6/scopes')) {
+      state.scopeRequests++;
+      // Defaults to every required scope granted; tests replace the list to simulate a partly configured app.
+      return Response.json({ code: state.scopeCode, data: { scopes: state.scopes ?? FEISHU_SCOPES.map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' })) } });
     }
     if (url.includes('/application/v6/applications/')) return Response.json({ code: state.applicationCode, data: { app: {
       app_id: state.applicationId ?? decodeURIComponent(new URL(url).pathname.split('/').at(-1)), app_name: state.currentAppName ?? state.appName,

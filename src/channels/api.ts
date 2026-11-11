@@ -2,7 +2,7 @@ import type { ActorContext } from '../identity/authorization.js';
 import { assertCurrent, authorize } from '../identity/authorization.js';
 import { fail, fields, HttpError, randomId, text, type Json } from '../core/security.js';
 import { ChannelService } from './service.js';
-import { FeishuAdapter } from './feishu.js';
+import { FEISHU_SCOPES, FeishuAdapter } from './feishu.js';
 
 export class ChannelApi {
   constructor(readonly service: ChannelService) {}
@@ -76,12 +76,19 @@ export class ChannelApi {
     }
     if (path === '/api/channels/setup' && method === 'GET') {
       authorize(actor, 'platform.manage');
-      return { ...await this.api(actor, 'GET', new URL('/api/channels/connectors', url), {}), origin: this.service.options.origin || null };
+      return { ...await this.api(actor, 'GET', new URL('/api/channels/connectors', url), {}), origin: this.service.options.origin || null, feishu_scopes: FEISHU_SCOPES };
     }
     if (path === '/api/channels/feishu/probe' && method === 'POST') {
       authorize(actor, 'platform.manage');
       fields(input, ['connector_id', 'expected_revision', 'app_id', 'app_secret']);
       const guard = () => authorize(actor, 'platform.manage');
+      // The grant check is advisory: it never fails a probe whose credentials and bot already work.
+      const scopes = async (adapter: FeishuAdapter): Promise<Json> => {
+        try { return { scopes: await adapter.scopeCheck() }; } catch (error) {
+          if (!(error instanceof HttpError) || !['channel_scope_check_unavailable', 'channel_delivery_failed', 'channel_auth_failed', 'channel_rate_limited'].includes(error.code)) throw error;
+          return { scope_error: error.code };
+        }
+      };
       let adapter: FeishuAdapter;
       if (input.connector_id !== undefined) {
         if (input.app_id !== undefined || input.app_secret !== undefined) fail(400, 'unknown_field');
@@ -103,6 +110,8 @@ export class ChannelApi {
           if (!(error instanceof HttpError) || !['channel_tenant_unavailable', 'channel_delivery_failed', 'channel_auth_failed', 'channel_rate_limited'].includes(error.code)) throw error;
           tenantError = error.code;
         }
+        // Check grants before the update below can advance the revision this request's guard compares against.
+        const grants = await scopes(adapter);
         let revision = c.revision;
         // Preserve a newer application label on lookup failure, while bot-only connections can still refresh their name.
         const preserve = facts.app_error && c.app_name_source === 'application' && c.app_name;
@@ -117,13 +126,14 @@ export class ChannelApi {
             revision++;
           }
         });
-        return { ...facts, name, name_source: nameSource, tenant_name: tenantName, ...(tenantError ? { tenant_error: tenantError } : {}), revision, state: 'verified', event_delivery_verified: false };
+        return { ...facts, name, name_source: nameSource, tenant_name: tenantName, ...(tenantError ? { tenant_error: tenantError } : {}), ...grants, revision, state: 'verified', event_delivery_verified: false };
       } else {
         // Only enterprise apps can authenticate before their first installation ticket arrives.
         adapter = new FeishuAdapter({ app_id: text(input.app_id, 200), application_type: 'enterprise' },
           { app_secret: text(input.app_secret, 4096) }, this.service.options.fetch, guard);
       }
-      return { ...await adapter.probe(), state: 'verified', event_delivery_verified: false };
+      const facts = await adapter.probe();
+      return { ...facts, ...await scopes(adapter), state: 'verified', event_delivery_verified: false };
     }
     const receipt = /^\/api\/channels\/operations\/([a-f0-9]{48})$/.exec(path);
     if (receipt && method === 'GET') {

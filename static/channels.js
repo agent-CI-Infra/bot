@@ -116,7 +116,7 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_employee_project_inactive: '项目已停用。', channel_employee_disabled: '旧群员工授权已停用。',
   channel_employee_sync_paused: '群授权或受众待核验，历史同步已暂停。', channel_bot_not_in_chat: '机器人当前不在这个群中。',
   channel_audience_unverified: '平台未提供完整成员范围，暂时无法核验。', channel_history_forbidden: '需要该群助手的配置人，或在其全部项目范围内有配置权限。',
-  channel_audience_permission_required: '飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在飞书开放平台为应用开通 im:chat.members:read，并发布新版本后再保存。',
+  channel_audience_permission_required: '飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在「全局设置 → 飞书连接」查看缺少的权限，为应用开通 im:chat.members:read 并发布新版本后再保存。',
   channel_revision_conflict: '这个群的配置已被其他人修改，请刷新本页后重新保存。', service_role_unavailable: '所选服务角色已停用。', service_role_not_bindable: '管理助手不能绑定到群聊。',
   channel_service_scope_paused: '配置人在全部所选仓库的权限都已变化，助手暂停。', channel_service_binding_disabled: '群聊助手已停用。',
   channel_destination_forbidden: '只有私聊的本人，或能管理该群聊助手的人可以登记。', schedule_destination_binding_required: '这个群没有启用的群聊助手绑定。',
