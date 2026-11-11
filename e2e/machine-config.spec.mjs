@@ -7,17 +7,21 @@ import { RuleService } from '../dist/rules/service.js';
 
 async function fixture() {
   const cleanup = [], manager = await managerFixture({ after: action => cleanup.push(action) });
-  const h = await harness(undefined, manager.manager), { admin, password } = await setup(h), a = await account(admin);
-  await repository(admin, a.id, '101');
-  await h.projects.reconcile();
-  const saved = await admin('/api/environments/101/configure', 'POST', {
-    operation_id: randomBytes(24).toString('hex'), generation: 1, spec: { cpus: 3 }
-  });
-  expect(saved.status).toBe(200);
-  new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/computer.yaml': 'memory_mb: 8192\n' });
-  return { h, password, manager, close: async () => {
+  const h = await harness(undefined, manager.manager);
+  const close = async () => {
     await h.stop(); for (const action of cleanup) await action(); rmSync(h.directory, { recursive: true, force: true });
-  } };
+  };
+  try {
+    const { admin, password } = await setup(h), a = await account(admin);
+    await repository(admin, a.id, '101');
+    await h.projects.reconcile();
+    const saved = await admin('/api/environments/101/configure', 'POST', {
+      operation_id: randomBytes(24).toString('hex'), generation: 1, spec: { cpus: 3 }
+    });
+    expect(saved.status).toBe(201);
+    new RuleService(h.store).cache('101', 'a'.repeat(40), { '.bot/computer.yaml': 'memory_mb: 8192\n' });
+    return { h, password, manager, close };
+  } catch (err) { await close(); throw err; }
 }
 async function login(page, f) {
   await page.goto(f.h.admin + '/#/projects/101/machine');
