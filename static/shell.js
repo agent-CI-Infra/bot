@@ -17,9 +17,18 @@ function loadConsoleGaps(id) {
 function forgetConsoleGaps() { consoleGaps.clear(); }
 // A background snapshot read answers with the same rows this cache holds, so its result has to reach the bar as well.
 function updateConsoleGaps(rows) {
-  let changed = false;
-  for (const row of rows || []) if (row && row.id != null) { consoleGaps.set(String(row.id), row); changed = true; }
-  if (changed) syncConsoleShell();
+  let changed = false, currentRow = null;
+  const scope = consoleScope();
+  for (const row of rows || []) if (row && row.id != null) {
+    consoleGaps.set(String(row.id), row); changed = true;
+    if (scope && String(row.id) === String(scope)) currentRow = row;
+  }
+  if (!changed) return;
+  syncConsoleShell();
+  // The project header draws its own read of the same snapshot; without this it keeps the previous answer while the bar
+  // shows the new one, so one screen contradicts itself until the reader navigates away and back. It is handed the row
+  // rather than reloaded, so a reader who is halfway through a form does not lose what was typed.
+  if (currentRow && typeof applyInstalledRow === 'function') applyInstalledRow(currentRow);
 }
 const consoleAttention = {
   failed: ['执行失败', '查看失败证据后选择修复方式；不是所有失败都适合直接重试。'],
