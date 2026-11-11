@@ -10,4 +10,9 @@
 .task-create-receipt { margin-top: 24px; overflow-wrap: anywhere; }
 .task-create-receipt:empty { display: none; }
 .board-create-task { min-height: 44px; padding: 8px 12px; }
+@media (max-width: 760px) {
+  .board-arrangement { grid-template-columns: minmax(0, 1fr) 44px auto auto; }
+  .board-arrangement > .board-create-task { grid-row: 2; grid-column: 3; }
+  .board-arrangement > button { grid-column: 4; }
+}
 @media (max-width: 850px) { .task-create-layout { grid-template-columns: minmax(0, 1fr); } .task-create-form, .task-create-receipt { padding: 18px; } }
