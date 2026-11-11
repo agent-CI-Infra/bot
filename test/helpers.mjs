@@ -24,7 +24,9 @@ export async function harness(t, manager, options = {}) {
     store = new Store(database, key);
     h.projects = manager ? new ProjectService(store, manager) : undefined;
     const extra = typeof options === 'function' ? options(store) : options; h.external = extra.external;
-    ({ server } = createControlPlane({ store, staticDirectory: resolve('static'), maxBodyBytes: 2048, projects: h.projects, ...extra }));
+    const { trustedProxies, security, ...rest } = extra;
+    ({ server } = createControlPlane({ store, staticDirectory: resolve('static'), maxBodyBytes: 2048, projects: h.projects, ...rest },
+      security ?? (trustedProxies ? { trustedProxies } : {})));
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     // One listener serves the console and every delivery path; both names stay so tests read as the caller would use them.
     const base = `http://127.0.0.1:${server.address().port}`;
