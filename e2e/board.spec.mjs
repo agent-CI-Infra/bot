@@ -153,3 +153,28 @@ test('自定义字段保留对象值与折叠列，成员视图和卡片不泄�
     expect(custom).not.toBe('bot_stage');
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });
+
+test('卡片只在记录到的状态能确定时写下一步，窄屏不横向溢出且空状态不写',async({page})=>{
+  const {h,admin,password}=await fixture();
+  boardTask(h.store,'waiting-configuration',6,'review.issue','waiting_configuration',{title:'Awaiting configuration'});
+  boardTask(h.store,'cancelled-review',8,'review.issue','cancelled',{title:'Cancelled review'});
+  h.store.run("INSERT INTO board_objects(repository_id,object_type,object_number,title,github_state,draft,last_seen) VALUES('101','pr',9,'Draft research PR','open',1,'2026-10-04T12:00:00.000Z'),('101','issue',10,'Issue without a task','open',0,'2026-10-04T12:00:00.000Z'),('101','pr',11,'Closed draft PR','closed',1,'2026-10-05T12:00:00.000Z')");
+  try{
+    await page.setViewportSize({width:1600,height:900});await login(page,h.admin,password);await page.setViewportSize({width:390,height:844});
+    await choose(page,'当前分组','attention');
+    await expect(work(page,'101/issue/6','review.issue').locator('.board-card-next')).toHaveText('下一步：补齐配置后重试');
+    await expect(work(page,'101/issue/5','review.issue').locator('.board-card-next')).toHaveText('下一步：查看失败原因后重试');
+    await expect(work(page,'101/issue/8','review.issue').locator('.board-card-next')).toHaveCount(0);
+    expect(await page.locator('#board-columns').evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);
+    await noPageScroll(page);
+    await choose(page,'当前分组','unreviewed');
+    await expect(work(page,'101/pr/9','review.pr').locator('.board-card-next')).toHaveText('下一步：等待作者标记为可评审');
+    const noTask=work(page,'101/issue/10','review.issue');await expect(noTask).toContainText('检视 Issue 未开始');await expect(noTask.locator('.board-card-next')).toHaveCount(0);
+    // A closed object cannot be acted on, so it gets no next step even when it is a draft: the badge says 已关闭.
+    await page.locator('.board-filter-details>summary').click();
+    await page.getByLabel('含已关闭',{exact:true}).check();
+    await expect(work(page,'101/pr/11','review.pr')).toContainText('已关闭');
+    await expect(work(page,'101/pr/11','review.pr').locator('.board-card-next')).toHaveCount(0);
+    await screenshot(page,'mobile-next-step');
+  }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
+});
