@@ -1,0 +1,22 @@
+.gate-step-nav,.gate-mobile-only{display:none}.gate-read-retry{margin:0 20px 12px;align-self:flex-start}
+#quickstart-view.wide .gate-chat{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);grid-template-rows:minmax(300px,.8fr) minmax(180px,1fr) auto;gap:16px;padding:16px;overflow:auto;align-items:stretch}
+#quickstart-view .gate-plan{display:contents}#quickstart-view .gate-plan[hidden]{display:none!important}#quickstart-view .gate-conversation{grid-column:1;grid-row:1;border:1px solid var(--color-border);border-radius:var(--radius-card);overflow:hidden;min-height:0}
+#quickstart-view .gate-plan-inputs{grid-column:1;grid-row:2;overflow:auto;min-width:0;display:grid;gap:12px;align-content:start;padding:16px;background:var(--color-surface-alt);border:1px solid var(--color-border);border-radius:var(--radius-card)}
+#quickstart-view .gate-file-panel{grid-column:2;grid-row:1/span 2;overflow:auto;min-width:0;min-height:300px;padding:16px;border:1px solid var(--color-border);border-radius:var(--radius-card);background:var(--color-surface)}
+#quickstart-view .gate-verification{grid-column:1;grid-row:3}#quickstart-view .gate-confirmation{grid-column:2;grid-row:3}
+#quickstart-view :is(.gate-verification,.gate-confirmation){min-width:0;padding:16px;background:var(--color-surface-alt);border:1px solid var(--color-border);border-radius:var(--radius-card)}
+#quickstart-view :is(.gate-plan-inputs,.gate-verification,.gate-confirmation) h3{margin:0 0 12px}#quickstart-view .gate-plan-inputs label{display:grid;gap:6px}#quickstart-view .gate-plan-inputs .check{display:flex;align-items:center;gap:6px}
+#quickstart-view #gate-onboarding-files pre{max-width:100%;overflow:auto;white-space:pre;tab-size:2}#quickstart-view #gate-onboarding-files p{overflow-wrap:anywhere}
+#quickstart-view #gate-onboarding-summary dd{overflow-wrap:anywhere;min-width:0}#quickstart-view #gate-onboarding-summary ul{padding-left:20px;overflow-wrap:anywhere;font-size:12px;line-height:1.7}
+.gate-validation-lanes{list-style:none;padding:0;display:grid;gap:8px}.gate-validation-lanes li{display:grid;grid-template-columns:90px minmax(0,1fr);gap:10px;border-top:1px solid var(--color-border);padding-top:8px;font-size:12px}.gate-validation-lanes p{margin:0}
+@media(max-width:860px){
+ #quickstart-view.wide .gate-step-nav{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:10px 14px;border-bottom:1px solid var(--color-border);flex:none;background:var(--color-surface)}
+ #quickstart-view .gate-step-nav button{min-width:0;padding:8px;background:var(--color-surface-alt);color:var(--color-text);border-color:var(--color-border)}#quickstart-view .gate-step-nav [aria-selected=true]{background:var(--color-brand-weak);color:var(--color-brand);border-color:var(--color-brand)}
+ #quickstart-view.wide .gate-chat{display:block;padding:12px;overflow:auto}#quickstart-view .gate-messages{overflow:auto;max-height:42dvh}#quickstart-view .gate-conversation{margin-bottom:12px;min-height:180px;max-height:none}
+ #quickstart-view .gate-mobile-only{display:block;margin-top:12px;width:100%}#quickstart-view .gate-plan-inputs{overflow:visible}
+ #quickstart-view .gate-file-panel{min-height:0}#quickstart-view .gate-file-panel details pre{font-size:12px}
+ #quickstart-view:not([data-gate-pane=plan]) :is(.gate-conversation,.gate-plan-inputs),#quickstart-view:not([data-gate-pane=files]) .gate-file-panel,#quickstart-view:not([data-gate-pane=verify]) .gate-verification,#quickstart-view:not([data-gate-pane=confirm]) .gate-confirmation{display:none}
+ #quickstart-view #gate-onboarding-confirm{width:100%;min-height:44px}#quickstart-view .gate-compose .actions{flex-wrap:wrap}
+}
+
+#quickstart-view .gate-compose{flex:none}#quickstart-view .gate-messages{min-height:100px}

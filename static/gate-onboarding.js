@@ -1,4 +1,4 @@
-// Gate onboarding (repository list → 接入门禁). The dialog first explains the five lanes; only then does the person start a
+// Gate onboarding (repository list → 接入门禁). The dialog first explains the four lanes; only then does the person start a
 // conversation in which the project's agent proposes each lane's commands from repository facts, or reviews the CI and gates
 // the repository already has. Nothing is written to the repository until the person confirms a plan revision after seeing
 // the files it changes. Globals are prefixed gateOnboarding: console scripts share one scope.
@@ -43,6 +43,12 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <p id="gate-onboarding-last" class="muted"></p>
 <div class="actions"><button type="button" class="quiet" id="gate-onboarding-resume" hidden>继续上次的对话</button><button type="button" id="gate-onboarding-start">开始适配</button></div>
 </section>
+<nav id="gate-onboarding-steps" class="gate-step-nav" aria-label="门禁接入步骤" role="tablist" hidden>
+<button type="button" role="tab" id="gate-step-plan" data-gate-step="plan" aria-controls="gate-onboarding-inputs">方案</button>
+<button type="button" role="tab" id="gate-step-files" data-gate-step="files" aria-controls="gate-onboarding-file-panel">文件</button>
+<button type="button" role="tab" id="gate-step-verify" data-gate-step="verify" aria-controls="gate-onboarding-verification">验证</button>
+<button type="button" role="tab" id="gate-step-confirm" data-gate-step="confirm" aria-controls="gate-onboarding-confirmation">确认</button>
+</nav><button type="button" class="quiet gate-read-retry" id="gate-onboarding-reload" hidden>重新读取会话</button>
 <div id="gate-onboarding-chat" class="gate-chat" hidden>
 <section class="gate-conversation" aria-label="对话">
 <ol id="gate-onboarding-messages" class="gate-messages" aria-live="polite"></ol>
@@ -51,7 +57,7 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <p id="gate-onboarding-turn" class="gate-turn muted" hidden></p>
 </section>
 <form id="gate-onboarding-plan" class="gate-plan" aria-labelledby="gate-onboarding-plan-title">
-<h3 id="gate-onboarding-plan-title">门禁方案</h3>
+<section id="gate-onboarding-inputs" class="gate-plan-inputs" role="tabpanel" aria-labelledby="gate-step-plan"><h3 id="gate-onboarding-plan-title">门禁方案</h3>
 <p id="gate-onboarding-queue" class="muted"></p>
 <fieldset id="gate-onboarding-queue-question" hidden><legend>默认分支是否启用了 merge queue？</legend>
 <label class="check"><input type="radio" name="merge_queue" value="enabled"> 已启用：合入门禁在队列里运行</label>
@@ -60,12 +66,18 @@ gateOnboardingView.innerHTML = `<div class="view-head"><h2 id="gate-onboarding-t
 <div id="gate-onboarding-tools" class="gate-tools"></div>
 <label>安装依赖（每行一条命令）<textarea name="install" rows="2"></textarea></label>
 <div id="gate-onboarding-plan-lanes" class="gate-plan-lanes"></div>
-<details id="gate-onboarding-preview"><summary>预览将提交的文件</summary><div id="gate-onboarding-files"></div></details>
+<button type="button" class="quiet gate-mobile-only" data-gate-step="files">下一步：文件</button></section>
+<section id="gate-onboarding-file-panel" class="gate-file-panel" role="tabpanel" aria-labelledby="gate-step-files">
+<details id="gate-onboarding-preview" open><summary>预览将提交的文件</summary><div id="gate-onboarding-files"></div></details>
+<button type="button" id="gate-onboarding-preview-retry" class="quiet" hidden>重新读取文件预览</button>
+<button type="button" class="quiet gate-mobile-only" data-gate-step="verify">下一步：验证</button></section>
+<section id="gate-onboarding-verification" class="gate-verification" role="tabpanel" aria-labelledby="gate-step-verify"><h3>验证与来源</h3><div id="gate-onboarding-evidence"></div><button type="button" class="quiet gate-mobile-only" data-gate-step="confirm">下一步：确认</button></section>
+<section id="gate-onboarding-confirmation" class="gate-confirmation" role="tabpanel" aria-labelledby="gate-step-confirm"><h3>确认方案</h3><div id="gate-onboarding-summary"></div>
 <p id="gate-onboarding-note" class="muted"></p>
-<div class="actions"><button type="submit" id="gate-onboarding-confirm">确认并创建门禁 PR</button></div>
+<div class="actions"><button type="submit" id="gate-onboarding-confirm">确认并创建门禁 PR</button></div></section>
 </form>
 </div>`;
-document.body.append(gateOnboardingView);
+document.body.append(gateOnboardingView); $('gate-onboarding-note').setAttribute('role','status');
 for (const [lane, when] of gateOnboardingLanes) $('gate-onboarding-lanes').append(element('dt', lane), element('dd', when));
 for (const [name, caption, hint] of gateOnboardingTools) {
   const label = element('label', caption), input = document.createElement('input'); input.name = 'tool_' + name; input.placeholder = hint; label.append(input);
@@ -81,11 +93,61 @@ for (const [lane, when] of gateOnboardingLanes) {
 }
 // row: the repository list row; session: the latest conversation; rendered: the plan revision the form shows, so polling
 // never overwrites what the person is typing; preview: files for the form's unsent edits; timer: polling while a step runs.
-let gateOnboardingContext = { row: null, after: null, session: null, ready: null, rendered: -1, preview: null, timer: null, wasBusy: false };
-
-function gateOnboardingError(err) {
-  const code = String(err.message || '').split(' · ')[1];
+const gateOnboardingExecutions = new Map();
+const gateOnboardingIdentity = () => me && JSON.stringify([me.id, me.actor?.tenant_id, me.actor?.principal_id]);
+const gateOnboardingNewContext = (row, after) => ({ row, after, owner: gateOnboardingIdentity(), session: null, ready: null, rendered: -1, preview: null, timer: null, wasBusy: false,
+  pane: 'plan', source: null, readIndex: 0, previewIndex: 0, previewTimer: null, previewPending: false, signature: null, sending: false, readFailed: false, writeUnknown: false });
+let gateOnboardingContext = gateOnboardingNewContext(null, null);
+const gateOnboardingLive = context => gateOnboardingContext === context && !!context.row && gateOnboardingView.open && context.owner === gateOnboardingIdentity();
+const gateOnboardingSignature = () => JSON.stringify(gateOnboardingForm());
+const gateOnboardingSource = session => JSON.stringify([session.id,session.revision,session.facts?.head_sha,session.merge_queue?.state]);
+function gateOnboardingForget(context) {
+  clearTimeout(context.timer); clearTimeout(context.previewTimer); context.previewIndex++; context.readIndex++; context.session = null; context.preview = null; context.signature = null;
+  $('gate-onboarding-plan').hidden = true;
+  for (const control of $('gate-onboarding-plan').querySelectorAll('textarea,input')) { if (control.type === 'checkbox' || control.type === 'radio') control.checked = false; else control.value = ''; }
+  $('gate-onboarding-plan').querySelector('select[name=workflow]')?.replaceChildren();
+  for (const id of ['gate-onboarding-messages','gate-onboarding-files','gate-onboarding-evidence','gate-onboarding-summary','gate-onboarding-last','gate-onboarding-turn']) $(id).replaceChildren();
+}
+function resetGateOnboarding() {
+  gateOnboardingForget(gateOnboardingContext); gateOnboardingContext.row = null; gateOnboardingExecutions.clear();
+  if (gateOnboardingView.open) gateOnboardingView.close();
+}
+function gateOnboardingError(err, context = gateOnboardingContext) {
+  if (!gateOnboardingLive(context)) return;
+  if ([401,403].includes(err.status)) {
+    gateOnboardingForget(context); context.row = null; gateOnboardingShowChat(false);
+    $('gate-onboarding-reload').hidden = true; $('gate-onboarding-title').textContent = '接入门禁'; $('gate-onboarding-start').disabled = true; $('gate-onboarding-resume').hidden = true;
+    $('gate-onboarding-error').textContent = '当前项目访问权限已失效，请关闭后按当前授权重新进入。'; return;
+  }
+  const code = err.code || String(err.message || '').split(' · ')[1];
   $('gate-onboarding-error').textContent = gateOnboardingErrors[code] || err.message;
+}
+function gateOnboardingPane(pane) {
+  if (!['plan','files','verify','confirm'].includes(pane)) return;
+  gateOnboardingContext.pane = pane; gateOnboardingView.dataset.gatePane = pane;
+  for (const tab of $('gate-onboarding-steps').querySelectorAll('[role=tab]')) {
+    const active = tab.dataset.gateStep === pane; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+  }
+}
+function gateOnboardingEvidence(session, view, fresh) {
+  const context = gateOnboardingContext, target = session.facts || {}, evidence = $('gate-onboarding-evidence'), summary = $('gate-onboarding-summary');
+  evidence.replaceChildren(note('下列内容是方案中的命令，不代表 CI 或试跑通过。实际输出请查看执行过程或对话原文。'));
+  const key = JSON.stringify([context.owner, context.row.id, session.id]);
+  if (session.task) gateOnboardingExecutions.set(key, session.task.id);
+  const task = session.task?.id || gateOnboardingExecutions.get(key);
+  if (task) evidence.append(button(session.task ? '查看本轮执行过程' : '查看最近记录的执行过程', () => openTask(task), 'quiet'));
+  else evidence.append(note('此页面没有读到关联的执行记录；可在项目运行状态中查找接入门禁任务。'));
+  evidence.append(button('查看对话原文', () => gateOnboardingPane('plan'), 'quiet'));
+  const rows = element('ul', '', 'gate-validation-lanes'), plan = gateOnboardingForm();
+  for (const [lane] of gateOnboardingLanes) { const row = element('li'); row.append(element('strong', lane), note(plan.lanes[lane].length ? `${plan.lanes[lane].length} 条检查命令 · 试跑结论未结构化提供` : '未配置 · 不适用，不表示检查通过')); rows.append(row); }
+  evidence.append(rows);
+  const files = fresh ? view.target?.files || [] : [];
+  const stateText = session.state === 'creating' && session.busy === false ? '已中断，结果待核验' : context.sending ? '正在提交当前方案' : gateOnboardingStates[session.state] || '状态未识别';
+  summary.replaceChildren(note(`当前：${stateText}`), facts([['方案版本', String(session.revision)], ['默认分支', target.default_branch || '未读取'], ['读取的提交', target.head_sha || '未读取'], ['文件预览', fresh ? `${files.length} 份文件差异` : '尚未完成当前表单预览']]));
+  if (fresh && files.length) { const list = element('ul'); for (const file of files) list.append(element('li', `${file.path} · ${file.mode === 'create' ? '新增' : '修改'}`)); summary.append(list); }
+  summary.append(note('确认只创建门禁 PR；已有检查按展示的差异合并，PR 仍需按仓库流程合入。'));
+  if (session.pr_url) summary.append(link(session.pr_url, '查看已创建的 PR'));
+  for (const pull of target.open_gate_prs || []) summary.append(link(pull.url, `查看已有门禁 PR #${pull.number}`));
 }
 function gateOnboardingLines(value) { return String(value || '').split('\n').map(line => line.trim()).filter(Boolean); }
 function gateOnboardingForm() {
@@ -108,7 +170,7 @@ function gateOnboardingFill(session) {
 }
 function gateOnboardingShowChat(show) {
   $('gate-onboarding-intro').hidden = show; $('gate-onboarding-chat').hidden = !show; $('gate-onboarding-restart').hidden = !show;
-  gateOnboardingView.classList.toggle('wide', show);
+  gateOnboardingView.classList.toggle('wide', show); $('gate-onboarding-steps').hidden = !show; gateOnboardingPane(gateOnboardingContext.pane);
 }
 function gateOnboardingIntro() {
   const session = gateOnboardingContext.session, last = $('gate-onboarding-last'), ready = gateOnboardingContext.ready; last.replaceChildren();
@@ -138,9 +200,10 @@ function gateOnboardingFiles(view, revision) {
 }
 
 function gateOnboardingRender() {
-  const session = gateOnboardingContext.session; if (!session) return;
-  const busy = gateOnboardingBusy.includes(session.state), open = session.state === 'ready' && session.latest && !busy;
-  const list = $('gate-onboarding-messages'); list.replaceChildren();
+  const context = gateOnboardingContext, session = context.session; if (!session || !gateOnboardingLive(context)) return;
+  const interrupted = session.state === 'creating' && session.busy === false;
+  const busy = gateOnboardingBusy.includes(session.state) && !interrupted, open = session.state === 'ready' && session.latest && !busy && !context.sending && !context.readFailed && !context.writeUnknown;
+  const list = $('gate-onboarding-messages'), scroll = list.scrollTop, nearEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 64; list.replaceChildren();
   for (const message of session.messages) {
     const item = element('li', '', 'gate-message gate-message-' + message.role);
     item.append(element('span', { agent: 'agent', user: '你', system: '控制面' }[message.role] || message.role, 'gate-message-role'), element('p', message.content));
@@ -154,14 +217,18 @@ function gateOnboardingRender() {
   if (task) turn.append(`本轮任务：${waiting || task.status}${task.error ? `（${task.error}）` : ''} `, button('查看执行过程', () => openTask(task.id), 'quiet'));
   if (session.pr_url) { const item = element('li', '', 'gate-message gate-message-system'), link = element('a', '打开门禁 PR', 'result-link');
     link.href = session.pr_url; link.target = '_blank'; link.rel = 'noopener noreferrer'; item.append(link); list.append(item); }
-  list.lastElementChild?.scrollIntoView({ block: 'end' });
+  list.scrollTop = nearEnd ? list.scrollHeight : scroll;
   const ready = session.ready || {};
   $('gate-onboarding-compose').hidden = !ready.ok || !open;
   $('gate-onboarding-agent').textContent = ready.ok ? `agent 在项目电脑里工作，使用模型 ${ready.model}` : ready.reason || '';
   const plan = $('gate-onboarding-plan'); plan.hidden = !session.plan || session.state === 'connected';
   if (!session.plan) return;
   // Only a new revision from the server replaces the form; the person's unsent edits otherwise stay.
-  if (gateOnboardingContext.rendered !== session.revision) { gateOnboardingFill(session); gateOnboardingContext.rendered = session.revision; gateOnboardingContext.preview = null; }
+  if (gateOnboardingContext.rendered !== session.revision) { gateOnboardingFill(session); gateOnboardingContext.rendered = session.revision; gateOnboardingContext.preview = null; context.previewIndex++; context.previewPending = false; context.signature = gateOnboardingSignature(); context.source = gateOnboardingSource(session); }
+  else if (context.source !== gateOnboardingSource(session)) {
+    context.source = gateOnboardingSource(session); context.preview = null; context.signature = null; context.previewPending = true; context.previewIndex++;
+    clearTimeout(context.previewTimer); context.previewTimer = setTimeout(() => gateOnboardingPreview(),0);
+  }
   $('gate-onboarding-plan-title').textContent = `门禁方案 · 第 ${session.revision} 版`;
   const queue = session.merge_queue || { state: 'unknown' }, question = $('gate-onboarding-queue-question');
   question.hidden = !queue.asked || session.state === 'done';
@@ -169,88 +236,133 @@ function gateOnboardingRender() {
     disabled: `merge queue：未启用（${queue.evidence}）。PR 上跑 pr-ready；每次合入默认分支后先跑 pr-ready 再跑 pr-merge。`, unknown: `merge queue：无法判断（${queue.evidence}），请在下面回答。` }[queue.state];
   if (queue.asked && queue.state !== 'unknown') $('gate-onboarding-queue').textContent += ' 可以在下面改。';
   // The saved answer (merge_queue.state) checks its radio; the person changes it there.
-  for (const radio of plan.querySelectorAll('input[name=merge_queue]')) { radio.checked = radio.value === queue.state; radio.disabled = !open; }
+  for (const radio of plan.querySelectorAll('input[name=merge_queue]')) { if (!context.sending && !context.previewPending) radio.checked = radio.value === queue.state; radio.disabled = !open; }
   for (const field of plan.querySelectorAll('input:not([type=radio]):not([type=checkbox]), textarea')) field.readOnly = !open;
   for (const field of plan.querySelectorAll('input[type=checkbox], select')) field.disabled = !open;
   const view = gateOnboardingContext.preview || session;
-  gateOnboardingFiles(view, session.revision);
-  const unchanged = !!view.target && !view.target.files.length;
+  const fresh = !context.previewPending && context.signature === gateOnboardingSignature();
+  if (fresh) gateOnboardingFiles(view, session.revision);
+  else $('gate-onboarding-files').replaceChildren(note(context.previewPending ? '正在更新当前表单的文件预览…' : '当前表单的文件预览尚未完成，暂时不能确认。'));
+  $('gate-onboarding-preview-retry').hidden = fresh || context.previewPending || !open;
+  gateOnboardingEvidence(session, view, fresh);
+  for (const tab of $('gate-onboarding-steps').querySelectorAll('[role=tab]')) tab.disabled = !session.plan;
+  gateOnboardingPane(context.pane);
+  const unchanged = fresh && !!view.target && !view.target.files.length;
   const blockers = [session.facts?.open_gate_prs?.length ? `仓库已有未合入的门禁 PR（${session.facts.open_gate_prs.map(item => '#' + item.number).join('、')}），请先合入或关闭。` : '',
-    view.target_problem || '', queue.state === 'unknown' && open ? '回答 merge queue 问题后才能确认。' : ''].filter(Boolean);
+    fresh ? view.target_problem || '' : '', queue.state === 'unknown' && open ? '回答 merge queue 问题后才能确认。' : ''].filter(Boolean);
   // No changes is only a note: an edit typed just before clicking confirm reaches the server with the click.
-  $('gate-onboarding-note').textContent = blockers.join(' ') || (!open ? '' : unchanged ? '方案和仓库现有的门禁一致，没有需要提交的改动；按建议修改后再确认。'
+  $('gate-onboarding-note').textContent = blockers.join(' ') || (interrupted ? '创建流程已中断，结果需核验；请查看已有 PR，或重新开始读取仓库。' : context.readFailed || context.writeUnknown ? '会话状态未确认，请先重新读取。' : !fresh ? '请先完成当前表单的文件预览，再确认方案。' : !open ? '' : unchanged ? '方案和仓库现有的门禁一致，没有需要提交的改动；按建议修改后再确认。'
     : '确认后控制面按右侧方案创建门禁 PR；空 lane 只表示还没有配置。');
   const confirm = $('gate-onboarding-confirm');
   confirm.hidden = ['done', 'connected', 'blocked', 'failed'].includes(session.state);
-  confirm.disabled = !open || blockers.length > 0;
+  confirm.disabled = !open || !fresh || unchanged || blockers.length > 0;
+  $('gate-onboarding-reload').hidden = !context.readFailed && !context.writeUnknown;
 }
 
 async function gateOnboardingRefresh() {
-  const context = gateOnboardingContext; if (!context.session) return;
-  clearTimeout(context.timer);
-  const value = await api(`/api/gate-onboarding/${context.session.id}`);
-  if (gateOnboardingContext !== context || !context.row) return;
-  context.session = value.session; gateOnboardingRender();
-  gateOnboardingWatch();
+  const context = gateOnboardingContext; if (!context.session || !gateOnboardingLive(context)) return;
+  clearTimeout(context.timer); const index = ++context.readIndex;
+  try {
+    const value = await api(`/api/gate-onboarding/${context.session.id}`);
+    if (!gateOnboardingLive(context) || index !== context.readIndex) return;
+    context.readFailed = false; context.writeUnknown = false; context.session = value.session;
+    $('gate-onboarding-error').textContent = ''; gateOnboardingRender();
+    // A successful session read also renews an invalidated form preview; confirmation stays blocked until both match.
+    if (context.session.state === 'ready' && context.signature !== gateOnboardingSignature() && !context.previewPending) await gateOnboardingPreview();
+    if (gateOnboardingLive(context)) gateOnboardingWatch();
+  } catch (error) { if (!gateOnboardingLive(context) || index !== context.readIndex) return; context.readFailed = true; gateOnboardingRender(); gateOnboardingError(error, context); }
 }
 function gateOnboardingWatch() {
   const context = gateOnboardingContext, busy = gateOnboardingBusy.includes(context.session?.state);
-  if (busy) { context.wasBusy = true; context.timer = setTimeout(() => gateOnboardingRefresh().catch(gateOnboardingError), 1500); }
-  else if (context.wasBusy) { context.wasBusy = false; if (['done', 'connected'].includes(context.session.state) && context.after) context.after(); }
+  if (!gateOnboardingLive(context)) return;
+  if (busy) { context.wasBusy = true; context.timer = setTimeout(() => gateOnboardingRefresh(), 1500); }
+  else if (context.wasBusy) { context.wasBusy = false; if (['done','connected'].includes(context.session.state) && context.after) context.after(); }
 }
 async function gateOnboardingSend(path, body) {
-  const context = gateOnboardingContext; $('gate-onboarding-error').textContent = '';
-  try { const value = await api(path, 'POST', body); context.session = value.session; gateOnboardingRender(); gateOnboardingWatch(); return true; }
-  catch (err) { gateOnboardingError(err); if (/gate_plan_changed/.test(err.message)) await gateOnboardingRefresh().catch(() => {}); return false; }
-}
-// Renders the files for the form as it is now, so the person sees what confirming would commit before sending anything.
-async function gateOnboardingPreview() {
-  const context = gateOnboardingContext, session = context.session; if (!session?.plan) return;
+  const context = gateOnboardingContext; if (!gateOnboardingLive(context) || context.sending || context.writeUnknown) return false;
+  context.sending = true; context.previewIndex++; context.readIndex++; clearTimeout(context.previewTimer); $('gate-onboarding-error').textContent = ''; gateOnboardingRender();
   try {
-    const view = await api(`/api/gate-onboarding/${session.id}/preview`, 'POST', { plan: gateOnboardingForm() });
-    if (gateOnboardingContext !== context || context.session?.id !== session.id) return;
-    context.preview = view; $('gate-onboarding-error').textContent = ''; gateOnboardingRender();
-  } catch (err) { gateOnboardingError(err); }
+    const value = await api(path,'POST',body); if (!gateOnboardingLive(context)) return false;
+    context.sending = false; context.session = value.session; gateOnboardingRender(); gateOnboardingWatch(); return true;
+  } catch (error) {
+    if (!gateOnboardingLive(context)) return false;
+    context.sending = false; context.previewPending = false;
+    if (!error.status || error.status >= 500) context.writeUnknown = true;
+    gateOnboardingRender(); gateOnboardingError(error,context);
+    if (error.code === 'gate_plan_changed' || context.writeUnknown) await gateOnboardingRefresh();
+    return false;
+  }
+}
+// An edited form invalidates its preview immediately; only the matching request may restore confirmation.
+async function gateOnboardingPreview() {
+  const context = gateOnboardingContext, session = context.session;
+  if (!session?.plan || !gateOnboardingLive(context)) return;
+  clearTimeout(context.previewTimer); const plan = gateOnboardingForm(), signature = JSON.stringify(plan), index = ++context.previewIndex, revision = session.revision, source = context.source;
+  context.previewPending = true; context.signature = null; gateOnboardingRender();
+  try {
+    const view = await api(`/api/gate-onboarding/${session.id}/preview`,'POST',{plan});
+    if (!gateOnboardingLive(context) || index !== context.previewIndex || context.session?.revision !== revision || source !== context.source || signature !== gateOnboardingSignature()) return;
+    if (view.basis?.revision !== revision || view.basis?.head_sha !== context.session.facts?.head_sha || view.basis?.merge_queue !== context.session.merge_queue?.state) {
+      context.previewPending = false; context.signature = null; context.readFailed = true; gateOnboardingRender();
+      $('gate-onboarding-error').textContent = '方案或仓库读取依据已变化，请重新读取会话后再确认。'; return;
+    }
+    context.preview = view; context.signature = signature; context.previewPending = false; $('gate-onboarding-error').textContent = ''; gateOnboardingRender();
+  } catch (error) {
+    if (!gateOnboardingLive(context) || index !== context.previewIndex) return;
+    context.previewPending = false; context.signature = null; gateOnboardingRender(); gateOnboardingError(error,context);
+  }
+}
+function gateOnboardingInvalidate() {
+  const context = gateOnboardingContext; if (!context.session?.plan || !gateOnboardingLive(context)) return;
+  clearTimeout(context.previewTimer); context.previewIndex++; context.previewPending = true; context.signature = null;
+  gateOnboardingRender(); context.previewTimer = setTimeout(() => gateOnboardingPreview(),200);
 }
 async function gateOnboardingStart() {
-  const context = gateOnboardingContext; context.rendered = -1; context.preview = null;
-  if (await gateOnboardingSend(`/api/projects/${context.row.id}/gate-onboarding`, {})) gateOnboardingShowChat(true);
+  const context = gateOnboardingContext; if (!gateOnboardingLive(context)) return; context.rendered = -1; context.preview = null; context.signature = null;
+  if (await gateOnboardingSend(`/api/projects/${context.row.id}/gate-onboarding`,{}) && gateOnboardingLive(context)) gateOnboardingShowChat(true);
 }
-
 async function openGateOnboarding(row, after) {
-  clearTimeout(gateOnboardingContext.timer);
-  gateOnboardingContext = { row, after, session: null, ready: null, rendered: -1, preview: null, timer: null, wasBusy: false };
-  $('gate-onboarding-title').textContent = '接入门禁 · ' + row.full_name; $('gate-onboarding-error').textContent = '';
-  // A previous repository's answer or unsent message must not carry over.
-  for (const radio of $('gate-onboarding-plan').querySelectorAll('input[name=merge_queue]')) radio.checked = false;
-  for (const field of $('gate-onboarding-compose').querySelectorAll('textarea')) field.value = '';
-  gateOnboardingShowChat(false); gateOnboardingIntro();
-  gateOnboardingView.showModal();
-  try { const value = await api(`/api/projects/${row.id}/gate-onboarding`); if (gateOnboardingContext.row === row) { Object.assign(gateOnboardingContext, { session: value.session, ready: value.ready }); gateOnboardingIntro(); } }
-  catch (err) { gateOnboardingError(err); }
+  gateOnboardingForget(gateOnboardingContext);
+  const context = gateOnboardingNewContext(row,after); gateOnboardingContext = context;
+  $('gate-onboarding-title').textContent = '接入门禁 · '+row.full_name; $('gate-onboarding-error').textContent = ''; $('gate-onboarding-reload').hidden = true;
+  for (const field of $('gate-onboarding-compose').querySelectorAll('textarea')) field.value = ''; gateOnboardingShowChat(false); gateOnboardingIntro(); if (!gateOnboardingView.open) gateOnboardingView.showModal();
+  try { const value = await api(`/api/projects/${row.id}/gate-onboarding`); if (gateOnboardingLive(context)) { Object.assign(context,{session:value.session,ready:value.ready}); gateOnboardingIntro(); } }
+  catch (error) { if (!gateOnboardingLive(context)) return; context.readFailed = true; $('gate-onboarding-reload').hidden = false; gateOnboardingError(error,context); }
 }
 $('gate-onboarding-start').addEventListener('click', () => gateOnboardingStart());
 $('gate-onboarding-restart').addEventListener('click', async () => {
   if (await askConfirm({ title: '重新开始接入？', body: ['重新只读地查看仓库，开始一段新的对话。当前对话里还没确认的方案不会保留。'], action: '重新开始' })) gateOnboardingStart();
 });
 $('gate-onboarding-resume').addEventListener('click', () => { gateOnboardingShowChat(true); gateOnboardingRender(); gateOnboardingWatch(); });
-$('gate-onboarding-close').addEventListener('click', () => { clearTimeout(gateOnboardingContext.timer); gateOnboardingContext.row = null; gateOnboardingView.close(); });
+$('gate-onboarding-close').addEventListener('click', () => gateOnboardingView.close());
+gateOnboardingView.addEventListener('close', () => { if (gateOnboardingView.open) return; const context = gateOnboardingContext; clearTimeout(context.timer); clearTimeout(context.previewTimer); context.previewIndex++; context.row = null; });
+$('gate-onboarding-preview-retry').addEventListener('click', gateOnboardingPreview);
+$('gate-onboarding-reload').addEventListener('click', () => { const context = gateOnboardingContext; if (!gateOnboardingLive(context)) return; if (context.session) void gateOnboardingRefresh(); else void openGateOnboarding(context.row,context.after); });
+gateOnboardingView.addEventListener('click', event => { const step = event.target.closest('[data-gate-step]'); if (step && !step.disabled) gateOnboardingPane(step.dataset.gateStep); });
+$('gate-onboarding-steps').addEventListener('keydown', event => {
+  const tabs = [...$('gate-onboarding-steps').querySelectorAll('[role=tab]')].filter(tab => !tab.disabled); let index = tabs.indexOf(document.activeElement);
+  if (index < 0 || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return; event.preventDefault();
+  index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length-1 : (index+(event.key === 'ArrowRight' ? 1 : -1)+tabs.length)%tabs.length; tabs[index].click(); tabs[index].focus();
+});
 $('gate-onboarding-compose').addEventListener('submit', async event => {
-  event.preventDefault(); const form = event.currentTarget, session = gateOnboardingContext.session, submit = form.querySelector('[type=submit]');
-  if (!session) return;
+  event.preventDefault(); const form = event.currentTarget, context = gateOnboardingContext, session = context.session, submit = form.querySelector('[type=submit]');
+  if (!session || !gateOnboardingLive(context)) return;
   submit.disabled = true;
   // The person's unsent plan edits travel with the message, so the agent answers about what they see.
-  if (await gateOnboardingSend(`/api/gate-onboarding/${session.id}/messages`, { content: form.elements.content.value, revision: gateOnboardingContext.rendered, plan: gateOnboardingForm() })) form.reset();
-  submit.disabled = false;
+  if (await gateOnboardingSend(`/api/gate-onboarding/${session.id}/messages`, { content: form.elements.content.value, revision: gateOnboardingContext.rendered, plan: gateOnboardingForm() }) && gateOnboardingLive(context)) form.reset();
+  if (gateOnboardingLive(context)) submit.disabled = false;
 });
-// A merge queue answer is saved at once; any other change re-renders the preview from the form.
-$('gate-onboarding-plan').addEventListener('change', event => {
-  const session = gateOnboardingContext.session;
-  if (!session) return;
-  if (event.target.name === 'merge_queue') gateOnboardingSend(`/api/gate-onboarding/${session.id}/merge-queue`, { answer: event.target.value }).then(() => { if (gateOnboardingContext.preview) gateOnboardingPreview(); });
-  else gateOnboardingPreview();
+// The answer changes the rendered triggers too, so it invalidates files just like any other edit.
+$('gate-onboarding-plan').addEventListener('input',event => { if(event.target.name !== 'merge_queue') gateOnboardingInvalidate(); });
+$('gate-onboarding-plan').addEventListener('change',async event => {
+  const context = gateOnboardingContext, session = context.session; if (!session || !gateOnboardingLive(context)) return;
+  if (event.target.name === 'merge_queue') {
+    clearTimeout(context.previewTimer); context.previewIndex++; context.previewPending = true; context.signature = null; gateOnboardingRender();
+    if (await gateOnboardingSend(`/api/gate-onboarding/${session.id}/merge-queue`,{answer:event.target.value})) await gateOnboardingPreview();
+  } else if (context.signature !== gateOnboardingSignature()) await gateOnboardingPreview();
 });
-$('gate-onboarding-plan').addEventListener('submit', async event => {
-  event.preventDefault(); const session = gateOnboardingContext.session; if (!session) return;
-  await gateOnboardingSend(`/api/gate-onboarding/${session.id}/confirm`, { revision: gateOnboardingContext.rendered, plan: gateOnboardingForm() });
+$('gate-onboarding-plan').addEventListener('submit',async event => {
+  event.preventDefault(); const context = gateOnboardingContext, session = context.session; if (!session || $('gate-onboarding-confirm').disabled) return;
+  if (context.previewPending || context.signature !== gateOnboardingSignature()) { await gateOnboardingPreview(); return; }
+  await gateOnboardingSend(`/api/gate-onboarding/${session.id}/confirm`,{revision:context.rendered,plan:gateOnboardingForm()});
 });

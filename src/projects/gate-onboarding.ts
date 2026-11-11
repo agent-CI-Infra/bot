@@ -201,16 +201,18 @@ export class GateOnboarding {
   // ---- GitHub access for the confirmed PR ----------------------------------------------------------------------------
   /** An empty token sends the request without credentials (public reads). 404 is null; other failures throw. */
   private async request(method: string, path: string, token: string, body?: unknown): Promise<any | null> {
-    this.tokenGuards.get(token)?.();
+    // The caller's existing guard follows background creation too, including each external write.
+    this.store.checkAuthorization(); this.tokenGuards.get(token)?.();
     let response: Response;
     try {
       response = await fetch(this.apiUrl.replace(/\/$/, '') + path, { method, redirect: 'error', signal: AbortSignal.timeout(30000),
         headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     } catch { throw new Error('github_unavailable'); }
+    this.store.checkAuthorization(); this.tokenGuards.get(token)?.();
     if (response.status === 404) return null;
     if (!response.ok) throw new Error('github_http_' + response.status);
-    const text = await response.text();
+    const text = await response.text(); this.store.checkAuthorization();
     return text ? JSON.parse(text) : {};
   }
   private async file(repo: string, path: string, token: string, ref?: string): Promise<string | null> {
@@ -328,7 +330,8 @@ export class GateOnboarding {
     const facts: GateFacts = JSON.parse(String(row.facts)), mergeQueue = mergeQueueOf(row, facts);
     let normalized: GatePlan;
     try { normalized = normalizePlan(plan); } catch (error) { if (error instanceof PlanError) return fail(400, error.code); throw error; }
-    return targetView(facts, normalized, mergeQueue === 'unknown' ? null : filesFor(facts, mergeQueue, normalized));
+    return { ...targetView(facts, normalized, mergeQueue === 'unknown' ? null : filesFor(facts, mergeQueue, normalized)),
+      basis: { revision: Number(row.revision), head_sha: facts.head_sha, merge_queue: mergeQueue } };
   }
   latest(repositoryId: string): Json | null {
     const id = latestSession(this.store, repositoryId);
