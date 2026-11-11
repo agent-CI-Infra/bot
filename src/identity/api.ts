@@ -1,5 +1,5 @@
 import type { Store } from '../storage/database.js';
-import type { Actor } from '../app/auth.js';
+import { repository, superAdmin, type Actor } from '../app/auth.js';
 import { digest, fail, fields, randomId, text, type Json } from '../core/security.js';
 import { authorize, createProjectServicePrincipal, invalidate, listEffectiveScopes, migrationReport, refreshSessionRevision } from './authorization.js';
 import { projectCapabilities, explicitDelegationCapabilities } from './storage.js';
@@ -7,6 +7,27 @@ import { revokeIdentity } from './bindings.js';
 
 export function identityApi(store: Store, user: Actor, token: string, method: string, url: URL, body: Json): Json | undefined {
   const path = url.pathname, context = user.context!;
+  const members = /^\/api\/repositories\/([^/]+)\/members$/.exec(path);
+  if (members && method === 'GET') {
+    const project = members[1]!;
+    repository(store, user, project);
+    authorize(context, 'config.write', { project_id: project });
+    const tenant = store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
+    // A tenant-wide GitHub grant only covers repositories still present in that installation.
+    const grants = store.all(`SELECT g.id,g.principal_id,g.scope,g.role,g.source,g.policy,g.verified_at,g.expires_at
+      FROM scoped_grants g WHERE g.tenant_id=? AND (g.project_id=? OR g.scope='tenant')
+      AND (g.source<>'github_derived' OR EXISTS(SELECT 1 FROM installation_repositories r
+        WHERE r.installation_ref=g.installation_ref AND r.repository_id=? AND r.present=1)) ORDER BY g.principal_id,g.id`, tenant, project, project)
+      .map(g => {
+        const scope = listEffectiveScopes(store, g.principal_id).find(s => s.grant_id === g.id);
+        return { ...g, state: scope?.state || 'inactive', capabilities: scope?.capabilities || [],
+          principal_name: store.get("SELECT display_name FROM external_identities WHERE principal_id=? AND provider='github' ORDER BY verified_at DESC LIMIT 1", g.principal_id)?.display_name ||
+            store.get('SELECT username FROM users WHERE id=?', g.principal_id)?.username || g.principal_id };
+      });
+    let canManageLegacy = false;
+    try { superAdmin(user); canManageLegacy = true; } catch { /* Source-specific writes remain platform-only. */ }
+    return { grants, can_manage_legacy: canManageLegacy, read_at: Date.now() };
+  }
   if (path === '/api/identity' && method === 'GET') {
     const scopes = listEffectiveScopes(store, context.principal_id), platform = scopes.some(s => s.scope === 'platform');
     const tenants = store.all('SELECT * FROM tenants').filter(t => platform || scopes.some(s => s.tenant_id === t.id && s.state === 'active'));

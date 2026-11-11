@@ -1,6 +1,6 @@
 // Project pages: one settings page per repository with categories on the left (#/projects/<id>/<section>).
 // Loaded after app.js and views.js and reuses their helpers.
-const projectSections = [['overview', '项目总览'], ['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['external', '外部执行'], ['members', '成员', true], ['activity', '运行状态']];
+const projectSections = [['overview', '项目总览'], ['basic', '基本设置'], ['management', '管理对话'], ['machine', '机器配置'], ['roles', '角色'], ['model', '模型'], ['release', '发版本'], ['knowledge', '项目知识'], ['external', '外部执行'], ['members', '成员'], ['activity', '运行状态']];
 // Older addresses open the Manager page: the workflows page it replaced, the task overview and the review, development and rule pages.
 const legacyProjectSections = { workflows: 'manager-prompt', tasks: '', review: '', development: '', rules: 'rule-sources' };
 // Every file has the same three layers: built-in default, project console override, default-branch repository file.
@@ -60,25 +60,54 @@ function releaseAdvice(markdown) {
 }
 // A settings form: fields, an error line and a save button; `save` receives the form and reports through the error line.
 // `after` receives the result text; without it the project page shows the text and reloads.
-function settingsForm(title, nodes, save, { editable = true, caption = '保存', after = null } = {}) {
+const projectSettingDrafts = new Map();
+function settingsForm(title, nodes, save, { editable = true, caption = '保存', after = null, draftKey = null } = {}) {
+  const target = current, address = location.hash;
+  const live = () => current === target && location.hash === address && form.isConnected;
   const section = card(title), form = document.createElement('form'), message = element('p', '', 'view-error'), submit = element('button', caption);
   form.className = 'project-form'; form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'alert');
   const set = element('fieldset', ''); set.disabled = !editable; set.append(...nodes); form.append(set, message);
   if (editable) { const actions = element('div', '', 'actions form-actions'); actions.append(submit); form.append(actions); }
+  const key = draftKey && `${me.id}:${me.actor?.tenant_id || ''}:${target.id}:${draftKey}`;
+  const draftNotice = element('p', '', 'muted'); draftNotice.setAttribute('role', 'status');
+  if (key && editable) {
+    const valueOf = control => control.type === 'checkbox' ? control.checked : control.value;
+    const baseline = Object.fromEntries([...form.elements].filter(c => c.name).map(c => [c.name, valueOf(c)]));
+    const draft = { ...projectSettingDrafts.get(key) };
+    for (const [name, value] of Object.entries(draft)) {
+      const control = form.elements[name]; if (!control) continue;
+      if (control.type === 'checkbox') control.checked = value; else control.value = value;
+    }
+    const update = () => { draftNotice.textContent = Object.keys(draft).length ? '草稿未保存；刷新会保留输入，保存时重新核对当前权限。' : ''; };
+    form.addEventListener('input', event => {
+      const control = event.target; if (!control.name) return;
+      if (valueOf(control) === baseline[control.name]) delete draft[control.name]; else draft[control.name] = valueOf(control);
+      projectSettingDrafts.set(key, draft); update();
+    });
+    update(); form.prepend(draftNotice);
+    const discard = button('放弃本组草稿', async () => {
+      if (!await askConfirm({ title: '放弃未保存的设置？', body: ['仅清除此组草稿，并读取最新已保存设置。'], action: '放弃草稿' })) return;
+      projectSettingDrafts.delete(key); if (live()) await reloadProject();
+    }, 'quiet');
+    form.querySelector('.form-actions').append(discard);
+  }
   form.addEventListener('submit', async event => {
-    event.preventDefault(); message.className = 'view-error'; message.textContent = '';
+    event.preventDefault(); if (submit.disabled || !editable || !live()) return; message.className = 'view-error'; message.textContent = '';
     const invalid = [...form.querySelectorAll('input')].find(el => !el.checkValidity());
     if (invalid) {
       const label = invalid.closest('label')?.firstChild?.textContent?.trim() || invalid.name, range = invalid.validity.rangeOverflow || invalid.validity.rangeUnderflow;
       message.textContent = range ? `${label}需在 ${invalid.min}–${invalid.max} 之间` : invalid.validity.stepMismatch ? `${label}的取值步长是 ${invalid.step}` : `${label}：${invalid.validationMessage}`; invalid.focus(); return;
     }
-    submit.disabled = true;
+    const submittedDraft = key && projectSettingDrafts.get(key);
+    submit.disabled = true; if (key) set.disabled = true;
     // The page re-renders after saving, so the result is shown at the top of the refreshed section.
     try {
       const done = await save(form, text => { message.className = 'view-progress'; message.textContent = text; }), text = typeof done === 'string' && done ? done : '已保存';
+      if (key && projectSettingDrafts.get(key) === submittedDraft) projectSettingDrafts.delete(key);
+      if (!live()) return;
       if (after) await after(text); else { current.flash = text; await reloadProject(); }
     }
-    catch (err) { message.className = 'view-error'; message.textContent = err.message; } finally { submit.disabled = false; }
+    catch (err) { message.className = 'view-error'; message.textContent = err.message; } finally { submit.disabled = false; set.disabled = !editable; }
   });
   section.append(form); return section;
 }
@@ -117,10 +146,14 @@ async function loadProject(id,section=current.section) {
   const overview = section === 'overview', target = current;
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), overview ? null : api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, overview ? null : api('/api/repositories/'+id+'/rules').catch(()=>null), overview ? null : api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  Object.assign(target, { external, repository: repo.repository, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+  Object.assign(target, { external, repository: repo.repository, canConfigure: repo.can_configure, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
-async function reloadProject() { await loadProject(current.id); renderProject({ id: current.id, section: current.section, item: current.item }); }
+async function reloadProject() {
+  const target = current, route = { id: target.id, section: target.section, item: target.item };
+  await loadProject(target.id, target.section);
+  if (current === target && projectRoute()?.id === route.id && projectRoute()?.section === route.section) return renderProject(route);
+}
 // Reloads the project with the outcome of an action shown at the top of the section.
 async function reloadWith(notice) { if (notice) current.flash = notice; await reloadProject(); }
 function projectStatus() {
@@ -134,15 +167,7 @@ function projectHeader() {
   const back = element('a', '← 全部项目', 'back-link'); back.href = '#/projects';
   title.append(element('h1', repository.full_name), ...projectStatus());
   actions.append(link(`https://github.com/${repository.full_name}`, '在 GitHub 打开', 'button-link'));
-  if (me.role === 'super_admin') actions.append(policy.enabled
-    ? button('禁用项目', async () => {
-      if (!await askConfirm({ title: `禁用 ${repository.full_name}？`, body: ['新的 Issue／PR 不再处理，正在执行的任务会中止，虚拟电脑停止但数据保留，之后可以再启用。'], action: '禁用', danger: true })) return;
-      await api(`/api/installations/${current.id}/disable`, 'POST', {}).catch(error); await reloadProject();
-    })
-    : button('启用项目', async () => { await api(`/api/installations/${current.id}/activate`, 'POST', {}).catch(error); await reloadProject(); }, ''));
-  // Always offered here; the server deletes only when GitHub, asked right now, says the account lost the repository.
-  if (me.role === 'super_admin') actions.append(button('删除项目',
-    () => deleteProject({ id: current.id, full_name: repository.full_name, registered: true }, async () => { current = null; location.hash = '#/projects'; }), 'quiet destructive'));
+  if (current.section === 'basic') actions.append(button('刷新项目设置', () => reloadProject().catch(error)));
   head.append(back, title, actions); return head;
 }
 function projectBody(section) {
@@ -325,7 +350,9 @@ const editableRole = r => ({ role_id: r.role_id, enabled: r.enabled, name: r.nam
 
 function rolesSection() { return rolesConsole(); }
 function basicSection() {
-  const { repository, policy, installed, environment } = current, info = card('仓库');
+  const target = current, { repository, policy, installed, environment } = target, info = card('项目概况');
+  const id = target.id, save = values => api(`/api/repositories/${id}/policy`, 'PATCH', values);
+  const editable = target.canConfigure !== false;
   info.append(facts([['仓库', link(`https://github.com/${repository.full_name}`, repository.full_name)], ['仓库 ID', repository.id], ['所有者', installed?.owner_login ? `${installed.owner_login}（${repository.owner_id}）` : repository.owner_id],
     ['处理账号', installed?.account_name || repository.account_id], ['安装', !installed ? null : installed.installed === null ? '不在安装列表' : `${installed.installation_id ? '安装 ' + installed.installation_id : '机器人账号可见'}${installed.installed === false ? '（已移出）' : ''}`],
     ['可见性', installed ? installed.private ? '私有' : '公开' : null], ['项目状态', policy.enabled ? '已启用' : '已禁用'], ['虚拟电脑', environment ? (states[environment.environment.state] || [environment.environment.state])[0] : '读取失败']]));
@@ -334,8 +361,60 @@ function basicSection() {
     ['机器', current.rules?.computer?.cpus ? `${current.rules.computer.cpus} CPU · ${current.rules.computer.memory_mb} MB（${current.rules.files.find(f=>f.path==='.bot/computer.yaml').source==='repository'?'仓库 .bot/computer.yaml':'控制台'}）` : environment?.environment.computer ? `${environment.environment.computer.cpus} CPU · ${environment.environment.computer.memory_mb} MB` : null]]));
   const branch = settingsForm('分支', [field('基准分支', input('base_branch', policy.base_branch, { maxLength: 256, placeholder: '留空使用仓库默认分支' })),
     note('开发任务从这个分支拉取代码并向它开 PR；检视 Issue 时也读取这个分支的代码。')],
-  form => patchPolicy(changed({ base_branch: form.elements.base_branch.value.trim() }, { base_branch: policy.base_branch || '' })));
-  return [info, summary, branch];
+    form => save(changed({ base_branch: form.elements.base_branch.value.trim() }, { base_branch: policy.base_branch || '' })), { editable, draftKey: 'branch' });
+  const automation = settingsForm('检视与开发策略', [
+    checkbox('review_enabled', policy.review_enabled, '开启 Issue 与 PR 检视'), checkbox('development_enabled', policy.development_enabled, '开启自动开发'),
+    note('此处保存功能开关，不代表任务正在执行。项目禁用时仍可保存，重新启用后生效。')],
+    form => save(changed({ review_enabled: form.elements.review_enabled.checked, development_enabled: form.elements.development_enabled.checked },
+      { review_enabled: !!policy.review_enabled, development_enabled: !!policy.development_enabled })), { editable, draftKey: 'automation' });
+  const sources = card('规则来源');
+  sources.append(note('内置默认、项目控制台和默认分支仓库文件依次覆盖。这里仅展示来源，编辑入口沿用角色与机器页面。'));
+  if (!target.rules) sources.append(consoleState('规则来源暂不可读取', '请重新读取；当前不能判断哪一层生效。', { retry: () => reloadProject().catch(error) }));
+  else for (const file of target.rules.files.filter(f => f.path === '.bot/guide.md' || f.path === '.bot/computer.yaml')) {
+    sources.append(facts([['规则', file.path], ['当前来源', layerNames[file.source] || file.source]]));
+  }
+  sources.append(consoleLink(`#/projects/${id}/roles/manager`, '查看与修改规则', '保留现有的来源比较和版本检查'));
+  const publication = card('公开可见性');
+  if (me.role !== 'super_admin') publication.append(note('公开看板由平台超级管理员管理；项目配置权限不会增加公开授权。'));
+  else if (!installed) publication.append(consoleState('公开设置暂不可读取', '安装信息读取失败，公开状态未知。', { retry: () => reloadProject().catch(error) }));
+  else {
+    const status = element('p', '', 'muted'), feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'status');
+    const toggle = button('', async () => {
+      const enabled = !installed.board_enabled;
+      if (!await askConfirm({ title: enabled ? '开启公开看板？' : '关闭公开看板？',
+        body: [enabled ? '允许无需登录访问单仓看板及 Dashboard 汇总，包括私有仓显式公开的看板数据。' : '保存后停止对外提供本项目看板。',
+          '公开内容由看板采集服务生成，不开放管理端任务日志、身份、提示词或成本。'], action: enabled ? '开启公开看板' : '关闭公开看板', danger: enabled })) return;
+      toggle.disabled = true; feedback.textContent = '正在保存公开设置…';
+      try {
+        const { board } = await api(`/api/installations/${id}/board`, 'PATCH', { enabled });
+        Object.assign(installed, { board_enabled: board.enabled, board_state: board.state, board_url: board.url });
+        show(); feedback.textContent = board.enabled ? '公开设置已保存；看板数据允许公开访问。' : '已关闭公开访问。';
+      } catch (err) { feedback.textContent = '公开设置保存失败：' + err.message; }
+      finally { toggle.disabled = installed.installed !== true; }
+    });
+    const show = () => { status.textContent = !installed.board_enabled ? '看板未公开' : installed.board_state === 'published' ? '看板已公开' : '已允许公开，等待采集'; toggle.textContent = installed.board_enabled ? '关闭公开看板' : '开启公开看板'; };
+    show(); toggle.disabled = installed.installed !== true;
+    publication.append(status, note('公开与项目启用分别保存。私有仓也可显式选择公开，请确认数据范围后操作。'), toggle, feedback);
+    if (installed.board_enabled && installed.board_url) publication.append(link(installed.board_url, '查看公开看板'));
+  }
+  const danger = card('危险区'); danger.classList.add('project-danger');
+  danger.append(note('禁用会停止新任务、中止正在执行的任务并停止虚拟电脑，保留现有数据；删除会清除本系统项目数据，且仍须通过服务端的实时检查。'));
+  if (me.role === 'super_admin') {
+    const feedback = element('p', '', 'view-error'); feedback.setAttribute('role', 'alert');
+    const change = button(policy.enabled ? '禁用项目' : '启用项目', async () => {
+      if (!await askConfirm({ title: `${policy.enabled ? '禁用' : '启用'} ${repository.full_name}？`,
+        body: [policy.enabled ? '新 Issue／PR 不再处理；正在执行的任务会中止，虚拟电脑停止，已有数据保留。' : '恢复按当前检视、开发与模型配置处理任务。', '公开看板的可见性由上方独立设置控制。'], action: policy.enabled ? '禁用' : '启用', danger: !!policy.enabled })) return;
+      change.disabled = true; feedback.textContent = '';
+      try { await api(`/api/installations/${id}/${policy.enabled ? 'disable' : 'activate'}`, 'POST', {}); if (current === target && projectRoute()?.id === id) await reloadProject(); }
+      catch (err) { feedback.textContent = `项目${policy.enabled ? '禁用' : '启用'}失败：${err.message}`; }
+      finally { change.disabled = false; }
+    }, policy.enabled ? 'destructive' : '');
+    danger.append(change, button('删除项目', () => deleteProject({ id, full_name: repository.full_name, registered: true }, async () => {
+      if (current === target && projectRoute()?.id === id) { current = null; location.hash = '#/projects'; }
+    }), 'quiet destructive'), feedback);
+  } else danger.append(note('启用、禁用与删除项目由平台超级管理员处理。请联系该管理员；项目管理员不因页面入口获得这些能力。'));
+  const layout = element('div', '', 'project-settings-layout'); layout.append(info, summary, branch, automation, sources, publication, danger);
+  return [layout];
 }
 
 function machineSection() {
@@ -816,27 +895,74 @@ async function refreshActionsFailureStatus(token) {
 }
 
 function membersSection() {
-  const section = card('项目管理员'), list = element('ul', '', 'history'), add = element('div', '', 'actions member-add');
-  section.append(note('项目管理员可以管理这个项目的检视、开发、模型和虚拟电脑启停，看到它的任务、日志和投递；不能修改机器配置或其他项目。'), list, add);
-  (async () => {
+  const target = current, id = target.id, address = location.hash, section = card('项目成员与授权来源');
+  const live = () => current === target && location.hash === address && section.isConnected;
+  let readVersion = 0;
+  const load = async () => {
+    const request = ++readVersion, isCurrent = () => live() && request === readVersion;
+    let data;
+    try { data = await api(`/api/repositories/${id}/members`); }
+    catch (err) {
+      if (isCurrent()) section.replaceChildren(element('h3', '项目成员与授权来源'), consoleState('成员权限读取失败',
+        err.status === 403 ? '需要本项目配置权限。请联系组织或平台管理员；身份绑定不会自动增加成员管理能力。' : err.message,
+        { tone: 'error', retry: load }));
+      return;
+    }
+    if (!isCurrent()) return;
+    section.replaceChildren(element('h3', '项目成员与授权来源'), note(`本次读取：${timestamp(data.read_at)}。每次操作仍由服务端重新核验。平台超级管理员可管理全部项目，不计入下方项目授权。`));
+    const list = element('div', '', 'project-member-list');
+    for (const grant of data.grants) {
+      const row = element('article', '', 'project-member'), inherited = grant.scope === 'tenant', github = grant.source === 'github_derived';
+      row.append(element('h4', grant.principal_name), badge(({ active: '有效', revoked: '已撤销', inactive: '账号已停用', pending_verification: '待验证', quarantined: '归属待处理' })[grant.state] || grant.state, grant.state === 'active' ? 'success' : 'warning'),
+        facts([['角色', ({ project_admin: '项目管理员', org_admin: '组织管理员', delegated: '受委派成员', service: '项目服务身份' })[grant.role] || grant.role],
+          ['生效范围', inherited ? '整个组织，包含本项目' : '仅本项目'], ['授权来源', github ? 'GitHub 当前权限（继承）' : inherited ? '组织显式委派（继承）' : '项目显式委派'],
+          ['最近核验', grant.verified_at ? timestamp(grant.verified_at) : '未提供核验时间'], ['到期时间', grant.expires_at == null ? '未设置到期时间' : timestamp(grant.expires_at)]]));
+      const capabilities = element('details', '', 'fold'); capabilities.append(element('summary', '查看授权能力'), note(grant.capabilities.join('、') || '当前无有效能力')); row.append(capabilities);
+      row.append(note(github ? '由当前 GitHub 身份和安装范围核验；请在 GitHub 修改后重新验证，不能在这里直接编辑。' : inherited ? '继承自组织授权，请在原授权来源调整；移除项目单独授权不会移除继承权限。' : grant.policy === 'legacy' ? '由平台管理员在下方管理项目分配。' : '独立显式委派沿用授权服务管理；撤销其他来源不会移除这条委派。'));
+      list.append(row);
+    }
+    if (!data.grants.length) list.append(consoleState('没有本项目授权记录', '平台超级管理员仍可管理本项目。需要其他成员访问时，请由有转授权能力的管理员处理。'));
+    section.append(button('刷新成员权限', load, 'quiet'), list);
+    if (data.can_manage_legacy) {
+      const legacy = card('项目管理员分配'); section.append(legacy); await loadLegacy(legacy, isCurrent);
+    } else section.append(note('当前页面只展示授权。项目管理员不自动拥有 grants.manage，不能再转授权。'));
+  };
+  const loadLegacy = async (container, isCurrent) => {
+    try {
     const [{ users }, { assignments, organization_assignments: organizations, organizations: installed }] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);
+    if (!isCurrent()) return;
+    const list = element('ul', '', 'history'), add = element('div', '', 'actions member-add'), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
+    container.append(note('只修改本项目的旧式显式分配；GitHub 派生、独立委派和整个组织授权保持各自来源。'), list, add, message);
     const assigned = user => assignments.filter(a => a.user_id === user.id).map(a => a.repository_id);
     // Only the single-repository grant is changed here; a whole-organization grant is edited on the users page.
-    const wholeOrganization = user => organizations.some(o => o.user_id === user.id && o.owner_id === current.repository.owner_id);
+    const wholeOrganization = user => organizations.some(o => o.user_id === user.id && o.owner_id === target.repository.owner_id);
     // A grant whose repository is neither installed nor a project any more would be refused, so saving here drops it.
     const grantable = new Set([...installed.flatMap(o => o.repositories.map(r => r.id)), ...repositories.map(r => r.id)]);
-    const update = async (user, ids) => { await api('/api/project-admin-assignments', 'PUT', { user_id: user.id, repository_ids: ids.filter(id => grantable.has(id)) }).catch(error); await reloadProject(); };
-    for (const user of users.filter(u => u.role === 'project_admin' && (assigned(u).includes(current.id) || wholeOrganization(u)))) {
+    let pending = false;
+    const update = async (user, ids) => {
+      if (pending || !live()) return; pending = true;
+      container.querySelectorAll('button,select').forEach(control => control.disabled = true); message.textContent = '';
+      try { await api('/api/project-admin-assignments', 'PUT', { user_id: user.id, repository_ids: ids.filter(id => grantable.has(id)) }); if (live()) await load(); }
+      catch (err) { if (live()) message.textContent = '项目分配保存失败：' + err.message; }
+      finally { pending = false; container.querySelectorAll('button,select').forEach(control => control.disabled = false); }
+    };
+    for (const user of users.filter(u => u.role === 'project_admin' && (assigned(u).includes(id) || wholeOrganization(u)))) {
       const li = element('li', ''); li.append(element('span', user.username + (user.active ? '' : '（已停用）')));
       if (wholeOrganization(user)) li.append(element('span', '整个组织授权，在「用户」页修改', 'muted'));
-      if (assigned(user).includes(current.id)) li.append(button('移除', () => update(user, assigned(user).filter(id => id !== current.id))));
+      if (assigned(user).includes(id)) li.append(button('移除', async () => {
+        if (await askConfirm({ title: `移除 ${user.username} 的项目分配？`, body: ['只移除此项目的显式分配；组织继承、GitHub 派生和其他显式委派仍按各自条件生效。'], action: '移除分配', danger: true })) await update(user, assigned(user).filter(value => value !== id));
+      }));
       list.append(li);
     }
     if (!list.childElementCount) list.append(element('li', '还没有项目管理员，超级管理员可以管理全部项目。', 'muted'));
-    const candidates = users.filter(u => u.role === 'project_admin' && u.active && !assigned(u).includes(current.id) && !wholeOrganization(u)), select = document.createElement('select');
+    const candidates = users.filter(u => u.role === 'project_admin' && u.active && !assigned(u).includes(id) && !wholeOrganization(u)), select = document.createElement('select');
+    select.setAttribute('aria-label', '添加项目管理员');
     select.add(new Option(candidates.length ? '选择项目管理员' : '没有可添加的项目管理员（在“用户”页创建）', '')); candidates.forEach(u => select.add(new Option(u.username, u.id)));
-    add.append(select, button('添加', () => { const user = candidates.find(u => u.id === select.value); if (user) update(user, [...assigned(user), current.id]); }));
-  })().catch(err => list.replaceChildren(element('li', err.message, 'view-error')));
+    add.append(select, button('添加', () => { const user = candidates.find(u => u.id === select.value); if (user) return update(user, [...assigned(user), id]); }));
+    } catch (err) { if (isCurrent()) container.append(consoleState('项目分配读取失败', err.message, { tone: 'error', retry: () => { container.replaceChildren(element('h3', '项目管理员分配')); return loadLegacy(container, isCurrent); } })); }
+  };
+  section.append(consoleState('正在读取项目授权', '按本项目范围核对有效授权和历史来源。'));
+  void load();
   return [section];
 }
 

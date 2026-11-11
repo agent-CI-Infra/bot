@@ -31,6 +31,8 @@ GitHub 登录后的页头显示 GitHub 用户名和头像，内部账号 ID 仍�
 
 ## 服务端契约
 
+`GET /api/repositories/:id/members` 是按项目过滤的只读授权投影，要求当前项目的 `tasks.read` 与 `config.write`。它只返回该项目或其组织范围内的授权摘要；组织级 GitHub 派生授权还须命中该安装的当前仓库范围。响应不包含身份凭据或授权证据原文，也不会开放组织级成员列表。`can_manage_legacy` 仅说明当前平台管理员能否使用原有项目分配接口，既有写入能力和服务端版本检查保持不变。项目详情返回 `can_configure`，供只读页面隐藏修改入口。
+
 `src/identity/authorization.ts` 提供 `resolveActor(store, sessionRef, options)`、`authorize(actor, capability, resource)` 和 `listEffectiveScopes(store, principalId)`。ActorContext 字段为 `principal_id, tenant_id, project_id?, channel, capabilities, authorization_revision, request_id`。它由可信服务端建立；对象副本、浏览器 JSON、IM 文本或模型参数不能成为已认证 Actor。旧 Actor 由 `src/app/auth.ts` 适配，继续用于现有控制台服务。
 
 能力包括 `tasks.read/tasks.write`、`roles.edit/roles.publish`、`knowledge.read/knowledge.write`、`schedules.manage`、`config.write`、`release.manage`；平台另外拥有授权管理能力。授权检查同时校验租户和项目归属。读取接口继续使用服务端范围过滤；写请求在事务开始或每次独立落库前检查当前版本，GitHub 请求发出前再检查。异步人类任务与发布使用发起人的当前项目能力；新项目自动化使用独立 service principal、项目显式授权和组织维护归属，不借用创建人的个人 token。创建人停用后 service principal 可以继续按项目授权执行；缺少维护归属或项目授权时暂停。调度器、管理对话与 IM SDK 属于后续模块。

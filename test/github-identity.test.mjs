@@ -98,6 +98,30 @@ test('global user access matches authorized project lists, including inherited, 
   assert.deepEqual(user.access.projects, []); assert.equal(user.access.github_pending, false);
 });
 
+test('project members expose only applicable grants and require current project configuration authority', async t => {
+  const f = await identityFixture(t), login = await f.login(), principal = login.result.principal_id;
+  await repository(f.admin, f.a.id, '102');
+  const credentials = session(f.h.store, principal, login.result.identity_id);
+  const read = path => fetch(f.h.admin + path, { headers: { Cookie: 'bot_session=' + credentials.token } });
+  const own = await read('/api/repositories/101/members'); assert.equal(own.status, 200);
+  const data = await own.json(); assert.equal(data.can_manage_legacy, false);
+  assert.ok(data.grants.some(g => g.principal_id === principal && g.source === 'github_derived' && g.state === 'active'));
+  assert.ok(data.grants.every(g => !('evidence' in g) && !('installation_ref' in g) && !('credentials' in g)));
+  assert.equal((await read('/api/repositories/201/members')).status, 403);
+  assert.equal((await read('/api/project-admin-assignments')).status, 403);
+  assert.equal((await f.admin('/api/repositories/101/members')).value.can_manage_legacy, true);
+  // An owner-wide derived grant must not appear for a same-tenant project outside its installation.
+  assert.ok(!(await f.admin('/api/repositories/102/members')).value.grants.some(g => g.principal_id === principal));
+  const manual = await f.admin('/api/identity/grants', 'POST', { principal_id: principal, tenant_id: 'github.com:20', project_id: '201', capabilities: ['tasks.read'] });
+  assert.equal(manual.status, 201);
+  const view = await read('/api/repositories/201'); assert.equal(view.status, 200); assert.equal((await view.json()).can_configure, false);
+  assert.equal((await read('/api/repositories/201/members')).status, 403);
+  f.h.store.run("UPDATE github_installations SET status='suspended'");
+  assert.equal((await read('/api/repositories/101/members')).status, 403);
+  const historical = (await f.admin('/api/repositories/101/members')).value.grants.find(g => g.principal_id === principal);
+  assert.equal(historical.state, 'pending_verification');
+});
+
 test('only repository Admin automatically grants management; Write, Maintain, Triage and Read do not', async t => {
   const f = await identityFixture(t); f.state.owner = false;
   const login = await f.login(), principal = login.result.principal_id;
