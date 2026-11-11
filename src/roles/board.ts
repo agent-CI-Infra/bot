@@ -1,3 +1,4 @@
+import { roleKind } from './catalog.js';
 import { createHash } from 'node:crypto';
 import type { Store } from '../storage/database.js';
 import { fail, type Json } from '../core/security.js';
@@ -139,14 +140,18 @@ export function roleBoard(store: Store, repositoryId: string, url?: URL): Json {
     const mine = ready.filter(entry => entry.role === role.role_id && role.enabled);
     if (mine.length > limit) truncated = true;
     const limitValue = limits[role.role_id] ?? null;
-    // No `blocked` object here: nothing blocks a run in this slice, so any count would be a hard-coded zero that a
-    // reader would take for a measurement. It comes back with admission, when it can report something it actually knows.
+    // No `blocked` object here: admission refuses a run in role-run.ts and the bind re-check, neither of which knows the
+    // queued-task projection this board builds, so any count would be a hard-coded zero a reader would take for a
+    // measurement. `limit` still says what admission will enforce.
     return { role: role.role_id, enabled: !!role.enabled, limit: limitValue, limit_source: limitValue === null ? 'unset' : 'policy',
       running, ready: mine.slice(0, limit).map(entry => ({ task_id: entry.task.id, object_number: entry.task.object_number, kind: entry.task.kind, queued_at: entry.task.created_at, position: entry.position })) };
   });
   const version = createHash('sha256').update(JSON.stringify({ revision: config.revision, updated_at: config.updated_at ?? null, stages: config.required_stages ?? [], limits })).digest('hex').slice(0, 16);
-  // `enforced` describes this project, not the module: a project with no limit has nothing that can refuse a run.
-  return { version, updated_at: config.updated_at ?? null, enforced: Object.values(limits).some(limit => limit !== null),
+  // `enforced` means "admission can refuse a run in this project", so only a limit on a role admission gates counts: a
+  // limit on an observer role (reviewer, test, ux, or any custom id — see catalog.js) can never refuse anything, because
+  // observer runs take no slot.
+  const enforced = config.roles.some(role => roleKind(role.role_id) !== 'observer' && (limits[role.role_id] ?? null) !== null);
+  return { version, updated_at: config.updated_at ?? null, enforced,
     project: { task_concurrency: repositoryConcurrency(store, repositoryId), task_concurrency_default: defaultConcurrency(store) },
     unsupported, roles, ready_more: truncated };
 }
