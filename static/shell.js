@@ -41,6 +41,31 @@ const consoleAttention = {
   needs_replan: ['需要重新规划', '查看验收缺口和已有产物，再决定下一步。']
 };
 function consoleInboxRoute() { return /^#\/inbox(?:\/(all|[1-9]\d*))?(?:\/(\d+))?$/.exec(location.hash); }
+// Return metadata stays in memory: no draft, credential or task detail is stored in a URL or browser storage.
+let consoleInboxReturn = null;
+function captureConsoleInbox(taskId) {
+  return consoleInboxRoute() ? { address: location.hash, actor: me, taskId, y: scrollY } : null;
+}
+function rememberInboxReturn(origin, repositoryId) {
+  consoleInboxReturn = origin && origin.actor === me ? { ...origin, repositoryId } : null;
+}
+function inboxReturnLink(repositoryId) {
+  const origin = consoleInboxReturn;
+  if (!origin || origin.actor !== me || String(origin.repositoryId) !== String(repositoryId)) return null;
+  return consoleLink(origin.address, '返回待处理列表', '重新读取原来的项目范围和分页；配置保存不代表任务已恢复。');
+}
+async function refreshInboxAfterTask(origin) {
+  const live = () => me === origin.actor && tab === 'inbox' && location.hash === origin.address && !taskView.open;
+  if (!live()) return;
+  const request = ++renderVersion;
+  await renderConsoleInbox(request);
+  if (!live() || request !== renderVersion) return;
+  restoreInboxPosition(origin);
+}
+function restoreInboxPosition(origin) {
+  const target = document.querySelector(`[data-attention-task="${CSS.escape(origin.taskId)}"]`) || $('console-page').querySelector('.console-inbox-filters button');
+  scrollTo(0, origin.y); target?.focus({ preventScroll: true });
+}
 // Same wording as the task detail (static/views.js): the list must not invent a second name for a level.
 const consolePriority = { P0: '紧急止损', P1: '核心阻塞', P2: '正常开发', P3: '非核心完善' };
 // How long an item has waited, from the state change the list is already sorted by; coarse on purpose, because the
@@ -61,7 +86,7 @@ function consoleTaskRow(row, attention = false) {
   const level = consolePriority[priority] ? `${priority} ${consolePriority[priority]}` : priority;
   // A waiting item says which level it is: P0 and P2 look alike otherwise, and the list is sorted by age, not urgency.
   text.append(element('p', `${row.full_name || row.repository_id} · ${guidance?.[0] || projectTaskLabel(row)}${guidance ? ' · ' + level : ''}`, 'eyebrow'), element('h2', row.summary || row.id));
-  if (guidance) text.append(element('p', guidance[1]));
+  if (guidance) text.append(element('p', row.error_cause?.action || guidance[1]));
   if (row.origin) text.append(element('p', taskOriginCaption(row.origin), 'muted'));
   if (row.error_code) text.append(element('p', row.error_code, 'muted'));
   const waited = guidance ? waitedFor(row.updated_at) : null;
@@ -217,7 +242,14 @@ async function renderConsoleInbox(request) {
 }
 async function renderConsolePage(request) {
   if (tab === 'new-task') await renderNewTask(request);
-  else if (tab === 'more') renderConsoleMore(); else await renderConsoleInbox(request);
+  else if (tab === 'more') renderConsoleMore();
+  else {
+    await renderConsoleInbox(request);
+    const origin = consoleInboxReturn;
+    if (request === renderVersion && tab === 'inbox' && origin?.actor === me && origin.address === location.hash) {
+      consoleInboxReturn = null; restoreInboxPosition(origin);
+    }
+  }
 }
 // Keep only position/focus metadata in memory: never persist field values, passwords or credentials.
 function rememberConsolePosition() {

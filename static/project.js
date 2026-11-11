@@ -130,6 +130,8 @@ async function renderProject(route) {
   // A newly granted or externally created project may not be in the list loaded at login.
   if (!repositories.some(repo => String(repo.id) === String(current.id))) repositories.push(current.repository);
   current.section = section; current.item = route.item || null; page.replaceChildren(projectHeader(), projectBody(section));
+  const inboxReturn = typeof inboxReturnLink === 'function' ? inboxReturnLink(current.id) : null;
+  if (inboxReturn) page.prepend(inboxReturn);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   // The Manager page draws its cards after reading them; the anchor of an older address is scrolled to once they are there.
   if (current.focusAnchor) { const anchor = current.focusAnchor; current.focusAnchor = null;
