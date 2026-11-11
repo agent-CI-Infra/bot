@@ -53,7 +53,7 @@ test('模型行写明哪些工作类型显式指定它', async ({ page }) => {
     const sharedCard = page.locator('.side-card').filter({ has: page.getByRole('heading', { name: '部署共享模型', exact: true }) });
     const sharedRow = sharedCard.locator('li.model-entry').filter({ hasText: 'shared-model' });
     await expect(sharedRow).toContainText('部署共享');
-    await expect(sharedRow).toContainText('未被任何项目选用');
+    await expect(sharedRow).toContainText('无项目默认或工作类型引用');
     await expect(sharedRow.locator('.model-connection-facts')).not.toContainText('没有被工作类型显式指定');
     await expect(sharedRow.locator('.model-connection-facts')).not.toContainText('工作类型显式使用');
     expect(errors).toEqual([]);
