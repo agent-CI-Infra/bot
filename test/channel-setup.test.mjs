@@ -1,9 +1,77 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { channelFixture, connector, credentials, until, envelope, post, finished, group, directQuery } from './channel-fixture.mjs';
+import { channelFixture, connector, credentials, until, envelope, post, finished, group, directQuery, bindFixture } from './channel-fixture.mjs';
 import { harness, setup } from './helpers.mjs';
 
 const probe = (admin, id, revision = 1) => admin('/api/channels/feishu/probe', 'POST', { connector_id: id, expected_revision: revision });
+test('personal name discovery is owner-only, returns only the matched name and leaves identity proof and grants unchanged', async t => {
+  const { h, id, admin, member, wire } = await channelFixture(t);
+  await probe(admin, id);
+  const local = await member('readable-name-user', {});
+  bindFixture(h, id, local.id, 'ou_readable', 'install-tenant');
+  const binding = (await local.client('/api/channels/bindings')).value.bindings[0];
+  assert.equal(binding.app_name, 'Fixture bot'); assert.equal(binding.tenant_name, 'Fixture enterprise');
+  assert.equal(binding.can_read_name, 1); assert.equal(wire.state.profileRequests.length, 0);
+  const route = '/api/channels/bindings/' + binding.id + '/name';
+  assert.equal((await admin(route, 'POST', {})).status, 404);
+  assert.equal((await h.client()(route, 'POST', {})).status, 401);
+  assert.equal((await local.client(route, 'POST', {}, { 'X-CSRF-Token': '' })).value.error, 'csrf_required');
+  assert.equal((await local.client(route, 'POST', { open_id: 'ou_someone_else' })).value.error, 'unknown_field');
+  assert.equal(wire.state.profileRequests.length, 0);
+  const before = h.store.get('SELECT * FROM external_identities WHERE id=?', binding.id);
+  const grants = JSON.stringify(h.store.all('SELECT * FROM scoped_grants ORDER BY id'));
+  const refreshed = await local.client(route, 'POST', {});
+  assert.equal(refreshed.status, 201);
+  assert.deepEqual(refreshed.value, { id: binding.id, display_name: '张小明' });
+  assert.doesNotMatch(JSON.stringify(refreshed.value), /must-not-expose|fixture-only|email|mobile/);
+  assert.deepEqual({ ...h.store.get('SELECT * FROM external_identities WHERE id=?', binding.id) }, { ...before, display_name: '张小明' });
+  assert.equal(JSON.stringify(h.store.all('SELECT * FROM scoped_grants ORDER BY id')), grants);
+  wire.state.profileCode = 99991672;
+  assert.equal((await local.client(route, 'POST', {})).value.error, 'channel_user_name_unavailable');
+  wire.state.profileCode = 0; wire.state.profileName = '';
+  assert.equal((await local.client(route, 'POST', {})).value.error, 'channel_user_name_unavailable');
+  wire.state.profileName = 'Wrong person'; wire.state.profileOpenId = 'ou_wrong';
+  assert.equal((await local.client(route, 'POST', {})).value.error, 'channel_user_name_unavailable');
+  assert.equal(h.store.get('SELECT display_name FROM external_identities WHERE id=?', binding.id).display_name, '张小明');
+  const requests = wire.state.profileRequests.length;
+  await h.stop(); await h.start();
+  assert.equal((await local.client('/api/channels/bindings')).value.bindings[0].display_name, '张小明');
+  assert.equal(wire.state.profileRequests.length, requests);
+});
+
+test('name lookups never use another enterprise or a replaced app and do not disclose another user binding', async t => {
+  const { admin, h, id, wire } = await channelFixture(t);
+  const binding = (await admin('/api/channels/bindings')).value.bindings[0];
+  assert.equal(binding.can_read_name, 0);
+  const route = '/api/channels/bindings/' + binding.id + '/name';
+  assert.equal((await admin(route, 'POST', {})).value.error, 'channel_user_name_unavailable');
+  assert.equal(wire.state.profileRequests.length, 0);
+  await admin('/api/channels/connectors/' + id, 'PATCH', { app_id: 'cli_replaced', bot_open_id: 'ou_replaced_bot', expected_revision: 1 });
+  const after = (await admin('/api/channels/bindings')).value.bindings[0];
+  assert.equal(after.app_name, null); assert.equal(after.tenant_name, null); assert.equal(after.can_read_name, 0);
+  assert.equal((await admin(route, 'POST', {})).value.error, 'channel_connector_inactive');
+  assert.equal(h.store.get('SELECT display_name FROM external_identities WHERE id=?', binding.id).display_name, 'ou_alice');
+  assert.equal(wire.state.profileRequests.length, 0);
+});
+
+test('asynchronous name refresh rechecks revocation and the current connector revision before caching', async t => {
+  for (const change of ['disable', 'revision', 'revoke']) await t.test(change, async t => {
+    const { admin, h, id, wire, principal } = await channelFixture(t);
+    bindFixture(h, id, principal, 'ou_profile_race', 'install-tenant');
+    const binding = h.store.get("SELECT * FROM external_identities WHERE external_actor='ou_profile_race'");
+    let release; wire.state.profileGate = new Promise(r => { release = r; }); t.after(() => release());
+    const pending = admin('/api/channels/bindings/' + binding.id + '/name', 'POST', {});
+    await until(() => wire.state.profileRequests.length);
+    if (change === 'revoke') await admin('/api/identity/bindings/' + binding.id, 'DELETE', {});
+    else await admin('/api/channels/connectors/' + id, 'PATCH', { enabled: change !== 'disable', expected_revision: 1 });
+    release();
+    const result = await pending;
+    assert.ok(result.status >= 400);
+    assert.match(result.value.error, /authorization_changed|external_binding_required|channel_connector_inactive|channel_configuration_changed/);
+    assert.equal(h.store.get('SELECT display_name FROM external_identities WHERE id=?', binding.id).display_name, 'ou_profile_race');
+  });
+});
+
 test('global Feishu administration requires platform authority; public app discovery is independent of project grants and selected organization', async t => {
   const f = await channelFixture(t), { admin, h, id, member } = f;
   const other = await connector(admin, { app_id: 'cli_other' });

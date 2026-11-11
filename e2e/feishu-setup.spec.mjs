@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { managementFixture } from '../test/management-fixture.mjs';
 import { identityFixture } from '../test/identity-fixture.mjs';
-import { transport, connector, envelope, post, finished, credentials } from '../test/channel-fixture.mjs';
+import { transport, connector, envelope, post, finished, credentials, bindFixture } from '../test/channel-fixture.mjs';
 import { harness, setup } from '../test/helpers.mjs';
 
 const output = '.tmp/feishu-setup-165';
@@ -269,7 +269,7 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
     await page.setViewportSize({ width: 1440, height: 1100 }); await page.screenshot({ path: output + '/code-binding-desktop.png', fullPage: true });
     const grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
     await identity.getByRole('button', { name: '确认绑定到当前账户' }).click();
-    await expect(identity).toContainText('ou_code_browser · 已绑定');
+    await expect(identity).toContainText('code-browser-user 的飞书账号 · 已绑定');
     expect(f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='feishu'").principal_id).toBe(local.id);
     expect(f.h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grants);
     const replay = await page.evaluate(input => api('/api/channels/bindings/confirm', 'POST', input).catch(e => e.message), { code, connector_id: id });
@@ -284,12 +284,56 @@ test('ordinary users see connected bot names and private-chat links, confirm a p
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
+test('a linked account shows readable names without blocking on directory lookup, and preserves names when lookup is unavailable', async ({ page }) => {
+  test.setTimeout(90000);
+  const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
+  let release; wire.state.profileGate = new Promise(resolve => { release = resolve; });
+  wire.state.appName = '项目协作助手'; wire.state.tenantName = '示例企业';
+  mkdirSync(output, { recursive: true }); const errors = []; page.on('pageerror', e => errors.push(e.message));
+  try {
+    const id = await connector(f.admin, { installation_tenant: undefined, bot_open_id: undefined }), local = await f.member('readable-user', {});
+    bindFixture(f.h, id, local.id, 'ou_unreadable', 'install-tenant');
+    await page.goto(f.h.admin + '/#/identity/feishu'); await login(page, f.h, local.password, 'readable-user');
+    const binding = page.getByLabel('我的飞书账号', { exact: true });
+    await expect(binding).toContainText('readable-user 的飞书账号 · 已绑定');
+    await expect(binding).toContainText('机器人：项目协作助手；所属企业：示例企业');
+    await expect(binding.getByRole('button', { name: '刷新飞书姓名' })).toBeDisabled();
+    await expect(binding).not.toContainText('ou_unreadable');
+    await expect(binding).not.toContainText('cli_fixture');
+    await expect(binding).not.toContainText('install-tenant');
+    release();
+    await expect(binding).toContainText('张小明 · 已绑定');
+    await expect(binding).toContainText('关联平台账户：readable-user');
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.screenshot({ path: output + '/readable-identity-desktop.png', fullPage: true });
+    wire.state.profileCode = 99991672;
+    await binding.getByRole('button', { name: '刷新飞书姓名' }).click();
+    await expect(binding).toContainText('保留上次读取的姓名');
+    await expect(binding).toContainText('张小明 · 已绑定');
+    expect(await binding.innerText()).not.toContain('fixture-only-access-token');
+    wire.state.profileCode = 0; wire.state.profileName = '<img src=x onerror=alert(1)> 张小明';
+    await binding.getByRole('button', { name: '刷新飞书姓名' }).click();
+    await expect(binding).toContainText(wire.state.profileName + ' · 已绑定');
+    await expect(binding.locator('img')).toHaveCount(0);
+    wire.state.profileName = '张小明';
+    await binding.getByRole('button', { name: '刷新飞书姓名' }).click();
+    await expect(binding).toContainText('张小明 · 已绑定');
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: output + '/readable-identity-mobile.png', fullPage: true });
+    page.once('dialog', dialog => dialog.accept()); await binding.getByRole('button', { name: '解除飞书绑定' }).click();
+    await expect(binding).toContainText('已解绑'); await expect(binding).not.toContainText('ou_unreadable');
+    await expect(binding.getByRole('button', { name: '刷新飞书姓名' })).toHaveCount(0);
+    expect(errors).toEqual([]);
+  } finally { release(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
 test('personal Feishu guide completes both ends, shows the current identity and unlinks without exposing app configuration', async ({ page }) => {
   test.setTimeout(90000);
   const wire = transport(), f = await identityFixture(null, { channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false } });
   const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
   try {
-    const id = await connector(f.admin), started = await post(f.h, id, envelope('/bind')); await finished(f.h, started.value.operation_id);
+    const id = await connector(f.admin, { installation_tenant: undefined, bot_open_id: undefined }), started = await post(f.h, id, envelope('/bind')); await finished(f.h, started.value.operation_id);
     const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', started.value.operation_id);
     const body = f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id), challenge = /challenge=([a-f0-9]+)/.exec(JSON.stringify(body))[1];
     await page.goto(f.h.admin + '/auth/channels/start?challenge=' + challenge);
@@ -298,6 +342,10 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     await expect(page).toHaveURL(/#\/identity\/feishu$/);
     await expect(page.getByRole('heading', { name: '飞书身份绑定' })).toBeVisible();
     await expect(page.getByLabel('待确认的飞书身份')).toContainText('等待原飞书操作者确认');
+    await expect(page.getByLabel('待确认的飞书身份')).toContainText('Fixture bot');
+    await expect(page.getByLabel('待确认的飞书身份')).toContainText('Fixture enterprise');
+    await expect(page.getByLabel('待确认的飞书身份')).not.toContainText('ou_alice');
+    await expect(page.getByLabel('待确认的飞书身份')).not.toContainText('cli_fixture');
     const confirmation = await page.getByLabel('在原私聊发送的确认指令', { exact: true }).inputValue();
     expect(f.h.store.get("SELECT count(*) n FROM external_identities WHERE provider='feishu'").n).toBe(0);
     const grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
@@ -307,7 +355,8 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     await page.setViewportSize({ width: 1440, height: 1100 }); await page.screenshot({ path: output + '/personal-pending-desktop.png', fullPage: true });
     const confirming = await post(f.h, id, envelope(confirmation)); expect((await finished(f.h, confirming.value.operation_id)).state).toBe('completed');
     await page.getByRole('button', { name: '刷新飞书绑定状态' }).click();
-    await expect(page.locator('#feishu-identity')).toContainText('ou_alice · 已绑定');
+    await expect(page.getByLabel('我的飞书账号', { exact: true })).toContainText('已绑定');
+    await expect(page.getByLabel('我的飞书账号', { exact: true })).not.toContainText('ou_alice');
     expect(f.h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grants);
     const denied = await page.evaluate(async () => (await fetch('/api/channels/setup')).status); expect(denied).toBe(403);
     await page.goto(f.h.admin + '/#/settings/feishu'); await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
@@ -319,7 +368,7 @@ test('personal Feishu guide completes both ends, shows the current identity and 
     page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: '解除飞书绑定' }).click();
     const unlinkResult = await (await unlinkResponse).json();
     expect(unlinkResult).toEqual({ ok: true });
-    await expect(page.locator('#feishu-identity')).toContainText('ou_alice · 已解绑');
+    await expect(page.getByLabel('我的飞书账号', { exact: true })).toContainText('已解绑');
     await expect(page.locator('#feishu-identity')).toContainText('/reauth'); expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
@@ -352,7 +401,7 @@ test('a local account completes Feishu binding without GitHub login and keeps it
     const confirmed = await post(f.h, id, envelope(confirmation, actor));
     expect((await finished(f.h, confirmed.value.operation_id)).state).toBe('completed');
     await page.getByRole('button', { name: '刷新飞书绑定状态' }).click();
-    await expect(page.locator('#feishu-identity')).toContainText('ou_local_browser · 已绑定');
+    await expect(page.locator('#feishu-identity')).toContainText('local-feishu-user 的飞书账号 · 已绑定');
     expect(f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='feishu'").principal_id).toBe(local.id);
     expect(f.h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grants);
     expect(f.h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n).toBe(0);

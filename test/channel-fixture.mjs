@@ -5,8 +5,9 @@ import { digest, randomId } from '../dist/core/security.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
-  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', currentAppName: null, applicationCode: 0, applicationId: null, tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
-    audienceRequests: [], audience: null, inChat: true, members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
+  const sent = [], state = { sendFailures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', currentAppName: null, applicationCode: 0, applicationId: null, tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
+    audienceRequests: [], audience: null, inChat: true, profileRequests: [], profileGate: null, profileCode: 0, profileOpenId: null, profileName: '张小明',
+    members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
       state.authStarted++;
@@ -15,8 +16,15 @@ export function transport() {
       if (url.endsWith('/app_access_token')) return Response.json({ code: 0, app_access_token: 'fixture-app-access-token' });
       return Response.json({ code: state.authCode, tenant_access_token: 'fixture-only-access-token', msg: 'fixture-feishu-app-secret' });
     }
-    if (state.failures) { state.failures--; return Response.json({ code: 999, msg: 'fixture failure' }, { status: 503 }); }
+    if (state.sendFailures && ['POST', 'PATCH'].includes(init.method) && url.includes('/im/v1/messages')) {
+      state.sendFailures--; return Response.json({ code: 999, msg: 'fixture failure' }, { status: 503 });
+    }
     if (url.endsWith('/bot/v3/info')) return Response.json({ code: state.botCode, bot: { open_id: state.botOpenId, app_name: state.appName }, msg: 'fixture-only-access-token' });
+    if (url.includes('/contact/v3/users/')) {
+      state.profileRequests.push(url); if (state.profileGate) await state.profileGate;
+      return Response.json({ code: state.profileCode, data: { user: { open_id: state.profileOpenId ?? decodeURIComponent(new URL(url).pathname.split('/').at(-1)),
+        name: state.profileName, email: 'must-not-expose-profile-email', mobile: 'must-not-expose-profile-phone' } }, msg: 'fixture-only-access-token' });
+    }
     if (url.includes('/application/v6/applications/')) return Response.json({ code: state.applicationCode, data: { app: {
       app_id: state.applicationId ?? decodeURIComponent(new URL(url).pathname.split('/').at(-1)), app_name: state.currentAppName ?? state.appName,
       secret: 'must-not-return-app-secret', encryption: { verification_token: 'must-not-return-verification-token' } } } });

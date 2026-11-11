@@ -1,6 +1,7 @@
 // Personal identity proof belongs with account permissions; app credentials live in global settings.
 async function feishuIdentityCard() {
-  const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'); section.id = 'feishu-identity';
+  const data = await api('/api/channels/bindings'), section = card('飞书身份绑定'), request = renderVersion, nameLookups = [];
+  section.id = 'feishu-identity';
   section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
   if (me.role === 'super_admin') section.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link'));
   const steps = element('ol', '', 'feishu-binding-steps');
@@ -61,14 +62,42 @@ async function feishuIdentityCard() {
   for (const p of data.pending) {
     const pending = element('div', '', 'channel-binding'); pending.setAttribute('aria-label', '待确认的飞书身份');
     pending.append(element('strong', '等待原飞书操作者确认'), facts([['平台账户', p.account.username],
-      ['飞书应用', p.app_id], ['安装租户', p.installation_tenant], ['操作者租户', p.actor_tenant], ['飞书 open_id', p.open_id], ['有效期', new Date(p.expires_at).toLocaleString()]]),
+      ['飞书账号', '发起本次绑定的飞书账号'], ['机器人', p.app_name || '机器人名称暂未获取'],
+      ['机器人所属企业', p.tenant_name || '企业名称暂未获取'], ['有效期', new Date(p.expires_at).toLocaleString()]]),
       channelCopy('在原私聊发送的确认指令', '确认绑定 ' + p.confirmation));
     section.append(pending);
   }
   if (!data.bindings.length && !data.pending.length) section.append(element('p', '尚未绑定飞书身份', 'muted'));
   for (const b of data.bindings) {
     const row = element('div', '', 'channel-binding'), active = b.status === 'active';
-    row.append(element('strong', `${b.external_actor} · ${active ? '已绑定' : b.status === 'revoked' ? '已解绑' : '需要重新认证'}`), note(`飞书应用 ${b.connector.replace(/^[a-f0-9]{48}:/, '')}；操作者租户 ${b.external_tenant}`));
+    const name = () => { const value = typeof b.display_name === 'string' ? b.display_name.trim() : ''; return value && value !== b.external_actor ? value : ''; };
+    const state = active ? '已绑定' : b.status === 'revoked' ? '已解绑' : '需要重新认证';
+    const title = element('strong'), renderName = () => { title.textContent = `${name() || me.username + ' 的飞书账号'} · ${state}`; };
+    renderName();
+    row.setAttribute('aria-label', '我的飞书账号');
+    row.append(title, note(`机器人：${b.app_name || '机器人名称暂未获取'}；所属企业：${b.tenant_name || '企业名称暂未获取'}`),
+      note(`关联平台账户：${me.username}`));
+    const nameStatus = note(name() ? '' : '飞书姓名暂不可读取，当前显示关联的平台账户。'); nameStatus.setAttribute('role', 'status');
+    row.append(nameStatus);
+    if (b.connection_enabled === 0) row.append(note('此机器人连接已停用。'));
+    else if (b.connection_enabled === null) row.append(note('原机器人连接已不可用。'));
+    if (b.can_read_name) {
+      const refreshName = async () => {
+        if (refresh.disabled) return;
+        refresh.disabled = true; nameStatus.textContent = '正在读取飞书姓名…';
+        try {
+          const result = await api('/api/channels/bindings/' + encodeURIComponent(b.id) + '/name', 'POST', {});
+          if (request !== renderVersion) return;
+          b.display_name = result.display_name; renderName(); nameStatus.textContent = '飞书姓名已更新。';
+        } catch (err) {
+          if (request !== renderVersion) return;
+          const changed = ['authorization_changed', 'external_binding_required', 'identity_not_found', 'channel_connector_inactive', 'channel_configuration_changed', 'login_required'].some(code => err.message.includes(code));
+          nameStatus.textContent = changed ? '绑定或机器人连接状态已变化，请刷新飞书绑定状态。' : name() ? '暂时无法更新飞书姓名，保留上次读取的姓名。' : '飞书暂未提供姓名，当前显示关联的平台账户。';
+        } finally { refresh.disabled = false; }
+      };
+      const refresh = button('刷新飞书姓名', refreshName, 'quiet'); row.append(refresh);
+      if (!name()) nameLookups.push(refreshName);
+    }
     if (active) row.append(button('解除飞书绑定', async () => {
       if (!confirm('解除绑定后，这个飞书身份不能继续管理项目。继续？')) return;
       try { await api('/api/identity/bindings/' + b.id, 'DELETE', {}); await start(); } catch (err) { error(err); }
@@ -77,6 +106,8 @@ async function feishuIdentityCard() {
     section.append(row);
   }
   section.append(button('刷新飞书绑定状态', () => start().catch(error), 'quiet'), note('绑定后可直接说“你好”“我能管理哪些项目”或“看看 bot 项目的任务”；需要明确目标时，助手会按名称追问。群内由维护人启用员工后，普通成员无需逐人绑定。'));
+  // Names are presentation metadata: render immediately, then fill missing names without blocking the identity page.
+  void (async () => { for (const lookup of nameLookups) { if (request !== renderVersion) break; await lookup(); } })();
   section.append(await channelEmployeeSettings());
   return section;
 }

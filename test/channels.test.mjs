@@ -449,7 +449,9 @@ test('HTTP and enterprise SDK ingress share dedup; config CAS, outbox retries, c
   sockets.close(); assert.equal(closed, true);
   h.store.run("UPDATE channel_connectors SET transport='http',application_type='enterprise' WHERE id=?", id);
   assert.equal((await admin('/api/channels/connectors/' + id, 'PATCH', { expected_revision: 9, enabled: false })).value.error, 'channel_revision_conflict');
-  wire.state.failures = 1;
+  // The first inbox can complete before its outbox; fault only the next message's send, not history sync or the prior reply.
+  await until(() => h.store.get('SELECT state FROM channel_outbox WHERE source_event=?', first.value.operation_id)?.state, state => state === 'sent');
+  wire.state.sendFailures = 1;
   const retry = await post(h, id, envelope('/identity')); await finished(h, retry.value.operation_id);
   const queued = await until(() => h.store.get("SELECT * FROM channel_outbox WHERE source_event=? AND state='retry'", retry.value.operation_id));
   assert.equal(queued.attempts, 1); assert.equal(queued.last_error, 'channel_delivery_rejected');
