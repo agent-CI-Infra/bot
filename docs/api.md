@@ -2,7 +2,7 @@
 
 管理页面的操作都经由下列接口。它们和管理页面、OAuth 与 App 回调、Webhook 在同一个业务端口（容器 `8791`，宿主默认 `127.0.0.1:8791`），对外经同一个 HTTPS 入口访问；Webhook 和外部执行端路径按自己的签名或令牌认证，不需要浏览器会话。部署见[部署细节](deployment.md)。
 
-除初始化状态、初始化、登录和健康检查外，管理 API 都需要登录会话。登录／初始化响应设置 `HttpOnly; SameSite=Strict` Cookie，并返回 `csrf_token`；之后的写请求必须提供同值 `X-CSRF-Token` 和 `Content-Type: application/json`。登录后 `GET /api/auth/me` 可读取当前会话的 CSRF 值。接口不接受额外字段，不支持传入 `role` 将自己升级。HTTP 失败只返回稳定错误码，不回显输入或内部异常。
+除初始化状态、初始化、登录和健康检查外，管理 API 都需要登录会话。登录／初始化响应设置 `HttpOnly; SameSite=Strict` Cookie，并返回 `csrf_token`；之后的写请求必须提供同值 `X-CSRF-Token` 和 `Content-Type: application/json`。登录后 `GET /api/auth/me` 可读取当前会话的 CSRF 值。接口不接受额外字段，不支持传入 `role` 将自己升级。HTTP 失败只返回稳定错误码，不回显输入或内部异常。经 Cloudflare 等入口访问时，502、504 响应的正文会被入口换成它自己的错误页，错误码随之丢失；控制台此时提示“入口网关返回了错误页面”，不显示 JSON 解析错误。需要用户据此处理的错误不用这两个状态码。
 
 项目列表 `GET /api/repositories`、`GET /api/installations` 和 `GET /api/installations/hidden` 支持 `repository_id,account_id,owner_id` 筛选；先应用权限和筛选，再按原顺序分页。传入 `limit` 或 `offset` 时每页默认 50 条、上限 100 条，`offset` 默认 0；不传分页参数时保留完整列表响应，供其他页面使用。项目页和任务数刷新固定请求当前页的 50 条，再按 `owner_id` 分组展示；分组不改变权限或筛选。
 

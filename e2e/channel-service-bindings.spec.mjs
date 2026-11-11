@@ -47,3 +47,32 @@ for (const width of [1440, 390]) test(`maintainer binds a group to the repositor
     expect(h.store.get('SELECT active FROM principals WHERE id=?', row.principal_id).active).toBe(0); expect(errors).toEqual([]);
   } finally { await h.stop(); }
 });
+
+test('saving explains an app without the member scope, and a gateway page, instead of a JSON parse error (protocol fixtures)', async ({ page }) => {
+  const wire = transport(), errors = [], h = await harness(undefined, undefined, store => ({
+    engine: new TaskEngine(store, { call: async () => null }), channels: { origin: 'https://console.example.test', fetch: wire.fetch, longConnections: false }
+  }));
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    const id = await connector(admin), principal = (await admin('/api/auth/me')).value.id;
+    bindFixture(h, id, principal); const quiet = inGroup('', 'ou_alice'); quiet.event.message.mentions = []; quiet.event.message.content = JSON.stringify({ text: 'Group discussion' }); await post(h, id, quiet);
+    // Feishu refuses the member lookup when the app holds none of the member-reading scopes.
+    wire.state.audience = () => Response.json({ code: 99991672, msg: 'Access denied.' }, { status: 400 });
+    await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(h.admin + '/#/identity');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByLabel('fixture/project-101', { exact: true }).check();
+    const save = page.getByRole('button', { name: '保存群聊助手', exact: true }), alert = page.locator('form').filter({ has: save }).getByRole('alert');
+    await save.click();
+    await expect(alert).toHaveText('飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在飞书开放平台为应用开通 im:chat.members:read，并发布新版本后再保存。');
+    // After the scope is granted, an entry proxy still answers once with its own page (Cloudflare replaces 502 bodies).
+    wire.state.audience = null;
+    await page.route('**/service-binding', route => route.fulfill({ status: 502, contentType: 'text/html', body: '<!DOCTYPE html><html><body>Bad gateway</body></html>' }), { times: 1 });
+    await save.click();
+    await expect(alert).toHaveText('502 · 入口网关返回了错误页面，没有带回具体原因。请稍后重试；持续出现时请管理员查看服务日志。');
+    await save.click();
+    await expect(page.getByRole('article', { name: '群聊助手绑定' }).getByText('生效中 · 仓库问答助手', { exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally { await h.stop(); }
+});

@@ -31,7 +31,7 @@
 | `im:message.group_msg` | 接收全量群消息并读取机器人可见群历史，属于需审批的敏感权限 |
 | `im:message:readonly` | 读取机器人所在会话的可见历史及接收撤回事件 |
 | `im:chat.members:bot_access` | 接收机器人进群、移出事件 |
-| `im:chat.members:read` | 判断当前 bot 是否在群中并完整分页核验维护人及来源成员；具体可用范围仍需接入时验证 |
+| `im:chat.members:read` | 判断当前 bot 是否在群中并完整分页核验维护人及来源成员；保存群聊助手绑定时必需，缺少时保存返回 `channel_audience_permission_required` |
 | `tenant:tenant:readonly` | 企业自建应用自动获取安装 tenant_key；保存连接前需开通并发布生效 |
 
 导入权限不会自动订阅卡片操作回调。新应用和已有应用都必须补齐权限、分别配置事件与回调，再创建并发布新版本。卡片实体权限见[创建卡片实体](https://open.feishu.cn/document/cardkit-v1/card/create)，回调结构见[卡片回传交互](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-callback-communication)。
@@ -95,7 +95,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 群聊由服务角色回答（服务角色的定义、模型、预算与计费见[服务角色](service-roles.md)）。「身份与权限 → 飞书群聊助手」为一个群保存一条绑定：一个服务角色、一份项目范围（整个组织，或多选仓库）和发言范围（仅回应 @／回应 @ 及以问号结尾的文字／读取每条新文字后判断是否发言），以及配置人和 revision。一个群只绑定一个角色，不切换；默认推荐内置的「仓库问答助手」（可以查询 Issue／PR、解释代码，不能派活）。需要更大权限的群（例如可信 committer 群）可以绑定超级管理员新建的自定义服务角色。管理助手的权限继承当前用户，不能绑定到群。
 
-配置人必须已绑定飞书、当前在该群中（保存时用应用身份完整分页核验群成员），并对所选的每个仓库有 `config.write`；选整个组织时需要组织级 `config.write`。范围写入这条绑定专用 service principal 的 `scoped_grants`（每个仓库一条，或组织一条），授权者记为配置人；这个 principal 最多持有 `tasks.read`／`tasks.write`，没有项目配置、授权管理、知识或计划能力。修改或重新启用时整份范围按当前配置人重写；停用要求配置人本人、超级管理员，或对全部范围有 `config.write` 的维护人。保存要求 `expected_revision`，冲突返回 `channel_revision_conflict`，每次修改写审计 `channel.service_binding.*`。页面提示：群内所有成员都能看到助手读取的所选仓库内容（包括私有仓库），由配置人负责控制范围。
+配置人必须已绑定飞书、当前在该群中（保存时用应用身份完整分页核验群成员；应用没有读取群成员的权限时，飞书返回 99991672，保存返回 403 `channel_audience_permission_required`，页面提示超级管理员开通 `im:chat.members:read` 并发布新版本），并对所选的每个仓库有 `config.write`；选整个组织时需要组织级 `config.write`。范围写入这条绑定专用 service principal 的 `scoped_grants`（每个仓库一条，或组织一条），授权者记为配置人；这个 principal 最多持有 `tasks.read`／`tasks.write`，没有项目配置、授权管理、知识或计划能力。修改或重新启用时整份范围按当前配置人重写；停用要求配置人本人、超级管理员，或对全部范围有 `config.write` 的维护人。保存要求 `expected_revision`，冲突返回 `channel_revision_conflict`，每次修改写审计 `channel.service_binding.*`。页面提示：群内所有成员都能看到助手读取的所选仓库内容（包括私有仓库），由配置人负责控制范围。
 
 群内有效权限 = 服务角色的权限项 ∩ 绑定范围 ∩ 授权者当前仍有效的授权（该仓库的 `config.write` 及工具所需能力）。授权者失去某个仓库的权限时只暂停这个仓库；全部仓库都不可达时绑定显示暂停。不再校验群内发言人的绑定、权限或成员快照，未绑定的普通成员也按绑定配置使用助手；来源真实性仍由飞书事件签名、连接版本和本地消息账本校验。服务角色被停用时群内说明原因，不改用其他角色；仍有启用中绑定的服务角色不能删除（`service_role_in_use`）。
 
@@ -150,13 +150,13 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 验证
 
-`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、跨仓库问答与范围拒绝、任务读写与撤权、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
+`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、任务读写与撤权、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
 
 `e2e/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
 
 `e2e/feishu-setup.spec.mjs` 经实际页面验证管理员创建/恢复连接、失败提示、版本冲突，以及用户从合法飞书绑定事件开始，经本地平台登录或可选 GitHub OAuth、原私聊确认到查看与解绑的完整路径。本地登录场景不配置 GitHub OAuth，并核对绑定不增加仓库授权。桌面和手机截图保存在 `.tmp/feishu-setup-165/`；同样使用本地协议夹具，不代表已连接真实飞书应用。
 
-`e2e/channel-service-bindings.spec.mjs` 在桌面和手机宽度验证维护人选择仓库绑定仓库问答助手、查询本地群记录和停用；`e2e/channel-conversation.spec.mjs` 验证群聊助手与个人私聊的连续会话页面。截图保存在 `.tmp/channel-service-bindings-312/` 和 `.tmp/channel-conversation-312/`。
+`e2e/channel-service-bindings.spec.mjs` 在桌面和手机宽度验证维护人选择仓库绑定仓库问答助手、查询本地群记录和停用，并验证应用缺少成员权限和入口返回网关错误页时保存给出可读提示；`e2e/channel-conversation.spec.mjs` 验证群聊助手与个人私聊的连续会话页面。截图保存在 `.tmp/channel-service-bindings-312/` 和 `.tmp/channel-conversation-312/`。
 
 `test/channel-ledger.test.mjs` 验证事务回滚、官方 SDK frame 的失败/成功 ACK、数据库重启、全部分页和 thread、过期租约、429、异常游标、撤回合并、敏感信息、本地零回源及保留边界。`e2e/channel-history.spec.mjs` 在桌面和手机验证超过 100 条、跨成员/thread/日期的本地消息分页、搜索、同步诊断和保留配置；均为本地协议夹具，不是飞书或 GitHub 真实集成。
 

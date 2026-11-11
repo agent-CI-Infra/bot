@@ -152,6 +152,23 @@ test('binding needs a Feishu-bound maintainer in the group with config.write ove
   assert.equal((await f.admin('/api/channels/chats/' + chat.id + '/employee', 'PUT', { project_id: '101', role_id: 'reviewer', capabilities: ['tasks.read'], enabled: true, expected_revision: 0 })).value.error, 'channel_employee_retired');
 });
 
+test('an app without a member-reading scope refuses the binding with an actionable 4xx code; other Feishu rejections stay upstream failures', async t => {
+  const f = await fixture(t), { h, chat } = f;
+  // Feishu answers HTTP 400 code 99991672 when the app holds none of the scopes that can read a chat's members.
+  f.wire.state.audience = () => Response.json({ code: 99991672, msg: 'Access denied. One of the following scopes is required: [im:chat.members:read].' }, { status: 400 });
+  const refused = await f.bind();
+  assert.deepEqual([refused.status, refused.value], [403, { error: 'channel_audience_permission_required' }]);
+  assert.equal(h.store.get('SELECT last_error FROM channel_audiences WHERE chat_id=?', chat.id).last_error, 'channel_audience_permission_required');
+  f.wire.state.audience = () => Response.json({ code: 232011, msg: 'fixture rejection' }, { status: 400 });
+  const rejected = await f.bind();
+  assert.deepEqual([rejected.status, rejected.value], [502, { error: 'channel_delivery_rejected' }]);
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_service_bindings').n, 0);
+  // Once the administrator grants the scope, the same save succeeds.
+  f.wire.state.audience = null;
+  const bound = await f.bind();
+  assert.equal(bound.status, 200, JSON.stringify(bound.value)); assert.equal(bound.value.state, 'active');
+});
+
 test('other roles\' tasks follow the role permission: read lists progress, write pauses through the management service, revocation refuses the next call', async t => {
   const f = await fixture(t); assert.equal((await f.bind({ scope: { kind: 'repositories', repositories: ['101'] } })).status, 200);
   const binding = f.h.store.get('SELECT * FROM channel_service_bindings');
