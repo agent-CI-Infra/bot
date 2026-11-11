@@ -228,7 +228,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     suggestion.append(element('strong', caption), element('span', text)); suggestions.append(suggestion);
   }
   welcome.append(suggestions); feed.append(welcome);
-  const feedWrap = element('div', '', 'management-feed-wrap'), latest = button('↓ 回到最新消息', () => { followOutput = true; feed.scrollTop = feed.scrollHeight; latest.hidden = true; }, 'quiet management-latest');
+  const feedWrap = element('div', '', 'management-feed-wrap'), latest = button('↓ 回到最新消息', () => { flushMarkdown(true); scrollOutput(true); }, 'quiet management-latest');
+  // Blurring the composer can restore mobile navigation and move this button before pointer-up.
+  latest.addEventListener('pointerdown', event => event.preventDefault());
   latest.hidden = true; feedWrap.append(feed, latest); panel.append(feedWrap);
   const tools = element('div', '', 'management-tools'); tools.id = 'management-tools'; tools.hidden = true;
   tools.append(element('h3', '快捷操作'), note('直接查询或使用表单。操作结果会回到对话里。'),
@@ -246,21 +248,42 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   const footer = element('div', '', 'management-input-footer'), controls = element('div', '', 'actions');
   controls.append(stopButton, send); footer.append(element('span', '支持 Markdown · Ctrl / ⌘ + Enter 发送', 'muted'), controls); input.append(message, footer); panel.append(input);
   let conversation = null, cursor = 0, active = null, reading = null, scopeGeneration = 0, streamController = null, formGeneration = 0;
-  let disposed = false, opening = false, submitting = false, historyReady = false, toolsOpen = false, toolsDirty = true, followOutput = true, renderFrame = 0;
+  let disposed = false, opening = false, submitting = false, historyReady = false, toolsOpen = false, toolsDirty = true, followOutput = true, unseenOutput = false, renderFrame = 0;
   const pendingMarkdown = new Set();
   const drafts = new Map(), turns = new Map(), messages = new Map();
   const alive = generation => !disposed && panel.isConnected && me?.id === user && generation === scopeGeneration;
   const showError = err => { if (!disposed) { status.textContent = err.message; status.classList.add('view-error'); } };
-  feed.addEventListener('scroll', () => { followOutput = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 64; if (followOutput) latest.hidden = true; });
-  const scrollOutput = () => { if (followOutput) feed.scrollTop = feed.scrollHeight; else latest.hidden = false; };
-  const queueMarkdown = answer => {
-    pendingMarkdown.add(answer);
-    if (!renderFrame) renderFrame = requestAnimationFrame(() => {
-      renderFrame = 0;
-      for (const item of pendingMarkdown) renderManagementMarkdown(item.body, item.text);
-      pendingMarkdown.clear(); scrollOutput();
-    });
+  const selectedWithin = node => {
+    const selection = window.getSelection();
+    return selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode));
   };
+  const holdingReading = () => selectedWithin(feed) || document.activeElement === message && message.value.length > 0;
+  feed.addEventListener('scroll', () => {
+    followOutput = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 64;
+    if (followOutput && !holdingReading()) { unseenOutput = false; latest.hidden = true; }
+  });
+  const scrollOutput = (force = false) => {
+    if (force) followOutput = true;
+    else if (holdingReading()) followOutput = false;
+    if (followOutput) { feed.scrollTop = feed.scrollHeight; unseenOutput = false; }
+    latest.hidden = !unseenOutput;
+  };
+  function flushMarkdown(force = false) {
+    renderFrame = 0;
+    const top = feed.scrollTop; let rendered = false;
+    for (const item of pendingMarkdown) {
+      // Replacing a selected answer's DOM would destroy the selection even if scrolling were disabled.
+      if (!force && selectedWithin(item.body)) continue;
+      renderManagementMarkdown(item.body, item.text); pendingMarkdown.delete(item); rendered = true;
+    }
+    if (rendered) unseenOutput = true;
+    if (!followOutput) feed.scrollTop = top;
+    scrollOutput();
+  }
+  const scheduleMarkdown = () => { if (!renderFrame) renderFrame = requestAnimationFrame(() => flushMarkdown()); };
+  const selectionChanged = () => { if (!disposed && panel.isConnected && pendingMarkdown.size && !selectedWithin(feed)) scheduleMarkdown(); };
+  document.addEventListener('selectionchange', selectionChanged);
+  const queueMarkdown = answer => { pendingMarkdown.add(answer); scheduleMarkdown(); };
   const updateBusy = () => {
     message.disabled = opening || !conversation;
     for (const suggestion of welcome.querySelectorAll('button')) suggestion.disabled = message.disabled;
@@ -451,7 +474,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       }
       onActivity(!!active, true);
     }
-    paintTurn(currentTurn); scrollOutput();
+    paintTurn(currentTurn); unseenOutput = true; scrollOutput();
   }
   async function read() {
     if (reading || !conversation || disposed) return reading;
@@ -492,7 +515,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   async function openConversation(create = false, selected = null) {
     if (conversation) drafts.set(conversation, message.value);
     const generation = ++scopeGeneration; formGeneration++; streamController?.abort(); conversation = null; active = null; submitting = false; historyReady = false; opening = true; updateBusy();
-    remember(scopeKey, scope.value); cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
+    remember(scopeKey, scope.value); cursor = 0; turns.clear(); messages.clear(); pendingMarkdown.clear(); followOutput = true; unseenOutput = false; latest.hidden = true; reconnect.hidden = true; feed.replaceChildren(welcome); welcome.hidden = false; message.value = '';
     forms.replaceChildren(); toolsDirty = true; status.classList.remove('view-error'); status.textContent = '正在读取会话…';
     try {
       const all = (await api(endpoint + '/conversations')).conversations.filter(item => item.scope === scope.value);
@@ -513,7 +536,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       const result = await api(endpoint + '/conversations/' + id + '/messages', 'POST', { source_message: crypto.randomUUID(), ...body });
       if (!alive(generation) || conversation !== id) return true;
       messages.set(result.id, { input: body, state: result.state, created_at: new Date().toISOString() }); turn(result.id); active = result.id;
-      followOutput = true; showTools(false); sessions.open = false; scrollOutput(); status.textContent = '请求已发送 · 正在连接助手'; void read(); return true;
+      followOutput = true; showTools(false); sessions.open = false; scrollOutput(true); status.textContent = '请求已发送 · 正在连接助手'; void read(); return true;
     } catch (err) { if (alive(generation)) showError(err); return false; }
     finally { if (alive(generation)) { submitting = false; updateBusy(); } }
   }
@@ -560,10 +583,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   scope.onchange = () => openConversation().catch(showError);
   conversations.onchange = () => openConversation(false, conversations.value).catch(showError);
   const elapsedTimer = setInterval(() => { for (const value of turns.values()) if (['pending', 'running'].includes(value.state)) paintTurn(value); }, 1000);
-  try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); throw err; }
+  try { await openConversation(); } catch (err) { clearInterval(elapsedTimer); document.removeEventListener('selectionchange', selectionChanged); throw err; }
   return {
     async setScope(value) { if (!available(value)) { showError(new Error('当前账号无权管理这个项目。')); return; } if (scope.value !== value) { scope.value = value; await openConversation(); } },
     focus() { if (toolsOpen) toolsButton.focus(); else message.focus(); },
-    dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); pendingMarkdown.clear(); drafts.clear(); }
+    dispose() { disposed = true; scopeGeneration++; formGeneration++; streamController?.abort(); clearInterval(elapsedTimer); cancelAnimationFrame(renderFrame); document.removeEventListener('selectionchange', selectionChanged); pendingMarkdown.clear(); drafts.clear(); }
   };
 }
