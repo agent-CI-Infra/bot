@@ -99,12 +99,13 @@ const settingsCards = {
     const resources = { computer: settings.computer_defaults };
     return [about, concurrency, liveCard('虚拟电脑默认资源', redraw => resourceDefaultsBody(resources, redraw)).section];
   },
-  // Where GitHub's webhooks arrive: a self-hosted HTTPS address, or a Cloudflare Tunnel in front of it.
+  // Where GitHub's webhooks arrive: a self-hosted HTTPS address, or a Cloudflare Tunnel in front of it. The login
+  // configuration is shown read-only beside them, so the address, its check, the tunnel and the login agree on one page.
   async access(request) {
     const view = settingsView = { request, onboarding: await api('/api/onboarding'), accounts: [], models: [] };
     view.address = liveCard('公网 HTTPS 地址', redraw => addressBody(view, redraw));
     view.tunnel = liveCard('Cloudflare Tunnel', redraw => tunnelBody(view, redraw));
-    return [view.address.section, view.tunnel.section];
+    return [view.address.section, view.tunnel.section, loginAccessCard(view.onboarding.github_login)];
   },
   // The App the wizard uses, then every registered account (GitHub Apps and bot tokens). One account has its own page;
   // that page does all of its own reading, so the list keeps the requests the console already made.
@@ -495,6 +496,32 @@ function tunnelBody(view, redraw) {
     view.onboarding.tunnel = (await api('/api/onboarding/tunnel', 'POST', { token: credential.value })).tunnel; redraw('已保存 tunnel token');
   }, configured ? [revoke] : []));
   return nodes;
+}
+// The GitHub login configuration as it is in force: the OAuth App, where GitHub returns the user, and what a change does.
+// It is read-only here; the wizard's third step is the only place that writes it, so the two never disagree about a value.
+const loginOriginSources = { public_address: '已验证的公网地址', deployment: '部署配置的入口（BOT_PUBLIC_ORIGIN）', local: '本机地址（只在本地测试时可用）' };
+const loginConfigSources = { wizard: '控制台向导保存', deployment: '部署环境变量', empty: '未配置' };
+function loginAccessCard(login) {
+  const section = card('GitHub 登录（只读）');
+  if (!login) { section.append(note('这个部署没有登录配置接口，读不到 GitHub 登录设置。')); return section; }
+  const separate = login.application_type === 'oauth_app', configured = login.source !== 'empty';
+  section.append(facts([['登录状态', login.enabled ? '已启用：用户可以用 GitHub 账号登录' : '未启用：只能用本地账号登录'],
+    // Nothing saved means no App at all: naming one here would contradict「Client ID 未填写」on the next line.
+    ['OAuth App', !configured ? '未配置' : separate ? '独立 OAuth App（只用于登录）' : '仍复用仓库 GitHub App（登录与仓库连接没有分开）'],
+    ['Client ID', login.client_id || '未填写'],
+    ['Client secret', login.secret_configured ? '已保存（接口不回读）' : '未保存'],
+    ['登录 Callback URL', login.callback_url || '还没有可用的公网地址'],
+    ['回调地址来源', loginOriginSources[login.origin_source] || login.origin_source],
+    ['配置来源', loginConfigSources[login.source] || login.source]]));
+  // A configuration saved under another address still has that callback registered at GitHub.
+  if (login.previous_callback_url) section.append(note(`这个配置是在旧地址保存的：GitHub 目前仍把用户送回 ${login.previous_callback_url}。请在该 OAuth App 里把 Authorization callback URL 改成上面的登录 Callback URL。`));
+  if (login.migration_required) section.append(note('登录仍复用仓库 GitHub App：切换成独立 OAuth App 后，仓库 App 与它的安装都不变，但登录凭据要换。'));
+  section.append(note('改动登录配置的影响：换 OAuth App 或 Client ID 后，现有 GitHub 会话失效，用户要用新 App 重新登录；旧 App 的个人授权要到 GitHub 的 Authorized GitHub Apps 里撤销。仓库连接用的 GitHub App、安装和 webhook 都由「机器人账号」和上面的地址管理，不受登录配置影响。'));
+  // Read-only on purpose: the wizard owns the editor, this page only states what is in force and what changing it means.
+  const onlyRead = element('p', '这里只显示当前生效的登录配置，不在这里修改；改配置或换凭据请到 ', 'muted');
+  onlyRead.append(settingsLink('#/settings/onboarding/2', '接入向导第 3 步（GitHub 登录）'), '。');
+  section.append(onlyRead);
+  return section;
 }
 // Only Apps registered in this system are offered. Creating an App and installing it stay one-time steps of the wizard.
 function appBody(view, redraw) {
