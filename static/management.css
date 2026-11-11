@@ -184,3 +184,13 @@ body.management-page-mode, body.management-fullscreen-mode { overflow: hidden; }
   .management-input textarea { min-height: 48px; height: 60px; }
   .management-status-bar { padding-top: 3px; padding-bottom: 3px; }
 }
+
+/* A command receipt as a page of its own (#235): the project page shell, with the state beside the title. */
+.management-receipt-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.management-receipt-head h1 { margin: 0; font-size: 20px; }
+.management-receipt-page-note { margin: 0; color: #365564; font-size: 13px; line-height: 1.7; }
+#management-receipt-page .facts { margin: 6px 0 0; }
+#management-receipt-page .facts dt { font-size: 12px; }
+#management-receipt-page .side-card > p { margin: 6px 0 0; overflow-wrap: anywhere; }
+#management-receipt-page .rule-table td:last-child { text-align: left; white-space: normal; }
+#management-receipt-page .rule-table td:first-child { white-space: nowrap; color: #365564; }

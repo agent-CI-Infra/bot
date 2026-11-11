@@ -142,12 +142,144 @@ async function openManagementPage(projectId = null) {
   if (location.hash !== '#/management') { chat.returnAddress = location.hash || '#/projects'; history.pushState(null, '', '#/management'); }
   chat.requestedProject = projectId; await route();
 }
+// Why a command did not run, in words instead of only the code the server returned. A code the console cannot explain
+// keeps its bare value below the sentence rather than being guessed at.
+const managementFailureHints = {
+  task_already_delivered: '任务已经交付，这个操作不能再执行。',
+  management_revision_conflict: '提交之后项目配置的版本变了，命令没有执行；先读回当前配置再提交。',
+  authorization_changed: '发起人的权限在命令提交之后变了，命令没有执行。',
+  execution_context_changed: '执行上下文（权限或环境）在提交之后变了，命令没有执行。',
+  command_operator_required: '只有这条命令的发起人可以执行它。',
+  approval_retired: '这条命令来自审批流程取消之前，已经作废，不会执行。',
+  role_setting_forbidden: '这个项目不允许通过这些字段修改角色。',
+  external_result_unknown: '外部调用可能已经生效，对账回读之前不知道结果；不要重复提交。',
+  management_tool_failed: '服务端在处理这条命令时出错，命令没有完成。'
+};
+const managementChannels = { api: '接口调用', console: '控制台', im: '即时消息' };
+const managementStateTone = { succeeded: 'success', failed: 'danger', rejected: 'warning', unknown: 'warning', pending: 'warning', executing: 'warning', not_operator: 'warning' };
+// The target keys this page can name; a key it does not know keeps its own name.
+const managementTargetNames = { project_id: '项目', task_id: '任务', workflow_id: '工作类型', repository_id: '仓库' };
+// A command receipt has an address of its own (#235). It renders the one GET /api/management/commands/<id> the console
+// already exposes and nothing else, and it is read-only: no approval, retry or reconcile, so a bookmarked receipt can
+// never turn into a second execution.
+function hideManagementReceiptPage() {
+  const page = document.getElementById('management-receipt-page'); if (page) page.hidden = true;
+}
+// The console's link() only builds absolute http(s) anchors, so a hash address or an API path needs a plain anchor:
+// a receipt page that looks like a link but is not one would be worse than no link at all.
+function managementReceiptLink(href, caption) {
+  const anchor = element('a', caption); anchor.href = href;
+  if (/^https?:/.test(href)) { anchor.target = '_blank'; anchor.rel = 'noopener noreferrer'; }
+  return anchor;
+}
+function managementReceiptPage() {
+  let page = document.getElementById('management-receipt-page'); if (page) return page;
+  page = element('section', '', 'project-page'); page.id = 'management-receipt-page'; page.hidden = true;
+  page.setAttribute('aria-label', '命令回执详情');
+  const body = element('div', '', 'project-body settings-body'), nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content');
+  nav.setAttribute('aria-label', '命令回执导航');
+  body.append(nav, content); page.append(body); document.getElementById('workspace').append(page);
+  return page;
+}
+async function renderManagementReceiptPage(id) {
+  const page = managementReceiptPage(), nav = page.querySelector('.project-nav'), content = page.querySelector('.project-content');
+  page.hidden = false;
+  const back = element('a', '返回管理对话'); back.href = '#/management'; nav.replaceChildren(back);
+  content.replaceChildren(element('p', '正在加载命令回执…', 'muted'));
+  let receipt;
+  try { receipt = await api('/api/management/commands/' + encodeURIComponent(id)); }
+  catch (err) { if (!page.hidden) content.replaceChildren(element('p', '读不到这条回执：' + err.message, 'view-error')); return; }
+  if (page.hidden) return;
+  if (receipt.project_id) {
+    const roles = element('a', '项目配置'); roles.href = '#/projects/' + receipt.project_id + '/roles';
+    const activity = element('a', '任务'); activity.href = '#/projects/' + receipt.project_id + '/activity';
+    nav.append(roles, activity);
+  }
+  content.replaceChildren(...managementReceiptBody(receipt));
+  window.scrollTo(0, 0);
+}
+function managementReceiptBody(receipt) {
+  const operation = managementOperationLabels[receipt.operation] ?? receipt.operation, nodes = [];
+  // The same state machine the transcript card uses: the page never restates a state the console can already name.
+  const shown = receipt.state === 'failed' && receipt.result?.error === 'command_operator_required' ? 'not_operator' : receipt.state;
+  const [caption, explanation] = managementCommandState(shown);
+  const head = element('div', '', 'management-receipt-head'), state = badge(caption, managementStateTone[shown] ?? 'warning');
+  state.dataset.receiptState = '';
+  head.append(element('h1', '命令回执'), state); nodes.push(head);
+  nodes.push(element('p', explanation, 'management-receipt-page-note'));
+  // The project is named from the list the console already loaded; the initiator is only called "you" when it is you.
+  const project = (typeof repositories === 'undefined' ? [] : repositories).find(row => String(row.id) === String(receipt.project_id));
+  const projectLine = element('span', project ? project.full_name : `项目 ${receipt.project_id}`);
+  if (project) projectLine.append(' · ', managementReceiptLink('#/projects/' + receipt.project_id + '/basic', '打开项目'));
+  const initiator = element('span', ''); initiator.dataset.receiptInitiator = '';
+  initiator.textContent = me && String(receipt.principal_id) === String(me.id)
+    ? '你（当前登录用户） · ' + receipt.principal_id
+    : receipt.principal_id + '（不是当前登录用户；只有发起人可以执行或对账这条命令）';
+  const version = receipt.before_revision ? receipt.before_revision.slice(0, 12) + ' → ' + (receipt.after_revision ?? receipt.before_revision).slice(0, 12) : null;
+  const overview = card('这次操作');
+  overview.append(facts([['操作', `${operation}（${receipt.operation}）`], ['项目', projectLine], ['发起人', initiator],
+    ['渠道', managementChannels[receipt.channel] ?? receipt.channel], ['版本', version],
+    ['提交时间', timestamp(receipt.created_at)], ['更新时间', timestamp(receipt.updated_at)],
+    ['幂等键', receipt.idempotency_key], ['参数指纹', receipt.parameter_hash ? receipt.parameter_hash.slice(0, 12) : null]]));
+  nodes.push(overview);
+  // What the command named and what it wrote, as fields instead of one JSON blob.
+  const change = card('具体变更'), target = element('div', ''); target.dataset.receiptTarget = '';
+  target.append(facts(Object.entries(receipt.target || {}).map(([key, value]) => [managementTargetNames[key] ?? key, typeof value === 'object' ? JSON.stringify(value) : String(value)])));
+  if (!target.querySelector('dd')) target.append(element('p', '这次操作没有指定目标字段。', 'muted'));
+  const args = element('div', ''); args.dataset.receiptArguments = '';
+  args.append(facts(Object.entries(receipt.arguments || {}).map(([key, value]) => [key, value === null || value === undefined ? '未设置' : typeof value === 'object' ? JSON.stringify(value) : String(value)])));
+  if (!args.querySelector('dd')) args.append(element('p', '这次操作没有提交参数。', 'muted'));
+  change.append(target, args); nodes.push(change);
+  // The recorded diff, one row per field: before, after. A command that records no diff says so rather than showing an
+  // empty table that could be read as "nothing changed".
+  const difference = card('配置差异'), differenceBox = element('div', ''); differenceBox.dataset.receiptDiff = '';
+  const before = receipt.result?.diff?.before, after = receipt.result?.diff?.after;
+  const text = value => value === null || value === undefined || value === '' ? '未设置' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  if (before || after) {
+    const table = element('table', '', 'rule-table'), thead = element('thead', ''), tbody = element('tbody', ''), headRow = element('tr', '');
+    for (const column of ['字段', '之前', '之后']) headRow.append(element('th', column));
+    thead.append(headRow);
+    for (const key of [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])]) {
+      const row = element('tr', ''); row.append(element('td', key), element('td', text(before?.[key])), element('td', text(after?.[key]))); tbody.append(row);
+    }
+    table.append(thead, tbody); const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); differenceBox.append(wrap);
+  } else differenceBox.append(element('p', '这个操作不回执字段级差异；执行结果写在下面的回执里。', 'muted'));
+  difference.append(differenceBox); nodes.push(difference);
+  // The result: what the server recorded, with the sentence a person needs beside the code it returned.
+  const result = card('执行结果'), resultBox = element('div', ''); resultBox.dataset.receiptResult = '';
+  const outcome = receipt.result || {};
+  if (receipt.state === 'failed' || shown === 'not_operator') {
+    resultBox.append(element('p', '命令未执行：' + (managementFailureHints[outcome.error] ?? '服务端拒绝了这个操作，原因见下方代码。')));
+    resultBox.append(facts([['错误代码', String(outcome.error ?? '未提供')], ['HTTP 状态', outcome.http_status ? String(outcome.http_status) : null]]));
+  } else if (receipt.state === 'unknown') {
+    resultBox.append(element('p', '结果待确认：外部调用可能已经生效，对账回读之前不要重复提交这条命令。'));
+    resultBox.append(facts([['错误代码', String(outcome.error ?? '未提供')]]));
+  } else if (receipt.state === 'pending' || receipt.state === 'executing') {
+    resultBox.append(element('p', '结果还没出来：执行结束后回执会更新，刷新这一页即可看到最新状态。'));
+  }
+  if (outcome.notice) resultBox.append(element('p', String(outcome.notice)));
+  if (outcome.pr_url) resultBox.append(managementReceiptLink(String(outcome.pr_url), '查看配置 PR（待合入）'));
+  if (outcome.configuration_url) resultBox.append(managementReceiptLink(String(outcome.configuration_url), '查看当前配置'));
+  const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? outcome.id : null);
+  if (taskId) resultBox.append(managementReceiptLink('#/projects/' + receipt.project_id + '/activity', '查看任务 ' + taskId));
+  if (outcome.rollback) resultBox.append(element('p', '这条回执带有原值回滚；需要回滚时在管理对话里发起，会重新校验权限与版本。', 'muted'));
+  const record = element('p', ''); record.append('回执 ID ' + receipt.id + ' · ', managementReceiptLink('/api/management/commands/' + receipt.id, '原始回执（JSON）'));
+  resultBox.append(record);
+  result.append(resultBox); nodes.push(result);
+  // Read-only by design: retry and reconcile are executions, and they belong to the conversation that can show them.
+  nodes.push(element('p', '这一页只读：不提供批准、重试或对账。需要重试或对账时回管理对话，那里的操作会重新校验权限与版本。', 'management-receipt-page-note'));
+  return nodes;
+}
 async function renderManagementPage() {
+  const receipt = /^#\/management\/commands\/([a-f0-9]+)$/.exec(location.hash)?.[1];
+  if (receipt) { leaveManagementPage(); await renderManagementReceiptPage(receipt); return; }
+  hideManagementReceiptPage();
   syncManagementChat(); const project = managementChat?.requestedProject || null;
   if (managementChat) managementChat.requestedProject = null;
   window.scrollTo(0, 0); await openManagementChat(project, { mode: 'page' });
 }
 function leaveManagementPage() {
+  hideManagementReceiptPage();
   const chat = managementChat; if (!chat || !(chat.mode === 'page' || chat.mode === 'fullscreen' && chat.fullscreenFrom === 'page')) return;
   chat.openVersion++; setManagementPresentation(chat, 'floating'); minimizeManagementChat(false);
 }
@@ -391,7 +523,8 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       if (value.arguments) { const args = element('details', ''); args.append(element('summary', '查看请求参数'), element('pre', JSON.stringify(value.arguments, null, 2))); body.append(args); }
       if (value.result?.diff) { const diff = element('details', ''); diff.append(element('summary', '查看配置差异'), element('pre', JSON.stringify(value.result.diff, null, 2))); body.append(diff); }
       if (value.result?.pr_url) body.append(link(value.result.pr_url, '查看配置 PR（待合入）'));
-      const links = element('p', ''); links.append(link('/api/management/commands/' + value.id, '命令回执'));
+      // The card stays a summary; the structured, bookmarked view of the same receipt is the page behind this link.
+      const links = element('p', ''); links.append(managementReceiptLink('#/management/commands/' + value.id, '回执详情'), ' · ', managementReceiptLink('/api/management/commands/' + value.id, '原始回执（JSON）'));
       if (value.project_id) links.append(' · ', link('#/projects/' + value.project_id + '/roles', '配置'), ' · ', link('#/projects/' + value.project_id + '/activity', '任务'));
       body.append(links);
       const taskId = value.target?.task_id ?? (value.operation === 'task.create' ? value.result?.id : null);
