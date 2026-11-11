@@ -99,12 +99,21 @@ function deliveryDetail(value){
     ['仓库',event.full_name||event.repository_id],['接收时间',timestamp(event.received_at)]])); nodes.push(origin);
   nodes.push(deliverySection('reception','接收',[['HTTP 状态',reception.http_status],['正文完整',reception.body_complete?'是':'否'],
     ['结果',reception.accepted?'已接收':'已拒收'+(reception.code?' · '+reception.code:'')]]));
+  // "Unchecked" is not a failed verification: a body over the limit or an unknown endpoint never reaches the signature
+  // check, so the basis says that instead of claiming the request failed it.
+  const signatureBasis=signature.state==='verified'?'签名凭据、正文与入口都核验通过'
+    :signature.state==='invalid'?'未通过验签，请求没有进入处理'
+    :signature.reason==='payload_too_large'?'正文超过大小上限，验签没有执行'
+    :signature.reason==='unknown_endpoint'?'账号下没有这个 Webhook 入口，验签没有执行'
+    :'这次请求没有做验签';
   nodes.push(deliverySection('signature','验签',[['结果',signature.state==='verified'?'签名有效':signature.state==='invalid'?'签名无效':'未验签'],
-    ['依据',signature.state==='verified'?'签名凭据、正文与入口都核验通过':'未通过验签，请求没有进入处理']]));
+    ['依据',signatureBasis]]));
   const processing=element('section','','detail-section'); processing.dataset.detailSection='processing';
   const [caption]=deliveryOutcome(event), rows=[['处理结果',caption]];
   if(deliveryIgnoreReasons[event.processing_result])rows.push(['说明',deliveryIgnoreReasons[event.processing_result]]);
-  if(event.response?.review_outcome)rows.push(['Manager 前的归档结论',event.response.review_outcome]);
+  // response.review_outcome is computed before the Manager decides whether to create a task, so it can contradict the
+  // row that did create one (a task is created for an event whose review_outcome still says not_trigger). It never adds
+  // anything the archive outcome above does not already say, so it stays out of the page rather than being explained. 
   processing.append(element('h3','处理'), facts(rows));
   if((event.tasks||[]).length){ const tasks=element('ul','','delivery-tasks');
     for(const task of event.tasks)tasks.append(element('li',`${kindLabels[task.kind]||task.kind} #${task.object_number} · ${task.status}`)); processing.append(tasks); }
