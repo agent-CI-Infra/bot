@@ -22,7 +22,7 @@ async function prepared(page, shared = false) {
     await expect(row(page)).toBeVisible(); return { h, admin, model };
   } catch (error) { await h.stop(); throw error; }
 }
-const row = page => page.locator('li.model-entry').filter({ has: page.locator('.model-address').filter({ hasText: /^Role-only model$/ }) });
+const row = page => page.locator('li.model-entry').filter({ has: page.locator('.model-address').filter({ hasText: /^Role-only model(?:$|\s)/ }) });
 const dialog = page => page.getByRole('dialog', { name: '删除模型 Role-only model？', exact: true });
 
 test('role-only references remain clear before cancelling deletion on desktop and small phones', async ({ page }) => {
