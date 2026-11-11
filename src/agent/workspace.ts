@@ -7,6 +7,16 @@ import { eventHistory, historyOrder } from '../roles/role-run.js';
 import { type Mirror } from './git-cache.js';
 import { open, rm } from 'node:fs/promises';
 
+// Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
+// is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
+// row scanned the table for minutes with a cold cache), and a row an interrupted attempt left 'pending' is not running.
+const inFlight=new Map<string,Map<string,any>>();
+/** The newest operation the task is executing right now in this process, or null. */
+export function currentOperation(taskId:string):{id:string;request:any}|null{
+  const last=[...inFlight.get(taskId)?.entries()??[]].at(-1);
+  return last?{id:last[0],request:last[1]}:null;
+}
+
 export class Workspace {
   constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void){}
   async call(key:string,request:any){
@@ -30,8 +40,11 @@ export class Workspace {
     let response;
     // The manager answers a command only when it ends; one without timeout_ms waits as long as it runs (0 = no client timeout).
     const wait=['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','git_import'].includes(request.type)?0:request.type!=='workspace_command'?90000:request.timeout_ms==null?0:Number(request.timeout_ms)+120000;
+    const operations=inFlight.get(this.task.id)??new Map<string,any>();inFlight.set(this.task.id,operations);
+    operations.delete(id);operations.set(id,input.request);
     try{response=await this.manager.call('POST',`/v1/projects/${this.task.repository_id}/execute`,input,wait);}
     catch{return stop('execution_interrupted','waiting_environment',`Runner request interrupted: ${request.type}${request.path?' '+request.path:''}`);}
+    finally{operations.delete(id);if(!operations.size&&inFlight.get(this.task.id)===operations)inFlight.delete(this.task.id);}
     await this.guard();
     const result=this.redactor.clean(response.ok?response.result:{error:response.error||'runner_operation_failed',...(response.detail?{detail:response.detail}:{})});
     this.store.run(`UPDATE ${table} SET state='completed',result=? WHERE id=?`,conversation?this.store.secrets.seal(result,'conversation-operation:'+id+':result'):JSON.stringify(result),id);

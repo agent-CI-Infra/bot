@@ -13,6 +13,8 @@ import { commitInstallationProjection } from '../dist/installations/projection.j
 import { IntegrationChecker } from '../dist/projects/integrations.js';
 import { loadConsole } from './console-page.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
+import { Workspace } from '../dist/agent/workspace.js';
+import { Redactor } from '../dist/agent/common.js';
 import { command } from '../runner/command.mjs';
 
 const installation = { id: 77, account: { id: 10, login: 'fixture', type: 'Organization' } };
@@ -248,17 +250,33 @@ test('a background check of stale integration chips updates them in place and ne
 });
 
 test('the console reads the output of the command a running task is executing', async t => {
-  const calls = [], manager = { call: async (_method, path) => { calls.push(path); return { data: 'step 1\n', offset: 7, size: 7, state: 'running' }; } };
+  // The project computer answers the command only when it ends; until then the task is executing it.
+  const calls = [];let finish;
+  const manager = { call: async (method, path, body) => {
+    calls.push(path);
+    if (path.endsWith('/execute') && body?.request?.type === 'workspace_command') return new Promise(resolve => { finish = resolve; });
+    return { data: 'step 1\n', offset: 7, size: 7, state: 'running' };
+  } };
   const h = await harness(t), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101');
-  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number) VALUES('t1','101','review.pr','running','pr',4)");
-  const op = 'a'.repeat(48);
-  h.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')", op, 't1', JSON.stringify({ operation_id: op, generation: 1, request: { type: 'workspace_command', command: 'npm test', timeout_ms: 600000, keep_background: false } }));
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,attempt,generation,workspace_id) VALUES('t1','101','review.pr','running','pr',4,2,1,'w1')");
+  // A row an interrupted attempt left pending is not running anymore and must not be shown as the current command.
+  const stale = 'b'.repeat(48);
+  h.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')", stale, 't1', JSON.stringify({ operation_id: stale, generation: 1, request: { type: 'workspace_command', command: 'old command' } }));
   const engine = new TaskEngine(h.store, manager, undefined, undefined, acceptanceFixture), url = path => new URL('http://local' + path);
   const user = { id: 'x', role: 'super_admin', repositories: [] };
+  assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live'), {}), { running: false });
+  const task = h.store.get("SELECT * FROM tasks WHERE id='t1'");
+  const workspace = new Workspace(h.store, manager, task, new Redactor(), async () => {}, () => {});
+  const command = workspace.call('test', { type: 'workspace_command', command: 'npm test', timeout_ms: 600000, keep_background: false });
+  while (!finish) await new Promise(resolve => setImmediate(resolve));
+  const op = h.store.get("SELECT id FROM task_tools WHERE task_id='t1' AND id<>?", stale).id;
+  calls.length = 0;
   assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live?offset=3'), {}),
     { running: true, operation_id: op, command: 'npm test', timeout_ms: 600000, keep_background: false, output: 'step 1\n', offset: 7, state: 'running' });
-  assert.equal(calls[0], `/v1/projects/101/output/${op}?offset=3`);
+  assert.deepEqual(calls, [`/v1/projects/101/output/${op}?offset=3`]);
+  finish({ ok: true, result: { exit_code: 0, output: 'ok' } });await command;
+  assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live'), {}), { running: false });
   h.store.run("UPDATE tasks SET status='succeeded' WHERE id='t1'");
   assert.deepEqual(await engine.api(user, 'GET', url('/api/tasks/t1/live'), {}), { running: false });
   await assert.rejects(engine.api({ id: 'y', role: 'project_admin', repositories: ['202'] }, 'GET', url('/api/tasks/t1/live'), {}), /task_not_found/);

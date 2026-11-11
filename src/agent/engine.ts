@@ -35,7 +35,7 @@ import { classificationLabels, repositoryLabels } from '../review/labels.js';
 import { agentLoop, type PlatformTools } from './loop.js';
 import { roleAssignmentContext } from './profiles.js';
 import { ReadTokens } from './read-token.js';
-import { Workspace } from './workspace.js';
+import { currentOperation, Workspace } from './workspace.js';
 import { automaticState, isAttemptFailure } from './failures.js';
 import { clip, Redactor, sha, operationId, stop, TaskError } from './common.js';
 import { RuleService, resolveRules, behaviorPath, developmentLabel, ruleErrors, skillIndex, computerRequest } from '../rules/service.js';
@@ -830,8 +830,8 @@ export class TaskEngine {
   async live(user:Actor,id:string,url:URL):Promise<Json>{
     const filter=scope(user,'repository_id'),task=this.store.get(`SELECT * FROM tasks WHERE id=? AND ${filter.sql}`,id,...filter.args);
     if(!task)return fail(404,'task_not_found');
-    const tool=task.status==='running'?this.store.get("SELECT id,request FROM task_tools WHERE task_id=? AND state='pending' ORDER BY rowid DESC LIMIT 1",task.id):undefined;
-    const request=tool?JSON.parse(tool.request).request:null;
+    const tool=task.status==='running'?currentOperation(task.id):null;
+    const request=tool?.request??null;
     const offset=Number(url.searchParams.get('offset'))||0;if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_offset');
     if(!tool||!['workspace_command','command'].includes(request?.type)){
       if(task.status!=='running'||task.phase!=='model'||!task.workspace_id||!task.generation)return {running:false};
