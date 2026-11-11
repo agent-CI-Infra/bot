@@ -68,6 +68,20 @@ test('computer field sources follow each repository key without relabelling inhe
   assert.deepEqual(consoleSpec,{cpus:3,memory_mb:4096,egress:true,env:{MODE:'test'}});
 });
 
+test('an uncached repository marks its provisional computer sources as needing refresh until a branch is read',async t=>{
+  const f=await repositoryFixture(t);
+  f.store.run('INSERT INTO computer_console_specs VALUES(?,?)','101',JSON.stringify({cpus:2}));
+  const sha=f.heads.main=f.commit({'.bot/computer.yaml':'cpus: 1.5\n'});
+  const unread=(await f.admin('/api/repositories/101/rules')).value.rules;
+  assert.equal(unread.needs_refresh,true);assert.equal(unread.sha,null);
+  assert.equal(unread.computer_sources.cpus,'console');assert.equal(unread.computer.cpus,2);
+  const refreshed=await f.admin('/api/repositories/101/rules/refresh','POST',{});
+  assert.equal(refreshed.status,200,JSON.stringify(refreshed.value));
+  const read=refreshed.value.rules;
+  assert.equal(read.needs_refresh,false);assert.equal(read.sha,sha);
+  assert.equal(read.computer_sources.cpus,'repository');assert.equal(read.computer.cpus,1.5);
+});
+
 test('a label line ends with its line: an empty value is an empty label, never the next line',()=>{
   const rules=files=>resolveRules({},files);
   assert.equal(rules({'.bot/rules/issue-development.md':'development_label:\n# Issue development\n'}).development_label,'bot-develop');

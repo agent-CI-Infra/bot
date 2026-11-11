@@ -327,6 +327,7 @@ function machineSection() {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
   const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
   if (!pc) return [status, concurrencyForm(), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
+  const unread = !current.rules || current.rules.needs_refresh === true || !current.rules.sha;
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
   // A resource left empty follows the global default; own() is the value the project sets (console or repository file).
@@ -336,11 +337,11 @@ function machineSection() {
   const configField = (label, control, name) => {
     const wrap = element('div', '', 'machine-config-field'), source = current.rules?.computer_sources?.[name];
     const inherited = specFields.includes(name) && own(name) == null;
-    const origin = !current.rules ? '来源暂未读取' : source ? layerNames[source] : specFields.includes(name) ? '全局默认' : '内置默认';
-    const hint = element('span', `已保存来源：${origin}${inherited && source ? '，跟随全局默认' : ''}`, 'machine-config-origin');
+    const origin = source ? layerNames[source] : specFields.includes(name) ? '全局默认' : '内置默认';
+    const hint = element('span', unread ? '来源暂未读取' : `已保存来源：${origin}${inherited && source ? '，跟随全局默认' : ''}`, 'machine-config-origin');
     if (specFields.includes(name)) {
       const target = own(name) ?? pc.defaults?.[name];
-      hint.append(` · 配置目标 ${target ?? '未知'} · 电脑报告 ${pc[name] ?? '未知'}`);
+      hint.append(` · ${unread ? '临时值' : '配置目标'} ${target ?? '未知'} · 电脑报告 ${pc[name] ?? '未知'}`);
     }
     wrap.append(control.tagName === 'LABEL' ? control : field(label, control), hint); return wrap;
   };
@@ -351,7 +352,7 @@ function machineSection() {
   const sourceLink=element('a','查看规则文件来源');sourceLink.href=`#/projects/${current.id}/roles/manager`;
   const sourceActions=element('div','','actions');sourceActions.append(sourceLink);
   // Tasks apply the repository file when they prepare; a super administrator can apply it right away.
-  if(source?.source==='repository'&&editable){const apply=button('立即应用仓库文件',async()=>{apply.disabled=true;apply.textContent='正在按仓库文件重建虚拟电脑…';
+  if(source?.source==='repository'&&editable&&!unread){const apply=button('立即应用仓库文件',async()=>{apply.disabled=true;apply.textContent='正在按仓库文件重建虚拟电脑…';
     try{await api(`/api/repositories/${current.id}/rules/apply-computer`,'POST',{});current.flash='已按仓库 .bot/computer.yaml 重建虚拟电脑';await reloadProject();}catch(err){apply.disabled=false;apply.textContent='立即应用仓库文件';error(err);}});sourceActions.append(apply);}
   const resourceGrid = element('div', '', 'field-grid');
   resourceGrid.append(configField('CPU（核）', number('cpus', '0.25'), 'cpus'), configField('内存（MB）', number('memory_mb', '128'), 'memory_mb'),
@@ -373,7 +374,7 @@ function machineSection() {
   if (source?.source === 'repository') impact.append(note('仓库仅覆盖写明的字段；表单改动写入项目控制台，下次任务准备时同名字段仍以仓库文件为准。'));
   const layout = element('div', '', 'machine-config-layout'); layout.append(fields, impact);
   const nodes = [
-    note(source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的配置目标，电脑是否已应用需结合上方状态核对。':'表单显示已保存的配置目标；仓库 .bot/computer.yaml 可以按字段覆盖控制台值。'),sourceActions,
+    note(unread?'尚未读取默认分支配置，目前仅显示内置与控制台临时值，无法确认仓库覆盖关系。':source?.source==='repository'?'表单显示默认分支 .bot/computer.yaml 合并后的配置目标，电脑是否已应用需结合上方状态核对。':'表单显示已保存的配置目标；仓库 .bot/computer.yaml 可以按字段覆盖控制台值。'),sourceActions,
     layout];
   const readSpec = form => {
     const spec = {};
@@ -393,7 +394,7 @@ function machineSection() {
     progress(spec.packages ? '正在安装软件包并重建虚拟电脑，首次可能需要几分钟…' : spec.setup_script !== undefined || spec.rerun_setup ? '正在重建虚拟电脑并运行初始化脚本…' : '正在按新配置重建虚拟电脑…');
     await api(`/api/environments/${current.id}/configure`, 'POST', { operation_id: operationId(), generation: environment.environment.generation, spec });
     return '已保存，虚拟电脑已按新配置重建';
-  }, { editable: editable && !!current.rules });
+  }, { editable: editable && !unread });
   form.classList.add('machine-config-card');
   const names = { cpus: 'CPU', memory_mb: '内存', pids: '进程数', tmp_mb: '/tmp', packages: '软件包', setup_script: '初始化脚本', rerun_setup: '重新初始化', egress: '网络', env: '环境变量' };
   const update = () => {
@@ -401,14 +402,24 @@ function machineSection() {
     catch (err) { draft.textContent = '草稿尚未保存：' + err.message; }
   };
   form.addEventListener('input', update); update();
+  const sourceReadError = element('p', '', 'view-error'); sourceReadError.hidden = true;
   const reread = button('重新读取电脑配置', async () => {
+    const target = current, actor = me, address = location.hash, live = () => current === target && me === actor && location.hash === address;
     let dirty = true; try { dirty = !!Object.keys(readSpec(form.querySelector('form'))).length; } catch {}
     if (dirty && !await askConfirm({ title: '重新读取已保存配置？', body: ['本组未保存的输入将被替换。取消可继续保留草稿。'], action: '重新读取' })) return;
-    await reloadProject().catch(error);
+    if (!live()) return;
+    reread.disabled = true; sourceReadError.hidden = true;
+    try {
+      // Re-reading an uncached local projection cannot discover repository overrides; fetch the branch first.
+      if (unread && target.rules) await api(`/api/repositories/${target.id}/rules/refresh`, 'POST', {});
+      if (live()) await reloadProject();
+    } catch (err) { if (live()) { sourceReadError.textContent = '重新读取失败：' + err.message; sourceReadError.setAttribute('role', 'alert'); sourceReadError.hidden = false; } }
+    finally { reread.disabled = false; }
   }, 'quiet');
   // Keep recovery outside the disabled fieldset when source data was unavailable.
   const heading=form.querySelector('h3'),toolbar=element('div','','heading');heading.replaceWith(toolbar);toolbar.append(heading,reread);
-  if(!current.rules)toolbar.after(note('规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。'));
+  toolbar.after(sourceReadError);
+  if(unread)toolbar.after(note(!current.rules?'规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。':'尚未读取默认分支文件，不能确认仓库覆盖关系。请重新读取配置后保存。'));
   return [status, concurrencyForm(), form];
 }
 // How many tasks this computer runs at once: the project's own value, or empty for the global default. Project
