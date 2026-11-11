@@ -110,9 +110,25 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 - `list_projects`：当前可用的仓库全名和 GitHub 链接，不返回内部 ID；
 - `conversation_history`：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
 - `github: read`：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
-- `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等、组织审批策略和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和审批后恢复时都重新核对绑定、来源消息、角色权限和授权者权限。
+- `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等、组织审批策略和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和审批后恢复时都重新核对绑定、来源消息、角色权限和授权者权限；
+- `delegation: allow`（派活）：`create_project_task` 在范围内的仓库新建任务，参数为需求和交付约定（目标、范围、验收条件、终点）；同时提供 `list_project_tasks`、`read_project_task` 和 `manage_project_task` 的追加说明、修改约定（`task.contract`）与取消。见下文「派活」；
+- 独立任务：`start_own_task`、`continue_own_task`、`list_own_tasks`，不受权限项控制，见[服务角色](service-roles.md#独立任务)。
 
-派活、服务角色自己的独立任务和群内审批不在当前版本中。
+#### 派活
+
+服务角色只能经项目的 Manager 间接派活：新建的任务与控制台创建的任务相同，交给项目团队、由 Manager 规划和分派；不能指定执行角色，也不能直接操作某个角色的运行。群里提交的任务命令按操作检查服务角色的权限：
+
+| 操作 | 需要 |
+| --- | --- |
+| 新建任务 `task.create`、修改约定 `task.contract` | `delegation: allow` |
+| 追加说明 `task.instructions`、取消 `task.cancel` | `delegation: allow` 或 `project_tasks: write` |
+| 暂停 `task.pause`、重试 `task.retry` | `project_tasks: write` |
+
+新建任务经 `ManagementService.submit('task.create')` 以绑定的 principal 提交：服务端读取当前项目版本作为 `expected_revision`，幂等键由群、来源消息和工具调用生成；授权者对该仓库须仍有 `config.write` 和 `tasks.write`；组织审批策略、审计和回执与控制台一致。任务创建时（包括审批后执行时）记入 `channel_service_tasks`，关联到这条绑定和来源消息。任务完成、提交 PR、取消或失败时，结果发回原群；入队和发送前复核绑定仍启用、授权者仍能读该仓库以及任务的来源权限。结果消息记在本绑定的范围内，并带上当时的群围栏，之后的回答可以引用它；绑定或权限变化后不再进入上下文。
+
+任务执行期间，任务引擎每次复核来源时也检查这条绑定：绑定仍是该群当前且启用的绑定、服务角色仍是 `delegation: allow`、授权者对该仓库仍有 `config.write` 和 `tasks.write`；任一不满足就停止后续步骤（`channel_service_delegation_revoked` 或 `channel_service_scope_paused`）。
+
+群内不另设审批入口：群助手在权限内的操作直接执行。只有受信任的组织策略 `management_policies.approval_operations` 把某个操作列为需审批时，命令才进入“等待审批”，助手在群里如实说明尚未执行，由有 `grants.manage` 的人在控制台处理，与私聊一致。
 
 #### 旧群员工的迁移
 
@@ -158,7 +174,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 验证
 
-`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、任务读写与撤权、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
+`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、任务读写与撤权、经 Manager 派活（新建、追加说明、修改约定、取消，不能暂停或指定角色）与结果回群、撤销派活后停止任务、群聊助手的独立任务与围栏变化后隐藏、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
 
 `e2e/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
 

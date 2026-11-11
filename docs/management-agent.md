@@ -31,7 +31,7 @@
 | `idempotency_key` | 操作者范围内唯一的请求标识 |
 | `source_conversation` / `source_message` | 原始会话与消息引用 |
 
-命令包括 `project.update`、`manager.update`（Manager 提示词、工作类型的开关和写入、事件开关）、`workflow.update`（兼容旧名称：改一个工作类型的章节、开关或写入）、`roles.update`、`task.create`、`task.pause`、`task.cancel`、`task.retry`、`task.instructions`、`task.contract`、`task.adopt-config` 和扩展注册入口。模型只有 query / command 工具，不能指定 actor、tenant、capabilities、SQL、后台地址或控制面 shell。模型调用的来源和幂等键由会话服务生成。
+命令包括 `project.update`、`manager.update`（Manager 提示词、工作类型的开关和写入、事件开关）、`workflow.update`（兼容旧名称：改一个工作类型的章节、开关或写入）、`roles.update`、`task.create`、`task.pause`、`task.cancel`、`task.retry`、`task.instructions`、`task.contract`、`task.adopt-config` 和扩展注册入口。模型只有 query / command 工具，以及管理助手自己的独立任务工具（`start_own_task`、`continue_own_task`、`list_own_tasks`，见[服务角色](service-roles.md#独立任务)），不能指定 actor、tenant、capabilities、SQL、后台地址或控制面 shell。模型调用的来源和幂等键由会话服务生成。
 
 命令回执包含操作者、渠道、目标、参数、修改前后版本、状态和结果。`GET /api/management/commands/:id` 回读；重复键和相同参数返回原回执，参数变化返回 `idempotency_conflict`。版本冲突返回 `management_revision_conflict`，客户端必须重读并重新形成修改，不能覆盖新配置。配置回执提供 diff 和重新绑定当前版本后可提交的回滚参数。
 

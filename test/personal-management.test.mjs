@@ -18,7 +18,7 @@ const sent=(f,id)=>until(()=>f.wire.sent.find(s=>JSON.stringify(s.content).inclu
 test('multi-project greetings use the shared management agent and private history shows the actual answer',async t=>{
   const f=await channelFixture(t);
   f.modelState.respond=async(body,res)=>{
-    assert.deepEqual(body.tools.map(t=>t.function.name),['management_query','management_command']);
+    assert.deepEqual(body.tools.map(t=>t.function.name),['management_query','management_command','start_own_task','continue_own_task','list_own_tasks']);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
     assert.match(body.messages[0].content,/No project is preselected/);
     reply(res,'你好！可以按项目名称查询任务和管理配置。');
@@ -213,4 +213,41 @@ test('private history cleanup erases management text and snapshots, including a 
   f.modelState.gate=null;release();assert.equal((await finished(f.h,receipt.value.operation_id)).state,'failed');
   assert.equal(f.h.store.get('SELECT request_snapshot FROM model_requests WHERE conversation_id=?',row.conversation_id).request_snapshot,null);
   assert.ok(!JSON.stringify(f.h.store.all('SELECT data FROM management_events WHERE message_id=?',row.message_id)).includes('private-cleanup-derived'));
+});
+
+test('the management assistant works a side question in its own task with the user\'s own tools and keeps only the conclusion',async t=>{
+  const f=await channelFixture(t),ownBodies=[];
+  const tool=(res,name,args)=>respond(res,{role:'assistant',content:null,tool_calls:[{id:'call-'+name,type:'function',function:{name,arguments:JSON.stringify(args)}}]});
+  let main;
+  f.modelState.respond=async(body,res)=>{
+    const seen=observation(body);
+    if(body.messages[0].content.includes('one of your own independent tasks')){
+      ownBodies.push(body);
+      return seen.length?reply(res,'可访问的项目有 '+seen[0].projects.length+' 个。'):call(res,'list_projects');
+    }
+    return main(body,res,seen);
+  };
+  main=(body,res,seen)=>!seen.length?tool(res,'start_own_task',{title:'盘点项目',instruction:'数一数我能访问几个项目'}):reply(res,'结论：'+seen[0].conclusion);
+  const first=await web(f,'我能管理几个项目？');
+  assert.equal(first.history.messages[0].state,'completed');
+  const events=first.history.events.filter(e=>e.type==='tool_call').map(e=>e.data.name);
+  assert.deepEqual(events,['start_own_task','management_query']);
+  const result=first.history.events.find(e=>e.type==='tool_result'&&e.data.name==='start_own_task').data.result;
+  assert.equal(result.state,'completed');assert.match(result.conclusion,/可访问的项目有 \d+ 个/);
+  assert.match(first.history.events.find(e=>e.type==='reply').data.text,/结论：可访问的项目有/);
+  // Inside the own task: the same management tools, no own-task tools, a context of its own.
+  assert.deepEqual(ownBodies[0].tools.map(t=>t.function.name),['management_query','management_command']);
+  assert.equal(JSON.parse(ownBodies[0].messages[1].content).instruction,'数一数我能访问几个项目');
+  const row=f.h.store.get('SELECT * FROM service_role_own_tasks');
+  assert.equal(row.owner_kind,'management');assert.equal(row.owner_id,first.conversation);assert.equal(row.service_role_id,'management-assistant');
+  assert.equal(f.h.store.get("SELECT count(*) n FROM model_requests WHERE service_role_id='management-assistant' AND repository_id IS NOT NULL").n,0);
+  // Another conversation of the same user does not see it; the same conversation can continue it.
+  main=(body,res,seen)=>!seen.length?tool(res,'list_own_tasks',{}):reply(res,'没有。');
+  const other=await web(f,'列出独立任务');assert.deepEqual(observation(f.requests.at(-1))[0].own_tasks,[]);
+  assert.notEqual(other.conversation,first.conversation);
+  main=(body,res,seen)=>!seen.length?tool(res,'continue_own_task',{task_id:row.id,instruction:'再确认一次'}):reply(res,'已确认。');
+  const message=(await f.admin('/api/management/conversations/'+first.conversation+'/messages','POST',{source_message:'fixture-web-2',content:'再确认一次'})).value;
+  const history=await settled(f.admin,first.conversation,message.id);
+  assert.equal(history.events.filter(e=>e.type==='tool_result'&&e.data.name==='continue_own_task').at(-1).data.result.round,2);
+  assert.match(JSON.parse(ownBodies.at(-1).messages[1].content).own_task.previous_rounds[0].conclusion,/可访问的项目有/);
 });
