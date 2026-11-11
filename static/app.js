@@ -128,9 +128,11 @@ function deliveryDetail(value){
       element('p',item.reason?'原因：'+item.reason:'没有记录原因','muted'), element('p',timestamp(item.decided_at||item.created_at),'muted')); dispatch.append(entry); }
   else dispatch.append(element('p','未交给 Manager：'+(deliveryIgnoreReasons[event.processing_result]||'这个投递没有分派记录。'),'muted'));
   nodes.push(dispatch);
-  // The archive removes credential-ish request headers by name only; the JSON body is stored as received, so the summary
-  // says exactly that rather than promising a sanitised payload.
-  const raw=element('details','','fold raw-payload'); raw.append(element('summary','原始请求与响应（请求头凭据已移除，正文未脱敏）'),
+  // The read path replaces the closed set of credential keys (token, secret, password, authorization, cookie,
+  // private_key) at every depth of request_headers, payload and response, and a body it cannot filter comes back as a
+  // placeholder instead of the raw bytes. The summary says that, so it never promises a sanitiser this exit does not
+  // have; a header removed at ingest is already gone before the body is read.
+  const raw=element('details','','fold raw-payload'); raw.append(element('summary','原始请求与响应（凭据字段已脱敏；无法脱敏的正文不显示）'),
     element('pre',JSON.stringify({request_headers:event.request_headers,payload:event.payload,response:event.response},null,2),'output')); nodes.push(raw);
   return nodes;
 }

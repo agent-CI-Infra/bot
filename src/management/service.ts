@@ -13,7 +13,7 @@ const parseSectionBody=(content:string,id:string)=>parseSections(content).sectio
 import { TaskCommands } from '../tasks/commands.js';
 import { TaskRecords } from '../tasks/service.js';
 import { taskTrace, traceClean } from '../tasks/trace.js';
-import { queries as taskQueries } from '../app/queries.js';
+import { queries as taskQueries, redactEgress } from '../app/queries.js';
 import { updatePolicy } from '../app/management.js';
 import { TaskError } from '../agent/common.js';
 import { roleApi } from '../roles/api.js';
@@ -194,7 +194,7 @@ export class ManagementService {
   }
   receipt(row:Row):Json {
     const {arguments:args,result,target,...safe}=row;
-    return traceClean({...safe,target:JSON.parse(target),arguments:JSON.parse(args),result:result?JSON.parse(result):null});
+    return redactEgress(traceClean({...safe,target:JSON.parse(target),arguments:JSON.parse(args),result:result?JSON.parse(result):null}));
   }
   read(actor:ActorContext,id:string):Json {
     const row=this.store.get('SELECT * FROM management_commands WHERE id=?',id);if(!row)fail(404,'management_command_not_found');

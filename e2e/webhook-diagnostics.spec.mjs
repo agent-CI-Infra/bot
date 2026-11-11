@@ -95,6 +95,9 @@ test('webhook list and detail separate reception, signature and processing outco
   await expect(dialog.locator('[data-detail-section="dispatch"]')).toContainText(/reason|原因/);
   await expect(dialog.locator('[data-delivery-id]')).toHaveText('delivery-success');
   await expect(dialog.locator('details.raw-payload')).not.toHaveAttribute('open', '');
+  // #357: the body leaves the server through the closed-set filter, so the fold says the credential fields are gone
+  // from both headers and body. It must not keep promising a body that was never sanitised.
+  await expect(dialog.locator('details.raw-payload summary')).toHaveText('原始请求与响应（凭据字段已脱敏；无法脱敏的正文不显示）');
 
   await dialog.getByRole('button', { name: '关闭', exact: true }).click();
   await row('delivery-duplicate').getByRole('button', { name: '查看详情', exact: true }).click();
