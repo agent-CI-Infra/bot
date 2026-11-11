@@ -18,12 +18,16 @@ export class ChannelApi {
       return result;
     }
     const employee = /^\/api\/channels\/chats\/([a-f0-9]{48})\/employee$/.exec(path);
-    // Notification destinations are registered here, not by chat commands (#312).
-    if (path === '/api/channels/destinations' && method === 'GET') return this.service.destinations(actor);
-    const register = /^\/api\/channels\/chats\/([a-f0-9]{48})\/destinations$/.exec(path);
-    if (register && method === 'POST') return this.service.registerDestination(actor, register[1]!, input);
-    const destination = /^\/api\/channels\/destinations\/([a-f0-9]{48})$/.exec(path);
-    if (destination && method === 'DELETE') { fields(input, []); return this.service.revokeDestination(actor, destination[1]!); }
+    // Prompt-driven timers of a private chat or a bound group (#330). Notification destinations are no longer registered here:
+    // a project's schedule panel offers the chats that may receive it directly.
+    if (path === '/api/channels/schedules/preview' && method === 'POST') return this.service.schedules.preview(input);
+    const schedules = /^\/api\/channels\/chats\/([a-f0-9]{48})\/schedules$/.exec(path);
+    if (schedules && method === 'GET') return this.service.schedules.list(actor, schedules[1]!);
+    if (schedules && method === 'POST') return this.service.schedules.create(actor, schedules[1]!, input);
+    const schedule = /^\/api\/channels\/schedules\/([a-f0-9]{48})(\/run)?$/.exec(path);
+    if (schedule && !schedule[2] && method === 'PATCH') return this.service.schedules.update(actor, schedule[1]!, input);
+    if (schedule && !schedule[2] && method === 'DELETE') return this.service.schedules.remove(actor, schedule[1]!, input);
+    if (schedule && schedule[2] && method === 'POST') return this.service.schedules.runNow(actor, schedule[1]!, input);
     const conversation=/^\/api\/channels\/chats\/([a-f0-9]{48})\/conversation$/.exec(path);
     if(conversation&&method==='GET')return this.service.conversationView(actor,conversation[1]!,Number(url.searchParams.get('offset')??0));
     // Legacy employees can only be disabled; a group now binds a service role (#312).

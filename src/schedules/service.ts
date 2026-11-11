@@ -164,8 +164,29 @@ export class ScheduleService {
       this.audit(row, 'business.' + state, null, row.source, { run_id: row.run_id });
     });
   }
-  validatePlan(actor: ActorContext, project: string, value: unknown, existing?: Row): { plan: Plan; grant: Row; execution: ActorContext } {
+  /** Chats the actor may name as this project's destination without registering them first (#330): a private chat of the
+   * actor's own with read access to the project, or a group whose assistant the actor manages and whose scope reaches it. */
+  chatDestinations(actor: ActorContext, project: string): Json[] {
+    const usable = (check: () => unknown) => { try { check(); return true; } catch (error) { if (error instanceof HttpError) return false; throw error; } };
+    const channels = this.channels, personal = this.store.all("SELECT c.* FROM channel_personal_owners o JOIN channel_chats c ON c.id=o.chat_id WHERE o.principal_id=? AND c.chat_type='p2p'", actor.principal_id)
+      .filter(chat => usable(() => { channels.schedules.owner(channels.employees.chat(chat.id), actor.principal_id); authorize(actor, 'tasks.read', { project_id: project }); }));
+    const groups = this.store.all("SELECT c.* FROM channel_service_bindings b JOIN channel_chats c ON c.id=b.chat_id WHERE b.enabled=1 AND c.chat_type='group'").filter(chat => usable(() => {
+      const binding = channels.serviceBindings.canView(actor, chat.id);
+      if (!binding || !channels.serviceBindings.reachable(channels.serviceBindings.assertUsable(binding), project, ['tasks.read'])) fail(403, 'schedule_destination_unavailable');
+    }));
+    return [...personal, ...groups].map(chat => ({ id: 'chat:' + chat.id, type: chat.chat_type, chat_id: chat.chat_id }));
+  }
+  /** A chosen chat ('chat:<id>') is registered for this project and registrant when saved, with every check of a registration;
+   * the saved plan or subscription keeps the registered destination. Previews only check that the chat may be chosen. */
+  private chosen(actor: ActorContext, project: string, id: string, register = true): string {
+    if (!id.startsWith('chat:')) return id;
+    if (!register) { if (!this.chatDestinations(actor, project).some(d => d.id === id)) fail(403, 'schedule_destination_unavailable'); return id; }
+    return String(this.channels.registerDestination(actor, id.slice(5), { project_id: project }).id);
+  }
+  validatePlan(actor: ActorContext, project: string, value: unknown, existing?: Row, register = true): { plan: Plan; grant: Row; execution: ActorContext } {
     validate(planSchema, value); const plan = value as Plan;
+    const preview = !register && plan.destination_id.startsWith('chat:');
+    plan.destination_id = this.chosen(actor, project, plan.destination_id, register);
     if (existing && (plan.kind !== existing.kind || plan.actor_id !== existing.actor_id || plan.owner_id !== existing.owner_id)) fail(403, 'schedule_identity_immutable');
     if (!!plan.cron === !!plan.interval_ms || plan.end_at !== undefined && plan.end_at <= plan.start_at) fail(400, 'invalid_schedule_recurrence');
     localParts(this.clock(), plan.timezone); if (plan.cron) parseCron(plan.cron);
@@ -174,7 +195,7 @@ export class ScheduleService {
       if (Object.keys(plan.parameters).some(k => k !== 'window_ms') || plan.parameters.window_ms !== undefined && (!Number.isSafeInteger(plan.parameters.window_ms) || Number(plan.parameters.window_ms) < 60000 || Number(plan.parameters.window_ms) > 31 * 86400000)) fail(400, 'invalid_report_parameters');
     }
     const grant = this.grants(actor, plan, project, existing), tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
-    const execution = this.actor({ tenant_id: tenant, project_id: project, grant_snapshot: JSON.stringify(grant) }, plan);
+    const execution = this.actor({ tenant_id: tenant, project_id: project, grant_snapshot: JSON.stringify(grant) }, plan, !preview);
     return { plan, grant, execution };
   }
   pause(row: Row, reason: string): void {
@@ -259,6 +280,7 @@ export class ScheduleService {
       if (spec.projects.length !== 1 || spec.projects[0] !== project) fail(400, 'subscription_project_scope_required');
       localParts(this.clock(), spec.timezone);
       if (!!spec.quiet_start !== !!spec.quiet_end || [spec.quiet_start, spec.quiet_end].some(v => v !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) || spec.quiet_start && spec.quiet_start === spec.quiet_end) fail(400, 'invalid_subscription_quiet_hours');
+      spec.destination_id = this.chosen(actor, project, spec.destination_id);
       this.destination(spec.destination_id, project); const id = old?.id ?? randomId(), now = this.clock();
       if (old) this.store.run('UPDATE notification_subscriptions SET spec=?,revision=revision+1,state=?,reason=NULL,updated_at=? WHERE id=?', JSON.stringify(spec), spec.enabled ? 'active' : 'paused', now, id);
       else this.store.run(`INSERT INTO notification_subscriptions(id,tenant_id,project_id,principal_id,spec,revision,state,reason,event_cursor,created_at,updated_at) VALUES(?,?,?,?,?,1,?,NULL,?,?,?)`, id,
@@ -289,7 +311,7 @@ export class ScheduleService {
     if (operation === 'preview_schedule') {
       const existing = args.schedule_id ? this.schedule(project, args.schedule_id) : undefined;
       if (existing) this.owned(actor, existing);
-      const { plan } = this.validatePlan(actor, project, args.plan, existing);
+      const { plan } = this.validatePlan(actor, project, args.plan, existing, false);
       return { revision, plan, timezone: plan.timezone, future: previewTimes(plan, this.clock()), supported: plan.workflow === 'report.daily' || this.handlers.has(plan.workflow),
         report_preview_at: this.clock(),
         report: plan.workflow === 'report.daily' ? this.reports.render(project, this.clock(), plan.timezone, Number(plan.parameters.window_ms ?? 86400000)) : null };
@@ -300,9 +322,11 @@ export class ScheduleService {
       return { revision, [operation === 'list_schedules' ? 'schedules' : 'subscriptions']: rows.map(r => operation === 'list_schedules' ? this.view(r) : this.subscriptionView(r)), next_offset: more ? offset + limit : null };
     }
     if (operation === 'list_schedule_destinations') {
-      const destinations = this.store.all("SELECT id,created_at FROM channel_outbox WHERE state='registered'").flatMap(r => {
+      const destinations: Json[] = this.store.all("SELECT id,created_at FROM channel_outbox WHERE state='registered'").flatMap(r => {
         try { const d = this.destination(r.id, project); return [{ id: r.id, type: d.event.chat_type, chat_id: d.event.chat_id }]; } catch { return []; }
       });
+      // Chats that may receive this project's notifications are offered directly; no separate registration step (#330).
+      destinations.push(...this.chatDestinations(actor, project).filter(chat => !destinations.some(d => d.chat_id === chat.chat_id)));
       let canDelegate = false; try { authorize(actor, 'grants.manage', { project_id: project }); canDelegate = true; } catch { /* Personal schedules need no delegation capability. */ }
       const tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)!.tenant_id;
       const services = canDelegate ? this.store.all("SELECT id,maintenance FROM principals WHERE kind='service' AND active=1 AND project_id=? AND tenant_id=? AND maintenance<>''", project, tenant) : [];

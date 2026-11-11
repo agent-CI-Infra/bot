@@ -119,38 +119,92 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_audience_permission_required: '飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在「全局设置 → 飞书连接」查看缺少的权限，为应用开通 im:chat.members:read 并发布新版本后再保存。',
   channel_revision_conflict: '这个群的配置已被其他人修改，请刷新本页后重新保存。', service_role_unavailable: '所选服务角色已停用。', service_role_not_bindable: '管理助手不能绑定到群聊。',
   channel_service_scope_paused: '配置人在全部所选仓库的权限都已变化，助手暂停。', channel_service_binding_disabled: '群聊助手已停用。',
-  channel_destination_forbidden: '只有私聊的本人，或能管理该群聊助手的人可以登记。', schedule_destination_binding_required: '这个群没有启用的群聊助手绑定。',
+  schedule_destination_binding_required: '这个群没有启用的群聊助手绑定。',
   channel_service_binding_forbidden: '只有配置人、超级管理员或在全部范围内有配置权限的维护人可以停用。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
   service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
 const employeeError = value => Object.entries(employeeErrors).find(([key]) => String(value).includes(key))?.[1] || String(value);
-// Notification destinations are registered here (#312); schedules and event subscriptions then pick them.
-function channelDestinations(chatId, projects, registered) {
-  const box = element('div', '', 'channel-destinations'), form = element('form', '', 'project-form');
-  box.append(element('strong', '通知目的地'));
-  for (const d of registered.filter(item => item.chat_id === chatId)) {
-    const row = element('div', '', 'channel-binding');
-    row.append(note(`已登记：${d.full_name || '项目已不可见'}（${new Date(d.created_at).toLocaleString()}）`), button('撤销此通知目的地', async () => {
-      try { await api('/api/channels/destinations/' + d.id, 'DELETE', {}); await start(); } catch (err) { error(err); }
-    }, 'quiet'));
-    box.append(row);
+// Prompt-driven timers of one chat (#330): the chat's own assistant runs the prompt with the chat's permissions and posts the
+// result here. A private chat uses its owner's management assistant; a group uses its bound service role.
+const scheduleStates = { active: '生效中', paused: '已暂停' };
+const scheduleRunStates = { running: '运行中', completed: '已发送结果', silent: '无需通知，未发送', failed: '未完成', skipped: '已跳过' };
+const scheduleErrors = { channel_schedule_forbidden: '只有私聊的本人，或能管理该群聊助手的人可以管理这里的定时任务。',
+  channel_schedule_recurrence_required: '请填写 Cron 表达式或间隔分钟数，二选一。', channel_schedule_interval_invalid: '间隔须为 5 分钟到 31 天之间的整数分钟。',
+  invalid_schedule_cron: 'Cron 表达式应为五段：分 时 日 月 周，例如 0 9 * * 1-5。', invalid_schedule_timezone: '时区无效，请使用 IANA 时区名，例如 Asia/Shanghai。',
+  channel_schedule_revision_conflict: '定时任务已被其他操作修改，请刷新本页后重试。', channel_schedule_running: '这个定时任务正在运行，请稍后再试。',
+  channel_schedule_missed: '服务未运行时错过了触发时间', channel_schedule_previous_run_active: '上一次运行尚未结束', channel_schedule_interrupted: '服务重启时中断',
+  channel_schedule_changed: '定时任务在运行中被修改或删除', external_binding_required: '本人的飞书身份绑定已失效', principal_inactive: '账户已停用',
+  user_paused: '已手动暂停', invalid_field: '名称、提示词和时区都需要填写。' };
+const scheduleError = value => scheduleErrors[String(value)] || employeeError(value);
+const scheduleTime = (at, zone) => new Date(at).toLocaleString('zh-CN', { timeZone: zone });
+async function channelSchedules(chatId) {
+  const box = element('div', '', 'channel-schedules'); box.setAttribute('aria-label', '定时任务');
+  box.append(element('strong', '定时任务'), note('到点后用这里的提示词唤醒本会话的助手，在本会话的权限内查询、汇总或处理，再把结果发回本会话；超出权限的项目和操作会被拒绝。私聊用管理助手和你本人的当前权限，群聊用本群绑定的服务角色和项目范围。模型用量记在对应的服务角色上。'));
+  let data;
+  try { data = await api('/api/channels/chats/' + chatId + '/schedules'); } catch (err) { box.append(note(scheduleError(err.message))); return box; }
+  const list = element('div');
+  let fill = () => {};
+  for (const s of data.schedules) {
+    const row = element('article', '', 'channel-binding'); row.setAttribute('aria-label', '定时任务 ' + s.name);
+    const rhythm = s.cron ? 'Cron ' + s.cron : '每 ' + s.interval_minutes + ' 分钟';
+    row.append(element('strong', `${scheduleStates[s.state] || s.state} · ${s.name}`), note(`${rhythm}（${s.timezone}）${s.reason ? '；暂停原因：' + scheduleError(s.reason) : ''}`),
+      element('p', '提示词：' + s.prompt), note(s.future.length ? '接下来：' + s.future.map(at => scheduleTime(at, s.timezone)).join('、') : '暂停中，不会自动触发。'));
+    const latest = s.runs[0];
+    if (latest) row.append(note(`最近一次（${latest.trigger === 'manual' ? '手动' : '定时'}，${scheduleTime(latest.created_at, s.timezone)}）：${scheduleRunStates[latest.state] || latest.state}${latest.error ? '，原因：' + scheduleError(latest.error) : ''}`));
+    const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
+    // A step returning false (a cancelled confirmation) leaves the page as it is.
+    const act = (caption, work) => button(caption, async () => { status.textContent = ''; try { if (await work() !== false) await start(); } catch (err) { status.textContent = scheduleError(err.message); } }, 'quiet');
+    const actions = element('div', '', 'actions'); row.append(actions);
+    if (s.can_manage) actions.append(act('立即运行一次', () => api('/api/channels/schedules/' + s.id + '/run', 'POST', {})),
+      act(s.state === 'active' ? '暂停' : '恢复', () => api('/api/channels/schedules/' + s.id, 'PATCH', { expected_revision: s.revision, enabled: s.state !== 'active' })),
+      button('编辑', () => fill(s), 'quiet'), act('删除', async () => { if (!confirm('删除定时任务「' + s.name + '」？')) return false; await api('/api/channels/schedules/' + s.id, 'DELETE', { expected_revision: s.revision }); }));
+    else if (s.state === 'active') actions.append(act('停用（管理员）', () => api('/api/channels/schedules/' + s.id, 'PATCH', { expected_revision: s.revision, enabled: false })));
+    row.append(status); list.append(row);
   }
-  if (!projects.length) { box.append(note('没有可登记的项目。')); return box; }
-  const project = channelSelect(form, '通知项目', 'destination_project_' + chatId, projects.map(p => [p.id, p.full_name]));
-  const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
-  const save = element('button', '登记为通知目的地'); save.type = 'submit';
-  form.append(note('登记后，可以在项目「定时计划」中把日报和事件订阅发到这里；登记本身不发送消息，每次发送前仍检查当前权限。'), status, save);
-  form.addEventListener('submit', async event => {
-    event.preventDefault(); save.disabled = true; status.textContent = '';
-    try { await api('/api/channels/chats/' + chatId + '/destinations', 'POST', { project_id: project.value }); await start(); }
-    catch (err) { status.textContent = employeeError(err.message); save.disabled = false; }
-  });
-  box.append(form); return box;
+  if (!data.schedules.length) list.append(note('还没有定时任务。'));
+  box.append(list);
+  if (data.can_manage) {
+    const form = element('form', '', 'project-form'), title = element('strong', '新建定时任务');
+    const name = channelField(form, '定时任务名称', 'schedule_name_' + chatId);
+    const prompt = document.createElement('textarea'); prompt.name = 'schedule_prompt_' + chatId; prompt.rows = 4; prompt.maxLength = 8000;
+    prompt.placeholder = '例如：汇总我可读的所有项目中过去 24 小时失败的任务和 CI，按项目分条列出；如果都没有异常，简短告知一切正常。';
+    form.append(field('任务提示词', prompt));
+    const zone = channelField(form, '时区', 'schedule_zone_' + chatId, 'Asia/Shanghai');
+    const kind = channelSelect(form, '触发方式', 'schedule_kind_' + chatId, [['cron', 'Cron 表达式'], ['interval', '固定间隔']]);
+    const cron = channelField(form, 'Cron 表达式（分 时 日 月 周）', 'schedule_cron_' + chatId, '0 9 * * *');
+    const minutes = channelField(form, '间隔分钟数', 'schedule_minutes_' + chatId, '60', 'number'); minutes.min = '5';
+    const enabled = checkbox('schedule_enabled_' + chatId, true, '保存后立即生效'); form.append(enabled);
+    const preview = note(''), status = element('p', '', 'view-error'); status.setAttribute('role', 'alert'); preview.setAttribute('role', 'status');
+    const save = element('button', '保存定时任务'); save.type = 'submit';
+    let editing = null;
+    const spec = () => ({ name: name.value.trim(), prompt: prompt.value.trim(), timezone: zone.value.trim(), ...(kind.value === 'cron' ? { cron: cron.value.trim() } : { interval_minutes: Number(minutes.value) }) });
+    const showKind = () => { cron.closest('label').hidden = kind.value !== 'cron'; minutes.closest('label').hidden = kind.value === 'cron'; };
+    kind.addEventListener('change', showKind); showKind();
+    fill = s => { editing = s; title.textContent = '编辑定时任务「' + s.name + '」'; name.value = s.name; prompt.value = s.prompt; zone.value = s.timezone;
+      kind.value = s.cron ? 'cron' : 'interval'; cron.value = s.cron || '0 9 * * *'; minutes.value = String(s.interval_minutes || 60); enabled.querySelector('input').checked = s.state === 'active'; showKind(); name.focus(); };
+    form.append(button('预览触发时间', async () => {
+      preview.textContent = '';
+      try { const result = await api('/api/channels/schedules/preview', 'POST', { timezone: spec().timezone, ...(kind.value === 'cron' ? { cron: spec().cron } : { interval_minutes: spec().interval_minutes }) });
+        preview.textContent = '接下来：' + result.future.map(at => scheduleTime(at, spec().timezone)).join('、'); }
+      catch (err) { preview.textContent = scheduleError(err.message); }
+    }, 'quiet'), preview, status, save);
+    form.addEventListener('submit', async event => {
+      event.preventDefault(); save.disabled = true; status.textContent = '';
+      try {
+        const body = { ...spec(), enabled: enabled.querySelector('input').checked };
+        if (editing) await api('/api/channels/schedules/' + editing.id, 'PATCH', { ...body, expected_revision: editing.revision });
+        else await api('/api/channels/chats/' + chatId + '/schedules', 'POST', body);
+        await start();
+      } catch (err) { status.textContent = scheduleError(err.message); save.disabled = false; }
+    });
+    box.append(title, form);
+  }
+  return box;
 }
 const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应 @ 及以问号结尾的文字'], ['all', '读取每条新文字后判断是否发言']];
 const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已停用' };
 // A group binds one service role and one project scope; members use it without binding themselves.
 async function channelServiceBindingSettings() {
-  const [data, { destinations }] = await Promise.all([api('/api/channels/service-bindings'), api('/api/channels/destinations')]), box = card('飞书群聊助手'), form = element('form', '', 'project-form');
+  const data = await api('/api/channels/service-bindings'), box = card('飞书群聊助手'), form = element('form', '', 'project-form');
   box.append(note('为机器人所在的群选择一个服务角色和项目范围（整个组织或多个仓库）。群成员无需绑定或授权，按这里的配置使用助手，也不需要先选项目。配置人需要已绑定飞书、在该群中，并对所选仓库（或整个组织）有配置权限；配置人失去某个仓库的权限时，只暂停该仓库。'));
   const chats = new Map([...data.chats.map(c => [c.id, `${c.app_name || c.app_id || '已配置群'} · ${c.chat_id}`]), ...data.bindings.filter(b => !data.chats.some(c => c.id === b.chat_id)).map(b => [b.chat_id, `${b.chat.app_name || '已配置群'} · ${b.chat.chat_id}`])]);
   const chat = channelSelect(form, '助手所在群', 'binding_chat', [...chats]);
@@ -219,7 +273,7 @@ async function channelServiceBindingSettings() {
       try { await api('/api/channels/chats/' + b.chat_id + '/service-binding', 'PUT', { enabled: false, expected_revision: b.revision }); await start(); }
       catch (err) { error(err); }
     }, 'quiet'));
-    if (b.enabled && b.can_manage) row.append(channelDestinations(b.chat_id, b.reachable_projects, destinations));
+    if (b.enabled && b.can_manage) row.append(await channelSchedules(b.chat_id));
     row.append(history); box.append(row);
   }
   const legacy = data.legacy_employees.filter(g => g.enabled);
@@ -238,14 +292,14 @@ async function channelServiceBindingSettings() {
   return box;
 }
 async function channelPersonalChats() {
-  const [data, { destinations }] = await Promise.all([api('/api/channels/employees'), api('/api/channels/destinations')]), personal = card('我的飞书私信会话');
+  const data = await api('/api/channels/employees'), personal = card('我的飞书私信会话');
   personal.append(note('私信与控制台管理对话共用管理助手、当前授权与执行回执。可按项目或任务名称提问并继续选择，无需先选项目。同一私信跨项目和话题延续上下文，个人记录不进入群聊。'));
   if (!data.personal_chats.length) personal.append(note('绑定后先在飞书私聊发一条普通消息，再刷新此页。'));
   for (const chat of data.personal_chats) {
     const row = element('article', '', 'channel-binding'), target = element('div');
     row.append(element('strong', '私信 ' + chat.chat_id), button('查看私信连续会话', () => channelConversation(chat.id, target).catch(error), 'quiet'),
       button('查询私信本地记录', () => channelEmployeeHistory({ chat_id: chat.id }, target).catch(error), 'quiet'));
-    row.append(channelDestinations(chat.id, data.projects.map(p => ({ id: p.id, full_name: p.full_name })), destinations), target); personal.append(row);
+    row.append(await channelSchedules(chat.id), target); personal.append(row);
   }
   return personal;
 }

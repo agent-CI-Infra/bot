@@ -14,6 +14,7 @@ import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
 import { bindingScope, ChannelServiceBindings } from './service-bindings.js';
 import { ChannelServiceSessions } from './service-session.js';
+import { ChannelSchedules } from './schedules.js';
 import { roleConfiguration } from '../roles/definition.js';
 import { assertManagedExecution, taskAuthorizationFence } from '../tasks/management.js';
 import type { Manager } from '../projects/service.js';
@@ -35,6 +36,7 @@ export class ChannelService {
   readonly serviceBindings: ChannelServiceBindings;
   readonly serviceSessions: ChannelServiceSessions;
   readonly reactions: ChannelReactions;
+  readonly schedules: ChannelSchedules;
   private readonly business = new Map<string,Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
@@ -47,6 +49,7 @@ export class ChannelService {
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
     this.serviceBindings = new ChannelServiceBindings(store, this.employees);
     this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl);
+    this.schedules = new ChannelSchedules(store, this);
     // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
     this.employees.bindingGuard = origin => this.serviceBindings.guardTask(origin);
     management.service.taskCreated = (command, task) => this.serviceBindings.linkTask(command, task);
@@ -66,6 +69,9 @@ export class ChannelService {
       const binding = store.get('SELECT * FROM channel_service_bindings WHERE principal_id=?', command.principal_id);
       const source = store.get(`SELECT * FROM channel_inbox WHERE conversation_id=? AND ${binding ? '' : 'message_id IS NOT NULL AND '}id=?`,
         command.source_conversation, String(command.source_message).replace(/^feishu:/, ''));
+      // A group's timer run (#330) is its source the way a message is: the run must be live and belong to this group.
+      const run = String(command.source_message).replace(/^feishu:/, '');
+      if (binding && !source && run.startsWith('schedule:')) { this.schedules.sourceOfCommand(command, run.slice(9)); this.serviceBindings.guardCommand(binding, command); return; }
       if (!source) fail(403, 'channel_command_source_required');
       const e = store.secrets.open(source!.payload, 'channel-event:' + source!.id) as unknown as ChannelEvent;
       this.source(e);
@@ -88,10 +94,10 @@ export class ChannelService {
   start(): void {
     for (const chat of this.store.all("SELECT h.id FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.state='active' AND c.enabled=1 AND c.app_id=h.app_id AND c.installation_tenant=h.installation_tenant")) this.ledger.resync(chat.id);
     this.timer = setInterval(() => { void this.tick(); }, 100); this.timer.unref();
-    this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); void this.employees.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
+    this.syncTimer = setInterval(() => { void this.historySync.tick().catch(() => {}); void this.employees.tick().catch(() => {}); void this.schedules.tick().catch(() => {}); }, 1000); this.syncTimer.unref();
   }
-  close(): void { this.stopped = true; this.reactions.close(); this.serviceSessions.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
-  async drain():Promise<void>{await Promise.allSettled([...this.business.values(),this.reactions.drain()]);}
+  close(): void { this.stopped = true; this.schedules.close(); this.reactions.close(); this.serviceSessions.stop(); this.historySync.close(); this.employees.close(); clearInterval(this.timer); clearInterval(this.syncTimer); }
+  async drain():Promise<void>{await Promise.allSettled([...this.business.values(),this.reactions.drain(),this.schedules.drain()]);}
   /** Console readers of a chat's local history: platform managers, its binding's managers, the personal owner or a legacy maintainer. */
   authorizeHistory(actor:ActorContext,id:string):void{
     if(this.serviceBindings.canView(actor,id))return;
@@ -157,7 +163,7 @@ export class ChannelService {
         request:JSON.parse(m.input).content,reply:this.personalReply(actor,m),role_id:'管理助手'})),
       has_more:messages.length>50,next_offset:messages.length>50?offset+50:null,usage:{...requests,costs},...this.ledger.diagnostics(chat.id)};
   }
-  private personalReply(actor:ActorContext,message:Row):string{
+  personalReply(actor:ActorContext,message:Row):string{
     const reply=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply' ORDER BY sequence DESC LIMIT 1",message.id);
     const error=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1",message.id);
     const operations=this.store.all('SELECT * FROM management_commands WHERE source_conversation=? AND source_message=? ORDER BY created_at',message.conversation_id,message.source_message);
@@ -281,8 +287,24 @@ export class ChannelService {
     return this.store.get('SELECT * FROM channel_sessions WHERE id=?', id)!;
   }
   private url(): string { return (this.options.origin ?? '') + '/#/management'; }
-  /** A notification destination, registered in the console (#312): a private chat by its own bound owner, or a bound group by a
-   * manager of its binding for a project in its scope. Schedules consume the sealed registration; it never proves delivery. */
+  /** A send-only source for a chat through its app's current connection: no message and no speaker. */
+  chatEvent(chat: Row): ChannelEvent {
+    const c = this.connector(chat.connector_id);
+    return { provider: 'feishu', connector_id: c.id, connector_revision: c.revision, app_id: chat.app_id, installation_tenant: chat.installation_tenant, actor_tenant: '', actor_id: '',
+      chat_id: chat.chat_id, chat_type: chat.chat_type, message_id: '', event_id: '', thread_id: '', created_at: Date.now(), kind: 'message', content: '' };
+  }
+  /** Queues a card to a chat once per key; the protection is checked again right before sending. */
+  post(chat: Row, message: string, key: string, source: string, protection: Json): string { return this.queue(this.chatEvent(chat), card(message), key, source, protection); }
+  chatBusy(chat: string): boolean { return this.business.has(chat); }
+  /** Runs a turn of a group's assistant while the group's incoming messages wait in the queue, as for a live answer. */
+  exclusive<T>(chat: string, work: () => Promise<T>): Promise<T> {
+    if (this.business.has(chat)) return fail(409, 'channel_chat_busy');
+    const result = work(), settled = result.then(() => {}, () => {}).finally(() => this.business.delete(chat));
+    this.business.set(chat, settled); return result;
+  }
+  /** A project notification destination (#312): a private chat of its own bound owner, or a bound group a manager of its binding
+   * may use for a project in its scope. Since #330 a project's schedule panel registers a chosen chat through this on save,
+   * once per chat, project and registrant; schedules consume the sealed registration, which never proves delivery. */
   registerDestination(actor: ActorContext, id: string, input: Json): Json {
     fields(input, ['project_id']); assertCurrent(actor);
     const project = text(input.project_id), chat = this.employees.chat(id), c = this.connector(chat.connector_id);
@@ -305,40 +327,14 @@ export class ChannelService {
       event = { ...base, actor_tenant: '', actor_id: '' };
       protection = { principal_id: actor.principal_id, project_id: project, chat_id: chat.id, binding_id: binding.id };
     }
-    // One registration per chat, project and registrant; a revoked one frees the key (see revokeDestination).
+    // One registration per chat, project and registrant.
     const key = 'destination:' + digest(JSON.stringify([chat.id, project, actor.principal_id]));
     return this.store.transaction(() => {
       const existing = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key);
       const created = existing?.id ?? this.queue(event, card('通知目的地已登记，尚未发送。'), key, undefined, protection, true);
       if (!existing) this.store.audit(actor.principal_id, 'channel.destination.registered', created, project);
-      return this.destinationView(this.store.get('SELECT * FROM channel_outbox WHERE id=?', created)!);
+      return { id: created, chat_id: chat.id, chat_type: chat.chat_type, project_id: project };
     });
-  }
-  private destinationView(row: Row): Json {
-    const { event, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
-    const chat = protection?.chat_id ? this.store.get('SELECT id FROM channel_chats WHERE id=?', protection.chat_id)
-      : this.store.get('SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', event.provider, event.app_id, event.installation_tenant, event.chat_id);
-    return { id: row.id, state: row.state, chat_id: chat?.id ?? null, chat_type: event.chat_type, project_id: protection?.project_id ?? null,
-      full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', protection?.project_id ?? '')?.full_name ?? null, registered_by: protection?.principal_id ?? null, created_at: row.created_at };
-  }
-  /** Registered destinations the actor registered (all of them for a platform manager). */
-  destinations(actor: ActorContext): Json {
-    assertCurrent(actor);
-    let platform = false; try { authorize(actor, 'platform.manage'); platform = true; } catch (error) { if (!(error instanceof HttpError)) throw error; }
-    return { destinations: this.store.all("SELECT * FROM channel_outbox WHERE state='registered' ORDER BY created_at").map(row => this.destinationView(row))
-      .filter(d => platform || d.registered_by === actor.principal_id) };
-  }
-  revokeDestination(actor: ActorContext, id: string): Json {
-    assertCurrent(actor);
-    const row = this.store.get("SELECT * FROM channel_outbox WHERE id=? AND state='registered'", id);
-    if (!row) return fail(404, 'channel_destination_not_found');
-    if (this.destinationView(row).registered_by !== actor.principal_id) authorize(actor, 'platform.manage');
-    // Schedules that named it stop at their next check; the deterministic key is released for a later registration.
-    this.store.transaction(() => {
-      this.store.run("UPDATE channel_outbox SET state='revoked',idempotency_key=idempotency_key||':revoked:'||id WHERE id=? AND state='registered'", id);
-      this.store.audit(actor.principal_id, 'channel.destination.revoked', id);
-    });
-    return { id, state: 'revoked' };
   }
   /** A group destination stays usable while the group's enabled binding still reaches the project. */
   groupDestination(e: ChannelEvent, project: string): void {
@@ -465,9 +461,10 @@ export class ChannelService {
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
     const c = this.source(event);
-    if(['employee','personal_conversation','service_binding','service_task'].includes(protection?.kind)){
+    if(['employee','personal_conversation','service_binding','service_task','channel_schedule'].includes(protection?.kind)){
       const guard=()=>{
         this.source(event);if(this.stopped)fail(409,'channel_stopped');
+        if(protection.kind==='channel_schedule'){this.schedules.guardDelivery(protection);return;}
         if(protection.kind==='service_task'){
           const binding=this.serviceBindings.get(protection.chat_id);
           if(!binding||binding.id!==protection.binding_id)fail(409,'conversation_source_changed');
@@ -494,13 +491,15 @@ export class ChannelService {
           if(turn?.state!=='completed'||turn.fence!==protection.source_fence||this.businessFence(this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!)!==turn.fence)fail(409,'conversation_source_changed');}
       };
       guard();const remote=await this.adapter(c,guard).send(delivery,digest(row.id));
+      // A private timer's result is a personal reply: it is not part of any group's context.
+      if(protection.kind==='channel_schedule'&&!protection.binding_id){if(!this.stopped)this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);return;}
       if(!this.stopped)this.store.transaction(()=>{this.store.run("UPDATE channel_outbox SET state='sent',last_error=NULL,remote_message_id=? WHERE id=?",remote,row.id);
         const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',protection.chat_id)!;
         const content=String(delivery.content.elements?.[0]?.text?.content??'');
         this.ledger.merge(chat,{message_id:remote,sender_id:c.bot_open_id,sender_tenant:c.installation_tenant,sender_type:'app',message_type:'interactive',content,raw_content:JSON.stringify(delivery.content),created_at:Date.now(),updated_at:Date.now(),parent_id:event.message_id,root_id:'',thread_id:event.thread_id,deleted:false},'live');
         // A delegated task's result joins the group's own context under the binding, until the group's fence changes.
         const fence=protection.kind==='service_task'?this.serviceBindings.fence(chat.id):protection.source_fence;
-        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
+        this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,['service_binding','service_task','channel_schedule'].includes(protection.kind)?bindingScope(protection.binding_id):protection.project_id,fence);
       });return;
     }
     const actor = protection ? await this.actor(event) : undefined;
@@ -589,8 +588,9 @@ export class ChannelService {
     this.serviceBindings.assertUsable(binding);
     if(!this.serviceBindings.reachable(binding,task.repository_id,['tasks.read']))return;
     this.resultAuthority(task);
-    const receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',link.source_message);if(!receipt)return;
-    const original=this.store.secrets.open(receipt.payload,'channel-event:'+link.source_message) as unknown as ChannelEvent,c=this.connector(chat.connector_id);
+    // A task a group's timer delegated (#330) has no source message; its result goes to the same group.
+    const receipt=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',link.source_message);if(!receipt&&!String(link.source_message).startsWith('schedule:'))return;
+    const original=receipt?this.store.secrets.open(receipt.payload,'channel-event:'+link.source_message) as unknown as ChannelEvent:this.chatEvent(chat),c=this.connector(chat.connector_id);
     const name=this.store.get('SELECT full_name FROM repositories WHERE id=?',task.repository_id)?.full_name??task.repository_id;
     const state=({completed:'已完成',succeeded:'已完成',pr_opened:'已提交 PR',cancelled:'已取消',failed:'失败'} as Record<string,string>)[task.status]??task.status;
     let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
