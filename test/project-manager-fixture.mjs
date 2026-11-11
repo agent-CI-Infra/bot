@@ -9,7 +9,10 @@ export async function managerFixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'project-files-')), docker = new FakeDocker();
   const options = { database: join(root, 'manager.sqlite'), docker, deployment: 'fixture', image: 'approved' };
   let projects = new Projects(options);
-  t.after(async () => { projects.db.close(); await rm(root, { recursive: true, force: true }); });
+  // #385: the notes volume can still be receiving a write when teardown starts, so the recursive rmdir
+  // occasionally hit ENOTEMPTY on project-notes/<id>. fs.rm retries that race itself (no fixed sleep),
+  // the delete stays exhaustive and every other error keeps surfacing.
+  t.after(async () => { projects.db.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); });
   const manager = { async call(method, path, input) {
     try {
     const url = new URL('http://manager'+path);
