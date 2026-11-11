@@ -7,7 +7,7 @@ async function fixture() {
   const state={offline:false,absent:false,recovering:false,responseError:false,liveState:'ready',metricsFail:false,stats:{running:true,cpu_percent:0,memory_bytes:1048576,memory_limit_bytes:2147483648,pids:3},computer:{cpus:2,memory_mb:2048,pids:512,tmp_mb:512,
     defaults:{cpus:2,memory_mb:2048,pids:512,tmp_mb:512},inherited:['cpus','memory_mb','pids','tmp_mb'],packages:[],env:{},setup_script:'',network_policy:'internal, no egress',
     image:'approved/project-computer@sha256:'+'a'.repeat(64),build:{state:'ready',output:'Public package build output'},setup:{state:'succeeded',exit_code:0,output:'Public initialization output',generation:1}}};
-  const manager={async call(_method,path){const id=path.split('/')[3];if(path.endsWith('/stats')){if(state.metricsFail)throw new Error('metrics_unavailable');return {...state.stats,sampled_at:state.stats.sampled_at||new Date().toISOString()};}
+  const manager={async call(_method,path){const id=path.split('/')[3];if(path.endsWith('/stats')){if(state.offline)fail(503,'manager_unavailable');if(state.absent)fail(404,'project_not_registered');if(state.recovering)fail(503,'manager_not_ready');if(state.responseError)fail(403,'resource_ownership_mismatch');if(state.metricsFail)throw new Error('metrics_unavailable');return {...state.stats,sampled_at:state.stats.sampled_at||new Date().toISOString()};}
     if(state.offline)throw new Error('manager_unavailable');if(state.recovering)fail(503,'manager_not_ready');if(state.responseError)fail(403,'private_response_detail');if(state.absent)return null;
     return {repository_id:id,generation:1,state:state.liveState,desired:'ready',revision:1,computer:structuredClone(state.computer)};}};
   const h=await harness(undefined,manager),{admin,password}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');await repository(admin,a.id,'202');
@@ -108,5 +108,31 @@ test('manager recovery and answered errors remain distinct from an outage across
     f.state.offline=true;await page.evaluate(()=>{location.hash='#/projects/101/basic';});
     await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑待核验');
     await expect(page.locator('.project-body [data-project-environment-state]')).toHaveText('电脑待核验');
+  }finally{await f.close();}
+});
+
+
+test('an absent manager record keeps the saved project and draft when its real stats read is 404',async({page})=>{
+  const f=await fixture();
+  try{await login(page,f);const cpu=page.getByLabel('CPU（核）',{exact:true});await cpu.fill('3');f.state.absent=true;
+    await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
+    await expect(page.locator('#machine-status')).toBeVisible();await expect(cpu).toHaveValue('3');
+    await expect(page.locator('.project-head [data-project-environment-state]')).toHaveText('电脑记录缺失');
+    await expect(card(page,'软件安装与初始化')).toContainText('初始化状态未知');
+    await expect(card(page,'软件安装与初始化')).not.toContainText('没有初始化脚本');
+    expect(await page.evaluate(async()=>{try{await api('/api/environments/101/stats');}catch(err){return {status:err.status,code:err.code};}})).toEqual({status:404,code:'project_not_registered'});
+    await page.evaluate(()=>refreshProjectStatus(renderToken));await expect(page.locator('#machine-status')).toBeVisible();
+    await expect(page.getByRole('heading',{name:'项目电脑暂不可访问',exact:true})).toHaveCount(0);
+    f.state.absent=false;await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
+    await expect(card(page,'软件安装与初始化')).toContainText('初始化脚本成功');
+  }finally{await f.close();}
+});
+
+for(const suffix of ['', '/stats'])test(`a control-plane project 404 still clears private data from ${suffix||'the environment read'}`,async({page})=>{
+  const f=await fixture();
+  try{await login(page,f);await page.route('**/api/environments/101'+suffix,route=>route.fulfill({status:404,json:{error:'repository_not_found'}}));
+    await page.getByRole('button',{name:'刷新电脑状态',exact:true}).click();
+    await expect(page.getByRole('heading',{name:'项目电脑暂不可访问',exact:true})).toBeVisible();
+    await expect(page.locator('#machine-status')).toHaveCount(0);await expect(page.getByLabel('CPU（核）',{exact:true})).toHaveCount(0);
   }finally{await f.close();}
 });

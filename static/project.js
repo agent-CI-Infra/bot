@@ -499,7 +499,7 @@ function machineStatus() {
   const work=card('运行与排队记录'), count=value=>Array.isArray(value)?value.length:'未知';
   work.append(facts([['运行任务记录',count(environment.running_tasks)],['排队任务记录',count(environment.queued_tasks)]]),
     consoleLink(`#/projects/${current.id}/activity`,'查看运行与排队任务','与本页使用同一项目电脑记录'),note('任务记录与电脑连接分别读取；配置页的项目任务并发与角色容量是不同限制。'));
-  return [machine, usageCard(), work, preparationCard(pc)];
+  return [machine, usageCard(), work, preparationCard(pc, available && !!env.computer)];
 }
 let usage = null;
 function usageCard() {
@@ -514,10 +514,10 @@ function usageCard() {
   return section;
 }
 // Package image build and setup script results: what was installed into this computer and whether it worked.
-function preparationCard(pc) {
+function preparationCard(pc, known = true) {
   const section = card('软件安装与初始化'), build = pc.build, setup = pc.setup;
   const buildState = { none: ['仅用镜像自带软件', ''], building: ['正在构建软件包镜像', 'info'], ready: ['软件包镜像已就绪', 'success'], failed: ['软件包镜像构建失败', 'danger'] }[build?.state] || ['未知', ''];
-  const setupState = !setup ? ['没有初始化脚本', ''] : { running: ['初始化脚本运行中', 'info'], succeeded: ['初始化脚本成功', 'success'], failed: ['初始化脚本失败', 'danger'] }[setup.state] || [setup.state, ''];
+  const setupState = !known ? ['初始化状态未知', ''] : !setup ? ['没有初始化脚本', ''] : { running: ['初始化脚本运行中', 'info'], succeeded: ['初始化脚本成功', 'success'], failed: ['初始化脚本失败', 'danger'] }[setup.state] || [setup.state, ''];
   const head = element('div', '', 'actions'); head.append(badge(...buildState), badge(...setupState)); section.append(head);
   section.append(facts([['镜像标签', build?.tag], ['构建完成', timestamp(build?.finished_at)], ['脚本退出码', setup?.exit_code ?? (setup?.error || null)], ['运行于', setup ? `g${setup.generation} · ${timestamp(setup.finished_at || setup.started_at)}` : null]]));
   if (build?.output) section.append(collapsible('构建输出', build.output, build.state === 'failed'));
@@ -533,7 +533,9 @@ async function refreshProjectStatus(token) {
   const [environment, stats] = await Promise.all([settled(api('/api/environments/' + id)),
     section === 'machine' ? settled(api(`/api/environments/${id}/stats`).then(r => r.stats)) : {value:null}]);
   if (token !== renderToken || read!==projectStatusRead || current!==target || location.hash!==address) return;
-  const errors=[environment.error,stats.error],revoked=errors.find(err=>err&&[401,403].includes(err.status))||(target.environment&&errors.find(err=>err?.status===404));
+  // These manager answers describe the computer/service, not the signed-in actor's project access.
+  const managerStatsError=stats.error&&['project_not_registered','unauthorized','resource_ownership_mismatch'].includes(stats.error.code);
+  const errors=[environment.error,managerStatsError?null:stats.error],revoked=errors.find(err=>err&&[401,403].includes(err.status))||(target.environment&&errors.find(err=>err?.status===404));
   if(revoked){target.environment=null;usage=null;$('project-page').replaceChildren(consoleState('项目电脑暂不可访问','原记录和配置已清除。'+revoked.message,{tone:'error',retry:()=>renderProject({id,section})}));return;}
   if (environment.value) target.environment = environment.value;
   target.environmentReadError=environment.error?.message||'';
