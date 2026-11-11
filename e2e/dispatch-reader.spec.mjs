@@ -78,7 +78,7 @@ test('retry retains the original failure and event identity, and repeated clicks
     const gate = new Promise(resolve => release = resolve);
     await page.route('**/api/repositories/101/dispatch/failed/retry', async route => { writes++; await gate; await route.continue(); });
     const retry = detail(page).getByRole('button', { name: '重试这条分派', exact: true }); await retry.click(); await expect(retry).toBeDisabled(); await retry.evaluate(el => el.click()); expect(writes).toBe(1); release();
-    await expect(detail(page)).toContainText('原轮尝试 8 次'); await expect(detail(page)).toContainText('等待或自动重试'); await expect(retry).toBeHidden();
+    await expect(detail(page)).toContainText('原轮尝试 8 次'); await expect(detail(page).getByRole('status')).toHaveText('已请求重试，仍使用同一条分派记录。'); await expect(detail(page)).toContainText('等待或自动重试'); await expect(retry).toBeHidden();
     expect(h.store.get("SELECT count(*) n FROM dispatch_retries WHERE event_id='failed'").n).toBe(1); expect(h.store.get('SELECT count(*) n FROM tasks').n).toBe(0);
     await page.reload(); await expect(detail(page)).toContainText('原轮尝试 8 次'); await expect(detail(page)).toContainText('invalid_decision');
   } finally { release?.(); await h.stop(); }
@@ -110,4 +110,18 @@ test('a late detail for one project cannot appear in another project', async ({ 
     await page.goto(h.admin + '/#/projects/102/roles/manager'); await expect(page.getByRole('region', { name: 'Manager 分派记录', exact: true })).toContainText('当前筛选没有分派记录'); release();
     await expect(page.locator('dialog.dispatch-detail')).toHaveCount(1); await expect(detail(page)).toBeHidden(); await expect(page.locator('#project-page')).not.toContainText('Visible event failed');
   } finally { release?.(); await h.stop(); }
+});
+
+
+test('opening a linked task reports a rejected read without an unhandled rejection', async ({ page }) => {
+  const { h, reader } = await prepared(page), errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    h.store.run('INSERT INTO tasks(id,repository_id,kind,status,summary) VALUES(?,?,?,?,?)', 'linked-failure', '101', 'review.issue', 'succeeded', 'Linked fixture task');
+    h.store.run('INSERT INTO task_events(task_id,event_id,relation,created_at) VALUES(?,?,?,?)', 'linked-failure', 'created', 'created', new Date().toISOString());
+    await reader.locator('[data-dispatch-event="created"]').getByRole('button', { name: '查看分派详情', exact: true }).click();
+    await page.evaluate(() => { window.linkedTaskRequests = []; window.openTask = async id => { window.linkedTaskRequests.push(id); throw new Error('fixture_task_open_failed'); }; });
+    await detail(page).getByRole('button', { name: /^新建 · review.issue · linked-/ }).click();
+    await expect(page.locator('#message')).toContainText('fixture_task_open_failed');
+    expect(await page.evaluate(() => window.linkedTaskRequests)).toEqual(['linked-failure']); expect(errors).toEqual([]);
+  } finally { await h.stop(); }
 });

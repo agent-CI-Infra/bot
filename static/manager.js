@@ -118,9 +118,10 @@ function dispatchCard() {
   section.append(note('筛选事件收到的时间；时间按本机时区 ' + Intl.DateTimeFormat().resolvedOptions().timeZone + ' 输入。这里显示最终任务分派，工具操作需结合已保存理由核对。等待或读取失败时，最终决定仍未知。'), form, element('div', '', 'actions'), message, count, list, more);
   form.nextElementSibling.append(refresh);
   const dialog = document.createElement('dialog'); dialog.className = 'dispatch-detail'; dialog.setAttribute('aria-label', '分派详情');
+  const detailStatus = element('p', '', 'muted'); detailStatus.setAttribute('role', 'status');
   const detailMessage = element('p', '', 'view-error'), body = element('div', '', 'dispatch-detail-body'), footer = element('div', '', 'actions'); detailMessage.setAttribute('role', 'alert');
   const close = button('关闭分派详情', () => dialog.close()), read = button('刷新当前结果', () => void readDetail(selected)), retry = button('重试这条分派', () => void retrySelected());
-  footer.append(close, read, retry); dialog.append(element('h2', '分派详情'), detailMessage, body, footer); section.append(dialog);
+  footer.append(close, read, retry); dialog.append(element('h2', '分派详情'), detailStatus, detailMessage, body, footer); section.append(dialog);
   let request = 0, detailRequest = 0, cursor = null, loaded = false, loading = false, detailBusy = false, selected = null, detail = null, revoked = false, rows = [], opener;
   const address = () => {
     if (!live()) return;
@@ -131,7 +132,7 @@ function dispatchCard() {
   };
   const forbidden = err => {
     if (![401, 403].includes(err.status)) return false;
-    revoked = true; request++; detailRequest++; loading = false; detailBusy = false; rows = []; detail = null; selected = null; list.replaceChildren(); body.replaceChildren();
+    revoked = true; request++; detailRequest++; loading = false; detailBusy = false; rows = []; detail = null; selected = null; detailStatus.textContent = ''; list.replaceChildren(); body.replaceChildren();
     if (dialog.open) dialog.close(); address(); more.hidden = true; count.textContent = '当前身份无法读取分派，已清空旧记录。'; controls(); return true;
   };
   const controls = () => { apply.disabled = refresh.disabled = more.disabled = loading; read.disabled = detailBusy; retry.disabled = detailBusy; retry.hidden = !detail || detail.event.state !== 'failed' || revoked; };
@@ -165,10 +166,10 @@ function dispatchCard() {
   });
   function openDetail(eventId) {
     if (!live()) return;
-    opener = document.activeElement; selected = eventId; detail = null; body.replaceChildren(note('正在读取这条分派…')); detailMessage.textContent = ''; controls(); address();
+    opener = document.activeElement; selected = eventId; detail = null; detailStatus.textContent = ''; body.replaceChildren(note('正在读取这条分派…')); detailMessage.textContent = ''; controls(); address();
     if (!dialog.open) dialog.showModal(); void readDetail(eventId);
   }
-  dialog.addEventListener('close', () => { selected = null; detail = null; detailRequest++; body.replaceChildren(); address(); if (live() && !opener?.isConnected) refresh.focus(); });
+  dialog.addEventListener('close', () => { selected = null; detail = null; detailRequest++; detailStatus.textContent = ''; body.replaceChildren(); address(); if (live() && !opener?.isConnected) refresh.focus(); });
   function drawDetail(value) {
     const event = value.event, position = dialog.scrollTop; body.replaceChildren();
     const group = (title, ...children) => { const el = element('section'); el.append(element('h3', title), ...children); body.append(el); return el; };
@@ -179,7 +180,7 @@ function dispatchCard() {
     if (event.state === 'pending' && event.next_run_at) body.lastChild.append(note('下次允许自动尝试：' + timestamp(new Date(event.next_run_at).toISOString())));
     const tasks = group('关联任务');
     if (!value.tasks.length) tasks.append(note(event.state === 'decided' && event.decision === 'ignore' ? '本次没有关联的新建或续接任务。工具操作应结合已保存理由与实际记录核对。' : '当前没有可读取的关联任务；分派结果不等于任务已完成。'));
-    for (const task of value.tasks) tasks.append(button(`${task.relation === 'created' ? '新建' : '续接'} · ${task.kind} · ${task.id.slice(0, 8)} · ${task.status}`, () => { dialog.close(); if (live()) openTask(task.id); }));
+    for (const task of value.tasks) tasks.append(button(`${task.relation === 'created' ? '新建' : '续接'} · ${task.kind} · ${task.id.slice(0, 8)} · ${task.status}`, () => { dialog.close(); if (live()) openTask(task.id).catch(error); }));
     const history = group('人工重试记录', note('重试沿用同一事件编号，原决定的幂等约束继续生效；只有失败状态可以请求人工重试。这里显示最近 50 条人工重试，不表示任务一定成功。'));
     if (!value.retries.length) history.append(note('没有人工重试记录。'));
     for (const record of value.retries) history.append(element('p', `${timestamp(record.requested_at)} · 原轮尝试 ${record.previous_attempts} 次 · ${record.previous_error?.code || '未记录错误码'}${record.previous_error?.detail ? ' · ' + record.previous_error.detail : ''}`));
@@ -200,11 +201,11 @@ function dispatchCard() {
   }
   async function retrySelected() {
     if (!live() || detailBusy || detail?.event.state !== 'failed') return;
-    const eventId = selected, own = ++detailRequest; detailBusy = true; detailMessage.textContent = ''; controls();
+    const eventId = selected, own = ++detailRequest; detailBusy = true; detailStatus.textContent = ''; detailMessage.textContent = ''; controls();
     try {
       await api(`/api/repositories/${id}/dispatch/${encodeURIComponent(eventId)}/retry`, 'POST', {});
       if (!live() || own !== detailRequest || selected !== eventId) return;
-      detailMessage.textContent = '已请求重试，仍使用同一条分派记录。'; detail = null; detailBusy = false; controls(); await readDetail(eventId); void load(false);
+      detailStatus.textContent = '已请求重试，仍使用同一条分派记录。'; detail = null; detailBusy = false; controls(); await readDetail(eventId); void load(false);
     } catch (err) {
       if (!live() || own !== detailRequest || selected !== eventId) return;
       if (!forbidden(err)) detailMessage.textContent = managerError(err) + ' · 写入结果可能已变化，请先刷新当前结果再决定是否重试。';
