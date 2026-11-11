@@ -46,6 +46,7 @@ const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'manag
 const SHARED = {
   '--color-surface': '#fff',
   '--color-brand': '#245de0', '--color-text-muted': '#607087', '--font-size-2': '14px', '--control-min': '44px',
+  '--color-brand-weak': '#edf2ff',
 };
 
 test('tokens the module sheets read through shell.css keep their contract value', () => {
