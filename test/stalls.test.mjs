@@ -12,7 +12,7 @@ test('a blocked event loop is logged with the requests in flight, and a slow req
   done(); done();
   const stall = lines.find(line => line.startsWith('[stall]'));
   assert.ok(stall, lines.join('\n'));
-  assert.match(stall, /event loop blocked ~1\.\d s; requests in flight: GET \/api\/tasks\/abc\/logs \(1\.\d s\)/);
+  assert.match(stall, /event loop blocked ~1\.\d s; requests finished while blocked: none; requests in flight: GET \/api\/tasks\/abc\/logs \(1\.\d s\)/);
   assert.deepEqual(lines.filter(line => line.startsWith('[slow]')).length, 1, 'a request is reported once');
   assert.match(lines.find(line => line.startsWith('[slow]')), /^\[slow\] GET \/api\/tasks\/abc\/logs \d+ ms$/);
   assert.ok(!lines.join('\n').includes('secret-value'), 'query strings are never logged');
@@ -26,4 +26,17 @@ test('a block with no request in flight says so, and ordinary timer jitter is no
   for (const end = Date.now() + 800; Date.now() < end;);
   await new Promise(resolve => setTimeout(resolve, 250));
   assert.match(lines.join('\n'), /requests in flight: none$/m);
+});
+
+test('a request whose own handler blocked the loop is named as finished while blocked', async t => {
+  // Production: GET /api/events held the thread 104 s and finished just before the timer ran, so the stall line showed
+  // only the requests that were waiting behind it.
+  const lines = [], monitor = new StallMonitor({ stallMs: 500, log: line => lines.push(line) });
+  monitor.start(100); t.after(() => monitor.stop());
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const done = monitor.request('GET', '/api/events?limit=50');
+  for (const end = Date.now() + 900; Date.now() < end;);
+  done();
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.match(lines.join('\n'), /requests finished while blocked: GET \/api\/events \(0\.9 s\); requests in flight: none/);
 });

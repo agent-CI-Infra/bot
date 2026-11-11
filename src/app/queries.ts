@@ -48,8 +48,12 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50));
     const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
     if (!Number.isSafeInteger(limit) || !Number.isSafeInteger(offset)) fail(400, 'invalid_pagination');
-    return { events: store.all(`SELECT *, (SELECT full_name FROM repositories WHERE id=deliveries.repository_id) AS full_name
-      FROM deliveries WHERE ${clauses.join(' AND ')} ORDER BY received_at DESC,id DESC LIMIT ? OFFSET ?`, ...args, limit, offset).map(row=>{const {payload,response,request_headers,...safe}=row;return {...safe,...deliveryResult(store,row)};}) };
+    // Page by id first: sorting whole rows sorted every archived payload (30k deliveries, ~700 MB), which held the
+    // control plane's only thread for 100 s on each visit. Only the page's rows are read in full.
+    const page = store.all(`SELECT id FROM deliveries WHERE ${clauses.join(' AND ')} ORDER BY received_at DESC,id DESC LIMIT ? OFFSET ?`, ...args, limit, offset).map(row => row.id);
+    const rows = new Map(store.all(`SELECT *, (SELECT full_name FROM repositories WHERE id=deliveries.repository_id) AS full_name
+      FROM deliveries WHERE id IN (${page.map(() => '?').join(',') || 'NULL'})`, ...page).map(row => [row.id, row]));
+    return { events: page.map(id => rows.get(id)!).map(row=>{const {payload,response,request_headers,...safe}=row;return {...safe,...deliveryResult(store,row)};}) };
   }
   const event = /^\/api\/events\/([^/]+)$/.exec(path);
   if (event) {

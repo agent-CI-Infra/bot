@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Store } from '../dist/storage/database.js';
 import { latestRoleCandidate } from '../dist/roles/schedule.js';
-import { runEvents } from '../dist/roles/role-run.js';
+import { runEvents, toolReceipts } from '../dist/roles/role-run.js';
+import { queries } from '../dist/app/queries.js';
 
 // Production: latestRoleCandidate joined task_history on 'task_history:'||h.id, which cannot use the key, so every call
 // scanned the whole table (65 ms at 100k rows). The engine's task guard ran it several times a second per task, and with
@@ -24,4 +25,24 @@ test('role event lookups reach task_history by its key instead of scanning it', 
   }
   const candidate = store.all('EXPLAIN QUERY PLAN ' + lookups[0]).map(row => row.detail);
   assert.ok(candidate.some(detail => /SEARCH e USING INDEX role_run_event_task/.test(detail)), candidate.join(' | '));
+});
+
+// Production: each checkpoint of a role run read its tool receipts by run_id, which no index covered, so the two reads
+// scanned task_history (0.8 s each); the console's event list sorted every archived delivery with its payload (100 s).
+test('run receipts and the console event list are read through indexes, never by sorting or scanning whole tables', async t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  const seen = [], all = store.all.bind(store), get = store.get.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push(sql); return get(sql, ...args); };
+  toolReceipts(store, 'run');
+  queries(store, { id: 'admin', role: 'super_admin' }, new URL('http://local/api/events?limit=50'));
+  store.all = all; store.get = get;
+  const plan = sql => store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
+  for (const sql of seen.filter(sql => /FROM task_history WHERE run_id=\?/.test(sql))) {
+    assert.match(plan(sql), /SEARCH task_history USING INDEX task_history_run_type/, sql);
+  }
+  const [page, rows] = seen.filter(sql => /FROM deliveries/.test(sql));
+  assert.match(page, /^SELECT id FROM deliveries/);
+  assert.doesNotMatch(plan(page), /TEMP B-TREE|SCAN deliveries\b(?! USING)/, 'the page is read in index order');
+  assert.match(rows, /WHERE id IN/);
 });

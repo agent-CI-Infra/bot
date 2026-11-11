@@ -252,7 +252,7 @@ export function recordStageResult(s: Store, assignment: string, runId: string, e
     const admission = JSON.parse(run.admission ?? '{}');
     if (!admission.admitted || stage.role_constraints.capabilities.some(cap => !admission.provided?.[cap]?.ok)) stop('unsupported_capability','waiting_configuration');
     if (stage.role_constraints.independent && (snapshot.kind !== 'observer' || snapshot.capability.tools === null || snapshot.capability.tools.includes('write_file') || !admission.provided.fresh_context?.ok)) throw new Error('stage_independence_required');
-    const collected=s.get("SELECT h.data FROM role_run_events e JOIN task_history h ON 'task_history:'||h.id=e.history_ref WHERE e.run_id=? AND e.type='ended' AND e.category='completed'",runId);
+    const collected=s.get(`SELECT h.data FROM role_run_events e JOIN task_history h ON ${eventHistory} WHERE e.run_id=? AND e.type='ended' AND e.category='completed'`,runId);
     const output=collected?JSON.parse(collected.data).data:null;
     if(!output||output.result_ref!==refs.result_ref||candidateKey(output.candidate_ref)!==candidateKey(refs.candidate_ref))throw new Error('stage_result_conflict');
     const candidate = snapshot.kind === 'writer' ? refs.candidate_ref : ctx.candidate_ref;
