@@ -10,6 +10,7 @@ import { TaskCommands } from '../dist/tasks/commands.js';
 import { ChannelService } from '../dist/channels/service.js';
 import { ScheduleService } from '../dist/schedules/service.js';
 import { Scheduler } from '../dist/schedules/worker.js';
+import { scheduleStorage } from '../dist/schedules/storage.js';
 import { defaultLimits } from '../dist/schedules/types.js';
 import { nextTime, previewTimes, quietUntil } from '../dist/schedules/time.js';
 import { HttpError, randomId } from '../dist/core/security.js';
@@ -258,7 +259,7 @@ test('transaction rollback cannot separate report completion from its notificati
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 0);
 });
 test('subscription aggregates a failure incident, links recovery, respects quiet hours and blocks old outbox after unsubscribe', async t => {
-  const f = await fixture(t), spec = { name: '失败与恢复', destination_id: f.destination, events: ['task.failed', 'ci.failed', 'ci.recovered', 'approval.waiting'], projects: ['101'], aggregate_ms: 60000, timezone: 'UTC', enabled: true };
+  const f = await fixture(t), spec = { name: '失败与恢复', destination_id: f.destination, events: ['task.failed', 'ci.failed', 'ci.recovered'], projects: ['101'], aggregate_ms: 60000, timezone: 'UTC', enabled: true };
   const saved = await command(f, 'notification.register', { subscription: spec }); assert.equal(saved.value.state, 'succeeded', JSON.stringify(saved)); const sub = saved.value.result.subscription;
   f.h.store.run("UPDATE tasks SET status='failed' WHERE id='blocked'"); f.worker.fanout();
   assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 1);
@@ -346,7 +347,7 @@ test('manual retry acknowledges unknown results, preserves attempts/idempotency 
   assert.equal(f.h.store.get('SELECT count(*) n FROM notification_outbox').n, 1);
 });
 
-test('signed CI/approval mutations atomically publish supported events and daily reports query the real check evidence', async t => {
+test('signed CI mutations atomically publish supported events, daily reports query the real check evidence, and approval events are retired', async t => {
   const f = await fixture(t);
   const repo = { id: 101, full_name: 'agent-test-zone/admin-fixture-101', owner: { id: 10 } }, run = { id: 4321, run_attempt: 1, status: 'completed', conclusion: 'failure' };
   const send = async (id, conclusion) => f.h.hook(f.a.path, f.a.secret, id, { action: 'completed', repository: repo, workflow_run: { ...run, conclusion } }, { 'X-GitHub-Event': 'workflow_run' });
@@ -356,9 +357,22 @@ test('signed CI/approval mutations atomically publish supported events and daily
   assert.deepEqual(f.h.store.all('SELECT type FROM schedule_events ORDER BY sequence').map(r => r.type), ['ci.failed', 'ci.recovered']);
   f.advance(60000); const report = f.worker.service.reports.render('101', f.now(), 'UTC');
   assert.ok(report.evidence.some(e => e.id.startsWith('delivery:') && e.kind === 'ci' && e.status === 'success')); assert.equal(report.counts['ci:success'], 1);
+  assert.ok(!report.evidence.some(e => e.kind === 'approval')); assert.ok(!report.text.includes('审批'));
+  // A policy left by an older version holds nothing back, and no approval.waiting event exists any more.
   f.h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"schedule.register\"]')");
-  const saved = await command(f, 'schedule.register', { plan: f.plan() }); assert.equal(saved.value.state, 'awaiting_approval');
-  assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_events WHERE type='approval.waiting'").n, 1);
+  const saved = await command(f, 'schedule.register', { plan: f.plan() }); assert.equal(saved.value.state, 'succeeded', JSON.stringify(saved.value));
+  assert.equal(f.h.store.get("SELECT count(*) n FROM schedule_events WHERE type='approval.waiting'").n, 0);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM sqlite_master WHERE type='trigger' AND name='schedule_approval_event'").n, 0);
+  // Subscriptions saved by an older version drop the event; one left with nothing to watch pauses with a reason.
+  const legacy = (id, events) => f.h.store.run(`INSERT INTO notification_subscriptions(id,tenant_id,project_id,principal_id,spec,revision,state,reason,event_cursor,created_at,updated_at)
+    VALUES(?,'github.com:10','101',?,?,3,'active',NULL,0,?,?)`, id, f.principal, JSON.stringify({ name: id, destination_id: f.destination, events, projects: ['101'], aggregate_ms: 0, timezone: 'UTC', enabled: true }), f.now(), f.now());
+  legacy('mixed', ['task.failed', 'approval.waiting']); legacy('approval-only', ['approval.waiting']); legacy('untouched', ['ci.failed']);
+  scheduleStorage(f.h.store);
+  const read = id => f.h.store.get('SELECT * FROM notification_subscriptions WHERE id=?', id);
+  assert.deepEqual(JSON.parse(read('mixed').spec).events, ['task.failed']); assert.equal(read('mixed').state, 'active'); assert.equal(read('mixed').revision, 4);
+  assert.deepEqual(JSON.parse(read('approval-only').spec).events, []); assert.equal(read('approval-only').state, 'paused');
+  assert.equal(read('approval-only').reason, 'approval_event_retired'); assert.equal(read('approval-only').revision, 4);
+  assert.equal(read('untouched').revision, 3);
 });
 
 test('a real worker process exits after its committed claim; replacement processes recover one run under competition', async t => {

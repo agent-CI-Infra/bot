@@ -136,20 +136,14 @@ test('a configuration conflict preserves inputs and the next submit uses refresh
   } finally { await f.close(); }
 });
 
-test('a pending approval is displayed without inventing a task and refresh reads the eventual receipt', async ({ page }) => {
+test('a leftover approval policy does not hold task creation back', async ({ page }) => {
   const f = await fixture();
   try {
     const tenant = f.h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
     f.h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES(?,?) ON CONFLICT(tenant_id) DO UPDATE SET approval_operations=excluded.approval_operations", tenant, JSON.stringify(['task.create']));
     await login(page, f); await fill(page); await page.getByRole('button', { name: '提交任务', exact: true }).click();
-    await expect(page.getByRole('heading', { name: '等待管理审批', exact: true })).toBeVisible();
-    expect(f.h.store.get('SELECT count(*) n FROM tasks').n).toBe(2);
-    await expect(page.getByRole('button', { name: '查看已创建的任务', exact: true })).toHaveCount(0);
-    const receipt = f.h.store.get("SELECT * FROM management_commands WHERE operation='task.create'");
-    const approved = await f.admin('/api/management/commands/' + receipt.id + '/approval', 'POST', { parameter_hash: receipt.parameter_hash, expected_revision: receipt.expected_revision, decision: 'approve' });
-    expect(approved.value.state).toBe('succeeded');
-    await page.getByRole('button', { name: '刷新创建回执', exact: true }).click();
     await expect(page.getByRole('heading', { name: '任务已创建', exact: true })).toBeVisible(); expect(createCount(f)).toBe(1);
+    await expect(page.getByText('等待管理审批')).toHaveCount(0);
   } finally { await f.close(); }
 });
 

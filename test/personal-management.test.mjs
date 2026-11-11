@@ -64,20 +64,20 @@ test('authorized names, ambiguous project clarification, continuation and switch
   const projects=(await query(member.client,'list_projects')).value.projects;assert.deepEqual(projects.map(p=>p.full_name),['alpha/bot','beta/bot']);
 });
 
-test('Web and personal natural-language writes share approval, audit, receipts and replay protection',async t=>{
+test('Web and personal natural-language writes share audit, receipts and replay protection and execute without approval',async t=>{
   const f=await channelFixture(t),tenant=f.h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
+  // A policy left by an older version is no longer read.
   f.h.store.run('INSERT INTO management_policies(tenant_id,approval_operations) VALUES(?,?)',tenant,JSON.stringify(['task.pause']));
   const w=await web(f,'暂停任务'),i=await im(f,'暂停任务');assert.equal(i.row.state,'completed',i.row.error);
   const receipts=f.h.store.all("SELECT * FROM management_commands WHERE source_message LIKE 'feishu:%' OR source_message='fixture-web' ORDER BY created_at");assert.equal(receipts.length,2);
-  assert.deepEqual(receipts.map(r=>[r.operation,r.state]),[['task.pause','awaiting_approval'],['task.pause','awaiting_approval']]);
+  assert.deepEqual(receipts.map(r=>r.operation),['task.pause','task.pause']);assert.equal(receipts[0].state,'succeeded');
+  assert.ok(!receipts.some(r=>r.state==='awaiting_approval'));
   assert.deepEqual(receipts.map(r=>r.channel),['web','im']);assert.equal(receipts[0].principal_id,receipts[1].principal_id);
-  assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
-  await sent(f,'等待审批，尚未执行');
+  assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'paused');
+  assert.ok(f.h.store.get("SELECT 1 FROM audit WHERE action='management.succeeded' AND resource_id=?",receipts[0].id));
   await post(f.h,f.id,i.event);assert.equal(f.h.store.get('SELECT count(*) n FROM management_commands WHERE source_message LIKE \'feishu:%\' OR source_message=\'fixture-web\'').n,2);
-  const op=receipts[1],approved=await f.admin('/api/management/commands/'+op.id+'/approval','POST',{parameter_hash:op.parameter_hash,expected_revision:op.expected_revision,decision:'approve'});
-  assert.equal(approved.value.state,'succeeded');assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'paused');
-  assert.ok(f.h.store.get("SELECT 1 FROM audit WHERE action='management.succeeded' AND resource_id=?",op.id));
-  assert.ok(w.history.events.some(e=>e.type==='tool_result'&&e.data.result.state==='awaiting_approval'));
+  assert.ok(w.history.events.some(e=>e.type==='tool_result'&&e.data.result.state==='succeeded'));
+  assert.ok(!JSON.stringify(f.wire.sent).includes('等待审批'));
 });
 
 test('read-only and out-of-scope tool calls fail identically in Web and personal messages without writes',async t=>{
@@ -126,16 +126,12 @@ test('revocation while the model waits blocks late writes, old history and prote
   assert.ok(!JSON.stringify(f.wire.sent).includes('Inspect task facts'));
 });
 
-test('recalled private sources invalidate Web context and deferred approval, then continue with fresh history',async t=>{
-  const f=await channelFixture(t),tenant=f.h.store.get("SELECT tenant_id FROM identity_projects WHERE project_id='101'").tenant_id;
-  f.h.store.run('INSERT INTO management_policies(tenant_id,approval_operations) VALUES(?,?)',tenant,JSON.stringify(['task.pause']));
-  const initial=await im(f,'暂停任务'),op=f.h.store.get("SELECT * FROM management_commands WHERE channel='im'");
-  assert.equal(op.state,'awaiting_approval');
+test('recalled private sources invalidate Web context, then continue with fresh history',async t=>{
+  const f=await channelFixture(t);
+  const initial=await im(f,'暂停任务');
   const recall={header:{...initial.event.header,event_id:'recall-personal-request',event_type:'im.message.recalled_v1'},event:{chat_id:'oc_private',message_id:initial.event.event.message.message_id,recall_time:String(Date.now())}};
   await finished(f.h,(await post(f.h,f.id,recall)).value.operation_id);
   assert.equal((await f.admin('/api/management/conversations/'+initial.row.conversation_id+'/events')).status,409);
-  const approval=await f.admin('/api/management/commands/'+op.id+'/approval','POST',{parameter_hash:op.parameter_hash,expected_revision:op.expected_revision,decision:'approve'});
-  assert.equal(approval.value.state,'failed');assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
   f.modelState.respond=async(body,res)=>{assert.deepEqual(input(body).history,[]);reply(res,'请重新说明要处理的项目和任务。');};
   const fresh=await im(f,'继续');assert.equal(fresh.row.state,'completed',fresh.row.error);assert.notEqual(fresh.row.conversation_id,initial.row.conversation_id);
 });

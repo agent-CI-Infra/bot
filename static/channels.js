@@ -239,7 +239,7 @@ async function channelServiceBindingSettings() {
 }
 async function channelPersonalChats() {
   const [data, { destinations }] = await Promise.all([api('/api/channels/employees'), api('/api/channels/destinations')]), personal = card('我的飞书私信会话');
-  personal.append(note('私信与控制台管理对话共用管理助手、当前授权、审批与执行回执。可按项目或任务名称提问并继续选择，无需先选项目。同一私信跨项目和话题延续上下文，个人记录不进入群聊。'));
+  personal.append(note('私信与控制台管理对话共用管理助手、当前授权与执行回执。可按项目或任务名称提问并继续选择，无需先选项目。同一私信跨项目和话题延续上下文，个人记录不进入群聊。'));
   if (!data.personal_chats.length) personal.append(note('绑定后先在飞书私聊发一条普通消息，再刷新此页。'));
   for (const chat of data.personal_chats) {
     const row = element('article', '', 'channel-binding'), target = element('div');

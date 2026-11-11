@@ -80,7 +80,7 @@ async function renderNewTask(request) {
       }
       return;
     }
-    const names = { succeeded: '任务已创建', failed: '创建未成功', awaiting_approval: '等待管理审批', pending: '命令已接收', executing: '命令处理中', unknown: '结果待核实', rejected: '审批已拒绝' };
+    const names = { succeeded: '任务已创建', failed: '创建未成功', pending: '命令已接收', executing: '命令处理中', unknown: '结果待核实', rejected: '已拒绝' };
     const created = receipt.state === 'succeeded' && typeof receipt.result?.id === 'string';
     receiptBox.append(element('h2', receipt.state === 'succeeded' && !created ? '命令完成，任务编号待核验' : names[receipt.state] || '命令状态：' + receipt.state), note('回执编号：' + receipt.id));
     if (receipt.state === 'succeeded' && typeof receipt.result?.id === 'string') {
@@ -92,7 +92,7 @@ async function renderNewTask(request) {
         draft.envelope = null; draft.receipt = null; draft.uncertain = false; feedback.replaceChildren(); showReceipt(); await readContext();
       }, 'quiet'));
     } else {
-      receiptBox.append(note(receipt.state === 'awaiting_approval' ? '尚未创建任务。审批由现有管理流程处理；刷新仅回读状态。' : '回执尚未确认任务创建成功。'));
+      receiptBox.append(note('回执尚未确认任务创建成功。'));
       const refresh = button('刷新创建回执', async () => {
         refresh.disabled = true;
         try { const result = await api('/api/management/commands/' + receipt.id); draft.receipt = result; if (alive()) showReceipt(); }

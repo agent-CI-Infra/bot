@@ -166,7 +166,7 @@ export class ChannelServiceBindings {
     const capability = commands[command.operation]?.capability ?? 'tasks.write';
     if (!this.reachable(current, command.project_id, ['tasks.read', capability])) fail(403, 'channel_service_scope_paused');
   }
-  /** Links a task a group's delegation created to that group, at creation or after an approved command executes. */
+  /** Links a task a group's delegation created to that group, inside the transaction that creates it. */
   linkTask(command: Row, task: string): void {
     const binding = this.store.get('SELECT * FROM channel_service_bindings WHERE principal_id=?', command.principal_id);
     if (!binding || command.operation !== 'task.create') return;

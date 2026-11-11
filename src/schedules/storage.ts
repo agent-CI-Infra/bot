@@ -47,11 +47,8 @@ export function scheduleStorage(store: Store): void {
       INSERT OR IGNORE INTO schedule_events(event_key,project_id,type,incident,payload,created_at)
       VALUES('task:'||NEW.id||':'||NEW.attempt,NEW.repository_id,'task.failed','task:'||NEW.id,
         json_object('task_id',NEW.id,'status',NEW.status,'error',NEW.error_code),cast(unixepoch('subsec')*1000 AS INTEGER)); END;
-    CREATE TRIGGER IF NOT EXISTS schedule_approval_event AFTER INSERT ON management_commands
-    WHEN NEW.state='awaiting_approval' BEGIN
-      INSERT OR IGNORE INTO schedule_events(event_key,project_id,type,incident,payload,created_at)
-      VALUES('approval:'||NEW.id,NEW.project_id,'approval.waiting','approval:'||NEW.id,
-        json_object('command_id',NEW.id,'operation',NEW.operation),cast(unixepoch('subsec')*1000 AS INTEGER)); END;
+    -- Commands no longer wait for approval (#312), so there is no approval.waiting event any more.
+    DROP TRIGGER IF EXISTS schedule_approval_event;
     CREATE TRIGGER IF NOT EXISTS schedule_ci_event AFTER INSERT ON deliveries
     WHEN NEW.status='accepted' AND NEW.duplicate=0 AND NEW.body_complete=1 AND NEW.repository_id IS NOT NULL
       AND NEW.event IN ('workflow_run','check_run','check_suite') AND json_valid(CAST(NEW.payload AS TEXT)) BEGIN
@@ -66,4 +63,16 @@ export function scheduleStorage(store: Store): void {
         AND (json_extract(obj,'$.conclusion')<>'success' OR EXISTS(SELECT 1 FROM schedule_events e
           WHERE e.project_id=NEW.repository_id AND e.type='ci.failed' AND e.incident='ci:'||NEW.event||':'||json_extract(obj,'$.id'))); END;
   `);
+  // Subscriptions drop the retired approval.waiting event; one left with no event pauses with a reason instead of
+  // silently never firing. The revision moves so an editor holding the old version gets a conflict.
+  const retired = store.all("SELECT id,spec FROM notification_subscriptions WHERE spec LIKE '%approval.waiting%'");
+  if (retired.length) store.transaction(() => {
+    for (const row of retired) {
+      const spec = JSON.parse(row.spec), events = (spec.events ?? []).filter((e: string) => e !== 'approval.waiting');
+      if (events.length === (spec.events ?? []).length) continue;
+      store.run(`UPDATE notification_subscriptions SET spec=?,revision=revision+1,updated_at=?,
+        state=CASE WHEN ?=0 THEN 'paused' ELSE state END,reason=CASE WHEN ?=0 THEN 'approval_event_retired' ELSE reason END WHERE id=?`,
+        JSON.stringify({ ...spec, events }), Date.now(), events.length, events.length, row.id);
+    }
+  });
 }

@@ -34,9 +34,9 @@ export const parameterHash = (v: unknown): string => digest(canonical(v));
 const now=()=>new Date().toISOString();
 export class ManagementService {
   readonly extensions = new Map<string,ManagementExtension>();
-  // A trusted transport rechecks its persisted source when a deferred command resumes in Web.
+  // A trusted transport rechecks its persisted source whenever a command executes, including a reconciliation resumed in Web.
   sourceGuard?: (command: Row) => void;
-  /** Called inside the creating transaction when a task.create command (direct or after approval) creates a task. */
+  /** Called inside the creating transaction when a task.create command creates a task. */
   taskCreated?: (command: Row, task: string) => void;
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
   knowledgeRead?: (actor:ActorContext,project:string,id:string,revision?:number,versions?:boolean,baseline?:string)=>Promise<Json>;
@@ -209,44 +209,15 @@ export class ManagementService {
     const row=this.store.transaction(()=>{
       this.check(actor,command);const current=this.revision(command.target);
       if(current!==command.expected_revision)fail(409,'management_revision_conflict');
-      const policy=this.policy(actor,command.target.project_id),required=JSON.parse(policy?.approval_operations??'[]');
-      // Default-behavior changes count as Manager changes for approval, under both their names.
-      const defaults=['manager.update','workflow.update','rules.update'].includes(command.operation)||command.operation==='project.update'&&Object.keys(command.arguments).some(k=>['task_models','model_id','review_enabled','development_enabled','review_issues','review_pull_requests','review_pr_updates','review_issue_updates','review_pr_discussion'].includes(k));
-      const affected=[command.operation,...(defaults?['manager.update','workflow.update']:[])];
-      const id=randomId(),time=now(),approval=affected.some(op=>required.includes(op))||required.includes(entry.capability);
+      // Authorized commands execute directly: what an actor may do is configured in the console, with no approval step.
+      const id=randomId(),time=now();
       this.store.run(`INSERT INTO management_commands(id,principal_id,tenant_id,project_id,channel,operation,target,arguments,expected_revision,idempotency_key,parameter_hash,authorization_revision,execution_fence,source_conversation,source_message,state,before_revision,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,id,actor.principal_id,this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id,command.target.project_id,actor.channel,command.operation,JSON.stringify(command.target),JSON.stringify(traceClean(command.arguments)),command.expected_revision,command.idempotency_key,hash,actor.authorization_revision,this.fence(actor,command.target.project_id),command.source_conversation,command.source_message,approval?'awaiting_approval':'pending',current,time,time);
-      if(approval)this.store.run('INSERT INTO management_approvals(command_id,parameter_hash,target_revision,expires_at) VALUES(?,?,?,?)',id,hash,current,Date.now()+15*60_000);
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,id,actor.principal_id,this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?',command.target.project_id)!.tenant_id,command.target.project_id,actor.channel,command.operation,JSON.stringify(command.target),JSON.stringify(traceClean(command.arguments)),command.expected_revision,command.idempotency_key,hash,actor.authorization_revision,this.fence(actor,command.target.project_id),command.source_conversation,command.source_message,'pending',current,time,time);
       return this.store.get('SELECT * FROM management_commands WHERE id=?',id)!;
     });
-    if(row.state==='awaiting_approval')return this.receipt(row);
     return this.execute(actor,row.id,command);
   }
   private command(row:Row):ManagementCommand{return {operation:row.operation,target:JSON.parse(row.target),arguments:JSON.parse(row.arguments),expected_revision:row.expected_revision,idempotency_key:row.idempotency_key,source_conversation:row.source_conversation,source_message:row.source_message};}
-  async approve(actor:ActorContext,id:string,input:Json):Promise<Json>{
-    validate({type:'object',properties:{parameter_hash:{type:'string'},expected_revision:{type:'string'},decision:{type:'string',enum:['approve','reject']}},required:['parameter_hash','expected_revision','decision'],additionalProperties:false},input);
-    const row=this.store.get('SELECT * FROM management_commands WHERE id=?',id);if(!row)fail(404,'management_command_not_found');
-    authorize(actor,'grants.manage',{project_id:row!.project_id});this.scope(actor,row!.project_id);
-    if(row!.state!=='awaiting_approval')return this.receipt(row!);
-    // The original operator's revision is checked again by resume; approval never lends the approver's permissions.
-    const approval=this.store.get('SELECT * FROM management_approvals WHERE command_id=?',id)!;
-    if(approval.expires_at<=Date.now()||approval.parameter_hash!==input.parameter_hash||approval.target_revision!==input.expected_revision||this.revision(JSON.parse(row!.target))!==approval.target_revision)fail(409,'approval_stale');
-    this.store.transaction(()=>{
-      this.store.run('UPDATE management_approvals SET decided_by=?,decision=?,decided_at=? WHERE command_id=?',actor.principal_id,String(input.decision),Date.now(),id);
-      this.store.run('UPDATE management_commands SET state=?,updated_at=? WHERE id=?',input.decision==='approve'?'pending':'rejected',now(),id);
-      this.store.audit(actor.principal_id,'management.approval',id,row!.project_id);
-    });
-    if(input.decision==='approve'){
-      try{
-        const original=resolvePrincipalActor(this.store,row!.principal_id,row!.tenant_id,row!.project_id,row!.channel);
-        return await this.resume(original,id);
-      }catch(error){
-        this.finish(id,'failed',{error:error instanceof HttpError?error.code:'approval_execution_failed'});
-        return this.receipt(this.store.get('SELECT * FROM management_commands WHERE id=?',id)!);
-      }
-    }
-    return this.read(actor,id);
-  }
   async resume(actor:ActorContext,id:string):Promise<Json>{
     const row=this.store.get('SELECT * FROM management_commands WHERE id=?',id);if(!row)fail(404,'management_command_not_found');
     if(row!.principal_id!==actor.principal_id)fail(403,'command_operator_required');
@@ -263,8 +234,6 @@ export class ManagementService {
       if(row.principal_id!==actor.principal_id||row.authorization_revision!==actor.authorization_revision)fail(409,'authorization_changed');
       this.check(actor,command);
       if(row.execution_fence!==this.fence(actor,command.target.project_id))fail(409,'execution_context_changed');
-      const approval=this.store.get('SELECT * FROM management_approvals WHERE command_id=?',id);
-      if(approval&&(approval.decision!=='approve'||approval.expires_at<=Date.now()||approval.parameter_hash!==row.parameter_hash||approval.target_revision!==command.expected_revision))fail(409,'approval_stale');
       if(extension){
         // Any uncertain external response is reconciled using the persisted effect key, never blindly retried.
         if(['executing','unknown'].includes(row.state)){

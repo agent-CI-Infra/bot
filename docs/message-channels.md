@@ -1,6 +1,6 @@
 # 消息渠道与飞书应用机器人
 
-飞书与 Web 共用 `ManagementAgent`、`ManagementService`、工具目录、统一授权、版本检查、审批和审计。渠道适配器只证明来源，不能从消息正文、卡片参数、姓名、邮箱、群主身份或飞书管理员身份生成权限。外部身份键包含 provider、连接与 App ID、操作者 tenant_key 和 open_id；安装 tenant_key 独立保存并参与检查。
+飞书与 Web 共用 `ManagementAgent`、`ManagementService`、工具目录、统一授权、版本检查和审计。渠道适配器只证明来源，不能从消息正文、卡片参数、姓名、邮箱、群主身份或飞书管理员身份生成权限。外部身份键包含 provider、连接与 App ID、操作者 tenant_key 和 open_id；安装 tenant_key 独立保存并参与检查。
 
 ## 配置与权限
 
@@ -91,7 +91,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 私聊会话由连接、安装租户、操作者租户、操作者、chat 和 principal 共同隔离。Web 可直接读取相同 `conversation_id`、管理消息、命令 `operation_id`、修改前后版本、状态、差异和审计。
 
-`queued` 表示只落入渠道队列；`submitted` 表示管理消息已受理。管理消息 `completed` 表示模型/工具回合结束，业务命令必须另看回执的 `succeeded`、`awaiting_approval`、`failed` 或 `unknown`。IM 发送成功只表示送达卡片，不能证明管理/GitHub 操作成功。需要审批时在原管理服务批准；Web 恢复 IM 命令也重新验证持久渠道来源、绑定和连接：私聊命令核对本人的飞书绑定，群聊命令核对群绑定、来源消息、角色权限和授权者权限。
+`queued` 表示只落入渠道队列；`submitted` 表示管理消息已受理。管理消息 `completed` 表示模型/工具回合结束，业务命令必须另看回执的 `succeeded`、`failed` 或 `unknown`。IM 发送成功只表示送达卡片，不能证明管理/GitHub 操作成功。命令没有审批步骤，授权范围内直接执行；Web 对账恢复 IM 命令时也重新验证持久渠道来源、绑定和连接：私聊命令核对本人的飞书绑定，群聊命令核对群绑定、来源消息、角色权限和授权者权限。
 
 结果卡片只带“登录后台查看”链接，不携带回调操作；较早版本卡片上的“刷新执行状态”按钮点击后按过期处理（`channel_card_stale`），不会触发任何写入。
 
@@ -110,7 +110,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 - `list_projects`：当前可用的仓库全名和 GitHub 链接，不返回内部 ID；
 - `conversation_history`：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
 - `github: read`：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
-- `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等、组织审批策略和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和审批后恢复时都重新核对绑定、来源消息、角色权限和授权者权限；
+- `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和对账恢复时都重新核对绑定、来源消息、角色权限和授权者权限；
 - `delegation: allow`（派活）：`create_project_task` 在范围内的仓库新建任务，参数为需求和交付约定（目标、范围、验收条件、终点）；同时提供 `list_project_tasks`、`read_project_task` 和 `manage_project_task` 的追加说明、修改约定（`task.contract`）与取消。见下文「派活」；
 - 独立任务：`start_own_task`、`continue_own_task`、`list_own_tasks`，不受权限项控制，见[服务角色](service-roles.md#独立任务)。
 
@@ -124,11 +124,11 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 | 追加说明 `task.instructions`、取消 `task.cancel` | `delegation: allow` 或 `project_tasks: write` |
 | 暂停 `task.pause`、重试 `task.retry` | `project_tasks: write` |
 
-新建任务经 `ManagementService.submit('task.create')` 以绑定的 principal 提交：服务端读取当前项目版本作为 `expected_revision`，幂等键由群、来源消息和工具调用生成；授权者对该仓库须仍有 `config.write` 和 `tasks.write`；组织审批策略、审计和回执与控制台一致。任务创建时（包括审批后执行时）记入 `channel_service_tasks`，关联到这条绑定和来源消息。任务完成、提交 PR、取消或失败时，结果发回原群；入队和发送前复核绑定仍启用、授权者仍能读该仓库以及任务的来源权限。结果消息记在本绑定的范围内，并带上当时的群围栏，之后的回答可以引用它；绑定或权限变化后不再进入上下文。
+新建任务经 `ManagementService.submit('task.create')` 以绑定的 principal 提交：服务端读取当前项目版本作为 `expected_revision`，幂等键由群、来源消息和工具调用生成；授权者对该仓库须仍有 `config.write` 和 `tasks.write`；审计和回执与控制台一致。任务创建时记入 `channel_service_tasks`，关联到这条绑定和来源消息。任务完成、提交 PR、取消或失败时，结果发回原群；入队和发送前复核绑定仍启用、授权者仍能读该仓库以及任务的来源权限。结果消息记在本绑定的范围内，并带上当时的群围栏，之后的回答可以引用它；绑定或权限变化后不再进入上下文。
 
 任务执行期间，任务引擎每次复核来源时也检查这条绑定：绑定仍是该群当前且启用的绑定、服务角色仍是 `delegation: allow`、授权者对该仓库仍有 `config.write` 和 `tasks.write`；任一不满足就停止后续步骤（`channel_service_delegation_revoked` 或 `channel_service_scope_paused`）。
 
-群内不另设审批入口：群助手在权限内的操作直接执行。只有受信任的组织策略 `management_policies.approval_operations` 把某个操作列为需审批时，命令才进入“等待审批”，助手在群里如实说明尚未执行，由有 `grants.manage` 的人在控制台处理，与私聊一致。
+群里没有审批或人工确认：群助手在服务角色权限、绑定范围和授权者权限之内的操作直接执行，与控制台和私聊一致，见[统一管理服务与管理对话](management-agent.md#会话停止和执行)。
 
 #### 旧群员工的迁移
 
@@ -136,11 +136,11 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 维护绑定的人（配置人、超级管理员或对全部范围有配置权限者）可以查看连续会话、查询和分页搜索本地群记录、显式安排重新同步；这些读取只使用本地账本，不以历史或成员 API 回源。私信和其他群不因此开放。全局管理员继续管理连接、全部本地诊断和保留策略。
 
-群使用 `provider + app_id + installation_tenant + chat_id` 对应的稳定本地会话，换成员、thread、日期不另起会话。个人私聊使用绑定账户的共享 `ManagementAgent`，与控制台共用管理工具、有效权限、审批、幂等、版本检查和审计。个人管理历史与群聊历史分别保存，个人授权不会扩展群聊助手的能力。
+群使用 `provider + app_id + installation_tenant + chat_id` 对应的稳定本地会话，换成员、thread、日期不另起会话。个人私聊使用绑定账户的共享 `ManagementAgent`，与控制台共用管理工具、有效权限、幂等、版本检查和审计。个人管理历史与群聊历史分别保存，个人授权不会扩展群聊助手的能力。
 
 绑定后可以直接发送“你好”“我能管理哪些项目”“看看 bot 项目的任务”或“暂停刚才那个任务”。问候、帮助和跨项目查询不要求先选项目；助手通过真实项目查询发现名称，使用仓库全名和可读链接回答，同名或多候选写入先自然追问，用户可继续选择和切换项目。模型、预算和用量属于服务角色「管理助手」，与请求实际操作的项目分别处理，不会默认选中业务目标或授予权限。没有可访问项目时明确说明授权不足；缺少可用模型时提示检查配置，不虚报完成。
 
-同一绑定账户在同一私聊跨项目与 thread 延续管理问答，历史按当前授权重建；来源编辑、撤回或清理后丢弃旧派生上下文，发送前重新校验身份、来源及授权。解绑、换绑或撤权不恢复旧范围。以前 `/project` 指令留下的命令回执仍可在控制台按原会话追溯。个人绑定页展示共享管理问答与真实执行状态；等待审批、失败和执行结果待确认均区别于已执行，未知结果先对账。
+同一绑定账户在同一私聊跨项目与 thread 延续管理问答，历史按当前授权重建；来源编辑、撤回或清理后丢弃旧派生上下文，发送前重新校验身份、来源及授权。解绑、换绑或撤权不恢复旧范围。以前 `/project` 指令留下的命令回执仍可在控制台按原会话追溯。个人绑定页展示共享管理问答与真实执行状态；失败和执行结果待确认均区别于已执行，未知结果先对账。
 
 默认仅回应 @；配置人可让助手回应以问号结尾的文字，或读取每条新文字并由助手决定是否保持安静。所有合法可见消息仍独立落库，机器人消息、历史同步和超过实时窗口的旧消息不会触发模型工作。扩大发言范围会增加服务角色的用量，仍受服务角色预算限制。
 
@@ -174,7 +174,7 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 ## 验证
 
-`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、任务读写与撤权、经 Manager 派活（新建、追加说明、修改约定、取消，不能暂停或指定角色）与结果回群、撤销派活后停止任务、群聊助手的独立任务与围栏变化后隐藏、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、审批、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
+`npm ci`、`npm run check`、`npm test` 是基础检查；`test/channel-service-bindings.test.mjs` 用本地 GitHub App 和飞书协议夹具覆盖群聊绑定的授权条件、飞书应用缺少成员权限时的拒绝、跨仓库问答与范围拒绝、任务读写与撤权、经 Manager 派活（新建、追加说明、修改约定、取消，不能暂停或指定角色）与结果回群、撤销派活后停止任务、群聊助手的独立任务与围栏变化后隐藏、两个群的范围隔离、授权者失权、迁移和删除检查，`test/channel-conversation.test.mjs` 覆盖发言范围、长原文、滚动摘要和来源变化；`test/channels.test.mjs` 覆盖控制台登记通知目的地、聊天文本不再触发 `/project` 流程、验签/解密、重投、慢模型、双端绑定、群字段范围、会话隔离、撤权、旧卡片、发送重试和重启恢复。`test/channel-setup.test.mjs` 覆盖向导和凭据检查的管理员边界、个人应用范围、敏感信息过滤、异步版本检查及部分凭据更新。
 
 `e2e/channels.spec.mjs` 使用独立 SQLite、随机本地 HTTP 端口、官方事件结构的合法签名样本以及 GitHub/模型/飞书协议夹具验证用户路径。截图和结构化证据保存在 `.tmp/channels-165/`。测试中只使用测试凭据，不调用真实飞书租户，也不接触正在运行的部署。运行 Playwright 时，将 `TMPDIR` 和 `PLAYWRIGHT_BROWSERS_PATH` 设为工作树内目录。
 
