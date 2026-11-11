@@ -30,6 +30,27 @@ const managementOperationLabels = {
   'task.adopt-config': '采用新执行配置', 'workflow.update': '更新工作配置', 'manager.update': '更新 Manager 配置',
   'project.update': '更新项目配置', 'roles.update': '更新角色', 'rules.update': '更新规则', 'configuration.pr': '创建配置 PR'
 };
+// A console write is shown before it is sent (#355): the preview is drawn only from the command this page builds — the
+// operation label above, its target, its arguments and the expected revision — so it never claims an effect the server
+// does not have. Nothing reaches POST /api/management/commands until 确认执行; the receipt afterwards is still the
+// execution result, because there is no approval step (#312).
+function managementPreview(command, context = {}) {
+  const box = element('section', '', 'management-command-preview');
+  box.dataset.commandPreview = ''; box.dataset.operation = command.operation;
+  box.setAttribute('role', 'region'); box.setAttribute('aria-label', '执行前确认');
+  const place = [context.project && '项目 ' + context.project, context.task && '任务 ' + context.task, context.workflow && '工作类型 ' + context.workflow].filter(Boolean).join(' · ');
+  const rows = [['操作', managementOperationLabels[command.operation] ?? command.operation], ['目标', place || command.target.project_id],
+    ['预计版本', String(command.expected_revision)]];
+  for (const [key, value] of Object.entries(command.arguments ?? {})) {
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    rows.push(['参数 ' + key, text.length > 120 ? text.slice(0, 120) + '…' : text]);
+  }
+  const actions = element('div', '', 'actions'), confirm = button('确认执行', () => {}, ''), cancel = button('取消', () => {});
+  actions.append(confirm, cancel);
+  box.append(element('h3', '执行前确认'), facts(rows),
+    note('确认后立即提交并执行：控制台没有审批步骤，执行结果写在回执里。版本不一致或权限已变更时，服务端会拒绝这次操作。'), actions);
+  return { box, confirm, cancel };
+}
 // Commands execute directly (#312): a receipt is the execution result, never a pending decision. "rejected" only appears on
 // receipts recorded before the approval flow was retired.
 const managementCommandStates = {
@@ -489,6 +510,20 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   }
   const target = () => scope.value.startsWith('project:') ? { project_id: scope.value.slice(8) } : {};
   const query = (operation, targetValue = target()) => submit({ query: { operation, target: targetValue, arguments: {} } });
+  // One pending command at a time across the whole console (#355): opening another preview drops the earlier one, and a
+  // write leaves this page only after 确认执行 — for a quick action and for a receipt's rollback alike.
+  let pendingPreview = null;
+  function previewCommand(slot, command, context) {
+    pendingPreview?.(); const drawn = managementPreview(command, context);
+    const close = () => { if (pendingPreview === close) pendingPreview = null; slot.replaceChildren(); };
+    drawn.cancel.addEventListener('click', close);
+    drawn.confirm.addEventListener('click', async () => {
+      drawn.confirm.disabled = true;
+      if (await submit({ command })) close(); else drawn.confirm.disabled = false;
+    });
+    pendingPreview = close; slot.replaceChildren(drawn.box); drawn.box.scrollIntoView({ block: 'nearest' });
+    return drawn;
+  }
   actions.append(button('查询项目', () => query('list_projects', {}), 'quiet'), button('查询任务', () => query('list_tasks'), 'quiet'), button('查询有效配置', () => query('get_effective_config'), 'quiet'), button('成本与预算', () => query('get_usage'), 'quiet'), button('操作审计', () => query('list_audit'), 'quiet'), button('重新连接', () => read(), 'quiet'));
   const turn = id => {
     if (turns.has(id)) return turns.get(id);
@@ -585,7 +620,12 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
       body.append(links);
       const taskId = value.target?.task_id ?? (value.operation === 'task.create' ? value.result?.id : null);
       if (taskId) body.append(button('查看任务', () => openTask(taskId), 'quiet'));
-      if (value.result?.rollback && value.state !== 'rejected') body.append(button('按原值回滚', () => submit({ command: value.result.rollback }), 'quiet'));
+      // A rollback writes too, so it takes the same preview→confirm path as every other console write (#355): the receipt
+      // shows the command it would send, and nothing is submitted until 确认执行.
+      if (value.result?.rollback && value.state !== 'rejected') {
+        const slot = element('div', '', 'management-command-preview-slot');
+        body.append(button('按原值回滚', () => previewCommand(slot, value.result.rollback, { project: value.project_id }), 'quiet'), slot);
+      }
       if (['unknown', 'executing'].includes(value.state)) body.append(button('对账并回读', reconcile, 'quiet'));
       const details = element('details', ''); details.append(element('summary', '原始事实与回执'), element('pre', JSON.stringify(value, null, 2))); body.append(details);
       onState(value);
@@ -731,7 +771,10 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
   }
   async function configureForms(){
     const generation=++formGeneration; toolsDirty=false;
-    const submitForm = body => generation === formGeneration ? submit(body) : Promise.resolve(false);
+    // One pending preview at a time: clicking another write replaces it instead of stacking two commands. A confirm that
+    // the page cannot send (connection, authorization) keeps the preview so the person can retry or cancel it.
+    const previewSlot = element('div', '', 'management-command-preview-slot');
+    const confirmCommand = (command, context) => previewCommand(previewSlot, command, context);
     forms.replaceChildren();if(!target().project_id){forms.append(note('选择具体项目后可以修改配置或管理任务。'));return;}
     const project=target().project_id;
     const effective=await api(endpoint+'/query','POST',{operation:'get_effective_config',target:{project_id:project},arguments:{}});
@@ -742,7 +785,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     const chosen=()=>effective.workflows.find(w=>w.id===workflow.value);
     const fill=()=>{prompt.value=chosen()?.prompt.effective??'';};workflow.onchange=fill;fill();
     const form=document.createElement('form'),save=element('button','保存默认提示词');form.append(element('h3','Manager 章节'),field('工作类型',workflow),field('默认提示词',prompt),note('保存的是 Manager 提示词里这类工作的章节。仓库来源高于控制台层：被覆盖时会保存章节并明确显示实际行为尚未改变；配置 PR 合入后才生效。'),save);
-    form.onsubmit=async e=>{e.preventDefault();await submitForm({command:{operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision}});};if(chosen()?.prompt.path){const publish=button('创建配置 PR',()=>submitForm({command:{operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision}}),'quiet');form.append(publish);}
+    form.onsubmit=e=>{e.preventDefault();confirmCommand({operation:'workflow.update',target:{project_id:project,workflow_id:workflow.value},arguments:{prompt:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name});};if(chosen()?.prompt.path){const publish=button('创建配置 PR',()=>confirmCommand({operation:'configuration.pr',target:{project_id:project},arguments:{path:chosen().prompt.path,content:prompt.value},expected_revision:effective.revision},{project,workflow:chosen()?.name}),'quiet');form.append(publish);}
     forms.append(form);
     const tasks=(await api(endpoint+'/query','POST',{operation:'list_tasks',target:{project_id:project},arguments:{limit:100}})).tasks;
     if(generation!==formGeneration)return;
@@ -750,9 +793,9 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     for(const t of tasks){const o=element('option',t.task.summary+' · '+t.task.status);o.value=t.task.id;task.append(o);}
     const taskBox=element('section','');taskBox.append(element('h3','任务管理'),field('任务',task));
     taskBox.append(button('查看阻塞原因',()=>query('get_task',{project_id:project,task_id:task.value}), 'quiet'));
-    for(const [action,caption] of [['pause','暂停任务'],['cancel','取消任务'],['retry','重试任务'],['adopt-config','采用新执行配置']])taskBox.append(button(caption,async()=>{try{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});await submitForm({command:{operation:'task.'+action,target:{project_id:project,task_id:task.value},arguments:{},expected_revision:current.revision}});}catch(e){status.textContent=e.message;}},'quiet'));
-    const instruction=textarea('instruction','',{rows:2});instruction.setAttribute('aria-label','补充指令');taskBox.append(field('追加补充指令',instruction),button('追加指令',async()=>{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});await submitForm({command:{operation:'task.instructions',target:{project_id:project,task_id:task.value},arguments:{instruction:instruction.value},expected_revision:current.revision}});},'quiet'));
-    forms.append(taskBox);
+    for(const [action,caption] of [['pause','暂停任务'],['cancel','取消任务'],['retry','重试任务'],['adopt-config','采用新执行配置']])taskBox.append(button(caption,async()=>{try{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});confirmCommand({operation:'task.'+action,target:{project_id:project,task_id:task.value},arguments:{},expected_revision:current.revision},{project,task:tasks.find(item=>item.task.id===task.value)?.task.summary});}catch(e){status.textContent=e.message;}},'quiet'));
+    const instruction=textarea('instruction','',{rows:2});instruction.setAttribute('aria-label','补充指令');taskBox.append(field('追加补充指令',instruction),button('追加指令',async()=>{const current=await api(endpoint+'/query','POST',{operation:'get_task',target:{project_id:project,task_id:task.value},arguments:{}});confirmCommand({operation:'task.instructions',target:{project_id:project,task_id:task.value},arguments:{instruction:instruction.value},expected_revision:current.revision},{project,task:tasks.find(item=>item.task.id===task.value)?.task.summary});},'quiet'));
+    forms.append(taskBox, previewSlot);
     if (typeof renderSchedules === 'function') {
       const schedules = element('section', ''); forms.append(schedules);
       try { await renderSchedules(schedules, project); } catch (e) { schedules.append(note('定时计划暂不可用：' + e.message)); }

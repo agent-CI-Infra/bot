@@ -40,6 +40,7 @@ test('management UI, direct API and model tools agree on real persisted query, c
     // Explicit UI form shares the task command handler and updates the same persisted state.
     await page.getByRole('button',{name:'快捷操作',exact:true}).click();
     await page.getByLabel('管理任务',{exact:true}).selectOption('blocked');await page.getByRole('button',{name:'重试任务',exact:true}).click();
+    await page.getByRole('region',{name:'执行前确认',exact:true}).getByRole('button',{name:'确认执行',exact:true}).click();
     await expect(feed).toContainText('操作 重试任务 · 已执行');expect((await query(admin,'get_task',{project_id:'101',task_id:'blocked'})).value.task.status).toBe('queued');
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({path:'.tmp/management-164/task-mobile.png',fullPage:true});
@@ -283,4 +284,105 @@ test('management tab opens a full page, and resizing or maximizing the floating 
     expect((await chat.boundingBox()).width).toBe(360); expect((await chat.boundingBox()).height).toBe(460);
     expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1); expect(errors).toEqual([]);
   } finally { releaseReturn?.(); await page.unrouteAll({ behavior: 'wait' }); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('a console write previews its operation, target and expected revision, and sends nothing before it is confirmed', async ({ page }) => {
+  test.setTimeout(60000);
+  const f = await managementFixture(), { h, admin, password } = f;
+  const commands = () => h.store.get('SELECT count(*) n FROM management_commands').n;
+  const taskStatus = async () => (await query(admin, 'get_task', { project_id: '101', task_id: 'blocked' })).value.task.status;
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await page.getByRole('button', { name: '快捷操作', exact: true }).click();
+    await page.getByLabel('管理任务', { exact: true }).selectOption('blocked');
+    const preview = page.getByRole('region', { name: '执行前确认', exact: true }), before = commands();
+    await expect(preview).toBeHidden();
+    // Choosing a write shows what it will do and still sends nothing.
+    await page.getByRole('button', { name: '暂停任务', exact: true }).click();
+    await expect(preview).toBeVisible();
+    await expect(preview).toContainText('暂停任务');
+    await expect(preview).toContainText('项目 101 · 任务 Inspect task facts');
+    await expect(preview).toContainText('预计版本');
+    expect(commands()).toBe(before); expect(await taskStatus()).toBe('waiting_environment');
+    // The preview keeps the command inside a 390 px panel instead of widening it.
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await preview.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await page.screenshot({ path: '.tmp/management-preview-mobile.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    // 取消 drops it without a command.
+    await preview.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(preview).toBeHidden();
+    expect(commands()).toBe(before); expect(await taskStatus()).toBe('waiting_environment');
+    // 确认执行 sends exactly the previewed command.
+    await page.getByRole('button', { name: '暂停任务', exact: true }).click();
+    await page.screenshot({ path: '.tmp/management-preview-desktop.png', fullPage: true });
+    await preview.getByRole('button', { name: '确认执行', exact: true }).click();
+    await expect(page.getByRole('log', { name: '管理会话记录' })).toContainText('操作 暂停任务 · 已执行');
+    expect(commands()).toBe(before + 1); expect(await taskStatus()).toBe('paused');
+  } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }
+});
+
+test('a rollback previews the command it would send, and sends it only after it is confirmed', async ({ page }) => {
+  test.setTimeout(60000);
+  const f = await managementFixture(), { h, admin, password } = f;
+  const commands = () => h.store.get('SELECT count(*) n FROM management_commands').n;
+  const prompt = async () => (await query(admin, 'get_effective_config', { project_id: '101' })).value.workflows
+    .find(w => w.id === 'review.issue').prompt.effective;
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    await page.getByRole('button', { name: '快捷操作', exact: true }).click();
+    const before = commands(), original = await prompt();
+    await page.getByLabel('默认提示词', { exact: true }).fill('回滚要能回到的旧提示词');
+    await page.getByRole('button', { name: '保存默认提示词', exact: true }).click();
+    await page.getByRole('region', { name: '执行前确认', exact: true }).getByRole('button', { name: '确认执行', exact: true }).click();
+    const feed = page.getByRole('log', { name: '管理会话记录' });
+    await expect(feed).toContainText('操作 更新工作配置 · 已执行');
+    expect(commands()).toBe(before + 1); expect(await prompt()).toBe('回滚要能回到的旧提示词');
+    const receipt = feed.locator('.management-receipt').filter({ hasText: '操作 更新工作配置' }).last();
+    const rollback = receipt.getByRole('button', { name: '按原值回滚', exact: true });
+    const preview = receipt.getByRole('region', { name: '执行前确认', exact: true });
+    // A rollback is a write too: it names the command it would send and leaves the receipt untouched until confirmed.
+    await expect(preview).toBeHidden();
+    await rollback.click();
+    await expect(preview).toBeVisible();
+    await expect(preview).toContainText('更新工作配置');
+    await expect(preview).toContainText('项目 101');
+    await expect(preview).toContainText('预计版本');
+    expect(commands()).toBe(before + 1); expect(await prompt()).toBe('回滚要能回到的旧提示词');
+    const shown = await preview.evaluate(el => { const b = el.getBoundingClientRect();
+      const head = el.querySelector('h3').getBoundingClientRect(), hit = document.elementFromPoint(head.left + 8, head.top + head.height / 2);
+      return { top: b.top, bottom: b.bottom, hit: !!hit && el.contains(hit), inside: b.top >= 0 && b.bottom <= innerHeight }; });
+    expect(shown.hit).toBe(true); expect(shown.inside).toBe(true);
+    await page.screenshot({ path: '.tmp/management-rollback/1440.png', fullPage: true });
+    // The same confirmation stays inside a 390 px panel instead of widening it.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(preview).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await preview.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await preview.evaluate(el => el.scrollIntoView({ block: 'center' }));
+    const mobileShown = await preview.evaluate(el => { const b = el.getBoundingClientRect();
+      const head = el.querySelector('h3').getBoundingClientRect(), hit = document.elementFromPoint(head.left + 8, head.top + head.height / 2);
+      return { top: b.top, bottom: b.bottom, hit: !!hit && el.contains(hit), inside: b.top >= 0 && b.top <= innerHeight - 48 }; });
+    expect(mobileShown.hit).toBe(true); expect(mobileShown.inside).toBe(true);
+    await page.screenshot({ path: '.tmp/management-rollback/390.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    // 取消 drops the rollback without a command.
+    await preview.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(preview).toBeHidden();
+    expect(commands()).toBe(before + 1); expect(await prompt()).toBe('回滚要能回到的旧提示词');
+    // 确认执行 sends exactly one rollback and the restored value is readable from the API.
+    await rollback.click();
+    await preview.getByRole('button', { name: '确认执行', exact: true }).click();
+    await expect(feed).toContainText('操作 更新工作配置 · 已执行', { timeout: 15000 });
+    await expect.poll(prompt).toBe(original);
+    expect(commands()).toBe(before + 2);
+  } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }
 });
