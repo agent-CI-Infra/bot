@@ -6,7 +6,7 @@ import {readFileSync,readdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {GitHub} from '../dist/github/client.js';
 import {Redactor,networkReason} from '../dist/agent/common.js';
-import {classifiedCodes,explainFailure,failureCause} from '../dist/agent/failures.js';
+import {automaticState,classifiedCodes,explainFailure,failureCause} from '../dist/agent/failures.js';
 import {emptyRepositoryFixture} from './empty-repository-helpers.mjs';
 import {loadConsole} from './console-page.mjs';
 
@@ -63,6 +63,17 @@ test('network failures say whether it was a timeout, DNS, a reset, TLS or a refu
     assert.deepEqual([error.code,error.state,error.detail],['github_unavailable','retry_wait','GitHub 请求 GET /repos/octo/repo/pulls/1 失败：连接被拒绝（ECONNREFUSED）。']);return true;});
   await assert.rejects(github.request('POST',github.path('/pulls'),{}),error=>{
     assert.equal(error.code,'github_response_unknown');assert.match(error.detail,/连接被拒绝（ECONNREFUSED），写入结果尚未确认。$/);return true;});
+});
+
+test('a stop the bot, the model, the project computer or an outage caused retries on its own; one that needs a person stays',()=>{
+  // Production: a crash left an operation that conflicted on restart (tool_operation_conflict) and an unexpected error
+  // ended a publication (task_runtime_failure); both ended failed although another attempt would have succeeded.
+  for(const code of ['task_runtime_failure','tool_operation_conflict','pi_execution_failed','model_request_invalid','agent_output_invalid','candidate_unavailable','model_http_503','some_new_internal_code'])
+    assert.equal(automaticState(code,'failed'),'retry_wait',code);
+  for(const code of ['agent_context_too_large','github_permissions_insufficient','work_disabled','github_http_422','model_http_400','role_disabled','github_publication_unknown'])
+    assert.equal(automaticState(code,'failed'),'failed',code);
+  for(const state of ['waiting_permission','waiting_configuration','waiting_publication','needs_replan','cancelled','retry_wait'])
+    assert.equal(automaticState('task_runtime_failure',state),state,state);
 });
 
 test('a GitHub answer cut off while its body is read waits for retry like a failed request, never fails the task',async t=>{

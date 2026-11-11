@@ -21,7 +21,8 @@ export function roleRunStorage(s: Store) {
     CREATE INDEX IF NOT EXISTS role_run_tokens_run ON role_run_tokens(run_id);
     CREATE TABLE IF NOT EXISTS role_run_events(run_id TEXT NOT NULL,seq INTEGER NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,lease_epoch INTEGER NOT NULL,type TEXT NOT NULL,
       category TEXT NOT NULL,operation_id TEXT,source_version TEXT NOT NULL,digest TEXT NOT NULL,history_ref TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(run_id,seq));
-    CREATE UNIQUE INDEX IF NOT EXISTS role_run_event_operation ON role_run_events(run_id,type,operation_id) WHERE operation_id IS NOT NULL;`);
+    CREATE UNIQUE INDEX IF NOT EXISTS role_run_event_operation ON role_run_events(run_id,type,operation_id) WHERE operation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS role_run_event_task ON role_run_events(task_id,type,category);`);
   const existing = new Set(s.all('PRAGMA table_info(task_runs)').map(r => r.name));
   for (const [name, type] of Object.entries({ lease_scope: 'TEXT', lease_epoch: 'INTEGER', resume_from_run_id: 'TEXT', run_context: 'TEXT', admission: 'TEXT', protocol_recovery: 'TEXT', operation_id: 'TEXT' }))
     if (!existing.has(name)) s.db.exec(`ALTER TABLE task_runs ADD COLUMN ${name} ${type}`);
@@ -119,10 +120,15 @@ export function appendRunEvent(s: Store, input: { run_id: string; lease_epoch: n
     return { accepted: true as const, seq, ref };
   });
 }
+// An event's history record by primary key. Matching on 'task_history:'||h.id cannot use the key: SQLite then scanned the
+// whole task_history table (100k+ rows) on every lookup, and the engine's task guard runs one several times a second.
+// The string comparison stays as a check. Order such queries by historyOrder, which belongs to the event row.
+export const eventHistory = "h.id=CAST(substr(e.history_ref,14) AS INTEGER) AND e.history_ref='task_history:'||h.id";
+export const historyOrder = 'CAST(substr(e.history_ref,14) AS INTEGER)';
 /** A bounded page of a run's events after a cursor. Reading again after a broken connection continues the same run. */
 export function runEvents(s: Store, runId: string, after = 0, limit = 100) {
   if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1) throw new TaskError('role_run_cursor_invalid', 'failed');
-  const rows = s.all('SELECT e.seq,e.history_ref,h.data FROM role_run_events e JOIN task_history h ON h.task_id=e.task_id AND \'task_history:\'||h.id=e.history_ref WHERE e.run_id=? AND e.seq>? ORDER BY e.seq LIMIT ?', runId, after, Math.min(limit, 500));
+  const rows = s.all(`SELECT e.seq,e.history_ref,h.data FROM role_run_events e JOIN task_history h ON h.task_id=e.task_id AND ${eventHistory} WHERE e.run_id=? AND e.seq>? ORDER BY e.seq LIMIT ?`, runId, after, Math.min(limit, 500));
   const events = rows.map(r => ({ ...JSON.parse(String(r.data)), ref: r.history_ref }));
   const last = Number(s.get('SELECT coalesce(max(seq),0) n FROM role_run_events WHERE run_id=?', runId)!.n);
   return { run_id: runId, events, next_cursor: events.length ? events.at(-1)!.seq : after, more: (events.at(-1)?.seq ?? after) < last, ended: !!s.get("SELECT 1 FROM role_run_events WHERE run_id=? AND type='ended'", runId) };

@@ -212,6 +212,23 @@ test('manual retries and close webhooks leave the eight-hour cycle',async t=>{
   h.due();await h.run();assert.equal(h.store.get('SELECT status FROM tasks WHERE id=?',h.taskId).status,'cancelled');
 });
 
+test('an unexpected error retries on its own after 5 s, 15 s, 45 s and 135 s, then every eight hours',async t=>{
+  // Before, any error that was not a known task stop ended the task as failed until someone pressed 重试.
+  const h=await emptyRepositoryFixture(t);h.setBranch('ready');t.mock.method(console,'error',()=>{});
+  const call=h.engine.manager.call.bind(h.engine.manager);
+  h.engine.manager.call=async(method,path,body)=>{if(method==='GET'&&path==='/v1/projects/101')throw new Error('unexpected failure');return call(method,path,body);};
+  for(const [i,delay] of [5000,15000,45000,135000].entries()){
+    h.due();const before=Date.now(),task=await h.run(),after=Date.now();
+    assert.deepEqual([task.status,task.error_code,task.retry_count,task.retry_cycle_started_at],['retry_wait','task_runtime_failure',i+1,null]);
+    assert.ok(task.next_run_at>=before+delay&&task.next_run_at<=after+delay,`retry ${i+1}: ${task.next_run_at-before} ms`);
+  }
+  h.due();const before=Date.now(),task=await h.run();
+  assert.deepEqual([task.status,task.retry_count],['retry_wait',5]);assert.ok(task.retry_cycle_started_at>=before);
+  assert.ok(Math.abs(task.next_run_at-(task.retry_cycle_started_at+8*60*60*1000))<1000,'then once every eight hours');
+  // Once the cause is gone the next retry continues the task.
+  h.engine.manager.call=call;h.due();assert.notEqual((await h.run()).error_code,'task_runtime_failure');
+});
+
 const waits=[
   ['environment_not_ready','waiting_environment',5000,300000],
   ['environment_generation_changed','waiting_environment',5000,300000],

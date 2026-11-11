@@ -2,7 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import type { RoleSnapshot } from './definition.js';
 import { roleConfiguration, roleAuthority } from './definition.js';
 import { stageAllows, validateStages, type StageDefinition } from './stage-policy.js';
-import { assertLease } from './role-run.js';
+import { assertLease, eventHistory, historyOrder } from './role-run.js';
 import { contentHash, validateCandidateRef, type CandidateRef, type RunContext } from './protocol.js';
 import { stop } from '../agent/common.js';
 import { traceEvent } from '../tasks/trace.js';
@@ -52,8 +52,8 @@ export function candidateKey(candidate: CandidateRef | null) {
   return stageHash(version);
 }
 export function latestRoleCandidate(s: Store, taskId: string): CandidateRef | null {
-  const row = s.get(`SELECT h.data FROM role_run_events e JOIN task_runs r ON r.id=e.run_id JOIN task_history h ON 'task_history:'||h.id=e.history_ref
-    WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev' AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id) ORDER BY h.id DESC LIMIT 1`, taskId);
+  const row = s.get(`SELECT h.data FROM role_run_events e JOIN task_runs r ON r.id=e.run_id JOIN task_history h ON ${eventHistory}
+    WHERE e.task_id=? AND e.type='ended' AND e.category='completed' AND r.role='dev' AND r.revision=(SELECT revision FROM task_records WHERE task_id=e.task_id) ORDER BY ${historyOrder} DESC LIMIT 1`, taskId);
   return row ? JSON.parse(row.data).data.candidate_ref ?? null : null;
 }
 export function deliveryType(s: Store, taskId: string, candidate?: CandidateRef | null): 'code' | 'artifact' | 'no_changes' {

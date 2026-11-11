@@ -62,12 +62,17 @@ test('workspace conflicts reach fault logs and the task detail through the exist
   h.store.run('UPDATE tasks SET workspace_id=? WHERE id=?','workspace-b',task.id);
   h.store.run("INSERT INTO task_tools VALUES(?,?,?,NULL,'pending')",id,task.id,JSON.stringify({operation_id:id,generation:1,
     request:{type:'workspace_init',author_email:'999+fixture-bot@users.noreply.github.com',workspace_id:'workspace-a'}}));
-  const result=await h.run();assert.equal(result.status,'failed');assert.equal(result.error_code,'tool_operation_conflict');
+  // A conflict is the bot's own fault, not the person's: it waits for an automatic retry, in a new attempt whose
+  // operation keys cannot collide with the leftover one.
+  const result=await h.run();assert.equal(result.status,'retry_wait');assert.equal(result.error_code,'tool_operation_conflict');
+  assert.equal(result.attempt,task.attempt+1);assert.equal(result.workspace_id,null);assert.ok(result.next_run_at>Date.now());
   const detail=(await h.admin('/api/tasks/'+task.id)).value.task.error_detail;
   assert.match(detail,/key=prepare:init/);assert.match(detail,/type=workspace_init/);assert.match(detail,/workspace_id 不同/);
   const logs=(await h.admin('/api/tasks/'+task.id+'/logs')).value.logs.map(row=>JSON.parse(row.content));
   assert.equal(logs.find(log=>log.type==='fault').detail,detail);assert.ok(!detail.includes('base64'));
   assert.ok(!h.operations.includes('workspace_init'));
+  h.due();const retried=await h.run();
+  assert.notEqual(retried.error_code,'tool_operation_conflict');assert.ok(h.operations.includes('workspace_init'),'the new attempt prepares its workspace');
 });
 
 test('missing model configuration records a Chinese reason while existing fault logs stay unchanged',async t=>{

@@ -70,6 +70,18 @@ export function failureCause(code: string, state?: string): FailureCause {
   return 'bot';
 }
 
+// A next attempt can succeed with nobody changing anything when the stop came from a passing outage, the model, the
+// project computer or the bot itself (an unexpected error, an operation left over from an interrupted run). Such a stop
+// that would end the task as failed waits for an automatic retry instead: after 5 s, 15 s, 45 s and 135 s, then every eight
+// hours once the same stop has repeated five times. Stops that need a person keep their state: permissions, configuration,
+// repository content, a changed task, a GitHub write whose outcome is unconfirmed, a request GitHub refused.
+const selfHealing = new Set<FailureCause>(['external','model','environment','bot']);
+export function automaticState(code: string, state: string): string {
+  // A provider that refused the request itself (HTTP 4xx other than 408/429) answers the same again, like a GitHub 4xx.
+  if (/^model_http_4\d\d$/.test(code) && failureCause(code, state) === 'model') return state;
+  return state === 'failed' && selfHealing.has(failureCause(code, state)) ? 'retry_wait' : state;
+}
+
 // These states are polled by the engine and continue on their own; every other paused or failed state waits for 重试.
 const automatic = new Set(['queued','retry_wait','waiting_coordination','waiting_configuration','waiting_environment','waiting_pr_head']);
 // A wait the engine ends by itself once its condition is gone, in a state that otherwise waits for a person.
