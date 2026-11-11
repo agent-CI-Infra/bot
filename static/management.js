@@ -407,7 +407,7 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     else if (row.type === 'error' || row.type === 'stopped') {
       finishTurn(currentTurn, row.type === 'error' ? 'failed' : 'stopped', row.created_at);
       if (!currentTurn.notice) {
-        currentTurn.notice = element('p', row.type === 'stopped' ? '已停止后续处理。已提交的操作仍保留结果，请在执行进展中核对。' : '这次处理未完成：' + data.error + '。可以检查项目模型与权限配置后继续。', 'management-run-notice');
+        currentTurn.notice = element('p', row.type === 'stopped' ? '已停止后续处理。已提交的操作仍保留结果，请在执行进展中核对。' : data.notice ? '这次处理未完成：' + data.notice : '这次处理未完成：' + data.error + '。可以检查管理助手的模型与权限配置后继续。', 'management-run-notice');
         replies.append(currentTurn.notice);
       }
       onActivity(!!active, true);

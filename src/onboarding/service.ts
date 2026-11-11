@@ -12,6 +12,7 @@ import { InstallationSetup } from '../installations/setup.js';
 import { tunnelToken } from './tunnel-token.js';
 import { appSettingsUrl } from '../app/installations.js';
 import type { GitHubLogin } from '../identity/github-login.js';
+import { adoptDefaultModel } from '../service-roles/roles.js';
 
 interface Options { tunnelFile?: string; tunnelMetrics?: string; githubUrl?: string; fetcher?: typeof fetch; probe?: typeof probeGet; githubLogin?: GitHubLogin }
 export class Onboarding {
@@ -147,7 +148,8 @@ export class Onboarding {
     if(method==='POST'&&url.pathname==='/api/onboarding/installation-target'){fields(input,['target']);return this.installationTarget(input.target);}
     if (method === 'POST' && url.pathname === '/api/onboarding/model') {
       fields(input, ['model_id']); const model = this.store.get('SELECT id FROM models WHERE id=? AND repository_id IS NULL AND api_key IS NOT NULL', text(input.model_id));
-      if (!model) fail(400, 'shared_model_required'); this.save('model', model!.id); return { model_id: model!.id };
+      if (!model) fail(400, 'shared_model_required');
+      this.store.transaction(() => { this.save('model', model!.id); adoptDefaultModel(this.store, model!.id, user.id); }); return { model_id: model!.id };
     }
     if (method === 'POST' && url.pathname === '/api/onboarding/use-app') {
       fields(input, ['account_id','update_webhook']); const account = this.store.get("SELECT * FROM accounts WHERE id=? AND type='github_app'", text(input.account_id));

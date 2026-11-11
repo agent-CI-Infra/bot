@@ -30,11 +30,15 @@ export async function managementFixture(t,options={}) {
   t?.after(()=>new Promise(r=>{provider.close(r);provider.closeAllConnections();}));
   const model=(await admin('/api/models','POST',{repository_id:'101',model_name:'Management fixture',api_url:`http://127.0.0.1:${provider.address().port}/v1`,api_key:'fixture-provider-key'})).value.model;
   await admin('/api/repositories/101/policy','PATCH',{model_id:model.id});
+  // The management assistant is a service role with its own shared model; project 101's model only runs project tasks.
+  const assistantModel=(await admin('/api/models','POST',{model_name:'Management fixture',api_url:`http://127.0.0.1:${provider.address().port}/v1`,api_key:'fixture-provider-key'})).value.model;
+  const assistant=(await admin('/api/service-roles')).value.service_roles.find(r=>r.id==='management-assistant');
+  await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,model_id:assistantModel.id});
   async function member(name,grants){
     const password=testPassword(),created=await admin('/api/users','POST',{username:name,password,...grants}),client=h.client();
     await client('/api/auth/login','POST',{username:name,password});return {id:created.value.user.id,client,password};
   }
-  return {h,admin,password,a,model,requests,modelState,provider,member,close:async()=>{await h.stop();await new Promise(r=>{provider.close(r);provider.closeAllConnections();});}};
+  return {h,admin,password,a,model,assistantModel,requests,modelState,provider,member,close:async()=>{await h.stop();await new Promise(r=>{provider.close(r);provider.closeAllConnections();});}};
 }
 export const query=(client,operation,target={},args={})=>client('/api/management/query','POST',{operation,target,arguments:args});
 export async function command(client,operation,target,args={},key='command-'+Math.random(),revision){

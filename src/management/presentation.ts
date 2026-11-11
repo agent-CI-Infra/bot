@@ -1,5 +1,9 @@
 /** Public explanations contain no request data; detailed codes remain in the authenticated trace. */
 export function managementFailure(code:string):string {
+  if(code==='service_role_model_not_configured')return '管理助手尚未配置模型，请超级管理员在控制台「全局设置 → 服务角色」中为它选择共享模型。';
+  if(code==='service_role_budget_exhausted')return '管理助手的用量预算已用完，请超级管理员在「全局设置 → 服务角色」中检查预算。';
+  if(code==='service_role_budget_usage_unknown')return '管理助手有无法计价的用量，预算无法核对，已暂停调用；请超级管理员在「全局设置 → 服务角色」中检查模型价格和预算。';
+  if(/^service_role_/.test(code))return '管理助手当前不可用，请超级管理员在「全局设置 → 服务角色」中检查配置。';
   if(/^(model_|management_model_|task_models_)/.test(code))return '管理助手的模型配置或服务暂不可用，请在控制台检查模型设置后重试。';
   if(/authorization_changed|conversation_source_changed|channel_message_changed|channel_sensitive_message/.test(code))return '身份、权限或来源消息已变化，请核对当前范围后重新说明请求。';
   if(/binding|principal_inactive/.test(code))return '当前飞书身份尚未有效绑定，请在私聊发送“绑定”或“重新认证”。';

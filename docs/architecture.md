@@ -38,7 +38,7 @@ bot 执行阶段沿用未检视、正在检视、已检视、正在开发、已�
 
 `task_metrics` 随任务状态进入和离开执行区间累计毫秒，运行中的时长在查询时动态补足；执行器定时保存计时检查点，排队与等待不计入。恢复上一个进程遗留的运行任务时关闭旧计时区间并标记不完整，避免把停机时间算成执行。重试保留累计值。升级前没有可靠计时的历史任务明确标记不完整，任务删除时附属计时级联删除。
 
-模型调用只在控制面代理中记账：发起 HTTP 请求前插入 `model_requests`，收到响应后先保存用量，再将响应交给 runner。一次实际请求只有一条记录；同一回复尚未被 runner 取走时的重复轮询不会重记，实际发出的重试请求单独计数，runner 交付失败也不会抹掉已经发生的用量。连接异常、服务错误、缺少 usage 等保留为未知记录。兼容标准 Chat Completions 的 `prompt_tokens_details.cached_tokens` 与 DeepSeek 的 `prompt_cache_hit_tokens`，同时接受 `input_tokens/output_tokens` 形式。缓存命中 token 是输入子集；命中率按累计 token 加权，缺少数据不当作零命中。字段口径见 [Chat Completions 对象](https://platform.openai.com/docs/api-reference/chat/object) 和 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)。
+模型调用只在控制面代理中记账：发起 HTTP 请求前插入 `model_requests`（项目运行记在 `repository_id` 上，管理助手等[服务角色](service-roles.md)记在 `service_role_id` 上），收到响应后先保存用量，再将响应交给 runner。一次实际请求只有一条记录；同一回复尚未被 runner 取走时的重复轮询不会重记，实际发出的重试请求单独计数，runner 交付失败也不会抹掉已经发生的用量。连接异常、服务错误、缺少 usage 等保留为未知记录。兼容标准 Chat Completions 的 `prompt_tokens_details.cached_tokens` 与 DeepSeek 的 `prompt_cache_hit_tokens`，同时接受 `input_tokens/output_tokens` 形式。缓存命中 token 是输入子集；命中率按累计 token 加权，缺少数据不当作零命中。字段口径见 [Chat Completions 对象](https://platform.openai.com/docs/api-reference/chat/object) 和 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)。
 
 `model_pricing` 按模型保存美元或人民币的每百万输入／输出／缓存命中单价。请求账本保存当时的模型名、币种、单价快照和估算费用，不保存密钥或请求／响应全文；改价不重算历史。输入费用先扣除缓存命中部分，再分别按输入价和缓存价计算。未配置价格或缺少必要 token 时费用未知，不伪造免费请求；币种分别汇总，不作汇率换算。任务删除后账本仅解除任务关联，保留项目费用。共享模型价格沿用超级管理员编辑边界。
 
