@@ -4,6 +4,7 @@ import { Store } from '../dist/storage/database.js';
 import { latestRoleCandidate } from '../dist/roles/schedule.js';
 import { runEvents, scopeUsage, toolReceipts } from '../dist/roles/role-run.js';
 import { queries } from '../dist/app/queries.js';
+import { pruneRejectedArchive, rejectedArchiveState, rejectedAudit } from '../dist/app/delivery-audit.js';
 
 // Production: latestRoleCandidate joined task_history on 'task_history:'||h.id, which cannot use the key, so every call
 // scanned the whole table (65 ms at 100k rows). The engine's task guard ran it several times a second per task, and with
@@ -64,5 +65,35 @@ test('role usage reads history and model requests by run through indexes', t => 
   for (const sql of reads) {
     const plan = store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
     assert.doesNotMatch(plan, /\bSCAN (task_history|model_requests|[a-z])\b(?! USING)/, `${sql}\n${plan}`);
+  }
+});
+
+// Production: pruning and reporting refused deliveries filtered with status<>'accepted', which cannot use the first
+// column of delivery_status_time, so each refusal scanned every accepted row (30k rows: ~25-35 ms per refused
+// transaction) and the state query behind GET /api/events scanned the table again (~8 ms per event list read). The
+// bounds here only ever touch refused rows, so every one of the four statements must reach the index by status.
+test('refused archive pruning and its counters read deliveries by status and time, never by scanning it', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  const now = Date.parse('2026-11-11T12:00:00Z');
+  const insert = store.db.prepare('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+  for (let i = 0; i < rejectedAudit.maxRows; i++) {
+    insert.run(`r${i}`, null, null, null, `d${i}`, 'push', '/', 'invalid_signature', 0,
+      new Date(now - i * 60_000).toISOString(), 401, '{}', Buffer.from('{}'), 1, '');
+  }
+  const seen = [], run = store.run.bind(store), get = store.get.bind(store), all = store.all.bind(store);
+  store.run = (sql, ...args) => { seen.push(sql); return run(sql, ...args); };
+  store.get = (sql, ...args) => { seen.push(sql); return get(sql, ...args); };
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  pruneRejectedArchive(store, now);
+  const state = rejectedArchiveState(store);
+  store.run = run; store.get = get; store.all = all;
+  assert.equal(state.rows, rejectedAudit.maxRows - 1, 'the cap removal happened, so the state query saw the capped rows');
+  const statements = seen.filter(sql => /(?:FROM|DELETE FROM) deliveries\b/.test(sql));
+  assert.equal(statements.length, 4, statements.join('\n'));
+  for (const sql of statements) {
+    assert.match(sql, /status IN \(/, 'every refusal query filters a closed status set');
+    const plan = all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
+    assert.doesNotMatch(plan, /\bSCAN deliveries\b/, `${sql}\n${plan}`);
+    assert.match(plan, /INDEX delivery_status_time/, `${sql}\n${plan}`);
   }
 });
