@@ -129,3 +129,11 @@ Pi worker tools are executed by the same control-plane callbacks as Native: Dev 
 `claude_code` and `codex` are registered worker backends for writer, observer and evaluator roles; they cannot run controller roles, including Manager and Coordinator (see [Claude Code](claude-code.md) and [Harness Runtime](harness-runtime.md#启用-codex-app-server) for the Codex App Server driver). `opencode` remains visible as a pending integration (#172); selecting it before registration returns `agent_backend_unavailable` at `roles.<id>.harness_ref.id`. Codex over the generic ACP bridge also remains usable by selecting `acp` with the trusted ACP deployment configuration.
 
 See [persistent role scheduling](role-scheduling.md) for task stage plans, project gates, parallel inspection, recovery and acceptance.
+
+## 控制台编辑与版本比较
+
+项目的「角色」页在概览与详情之间共用一份内存草稿。详情按基本信息、Agent 与模型、提示词、技能、权限、环境与输出、预算分区；分区跳转不新建表单副本，也不丢弃已输入内容。解析说明来自读取时的已保存配置，下面的选择属于待保存草稿；修改草稿不会重写运行中任务的历史模型或角色快照。
+
+保存携带读取时的 `expected_revision`。遇到版本冲突后保留草稿，通过「读取最新版本并比较」重新读取服务器配置；未重叠的修改会合并，重叠字段必须逐项选择使用草稿或最新值。角色、技能、阶段按各自标识比较；删除与他人修改同一记录也会形成冲突。应用比较结果只更新草稿及其版本基线，还须明确保存，服务器仍会重新校验权限、角色和阶段约束。
+
+读取失败时显示未知状态与只读重试入口。权限失效会清空本页草稿；切换项目后，旧页面的迟到响应不能替换新的编辑器。草稿仅保留在当前登录页面的内存中，整页重新加载后不恢复。

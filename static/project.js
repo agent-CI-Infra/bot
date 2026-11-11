@@ -124,7 +124,7 @@ async function renderProject(route) {
   const token = ++renderToken, page = $('project-page'); clearTimeout(projectTimer);
   if (current?.id !== route.id) { current = { id: route.id }; page.replaceChildren(element('p', '正在加载…', 'muted')); }
   if (legacyFocus) current.focusAnchor = legacyFocus;
-  try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) { if ([401,403].includes(err.status) && typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); page.replaceChildren(element('p', err.message, 'view-error')); } return; }
+  try { await loadProject(route.id,route.section); } catch (err) { if (token === renderToken) { if ([401,403].includes(err.status)) { if (typeof resetKnowledgeFiles === 'function') resetKnowledgeFiles(); if (current?.id === route.id) current.rolesDraft = null; } page.replaceChildren(element('p', err.message, 'view-error')); } return; }
   if (token !== renderToken) return;
   const section = projectSections.some(([key, , superOnly]) => key === route.section && (!superOnly || me.role === 'super_admin')) ? route.section : 'basic';
   // A newly granted or externally created project may not be in the list loaded at login.
