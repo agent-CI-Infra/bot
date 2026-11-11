@@ -40,6 +40,25 @@ test('installation profiles name the account, the authorization source and the m
     await page.goto(f.h.admin + '/#/settings/accounts');
     await expect(panel).toContainText('GitHub App 安装');
     await expect(panel).toContainText('凭据来源');
+
+    // The detail page has to answer the three checks on its own, not only from the list it was opened from.
+    await page.goto(f.h.admin + '/#/settings/installations/github.com/123/77');
+    await expect(panel).toContainText('App 定义检查');
+    await expect(panel).toContainText('App ID 123');
+    // The App definition check is the same check the list runs: it asks GitHub and names what a gap would block.
+    await expect(panel.getByRole('button', { name: '检查权限和事件订阅', exact: true })).toBeVisible();
+    // Both tables carry their column names on every cell, because the narrow layout prints them with td::before.
+    const repoRow = panel.locator('table').first().locator('tbody tr').first();
+    await expect(repoRow.locator('td')).toHaveCount(3);
+    await expect(repoRow.locator('td[data-label]')).toHaveCount(3);
+    const eventRow = panel.locator('table').nth(1).locator('tbody tr').first();
+    await expect(eventRow.locator('td')).toHaveCount(7);
+    await expect(eventRow.locator('td[data-label]')).toHaveCount(7);
+    await expect(eventRow.locator('td').nth(2)).toHaveAttribute('data-label', '动作');
+    // On a phone the same page stays inside the viewport with the labels in place.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(repoRow.locator('td[data-label]').first()).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally { await f.close(); }
 });
