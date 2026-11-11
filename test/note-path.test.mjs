@@ -85,3 +85,13 @@ test('atomic history writes keep the checked destination when its parent entry i
   assert.equal(await readFile(root + '/retained-blobs/target', 'utf8'), 'inside');
   await assert.rejects(readFile(join(other, 'target')), { code: 'ENOENT' });
 });
+
+test('a name carrying a control character is refused at the component and the path boundary', () => {
+  // NUL was already refused; every other C0 control, DEL, the C1 range and the two line separators are as invalid in a
+  // note name: they cannot be shown or typed in the console, and they break every line-oriented reader of the catalog.
+  const names = ['ctl\u0001name.txt', 'tab\tname.txt', 'new\nline.txt', 'esc\u001b[31m.txt', 'del\x7fname.txt', 'c1\x85name.txt', 'line\u2028sep.txt', 'para\u2029sep.txt'];
+  for (const value of names) assert.throws(() => noteComponent(value), /invalid_note_name/, JSON.stringify(value));
+  for (const value of names.map(name => 'folder/' + name)) assert.throws(() => notePath(value), /invalid_note_path/, JSON.stringify(value));
+  // A name without a control character is still accepted, including the separator characters a name may legitimately carry.
+  for (const value of ['自由 文件.txt', 'a b.txt', 'dash-and_underscore.txt', 'emoji 🚀.txt']) assert.equal(noteComponent(value), value);
+});

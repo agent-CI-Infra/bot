@@ -142,3 +142,17 @@ test('repository-backed legacy files cannot be edited, moved, deleted or restore
  for(const [method,suffix,input] of [['PUT','',{content:'overwrite',expected_revision:2}],['DELETE','',{expected_revision:2}],['POST','/restore',{revision:1,expected_revision:2}],['POST','/move',{path:'moved.md',expected_revision:2}]])await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,method,new URL(base+'/'+id+suffix),input),/memory_repository_authority/);
  assert.equal(memory.get('101',file.id).revision,2);assert.equal(memory.get('101',file.id).authority,'repository');assert.notEqual(memory.get('101',file.id).status,'archived');
 });
+
+test('a file name or a moved path carrying a control character is refused by the files API',async t=>{
+ const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const base='/api/repositories/101/knowledge-files',dirs='/api/repositories/101/knowledge-directories';
+ // A name is one component, so it reports the name's own code; the console can then say the name is wrong.
+ for(const name of ['ctl\u0001name.txt','tab\tname.txt','new\nline.txt','del\x7fname.txt','line\u2028sep.txt']){
+   const created=await admin(base,'POST',{name,content:'x'});assert.deepEqual([created.status,created.value.error],[400,'invalid_note_name'],JSON.stringify(name)); }
+ const ok=(await admin(base,'POST',{name:'ok.txt',content:'one'})).value.file;
+ for(const path of ['renamed\u0001.txt','new\nline.txt','del\x7f.txt']){
+   const moved=await admin(base+'/'+encodeURIComponent(ok.id)+'/move','POST',{path,expected_revision:1});assert.deepEqual([moved.status,moved.value.error],[400,'invalid_note_path'],JSON.stringify(path)); }
+ const badDir=await admin(dirs,'POST',{path:'docs\u0001'}),badList=await admin(base+'?directory='+encodeURIComponent('docs\u0001'));
+ assert.deepEqual([badDir.status,badList.status],[400,400]);
+ assert.equal((await admin(base+'/'+encodeURIComponent(ok.id))).value.file.content,'one');
+});
