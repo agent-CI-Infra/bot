@@ -11,6 +11,23 @@ export class ChannelRateLimitError extends HttpError {
 export class ChannelHistoryError extends HttpError {
   constructor(code: string, readonly permanent: boolean) { super(permanent ? 403 : 502, code); }
 }
+/**
+ * The single list of tenant scopes a connection needs. The wizard's import JSON, the connection-settings JSON and the
+ * automatic grant check are all generated from it; add a new scope here and to the table in docs/message-channels.md.
+ */
+export const FEISHU_SCOPES: readonly { scope: string; purpose: string; enterprise_only?: true }[] = [
+  { scope: 'im:message.p2p_msg:readonly', purpose: '接收私聊消息' },
+  { scope: 'im:message.group_at_msg:readonly', purpose: '接收群内 @ 机器人的消息' },
+  { scope: 'im:message:send_as_bot', purpose: '发送消息与更新卡片' },
+  { scope: 'cardkit:card:write', purpose: '创建与更新卡片' },
+  { scope: 'im:message.group_msg', purpose: '接收全量群消息、读取群历史（敏感权限，需审批）' },
+  { scope: 'im:message:readonly', purpose: '读取会话历史、接收撤回事件' },
+  { scope: 'im:chat.members:bot_access', purpose: '接收机器人进群、移出事件' },
+  { scope: 'im:chat.members:read', purpose: '核验群成员，保存群聊助手绑定' },
+  { scope: 'tenant:tenant:readonly', purpose: '自动获取安装企业', enterprise_only: true },
+];
+export const feishuScopes = (applicationType: string) => FEISHU_SCOPES.filter(s => !s.enterprise_only || applicationType === 'enterprise').map(s => s.scope);
+export type ScopeCheck = { required: string[]; missing: string[]; pending: string[] };
 const equal = (a: string, b: string) => !!a && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 /** Only this adapter reads credential values; persisted configuration and callers hold a reference. */
 export class FeishuAdapter implements ChannelAdapter {
@@ -117,6 +134,7 @@ export class FeishuAdapter implements ChannelAdapter {
       // A member lookup the app holds no scope for (99991672) needs an administrator to grant the scope, not a retry. It is
       // also a 4xx on purpose: Cloudflare in front of the console replaces a 502 body, which would hide this code.
       if (path.startsWith('/im/v1/chats/') && data.code === 99991672) fail(403, 'channel_audience_permission_required');
+      if (path === '/application/v6/scopes' && (!r.ok || data.code !== 0)) fail(502, 'channel_scope_check_unavailable');
       if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : path === '/tenant/v2/tenant/query' ? 'channel_tenant_unavailable' : 'channel_delivery_rejected');
       return data;
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }
@@ -164,6 +182,20 @@ export class FeishuAdapter implements ChannelAdapter {
     }
     this.guard();
     return { bot_open_id: text(bot.open_id), name, name_source: appError ? 'bot' : 'application', ...(appError ? { app_error: appError } : {}) };
+  }
+  /**
+   * Compares the required list with the tenant's grant states ("查询租户授权状态", no extra scope needed).
+   * grant_status 1 is granted; any other state means requested but not yet approved or published.
+   */
+  async scopeCheck(): Promise<ScopeCheck> {
+    const scopes = (await this.api('/application/v6/scopes', { method: 'GET' })).data?.scopes;
+    if (!Array.isArray(scopes)) fail(502, 'channel_scope_check_unavailable');
+    const tenant = scopes.filter((s: any) => s?.scope_type !== 'user' && typeof s?.scope_name === 'string');
+    const granted = new Set(tenant.filter((s: any) => s.grant_status === 1).map((s: any) => s.scope_name));
+    const requested = new Set(tenant.map((s: any) => s.scope_name));
+    const required = feishuScopes(String(this.connector.application_type)), missing = required.filter(s => !granted.has(s));
+    this.guard();
+    return { required, missing, pending: missing.filter(s => requested.has(s)) };
   }
   /** is_in_chat checks this token's bot, while members lists human members only. */
   async audience(chat: string): Promise<{ id: string; tenant: string }[]> {

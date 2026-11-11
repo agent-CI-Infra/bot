@@ -65,7 +65,7 @@ test('saving explains an app without the member scope, and a gateway page, inste
     await page.getByLabel('fixture/project-101', { exact: true }).check();
     const save = page.getByRole('button', { name: '保存群聊助手', exact: true }), alert = page.locator('form').filter({ has: save }).getByRole('alert');
     await save.click();
-    await expect(alert).toHaveText('飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在飞书开放平台为应用开通 im:chat.members:read，并发布新版本后再保存。');
+    await expect(alert).toHaveText('飞书应用还没有读取群成员的权限，无法核验你是否在群中。请超级管理员在「全局设置 → 飞书连接」查看缺少的权限，为应用开通 im:chat.members:read 并发布新版本后再保存。');
     // After the scope is granted, an entry proxy still answers once with its own page (Cloudflare replaces 502 bodies).
     wire.state.audience = null;
     await page.route('**/service-binding', route => route.fulfill({ status: 502, contentType: 'text/html', body: '<!DOCTYPE html><html><body>Bad gateway</body></html>' }), { times: 1 });

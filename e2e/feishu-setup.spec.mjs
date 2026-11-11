@@ -4,6 +4,7 @@ import { managementFixture } from '../test/management-fixture.mjs';
 import { identityFixture } from '../test/identity-fixture.mjs';
 import { transport, connector, envelope, post, finished, credentials, bindFixture } from '../test/channel-fixture.mjs';
 import { harness, setup } from '../test/helpers.mjs';
+import { FEISHU_SCOPES } from '../dist/channels/feishu.js';
 
 const output = '.tmp/feishu-setup-165';
 async function login(page, h, password, username = 'administrator') {
@@ -22,18 +23,18 @@ test('global administrator connects an app through the wizard, resumes it and se
     await expect(page.getByRole('navigation', { name: '飞书连接步骤' })).toBeVisible();
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('saas');
     await expect(page.getByLabel('事件接收方式')).toHaveValue('http');
-    const scopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
+    const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toEqual(['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'cardkit:card:write',
       'im:message.group_msg', 'im:message:readonly', 'im:chat.members:bot_access', 'im:chat.members:read']);
     expect(scopes.scopes.user).toEqual([]);
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('权限导入不会自动订阅回调');
     await page.getByRole('combobox', { name: '应用类型', exact: true }).selectOption('enterprise');
-    const enterpriseScopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
+    const enterpriseScopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
     expect(enterpriseScopes.scopes.tenant).toEqual([...scopes.scopes.tenant, 'tenant:tenant:readonly']);
     expect(enterpriseScopes.scopes.user).toEqual([]);
     await expect(page.getByText('企业自建应用需先开通', { exact: false })).toContainText('再进入下一步保存连接');
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => { window.copiedFeishuScopes = value; } } }));
-    await page.getByRole('button', { name: '复制基础权限 JSON', exact: true }).click();
+    await page.getByRole('button', { name: '复制完整权限 JSON', exact: true }).click();
     expect(JSON.parse(await page.evaluate(() => window.copiedFeishuScopes))).toEqual(enterpriseScopes);
     await page.getByRole('button', { name: '应用已准备，填写凭据' }).click();
     expect(f.h.store.get('SELECT count(*) n FROM tenants').n).toBe(0);
@@ -119,6 +120,8 @@ test('connection list refreshes current app names even when bot metadata is stal
     await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
     await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
     await expect(row.getByText('App ID：cli_fixture', { exact: true })).toBeVisible();
+    const grants = row.locator('.feishu-scope-check');
+    await expect(grants).toContainText(`所需的 ${FEISHU_SCOPES.length} 项均已开通`);
     expect(f.h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id).revision).toBe(1);
     const requests = wire.state.authRequests.length;
     await page.reload();
@@ -129,6 +132,24 @@ test('connection list refreshes current app names even when bot metadata is stal
     await page.screenshot({ path: output + '/connections-desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: output + '/connections-mobile.png', fullPage: true });
+    // A partly configured app lists what is missing, links Feishu's request page for exactly those scopes and offers the full import JSON.
+    wire.state.scopes = FEISHU_SCOPES.filter(s => !['im:message.group_msg', 'im:chat.members:read'].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' }));
+    await row.getByRole('button', { name: '刷新应用信息与权限' }).click();
+    await expect(grants).toContainText('缺少 2 项');
+    await expect(grants.getByRole('listitem')).toHaveText([/^im:message\.group_msg · /, /^im:chat\.members:read · 核验群成员/]);
+    const request = new URL(await grants.getByRole('link', { name: '在飞书开通缺少的权限' }).getAttribute('href'));
+    expect(request.origin + request.pathname).toBe('https://open.feishu.cn/app/cli_fixture/auth');
+    expect(request.searchParams.get('q')).toBe('im:message.group_msg,im:chat.members:read');
+    expect(JSON.parse(await grants.getByLabel('完整权限 JSON').inputValue()).scopes.tenant).toEqual(FEISHU_SCOPES.map(s => s.scope));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: output + '/connections-mobile-missing-scopes.png', fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.screenshot({ path: output + '/connections-desktop-missing-scopes.png', fullPage: true });
+    wire.state.scopeCode = 99991663;
+    await row.getByRole('button', { name: '刷新应用信息与权限' }).click();
+    await expect(grants).toContainText('暂时无法自动检查飞书权限');
+    await expect(row.getByRole('status')).toHaveText('应用与企业信息已检查。');
+    wire.state.scopeCode = 0; wire.state.scopes = null;
     wire.state.applicationCode = 99991672;
     await row.getByRole('button', { name: '刷新应用信息' }).click();
     await expect(row.getByRole('status')).toContainText('admin:app.info:readonly');
@@ -214,7 +235,7 @@ test('enterprise long connections require callback configuration as well as mess
     await page.reload();
     await expect(steps.nth(0).getByRole('link', { name: '前往启用连接' })).toHaveAttribute('href', '#/settings/feishu/' + id + '/1');
     await page.getByRole('button', { name: '1. 创建应用', exact: true }).click();
-    const scopes = JSON.parse(await page.getByLabel('基础权限 JSON').inputValue());
+    const scopes = JSON.parse(await page.getByLabel('完整权限 JSON').inputValue());
     expect(scopes.scopes.tenant).toContain('cardkit:card:write');
     await expect(page.getByText('卡片是默认功能：', { exact: false })).toContainText('已有应用也需补齐并发布新版本');
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }

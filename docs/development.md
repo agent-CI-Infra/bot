@@ -82,6 +82,8 @@ GitHub 登录、统一授权、迁移和隔离验收见 [身份与授权](identi
 
 飞书应用连接、双端绑定、群聊助手绑定、共享管理会话、通知目的地和发送队列见 [消息渠道与飞书应用机器人](message-channels.md)。
 
+新增飞书权限时，只在 `src/channels/feishu.ts` 的 `FEISHU_SCOPES` 加一项并写明用途，同时补上 [message-channels.md](message-channels.md) 的权限表，`test/channel-setup.test.mjs` 会核对两者一致。向导第 1 步和连接列表里的完整权限 JSON、连接列表的自动权限检查都从这份清单生成，页面里不另写权限名。这样已有连接的管理员打开连接列表就能看到缺少哪些权限，导入一次 JSON 即可补齐。
+
 持久化调度、日报、事件订阅、受控触发契约和通知 outbox 见 [定时计划、日报与事件订阅](schedules.md)。
 
 ## 按任务选择模型

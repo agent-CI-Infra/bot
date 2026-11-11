@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, connector, credentials, until, envelope, post, finished, bindFixture, privateChat, registerDestination } from './channel-fixture.mjs';
 import { harness, setup } from './helpers.mjs';
+import { readFileSync } from 'node:fs';
+import { FEISHU_SCOPES, feishuScopes } from '../dist/channels/feishu.js';
 
 const probe = (admin, id, revision = 1) => admin('/api/channels/feishu/probe', 'POST', { connector_id: id, expected_revision: revision });
 test('personal name discovery is owner-only, returns only the matched name and leaves identity proof and grants unchanged', async t => {
@@ -158,7 +160,8 @@ test('upgrading legacy binding requests adds code discovery without invalidating
 test('Feishu probes use saved or ephemeral credentials, return safe bot facts and never claim event delivery', async t => {
   const { admin, id, wire, h } = await channelFixture(t);
   const checked = await probe(admin, id);
-  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', name_source: 'application', tenant_name: 'Fixture enterprise', revision: 1, state: 'verified', event_delivery_verified: false });
+  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', name_source: 'application', tenant_name: 'Fixture enterprise', revision: 1, state: 'verified', event_delivery_verified: false,
+    scopes: { required: feishuScopes('enterprise'), missing: [], pending: [] } });
   const preview = await admin('/api/channels/feishu/probe', 'POST', { app_id: 'cli_preview', app_secret: 'unsaved-preview-secret' });
   assert.equal(preview.status, 201); assert.equal(preview.value.bot_open_id, 'ou_bot');
   assert.equal(wire.state.authRequests.at(-1).app_id, 'cli_preview');
@@ -352,4 +355,31 @@ test('store apps bootstrap without a bot ID, then persist discovery after a veri
   assert.equal((await probe(admin, id, 2)).value.revision, 2);
   assert.equal((await post(h, id, message())).value.state, 'queued');
   assert.ok(wire.state.authRequests.some(a => a.tenant_key === 'install-tenant'));
+});
+
+test('connection probes compare tenant grants with the one required scope list and stay usable when the grant check fails', async t => {
+  const { admin, id, wire, h } = await channelFixture(t);
+  const absent = 'im:chat.members:bot_access', pending = 'im:message:readonly', userOnly = 'im:message.group_msg';
+  wire.state.scopes = [...FEISHU_SCOPES.filter(s => ![absent, pending, userOnly].includes(s.scope)).map(s => ({ scope_name: s.scope, grant_status: 1, scope_type: 'tenant' })),
+    { scope_name: pending, grant_status: 2, scope_type: 'tenant' }, { scope_name: userOnly, grant_status: 1, scope_type: 'user' }];
+  const checked = await probe(admin, id);
+  assert.equal(checked.status, 201);
+  // A user-identity grant does not satisfy a tenant scope; a requested but unapproved scope is reported as pending.
+  assert.deepEqual(checked.value.scopes, { required: feishuScopes('enterprise'), missing: [userOnly, pending, absent], pending: [pending] });
+  const preview = await admin('/api/channels/feishu/probe', 'POST', { app_id: 'cli_preview', app_secret: 'unsaved-preview-secret' });
+  assert.deepEqual(preview.value.scopes.missing, [userOnly, pending, absent]);
+  wire.state.scopeCode = 99991663;
+  const degraded = await probe(admin, id);
+  assert.equal(degraded.status, 201); assert.equal(degraded.value.bot_open_id, 'ou_bot');
+  assert.equal(degraded.value.scope_error, 'channel_scope_check_unavailable'); assert.equal(degraded.value.scopes, undefined);
+  assert.doesNotMatch(JSON.stringify(degraded.value), /fixture-only-access-token|fixture-feishu-app-secret/);
+  assert.equal(h.store.get('SELECT revision FROM channel_connectors WHERE id=?', id).revision, 1);
+  // The wizard and connection settings render the same list the check uses; store apps omit the enterprise-only scope.
+  assert.deepEqual((await admin('/api/channels/setup')).value.feishu_scopes, JSON.parse(JSON.stringify(FEISHU_SCOPES)));
+  assert.deepEqual(feishuScopes('saas'), feishuScopes('enterprise').filter(s => s !== 'tenant:tenant:readonly'));
+});
+
+test('the documented Feishu scope table lists exactly the required scopes', () => {
+  const documented = [...readFileSync(new URL('../docs/message-channels.md', import.meta.url), 'utf8').matchAll(/^\| `([a-z]+:[^`]+)` \|/gm)].map(m => m[1]);
+  assert.deepEqual(documented, FEISHU_SCOPES.map(s => s.scope));
 });
