@@ -590,3 +590,10 @@ test('disabling a project during notes generation rejects the result before adva
   assert.equal(result.stage,'waiting_permission'); assert.equal(result.error,'release_disabled');
   assert.equal(result.body,''); assert.equal(f.state.releases.length,0);
 });
+
+test('release previews expose an exact ancestry count and records report their actual initiator',async t=>{
+  const f=await releaseFixture(t);const first=await f.preview();assert.equal(first.commit_count,2);
+  f.state.tags['v1.2.2']={type:'commit',sha:previous};const next=await f.preview();assert.equal(next.commit_count,1);assert.equal(next.previous_tag.sha,previous);
+  const created=await f.create();assert.equal(created.value.release.initiator.name,'administrator');
+  assert.equal((await f.admin(f.endpoint)).value.releases[0].initiator.name,'administrator');
+});

@@ -153,7 +153,8 @@ export class ReleaseService {
   }
   view(row: any): Json {
     const data = JSON.parse(row.data); if (data.skill) delete data.skill.content;
-    return releaseRedactor(this.store, row.repository_id).clean({ ...data, id: row.id, repository_id: row.repository_id, version: row.version, target_sha: row.target_sha, stage: row.stage, revision: row.revision, created_at: row.created_at, updated_at: row.updated_at });
+    const initiator = this.store.get('SELECT username FROM users WHERE id=?',row.actor_id);
+    return releaseRedactor(this.store, row.repository_id).clean({ ...data, id: row.id, repository_id: row.repository_id, version: row.version, target_sha: row.target_sha, stage: row.stage, revision: row.revision, initiator: initiator ? { name: initiator.username } : null, created_at: row.created_at, updated_at: row.updated_at });
   }
   save(row: any, patch: any, stage = row.stage, active = !['failed', 'published', 'externally_published'].includes(stage) && (stage !== 'draft' || !!row.lease)) {
     this.store.transaction(() => {

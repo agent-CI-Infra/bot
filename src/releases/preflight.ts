@@ -32,7 +32,7 @@ export async function inspect(github: GitHub, version: string, consolePrompt?: s
   const existingTag = validVersion(version) ? await tag(github, version) : null;
   const existingRelease = validVersion(version) ? await releases(github, version) : null;
   const previous = await previousTag(github, target, version);
-  const noChanges = previous !== null && (await newCommits(github, target, previous)).length === 0;
+  const commits = await newCommits(github,target,previous), noChanges = previous !== null && commits.length === 0;
   // The new version must rank above the previous reachable tag in SemVer order (a prerelease ranks below its stable version).
   const suggested = previous ? nextVersions(previous.name) : [];
   const behind = previous !== null && validVersion(version) && compareVersions(version, previous.name) <= 0;
@@ -46,7 +46,7 @@ export async function inspect(github: GitHub, version: string, consolePrompt?: s
     checks, version, version_valid: validVersion(version), version_pattern: versionPattern, prerelease: prerelease(version), target_sha: target,
     target_title: String(commit.commit?.message || '').split('\n')[0], target_url: commit.html_url, default_branch: github.defaultBranch,
     workflow_id: workflowId, workflow, files: { config: config?.sha, ci: ci?.sha, release: workflowFile?.sha },
-    previous_tag: previous, no_changes: noChanges, version_behind: behind, suggested_versions: suggested, existing_tag: existingTag, existing_release: existingRelease ? { id: existingRelease.id, draft: existingRelease.draft, url: existingRelease.html_url } : null,
+    commit_count: commits.length, previous_tag: previous, no_changes: noChanges, version_behind: behind, suggested_versions: suggested, existing_tag: existingTag, existing_release: existingRelease ? { id: existingRelease.id, draft: existingRelease.draft, url: existingRelease.html_url } : null,
     skill: skill ? { source: 'repository', path: skillPath, sha: target, hash: sha(skill.content), version: null, content: skill.content }
       : consolePrompt ? { source: 'console', path: null, sha: target, hash: sha(consolePrompt), version: null, content: consolePrompt }
       : { source: 'builtin', path: null, sha: target, hash: sha(builtinRule), version: 'release-notes-v1', content: builtinRule } };
