@@ -5,6 +5,8 @@ import { rm } from 'node:fs/promises';
 import { randomBytes, createHash } from 'node:crypto';
 import { ManagerError } from './docker.mjs';
 import { Notes, noteName } from '../runner/notes.mjs';
+import { FileTree } from './file-tree.mjs';
+import { validNoteId } from '../runner/note-catalog.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -219,6 +221,40 @@ export class Projects {
         if (error.code === 'ENOENT') throw new ManagerError('note_not_found', 404);
         if (error.message === 'note_revision_changed') throw new ManagerError(error.message, 409);
         if (/^(invalid_note|notes_(?:lock_expired|busy))/.test(error.message)) throw new ManagerError(error.message, 400);
+        throw error;
+      }
+    });
+  }
+  async fileTree(repo, method, id, action, input = {}, query = {}) {
+    this.validate(repo);
+    const directories=id==='directories';
+    if(id!==undefined&&!directories&&!validNoteId(id))throw new ManagerError('invalid_note_id',400);
+    const allowed=directories?['path']:id===undefined?['path','content','actor']:action==='move'?['path','expected_revision','actor']:action==='restore'?['revision','expected_revision','actor']:method==='DELETE'?['expected_revision','actor']:['content','expected_revision','actor'];
+    if(Object.keys(input).some(key=>!allowed.includes(key)))throw new ManagerError('invalid_input',400);
+    if(input.actor!==undefined&&(typeof input.actor!=='string'||input.actor.length>240))throw new ManagerError('invalid_input',400);
+    if(id!==undefined&&!directories&&method!=='GET'&&(!Number.isSafeInteger(input.expected_revision)||input.expected_revision<1))throw new ManagerError('invalid_note_revision',400);
+    if(action==='restore'&&(!Number.isSafeInteger(input.revision)||input.revision<1))throw new ManagerError('invalid_note_revision',400);
+    return this.lock(repo,async()=>{
+      if(!this.get(repo))this.db.prepare("INSERT INTO projects(repository_id,generation,state,desired) VALUES(?,1,'stopped','stopped')").run(repo);
+      await this.notesVolume(repo);const tree=new FileTree(this.notesRoot+'/'+repo),actor=input.actor??'console';
+      try{
+        if(directories&&method==='POST')return await tree.createDirectory(input.path);
+        if(directories&&method==='DELETE')return await tree.deleteDirectory(input.path);
+        if(id===undefined&&method==='GET')return await tree.list({directory:query.directory??'',query:query.query??'',includeDeleted:query.include_deleted==='1',deletedOnly:query.deleted_only==='1'});
+        if(id===undefined&&method==='POST')return await tree.create(input.path,input.content,actor);
+        if(method==='GET'&&action==='versions')return await tree.versions(id);
+        if(method==='GET'&&!action)return await tree.read(id,query.revision===undefined?undefined:Number(query.revision));
+        if(method==='PUT'&&!action)return await tree.save(id,input.content,input.expected_revision,actor);
+        if(method==='DELETE'&&!action)return await tree.delete(id,input.expected_revision,actor);
+        if(method==='POST'&&action==='restore')return await tree.restore(id,input.revision,input.expected_revision,actor);
+        if(method==='POST'&&action==='move')return await tree.move(id,input.path,input.expected_revision,actor);
+        throw new ManagerError('method_not_allowed',405);
+      }catch(error){
+        if(error instanceof ManagerError)throw error;
+        if(error.code==='ENOENT')throw new ManagerError('note_not_found',404);
+        if(error.message==='unsupported_note_format')throw new ManagerError(error.message,415);
+        if(error.message==='note_revision_changed')throw new ManagerError(error.message,409);
+        if(/^(?:invalid_note|notes_|note_(?:path_conflict|not_found|move_)|directory_)/.test(error.message))throw new ManagerError(error.message,error.status??400);
         throw error;
       }
     });
