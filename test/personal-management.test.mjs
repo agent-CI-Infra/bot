@@ -183,13 +183,18 @@ test('connector changes start fresh personal context without changing the logica
 
 test('personal delivery rechecks permission after asynchronous Feishu authentication',async t=>{
   const f=await channelFixture(t),member=await f.member('delivery-revoked',{repository_ids:['101']});bindFixture(f.h,f.id,member.id,'ou_delivery');
-  let release;f.wire.state.authGate=new Promise(r=>release=r);t.after(()=>release());
+  let release,sending;const gate=new Promise(resolve=>release=resolve);t.after(()=>release());
+  // Pause authentication for this reply, not a preceding profile or connection check.
+  f.wire.state.authGate=async()=>{
+    const row=f.h.store.all("SELECT id,payload,source_event FROM channel_outbox WHERE state='sending'").find(row=>JSON.stringify(f.h.store.secrets.open(row.payload,'channel-outbox:'+row.id).delivery).includes('Protected private project fact'));
+    if(row){sending=row;await gate;}
+  };
   f.modelState.respond=async(body,res)=>reply(res,'Protected private project fact');
   const receipt=await post(f.h,f.id,envelope('查询任务',{sender:{sender_id:{open_id:'ou_delivery'}},message:{chat_id:'oc_delivery'}}));
-  // Receipt reactions also exchange tokens; revoke only once the protected reply itself is waiting to send.
-  await until(()=>f.h.store.get('SELECT state FROM channel_outbox WHERE source_event=?',receipt.value.operation_id)?.state==='sending');
+  // Receipt reactions also exchange tokens; wait for this protected reply's actual authentication barrier.
+  await until(()=>sending);assert.equal(sending.source_event,receipt.value.operation_id);
   await f.admin('/api/project-admin-assignments','PUT',{user_id:member.id,repository_ids:[]});f.wire.state.authGate=null;release();
-  const outbox=await until(()=>f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?',receipt.value.operation_id),r=>r?.state==='failed');
+  const outbox=await until(()=>f.h.store.get('SELECT * FROM channel_outbox WHERE id=?',sending.id),r=>r?.state==='failed');
   assert.equal(outbox.last_error,'authorization_changed');assert.ok(!JSON.stringify(f.wire.sent).includes('Protected private project fact'));
 });
 

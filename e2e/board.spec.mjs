@@ -66,8 +66,10 @@ test('每类工作的卡片在所有维度保留状态、徽章和任务目标�
     await choose(page,'按…分列','repository');await expect(page.locator('.board-column')).toHaveCount(1);await expect(page.locator('.board-column')).toHaveAttribute('data-column-id','101');
     await page.getByRole('button',{name:'移除筛选 执行状态：正在执行',exact:true}).click();await expect(work(page,'101/issue/1','review.issue')).toBeVisible();
     for(let i=0;i<15;i++)boardTask(h.store,'many-'+i,100+i,'review.issue','succeeded');
-    await page.evaluate(()=>boardPoll());
-    expect(await page.locator('.board-column-list').evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
+    // A quiet poll intentionally skips a busy/reading board; explicitly refresh and await the inserted cards.
+    await page.getByRole('button',{name:'刷新',exact:true}).click();
+    await expect(work(page,'101/issue/114','review.issue')).toBeAttached();
+    await expect.poll(()=>page.locator('.board-column-list').evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
     await noPageScroll(page);expect(errors).toEqual([]);
   }finally{await h.stop();rmSync(h.directory,{recursive:true,force:true});}
 });

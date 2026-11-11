@@ -13,7 +13,7 @@ export function transport() {
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
       state.authStarted++;
-      if (state.authGate) await state.authGate;
+      if (state.authGate) await (typeof state.authGate === 'function' ? state.authGate(url) : state.authGate);
       const auth = JSON.parse(init.body); state.authRequests.push({ url, tenant_key: auth.tenant_key, app_id: auth.app_id });
       if (url.endsWith('/app_access_token')) return Response.json({ code: 0, app_access_token: 'fixture-app-access-token' });
       return Response.json({ code: state.authCode, tenant_access_token: 'fixture-only-access-token', msg: 'fixture-feishu-app-secret' });
