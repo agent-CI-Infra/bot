@@ -103,6 +103,23 @@ function releaseOverview(records) {
   }
   return table;
 }
+// #233: a failed record explains itself where the reader stands — which step failed and the original text of that
+// step's error. The attempt line only restates stored fields: `expected_attempt` above `run_attempt` is the one case
+// that proves a rerun was requested and not yet observed, while a `run_attempt` above 1 only says the stored snapshot
+// carried that attempt number — it does not place the retry after this failure. Nothing is inferred from the stage
+// name, and no log the page did not read is paraphrased here.
+function releaseFailurePanel(r) {
+  const step = r.failure_step ? (releaseSteps[r.failure_step] || r.failure_step) : null;
+  const panel = element('details', '', 'release-failure');
+  panel.dataset.releaseFailure = r.failure_step || 'unspecified';
+  panel.append(element('summary', step ? `失败步骤：${step}` : '失败详情'),
+    facts([['失败步骤', step || '未记录'], ['该步错误原文', r.detail || r.error || '未提供'], ['错误码', r.error]]));
+  const attempt = Number.isSafeInteger(r.run_attempt) ? r.run_attempt : null, expected = Number.isSafeInteger(r.expected_attempt) ? r.expected_attempt : null;
+  panel.append(element('p', expected !== null && expected > (attempt || 0) ? `已请求重跑到第 ${expected} 次运行，还没有新的运行快照`
+    : attempt !== null && attempt > 1 ? `当前运行快照为第 ${attempt} 次 attempt（该工作流曾重跑过）`
+    : '没有重试记录', 'muted'));
+  return panel;
+}
 function releaseRecord(r, endpoint, refresh, message, context) {
   const { live, target } = context;
   const section = card(r.version), run = r.run;
@@ -111,6 +128,8 @@ function releaseRecord(r, endpoint, refresh, message, context) {
   section.append(facts([['阶段', releaseStages[r.stage] || r.stage], ['目标提交', r.target_sha], ['失败步骤', r.failure_step], ['错误码', r.error], ['说明', r.detail],
     ['工作流', run?.name], ['Run／attempt', r.run_id ? `${r.run_id} / ${r.run_attempt}` : null], ['状态／结论', run ? `${run.status} / ${run.conclusion || '等待结果'}` : null],
     ['开始时间', run?.started_at], ['结束时间', run?.ended_at], ['Actions', r.actions_url ? link(r.actions_url, '查看本次运行') : null]]));
+  // A published or externally published record has no failure to explain, so it gets no such block at all.
+  if (r.stage === 'failed') section.append(releaseFailurePanel(r));
   const jobs = element('div', '', 'release-jobs');
   for (const job of run?.jobs || []) {
     const item = element('div', '', 'release-job'); item.append(note(`${job.name} · ${job.status} · ${job.conclusion || '等待结果'}`), link(job.url, '查看 job'));
