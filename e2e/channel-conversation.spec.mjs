@@ -5,7 +5,7 @@ import { roleApi } from '../dist/roles/api.js';
 import { resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { TaskEngine } from '../dist/agent/engine.js';
 
-for (const width of [1440, 390]) test(`continuous group/private conversation, role settings and shared task board at ${width}px (protocol/model fixtures)`, async ({ page }) => {
+for (const width of [1440, 390]) test(`continuous group/private management conversation and shared task board at ${width}px (protocol/model fixtures)`, async ({ page }) => {
   const f = await channelFixture(undefined, store => ({ engine: new TaskEngine(store, { call: async () => ({ state: 'stopped' }) }) })), errors = []; page.on('pageerror', error => errors.push(error.message));
   try {
     roleApi(f.h.store, { id: f.principal, role: 'super_admin', repositories: [] }, 'PUT', new URL('http://local/api/repositories/101/roles'), {
@@ -18,6 +18,9 @@ for (const width of [1440, 390]) test(`continuous group/private conversation, ro
     });
     let create = true;
     f.modelState.respond = async (body, res) => {
+      if (body.tools.some(t => t.function.name === 'management_query')) {
+        res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '你好！可按项目名称管理任务，私信沿用同一会话。' } }], usage: { prompt_tokens: 12, completion_tokens: 4 } })); return;
+      }
       const name = create && !body.messages.some(m => m.role === 'tool') ? 'create_task' : 'finish';
       const args = name === 'create_task' ? { request: '待执行的群报告', criteria: ['附上本地证据'], execute: false } : { message: create ? '已记录独立事项，聊天仍可继续。' : '私信沿用同一会话。' };
       res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: null,
@@ -26,7 +29,7 @@ for (const width of [1440, 390]) test(`continuous group/private conversation, ro
     const receipt = await post(f.h, f.id, inGroup('请记录一个独立报告事项', 'ou_bob'));
     await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', receipt.value.operation_id), r => r?.state === 'completed');
     create = false;
-    const privateReceipt = await post(f.h, f.id, envelope('/chat /project 101 继续我的私信'));
+    const privateReceipt = await post(f.h, f.id, envelope('你好'));
     await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', privateReceipt.value.operation_id), r => r?.state === 'completed');
     await page.setViewportSize({ width, height: 900 }); await page.goto(f.h.admin + '/#/identity');
     await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(f.password);
@@ -36,16 +39,12 @@ for (const width of [1440, 390]) test(`continuous group/private conversation, ro
     await expect(page.getByRole('link', { name: '查看同一项目任务看板', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '查询该群本地记录', exact: true }).click();
     await expect(page.getByText('未 @ 的共同决定：先核对本地证据', { exact: true })).toBeVisible();
-    await page.getByLabel('私信角色所属项目', { exact: true }).selectOption('101');
-    await expect(page.getByLabel('私信使用角色', { exact: true })).toBeEnabled();
-    await page.getByLabel('私信使用角色', { exact: true }).selectOption('dev');
-    await page.getByRole('button', { name: '保存私信角色', exact: true }).click();
-    await expect.poll(() => f.h.store.get('SELECT revision FROM channel_personal_roles')?.revision).toBe(1);
-    expect(f.h.store.get('SELECT role_id FROM channel_personal_roles').role_id).toBe('dev');
-    await expect(page.getByRole('button', { name: '保存私信角色', exact: true })).toBeEnabled();
+    await expect(page.getByText(/私信与控制台管理对话共用管理助手/)).toBeVisible();
+    await expect(page.getByLabel('私信使用角色', { exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: '查看私信连续会话', exact: true }).click();
-    // A role-setting revision invalidates the previous derived answer, but keeps its source and logical ID.
-    await expect(page.getByText('来源或授权范围已变化，旧派生回答不再展示。', { exact: true })).toBeVisible();
+    await expect(page.getByText('你好！可按项目名称管理任务，私信沿用同一会话。', { exact: true })).toBeVisible();
+    await expect(page.getByText('我：你好', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: '打开管理对话与执行记录', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     mkdirSync('.tmp/channel-conversation-245', { recursive: true }); await page.screenshot({ path: `.tmp/channel-conversation-245/conversation-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/board');

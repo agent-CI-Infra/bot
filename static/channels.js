@@ -76,7 +76,7 @@ async function feishuIdentityCard() {
     else row.append(note('需要恢复时，在原飞书私聊发送 /reauth，重新完成双端验证。'));
     section.append(row);
   }
-  section.append(button('刷新飞书绑定状态', () => start().catch(error), 'quiet'), note('绑定后可直接私聊机器人；多个项目时用 /chat /project <项目ID> <请求> 选择。群内由维护人启用员工后，普通成员无需逐人绑定。'));
+  section.append(button('刷新飞书绑定状态', () => start().catch(error), 'quiet'), note('绑定后可直接说“你好”“我能管理哪些项目”或“看看 bot 项目的任务”；需要明确目标时，助手会按名称追问。群内由维护人启用员工后，普通成员无需逐人绑定。'));
   section.append(await channelEmployeeSettings());
   return section;
 }
@@ -142,32 +142,12 @@ async function channelEmployeeSettings() {
     box.append(row);
   }
   const personal = card('我的飞书私信会话');
-  personal.append(note('私信使用本人的当前项目权限，同一私信跨项目和话题保留一个会话。默认使用 Reviewer；有项目配置权限时可选择其他启用角色。旧个人管理记录保留原追溯，不拼入群上下文。'));
+  personal.append(note('私信与控制台管理对话共用管理助手、当前授权、审批与执行回执。可按项目或任务名称提问并继续选择，无需先选项目。同一私信跨项目和话题延续上下文，个人记录不进入群聊。'));
   if (!data.personal_chats.length) personal.append(note('绑定后先在飞书私聊发一条普通消息，再刷新此页。'));
   for (const chat of data.personal_chats) {
-    const row = element('article', '', 'channel-binding'), target = element('div'), settings = element('form', '', 'project-form');
+    const row = element('article', '', 'channel-binding'), target = element('div');
     row.append(element('strong', '私信 ' + chat.chat_id), button('查看私信连续会话', () => channelConversation(chat.id, target).catch(error), 'quiet'),
       button('查询私信本地记录', () => channelEmployeeHistory({ chat_id: chat.id }, target).catch(error), 'quiet'));
-    if (data.projects.length) {
-      const project = channelSelect(settings, '私信角色所属项目', 'personal_project', data.projects.map(p => [p.id, p.full_name])), role = channelSelect(settings, '私信使用角色', 'personal_role', []);
-      const save = element('button', '保存私信角色'); save.type = 'submit'; settings.append(save); let loadVersion = 0;
-      const load = async () => {
-        const version = ++loadVersion; role.disabled = true; save.disabled = true;
-        const value = await api('/api/repositories/' + project.value + '/roles');
-        if (version !== loadVersion) return;
-        role.replaceChildren();
-        for (const r of value.configuration.roles.filter(r => r.enabled && r.kind !== 'evaluator' && r.role_id !== 'coordinator')) role.add(new Option(r.name || r.role_id, r.role_id));
-        role.value = data.personal_roles.find(r => r.chat_id === chat.id && r.project_id === project.value)?.role_id || 'reviewer';
-        role.disabled = false; save.disabled = !role.options.length;
-      };
-      project.addEventListener('change', () => load().catch(error)); await load();
-      settings.addEventListener('submit', async event => {
-        event.preventDefault(); save.disabled = true;
-        try { await api('/api/channels/chats/' + chat.id + '/personal-role', 'PUT', { project_id: project.value, role_id: role.value,
-          expected_revision: data.personal_roles.find(r => r.chat_id === chat.id && r.project_id === project.value)?.revision || 0 }); await start(); }
-        catch (err) { error(err); save.disabled = false; }
-      }); row.append(settings);
-    }
     row.append(target); personal.append(row);
   }
   box.append(personal); return box;
@@ -180,13 +160,15 @@ async function channelConversation(id, target) {
     try {
       if (!more) { offset = 0; turns.replaceChildren(); }
       const result = await api('/api/channels/chats/' + id + '/conversation?offset=' + offset); offset = result.next_offset;
-      summary.replaceChildren(facts([['会话', result.conversation_id], ['当前项目', result.current_project || '尚未选择'], ['模型请求记录', String(result.usage.requests || 0)], ['用量未完整核验', String(result.usage.usage_missing_requests || 0)],
+      summary.replaceChildren(facts([['会话', result.mode === 'management' ? '个人飞书管理会话' : result.conversation_id], ['管理范围', result.mode === 'management' ? '全部有权项目（按请求确定目标）' : result.current_project || '尚未选择'], ['模型请求记录', String(result.usage.requests || 0)], ['用量未完整核验', String(result.usage.usage_missing_requests || 0)],
         ['后端未报告实际请求次数的回合', String(result.usage.provider_request_count_unknown || 0)],
         ['已记录费用', result.usage.costs.map(c => c.currency + ' ' + c.amount).join('、') || '尚无已定价费用'], ['未知费用请求', String(result.usage.unpriced_requests || 0)]]));
       status.textContent = '本地同步：' + channelSyncText(result.sync_state) + '。未核验／缺口：' + result.gaps.map(g => channelGapText(g.reason)).join('、') + '。费用只汇总同一模型请求账本，未知金额不按零处理。';
       for (const turn of result.turns) {
         const row = element('article', '', 'channel-binding');
-        row.append(element('strong', turn.role_id + ' · 项目 ' + turn.project_id), note(new Date(turn.created_at).toLocaleString() + ' · 来源 ' + turn.source_message),
+        if (result.mode === 'management') row.append(element('strong', '管理助手 · ' + turn.state), note(new Date(turn.created_at).toLocaleString()),
+          ...(turn.request ? [element('p', '我：' + turn.request)] : []), element('p', turn.reply || '等待处理'), channelLink('#/management', '打开管理对话与执行记录'));
+        else row.append(element('strong', turn.role_id + ' · 项目 ' + turn.project_id), note(new Date(turn.created_at).toLocaleString() + ' · 来源 ' + turn.source_message),
           element('p', turn.reply || (turn.stale_source ? '来源或授权范围已变化，旧派生回答不再展示。' : turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + (turn.error || turn.state))),
           channelLink('#/projects/' + turn.project_id + '/overview/all', '查看同一项目任务看板')); turns.append(row);
       }

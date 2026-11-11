@@ -1,10 +1,12 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
-import { assertCurrent, authorize, type ActorContext } from '../identity/authorization.js';
+import { assertCurrent, authorize, restrictActor, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { traceClean } from '../tasks/trace.js';
 import { ManagementAgent } from '../management/agent.js';
 import { parameterHash } from '../management/service.js';
+import { managementFailure, managementStates } from '../management/presentation.js';
+import { commands } from '../management/catalog.js';
 import { ChannelBindings, externalSubject } from './binding.js';
 import { FeishuAdapter, type ChannelFetch } from './feishu.js';
 import type { ChannelDelivery, ChannelEvent } from './types.js';
@@ -13,7 +15,7 @@ import { ChannelHistorySync } from './history-sync.js';
 import { ChannelEmployees } from './employees.js';
 import { RoleConversations } from '../roles/conversation.js';
 import { roleConfiguration } from '../roles/definition.js';
-import { roleTaskCaller, assertManagedExecution, taskAuthorizationFence } from '../tasks/management.js';
+import { assertManagedExecution, taskAuthorizationFence } from '../tasks/management.js';
 import type { Manager } from '../projects/service.js';
 import { TaskError } from '../agent/common.js';
 
@@ -41,6 +43,15 @@ export class ChannelService {
     this.employees = new ChannelEmployees(store, (c, guard) => this.adapter(c, guard));
     this.conversations = new RoleConversations(store, management.service.tasks, options.manager);
     this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.employees.guardSync(chat));
+    management.sourceGuard=(actor,conversation)=>{
+      const source=store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND context_revision IS NOT NULL ORDER BY rowid DESC LIMIT 1',conversation);
+      if(!source)return;
+      const e=store.secrets.open(source.payload,'channel-event:'+source.id) as unknown as ChannelEvent;
+      this.source(e);
+      const chat=store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id);
+      if(!chat||chat.context_revision!==source.context_revision)fail(409,'conversation_source_changed');
+      this.employees.guardPersonal(chat!.id,actor.principal_id,source.id);
+    };
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
       const source = store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND message_id IS NOT NULL AND id=?',
@@ -52,6 +63,11 @@ export class ChannelService {
       if (!store.get("SELECT 1 FROM external_identities WHERE principal_id=? AND provider=? AND host=? AND connector=? AND external_tenant=? AND external_actor=? AND status='active'",
         command.principal_id, subject.provider, subject.host, subject.connector, subject.external_tenant, subject.external_actor)) fail(403, 'external_binding_required');
       if (e.chat_type === 'group') this.groupScope(e, command.project_id);
+      else {
+        const chat=store.get('SELECT id FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id);
+        if(chat&&store.get('SELECT 1 FROM channel_personal_owners WHERE chat_id=?',chat.id))this.employees.guardPersonal(chat.id,command.principal_id,source!.id);
+        if(source!.context_revision!==null&&store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat?.id)?.context_revision!==source!.context_revision)fail(409,'conversation_source_changed');
+      }
     };
     // An interrupted model turn must be inspected in Web, never submitted again on restart.
     store.run("UPDATE channel_inbox SET state='failed',error='interrupted_check_operation' WHERE state='running'");
@@ -67,6 +83,7 @@ export class ChannelService {
   conversationView(actor:ActorContext,id:string,offset=0):Json{
     this.employees.authorizeHistory(actor,id);if(!Number.isSafeInteger(offset)||offset<0)fail(400,'invalid_pagination');
     const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',id)!;
+    if(chat.chat_type==='p2p')return this.personalView(actor,chat,offset);
     const projects=this.employees.visibleProjects(id,actor),marks=projects.map(()=>'?').join(','),fence=this.businessFence(chat);
     const turns=projects.length?this.store.all(`SELECT id,source_message,project_id,role_id,state,reply,error,created_at,updated_at,fence FROM role_conversation_turns
       WHERE conversation_id=? AND project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`,id,...projects,offset):[];
@@ -77,6 +94,34 @@ export class ChannelService {
     return {conversation_id:id,current_project:this.store.get('SELECT project_id FROM role_conversations WHERE id=?',id)?.project_id??null,
       turns:turns.slice(0,50).map(t=>({...t,fence:undefined,reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'conversation-reply:'+t.id).message:null,
         stale_source:t.fence!==fence})),has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,usage:{...requests,costs,semantics:requests?.usage_missing_requests?'lower_bound':requests?.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(id)};
+  }
+  private personalView(actor:ActorContext,chat:Row,offset:number):Json{
+    const session=this.store.get("SELECT * FROM channel_sessions WHERE connector_id=? AND chat_id=? AND principal_id=? AND project_id=''",chat.connector_id,chat.chat_id,actor.principal_id);
+    const current=session&&session.context_revision===chat.context_revision&&session.connector_revision===this.connector(chat.connector_id).revision;
+    if(current)this.management.conversation(actor,session.conversation_id);
+    const messages=current?this.store.all(`SELECT * FROM management_messages WHERE conversation_id=? AND authorization_revision=? ORDER BY rowid DESC LIMIT 51 OFFSET ?`,session.conversation_id,actor.authorization_revision,offset):[];
+    const projects=this.management.service.projects(actor),marks=projects.map(()=>'?').join(',');
+    const requests=session&&projects.length?this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
+      sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
+      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks})`,session.conversation_id,...projects):null;
+    const costs=session&&projects.length?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`,session.conversation_id,...projects):[];
+    return {conversation_id:chat.id,management_conversation_id:session?.conversation_id,mode:'management',current_project:null,
+      turns:messages.slice(0,50).map(m=>({id:m.id,source_message:m.source_message,created_at:m.created_at,state:managementStates[m.state]??m.state,
+        request:JSON.parse(m.input).content,reply:this.personalReply(actor,m),role_id:'管理助手'})),
+      has_more:messages.length>50,next_offset:messages.length>50?offset+50:null,usage:{...requests,costs},...this.ledger.diagnostics(chat.id)};
+  }
+  private personalReply(actor:ActorContext,message:Row):string{
+    const reply=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='reply' ORDER BY sequence DESC LIMIT 1",message.id);
+    const error=this.store.get("SELECT data FROM management_events WHERE message_id=? AND type='error' ORDER BY sequence DESC LIMIT 1",message.id);
+    const operations=this.store.all('SELECT * FROM management_commands WHERE source_conversation=? AND source_message=? ORDER BY created_at',message.conversation_id,message.source_message);
+    const receipts=operations.map(op=>{
+      const receipt=this.management.service.read(actor,op.id),target=receipt.target as Json;
+      const project=this.management.service.scope(actor,op.project_id),task=target.task_id?this.store.get('SELECT summary FROM tasks WHERE id=? AND repository_id=?',String(target.task_id),op.project_id):null;
+      return `${project.full_name}${task?' · '+task.summary:''}：${commands[op.operation]?.description??op.operation}\n${managementStates[String(receipt.state)]??receipt.state}${(receipt.result as Json)?.error?'；'+managementFailure(String((receipt.result as Json).error)):''}`;
+    });
+    // A model's completion claim cannot override a pending, failed or uncertain receipt.
+    const answer=reply&&!operations.some(op=>op.state!=='succeeded')?JSON.parse(reply.data).text:'';
+    return [...receipts,answer,error?managementFailure(JSON.parse(error.data).error):''].filter(Boolean).join('\n\n')||managementStates[message.state]||'请求已记录，请在控制台查看进展。';
   }
   connector(id: string): Row {
     const c = this.store.get('SELECT * FROM channel_connectors WHERE id=? AND enabled=1', id);
@@ -197,15 +242,17 @@ export class ChannelService {
     this.session(actor, e, project, conversation);
   }
   private session(actor: ActorContext, e: ChannelEvent, project: string, link?: string): Row {
-    const keys = [e.connector_id, e.installation_tenant, e.actor_tenant, e.actor_id, e.chat_id, e.thread_id, project, actor.principal_id];
+    // An empty project denotes the personal platform scope; model routing never selects a business target.
+    const keys = [e.connector_id, e.installation_tenant, e.actor_tenant, e.actor_id, e.chat_id, project?e.thread_id:'', project, actor.principal_id];
     const row = this.store.get(`SELECT * FROM channel_sessions WHERE connector_id=? AND installation_tenant=? AND actor_tenant=? AND actor_id=? AND chat_id=? AND thread_id=? AND project_id=? AND principal_id=?`, ...keys);
     if (row) {
       if (link) this.store.run('UPDATE channel_sessions SET conversation_id=? WHERE id=?', link, row.id);
       return this.store.get('SELECT * FROM channel_sessions WHERE id=?', row.id)!;
     }
-    const conversation = link ?? (this.management.create(actor, { scope: 'project:' + project }).conversation as Json).id;
+    const conversation = link ?? (this.management.create(actor, { scope: project?'project:' + project:'platform' }).conversation as Json).id;
     const id = randomId();
     this.store.run('INSERT INTO channel_sessions(id,connector_id,installation_tenant,actor_tenant,actor_id,chat_id,thread_id,project_id,principal_id,conversation_id) VALUES(?,?,?,?,?,?,?,?,?,?)', id, ...keys, String(conversation));
+    if(!project)this.store.run('UPDATE channel_sessions SET context_revision=(SELECT context_revision FROM channel_chats WHERE connector_id=? AND chat_id=?),connector_revision=? WHERE id=?',e.connector_id,e.chat_id,e.connector_revision,id);
     return this.store.get('SELECT * FROM channel_sessions WHERE id=?', id)!;
   }
   private url(): string { return (this.options.origin ?? '') + '/#/management'; }
@@ -233,7 +280,7 @@ export class ChannelService {
       this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return;
     }
     if (e.kind === 'card') { await this.refreshCard(row, e); return; }
-    const content = e.content.trim();
+    const content = e.content.trim().replace(/^\/chat\s+/,'');
     const reply = (message: string, link?: string) => this.queue(e, card(message, link), row.id + ':reply', row.id);
     if (['绑定', '/bind', '重新认证', '/reauth'].includes(content)) {
       const binding = this.bindings.begin(e);
@@ -251,8 +298,11 @@ export class ChannelService {
       const chat = this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', e.provider,e.app_id,e.installation_tenant,e.chat_id);
       const employee = chat && e.chat_type==='group' && this.store.get('SELECT 1 FROM channel_employee_grants WHERE chat_id=? AND enabled=1',chat.id);
       const legacyCommand = /^\/project \S+\s+\/(?:query|command|link|destination)(?:\s|$)/.test(content);
-      const personalMain=e.chat_type==='p2p'&&!content.startsWith('/project ');
-      if ((employee && !legacyCommand)||personalMain) {
+      if(e.chat_type==='p2p'&&!legacyCommand){
+        if(!chat)return fail(403,'channel_chat_not_found');
+        await this.personalMessage(row,e,chat,content);return;
+      }
+      if (employee && !legacyCommand) {
         if(!chat)return fail(403,'channel_chat_not_found');
         if (this.business.has(chat.id)) { this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return; }
         const work = this.businessMessage(row,e,chat).catch(error=>{
@@ -293,6 +343,30 @@ export class ChannelService {
     }
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id);
   }
+  private async personalMessage(row:Row,e:ChannelEvent,chat:Row,content:string):Promise<void>{
+    const actor=await this.actor(e);
+    this.employees.personalOwner(chat.id,e,actor);
+    const revision=chat.context_revision;
+    restrictActor(actor,()=>{
+      if(this.stopped)fail(409,'channel_stopped');
+      this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
+      if(this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)?.context_revision!==revision)fail(409,'conversation_source_changed');
+    });
+    let session=this.session(actor,e,'');
+    if(this.store.get("SELECT 1 FROM management_messages WHERE conversation_id=? AND state IN ('pending','running')",session.conversation_id)){
+      this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;
+    }
+    if(e.created_at<session.last_message_at)fail(409,'channel_message_out_of_order');
+    if(session.context_revision!==revision||session.connector_revision!==e.connector_revision){
+      // Edited, recalled or cleaned local sources must not return through old management context.
+      const conversation=(this.management.create(actor,{scope:'platform'}).conversation as Json).id;
+      this.store.run('UPDATE channel_sessions SET conversation_id=?,context_revision=?,connector_revision=? WHERE id=?',String(conversation),revision,e.connector_revision,session.id);
+      session=this.store.get('SELECT * FROM channel_sessions WHERE id=?',session.id)!;
+    }
+    const message=this.management.send(actor,session.conversation_id,{content,source_message:'feishu:'+row.id});
+    this.store.run('UPDATE channel_sessions SET last_message_at=? WHERE id=?',e.created_at,session.id);
+    this.store.run("UPDATE channel_inbox SET state='submitted',conversation_id=?,message_id=?,context_revision=? WHERE id=?",session.conversation_id,String(message.id),revision,row.id);
+  }
   private businessFence(chat:Row):string {
     const visible=this.employees.visibleProjects(chat.id);
     if(chat.chat_type==='p2p'){
@@ -309,22 +383,18 @@ export class ChannelService {
         visible.includes(g.project_id)])}));
   }
   private async businessMessage(row:Row,e:ChannelEvent,chat:Row):Promise<void> {
-    const personal=e.chat_type==='p2p',actor=personal?await this.actor(e):undefined;
-    if(actor)this.employees.personalOwner(chat.id,e,actor);
-    const grants:Row[]=personal?this.management.service.projects(actor!).map(project_id=>({project_id,role_id:this.employees.personalRole(chat.id,project_id)})):
-      this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? AND enabled=1',chat.id);
+    const grants=this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? AND enabled=1',chat.id);
     const content=e.content.trim().replace(/^\/chat\s+/,''),selection=/^\/project (\S+)(?:\s+([\s\S]*))?$/.exec(content);
     const previous=this.store.get('SELECT project_id FROM role_conversations WHERE id=?',chat.id)?.project_id;
     const project=selection?.[1]??(grants.length===1?grants[0]!.project_id:grants.some(g=>g.project_id===previous)?previous:null);
-    if(!project){if(e.addressed)this.queue(e,card('请明确本次操作的项目：'+(personal?'/chat ':'')+'/project <项目ID> <请求>。可用项目：'+(grants.map(g=>g.project_id).join('、')||'尚无已授权项目')),row.id+':project',row.id);this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
+    if(!project){if(e.addressed)this.queue(e,card('请明确本次操作的项目：/project <项目ID> <请求>。可用项目：'+(grants.map(g=>g.project_id).join('、')||'尚无已授权项目')),row.id+':project',row.id);this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
     const grant=grants.find(g=>g.project_id===project);if(!grant)return fail(403,'channel_employee_project_required');
     if(!e.addressed&&grant.participation!=='all'&&!(grant.participation==='questions'&&/[?？]\s*$/.test(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
-    const privateActor=personal?await this.actor(e,project):undefined;
-    const caller=privateActor?roleTaskCaller(this.store,project,grant!.role_id,{actor:privateActor,conversation_id:chat.id,source_message:row.id,guard:()=>this.employees.guardPersonal(chat.id,privateActor.principal_id,row.id)}):this.employees.caller(chat.id,project,row.id);
+    const caller=this.employees.caller(chat.id,project,row.id);
     const message=(this.ledger.query(chat.id,{message_id:e.message_id}).messages as Json[])[0];
     if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
     const fence=()=>this.businessFence(chat),projects=this.employees.visibleProjects(chat.id);
-    const fixed=fence(),guard=()=>{if(this.stopped)fail(409,'channel_stopped');if(personal)this.employees.guardPersonal(chat.id,caller.principal_id!,row.id);else this.employees.assertGrant(grant!);if(fence()!==fixed)fail(409,'conversation_source_changed');};
+    const fixed=fence(),guard=()=>{if(this.stopped)fail(409,'channel_stopped');this.employees.assertGrant(grant!);if(fence()!==fixed)fail(409,'conversation_source_changed');};
     const summary=():Json=>{
       const saved=this.store.get('SELECT * FROM channel_chat_summaries WHERE chat_id=?',chat.id);
       if(!saved||JSON.parse(saved.sources).authorization_fence!==fixed)return {state:'not_compacted',notice:'摘要尚未建立；可检索本地原文。'};
@@ -355,7 +425,7 @@ export class ChannelService {
           JSON.stringify({authorization_fence:fixed,first_message:older[0]!.message_id,through_message:through.message_id,truncated_messages:older.filter(m=>String(m.content??'').length>3000).map(m=>m.message_id),range_hash:digest(JSON.stringify(older.map(m=>[m.message_id,m.updated_at])))}),
           this.store.secrets.seal({summary:text},'channel-summary:'+chat.id));
       }}}:{})});
-    guard(); if(result.message.trim())this.queue(e,card(result.message,this.url()),row.id+':business-result',row.id,{kind:personal?'personal_conversation':'employee',chat_id:chat.id,project_id:project,principal_id:caller.principal_id,
+    guard(); if(result.message.trim())this.queue(e,card(result.message,this.url()),row.id+':business-result',row.id,{kind:'employee',chat_id:chat.id,project_id:project,principal_id:caller.principal_id,
       grant_id:grant!.id??null,grant_revision:grant!.revision??null,source_message:row.id,source_fence:fixed,turn_id:result.id});
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?",row.id);
   }
@@ -364,7 +434,16 @@ export class ChannelService {
     if (!m || ['pending', 'running'].includes(m.state)) return;
     const e = this.store.secrets.open(row.payload, 'channel-event:' + row.id) as unknown as ChannelEvent;
     const session = this.store.get('SELECT * FROM channel_sessions WHERE conversation_id=? AND connector_id=? AND actor_id=? AND actor_tenant=? AND chat_id=?', row.conversation_id, e.connector_id, e.actor_id, e.actor_tenant, e.chat_id)!;
-    const actor = await this.actor(e, session.project_id);
+    const actor = await this.actor(e, session.project_id||undefined);
+    if(!session.project_id){
+      const chat=this.store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id)!;
+      this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
+      const message=this.store.get('SELECT * FROM management_messages WHERE id=?',row.message_id)!;
+      if(message.authorization_revision!==actor.authorization_revision||session.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
+      this.queue(e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
+        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id});
+      this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);return;
+    }
     const history = this.management.history(actor, row.conversation_id), events = (history.events as any[]).filter(v => v.message_id === row.message_id);
     const operations = this.store.all('SELECT id,state FROM management_commands WHERE source_conversation=? AND source_message=?', row.conversation_id, 'feishu:' + row.id);
     const summary = '管理消息 ' + row.message_id + '：' + m.state + '\n会话 ' + row.conversation_id +
@@ -443,7 +522,11 @@ export class ChannelService {
       if (protection && actor) {
         assertCurrent(actor);
         if (actor.principal_id !== protection.principal_id || protection.authorization_revision && actor.authorization_revision !== protection.authorization_revision) fail(403, 'authorization_changed');
-        this.management.service.scope(actor, protection.project_id);
+        if(protection.project_id)this.management.service.scope(actor, protection.project_id);
+        if(protection.personal_chat){
+          this.employees.guardPersonal(protection.personal_chat,actor.principal_id,protection.source_message);
+          if(this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',protection.personal_chat)?.context_revision!==protection.context_revision)fail(409,'conversation_source_changed');
+        }
         if (event.chat_type === 'group' && delivery.receive_id_type === 'chat_id') {
           this.groupScope(event, protection.project_id, protection.field ?? 'summary');
           for (const field of protection.required_fields ?? []) this.groupScope(event, protection.project_id, field);
@@ -467,7 +550,7 @@ export class ChannelService {
           this.store.run("UPDATE channel_inbox SET state='failed',error=? WHERE id=?", errorCode(error), row.id);
           // Stable public diagnostics never contain request contents, project data or credentials.
           const e = this.store.secrets.open(row.payload, 'channel-event:' + row.id) as unknown as ChannelEvent;
-          try { this.source(e); this.queue(e, card('未执行或无法展示：' + errorCode(error) + '。请登录后台检查；绑定需在私聊发起。', this.url()), row.id + ':error', row.id); } catch { /* An uninstalled connector cannot send. */ }
+          try { this.source(e); this.queue(e, card(e.chat_type==='p2p'?managementFailure(errorCode(error)):'未执行或无法展示：' + errorCode(error) + '。请登录后台检查；绑定需在私聊发起。', this.url()), row.id + ':error', row.id); } catch { /* An uninstalled connector cannot send. */ }
         }
       }
       for (const row of this.store.all("SELECT * FROM channel_outbox WHERE state IN ('queued','retry') AND next_attempt<=? ORDER BY created_at LIMIT 20", Date.now())) {

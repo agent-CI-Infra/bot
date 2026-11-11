@@ -51,7 +51,7 @@ test('HTTP acknowledges a slow model promptly, duplicate events/messages execute
   assert.equal(web.value.result.diff.after.prompt, 'Inspect evidence and cite the original logs.');
   const history = await admin('/api/management/conversations/' + row.conversation_id + '/events');
   assert.ok(history.value.events.some(e => e.type === 'tool_result' && e.data.result.id === op.id));
-  await until(() => wire.sent.some(s => JSON.stringify(s.content).includes(op.id)));
+  await until(() => wire.sent.some(s => JSON.stringify(s.content).includes('已执行')));
   assert.equal((await post(h, id, data)).value.duplicate, true);
   assert.equal(h.store.get("SELECT count(*) n FROM management_commands WHERE channel='im'").n, 1);
 });
@@ -324,15 +324,15 @@ test('group scope rejects private facts, limits result fields, isolates each sen
   assert.equal((await group(admin, id, { expected_revision: 1 })).value.error, 'channel_revision_conflict');
 });
 
-test('project selection is explicit, cross-channel linking requires owner and project, and stale/out-of-order input cannot write', async t => {
+test('natural requests use management while explicit linking retains owner, project and ordering checks', async t => {
   const f = await channelFixture(t), { h, id, admin, service, principal } = f;
-  const plain = await post(h, id, envelope('修改提示词')); await finished(h, plain.value.operation_id);
-  assert.equal(h.store.get('SELECT count(*) n FROM management_messages').n, 0);
+  const plain = await post(h, id, envelope('看看当前任务')); await finished(h, plain.value.operation_id);
+  assert.equal(h.store.get('SELECT count(*) n FROM management_messages').n, 1);
   const one = await post(h, id, envelope(directQuery())); const row = await finished(h, one.value.operation_id);
   const e = service.adapter(service.connector(id)).normalize(envelope()), actor = await service.actor(e, '101');
   const webConversation = (await admin('/api/management/conversations', 'POST', { scope: 'project:101' })).value.conversation.id;
   service.link(actor, e, '101', webConversation);
-  assert.equal(h.store.get('SELECT conversation_id FROM channel_sessions').conversation_id, webConversation);
+  assert.equal(h.store.get("SELECT conversation_id FROM channel_sessions WHERE project_id='101'").conversation_id, webConversation);
   const otherProject = (await admin('/api/management/conversations', 'POST', { scope: 'project:102' })).value.conversation.id;
   assert.throws(() => service.link(actor, e, '101', otherProject), /scope_forbidden|project_mismatch/);
   const member = await f.member('private-conversation', { repository_ids: ['101'] });

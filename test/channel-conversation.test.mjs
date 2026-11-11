@@ -12,7 +12,10 @@ async function fixture(t,mode='none'){
   const discovery=inGroup('Discover this group','ou_alice');discovery.event.message.mentions=[];await post(h,f.id,discovery);
   const chat=h.store.get("SELECT * FROM channel_chats WHERE chat_id='oc_group'");
   await service.employees.configure(resolvePrincipalActor(h.store,f.principal,null,'101'),chat.id,{project_id:'101',role_id:'reviewer',capabilities:['tasks.read',...(mode==='write'?['tasks.manage_own']:[]),'knowledge.read'],enabled:true,expected_revision:0});
-  f.modelState.respond=async(body,res)=>respond(res,'finish',{message:'Recorded local answer'});
+  f.modelState.respond=async(body,res)=>{
+    if(body.tools.some(t=>t.function.name==='management_query')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:'Recorded local answer'}}],usage:{prompt_tokens:12,completion_tokens:4}}));}
+    else respond(res,'finish',{message:'Recorded local answer'});
+  };
   return {...f,chat};
 }
 const complete=(f,receipt)=>until(()=>f.h.store.get('SELECT * FROM channel_inbox WHERE id=?',receipt.value.operation_id),r=>r&&['completed','failed'].includes(r.state));
@@ -127,8 +130,8 @@ test('one bound private chat stays continuous across projects, threads and dates
   const first=await post(f.h,f.id,envelope('/chat /project 101 private-first-fact'));const a=await complete(f,first);assert.equal(a.state,'completed',a.error);
   const second=envelope('/chat /project 102 compare with the previous private fact');second.event.message.thread_id='private-another-thread';
   const b=await complete(f,await post(f.h,f.id,second));assert.equal(b.state,'completed',b.error);assert.equal(a.conversation_id,b.conversation_id);assert.notEqual(a.conversation_id,f.chat.id);
-  const prompt=JSON.parse(f.requests.at(-1).messages[1].content);assert.ok(JSON.stringify(prompt.context.recent_messages).includes('private-first-fact'));
-  assert.ok(!JSON.stringify(prompt.context.recent_messages).includes('Discover this group'));
+  const prompt=JSON.parse(f.requests.at(-1).messages[1].content);assert.ok(JSON.stringify(prompt.history).includes('private-first-fact'));
+  assert.ok(!JSON.stringify(prompt.history).includes('Discover this group'));
   const owner=f.h.store.get('SELECT * FROM channel_personal_owners');assert.equal(owner.principal_id,f.principal);
   f.h.store.run("UPDATE external_identities SET status='revoked' WHERE principal_id=? AND provider='feishu'",f.principal);
   const before=f.requests.length,c=await complete(f,await post(f.h,f.id,envelope('Continue privately')));assert.equal(c.state,'failed');assert.equal(f.requests.length,before);
