@@ -10,6 +10,7 @@ import { TaskCommands } from '../dist/tasks/commands.js';
 import { TaskRecords } from '../dist/tasks/service.js';
 import { executionModel, taskConfiguration } from '../dist/tasks/configuration.js';
 import { roleApi } from '../dist/roles/api.js';
+import { managementStorage } from '../dist/management/storage.js';
 const project={project_id:'101'},workflow={...project,workflow_id:'review.issue'},task={...project,task_id:'blocked'};
 const service=h=>new ManagementService(h.store,new RuleService(h.store),new TaskCommands(h.store));
 
@@ -115,17 +116,27 @@ test('changing defaults affects newly created tasks while a queued task retains 
   const revised=records.submit(first,[{kind:'report',reference:'r',version:'tree'}],[],{});assert.notEqual(candidate.id,revised.id);
 });
 
-test('organization approval binds exact parameters/revision and never bypasses the original operator or live execution fences',async t=>{
+test('commands execute directly: a leftover approval policy holds nothing back, the approval endpoint is gone and a waiting command never runs',async t=>{
   const {h,admin,member}=await managementFixture(t),single=await member('single',{repository_ids:['101']});
-  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\"]')");
-  const pending=await command(single.client,'workflow.update',workflow,{prompt:'Needs policy approval'},'approval');assert.equal(pending.value.state,'awaiting_approval');
-  const approve=(receipt,patch={})=>admin('/api/management/commands/'+receipt.id+'/approval','POST',{parameter_hash:receipt.parameter_hash,expected_revision:receipt.expected_revision,decision:'approve',...patch});
-  assert.equal((await approve(pending.value,{parameter_hash:'forged'})).status,409);
-  assert.equal((await single.client('/api/management/commands/'+pending.value.id+'/approval','POST',{parameter_hash:pending.value.parameter_hash,expected_revision:pending.value.expected_revision,decision:'approve'})).status,403);
-  assert.equal((await approve(pending.value)).value.state,'succeeded');
-  const revoked=await command(single.client,'workflow.update',workflow,{prompt:'Must not save'},'revoke');
+  // A policy written by an older version is no longer read: the authorized operator's command runs at once.
+  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\",\"tasks.write\"]')");
+  const direct=await command(single.client,'workflow.update',workflow,{prompt:'Saved without approval'},'direct');
+  assert.equal(direct.value.state,'succeeded',JSON.stringify(direct.value));assert.equal(await managerSection(admin,'101','review.issue'),'Saved without approval');
+  assert.equal(h.store.get('SELECT count(*) n FROM management_approvals').n,0);
+  assert.equal((await admin('/api/management/commands/'+direct.value.id+'/approval','POST',{parameter_hash:direct.value.parameter_hash,expected_revision:direct.value.expected_revision,decision:'approve'})).status,404);
+  // Authorization is still the operator's own: a deactivated user cannot submit.
   await admin('/api/users/'+single.id,'PATCH',{active:false});
-  const denied=await approve(revoked.value);assert.ok(denied.status>=400||denied.value.state==='failed');assert.notEqual((await managerSection(admin,'101','review.issue')),'Must not save');
+  const denied=await command(single.client,'workflow.update',workflow,{prompt:'Must not save'},'revoked',direct.value.after_revision);
+  assert.ok(denied.status>=400||denied.value.state==='failed');assert.equal(await managerSection(admin,'101','review.issue'),'Saved without approval');
+  // A command left waiting for approval by an older version ends as failed on startup and is never executed.
+  const before=h.store.get("SELECT status FROM tasks WHERE id='blocked'").status;
+  h.store.run(`INSERT INTO management_commands(id,principal_id,tenant_id,project_id,channel,operation,target,arguments,expected_revision,idempotency_key,parameter_hash,authorization_revision,execution_fence,source_conversation,source_message,state,before_revision,created_at,updated_at)
+    VALUES('legacy-waiting',?,'github.com:10','101','web','task.pause',?,'{}','r','legacy-key','h',1,'f','fixture','legacy','awaiting_approval','r','2026-01-01','2026-01-01')`,direct.value.principal_id,JSON.stringify(task));
+  managementStorage(h.store);
+  const retired=h.store.get("SELECT * FROM management_commands WHERE id='legacy-waiting'");
+  assert.equal(retired.state,'failed');assert.equal(JSON.parse(retired.result).error,'approval_retired');
+  assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,before);
+  assert.ok(h.store.all('SELECT * FROM audit').some(row=>Object.values(row).includes('management.failed')&&Object.values(row).includes('legacy-waiting')));
 });
 
 test('pending commands stop on project, installation, credentials, budget or authorization changes; unknown effects reconcile without repeating creation',async t=>{
@@ -191,28 +202,27 @@ test('read-only grants cannot write through either API or agent, and revocation 
   assert.equal((await reader.client('/api/management/conversations/'+conversation)).status,403);
 });
 
-test('queued approved commands recheck credentials, installation revisions, budgets and withdrawn grants before executing',async t=>{
+test('direct commands recheck credentials, budgets and withdrawn grants before executing',async t=>{
   const {h,admin,a,member}=await managementFixture(t),operator=await member('operator',{repository_ids:['101']});
-  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"task.retry\"]')");
   const credentials=h.store.get('SELECT credentials FROM accounts WHERE id=?',a.id).credentials;
   const mutations=[
     {expected:'account_credentials_revoked',apply:()=>h.store.run('UPDATE accounts SET credentials=? WHERE id=?',h.store.secrets.seal({},'account:'+a.id),a.id),restore:()=>h.store.run('UPDATE accounts SET credentials=? WHERE id=?',credentials,a.id)},
-    {expected:'execution_context_changed',apply:()=>{
-      h.store.run("INSERT INTO github_installations(ref,github_host,app_id,installation_id,account_id,target_id,target_type,repository_selection,status,completeness,revision,scope_pending,updated_at) VALUES('github.com/123/77','github.com','123','77',?,'10','Organization','selected','active','complete',2,0,'now')",a.id);
-      h.store.run("INSERT INTO installation_repositories VALUES('github.com/123/77','101','agent-test-zone/admin-fixture-101','10','agent-test-zone',1,1,'now')");
-    },restore:()=>{h.store.run('DELETE FROM installation_repositories');h.store.run('DELETE FROM github_installations');}},
+    // An installation change before submission is simply the context the command runs in; the execution fence still stops a
+    // reconciliation whose context changed after submission (see the pending-command test above).
     {expected:'budget_exhausted',apply:()=>h.store.run("INSERT INTO management_budgets VALUES('101','USD',0)"),restore:()=>h.store.run('DELETE FROM management_budgets')},
   ];
+  const code=result=>result.value?.result?.error??result.value?.error;
   for(const [i,mutation] of mutations.entries()){
-    const pending=(await command(operator.client,'task.retry',task,{},'queued-'+i)).value;assert.equal(pending.state,'awaiting_approval');
+    // Without an approval step the same fences stop the command when it executes; nothing runs and the task is unchanged.
+    const revision=(await query(operator.client,'get_task',task)).value.revision;
     mutation.apply();
-    const approval=await admin('/api/management/commands/'+pending.id+'/approval','POST',{parameter_hash:pending.parameter_hash,expected_revision:pending.expected_revision,decision:'approve'});
-    assert.equal(approval.value.state,'failed');assert.equal(approval.value.result.error,mutation.expected);assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');mutation.restore();
+    const result=await command(operator.client,'task.retry',task,{},'direct-'+i,revision);
+    assert.ok(result.status>=400||result.value.state==='failed',JSON.stringify(result.value));assert.equal(code(result),mutation.expected,JSON.stringify(result.value));
+    assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');mutation.restore();
   }
-  const pending=(await command(operator.client,'task.retry',task,{},'withdrawn')).value;
   await admin('/api/project-admin-assignments','PUT',{user_id:operator.id,repository_ids:[]});
-  const denied=await admin('/api/management/commands/'+pending.id+'/approval','POST',{parameter_hash:pending.parameter_hash,expected_revision:pending.expected_revision,decision:'approve'});
-  assert.equal(denied.value.state,'failed');assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
+  const denied=await command(operator.client,'task.retry',task,{},'withdrawn','stale');
+  assert.ok(denied.status>=400||denied.value.state==='failed');assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
 });
 
 test('management and the roles console share V2 configuration, revision errors and field diagnostics',async t=>{

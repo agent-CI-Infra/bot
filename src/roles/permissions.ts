@@ -22,7 +22,7 @@ export const permissionItems: PermissionItem[] = [
   access('related_artifacts', '关联交付物', ['read_related_artifact'], [], '读取任务提供的关联交付物。'),
   access('github', 'GitHub 内容', ['github_read_token', 'github_read', 'github_search', 'read_job_log'], [], '读取本次任务授权的仓库；不授予 GitHub 写入凭据。'),
   // 「访问其他角色的任务」：拒绝 / 只读 / 读写。读写的工具只在提供它的入口出现（服务角色的任务操作），工作角色现有的值和快照不变。
-  access('project_tasks', '其他角色的任务', ['list_project_tasks', 'read_project_task'], ['manage_project_task'], '只读查询范围内其他角色任务的进展；读写还可以追加指令、暂停、继续或取消这些任务，仍走管理服务的版本检查和审批。角色自己的独立任务不受这一项限制。'),
+  access('project_tasks', '其他角色的任务', ['list_project_tasks', 'read_project_task'], ['manage_project_task'], '只读查询范围内其他角色任务的进展；读写还可以追加指令、暂停、继续或取消这些任务，仍走管理服务的版本检查和幂等。角色自己的独立任务不受这一项限制。'),
   access('coordination', '跨任务协调记录', ['read_coordination'], ['acknowledge_coordination', 'request_task_coordination', 'wait_for_tasks', 'submit_coordination'], '读取协调通知，或提出请求、等待依赖、登记采纳和提交建议。'),
   access('stage_plan', '任务阶段计划', ['read_stage_schedule'], ['plan_task'], '读取阶段进度，或安排可选阶段；项目必需阶段仍由控制面校验。'),
   action('dispatch', '处理项目事件', ['dispatch'], '决定为事件新建任务、续接任务或不处理。'),

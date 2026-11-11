@@ -147,7 +147,7 @@ test('streaming does not move the reader away from older content, and latest ret
   } finally { gate.resolve(); tail.resolve(); await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
-test('a completed reply does not label an operation successful while its receipt awaits approval', async ({ page }) => {
+test('a leftover approval policy holds nothing back: the operation executes and its receipt offers no approval', async ({ page }) => {
   const f = await managementFixture();
   f.h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\"]')");
   try {
@@ -155,14 +155,12 @@ test('a completed reply does not label an operation successful while its receipt
     await page.getByLabel('管理消息', { exact: true }).fill('更新任务默认提示词');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     const feed = page.getByRole('log', { name: '管理会话记录' }), step = feed.locator('.management-step').last();
-    await expect(feed.locator('.management-turn-state')).toHaveText('等待审批');
-    await expect(feed.locator('.management-progress > summary')).toHaveText('执行进展 · 1/2 步完成');
-    await expect(step.locator('.management-step-status')).toHaveText('等待审批');
-    // The receipt is a card in the conversation, not inside the collapsed step, so the decision is visible where it is made.
-    await feed.getByRole('button', { name: '批准此版本', exact: true }).click();
-    await expect(step.locator('.management-step-status')).toHaveText('已完成');
     await expect(feed.locator('.management-turn-state')).toHaveText('已完成');
     await expect(feed.locator('.management-progress > summary')).toHaveText('执行进展 · 2/2 步完成');
+    await expect(step.locator('.management-step-status')).toHaveText('已完成');
+    await expect(feed.getByRole('button', { name: '批准此版本', exact: true })).toHaveCount(0);
+    await expect(feed).not.toContainText('等待审批');
+    expect(f.h.store.get("SELECT state FROM management_commands WHERE operation='workflow.update'").state).toBe('succeeded');
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 

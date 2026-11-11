@@ -10,7 +10,7 @@ async function renderSchedules(panel, project) {
       const key = crypto.randomUUID();
       const receipt = await api(endpoint + '/commands', 'POST', { operation, target, arguments: args, expected_revision: revision,
         idempotency_key: key, source_conversation: 'console:schedules', source_message: key });
-      if (receipt.state !== 'succeeded') { status.textContent = receipt.state === 'awaiting_approval' ? '组织策略要求审批，请在管理回执中批准。' : '操作未成功：' + (receipt.result?.error ?? receipt.state); return; }
+      if (receipt.state !== 'succeeded') { status.textContent = '操作未成功：' + (receipt.result?.error ?? receipt.state); return; }
       await renderSchedules(panel, project);
     } catch (e) { status.textContent = e.message; }
   };
@@ -76,7 +76,7 @@ async function renderSchedules(panel, project) {
   let editingSubscription = null;
   const subName = input('订阅名称', '项目事件'), subDestination = select('订阅目的地', destinationOptions), subZone = input('订阅时区', 'Asia/Shanghai');
   const aggregate = input('聚合窗口分钟', '5', 'number'), quietStart = input('静默开始', '', 'time'), quietEnd = input('静默结束', '', 'time');
-  const events = select('事件筛选', [['task.failed', '任务失败'], ['approval.waiting', '等待审批'], ['ci.failed,ci.recovered', 'CI 失败与恢复'], ['project.daily', '项目日报']]);
+  const events = select('事件筛选', [['task.failed', '任务失败'], ['ci.failed,ci.recovered', 'CI 失败与恢复'], ['project.daily', '项目日报']]);
   const saveSubscription = button('创建事件订阅', () => {
     const subscription = { name: subName.value, destination_id: subDestination.value, events: events.value.split(','), projects: [project], aggregate_ms: Number(aggregate.value) * 60000, timezone: subZone.value,
       quiet_start: quietStart.value || undefined, quiet_end: quietEnd.value || undefined, enabled: editingSubscription ? editingSubscription.state === 'active' : true };

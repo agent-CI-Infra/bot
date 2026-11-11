@@ -465,7 +465,7 @@ test('revoking project access while a model is waiting blocks its command and re
   assert.ok(wire.sent.every(s => !JSON.stringify(s.content).includes('Inspect evidence')));
 });
 
-test('IM approval and revision conflicts retain the shared business outcome; revoked access stops a later message', async t => {
+test('IM commands and revision conflicts retain the shared business outcome without any approval step; revoked access stops a later message', async t => {
   const f = await channelFixture(t), { h, admin, service, id, wire } = f;
   const target = { project_id: '101', workflow_id: 'review.issue' }, revision = service.management.service.revision(target);
   const submit = async (expected = revision, actor = 'ou_alice', chat = 'oc_private') => {
@@ -476,15 +476,13 @@ test('IM approval and revision conflicts retain the shared business outcome; rev
   assert.equal(h.store.get('SELECT state FROM management_messages WHERE id=?', wrong.message_id).state, 'failed');
   const webConflict = await admin('/api/management/commands', 'POST', { operation: 'workflow.update', target, arguments: { prompt: 'Approved future prompt.' }, expected_revision: 'obsolete-revision', idempotency_key: 'web-conflict', source_conversation: 'web', source_message: 'web-conflict' });
   assert.equal(webConflict.value.error, 'management_revision_conflict');
+  // A policy left by an older version is no longer read: the private chat's command runs at once, with the console's receipt.
   h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"workflow.update\"]')");
   const pending = await submit(), op = h.store.get("SELECT * FROM management_commands WHERE channel='im'");
-  assert.equal(op.state, 'awaiting_approval');
-  await until(() => wire.sent.some(s => JSON.stringify(s.content).includes('等待审批，尚未执行')));
-  assert.equal((await admin('/api/management/commands/' + op.id)).value.state, 'awaiting_approval');
-  assert.notEqual((await managerSection(admin,'101','review.issue')), 'Approved future prompt.');
-  const approved = await admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
-  assert.equal(approved.value.state, 'succeeded');
+  assert.equal(op.state, 'succeeded');
+  assert.equal((await managerSection(admin,'101','review.issue')), 'Approved future prompt.');
   assert.equal((await admin('/api/management/commands/' + op.id)).value.source_conversation, pending.conversation_id);
+  assert.ok(!JSON.stringify(wire.sent).includes('等待审批'));
   const member = await f.member('revoked-member', { repository_ids: ['101'] });
   bindFixture(h, id, member.id, 'ou_member');
   await admin('/api/project-admin-assignments', 'PUT', { user_id: member.id, repository_ids: [] });
@@ -529,24 +527,6 @@ test('store apps persist verified v1 tickets and route one HTTP callback by inst
   assert.equal((await finished(h, next.value.operation_id)).state, 'completed');
 });
 
-test('Web approval cannot resume a group command after its service binding is disabled', async t => {
-  const f = await channelFixture(t), { h, admin } = f;
-  await repositoryAssistant(f, { project_tasks: 'write' });
-  const chat = await boundGroup(f, ['101']);
-  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"task.pause\"]')");
-  const repository = 'agent-test-zone/admin-fixture-101';
-  scriptedModel(f, [['read_project_task', { repository, task_id: 'blocked' }],
-    done => ['manage_project_task', { repository, task_id: 'blocked', operation: 'pause', expected_revision: done[0].revision }], '暂停已提交，等待审批。']);
-  const r = await post(h, f.id, inGroup('暂停 blocked 任务', 'ou_bob')); assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
-  const op = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); assert.equal(op.state, 'awaiting_approval');
-  assert.equal(op.source_conversation, chat.id);
-  const binding = h.store.get('SELECT * FROM channel_service_bindings');
-  assert.equal((await admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { enabled: false, expected_revision: binding.revision })).status, 200);
-  const approved = await admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
-  assert.equal(approved.value.state, 'failed'); assert.ok(['principal_inactive', 'channel_service_binding_disabled'].includes(approved.value.result.error), approved.value.result.error);
-  assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status, 'waiting_environment');
-});
-
 test('the send fence rechecks a group binding after asynchronous token exchange', async t => {
   const f = await channelFixture(t), { h, admin, wire } = f;
   await repositoryAssistant(f);
@@ -562,9 +542,8 @@ test('the send fence rechecks a group binding after asynchronous token exchange'
   assert.equal(failed.last_error, 'conversation_source_changed'); assert.ok(!wire.sent.some(s => JSON.stringify(s.content).includes('本群可以使用')));
 });
 
-test('deferred extensions retain the IM source guard across asynchronous steps before any external write', async t => {
-  const f = await channelFixture(t), { h, admin, service } = f;
-  h.store.run("INSERT INTO management_policies(tenant_id,approval_operations) VALUES('github.com:10','[\"knowledge.revise\"]')");
+test('extensions keep the IM source guard across asynchronous steps before any external write', async t => {
+  const f = await channelFixture(t), { h, service } = f;
   let entered = false, release, writes = 0; const gate = new Promise(r => { release = r; }); t.after(() => release());
   service.management.service.extensions.delete('knowledge.revise'); // Replace the real adapter with an asynchronous failure fixture.
   service.management.service.register('knowledge.revise', { execute: async actor => {
@@ -572,10 +551,10 @@ test('deferred extensions retain the IM source guard across asynchronous steps b
   }, reconcile: async () => null });
   const target = { project_id: '101' };
   scriptedModel(f, [['management_command', { operation: 'knowledge.revise', target, arguments: { id: 'fixture-document', revision: 1, body: 'Safe revision.' }, expected_revision: service.management.service.revision(target) }], '已提交。']);
-  const r = await post(h, f.id, envelope('修订项目知识 fixture-document')); await finished(h, r.value.operation_id);
-  const op = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); assert.equal(op.state, 'awaiting_approval');
-  const approving = admin('/api/management/commands/' + op.id + '/approval', 'POST', { parameter_hash: op.parameter_hash, expected_revision: op.expected_revision, decision: 'approve' });
-  // The private chat's owner unbinds Feishu while the external step is in flight.
+  const r = await post(h, f.id, envelope('修订项目知识 fixture-document'));
+  // The command runs directly in the chat turn; the private chat's owner unbinds Feishu while the external step is in flight.
   await until(() => entered); h.store.run("UPDATE external_identities SET status='revoked' WHERE provider='feishu'"); release();
-  const result = await approving; assert.equal(writes, 0); assert.equal(result.value.state, 'unknown'); assert.equal(result.value.result.error, 'external_binding_required');
+  await finished(h, r.value.operation_id);
+  const op = await until(() => h.store.get("SELECT * FROM management_commands WHERE channel='im'"), row => row && !['pending', 'executing'].includes(row.state));
+  assert.equal(writes, 0); assert.equal(op.state, 'unknown'); assert.equal(JSON.parse(op.result).error, 'external_binding_required');
 });

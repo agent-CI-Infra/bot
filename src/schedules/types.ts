@@ -1,7 +1,7 @@
 import type { ActorContext } from '../identity/authorization.js';
 import type { Json } from '../core/security.js';
 
-export const eventTypes = ['project.daily', 'task.failed', 'approval.waiting', 'ci.failed', 'ci.recovered'] as const;
+export const eventTypes = ['project.daily', 'task.failed', 'ci.failed', 'ci.recovered'] as const;
 export interface Limits {
   concurrency: number; runtime_ms: number; runs: number; model_calls: number; cost_micros: number;
   retries: number; manual_retries: number; notifications_per_minute: number;

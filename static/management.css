@@ -49,7 +49,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-turn-state { display: inline-flex; align-items: center; gap: 5px; color: #668078; font-size: 11px; }
 .management-turn-state[data-state=running]::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #41877b; animation: management-pulse 1.5s ease-in-out infinite; }
 .management-turn-state[data-state=failed], .management-step[data-state=failed] .management-step-status { color: #ab4941; }
-.management-turn-state:is([data-state=interrupted],[data-state=awaiting_approval],[data-state=unknown]), .management-step:is([data-state=awaiting_approval],[data-state=unknown],[data-state=interrupted]) .management-step-status { color: #8c691f; }
+.management-turn-state:is([data-state=interrupted],[data-state=unknown]), .management-step:is([data-state=unknown],[data-state=interrupted]) .management-step-status { color: #8c691f; }
 .management-elapsed { color: #8a999f; font-size: 11px; }
 .management-progress { margin-bottom: 16px; border: 1px solid #e2e9e9; border-radius: 10px; background: #f7f9f9; font-size: 12px; }
 .management-progress > summary { padding: 10px 12px; color: #607980; cursor: pointer; }
@@ -63,7 +63,7 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-step[data-state=succeeded] .management-step-indicator::after { content: '✓'; }
 .management-step[data-state=running] .management-step-indicator { border: 2px solid #d5e2de; border-top-color: #468373; animation: management-spin 1s linear infinite; }
 .management-step:is([data-state=failed],[data-state=rejected]) .management-step-indicator::after { content: '×'; color: #ab4941; }
-.management-step:is([data-state=awaiting_approval],[data-state=unknown],[data-state=executing],[data-state=interrupted]) .management-step-indicator::after { content: '·'; }
+.management-step:is([data-state=unknown],[data-state=executing],[data-state=interrupted]) .management-step-indicator::after { content: '·'; }
 .management-step-caption { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .management-step-status { color: #7a8d92; font-size: 11px; white-space: nowrap; }
 .management-step-detail { min-width: 0; padding: 0 0 8px 24px; }

@@ -76,7 +76,7 @@ docker compose -f compose.yaml -f compose.build.yaml config --quiet
 
 GitHub 登录、统一授权、迁移和隔离验收见 [身份与授权](identity-authorization.md)。
 
-管理服务、持久会话、命令 Schema、配置版本和审批/对账约定见 [统一管理服务与管理对话](management-agent.md)。
+管理服务、持久会话、命令 Schema、配置版本和对账约定见 [统一管理服务与管理对话](management-agent.md)。
 
 平台级服务角色（管理助手、仓库问答助手）的定义、权限、预算和按角色记账见 [服务角色](service-roles.md)。
 

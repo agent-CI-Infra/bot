@@ -55,5 +55,5 @@ export function validate(schema: Json, value: any): void {
 const toolCommandSchema={...obj({operation:(commandSchema.properties as Json).operation,target:targetSchema,arguments:{type:'object'},expected_revision:str},['operation','target','arguments','expected_revision']),anyOf:Object.entries(commands).map(([operation,entry])=>obj({operation:{type:'string',enum:[operation]},target:targetSchema,arguments:entry.arguments,expected_revision:str},['operation','target','arguments','expected_revision']))};
 export const managementTools = [
   { type:'function',function:{name:'management_query',description:'Read scoped persisted management facts. Never invent status, logs, costs or configuration.',parameters:querySchema} },
-  { type:'function',function:{name:'management_command',description:'Execute an authorized business command. Read its current revision first. Ordinary operations execute directly; deterministic organization policy alone can require approval.',parameters:toolCommandSchema} },
+  { type:'function',function:{name:'management_command',description:'Execute an authorized business command. Read its current revision first. Authorized commands execute directly; there is no approval step.',parameters:toolCommandSchema} },
 ];
