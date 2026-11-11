@@ -8,6 +8,7 @@ import { retryEvent } from '../dispatch/worker.js';
 import { activateActions } from '../actions/storage.js';
 import { dispatchPrompt } from '../dispatch/manager.js';
 import { taskDispatch } from '../dispatch/store.js';
+import { dispatchList, dispatchDetail } from '../dispatch/view.js';
 
 const json = (text: unknown, fallback: any) => { try { return JSON.parse(String(text)) ?? fallback; } catch { return fallback; } };
 /** The model a work type uses: its own entry in task_models, else the project default. */
@@ -101,17 +102,14 @@ export async function managerApi(store: Store, rules: RuleService, user: Actor, 
   if (removed) { repository(store, user, removed[1]!); throw Object.assign(new HttpError(410, 'workflows_removed'), { detail: `工作流已由项目 Manager 取代：GET/PUT /api/repositories/${removed[1]}/manager` }); }
   const manager = /^\/api\/repositories\/([^/]+)\/manager$/.exec(url.pathname);
   if (manager && method === 'GET') { repository(store, user, manager[1]!); return { manager: await managerView(store, rules, manager[1]!) }; }
-  const events = /^\/api\/repositories\/([^/]+)\/dispatch(?:\/([^/]+)\/retry)?$/.exec(url.pathname);
+  const events = /^\/api\/repositories\/([^/]+)\/dispatch(?:\/([^/]+)(\/retry)?)?$/.exec(url.pathname);
   if (events) {
     const repositoryId = events[1]!; repository(store, user, repositoryId);
     if (!events[2] && method === 'GET') {
-      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50)), offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
-      const state = url.searchParams.get('state');
-      const rows = store.all(`SELECT id,type,source,object_type,object_number,summary,state,decision,reason,brief,result,model,attempts,error,created_at,decided_at FROM dispatch_events
-        WHERE repository_id=? ${state ? 'AND state=?' : ''} ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?`, ...[repositoryId, ...(state ? [state] : []), limit + 1, offset]);
-      return { events: rows.slice(0, limit).map(row => ({ ...row, brief: json(row.brief, null), result: json(row.result, null), error: json(row.error, null) })), has_more: rows.length > limit, offset, limit };
+      return dispatchList(store, repositoryId, url.searchParams);
     }
-    if (events[2] && method === 'POST') {
+    if (events[2] && !events[3] && method === 'GET') return dispatchDetail(store, repositoryId, decodeURIComponent(events[2]));
+    if (events[2] && events[3] && method === 'POST') {
       fields(input, []);
       if (!retryEvent(store, repositoryId, decodeURIComponent(events[2]))) fail(409, 'dispatch_event_not_failed');
       store.audit(user.id, 'dispatch.retry', events[2], repositoryId); return { ok: true };

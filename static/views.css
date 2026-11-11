@@ -358,3 +358,11 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:12px;padding:4px 10px}
 .audit-filters button[aria-pressed=true]{border-color:#16636b;color:#16636b;background:#e8f3f4}
+
+
+/* Manager history filters wrap into the same readable controls on narrow screens. */
+.dispatch-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px;align-items:end;margin:12px 0}
+.dispatch-filters label{display:grid;gap:5px;min-width:0}.dispatch-filters input,.dispatch-filters select{width:100%;min-width:0;box-sizing:border-box}
+.dispatch-reader>.actions{margin-bottom:10px}.dispatch-reader>ol{margin-bottom:12px}
+.dispatch-detail{width:min(760px,calc(100vw - 32px));max-height:calc(100dvh - 32px);box-sizing:border-box;overflow:auto}
+.dispatch-detail-body{display:grid;gap:16px;min-width:0}.dispatch-detail-body section{min-width:0;overflow-wrap:anywhere}.dispatch-detail-body h3{margin:0 0 8px}.dispatch-detail-body .facts{min-width:0}.dispatch-detail>.actions{position:sticky;bottom:-1px;background:var(--surface,#fff);padding:12px 0;margin-bottom:0;flex-wrap:wrap}

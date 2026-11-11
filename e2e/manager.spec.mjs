@@ -59,10 +59,14 @@ test('the Manager role edits its complete prompt and events, lists decisions and
     const decisions = page.locator('.manager-dispatch');
     await expect(decisions.locator(`[data-dispatch-event="${decided.id}"]`)).toContainText('重复的问题，已有 Issue 在处理');
     const stuck = decisions.locator(`[data-dispatch-event="${failed.id}"]`);
-    await expect(stuck).toContainText('分派失败'); await expect(stuck).toContainText('model_not_configured');
+    await expect(stuck).toContainText('等待人工重试'); await expect(stuck).toContainText('model_not_configured');
     await page.screenshot({ path: '.tmp/manager-207/manager-desktop.png', fullPage: true });
-    await stuck.getByRole('button', { name: '重试分派', exact: true }).click();
-    await expect(decisions.locator(`[data-dispatch-event="${failed.id}"]`)).toContainText('等待 Manager');
+    await stuck.getByRole('button', { name: '查看分派详情', exact: true }).click();
+    const dispatchDetail = page.getByRole('dialog', { name: '分派详情', exact: true });
+    await dispatchDetail.getByRole('button', { name: '重试这条分派', exact: true }).click();
+    await expect(dispatchDetail).toContainText('原轮尝试 8 次');
+    await dispatchDetail.getByRole('button', { name: '关闭分派详情', exact: true }).click();
+    await expect(decisions.locator(`[data-dispatch-event="${failed.id}"]`)).toContainText('等待或自动重试');
     expect(h.store.get('SELECT state FROM dispatch_events WHERE id=?', failed.id).state).toBe('pending');
 
     // The models page lists every work type and the Manager's own dispatch model.

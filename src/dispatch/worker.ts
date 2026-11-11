@@ -93,7 +93,13 @@ export class Dispatcher {
 
 /** Retries a failed event now (a person pressed retry). */
 export function retryEvent(store: Store, repositoryId: string, id: string) {
-  return store.run("UPDATE dispatch_events SET state='pending',attempts=0,next_run_at=0,error=NULL WHERE id=? AND repository_id=? AND state='failed'", id, repositoryId).changes > 0;
+  return store.transaction(() => {
+    const previous = store.get("SELECT attempts,error FROM dispatch_events WHERE id=? AND repository_id=? AND state='failed'", id, repositoryId);
+    if (!previous) return false;
+    // Keep the failure a person retried even after the existing event advances to its next result.
+    store.run('INSERT INTO dispatch_retries(id,event_id,requested_at,previous_attempts,previous_error) VALUES(?,?,?,?,?)', randomId(), id, new Date().toISOString(), previous.attempts, previous.error);
+    return store.run("UPDATE dispatch_events SET state='pending',attempts=0,next_run_at=0,error=NULL WHERE id=? AND repository_id=? AND state='failed'", id, repositoryId).changes > 0;
+  });
 }
 
 /**

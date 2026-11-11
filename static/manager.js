@@ -90,38 +90,139 @@ function eventFiltersCard(manager, refresh) {
   section.append(form); return section;
 }
 
-// The Manager's latest decisions, newest first: what came in, what it decided and why, and the tasks it touched.
+// This reader belongs to one mounted project page; a newer permission error invalidates every older response.
 function dispatchCard() {
-  const section = card('最近的分派'), list = element('ol', '', 'manager-dispatch'), more = element('div', '', 'actions'), id = current.id;
-  section.dataset.overviewAnchor = 'manager-dispatch';
-  section.append(note('每个事件只分派一次；失败的分派会自动重试，多次失败后停在这里等人重试。任务详情里也能看到它因哪个事件新建或续接。'), list, more);
-  let offset = 0;
-  const load = async () => {
-    try {
-      const page = await api(`/api/repositories/${id}/dispatch?limit=20&offset=${offset}`); if (current?.id !== id) return;
-      if (!offset && !page.events.length) list.replaceChildren(element('li', '还没有事件交给 Manager。', 'muted'));
-      for (const event of page.events) list.append(dispatchEntry(event, () => { offset = 0; list.replaceChildren(); void load(); }));
-      offset += page.events.length; more.replaceChildren(...(page.has_more ? [button('更早的分派', () => void load())] : []));
-    } catch (err) { list.replaceChildren(element('li', err.message, 'view-error')); }
+  const target = current, token = renderToken, id = target.id, section = card('最近的分派');
+  section.dataset.overviewAnchor = 'manager-dispatch'; section.classList.add('dispatch-reader'); section.setAttribute('aria-label', 'Manager 分派记录');
+  const live = () => current === target && renderToken === token && current.section === 'roles' && section.isConnected;
+  const initial = new URLSearchParams(location.hash.split('?')[1] || ''), filters = {};
+  for (const key of ['state', 'decision', 'type', 'from', 'until']) filters[key] = initial.get('dispatch_' + key) || '';
+  const form = element('form', '', 'dispatch-filters'), list = element('ol', '', 'manager-dispatch'), message = element('p', '', 'view-error');
+  message.setAttribute('role', 'alert');
+  const choose = (name, label, entries) => {
+    const control = document.createElement('select'); control.name = name;
+    for (const [value, caption] of entries) { const option = element('option', caption); option.value = value; control.append(option); }
+    control.value = filters[name]; form.append(field(label, control)); return control;
   };
-  void load(); return section;
+  choose('state', '分派状态', [['', '全部状态'], ['pending', '等待或自动重试'], ['dispatching', 'Manager 处理中'], ['failed', '等待人工重试'], ['decided', '已决定']]);
+  choose('decision', '分派结果', [['', '全部结果'], ['create', '新建任务'], ['continue', '续接任务'], ['ignore', '不处理']]);
+  const type = input('type', filters.type, { placeholder: '例如 issue.opened', maxLength: 80 }); form.append(field('事件类型', type));
+  for (const [key, label] of [['from', '开始时间（含）'], ['until', '结束时间（不含）']]) {
+    let value = ''; if (filters[key] && Number.isFinite(Date.parse(filters[key]))) { const d = new Date(filters[key]); value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
+    form.append(field(label, input(key, value, { type: 'datetime-local' })));
+  }
+  const apply = element('button', '应用分派筛选'); apply.type = 'submit';
+  const refresh = button('重新读取分派', () => void load(false)), more = button('更早的分派', () => void load(true)), count = note('尚未读取，分派状态未知。'); more.hidden = true;
+  form.append(apply);
+  section.append(note('筛选事件收到的时间；时间按本机时区 ' + Intl.DateTimeFormat().resolvedOptions().timeZone + ' 输入。等待和读取失败不能当作不处理。'), form, element('div', '', 'actions'), message, count, list, more);
+  form.nextElementSibling.append(refresh);
+  const dialog = document.createElement('dialog'); dialog.className = 'dispatch-detail'; dialog.setAttribute('aria-label', '分派详情');
+  const detailMessage = element('p', '', 'view-error'), body = element('div', '', 'dispatch-detail-body'), footer = element('div', '', 'actions'); detailMessage.setAttribute('role', 'alert');
+  const close = button('关闭分派详情', () => dialog.close()), read = button('刷新当前结果', () => void readDetail(selected)), retry = button('重试这条分派', () => void retrySelected());
+  footer.append(close, read, retry); dialog.append(element('h2', '分派详情'), detailMessage, body, footer); section.append(dialog);
+  let request = 0, detailRequest = 0, cursor = null, loaded = false, loading = false, detailBusy = false, selected = null, detail = null, revoked = false, rows = [], opener;
+  const address = () => {
+    if (!live()) return;
+    const params = new URLSearchParams(location.hash.split('?')[1] || '');
+    for (const [key, value] of Object.entries(filters)) { if (value) params.set('dispatch_' + key, value); else params.delete('dispatch_' + key); }
+    if (selected) params.set('dispatch', selected); else params.delete('dispatch');
+    history.replaceState(null, '', location.hash.split('?')[0] + (params.size ? '?' + params : ''));
+  };
+  const forbidden = err => {
+    if (![401, 403].includes(err.status)) return false;
+    revoked = true; request++; detailRequest++; loading = false; detailBusy = false; rows = []; detail = null; selected = null; list.replaceChildren(); body.replaceChildren();
+    if (dialog.open) dialog.close(); address(); more.hidden = true; count.textContent = '当前身份无法读取分派，已清空旧记录。'; controls(); return true;
+  };
+  const controls = () => { apply.disabled = refresh.disabled = more.disabled = loading; read.disabled = detailBusy; retry.disabled = detailBusy; retry.hidden = !detail || detail.event.state !== 'failed' || revoked; };
+  async function load(append) {
+    if (!live() || loading) return;
+    const own = ++request; loading = true; message.textContent = ''; controls();
+    const params = new URLSearchParams({ limit: '20' });
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+    if (append && cursor) params.set('cursor', cursor);
+    try {
+      const page = await api(`/api/repositories/${id}/dispatch?` + params);
+      if (!live() || own !== request) return;
+      revoked = false; const seen = new Set(append ? rows.map(row => row.id) : []);
+      rows = [...(append ? rows : []), ...page.events.filter(row => !seen.has(row.id))]; cursor = page.next_cursor; loaded = true;
+      list.replaceChildren(...rows.map(row => dispatchEntry(row, event => openDetail(event.id))));
+      count.textContent = rows.length ? `已读取 ${rows.length} 条分派，按事件收到时间倒序。` : '当前筛选没有分派记录。';
+      more.hidden = !page.has_more; address();
+    } catch (err) {
+      if (!live() || own !== request) return;
+      if (!forbidden(err)) count.textContent = loaded ? '读取失败，保留上次读取的记录，可能不属于新的筛选范围。' : '读取失败，分派状态未知。';
+      message.textContent = err.message;
+    } finally { if (live() && own === request) { loading = false; controls(); } }
+  }
+  form.addEventListener('submit', event => {
+    event.preventDefault(); if (loading) return;
+    for (const key of ['state', 'decision', 'type', 'from', 'until']) { const value = form.elements[key].value; filters[key] = key === 'from' || key === 'until' ? value ? new Date(value).toISOString() : '' : value.trim(); }
+    address(); void load(false);
+  });
+  function openDetail(eventId) {
+    if (!live()) return;
+    opener = document.activeElement; selected = eventId; detail = null; body.replaceChildren(note('正在读取这条分派…')); detailMessage.textContent = ''; controls(); address();
+    if (!dialog.open) dialog.showModal(); void readDetail(eventId);
+  }
+  dialog.addEventListener('close', () => { selected = null; detail = null; detailRequest++; body.replaceChildren(); address(); if (live() && !opener?.isConnected) refresh.focus(); });
+  function drawDetail(value) {
+    const event = value.event, position = dialog.scrollTop; body.replaceChildren();
+    const group = (title, ...children) => { const el = element('section'); el.append(element('h3', title), ...children); body.append(el); return el; };
+    group('触发事件', facts([['事件编号', event.id], ['事件类型', dispatchEventNames[event.type] || event.type], ['来源', event.source], ['收到时间', timestamp(event.created_at)], ['对象', event.object_number ? `${event.object_type} #${event.object_number}` : '未记录对象'], ['投递编号', event.delivery_id || '未记录']]), element('p', event.summary));
+    group('Manager 判断', facts([['状态', dispatchState(event)], ['决定时间', event.decided_at ? timestamp(event.decided_at) : event.state === 'decided' ? '未记录决定时间' : '尚未决定'], ['记录的模型名称', event.model || '未记录；不能用当前配置推断历史模型'], ['当前轮尝试次数', String(event.attempts)]]), element('p', event.reason || '尚无已保存的决定理由。'));
+    if (event.brief?.goal) body.lastChild.append(element('p', '任务目标：' + event.brief.goal), note((event.brief.criteria || []).join('；')));
+    if (event.error) body.lastChild.append(element('p', '最近失败：' + event.error.code + (event.error.detail ? ' · ' + event.error.detail : ''), 'view-error'));
+    if (event.state === 'pending' && event.next_run_at) body.lastChild.append(note('下次允许自动尝试：' + timestamp(new Date(event.next_run_at).toISOString())));
+    const tasks = group('关联任务');
+    if (!value.tasks.length) tasks.append(note(event.state === 'decided' && event.decision === 'ignore' ? 'Manager 决定不处理，没有关联任务。' : '当前没有可读取的关联任务；分派结果不等于任务已完成。'));
+    for (const task of value.tasks) tasks.append(button(`${task.relation === 'created' ? '新建' : '续接'} · ${task.kind} · ${task.id.slice(0, 8)} · ${task.status}`, () => { dialog.close(); if (live()) openTask(task.id); }));
+    const history = group('人工重试记录', note('重试沿用同一事件编号，原决定的幂等约束继续生效；只有失败状态可以请求人工重试。这里显示最近 50 条人工重试，不表示任务一定成功。'));
+    if (!value.retries.length) history.append(note('没有人工重试记录。'));
+    for (const record of value.retries) history.append(element('p', `${timestamp(record.requested_at)} · 原轮尝试 ${record.previous_attempts} 次 · ${record.previous_error?.code || '未记录错误码'}${record.previous_error?.detail ? ' · ' + record.previous_error.detail : ''}`));
+    dialog.scrollTop = position;
+  }
+  async function readDetail(eventId) {
+    if (!live() || !eventId) return;
+    const own = ++detailRequest; detailBusy = true; detailMessage.textContent = ''; controls();
+    try {
+      const value = await api(`/api/repositories/${id}/dispatch/${encodeURIComponent(eventId)}`);
+      if (!live() || own !== detailRequest || selected !== eventId) return;
+      detail = value; drawDetail(value);
+    } catch (err) {
+      if (!live() || own !== detailRequest || selected !== eventId) return;
+      if (!forbidden(err)) detailMessage.textContent = err.message + (detail ? ' · 保留上次结果，请重新读取。' : ' · 当前结果未知，请重新读取。');
+      else message.textContent = err.message;
+    } finally { if (live() && own === detailRequest) { detailBusy = false; controls(); } }
+  }
+  async function retrySelected() {
+    if (!live() || detailBusy || detail?.event.state !== 'failed') return;
+    const eventId = selected, own = ++detailRequest; detailBusy = true; detailMessage.textContent = ''; controls();
+    try {
+      await api(`/api/repositories/${id}/dispatch/${encodeURIComponent(eventId)}/retry`, 'POST', {});
+      if (!live() || own !== detailRequest || selected !== eventId) return;
+      detailMessage.textContent = '已请求重试，仍使用同一条分派记录。'; detail = null; detailBusy = false; controls(); await readDetail(eventId); void load(false);
+    } catch (err) {
+      if (!live() || own !== detailRequest || selected !== eventId) return;
+      if (!forbidden(err)) detailMessage.textContent = err.message + ' · 写入结果可能已变化，请先刷新当前结果再决定是否重试。';
+      else message.textContent = err.message;
+    } finally { if (live() && own === detailRequest) { detailBusy = false; controls(); } }
+  }
+  // The enclosing Manager cards are attached after this constructor returns.
+  queueMicrotask(() => { if (live()) { void load(false); const selectedAddress = initial.get('dispatch'); if (selectedAddress) openDetail(selectedAddress); } });
+  return section;
 }
-function dispatchEntry(event, reload) {
+function dispatchState(event) {
+  return event.state === 'decided' ? decisionNames[event.decision]?.[0] || '已决定，结果未识别' : event.state === 'failed' ? '等待人工重试' : event.state === 'dispatching' ? 'Manager 处理中' : event.state === 'pending' ? '等待或自动重试' : '未识别的分派状态';
+}
+function dispatchEntry(event, open) {
   const item = element('li', '', 'manager-dispatch-entry'), head = element('div', '', 'manager-dispatch-head');
-  const [decision, tone] = decisionNames[event.decision] || [];
-  head.append(element('strong', dispatchEventNames[event.type] || event.type), event.state === 'decided' ? badge(decision, tone) : event.state === 'failed' ? badge('分派失败', 'danger') : badge('等待 Manager', 'warning'),
-    element('span', timestamp(event.created_at), 'muted'));
+  head.append(element('strong', dispatchEventNames[event.type] || event.type), badge(dispatchState(event), event.state === 'failed' ? 'danger' : event.state === 'decided' ? 'success' : 'warning'), element('span', timestamp(event.created_at), 'muted'));
   item.dataset.dispatchEvent = event.id; item.append(head, element('p', event.summary));
-  if (event.reason) item.append(element('p', '理由：' + event.reason, 'muted'));
-  if (event.brief?.goal) item.append(element('p', '简要说明：' + event.brief.goal + (event.brief.criteria?.length ? '（' + event.brief.criteria.join('；') + '）' : ''), 'muted'));
-  const tasks = [...(event.result?.created || []).map(task => ['新建', task]), ...(event.result?.continued || []).map(task => ['续接', task])];
-  if (tasks.length) { const links = element('div', '', 'actions'); for (const [caption, task] of tasks) links.append(button(`${caption}的任务 ${task.slice(0, 8)}`, () => openTask(task))); item.append(links); }
-  if (event.error) item.append(element('p', `最近一次失败：${event.error.code}${event.error.detail ? '：' + event.error.detail : ''}`, event.state === 'failed' ? 'view-error' : 'muted'));
-  if (event.state === 'failed') item.append(button('重试分派', async () => { try { await api(`/api/repositories/${current.id}/dispatch/${event.id}/retry`, 'POST', {}); reload(); } catch (err) { item.append(element('p', err.message, 'view-error')); } }));
-  return item;
+  if (event.reason) item.append(note('理由：' + event.reason));
+  if (event.error) item.append(note('最近失败：' + event.error.code));
+  item.append(button('查看分派详情', () => open(event), 'quiet')); return item;
 }
 
-// Where the rule sections' text comes from: repository files on the default branch replace the console layer.
 function managerRulesCard() {
   const section = card('规则文件来源');
   // Include repository skills here as well: the complete prompt editor has no separate per-section source list.
