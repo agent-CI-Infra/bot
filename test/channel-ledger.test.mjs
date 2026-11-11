@@ -290,7 +290,7 @@ test('bot join starts only local recording and visible-history work; project acc
   await until(() => wire.sent.length > 0);
   assert.equal(requests.length, 0);
   assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, before);
-  assert.equal(h.store.get('SELECT count(*) n FROM channel_group_scopes').n, 0);
+  assert.equal(h.store.get('SELECT count(*) n FROM channel_service_bindings').n, 0);
   assert.ok(JSON.stringify(wire.sent[0].content).includes('另行启用'));
   const user = await member('history-project-reader', { repository_ids: ['101'] });
   assert.equal((await user.client('/api/channels/chats')).status, 403);

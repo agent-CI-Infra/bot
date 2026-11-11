@@ -14,7 +14,7 @@ import { defaultLimits } from '../dist/schedules/types.js';
 import { nextTime, previewTimes, quietUntil } from '../dist/schedules/time.js';
 import { HttpError, randomId } from '../dist/core/security.js';
 import { configureDispatch, ruleDecider } from '../dist/dispatch/worker.js';
-import { channelFixture, envelope, post, finished, until, group, inGroup, bindFixture } from './channel-fixture.mjs';
+import { channelFixture, envelope, post, finished, until, inGroup, bindFixture, privateChat, boundGroup, registerDestination } from './channel-fixture.mjs';
 
 const target = { project_id: '101' };
 const query = async (f, operation, args = {}, client = f.admin, project = '101') => {
@@ -32,7 +32,7 @@ async function fixture(t) {
   now = Date.now();
   f.worker = worker; f.advance = ms => { now += ms; }; f.now = () => now;
   f.actor = () => resolveActor(f.h.store, f.admin.cookie().split('=')[1], { project_id: '101' });
-  f.destination = f.service.enqueue(f.actor(), f.service.adapter(f.service.connector(f.id)).normalize(envelope()), '101', 'fixture').operation_id;
+  f.destination = await registerDestination(f.admin, await privateChat(f));
   f.plan = override => ({ name: '项目日报', kind: 'personal', actor_id: f.principal, owner_id: f.principal, maintainer_id: f.principal,
     workflow: 'report.daily', parameters: {}, timezone: 'Asia/Shanghai', interval_ms: 60000, start_at: f.now() + 60000, enabled: true,
     misfire: 'skip', grace_ms: 60000, destination_id: f.destination, limits: { ...defaultLimits }, ...override });
@@ -47,13 +47,18 @@ function otherWorker(f, t, transport) {
   const service = new ScheduleService(store, management, channels, f.now), worker = new Scheduler(service, transport);
   t.after(async () => { await worker.close(); store.close(); }); return worker;
 }
+/** A group bound by a maintainer who stays: its binding's authority belongs to that maintainer, not to a departing plan owner. */
+async function keptGroup(f) {
+  const keeper = await f.member('group-keeper-' + randomId().slice(0, 6), { repository_ids: ['101'] });
+  bindFixture(f.h, f.id, keeper.id, 'ou_keeper'); f.wire.state.members.push({ member_id_type: 'open_id', member_id: 'ou_keeper', tenant_key: 'actor-tenant' });
+  return boundGroup(f, ['101'], 'oc_group', keeper.client);
+}
 async function projectPlan(f, maintainer, owner = f.principal) {
   const service = randomId();
   f.h.store.run("INSERT INTO principals(id,kind,project_id,tenant_id,maintenance) VALUES(?,'service','101','github.com:10','project maintainers')", service);
   f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
     VALUES(?,?,'github.com:10','101','project','service',?,'explicit_delegation',?,'schedule','fixture approval',?)`, randomId(), service, JSON.stringify(['tasks.read', 'schedules.manage']), f.principal, f.now());
-  await group(f.admin, f.id);
-  const destination = f.service.enqueue(f.actor(), f.service.adapter(f.service.connector(f.id)).normalize(inGroup('/project 101 /destination')), '101', 'handover-group').operation_id;
+  const destination = await registerDestination(f.admin, await keptGroup(f));
   return f.plan({ kind: 'project', actor_id: service, maintainer_id: maintainer, owner_id: owner, destination_id: destination });
 }
 test('wall-clock preview chooses first DST fold, skips gaps, uses cron OR semantics and bounds misfires', () => {
@@ -69,8 +74,11 @@ test('wall-clock preview chooses first DST fold, skips gaps, uses cron OR semant
 test('user creates and previews a daily report, sees evidence, runs now and receives a persisted delivery', async t => {
   const f = await fixture(t);
   f.modelState.failure = 503;
-  const registered = await post(f.h, f.id, envelope('/project 101 /destination'));
-  assert.equal((await finished(f.h, registered.value.operation_id)).state, 'completed');
+  // Chat text no longer registers a destination; registration happens in the console (#312).
+  const registeredBefore = f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n;
+  const typed = await post(f.h, f.id, envelope('/project 101 /destination')); await finished(f.h, typed.value.operation_id);
+  assert.equal(f.h.store.get("SELECT count(*) n FROM channel_outbox WHERE state='registered'").n, registeredBefore);
+  const modelRequests = f.requests.length;
   const preview = await query(f, 'preview_schedule', { plan: f.plan({ cron: '0 9 * * *', interval_ms: undefined }) });
   assert.equal(preview.timezone, 'Asia/Shanghai'); assert.equal(preview.future.length, 5);
   assert.ok(preview.report.evidence.some(e => e.id === 'task:blocked'));
@@ -82,7 +90,7 @@ test('user creates and previews a daily report, sees evidence, runs now and rece
   const deliveries = (await query(f, 'list_notification_deliveries')).records;
   assert.equal(deliveries[0].state, 'sent'); assert.equal(deliveries[0].attempts, 1); assert.ok(deliveries[0].remote_message_id);
   assert.equal(f.h.store.get('SELECT count(*) n FROM schedule_business_runs').n, 1);
-  assert.equal(f.requests.length, 0); assert.equal(deliveries[0].payload.report.model, 'deterministic_no_model');
+  assert.equal(f.requests.length, modelRequests); assert.equal(deliveries[0].payload.report.model, 'deterministic_no_model');
 });
 test('restart recovers an expired lease and two workers/replayed ticks create one occurrence and one business run', async t => {
   const f = await fixture(t); await f.create(); f.advance(60000); f.worker.produce();
@@ -115,8 +123,7 @@ test('misfire skips an unbounded history; once runs only one due instance, updat
 test('revoking a personal owner pauses the plan and blocks its queued notification before transport', async t => {
   const f = await fixture(t), member = await f.member('schedule-member', { repository_ids: ['101'] });
   bindFixture(f.h, f.id, member.id, 'ou_member');
-  const actor = resolveActor(f.h.store, member.client.cookie().split('=')[1], { project_id: '101' });
-  const destination = f.service.enqueue(actor, f.service.adapter(f.service.connector(f.id)).normalize(envelope('/project 101 /destination', { sender: { sender_id: { open_id: 'ou_member' } } })), '101', 'member').operation_id;
+  const destination = await registerDestination(member.client, await privateChat(f, 'ou_member', member.id, 'oc_member_private'));
   const plan = f.plan({ actor_id: member.id, owner_id: member.id, maintainer_id: member.id, destination_id: destination });
   const saved = await command(f, 'schedule.register', { plan }, member.client); assert.equal(saved.value.state, 'succeeded');
   f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
@@ -125,17 +132,22 @@ test('revoking a personal owner pauses the plan and blocks its queued notificati
   const before = f.wire.sent.length; await f.worker.tick();
   assert.equal(f.h.store.get('SELECT state FROM schedules').state, 'paused'); assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'blocked'); assert.equal(f.wire.sent.length, before);
 });
-test('private repository data cannot cross a public group scope, including a queued report after scope revocation', async t => {
-  const f = await fixture(t); await group(f.admin, f.id);
-  const event = f.service.adapter(f.service.connector(f.id)).normalize(inGroup('/project 101 /destination'));
-  const destination = f.service.enqueue(f.actor(), event, '101', 'group').operation_id;
+test('a group destination follows its binding: a queued report stops when the binding no longer reaches the project', async t => {
+  const f = await fixture(t), chat = await boundGroup(f), destination = await registerDestination(f.admin, chat);
+  const listed = await query(f, 'list_schedule_destinations');
+  assert.deepEqual(listed.destinations.map(d => d.type).sort(), ['group', 'p2p']);
   await f.create(f.plan({ destination_id: destination })); f.advance(60000); f.worker.produce(); f.worker.dispatch(f.worker.claimOccurrence());
-  f.h.store.run('UPDATE installed_repositories SET private=1 WHERE repository_id=\'101\'');
-  f.h.store.run("UPDATE channel_group_scopes SET sensitivity='public' WHERE project_id='101'");
+  // The maintainer narrows the group to another repository: project 101 is out of its scope now.
+  const revision = f.h.store.get('SELECT revision FROM channel_service_bindings').revision;
+  assert.equal((await f.admin('/api/channels/chats/' + chat.id + '/service-binding', 'PUT', { service_role_id: 'repository-assistant', scope: { kind: 'repositories', repositories: ['102'] }, enabled: true, expected_revision: revision })).status, 200);
   const before = f.wire.sent.length;
   const preview = await f.admin('/api/management/query', 'POST', { operation: 'preview_schedule', target, arguments: { plan: f.plan({ destination_id: destination }) } });
-  assert.equal(preview.status, 403); assert.equal(preview.value.error, 'channel_group_scope_required');
+  assert.equal(preview.status, 403); assert.equal(preview.value.error, 'channel_service_scope_paused');
   await f.worker.tick(); assert.equal(f.h.store.get('SELECT state FROM notification_outbox').state, 'blocked'); assert.equal(f.wire.sent.length, before);
+  assert.deepEqual((await query(f, 'list_schedule_destinations')).destinations.map(d => d.type), ['p2p']);
+  // Revoking a registration removes it from the choices; the registrant or a platform manager may revoke.
+  assert.equal((await f.admin('/api/channels/destinations/' + f.destination, 'DELETE', {})).value.state, 'revoked');
+  assert.deepEqual((await query(f, 'list_schedule_destinations')).destinations, []);
 });
 test('project service uses explicit minimum capabilities, survives creator departure and pauses when delegation or maintainer is revoked', async t => {
   const f = await fixture(t), maintainer = await f.member('service-maintainer', { repository_ids: ['101'] });
@@ -144,8 +156,7 @@ test('project service uses explicit minimum capabilities, survives creator depar
   f.h.store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
     VALUES(?,?,'github.com:10','101','project','service',?,'explicit_delegation',?,'schedule','fixture approval',?)`, grant, service, JSON.stringify(['tasks.read', 'schedules.manage']), f.principal, f.now());
   f.h.store.run('UPDATE principals SET authorization_revision=9 WHERE id=?', service);
-  await group(f.admin, f.id);
-  const destination = f.service.enqueue(f.actor(), f.service.adapter(f.service.connector(f.id)).normalize(inGroup('/project 101 /destination')), '101', 'project-group').operation_id;
+  const destination = await registerDestination(f.admin, await keptGroup(f));
   const schedule = await f.create(f.plan({ kind: 'project', actor_id: service, maintainer_id: maintainer.id, destination_id: destination }));
   const audit = f.h.store.get("SELECT * FROM schedule_audit WHERE action='schedule.register'"); assert.equal(audit.initiator, f.principal); assert.equal(audit.actor_id, service); assert.equal(audit.authorization_revision, 9);
   const serviceActor = f.worker.service.actor(f.h.store.get('SELECT * FROM schedules'), schedule.spec);

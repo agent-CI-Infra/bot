@@ -18,8 +18,12 @@ export class ChannelApi {
       return result;
     }
     const employee = /^\/api\/channels\/chats\/([a-f0-9]{48})\/employee$/.exec(path);
-    const personal=/^\/api\/channels\/chats\/([a-f0-9]{48})\/personal-role$/.exec(path);
-    if(personal&&method==='PUT')return this.service.employees.configurePersonal(actor,personal[1]!,input);
+    // Notification destinations are registered here, not by chat commands (#312).
+    if (path === '/api/channels/destinations' && method === 'GET') return this.service.destinations(actor);
+    const register = /^\/api\/channels\/chats\/([a-f0-9]{48})\/destinations$/.exec(path);
+    if (register && method === 'POST') return this.service.registerDestination(actor, register[1]!, input);
+    const destination = /^\/api\/channels\/destinations\/([a-f0-9]{48})$/.exec(path);
+    if (destination && method === 'DELETE') { fields(input, []); return this.service.revokeDestination(actor, destination[1]!); }
     const conversation=/^\/api\/channels\/chats\/([a-f0-9]{48})\/conversation$/.exec(path);
     if(conversation&&method==='GET')return this.service.conversationView(actor,conversation[1]!,Number(url.searchParams.get('offset')??0));
     // Legacy employees can only be disabled; a group now binds a service role (#312).
@@ -173,7 +177,7 @@ export class ChannelApi {
           queued: store.get("SELECT count(*) n FROM channel_inbox WHERE connector_id=? AND state IN ('queued','submitted')", c.id)!.n,
           failed: store.get("SELECT count(*) n FROM channel_outbox WHERE connector_id=? AND state='failed'", c.id)!.n } })) };
     }
-    const match = /^\/api\/channels\/connectors\/([a-f0-9]{48})(?:\/(groups|outbox|events))?$/.exec(path);
+    const match = /^\/api\/channels\/connectors\/([a-f0-9]{48})(?:\/(outbox|events))?$/.exec(path);
     if (path === '/api/channels/connectors' && method === 'POST' || match && !match[2] && method === 'PATCH') {
       authorize(actor, 'platform.manage');
       // Accept the retired actor_tenants field from older clients without applying an enterprise restriction.
@@ -253,32 +257,6 @@ export class ChannelApi {
     if (!match) return fail(404, 'channel_endpoint_not_found');
     const c = store.get('SELECT * FROM channel_connectors WHERE id=?', match[1]!);
     if (!c) return fail(404, 'channel_connector_not_found');
-    if (match[2] === 'groups') {
-      if (method === 'GET') return { groups: store.all('SELECT * FROM channel_group_scopes WHERE connector_id=?', c.id).filter(s => {
-        try { authorize(actor, 'config.write', { project_id: s.project_id }); return true; } catch { return false; }
-      }).map(s => ({ ...s, fields: JSON.parse(s.fields) })) };
-      if (method !== 'PUT') return fail(405, 'method_not_allowed');
-      fields(input, ['chat_id', 'project_id', 'fields', 'sensitivity', 'audience_verified_until', 'enabled', 'expected_revision']);
-      const project = text(input.project_id), chat = text(input.chat_id);
-      authorize(actor, 'config.write', { project_id: project });
-      if (!Array.isArray(input.fields) || !input.fields.length || input.fields.some(f => !['summary', 'status', 'operation', 'result'].includes(String(f))) ||
-        !['public', 'private'].includes(String(input.sensitivity)) || typeof input.enabled !== 'boolean' || !Number.isSafeInteger(input.audience_verified_until) ||
-        Number(input.audience_verified_until) < 0 || Number(input.audience_verified_until) > Date.now() + 3600_000) fail(400, 'channel_group_scope_invalid');
-      const row = store.get('SELECT * FROM channel_group_scopes WHERE connector_id=? AND installation_tenant=? AND chat_id=? AND project_id=?', c.id, c.installation_tenant, chat, project);
-      if (input.expected_revision !== (row?.revision ?? 0)) fail(409, 'channel_revision_conflict');
-      const id = row?.id ?? randomId(), result = { operation_id: randomId(), state: 'succeeded', group_id: id, revision: (row?.revision ?? 0) + 1 };
-      store.transaction(() => {
-        if (store.get('SELECT revision FROM channel_connectors WHERE id=?', c.id)?.revision !== c.revision) fail(409, 'channel_revision_conflict');
-        const locked = store.get('SELECT revision FROM channel_group_scopes WHERE connector_id=? AND installation_tenant=? AND chat_id=? AND project_id=?', c.id, c.installation_tenant, chat, project);
-        if ((locked?.revision ?? 0) !== input.expected_revision) fail(409, 'channel_revision_conflict');
-        store.run(`INSERT INTO channel_group_scopes VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET fields=excluded.fields,sensitivity=excluded.sensitivity,
-          audience_verified_until=excluded.audience_verified_until,enabled=excluded.enabled,revision=excluded.revision`, id, c.id, c.installation_tenant, chat, project,
-          JSON.stringify(input.fields), String(input.sensitivity), Number(input.audience_verified_until), Number(input.enabled), (row?.revision ?? 0) + 1);
-        store.audit(actor.principal_id, 'channel.group.updated', id, project);
-        store.run('INSERT INTO channel_control_operations(id,project_id,receipt) VALUES(?,?,?)', result.operation_id, project, JSON.stringify(result));
-      });
-      return result;
-    }
     authorize(actor, 'platform.manage');
     if (method === 'GET' && match[2] === 'outbox') return { deliveries: store.all('SELECT id,state,attempts,last_error,remote_message_id,created_at FROM channel_outbox WHERE connector_id=? ORDER BY created_at DESC LIMIT 100', c.id) };
     if (method === 'GET' && match[2] === 'events') return { operations: store.all('SELECT id AS operation_id,state,error,conversation_id,message_id,created_at FROM channel_inbox WHERE connector_id=? ORDER BY created_at DESC LIMIT 100', c.id) };

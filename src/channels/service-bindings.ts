@@ -251,7 +251,7 @@ export class ChannelServiceBindings {
         repositories: grants.filter(g => g.scope === 'project').map(g => ({ id: g.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', g.project_id)?.full_name ?? g.project_id })) },
       participation: binding.participation, enabled: !!binding.enabled, revision: binding.revision, migrated: binding.migrated_from === 'channel_employee',
       configured_by: this.store.get('SELECT username FROM users WHERE id=?', binding.configured_by)?.username ?? null,
-      state, error, reachable: reach.projects.map(p => p.full_name), paused: reach.paused.map(p => p.full_name), created_at: binding.created_at, updated_at: binding.updated_at };
+      state, error, reachable: reach.projects.map(p => p.full_name), reachable_projects: reach.projects.map(p => ({ id: p.id, full_name: p.full_name })), paused: reach.paused.map(p => p.full_name), created_at: binding.created_at, updated_at: binding.updated_at };
   }
   list(actor: ActorContext): Json {
     assertCurrent(actor);

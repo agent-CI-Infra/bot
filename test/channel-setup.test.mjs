@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { channelFixture, connector, credentials, until, envelope, post, finished, group, directQuery, bindFixture } from './channel-fixture.mjs';
+import { channelFixture, connector, credentials, until, envelope, post, finished, bindFixture, privateChat, registerDestination } from './channel-fixture.mjs';
 import { harness, setup } from './helpers.mjs';
 
 const probe = (admin, id, revision = 1) => admin('/api/channels/feishu/probe', 'POST', { connector_id: id, expected_revision: revision });
@@ -109,18 +109,16 @@ test('an administrator can connect Feishu before any GitHub organization or proj
 });
 
 test('startup removes legacy organization and actor enterprise restrictions without replacing credentials, bindings, group grants, destinations or receipts', async t => {
-  const { h, id, service, admin } = await channelFixture(t);
+  const f = await channelFixture(t), { h, id, service, admin } = f;
+  const destination = await registerDestination(admin, await privateChat(f));
   service.close();
   const event = service.adapter(service.connector(id)).normalize(envelope());
   service.bindings.begin(event);
-  const actor = await service.actor(event, '101');
-  service.enqueue(actor, event, '101', 'migration-destination');
-  const granted = await group(admin, id); assert.equal(granted.status, 200);
   // Recreate the two legacy organization columns in this persisted fixture before a real restart.
   for (const table of ['channel_connectors', 'channel_control_operations'])
     h.store.db.exec(`ALTER TABLE ${table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'github.com:10'`);
   h.store.db.exec(`ALTER TABLE channel_connectors ADD COLUMN actor_tenants TEXT NOT NULL DEFAULT '["actor-tenant"]'`);
-  const tables = ['channel_connectors', 'channel_control_operations', 'channel_credentials', 'external_identities', 'channel_group_scopes', 'channel_bind_requests', 'channel_outbox', 'scoped_grants'];
+  const tables = ['channel_connectors', 'channel_control_operations', 'channel_credentials', 'external_identities', 'channel_bind_requests', 'channel_outbox', 'scoped_grants'];
   const snapshot = () => Object.fromEntries(tables.map(table => [table, h.store.all(`SELECT * FROM ${table}`).map(row => {
     if (['channel_connectors', 'channel_control_operations'].includes(table)) { const { tenant_id, actor_tenants, ...rest } = row; return rest; }
     return row;
@@ -132,9 +130,9 @@ test('startup removes legacy organization and actor enterprise restrictions with
   assert.ok(!h.store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'actor_tenants'));
   const external = await post(h, id, envelope('/bind', { sender: { tenant_key: 'external-tenant' } }));
   assert.equal((await finished(h, external.value.operation_id)).state, 'completed');
-  assert.equal((await admin('/api/channels/operations/' + granted.value.operation_id)).status, 200);
+  assert.equal(h.store.get('SELECT state FROM channel_outbox WHERE id=?', destination).state, 'registered');
   assert.equal((await probe(admin, id)).status, 201);
-  const r = await post(h, id, envelope(directQuery('201', 'foreign')));
+  const r = await post(h, id, envelope('看看 201/foreign 任务'));
   assert.equal((await finished(h, r.value.operation_id)).state, 'completed');
   await h.stop(); await h.start();
   assert.equal((await admin('/api/channels/setup')).value.connectors[0].id, id);

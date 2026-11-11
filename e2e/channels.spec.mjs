@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { channelFixture, envelope, post, finished, until, directQuery, inGroup } from '../test/channel-fixture.mjs';
+import { channelFixture, envelope, post, finished, until, inGroup } from '../test/channel-fixture.mjs';
 
 test('Feishu user scenarios show the same management operation in Web and refuse unproved binding and private group data', async ({ page }) => {
   test.setTimeout(90000);
@@ -16,7 +16,7 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await page.goto(h.admin + '/#/settings/feishu/' + id + '/2');
     await expect(page.getByLabel('HTTP 回调地址', { exact: true })).toBeVisible();
     await page.screenshot({ path: '.tmp/channels-165/configuration-desktop.png', fullPage: true });
-    const query = await post(h, id, envelope(directQuery())); const queried = await finished(h, query.value.operation_id);
+    const query = await post(h, id, envelope('看看 blocked 任务的进展')); const queried = await finished(h, query.value.operation_id);
     const changed = await post(h, id, envelope('修改 agent-test-zone/admin-fixture-101 项目的提示词')); const result = await finished(h, changed.value.operation_id);
     const operation = h.store.get("SELECT * FROM management_commands WHERE channel='im'"); expect(operation.state).toBe('succeeded');
     await until(() => wire.sent.some(s => JSON.stringify(s.content).includes('已执行')));
@@ -35,13 +35,15 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     const unprovedResult = await finished(h, unproved.value.operation_id);
     expect(unprovedResult.error).toBe('binding_confirmation_invalid'); expect(h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grantsBefore);
     h.store.run("UPDATE installed_repositories SET private=1 WHERE repository_id='101'");
-    const group = await post(h, id, inGroup(directQuery())); const refused = await finished(h, group.value.operation_id);
-    expect(refused.error).toBe('channel_group_scope_required');
-    await until(() => wire.sent.some(s => s.receive_id === 'oc_group'));
+    // A group without a service role binding only learns how to bind one; it runs no management request.
+    const group = await post(h, id, inGroup('/project 101 看看 blocked 任务')); const refused = await finished(h, group.value.operation_id);
+    expect(refused.state).toBe('completed');
+    await until(() => wire.sent.some(s => s.receive_id === 'oc_group' && JSON.stringify(s.content).includes('本群尚未绑定群聊助手')));
     const groupReplies = wire.sent.filter(s => s.receive_id === 'oc_group');
     expect(JSON.stringify(groupReplies)).not.toMatch(/Project computer is stopped|environment_not_ready|Inspect task facts/);
     await page.goto(h.admin + '/#/settings/feishu/' + id + '/4');
-    await expect(page.getByText('channel_group_scope_required', { exact: false })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '连接健康与收发记录' })).toBeVisible();
+    await expect(page.getByText('群聊的项目范围在「身份与权限 → 飞书群聊助手」为每个群单独设置', { exact: false })).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: '.tmp/channels-165/diagnostics-mobile.png', fullPage: true });
@@ -51,7 +53,7 @@ test('Feishu user scenarios show the same management operation in Web and refuse
       prompt: { channel_operation: changed.value.operation_id, conversation_id: result.conversation_id, operation_id: operation.id, state: web.state, channel: web.channel,
         before_revision: web.before_revision, after_revision: web.after_revision, result: web.result },
       binding_failure: { state: unprovedResult.state, error: unprovedResult.error, grants_before: grantsBefore, grants_after: h.store.get('SELECT count(*) n FROM scoped_grants').n },
-      group_rejection: { operation_id: group.value.operation_id, state: refused.state, error: refused.error, leaked_private_facts: false }, page_errors: errors }, null, 2));
+      unbound_group: { operation_id: group.value.operation_id, state: refused.state, binding_hint: true, leaked_private_facts: false }, page_errors: errors }, null, 2));
     expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(h.directory, { recursive: true, force: true }); }
 });

@@ -1,10 +1,8 @@
 import type { IncomingHttpHeaders } from 'node:http';
 import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, restrictActor, type ActorContext } from '../identity/authorization.js';
-import { digest, fail, HttpError, object, randomId, text, type Json } from '../core/security.js';
-import { traceClean } from '../tasks/trace.js';
+import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { ManagementAgent } from '../management/agent.js';
-import { parameterHash } from '../management/service.js';
 import { managementFailure, managementStates, serviceFailure } from '../management/presentation.js';
 import { commands } from '../management/catalog.js';
 import { managementAssistant, serviceRole } from '../service-roles/roles.js';
@@ -69,7 +67,8 @@ export class ChannelService {
       const subject = externalSubject(e);
       if (!store.get("SELECT 1 FROM external_identities WHERE principal_id=? AND provider=? AND host=? AND connector=? AND external_tenant=? AND external_actor=? AND status='active'",
         command.principal_id, subject.provider, subject.host, subject.connector, subject.external_tenant, subject.external_actor)) fail(403, 'external_binding_required');
-      if (e.chat_type === 'group') this.groupScope(e, command.project_id);
+      // Groups submit commands only through their service binding (above); the /project group path was retired (#312).
+      if (e.chat_type === 'group') fail(403, 'channel_group_command_retired');
       else {
         const chat=store.get('SELECT id FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id);
         if(chat&&store.get('SELECT 1 FROM channel_personal_owners WHERE chat_id=?',chat.id))this.employees.guardPersonal(chat.id,command.principal_id,source!.id);
@@ -255,56 +254,91 @@ export class ChannelService {
         this.store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error='app_uninstalled' WHERE chat_id IN (SELECT id FROM channel_chats WHERE connector_id=?)", c.id);
         this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id IN (SELECT id FROM channel_chats WHERE connector_id=?)', c.id);
       }
-      if (event.kind === 'audience_changed') this.store.run('UPDATE channel_group_scopes SET audience_verified_until=0,revision=revision+1 WHERE connector_id=? AND chat_id=?', c.id, event.chat_id);
-      if (['bot_removed', 'chat_archived'].includes(event.kind)) this.store.run('UPDATE channel_group_scopes SET enabled=0,audience_verified_until=0,revision=revision+1 WHERE connector_id=? AND chat_id=?', c.id, event.chat_id);
     });
     return { operation_id: id, state };
   }
-  async actor(e: ChannelEvent, project?: string): Promise<ActorContext> {
+  async actor(e: ChannelEvent): Promise<ActorContext> {
     this.source(e);
-    // The selected project supplies its organization; the connection supplies only a verified identity.
-    return this.bindings.identities.resolveExternalActor(this.bindings.credential(e), null, project, () => {
-      this.source(e); if (project && e.chat_type === 'group') this.groupScope(e, project);
-    });
+    // The connection supplies only a verified identity; projects are chosen per request by the management assistant.
+    return this.bindings.identities.resolveExternalActor(this.bindings.credential(e), null, undefined, () => { this.source(e); });
   }
-  groupScope(e: ChannelEvent, project: string, field = 'summary'): Row {
-    const c = this.source(e);
-    const s = this.store.get('SELECT * FROM channel_group_scopes WHERE connector_id=? AND installation_tenant=? AND chat_id=? AND project_id=? AND enabled=1',
-      c.id, e.installation_tenant, e.chat_id, project);
-    // A public repository can still have private prompts, task logs and account configuration.
-    const privateRepo = field === 'result' || this.store.get('SELECT i.private FROM installed_repositories i JOIN repositories r ON r.account_id=i.account_id AND r.id=i.repository_id WHERE r.id=?', project)?.private !== 0;
-    if (!s || s.audience_verified_until <= Date.now() || !(JSON.parse(s.fields) as string[]).includes(field) || privateRepo && s.sensitivity !== 'private')
-      return fail(403, 'channel_group_scope_required');
-    return s;
-  }
-  link(actor: ActorContext, e: ChannelEvent, project: string, conversation: string): void {
-    this.management.service.scope(actor, project);
-    const target = this.management.conversation(actor, conversation);
-    if (target.row.scope !== 'project:' + project) fail(403, 'conversation_project_mismatch');
-    this.session(actor, e, project, conversation);
-  }
-  private session(actor: ActorContext, e: ChannelEvent, project: string, link?: string): Row {
-    // An empty project denotes the personal platform scope; model routing never selects a business target.
-    const keys = [e.connector_id, e.installation_tenant, e.actor_tenant, e.actor_id, e.chat_id, project?e.thread_id:'', project, actor.principal_id];
+  /** The bound user's personal management session in a private chat. */
+  private session(actor: ActorContext, e: ChannelEvent): Row {
+    const keys = [e.connector_id, e.installation_tenant, e.actor_tenant, e.actor_id, e.chat_id, '', '', actor.principal_id];
     const row = this.store.get(`SELECT * FROM channel_sessions WHERE connector_id=? AND installation_tenant=? AND actor_tenant=? AND actor_id=? AND chat_id=? AND thread_id=? AND project_id=? AND principal_id=?`, ...keys);
-    if (row) {
-      if (link) this.store.run('UPDATE channel_sessions SET conversation_id=? WHERE id=?', link, row.id);
-      return this.store.get('SELECT * FROM channel_sessions WHERE id=?', row.id)!;
-    }
-    const conversation = link ?? (this.management.create(actor, { scope: project?'project:' + project:'platform' }).conversation as Json).id;
-    const id = randomId();
+    if (row) return row;
+    const conversation = (this.management.create(actor, { scope: 'platform' }).conversation as Json).id, id = randomId();
     this.store.run('INSERT INTO channel_sessions(id,connector_id,installation_tenant,actor_tenant,actor_id,chat_id,thread_id,project_id,principal_id,conversation_id) VALUES(?,?,?,?,?,?,?,?,?,?)', id, ...keys, String(conversation));
-    if(!project)this.store.run('UPDATE channel_sessions SET context_revision=(SELECT context_revision FROM channel_chats WHERE connector_id=? AND chat_id=?),connector_revision=? WHERE id=?',e.connector_id,e.chat_id,e.connector_revision,id);
+    this.store.run('UPDATE channel_sessions SET context_revision=(SELECT context_revision FROM channel_chats WHERE connector_id=? AND chat_id=?),connector_revision=? WHERE id=?',e.connector_id,e.chat_id,e.connector_revision,id);
     return this.store.get('SELECT * FROM channel_sessions WHERE id=?', id)!;
   }
   private url(): string { return (this.options.origin ?? '') + '/#/management'; }
-  /** NotificationOutbox contract: callers register an authorized destination, never a raw webhook. */
-  enqueue(actor: ActorContext, e: ChannelEvent, project: string, key: string): Json {
+  /** A notification destination, registered in the console (#312): a private chat by its own bound owner, or a bound group by a
+   * manager of its binding for a project in its scope. Schedules consume the sealed registration; it never proves delivery. */
+  registerDestination(actor: ActorContext, id: string, input: Json): Json {
+    fields(input, ['project_id']); assertCurrent(actor);
+    const project = text(input.project_id), chat = this.employees.chat(id), c = this.connector(chat.connector_id);
     authorize(actor, 'schedules.manage', { project_id: project });
-    this.source(e); if (e.chat_type === 'group') this.groupScope(e, project);
-    // Schedules consume this sealed registration as a destination, never as proof of delivery.
-    const id = this.queue(e, card('通知已入队，尚未发送。', this.url()), 'notification:' + digest(JSON.stringify([actor.principal_id, project, e.connector_id, e.actor_tenant, e.chat_id, key])), undefined, { principal_id: actor.principal_id, project_id: project }, true);
-    return { operation_id: id, state: 'registered', sent: false };
+    const base = { provider: 'feishu' as const, connector_id: c.id, connector_revision: c.revision, app_id: chat.app_id, installation_tenant: chat.installation_tenant,
+      chat_id: chat.chat_id, chat_type: chat.chat_type, message_id: '', event_id: '', thread_id: '', created_at: Date.now(), kind: 'message' as const, content: '' };
+    let event: ChannelEvent, protection: Json;
+    if (chat.chat_type === 'p2p') {
+      const owner = this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?', chat.id, actor.principal_id);
+      if (!owner) return fail(403, 'channel_destination_forbidden');
+      const identity = this.employees.feishuIdentity(chat, actor.principal_id, { actor: owner.actor_id, tenant: owner.actor_tenant });
+      if (identity.external_actor !== owner.actor_id || identity.external_tenant !== owner.actor_tenant) fail(403, 'channel_destination_forbidden');
+      authorize(actor, 'tasks.read', { project_id: project });
+      event = { ...base, actor_tenant: owner.actor_tenant, actor_id: owner.actor_id };
+      protection = { principal_id: actor.principal_id, project_id: project, chat_id: chat.id };
+    } else {
+      const binding = this.serviceBindings.canView(actor, chat.id);
+      if (!binding?.enabled) return fail(403, 'channel_destination_forbidden');
+      if (!this.serviceBindings.reachable(binding, project, ['tasks.read'])) fail(403, 'channel_service_scope_paused');
+      event = { ...base, actor_tenant: '', actor_id: '' };
+      protection = { principal_id: actor.principal_id, project_id: project, chat_id: chat.id, binding_id: binding.id };
+    }
+    // One registration per chat, project and registrant; a revoked one frees the key (see revokeDestination).
+    const key = 'destination:' + digest(JSON.stringify([chat.id, project, actor.principal_id]));
+    return this.store.transaction(() => {
+      const existing = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key);
+      const created = existing?.id ?? this.queue(event, card('通知目的地已登记，尚未发送。'), key, undefined, protection, true);
+      if (!existing) this.store.audit(actor.principal_id, 'channel.destination.registered', created, project);
+      return this.destinationView(this.store.get('SELECT * FROM channel_outbox WHERE id=?', created)!);
+    });
+  }
+  private destinationView(row: Row): Json {
+    const { event, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
+    const chat = protection?.chat_id ? this.store.get('SELECT id FROM channel_chats WHERE id=?', protection.chat_id)
+      : this.store.get('SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', event.provider, event.app_id, event.installation_tenant, event.chat_id);
+    return { id: row.id, state: row.state, chat_id: chat?.id ?? null, chat_type: event.chat_type, project_id: protection?.project_id ?? null,
+      full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', protection?.project_id ?? '')?.full_name ?? null, registered_by: protection?.principal_id ?? null, created_at: row.created_at };
+  }
+  /** Registered destinations the actor registered (all of them for a platform manager). */
+  destinations(actor: ActorContext): Json {
+    assertCurrent(actor);
+    let platform = false; try { authorize(actor, 'platform.manage'); platform = true; } catch (error) { if (!(error instanceof HttpError)) throw error; }
+    return { destinations: this.store.all("SELECT * FROM channel_outbox WHERE state='registered' ORDER BY created_at").map(row => this.destinationView(row))
+      .filter(d => platform || d.registered_by === actor.principal_id) };
+  }
+  revokeDestination(actor: ActorContext, id: string): Json {
+    assertCurrent(actor);
+    const row = this.store.get("SELECT * FROM channel_outbox WHERE id=? AND state='registered'", id);
+    if (!row) return fail(404, 'channel_destination_not_found');
+    if (this.destinationView(row).registered_by !== actor.principal_id) authorize(actor, 'platform.manage');
+    // Schedules that named it stop at their next check; the deterministic key is released for a later registration.
+    this.store.transaction(() => {
+      this.store.run("UPDATE channel_outbox SET state='revoked',idempotency_key=idempotency_key||':revoked:'||id WHERE id=? AND state='registered'", id);
+      this.store.audit(actor.principal_id, 'channel.destination.revoked', id);
+    });
+    return { id, state: 'revoked' };
+  }
+  /** A group destination stays usable while the group's enabled binding still reaches the project. */
+  groupDestination(e: ChannelEvent, project: string): void {
+    const chat = this.store.get('SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', e.provider, e.app_id, e.installation_tenant, e.chat_id);
+    const binding = chat && this.serviceBindings.active(chat.id);
+    if (!binding) return fail(403, 'schedule_destination_binding_required');
+    this.serviceBindings.assertUsable(binding);
+    if (!this.serviceBindings.reachable(binding, project, ['tasks.read'])) fail(403, 'channel_service_scope_paused');
   }
   private queue(e: ChannelEvent, content: Json, key: string, source?: string, protection?: Json, registered = false, direct = false, update?: string): string {
     const previous = this.store.get('SELECT id FROM channel_outbox WHERE idempotency_key=?', key); if (previous) return previous.id;
@@ -321,8 +355,10 @@ export class ChannelService {
       this.queue(e, card('机器人会在应用获准的可见范围内记录本群消息并同步历史，仅查询本地记录；平台不可见或未同步的内容会标明。群聊助手须由已绑定飞书、对相关仓库有配置权限的维护人在控制台「身份与权限 → 飞书群聊助手」另行启用，并选择服务角色和项目范围。'), row.id + ':notice', row.id);
       this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return;
     }
-    if (e.kind === 'card') { await this.refreshCard(row, e); return; }
-    const content = e.content.trim().replace(/^\/chat\s+/,'');
+    // Result cards no longer carry refresh actions; a click on an older card is answered as stale.
+    if (e.kind === 'card') return fail(409, 'channel_card_stale');
+    // No /chat or /project syntax (#312): anything else is natural language for the assistant.
+    const content = e.content.trim();
     const reply = (message: string, link?: string) => this.queue(e, card(message, link), row.id + ':reply', row.id);
     if (['绑定', '/bind', '重新认证', '/reauth'].includes(content)) {
       const binding = this.bindings.begin(e);
@@ -340,12 +376,11 @@ export class ChannelService {
       const chat = this.store.get('SELECT * FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? AND chat_id=?', e.provider,e.app_id,e.installation_tenant,e.chat_id);
       // A bound group is served by its service role; legacy employees no longer receive messages.
       const binding = chat && e.chat_type==='group' ? this.serviceBindings.active(chat.id) : undefined;
-      const legacyCommand = /^\/project \S+\s+\/(?:query|command|link|destination)(?:\s|$)/.test(content);
-      if(e.chat_type==='p2p'&&!legacyCommand){
+      if(e.chat_type==='p2p'){
         if(!chat)return fail(403,'channel_chat_not_found');
         await this.personalMessage(row,e,chat,content);return;
       }
-      if (binding && chat && !legacyCommand) {
+      if (binding && chat) {
         if (this.business.has(chat.id)) { this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return; }
         const work = this.serviceMessage(row,e,chat,binding).catch(error=>{
           if(this.stopped)return;
@@ -354,33 +389,7 @@ export class ChannelService {
         }).finally(()=>this.business.delete(chat.id));
         this.business.set(chat.id,work);return;
       }
-      const selection = /^\/project ([^\s]+)(?:\s+([\s\S]*))?$/.exec(content);
-      if (!selection) { reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「身份与权限 → 飞书群聊助手」为本群选择服务角色和项目范围；个人绑定请在私聊发送“绑定”。'); this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id); return; }
-      const project = selection[1]!, request = selection[2] ?? '', actor = await this.actor(e, project);
-      this.management.service.scope(actor, project);
-      if (e.chat_type === 'group') this.groupScope(e, project);
-      const linked = /^\/link ([a-f0-9]{48})$/.exec(request);
-      if (request === '/destination' || request === '登记通知目的地') {
-        const registered = this.enqueue(actor, e, project, 'destination:' + row.id);
-        reply('通知目的地已登记：' + registered.operation_id + '。可在后台创建日报或事件订阅；登记不表示已发送通知。');
-      } else if (linked) { this.link(actor, e, project, linked[1]!); reply('已显式关联本人同一项目的管理会话。'); }
-      else {
-        const session = this.session(actor, e, project);
-        if (e.created_at < session.last_message_at) fail(409, 'channel_message_out_of_order');
-        const active = this.store.get("SELECT 1 FROM management_messages WHERE conversation_id=? AND state IN ('pending','running')", session.conversation_id);
-        if (active) { this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?", row.id); return; }
-        let input: Json = { content: request };
-        for (const mode of ['query', 'command']) if (request.startsWith('/' + mode + ' ')) {
-          let value: Json; try { value = object(JSON.parse(request.slice(mode.length + 2))); } catch { return fail(400, 'channel_command_invalid'); }
-          if ((value.target as Json)?.project_id !== project) fail(403, 'project_scope_mismatch');
-          input = { [mode]: value };
-        }
-        if (!request) fail(400, 'channel_request_required');
-        const message = this.management.send(actor, session.conversation_id, { ...input, source_message: 'feishu:' + row.id });
-        this.store.run('UPDATE channel_sessions SET last_message_at=? WHERE id=?', e.created_at, session.id);
-        this.store.run("UPDATE channel_inbox SET state='submitted',conversation_id=?,message_id=? WHERE id=?", session.conversation_id, String(message.id), row.id);
-        return;
-      }
+      reply('本群尚未绑定群聊助手。已绑定飞书的维护人可以在控制台「身份与权限 → 飞书群聊助手」为本群选择服务角色和项目范围；个人绑定请在私聊发送“绑定”。');
     }
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id);
   }
@@ -393,7 +402,7 @@ export class ChannelService {
       this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
       if(this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)?.context_revision!==revision)fail(409,'conversation_source_changed');
     });
-    let session=this.session(actor,e,'');
+    let session=this.session(actor,e);
     if(this.store.get("SELECT 1 FROM management_messages WHERE conversation_id=? AND state IN ('pending','running')",session.conversation_id)){
       this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;
     }
@@ -409,13 +418,8 @@ export class ChannelService {
     this.store.run("UPDATE channel_inbox SET state='submitted',conversation_id=?,message_id=?,context_revision=? WHERE id=?",session.conversation_id,String(message.id),revision,row.id);
   }
   private businessFence(chat:Row):string {
+    // Source fence of legacy employee tasks' results; a private chat's legacy tasks use the same shape with no grants.
     const visible=this.employees.visibleProjects(chat.id);
-    if(chat.chat_type==='p2p'){
-      const owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=?',chat.id);
-      return digest(JSON.stringify({owner,context:this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)?.context_revision,
-        principal:owner&&this.store.get('SELECT authorization_revision FROM principals WHERE id=?',owner.principal_id)?.authorization_revision,
-        projects:visible.map(project=>[project,roleConfiguration(this.store,project).revision,this.employees.personalRole(chat.id,project),this.store.get('SELECT enabled FROM policies WHERE repository_id=?',project)?.enabled])}));
-    }
     return digest(JSON.stringify({context:this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',chat.id)?.context_revision,
       audience:this.store.get('SELECT revision FROM channel_audiences WHERE chat_id=?',chat.id)?.revision,
       grants:this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? ORDER BY id',chat.id).map(g=>[g.id,g.revision,g.enabled,
@@ -425,7 +429,7 @@ export class ChannelService {
   }
   /** One message in a bound group: participation decides whether to answer; the reply is protected by the turn's fence. */
   private async serviceMessage(row:Row,e:ChannelEvent,chat:Row,binding:Row):Promise<void> {
-    const content=e.content.trim().replace(/^\/chat\s+/,'');
+    const content=e.content.trim();
     if(!e.addressed&&binding.participation!=='all'&&!(binding.participation==='questions'&&/[?？]\s*$/.test(content))){this.store.run("UPDATE channel_inbox SET state='completed',conversation_id=? WHERE id=?",chat.id,row.id);return;}
     const message=(this.ledger.query(chat.id,{message_id:e.message_id}).messages as Json[])[0];
     if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
@@ -440,63 +444,15 @@ export class ChannelService {
     if (!m || ['pending', 'running'].includes(m.state)) return;
     const e = this.store.secrets.open(row.payload, 'channel-event:' + row.id) as unknown as ChannelEvent;
     const session = this.store.get('SELECT * FROM channel_sessions WHERE conversation_id=? AND connector_id=? AND actor_id=? AND actor_tenant=? AND chat_id=?', row.conversation_id, e.connector_id, e.actor_id, e.actor_tenant, e.chat_id)!;
-    const actor = await this.actor(e, session.project_id||undefined);
-    if(!session.project_id){
-      const chat=this.store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id)!;
-      this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
-      const message=this.store.get('SELECT * FROM management_messages WHERE id=?',row.message_id)!;
-      if(message.authorization_revision!==actor.authorization_revision||session.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
-      this.queue(e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
-        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id});
-      this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);return;
-    }
-    const history = this.management.history(actor, row.conversation_id), events = (history.events as any[]).filter(v => v.message_id === row.message_id);
-    const operations = this.store.all('SELECT id,state FROM management_commands WHERE source_conversation=? AND source_message=?', row.conversation_id, 'feishu:' + row.id);
-    const summary = '管理消息 ' + row.message_id + '：' + m.state + '\n会话 ' + row.conversation_id +
-      operations.map(o => '\noperation ' + o.id + '：' + o.state).join('');
-    const receipts = operations.map(o => this.management.service.read(actor, o.id));
-    // Put durable receipts and version diffs first, before a potentially large query observation.
-    const details = JSON.stringify(traceClean({ operations: receipts, events }), null, 2);
-    const protection = { principal_id: actor.principal_id, project_id: session.project_id, authorization_revision: actor.authorization_revision };
-    let groupDetails = false;
-    if (e.chat_type === 'group') { this.groupScope(e, session.project_id); try { this.groupScope(e, session.project_id, 'result'); groupDetails = true; } catch { /* Details go to the authenticated operator's DM. */ } }
-    let token: string | undefined;
-    if (operations.length === 1) {
-      const operation = this.management.service.read(actor, operations[0]!.id); token = randomId();
-      this.store.run('INSERT INTO channel_cards VALUES(?,?,?,?,?,?,?,?,NULL)', digest(token), e.connector_id, actor.principal_id,
-        this.store.secrets.seal({...e,content:'',raw_content:''}, 'channel-card:' + digest(token)), session.project_id, String(operation.id), parameterHash(operation), Date.now() + 10 * 60_000);
-    }
-    let publicSummary = summary;
-    if (e.chat_type === 'group' && !groupDetails) {
-      const fields = JSON.parse(this.groupScope(e, session.project_id).fields) as string[];
-      publicSummary = '管理请求已处理。' + (fields.includes('status') ? '\n管理消息：' + m.state : '') +
-        (fields.includes('operation') ? '\n会话 ' + row.conversation_id + operations.map(o => '\noperation ' + o.id).join('') : '');
-      if (!fields.includes('operation') || !fields.includes('status')) token = undefined;
-    }
-    const requiredFields = e.chat_type === 'group' && !groupDetails ? (JSON.parse(this.groupScope(e, session.project_id).fields) as string[]).filter(f => ['summary', 'status', 'operation'].includes(f)) : [];
-    this.queue(e, card(publicSummary + (e.chat_type === 'p2p' || groupDetails ? '\n' + details : '\n详细结果请查看本人私聊或登录后台。'), this.url(), token), row.id + ':result', row.id, { ...protection, field: groupDetails ? 'result' : 'summary', required_fields: requiredFields });
-    if (e.chat_type === 'group' && !groupDetails) this.queue(e, card(summary + '\n' + details, this.url()), row.id + ':private', row.id, protection, false, true);
-    this.store.run("UPDATE channel_inbox SET state=? WHERE id=?", m.state === 'completed' ? 'completed' : 'failed', row.id);
-  }
-  private async refreshCard(row: Row, click: ChannelEvent): Promise<void> {
-    const c = this.store.get('SELECT * FROM channel_cards WHERE token_hash=?', digest(click.card_token ?? ''));
-    if (!c || c.connector_id !== click.connector_id || c.used_at || c.expires_at <= Date.now()) fail(409, 'channel_card_stale');
-    const original = this.store.secrets.open(c!.subject, 'channel-card:' + c!.token_hash) as unknown as ChannelEvent;
-    if (['app_id', 'installation_tenant', 'actor_tenant', 'actor_id', 'chat_id'].some(k => original[k as keyof ChannelEvent] !== click[k as keyof ChannelEvent])) fail(403, 'channel_card_operator_mismatch');
-    const actor = await this.actor(original, c!.project_id);
-    if (actor.principal_id !== c!.principal_id) fail(403, 'channel_card_operator_mismatch');
-    if (original.chat_type === 'group') this.groupScope(original, c!.project_id);
-    if (original.chat_type === 'group') { this.groupScope(original, c!.project_id, 'operation'); this.groupScope(original, c!.project_id, 'status'); }
-    const sent = this.store.all("SELECT payload,id FROM channel_outbox WHERE connector_id=? AND remote_message_id=? AND state='sent'", click.connector_id, click.message_id)
-      .some(o => JSON.stringify(this.store.secrets.open(o.payload, 'channel-outbox:' + o.id).delivery).includes(String(click.card_token)));
-    if (!sent) fail(403, 'channel_card_message_mismatch');
-    const operation = this.management.service.read(actor, c!.operation_id);
-    if (parameterHash(operation) !== c!.operation_version) fail(409, 'channel_card_stale');
-    // This card only refreshes an existing receipt. Writes and approvals use ManagementService contracts.
-    this.store.run('UPDATE channel_cards SET used_at=? WHERE token_hash=? AND used_at IS NULL', Date.now(), c!.token_hash);
-    this.queue(original, card('operation ' + operation.id + '：' + operation.state, this.url()), row.id + ':refresh', row.id,
-      { principal_id: actor.principal_id, project_id: c!.project_id, authorization_revision: actor.authorization_revision, field: 'operation', required_fields: ['operation', 'status'] }, false, false, click.message_id);
-    this.store.run("UPDATE channel_inbox SET state='completed' WHERE id=?", row.id);
+    const actor = await this.actor(e);
+    if(session.project_id){this.store.run("UPDATE channel_inbox SET state='failed',error='channel_project_session_retired' WHERE id=?",row.id);return;}
+    const chat=this.store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id)!;
+    this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
+    const message=this.store.get('SELECT * FROM management_messages WHERE id=?',row.message_id)!;
+    if(message.authorization_revision!==actor.authorization_revision||session.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
+    this.queue(e,card(this.personalReply(actor,message),this.url()),row.id+':result',row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
+      personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id});
+    this.store.run("UPDATE channel_inbox SET state=? WHERE id=?",m.state==='completed'?'completed':'failed',row.id);
   }
   private async deliver(row: Row): Promise<void> {
     const { event, delivery, protection } = this.store.secrets.open(row.payload, 'channel-outbox:' + row.id) as any;
@@ -529,7 +485,7 @@ export class ChannelService {
         this.store.run('INSERT OR REPLACE INTO channel_message_scopes VALUES(?,?,?,?)',chat.id,remote,protection.kind==='service_binding'?bindingScope(protection.binding_id):protection.project_id,protection.source_fence);
       });return;
     }
-    const actor = protection ? await this.actor(event, protection.project_id) : undefined;
+    const actor = protection ? await this.actor(event) : undefined;
     const guard = () => {
       const current = this.source(event);
       if (this.stopped || current.credential_ref !== c.credential_ref) fail(403, 'channel_connector_changed');
@@ -541,10 +497,8 @@ export class ChannelService {
           this.employees.guardPersonal(protection.personal_chat,actor.principal_id,protection.source_message);
           if(this.store.get('SELECT context_revision FROM channel_chats WHERE id=?',protection.personal_chat)?.context_revision!==protection.context_revision)fail(409,'conversation_source_changed');
         }
-        if (event.chat_type === 'group' && delivery.receive_id_type === 'chat_id') {
-          this.groupScope(event, protection.project_id, protection.field ?? 'summary');
-          for (const field of protection.required_fields ?? []) this.groupScope(event, protection.project_id, field);
-        }
+        // Protected group replies come only from service bindings now; an older queued project reply to a group is not sent.
+        if (event.chat_type === 'group' && delivery.receive_id_type === 'chat_id') fail(403, 'channel_group_reply_retired');
       }
     };
     guard();

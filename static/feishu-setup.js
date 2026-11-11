@@ -168,7 +168,7 @@ async function renderFeishuSetup(panel, request) {
   } else if (step === 3) {
     body.append(feishuList(['在飞书“版本管理与发布”创建新版本，核对机器人能力、默认消息与卡片权限，以及事件订阅和 card.action.trigger 卡片回调。已有应用新增权限或回调后也必须重新发布。',
       '设置应用可用范围，让需要使用机器人的成员能搜索和私聊它。发布版本，需要审核时等待企业管理员通过。',
-      '返回这里检查机器人信息。凭据可用不等于消息已经送达，下一步仍需实际绑定、查询并点击状态卡片。']),
+      '返回这里检查机器人信息。凭据可用不等于消息已经送达，下一步仍需实际绑定，并在私聊收到助手回复。']),
       channelLink('https://open.feishu.cn/app', '打开飞书发布应用', 'button-link'));
     const status = element('p', '', 'view-error'); status.setAttribute('role', 'status');
     const probe = button('检查已发布的机器人', async () => {
@@ -181,9 +181,9 @@ async function renderFeishuSetup(panel, request) {
     }, ''); body.append(probe, status); next('进入绑定与试用');
   } else {
     body.append(feishuList(['让每位使用者在机器人私聊发起 /bind，打开链接并使用本地账户或 GitHub 登录平台，核对当前账户后确认绑定，再回原私聊确认。',
-      '绑定后私聊发送 /project <项目ID> 查询任务状态，确认收到业务结果。绑定不增加权限，项目管理员仍需授权。',
-      '必须点击返回卡片上的“刷新执行状态”，确认收到更新结果后才完成接入。能聊天或读到机器人信息不代表卡片回调已配置；点击无响应时，检查“回调配置”的接收方式、card.action.trigger 订阅和已发布版本。',
-      '需要群内使用时，先在下方批准项目和群的接收范围，再在该群 @ 机器人发起请求。']),
+      '绑定后直接在私聊发送“你好”或“我能管理哪些项目”，确认收到助手回复后才完成接入。不需要先选项目；绑定不增加权限，项目管理员仍需授权。',
+      '需要群内使用时，由已绑定飞书、在该群中并对相关仓库有配置权限的维护人，在「身份与权限 → 飞书群聊助手」为该群选择服务角色和项目范围，再在群里 @ 机器人提问。',
+      '日报和事件订阅的通知目的地也在「身份与权限」页登记：私聊在「我的飞书私信会话」，群聊在对应的群聊助手处。']),
       channelLink('#/identity/feishu', '前往个人飞书身份绑定', 'button-link'), button('刷新收件与发送状态', () => render().catch(error), 'quiet'));
     await channelDiagnostics(c, panel);
   }

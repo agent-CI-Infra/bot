@@ -24,13 +24,15 @@ export class ChannelEmployees {
     if (this.stopped || chat.state !== 'active' || !c?.enabled || c.provider !== chat.provider || c.app_id !== chat.app_id || c.installation_tenant !== chat.installation_tenant) fail(403, 'channel_employee_source_inactive');
     return { ...chat, connector: c };
   }
-  private binding(chat: Row, principal: string, binding?: string): Row {
+  // One account may hold several Feishu identities for the same app (for example in two enterprises); a known speaker selects its own.
+  private binding(chat: Row, principal: string, binding?: string, subject?: { actor: string; tenant: string }): Row {
     const row = this.store.all("SELECT * FROM external_identities WHERE principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active'", principal)
-      .find(r => (!binding || r.id === binding) && String(r.connector).endsWith(':' + chat.app_id) && (!r.expires_at || r.expires_at > Date.now()));
+      .find(r => (!binding || r.id === binding) && (!subject || r.external_actor === subject.actor && r.external_tenant === subject.tenant)
+        && String(r.connector).endsWith(':' + chat.app_id) && (!r.expires_at || r.expires_at > Date.now()));
     if (!row) return fail(403, 'external_binding_required'); return row;
   }
   /** The principal's active Feishu identity for this chat's application. */
-  feishuIdentity(chat: Row, principal: string): Row { return this.binding(chat, principal); }
+  feishuIdentity(chat: Row, principal: string, subject?: { actor: string; tenant: string }): Row { return this.binding(chat, principal, undefined, subject); }
   private maintainer(grant: Row, chat: Row): Row {
     const actor = resolvePrincipalActor(this.store, grant.maintainer_id, null, grant.project_id, 'service');
     authorize(actor, 'config.write', { project_id: grant.project_id });
@@ -158,7 +160,8 @@ export class ChannelEmployees {
     const grant = this.store.get('SELECT * FROM channel_employee_grants WHERE principal_id=?', origin.principal_id ?? '');
     if (!grant) {
       const chat=origin.conversation_id&&this.store.get("SELECT * FROM channel_chats WHERE id=? AND chat_type='p2p'",origin.conversation_id);
-      if(chat){this.guardPersonal(chat.id,origin.principal_id,origin.source_message);if(!origin.source_task_id&&origin.source_role!==this.personalRole(chat.id,origin.project_id))fail(403,'channel_personal_role_changed');}
+      // A task a private chat created before #301 stays bound to that chat's owner and source message.
+      if(chat)this.guardPersonal(chat.id,origin.principal_id,origin.source_message);
       return;
     }
     this.assertGrant(grant);
@@ -179,7 +182,7 @@ export class ChannelEmployees {
   authorizeHistory(actor: ActorContext, id: string): void {
     try { authorize(actor, 'platform.manage'); return; } catch (error) { if ((error as any).code !== 'capability_forbidden') throw error; }
     const owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?',id,actor.principal_id);
-    if(owner){const binding=this.binding(this.chat(id),actor.principal_id);if(binding.external_actor===owner.actor_id&&binding.external_tenant===owner.actor_tenant)return;}
+    if(owner){const binding=this.binding(this.chat(id),actor.principal_id,undefined,{actor:owner.actor_id,tenant:owner.actor_tenant});if(binding.external_actor===owner.actor_id&&binding.external_tenant===owner.actor_tenant)return;}
     const grant = this.store.all('SELECT * FROM channel_employee_grants WHERE chat_id=? AND maintainer_id=? AND enabled=1', id, actor.principal_id)
       .find(g => { try { this.assertGrant(g); authorize(actor, 'config.write', { project_id: g.project_id }); return true; } catch { return false; } });
     if (!grant) fail(403, 'channel_history_forbidden');
@@ -191,9 +194,8 @@ export class ChannelEmployees {
       try{this.assertGrant(grant);if(actor)authorize(actor,'tasks.read',{project_id:grant.project_id});return true;}catch{return false;}
     }).map(g=>g.project_id);
   }
-  personalRole(id:string,project:string):string{return this.store.get('SELECT role_id FROM channel_personal_roles WHERE chat_id=? AND project_id=?',id,project)?.role_id??'reviewer';}
   personalOwner(id:string,event:ChannelEvent,actor:ActorContext):void{
-    const chat=this.chat(id),binding=this.binding(chat,actor.principal_id);
+    const chat=this.chat(id),binding=this.binding(chat,actor.principal_id,undefined,{actor:event.actor_id,tenant:event.actor_tenant});
     if(chat.chat_type!=='p2p'||binding.external_actor!==event.actor_id||binding.external_tenant!==event.actor_tenant)fail(403,'channel_personal_source_mismatch');
     const previous=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=?',id);
     if(previous&&(previous.actor_id!==event.actor_id||previous.actor_tenant!==event.actor_tenant))fail(403,'channel_personal_source_mismatch');
@@ -202,24 +204,10 @@ export class ChannelEmployees {
   guardPersonal(id:string,principal:string,source:string):void{
     const chat=this.chat(id),owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?',id,principal),row=this.store.get('SELECT payload FROM channel_inbox WHERE id=?',source);
     if(!owner||!row)fail(403,'channel_personal_source_mismatch');
-    const event=this.store.secrets.open(row!.payload,'channel-event:'+source) as unknown as ChannelEvent,binding=this.binding(chat,principal);
+    const event=this.store.secrets.open(row!.payload,'channel-event:'+source) as unknown as ChannelEvent,binding=this.binding(chat,principal,undefined,{actor:event.actor_id,tenant:event.actor_tenant});
     if(event.chat_id!==chat.chat_id||event.app_id!==chat.app_id||event.installation_tenant!==chat.installation_tenant||event.actor_id!==owner!.actor_id||event.actor_tenant!==owner!.actor_tenant||
       binding.external_actor!==event.actor_id||binding.external_tenant!==event.actor_tenant||event.kind!=='message')fail(403,'channel_personal_source_mismatch');
     this.currentMessage(chat,event);
-  }
-  configurePersonal(actor:ActorContext,id:string,input:Json):Json{
-    fields(input,['project_id','role_id','expected_revision']);const project=text(input.project_id),role=text(input.role_id);
-    const owner=this.store.get('SELECT * FROM channel_personal_owners WHERE chat_id=? AND principal_id=?',id,actor.principal_id);
-    if(!owner)fail(403,'channel_personal_source_mismatch');this.authorizeHistory(actor,id);authorize(actor,'config.write',{project_id:project});
-    const definition=roleConfiguration(this.store,project).roles.find(r=>r.role_id===role&&r.enabled);
-    if(!definition||definition.kind==='evaluator'||role==='coordinator')fail(403,'conversation_role_unavailable');
-    return this.store.transaction(()=>{
-      assertCurrent(actor);const previous=this.store.get('SELECT revision FROM channel_personal_roles WHERE chat_id=? AND project_id=?',id,project);
-      if(input.expected_revision!==(previous?.revision??0))fail(409,'channel_revision_conflict');
-      this.store.run('INSERT INTO channel_personal_roles VALUES(?,?,?,?) ON CONFLICT(chat_id,project_id) DO UPDATE SET role_id=excluded.role_id,revision=excluded.revision',id,project,role,(previous?.revision??0)+1);
-      this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?',id);this.store.audit(actor.principal_id,'channel.personal_role.configured',id,project);
-      return {conversation_id:id,role_id:role,revision:(previous?.revision??0)+1};
-    });
   }
   /** Groups the actor can pick: an active chat of an enabled app where the actor's bound Feishu identity has spoken. */
   selectableChats(actor: ActorContext): Row[] {
@@ -242,7 +230,6 @@ export class ChannelEmployees {
       if (g.enabled) try { this.assertGrant(g); } catch (e) { state = 'paused'; error = (e as any).code ?? 'channel_employee_unavailable'; }
       return { ...g, capabilities: JSON.parse(g.capabilities), state, error, conversation_id: g.chat_id };
     }), chats,personal_chats:this.store.all('SELECT c.id,c.chat_id,c.app_id FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=?',actor.principal_id),
-      personal_roles:this.store.all('SELECT r.* FROM channel_personal_roles r JOIN channel_personal_owners o ON o.chat_id=r.chat_id WHERE o.principal_id=?',actor.principal_id),
       projects: listEffectiveProjectAccess(this.store, actor.principal_id).filter(p => p.can_configure), capability_options: capabilities };
   }
   /** Refresh authority, never run business work. Queries themselves perform no provider reads. */

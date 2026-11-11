@@ -51,7 +51,7 @@ export class ScheduleService {
     this.channels.source(event);
     const tenant = this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', project)?.tenant_id;
     if (!tenant) fail(403, 'schedule_destination_project_mismatch');
-    if (event.chat_type === 'group') this.channels.groupScope(event, project, 'summary');
+    if (event.chat_type === 'group') this.channels.groupDestination(event, project);
     else {
       // A recipient's present read access is separate from a service schedule's execution rights.
       const recipient = resolvePrincipalActor(this.store, String(protection.principal_id), tenant, project, 'service');

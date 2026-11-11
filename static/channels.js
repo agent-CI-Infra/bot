@@ -118,14 +118,38 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_audience_unverified: '平台未提供完整成员范围，暂时无法核验。', channel_history_forbidden: '需要该群助手的配置人，或在其全部项目范围内有配置权限。',
   channel_revision_conflict: '这个群的配置已被其他人修改，请刷新本页后重新保存。', service_role_unavailable: '所选服务角色已停用。', service_role_not_bindable: '管理助手不能绑定到群聊。',
   channel_service_scope_paused: '配置人在全部所选仓库的权限都已变化，助手暂停。', channel_service_binding_disabled: '群聊助手已停用。',
+  channel_destination_forbidden: '只有私聊的本人，或能管理该群聊助手的人可以登记。', schedule_destination_binding_required: '这个群没有启用的群聊助手绑定。',
   channel_service_binding_forbidden: '只有配置人、超级管理员或在全部范围内有配置权限的维护人可以停用。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
   service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
 const employeeError = value => Object.entries(employeeErrors).find(([key]) => String(value).includes(key))?.[1] || String(value);
+// Notification destinations are registered here (#312); schedules and event subscriptions then pick them.
+function channelDestinations(chatId, projects, registered) {
+  const box = element('div', '', 'channel-destinations'), form = element('form', '', 'project-form');
+  box.append(element('strong', '通知目的地'));
+  for (const d of registered.filter(item => item.chat_id === chatId)) {
+    const row = element('div', '', 'channel-binding');
+    row.append(note(`已登记：${d.full_name || '项目已不可见'}（${new Date(d.created_at).toLocaleString()}）`), button('撤销此通知目的地', async () => {
+      try { await api('/api/channels/destinations/' + d.id, 'DELETE', {}); await start(); } catch (err) { error(err); }
+    }, 'quiet'));
+    box.append(row);
+  }
+  if (!projects.length) { box.append(note('没有可登记的项目。')); return box; }
+  const project = channelSelect(form, '通知项目', 'destination_project_' + chatId, projects.map(p => [p.id, p.full_name]));
+  const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
+  const save = element('button', '登记为通知目的地'); save.type = 'submit';
+  form.append(note('登记后，可以在项目「定时计划」中把日报和事件订阅发到这里；登记本身不发送消息，每次发送前仍检查当前权限。'), status, save);
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); save.disabled = true; status.textContent = '';
+    try { await api('/api/channels/chats/' + chatId + '/destinations', 'POST', { project_id: project.value }); await start(); }
+    catch (err) { status.textContent = employeeError(err.message); save.disabled = false; }
+  });
+  box.append(form); return box;
+}
 const participationOptions = [['mentions', '仅回应 @'], ['questions', '回应 @ 及以问号结尾的文字'], ['all', '读取每条新文字后判断是否发言']];
 const bindingStates = { active: '生效中', paused: '已暂停', disabled: '已停用' };
 // A group binds one service role and one project scope; members use it without binding themselves.
 async function channelServiceBindingSettings() {
-  const data = await api('/api/channels/service-bindings'), box = card('飞书群聊助手'), form = element('form', '', 'project-form');
+  const [data, { destinations }] = await Promise.all([api('/api/channels/service-bindings'), api('/api/channels/destinations')]), box = card('飞书群聊助手'), form = element('form', '', 'project-form');
   box.append(note('为机器人所在的群选择一个服务角色和项目范围（整个组织或多个仓库）。群成员无需绑定或授权，按这里的配置使用助手，也不需要先选项目。配置人需要已绑定飞书、在该群中，并对所选仓库（或整个组织）有配置权限；配置人失去某个仓库的权限时，只暂停该仓库。'));
   const chats = new Map([...data.chats.map(c => [c.id, `${c.app_name || c.app_id || '已配置群'} · ${c.chat_id}`]), ...data.bindings.filter(b => !data.chats.some(c => c.id === b.chat_id)).map(b => [b.chat_id, `${b.chat.app_name || '已配置群'} · ${b.chat.chat_id}`])]);
   const chat = channelSelect(form, '助手所在群', 'binding_chat', [...chats]);
@@ -194,6 +218,7 @@ async function channelServiceBindingSettings() {
       try { await api('/api/channels/chats/' + b.chat_id + '/service-binding', 'PUT', { enabled: false, expected_revision: b.revision }); await start(); }
       catch (err) { error(err); }
     }, 'quiet'));
+    if (b.enabled && b.can_manage) row.append(channelDestinations(b.chat_id, b.reachable_projects, destinations));
     row.append(history); box.append(row);
   }
   const legacy = data.legacy_employees.filter(g => g.enabled);
@@ -212,14 +237,14 @@ async function channelServiceBindingSettings() {
   return box;
 }
 async function channelPersonalChats() {
-  const data = await api('/api/channels/employees'), personal = card('我的飞书私信会话');
+  const [data, { destinations }] = await Promise.all([api('/api/channels/employees'), api('/api/channels/destinations')]), personal = card('我的飞书私信会话');
   personal.append(note('私信与控制台管理对话共用管理助手、当前授权、审批与执行回执。可按项目或任务名称提问并继续选择，无需先选项目。同一私信跨项目和话题延续上下文，个人记录不进入群聊。'));
   if (!data.personal_chats.length) personal.append(note('绑定后先在飞书私聊发一条普通消息，再刷新此页。'));
   for (const chat of data.personal_chats) {
     const row = element('article', '', 'channel-binding'), target = element('div');
     row.append(element('strong', '私信 ' + chat.chat_id), button('查看私信连续会话', () => channelConversation(chat.id, target).catch(error), 'quiet'),
       button('查询私信本地记录', () => channelEmployeeHistory({ chat_id: chat.id }, target).catch(error), 'quiet'));
-    row.append(target); personal.append(row);
+    row.append(channelDestinations(chat.id, data.projects.map(p => ({ id: p.id, full_name: p.full_name })), destinations), target); personal.append(row);
   }
   return personal;
 }
@@ -294,34 +319,11 @@ function channelSelect(form, caption, name, values, value) {
   form.append(field(caption, control)); return control;
 }
 async function channelDiagnostics(c, panel) {
-  const [{ groups }, { projects }, { operations }, { deliveries }] = await Promise.all([
-    api('/api/channels/connectors/' + c.id + '/groups'), api('/api/management/query', 'POST', { operation: 'list_projects', target: {}, arguments: { limit: 100 } }),
-    api('/api/channels/connectors/' + c.id + '/events'), api('/api/channels/connectors/' + c.id + '/outbox')]);
-  const view = card('连接健康与群接收范围');
+  const [{ operations }, { deliveries }] = await Promise.all([api('/api/channels/connectors/' + c.id + '/events'), api('/api/channels/connectors/' + c.id + '/outbox')]);
+  const view = card('连接健康与收发记录');
   view.append(facts([['连接状态', c.enabled ? '启用' : '停用'], ['传输状态', c.transport === 'http' ? 'HTTP 事件回调' : c.health.connection_state],
     ['最后收到事件', c.health.last_received_at ? new Date(c.health.last_received_at).toLocaleString() : '尚未收到'], ['诊断', c.health.last_error || '无'], ['待处理', c.health.queued], ['发送失败', c.health.failed]]),
-    note('应用鉴权成功或长连接已连接，都不能证明消息、卡片回调已配置。请完成发布并在飞书中实测。'));
-  const mapping = element('form', '', 'project-form');
-  const project = channelSelect(mapping, '项目', 'project', projects.map(p => [p.id, p.full_name]));
-  const chat = channelField(mapping, '群 chat_id', 'chat_id'); chat.required = true;
-  const sensitivity = channelSelect(mapping, '允许的敏感级别', 'sensitivity', [['public', '公开'], ['private', '私有']]);
-  const details = channelField(mapping, '允许群接收详细结果', 'details', '', 'checkbox'), attest = channelField(mapping, '我已核实群受众（授权一小时；成员变更即失效）', 'attest', '', 'checkbox');
-  const message = element('p', '', 'view-error'), approve = element('button', '批准或更新群范围'); message.setAttribute('role', 'alert'); approve.type = 'submit';
-  mapping.append(message, approve); approve.disabled = !project.options.length;
-  mapping.addEventListener('submit', async e => {
-    e.preventDefault(); approve.disabled = true; message.textContent = '';
-    const current = groups.find(s => s.chat_id === chat.value && s.project_id === project.value);
-    try { await api('/api/channels/connectors/' + c.id + '/groups', 'PUT', { chat_id: chat.value, project_id: project.value, fields: ['summary', 'status', 'operation', ...(details.checked ? ['result'] : [])], sensitivity: sensitivity.value,
-      audience_verified_until: attest.checked ? Date.now() + 3590000 : 0, enabled: true, expected_revision: current?.revision ?? 0 }); await render(); }
-    catch (err) { message.textContent = err.message; } finally { approve.disabled = !project.options.length; }
-  }); view.append(mapping);
-  for (const g of groups) {
-    const row = element('div', '', 'channel-binding'); row.append(note(`${g.chat_id} → 项目 ${g.project_id} · ${g.fields.join(', ')} · ${g.enabled && g.audience_verified_until > Date.now() ? '已核实受众' : '未授权或需重新核实'}`));
-    row.append(button('撤销群范围', async () => {
-      try { await api('/api/channels/connectors/' + c.id + '/groups', 'PUT', { chat_id: g.chat_id, project_id: g.project_id, fields: g.fields, sensitivity: g.sensitivity, audience_verified_until: 0, enabled: false, expected_revision: g.revision }); await render(); }
-      catch (err) { error(err); }
-    }, 'quiet')); view.append(row);
-  }
+    note('应用鉴权成功或长连接已连接，都不能证明消息已经送达。请完成发布并在飞书中实测。群聊的项目范围在「身份与权限 → 飞书群聊助手」为每个群单独设置。'));
   for (const op of operations.slice(0, 10)) view.append(note(`渠道操作 ${op.operation_id} · ${op.state}${op.error ? ' · ' + op.error : ''}${op.conversation_id ? ' · 会话 ' + op.conversation_id : ''}`));
   for (const d of deliveries.slice(0, 10)) view.append(note(`发送 ${d.id} · ${d.state} · 尝试 ${d.attempts}${d.last_error ? ' · ' + d.last_error : ''}`));
   panel.append(view);
