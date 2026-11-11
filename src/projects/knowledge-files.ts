@@ -17,10 +17,12 @@ const filePath = (value: unknown, root = false): string => {
   if(parts.length>32 || parts.some(part=>!part || ['.','..','.git'].includes(part.toLowerCase()) || /^\.(?:write|expired)-/.test(part) || Buffer.byteLength(part)>255)) fail(400,'invalid_note_path');
   return value as string;
 };
+// A legacy id is a physical file id by form: an old name that carries a control character still round-trips, and the
+// manager reports that file as quarantined instead of this route misrouting the request as an unknown id.
 const physicalId = (id:string) => {
   if (/^f:[a-f0-9]{32}$/.test(id)) return true;
   if (!/^n:[a-zA-Z0-9_-]+$/.test(id)) return false;
-  try { const name=Buffer.from(id.slice(2),'base64url').toString('utf8');return !filePath(name).includes('/') && 'n:'+Buffer.from(name).toString('base64url')===id; } catch { return false; }
+  try { const name=Buffer.from(id.slice(2),'base64url').toString('utf8');return !name.includes('/') && 'n:'+Buffer.from(name).toString('base64url')===id; } catch { return false; }
 };
 // A legacy title becomes a file name, so the same characters that a name may not carry are folded here instead of
 // failing the migration: a title is data, not a name its author chose on this filesystem.

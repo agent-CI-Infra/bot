@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, symlink, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Notes } from '../runner/notes.mjs';
@@ -30,6 +31,42 @@ test('legacy root names keep n: identities and history, and a newly created root
   const fresh=await tree.create('new.txt','new');assert.equal((await tree.read(legacy('new.txt'))).id,fresh.id);
   await tree.createDirectory('folder');assert.equal((await notes.list()).length,2);
   const searched=await tree.list({directory:'folder',query:'old'});assert.equal(searched.search_scope,'all_directories');assert.equal(searched.files[0].path,'old.txt');
+});
+
+test('a volume saved before control characters were refused keeps its healthy files and reports what it quarantined',async t=>{
+  // The previous rules let these names through, so a live volume can hold both an f: row and an n: row for them.
+  const {root,tree}=await fixture(t),healthy=await tree.create('healthy.txt','one');await tree.save(healthy.id,'two',1);
+  const legacyPath='ctl\u0001name.txt',opaquePath='ctl\u0002name.txt';
+  await writeFile(join(root,legacyPath),'old n row');await writeFile(join(root,opaquePath),'old f row');
+  const path=join(root,'.write-history/file-tree.json'),catalog=JSON.parse(await readFile(path,'utf8'));
+  catalog.files.push({id:legacy(legacyPath),path:legacyPath,aliases:[],history_key:'b'.repeat(64),legacy_paths:[legacyPath]});
+  catalog.files.push({id:'f:'+'c'.repeat(32),path:opaquePath,aliases:[legacy(opaquePath)],history_key:'d'.repeat(64),legacy_paths:[opaquePath]});
+  await writeFile(path,JSON.stringify(catalog));
+  // Opening the volume no longer fails on the two old rows: the healthy file lists, reads and writes, and the skipped
+  // rows are named in the response instead of disappearing.
+  const reopened=new FileTree(root),list=await reopened.list();
+  assert.deepEqual(list.files.map(file=>file.path),['healthy.txt']);
+  assert.deepEqual(list.quarantined.map(row=>row.path).sort(),[legacyPath,opaquePath].sort());
+  assert.ok(list.quarantined.every(row=>row.reason==='unsupported_name'));
+  assert.equal((await reopened.read(healthy.id)).content,'two');
+  assert.equal((await reopened.save(healthy.id,'three',2)).revision,3);
+  assert.equal((await reopened.create('later.txt','new')).path,'later.txt');
+  assert.deepEqual((await reopened.list()).files.map(file=>file.path),['healthy.txt','later.txt']);
+  assert.equal((await reopened.list()).quarantined.length,2);
+  await assert.rejects(reopened.read(legacy(legacyPath)),/note_not_found/);
+  // The rows stay in the catalog and the files stay on disk: nothing was renamed, deleted or rewritten.
+  const saved=JSON.parse(await readFile(path,'utf8'));
+  assert.deepEqual(saved.files.filter(row=>row.path.includes('\u0001')||row.path.includes('\u0002')).map(row=>row.path).sort(),[legacyPath,opaquePath].sort());
+  assert.equal(await readFile(join(root,legacyPath),'utf8'),'old n row');assert.equal(await readFile(join(root,opaquePath),'utf8'),'old f row');
+});
+
+test('a schema 1 history saved for an old control-character name is skipped while healthy histories still list',async t=>{
+  const {root}=await fixture(t),notes=new Notes(root);await notes.write('healthy.txt','one');
+  const bad='ctl\u0002name.txt';await writeFile(join(root,bad),'old');
+  const history=join(root,'.write-history'),name=createHash('sha256').update(bad).digest('hex')+'.json';
+  await writeFile(join(history,name),JSON.stringify({schema:1,name:bad,versions:[{revision:1,created_at:'2026-01-01T00:00:00.000Z',actor:'workspace',deleted:false,sha256:'e'.repeat(64),bytes:3}]}));
+  const files=(await new Notes(root).files()).files;
+  assert.deepEqual(files.map(file=>file.name),['healthy.txt']);
 });
 
 test('revision conflicts, deletion and restore preserve all prior content and do not replace another path',async t=>{

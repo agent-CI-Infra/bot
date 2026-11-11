@@ -5,30 +5,39 @@ import { noteComponent, notePath, withNoteDirectory, withNoteParent } from './no
 
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 export const legacyNoteId = name => 'n:' + Buffer.from(name).toString('base64url');
+// The form a legacy id may encode: one path component, never a separator or an internal name. Control characters are
+// allowed here because ids written before the current contract still carry them; addressability is checked separately.
+const legacyComponent = name => typeof name==='string' && !!name && !name.includes('/') && !name.includes('\\') && !['.','..','.git'].includes(name.toLowerCase()) && !name.startsWith('.write-') && !name.startsWith('.expired-');
 export function validNoteId(id) {
   if (typeof id !== 'string') return false;
   if (/^f:[a-f0-9]{32}$/.test(id)) return true;
   if (!/^n:[a-zA-Z0-9_-]+$/.test(id)) return false;
-  try { const name=Buffer.from(id.slice(2),'base64url').toString('utf8');return legacyNoteId(noteComponent(name))===id; } catch { return false; }
+  try { const name=Buffer.from(id.slice(2),'base64url').toString('utf8');return legacyComponent(name) && legacyNoteId(name)===id; } catch { return false; }
 }
 const identity = info => info && ({ dev: info.dev.toString(), ino: info.ino.toString() });
 const same = (info, saved) => !!info && !!saved && info.dev.toString()===saved.dev && info.ino.toString()===saved.ino;
+// A path is addressable when the current contract can name it; a legacy record that is not stays quarantined.
+const addressable = path => { try { notePath(path); return true; } catch { return false; } };
 
 // Paths may change; history keys and public ids do not. The same volume lease protects catalog and content writes.
 export class NoteCatalog {
   constructor(store,value) {
-    this.store=store;this.value=value;this.paths=new Map();this.refs=new Map();this.legacy=new Map();this.histories=new Set();
+    this.store=store;this.value=value;this.paths=new Map();this.refs=new Map();this.legacy=new Map();this.histories=new Set();this.quarantined=[];
     if(value.schema!==1||!Number.isSafeInteger(value.revision)||value.revision<0||!Array.isArray(value.files))fail('invalid_notes_catalog');
     for(const row of value.files){
       if(!row||!validNoteId(row.id)||!Array.isArray(row.aliases)||!Array.isArray(row.legacy_paths)||!/^[a-f0-9]{64}$/.test(row.history_key))fail('invalid_notes_catalog');
-      try{notePath(row.path);row.legacy_paths.forEach(path=>notePath(path));}catch{fail('invalid_notes_catalog');}
+      // A file created before this contract may still be on disk under a name that carries a control character. Keep its
+      // record (nothing is renamed or deleted) but do not index a path no request can address, so one such file cannot
+      // fail the whole volume or hide healthy files next to it. The rows are reported to the listing as quarantined.
+      if(!addressable(row.path)||!row.legacy_paths.every(addressable)){this.quarantined.push(row);continue;}
       if(this.paths.has(row.path)||this.histories.has(row.history_key))fail('invalid_notes_catalog');this.paths.set(row.path,row);this.histories.add(row.history_key);
       for(const ref of [row.id,...row.aliases]){if(!validNoteId(ref)||this.refs.has(ref))fail('invalid_notes_catalog');this.refs.set(ref,row);}
       for(const path of row.legacy_paths){if(this.legacy.has(path))fail('invalid_notes_catalog');this.legacy.set(path,row);}
     }
     if(value.pending){const p=value.pending;
-      if(!/^[a-f0-9]{24}$/.test(p.operation_id)||!this.refs.has(p.file_id)||typeof p.actor!=='string'||p.actor.length>240||typeof p.deleted!=='boolean')fail('invalid_notes_catalog');
-      try{notePath(p.from);notePath(p.to);}catch{fail('invalid_notes_catalog');}
+      if(!/^[a-f0-9]{24}$/.test(p.operation_id)||typeof p.actor!=='string'||p.actor.length>240||typeof p.deleted!=='boolean')fail('invalid_notes_catalog');
+      // The file a move belongs to may be quarantined above; recover() abandons that record under the volume lock.
+      if(this.refs.has(p.file_id))try{notePath(p.from);notePath(p.to);}catch{fail('invalid_notes_catalog');}
       if(!p.deleted&&(!p.source||!/^\d+$/.test(p.source.dev)||!/^\d+$/.test(p.source.ino)))fail('invalid_notes_catalog');
     }
   }
@@ -63,11 +72,15 @@ export class NoteCatalog {
   }
   async recover(check){
     const pending=this.value.pending;if(!pending)return;
-    const row=this.refs.get(pending.file_id);if(!row||![pending.from,pending.to].includes(row.path))fail('invalid_notes_catalog');
+    const cancel=async reason=>{this.value.pending=null;await this.save(check);return {reason};};
+    const row=this.refs.get(pending.file_id);
+    // The move belongs to a quarantined file whose paths can no longer be addressed: abandon the record so the rest of
+    // the volume stays readable and writable, and leave the two paths on disk untouched.
+    if(!row)return cancel('note_move_unavailable');
+    if(![pending.from,pending.to].includes(row.path))fail('invalid_notes_catalog');
     const other=this.paths.get(pending.to);if(other&&other!==row)fail('invalid_notes_catalog');
     let source=await this.entry(pending.from),target=await this.entry(pending.to);
     if(target&&!target.isFile()||source&&!source.isFile())fail('invalid_note_file');
-    const cancel=async reason=>{this.value.pending=null;await this.save(check);return {reason};};
     if(pending.deleted){if(target&&row.path===pending.from)return cancel('note_path_conflict');}
     else if(row.path===pending.from){
       if(!target&&same(source,pending.source)){

@@ -156,3 +156,12 @@ test('a file name or a moved path carrying a control character is refused by the
  assert.deepEqual([badDir.status,badList.status],[400,400]);
  assert.equal((await admin(base+'/'+encodeURIComponent(ok.id))).value.file.content,'one');
 });
+test('a legacy knowledge title with a control character is folded into a usable file name',async t=>{
+ // A title is data rather than a name its author chose here, so the migration folds the character instead of failing.
+ const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const created=await admin('/api/repositories/101/memories','POST',{key:'control-title',expected_revision:0,kind:'experience',body:'body',sources:[{reference:'source'}],reason:'initial',catalog:{audience:'role:dev',title:'bad\u0001title'}});
+ assert.equal(created.status,201,JSON.stringify(created.value));const id=created.value.memory.id;
+ const list=await admin('/api/repositories/101/knowledge-files');assert.equal(list.status,200);
+ const file=list.value.files.find(entry=>entry.id==='m:'+id);
+ assert.equal(file.name,'bad-title--'+id.slice(0,8)+'.md');assert.equal(file.path,file.name);
+});
