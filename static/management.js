@@ -220,7 +220,23 @@ function managementReceiptBody(receipt) {
   overview.append(facts([['操作', `${operation}（${receipt.operation}）`], ['项目', projectLine], ['发起人', initiator],
     ['渠道', managementChannels[receipt.channel] ?? receipt.channel], ['版本', version],
     ['提交时间', timestamp(receipt.created_at)], ['更新时间', timestamp(receipt.updated_at)],
-    ['幂等键', receipt.idempotency_key], ['参数指纹', receipt.parameter_hash ? receipt.parameter_hash.slice(0, 12) : null]]));
+    ['参数指纹', receipt.parameter_hash ? receipt.parameter_hash.slice(0, 12) : null]]));
+  // The key alone only means something with the rule it drives (#355): the same principal submitting the same key and
+  // the same arguments gets this receipt back instead of a second execution. A receipt without one says so, because an
+  // empty cell would read as "a repeat always runs again".
+  const idempotency = element('div', ''); idempotency.dataset.receiptIdempotency = '';
+  idempotency.append(facts([['幂等键', receipt.idempotency_key]]));
+  idempotency.append(element('p', receipt.idempotency_key
+    ? '同一个幂等键重放不会重复执行：同一发起人用同一个键和同一份参数再提交，服务端直接返回这份回执，不再执行一次。'
+    : '这条回执没有幂等键：服务端无法用它识别重放，重复提交会再执行一次。', 'muted'));
+  overview.append(idempotency);
+  // What the command is expected to affect. The server does not record it today, so the page says that rather than
+  // leaving the reader to assume "nothing".
+  const impactValue = [receipt.result?.impact, receipt.impact].find(value => typeof value === 'string' && value.trim());
+  const impact = element('div', ''); impact.dataset.receiptImpact = '';
+  impact.append(facts([['影响', impactValue]]));
+  impact.append(element('p', impactValue ? '上面是服务端为这次操作记录的影响描述。' : '服务端未提供影响描述：这次操作会影响什么，只能从「具体变更」和「配置差异」里读。', 'muted'));
+  overview.append(impact);
   nodes.push(overview);
   // What the command named and what it wrote, as fields instead of one JSON blob.
   const change = card('具体变更'), target = element('div', ''); target.dataset.receiptTarget = '';
@@ -245,8 +261,11 @@ function managementReceiptBody(receipt) {
     table.append(thead, tbody); const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); differenceBox.append(wrap);
   } else differenceBox.append(element('p', '这个操作不回执字段级差异；执行结果写在下面的回执里。', 'muted'));
   difference.append(differenceBox); nodes.push(difference);
-  // The result: what the server recorded, with the sentence a person needs beside the code it returned.
-  const result = card('执行结果'), resultBox = element('div', ''); resultBox.dataset.receiptResult = '';
+  // The outcome gets the section its state deserves (#355): a success, a refusal and an unconfirmed result read
+  // differently, so they never share one block. What is not the outcome — links, notices, the receipt id — stays in its
+  // own record section, so a refusal cannot be mistaken for a result.
+  const resultTitles = { succeeded: '执行结果', failed: '执行失败', not_operator: '未执行', rejected: '未执行', unknown: '结果待确认', pending: '执行进度', executing: '执行进度' };
+  const result = card(resultTitles[shown] ?? '执行结果'), resultBox = element('div', ''); resultBox.dataset.receiptResult = shown;
   const outcome = receipt.result || {};
   if (receipt.state === 'failed' || shown === 'not_operator') {
     resultBox.append(element('p', '命令未执行：' + (managementFailureHints[outcome.error] ?? '服务端拒绝了这个操作，原因见下方代码。')));
@@ -256,16 +275,26 @@ function managementReceiptBody(receipt) {
     resultBox.append(facts([['错误代码', String(outcome.error ?? '未提供')]]));
   } else if (receipt.state === 'pending' || receipt.state === 'executing') {
     resultBox.append(element('p', '结果还没出来：执行结束后回执会更新，刷新这一页即可看到最新状态。'));
+  } else if (shown === 'rejected') {
+    resultBox.append(element('p', '这条命令在审批流程取消前被拒绝，没有执行，也没有修改任何东西。'));
+  } else if (shown === 'succeeded') {
+    // A successful command says so in its own words instead of leaving an empty section beside the state badge.
+    resultBox.append(element('p', '已执行，服务端没有记录错误。'));
+    if (receipt.after_revision) resultBox.append(facts([['执行后版本', receipt.after_revision.slice(0, 12)]]));
   }
-  if (outcome.notice) resultBox.append(element('p', String(outcome.notice)));
-  if (outcome.pr_url) resultBox.append(managementReceiptLink(String(outcome.pr_url), '查看配置 PR（待合入）'));
-  if (outcome.configuration_url) resultBox.append(managementReceiptLink(String(outcome.configuration_url), '查看当前配置'));
-  const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? outcome.id : null);
-  if (taskId) resultBox.append(managementReceiptLink('#/projects/' + receipt.project_id + '/activity', '查看任务 ' + taskId));
-  if (outcome.rollback) resultBox.append(element('p', '这条回执带有原值回滚；需要回滚时在管理对话里发起，会重新校验权限与版本。', 'muted'));
-  const record = element('p', ''); record.append('回执 ID ' + receipt.id + ' · ', managementReceiptLink('/api/management/commands/' + receipt.id, '原始回执（JSON）'));
-  resultBox.append(record);
   result.append(resultBox); nodes.push(result);
+  // Everything that is a record of the command rather than its outcome: server notes, the links it produced and the
+  // receipt id with the raw JSON behind it.
+  const recordCard = card('回执记录'), recordBox = element('div', ''); recordBox.dataset.receiptRecord = '';
+  if (outcome.notice) recordBox.append(element('p', String(outcome.notice)));
+  if (outcome.pr_url) recordBox.append(managementReceiptLink(String(outcome.pr_url), '查看配置 PR（待合入）'));
+  if (outcome.configuration_url) recordBox.append(managementReceiptLink(String(outcome.configuration_url), '查看当前配置'));
+  const taskId = receipt.target?.task_id ?? (receipt.operation === 'task.create' ? outcome.id : null);
+  if (taskId) recordBox.append(managementReceiptLink('#/projects/' + receipt.project_id + '/activity', '查看任务 ' + taskId));
+  if (outcome.rollback) recordBox.append(element('p', '这条回执带有原值回滚；需要回滚时在管理对话里发起，会重新校验权限与版本。', 'muted'));
+  const record = element('p', ''); record.append('回执 ID ' + receipt.id + ' · ', managementReceiptLink('/api/management/commands/' + receipt.id, '原始回执（JSON）'));
+  recordBox.append(record);
+  recordCard.append(recordBox); nodes.push(recordCard);
   // Read-only by design: retry and reconcile are executions, and they belong to the conversation that can show them.
   nodes.push(element('p', '这一页只读：不提供批准、重试或对账。需要重试或对账时回管理对话，那里的操作会重新校验权限与版本。', 'management-receipt-page-note'));
   return nodes;
