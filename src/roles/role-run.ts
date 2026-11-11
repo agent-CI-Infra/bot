@@ -307,8 +307,9 @@ export function admitRun(s: Store, input: { task: Row; role: string; kind: strin
   const facts = input.environmentFacts;
   provided.run_isolation = { ok: c.isolation === 'run_environment' && !!facts?.verified && facts.isolation === 'run_container', basis: `harness:${c.isolation ?? 'undeclared'};environment:${facts ? (facts.verified ? 'verified' : 'unverified') : 'none'}`, evidence: facts?.evidence ?? null };
   const required = [...new Set([...requiredCapabilities(input.kind, input.environment), ...(input.required ?? [])])], missing = required.filter(name => !provided[name]?.ok);
-  // A project that configured a per-role limit gets it read here; a project that did not set one pays no query and its
-  // admission record stays exactly the shape it had before admission existed.
+  // A project that configured a per-role limit gets it read here. A project that did not set one still reads the policy
+  // and settings rows to find that out, but counts no run rows, and its admission record stays exactly the shape it had
+  // before admission existed.
   const capacity = roleCapacity(s, String(input.task.repository_id), input.role, input.kind);
   const admission = { protocol: roleRunProtocol.id, role: input.role, kind: input.kind, harness: `${input.harness.id}@${input.harness.version}`, environment: input.environment?.id ?? null, required, missing, provided: Object.fromEntries(required.map(name => [name, provided[name]])), admitted: !missing.length, ...(capacity ? { capacity } : {}) };
   if (input.record !== false) traceEvent(s, String(input.task.id), 'role_run_admission', admission, input.task.trace_run_id, 'framework');

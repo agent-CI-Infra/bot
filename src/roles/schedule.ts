@@ -207,9 +207,9 @@ export function stageBudgetUsage(s: Store, assignment?: string) {
 export const stageBudgetExceeded=(s:Store,assignment?:string)=>stageBudgetUsage(s,assignment)?.exceeded??null;
 function stageRuns(s:Store,taskId:string,plan:Row,stageId:string) {
   // A run refused at admission (the role was at its concurrency limit) has a task_runs row but never started: counting it
-  // would spend a stage attempt and stage wall time on a wait. It is the only stopped-with-no-work row, and the reason is
-  // what distinguishes it, because `status` alone cannot.
-  return s.all('SELECT r.id,r.started_at,r.ended_at FROM task_runs r JOIN task_stage_assignments a ON a.assignment_id=r.assignment_id JOIN task_stage_plans p ON p.task_id=a.task_id AND p.revision=a.plan_revision WHERE a.task_id=? AND p.contract_revision=? AND p.policy_hash=? AND a.stage_id=? AND NOT (r.status=\'stopped\' AND r.stop_reason=\'role_capacity\')',taskId,plan.contract_revision,plan.policy_hash,stageId);
+  // would spend a stage attempt and stage wall time on a wait. `stop_reason` is what distinguishes it — `status` alone
+  // cannot — and `IS NOT` keeps the comparison null-safe, so a stopped row with no reason still counts.
+  return s.all('SELECT r.id,r.started_at,r.ended_at FROM task_runs r JOIN task_stage_assignments a ON a.assignment_id=r.assignment_id JOIN task_stage_plans p ON p.task_id=a.task_id AND p.revision=a.plan_revision WHERE a.task_id=? AND p.contract_revision=? AND p.policy_hash=? AND a.stage_id=? AND r.stop_reason IS NOT \'role_capacity\'',taskId,plan.contract_revision,plan.policy_hash,stageId);
 }
 export function assertStageStart(s:Store,taskId:string,assignment:string|undefined,kind:string) {
   assertStageRun(s,taskId,assignment,kind);
