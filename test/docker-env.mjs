@@ -192,10 +192,15 @@ try {
     const machine=page.locator('#machine-status');await machine.waitFor();assert.equal(await page.locator('.project-nav a').count(),12);
     assert.equal(await page.locator('.project-nav').getByRole('link',{name:'项目总览',exact:true}).count(),1);
     assert.equal(await page.locator('.project-nav').getByRole('link',{name:'成员',exact:true}).count(),1);
-    await machine.getByRole('button',{name:'停止',exact:true}).click();await machine.locator('.status',{hasText:'已停止'}).waitFor();
-    await machine.getByRole('button',{name:'启动',exact:true}).click();await machine.locator('.status',{hasText:'就绪'}).waitFor();
+    // Check the live observation, not the same text in the folded persistent record.
+    const liveState=machine.locator('.side-card').filter({has:page.getByRole('heading',{name:'机器',exact:true})}).locator(':scope > .facts .status');
+    await machine.getByRole('button',{name:'停止',exact:true}).click();await liveState.filter({hasText:'已停止'}).waitFor();
+    await machine.getByRole('button',{name:'启动',exact:true}).click();await liveState.filter({hasText:'就绪'}).waitFor();
     // Reset asks in the console's own confirmation dialog.
-    await machine.getByRole('button',{name:'重置',exact:true}).click();await page.locator('dialog[open]').getByRole('button',{name:'重置',exact:true}).click();await machine.getByText('g3',{exact:true}).waitFor();
+    await machine.getByRole('button',{name:'重置',exact:true}).click();await page.locator('dialog[open]').getByRole('button',{name:'重置',exact:true}).click();
+    await wait(async()=> (await manager('101')).generation===3,'page reset generation');await liveState.filter({hasText:'就绪'}).waitFor();
+    await machine.getByText('g3',{exact:true}).waitFor({state:'attached'});
+    await machine.getByText('查看电脑记录与技术信息',{exact:true}).click();await machine.getByText('g3',{exact:true}).waitFor();
     await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:'.tmp/project-env/project-mobile.png',fullPage:true});
     assert.deepEqual(errors,[]);passed('desktop and mobile environment page obey administrator scope');
   } finally {await browser.close();}
