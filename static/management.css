@@ -121,6 +121,14 @@ body:has(#management-launcher) main { padding-bottom: calc(96px + env(safe-area-
 .management-forms :is(select,textarea,input) { min-width: 0; width: 100%; font-size: 12px; }
 .management-forms button { margin: 3px 4px 3px 0; font-size: 12px; }
 .management-forms p { overflow-wrap: anywhere; line-height: 1.6; }
+/* A write is confirmed before it is sent (#355): the preview repeats the tool-section frame, so the pending command reads
+   as one more step of 快捷操作, and long arguments wrap instead of widening the panel. */
+.management-command-preview-slot:empty { display: none; }
+.management-command-preview { display: grid; gap: 6px; padding: 12px; border: 1px solid #e2c98f; border-radius: 8px; background: #fffdf6; }
+.management-command-preview h3 { margin: 0 0 4px; font-size: 14px; }
+.management-command-preview .facts { margin: 0; }
+.management-command-preview .facts dd { white-space: pre-wrap; }
+.management-command-preview .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
 .management-panel textarea { width: 100%; box-sizing: border-box; }
 .management-status-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; padding: 10px 18px 6px; }
 .management-status { min-width: 0; margin: 0; padding: 0; color: #7b8d95; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
