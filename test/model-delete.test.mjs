@@ -4,10 +4,11 @@ import { harness, setup, account, repository, testPassword } from './helpers.mjs
 import { selectedModel } from '../dist/agent/model.js';
 import { beginModelRequest, finishModelRequest } from '../dist/metrics/accounting.js';
 import { loadConsole } from './console-page.mjs';
+import { TaskEngine } from '../dist/agent/engine.js';
 
 const pricing = { currency: 'USD', input_per_million: 2, output_per_million: 10, cache_per_million: 0.2 };
-async function fixture(t) {
-  const h = await harness(t), { admin } = await setup(h), a = await account(admin);
+async function fixture(t, roles = false) {
+  const h = await harness(t, undefined, roles ? store => ({ engine: new TaskEngine(store, { call: async () => null }) }) : {}), { admin } = await setup(h), a = await account(admin);
   await repository(admin, a.id, '101'); await repository(admin, a.id, '202');
   const password = testPassword(), member = h.client();
   await admin('/api/users', 'POST', { username: 'member', password, repository_ids: ['101'] });
@@ -105,6 +106,56 @@ test('deletion rolls every change back when its audit fails, and an unused model
   assert.equal((await admin(`/api/models/${model.id}`, 'DELETE', {})).status, 404);
 });
 
+async function saveRole(client, repo, modelId, { expected_revision = 0, enabled = true, name = 'Role-only reviewer' } = {}) {
+  const result = await client(`/api/repositories/${repo}/roles`, 'PUT', { expected_revision, enabled: false, roles: [{
+    role_id: 'reviewer', name, enabled, persona_prompt: 'Private role prompt', harness_ref: { id: 'native' },
+    model_profile_ref: modelId === null ? null : { model_id: modelId, api: 'openai-chat-completions', tool_calls: true, structured_output: 'tool_call' }
+  }] });
+  assert.equal(result.status, 200, JSON.stringify(result.value)); return result.value.configuration.revision;
+}
+
+test('model detail counts saved role-only references, including disabled roles, without counting historical revisions or mutating configuration', async t => {
+  const { h, admin, member, create } = await fixture(t, true), model = await create(member, '101');
+  const revision = await saveRole(member, '101', model.id, { enabled: false });
+  const before = ['settings', 'role_config_revisions', 'role_snapshots', 'audit'].map(table => h.store.all(`SELECT * FROM ${table}`));
+  const detail = (await member(`/api/models/${model.id}`)).value.model;
+  assert.deepEqual(detail.used_by, []); assert.equal(detail.onboarding_default, false);
+  assert.deepEqual(detail.role_used_by, [{ type: 'project_role', repository_id: '101', full_name: 'fixture/project-101',
+    role_id: 'reviewer', name: 'Role-only reviewer', enabled: false, configuration_enabled: false }]);
+  assert.ok(!JSON.stringify(detail).includes('Private role prompt')); assert.ok(!JSON.stringify(detail).includes(model.key));
+  assert.deepEqual(['settings', 'role_config_revisions', 'role_snapshots', 'audit'].map(table => h.store.all(`SELECT * FROM ${table}`)), before);
+  assert.ok(!('role_used_by' in (await member('/api/models?repository_id=101')).value.models[0]));
+  await saveRole(member, '101', null, { expected_revision: revision });
+  assert.ok(JSON.stringify(h.store.all('SELECT * FROM role_config_revisions')).includes(model.id));
+  assert.deepEqual((await admin(`/api/models/${model.id}`)).value.model.role_used_by, []);
+});
+
+test('shared model deletion preview includes service and project roles only for its administrator, and deletion preserves explicit project references', async t => {
+  const { h, admin, member, create } = await fixture(t, true), shared = await create(admin, null), fallback = await create(member, '101');
+  await admin(`/api/models/${shared.id}/projects`, 'PUT', { repository_ids: ['101', '202'] });
+  const revision = await saveRole(member, '101', shared.id);
+  await saveRole(admin, '202', shared.id, { name: 'Other project private role' });
+  await member('/api/repositories/101/policy', 'PATCH', { model_id: fallback.id });
+  const service = (await admin('/api/service-roles')).value.service_roles.find(role => role.id === 'repository-assistant');
+  assert.equal((await admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: service.revision, model_id: shared.id })).status, 200);
+  assert.equal((await admin('/api/onboarding/model', 'POST', { model_id: shared.id })).status, 201);
+  const detail = (await admin(`/api/models/${shared.id}`)).value.model;
+  assert.deepEqual(detail.used_by, []); assert.equal(detail.onboarding_default, true);
+  assert.deepEqual(detail.role_used_by.map(role => [role.type, role.repository_id, role.role_id]), [
+    ['project_role', '101', 'reviewer'], ['project_role', '202', 'reviewer'], ['service_role', null, 'management-assistant'], ['service_role', null, 'repository-assistant']]);
+  const restricted = (await member(`/api/models/${shared.id}`)).value.model;
+  for (const field of ['used_by', 'role_used_by', 'onboarding_default']) assert.ok(!(field in restricted));
+  assert.ok(!JSON.stringify(restricted).includes('Other project private role'));
+  const saved = (await member('/api/repositories/101/roles')).value;
+  assert.equal((await admin(`/api/models/${shared.id}`, 'DELETE', {})).status, 200);
+  assert.deepEqual((await member('/api/repositories/101/roles')).value.roles, saved.roles);
+  const resolved = await member('/api/repositories/101/roles/resolve', 'POST', { role: 'reviewer', workflow: 'development.issue', expected_revision: revision });
+  assert.equal(resolved.status, 409); assert.equal(resolved.value.error, 'role_model_not_available');
+  assert.equal((await member('/api/repositories/101/policy')).value.policy.model_id, fallback.id);
+  assert.equal(h.store.get("SELECT model_id FROM service_roles WHERE id='repository-assistant'").model_id, null);
+  assert.equal((await admin('/api/onboarding')).value.model_id, null);
+});
+
 function consoleFixture(respond, shared = false) {
   const page = loadConsole(['static/app.js', 'static/views.js', 'static/project.js'], respond);
   page.run(`me = { role: 'super_admin', csrf_token: 'csrf' }; current = { id: '101', section: 'model' };
@@ -123,7 +174,7 @@ test('model deletion previews all selected repositories, preserves a refusal acr
   const { page, view, click, cancel, submit } = consoleFixture((method, path, body) => {
     assert.equal(path, '/api/models/m');
     if (method === 'GET') return [200, { model: { model_name: 'fixture', repository_id: null, used_by: [
-      { repository_id: '101', full_name: 'fixture/one' }, { repository_id: '202', full_name: 'fixture/two' }] } }];
+      { repository_id: '101', full_name: 'fixture/one' }, { repository_id: '202', full_name: 'fixture/two' }], role_used_by: [], onboarding_default: false } }];
     assert.equal(method, 'DELETE'); assert.deepEqual(body, {}); return answer;
   }, true);
   const opening = click(); await settle();
@@ -144,9 +195,9 @@ test('model deletion previews all selected repositories, preserves a refusal acr
   assert.equal(view.open, false); assert.equal(page.run('reloads'), 1);
 });
 
-test('unused models say nobody selected them, and project administrators only get deletion on their own models', async () => {
-  const { page, view, click, cancel } = consoleFixture(() => [200, { model: { model_name: 'fixture', repository_id: '101', used_by: [] } }]);
-  const opening = click(); await settle(); assert.ok(view.querySelectorAll('p').some(node => node.textContent === '当前没有项目选用它。'));
+test('unused project selections are explicit, and project administrators only get deletion on their own models', async () => {
+  const { page, view, click, cancel } = consoleFixture(() => [200, { model: { model_name: 'fixture', repository_id: '101', used_by: [], role_used_by: [], onboarding_default: false } }]);
+  const opening = click(); await settle(); assert.ok(view.querySelectorAll('p').some(node => node.textContent === '当前没有项目默认或工作类型模型选用它。'));
   cancel(); await opening;
   page.run("me.role = 'project_admin';");
   assert.ok(page.run('modelActions(model, outcome)').querySelectorAll('button').some(node => node.textContent === '删除'));
@@ -162,6 +213,28 @@ test('a model detail failure stays on the row through a status refresh without s
   const failure = page.run('outcome').querySelector('p'); assert.equal(failure.textContent, '404 · model_not_found');
   await page.run('refreshProjectStatus(renderToken)');
   assert.equal(page.run('outcome').querySelector('p'), failure); assert.deepEqual(page.requests, ['GET /api/models/m']); assert.equal(page.run('reloads'), 0);
+});
+
+test('role-only and onboarding impacts remain visible before cancelling a shared model deletion', async () => {
+  const { page, view, click, cancel } = consoleFixture(() => [200, { model: { model_name: 'fixture', repository_id: null, used_by: [], onboarding_default: true,
+    role_used_by: [{ type: 'project_role', full_name: 'fixture/one', role_id: 'reviewer', name: 'Saved reviewer', enabled: false },
+      { type: 'service_role', role_id: 'assistant', name: 'Saved assistant', enabled: true }] } }], true);
+  const opening = click(); await settle();
+  assert.deepEqual(view.querySelectorAll('li').map(node => node.textContent), ['fixture/one · Saved reviewer（reviewer） · 已停用', 'Saved assistant（assistant）']);
+  const body = view.querySelectorAll('p').map(node => node.textContent).join('\n');
+  assert.match(body, /显式模型引用会保留为不可用/); assert.match(body, /平台服务角色将变为未配置模型/); assert.match(body, /接入向导的默认模型/); assert.match(body, /不包括历史运行快照/);
+  cancel(); await opening; assert.deepEqual(page.requests, ['GET /api/models/m']);
+});
+
+test('missing role impact metadata and late reads never open a deletion confirmation', async () => {
+  const incomplete = consoleFixture(() => [200, { model: { used_by: [] } }]);
+  await incomplete.click(); assert.equal(incomplete.view.open, undefined);
+  assert.match(incomplete.page.run('outcome').querySelector('p').textContent, /暂时无法确认完整引用范围/);
+  assert.deepEqual(incomplete.page.requests, ['GET /api/models/m']);
+  let release;
+  const late = consoleFixture(() => new Promise(resolve => { release = () => resolve([200, { model: { used_by: [], role_used_by: [], onboarding_default: false } }]); }));
+  const opening = late.click(); await settle(); late.page.run("location.hash = '#/projects/202/model';"); release(); await opening;
+  assert.equal(late.view.open, undefined); assert.deepEqual(late.page.requests, ['GET /api/models/m']);
 });
 
 test('project model management keeps shared models read-only for every role', async () => {

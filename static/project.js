@@ -590,18 +590,31 @@ function modelActions(model, result, after = reloadWith) {
   if (model.key_configured) actions.append(probeButton('测试模型', result, () => api(`/api/models/${model.id}/test`, 'POST', {}), testOutcome));
   actions.append(button('修改模型名', () => modelEdit(model, after)), button('计费单价', () => modelPricing(model, after)));
   actions.append(button('删除', async () => {
+    const actor=me,target=current,address=location.hash,live=()=>me===actor&&current===target&&location.hash===address;
     let detail;
     try { detail = (await api(`/api/models/${model.id}`)).model; }
-    catch (err) { result.hidden = false; result.replaceChildren(element('p', err.message, 'view-error')); return; }
+    catch (err) { if(live()){result.hidden = false; result.replaceChildren(element('p', err.message, 'view-error'));} return; }
+    if(!live())return;
+    if(!Array.isArray(detail.used_by)||!Array.isArray(detail.role_used_by)||typeof detail.onboarding_default!=='boolean'
+      ||detail.role_used_by.some(role=>!['project_role','service_role'].includes(role.type))){
+      result.hidden=false;result.replaceChildren(element('p','暂时无法确认完整引用范围，请重新读取后再删除。','view-error'));return;
+    }
     const used = detail.used_by || [], body = [
       '只从本系统删除这条模型配置，并销毁封存的 API Key；页面和日志都不会显示它。',
       '不会删除 GitHub 上的任何东西。已有成本记录保留，仍使用当时记下的模型名和单价。'];
     if (used.length) body.push('以下项目正在使用它。默认选择会改回“不使用模型”；任务专属选择保留为不可用，相关任务进入“配置待补”：', used.map(repo => repo.full_name));
-    else body.push('当前没有项目选用它。');
+    else body.push('当前没有项目默认或工作类型模型选用它。');
+    const roles=detail.role_used_by,projectRoles=roles.filter(role=>role.type==='project_role'),serviceRoles=roles.filter(role=>role.type==='service_role');
+    const roleName=role=>`${role.full_name?role.full_name+' · ':''}${role.name}（${role.role_id}）${!role.enabled?' · 已停用':role.configuration_enabled===false?' · 角色配置未启用':''}`;
+    if(projectRoles.length)body.push('以下项目角色的显式模型引用会保留为不可用，后续执行等待补充配置，不会换用其他模型：',projectRoles.map(roleName));
+    if(serviceRoles.length)body.push('以下平台服务角色将变为未配置模型，之后的调用等待重新配置：',serviceRoles.map(roleName));
+    if(!roles.length)body.push('当前没有已保存角色显式引用它。');
+    if(detail.onboarding_default)body.push('这也是接入向导的默认模型；删除后需要重新选择接入默认模型。');
+    body.push('以上是本次读取的已保存配置引用，不包括历史运行快照。已有运行快照和成本记录不会被改写。');
     if (detail.repository_id === null) body.push('这是部署共享模型，删除后所有项目都不能再选它。');
     const deleted = await confirmDialog({ title: `删除模型 ${detail.model_name}？`, body, action: '删除', danger: true,
-      progress: '正在删除模型…', run: () => api(`/api/models/${model.id}`, 'DELETE', {}) });
-    if (deleted) await after(`已删除模型 ${detail.model_name}`);
+      progress: '正在删除模型…', run: () => {if(!live())throw new Error('页面或身份已变化，请重新读取模型后再删除。');return api(`/api/models/${model.id}`, 'DELETE', {});} });
+    if (deleted&&live()) await after(`已删除模型 ${detail.model_name}`);
   }, 'quiet destructive'));
   return actions;
 }
@@ -680,10 +693,10 @@ function modelConnectionFacts(model) {
     // project policy in hand, so stating "nobody explicitly" there would name an absence the page cannot see.
     if (policy) box.append(element('span', kinds.length ? `工作类型显式使用：${kinds.join('、')}（不继承项目默认）` : '没有被工作类型显式指定', 'muted'));
   } catch { box.append(element('span', '工作类型模型配置未能解析', 'muted')); }
-  // Which projects reference this model, from the list route's `used_by`. The absence is stated: a model nobody uses
-  // can be deleted without a migration, so "nobody" is information, not an empty cell.
+  // The list projection covers project defaults and work types. Current role references are read separately
+  // before deletion; an empty project list must not imply that no saved role depends on this model.
   const used = model.used_by || [];
-  box.append(element('span', used.length ? `使用位置：${used.map(repo => repo.full_name).join('、')}` : '未被任何项目选用', 'model-usage'));
+  box.append(element('span', Array.isArray(model.used_by)?used.length ? `项目默认/工作类型引用：${used.map(repo => repo.full_name).join('、')}` : '无项目默认或工作类型引用':'项目配置引用尚未读取', 'model-usage'));
   return box;
 }
 function providerList(models, row, after = reloadWith, { editable = true } = {}) {
