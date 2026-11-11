@@ -323,3 +323,15 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 }
 .project-content .computer-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 900px) { .project-content .computer-status-grid { grid-template-columns: minmax(0, 1fr); } }
+/* #238 webhooks: a delivery row carries reception, signature and processing as three independent badges, and the
+   detail reads the same facts as labelled sections with the Manager dispatch and the collapsed raw request. */
+/* Desktop only: the narrow layout keeps the shared single-column row so a 390px page does not squeeze the text. */
+@media (min-width: 761px) { #rows[data-view=events] .row.has-actions { grid-template-columns: minmax(0,1fr) 260px 90px; } }
+#detail-body code { overflow-wrap:anywhere; }
+#detail-body .detail-section { margin-top:14px; }
+#detail-body .detail-section h3 { margin:0; font-size:13px; }
+#detail-body .detail-section .facts { margin-top:6px; }
+#detail-body .delivery-tasks { margin:8px 0 0; padding-left:18px; font-size:12px; line-height:1.7; }
+#detail-body .dispatch-entry { margin-top:8px; padding-left:10px; border-left:2px solid #e3eaf0; }
+#detail-body .dispatch-entry p { margin:0; font-size:12px; line-height:1.6; }
+#detail-body details.raw-payload { margin-top:14px; border-top:1px solid #e3eaf0; padding-top:10px; }

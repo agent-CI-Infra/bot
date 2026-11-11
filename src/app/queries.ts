@@ -5,7 +5,7 @@ import { taskTrace, traceClean } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
 import { type Store } from '../storage/database.js';
 import { type Actor, repository, scope } from './auth.js';
-import { deliveryResult } from '../review/delivery.js';
+import { deliveryResult, deliveryDiagnosis } from '../review/delivery.js';
 import { fail, type Json } from '../core/security.js';
 import { withTaskMetrics } from '../metrics/accounting.js';
 import { workTypes } from '../work/catalog.js';
@@ -54,14 +54,14 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
     const page = store.all(`SELECT id FROM deliveries WHERE ${clauses.join(' AND ')} ORDER BY received_at DESC,id DESC LIMIT ? OFFSET ?`, ...args, limit, offset).map(row => row.id);
     const rows = new Map(store.all(`SELECT *, (SELECT full_name FROM repositories WHERE id=deliveries.repository_id) AS full_name
       FROM deliveries WHERE id IN (${page.map(() => '?').join(',') || 'NULL'})`, ...page).map(row => [row.id, row]));
-    return { events: page.map(id => rows.get(id)!).map(row=>{const {payload,response,request_headers,...safe}=row;return {...safe,...deliveryResult(store,row)};}) };
+    return { events: page.map(id => rows.get(id)!).map(row=>{const {payload,response,request_headers,...safe}=row;return {...safe,...deliveryResult(store,row),...deliveryDiagnosis(store,row)};}) };
   }
   const event = /^\/api\/events\/([^/]+)$/.exec(path);
   if (event) {
     const row = store.get(`SELECT * FROM deliveries WHERE id=? AND ${filter.sql}`, event[1]!, ...filter.args);
     if (!row) return fail(404, 'event_not_found');
     return { event: { ...row, request_headers: JSON.parse(row.request_headers),
-      payload: Buffer.from(row.payload).toString('utf8'), response: JSON.parse(row.response) } };
+      payload: Buffer.from(row.payload).toString('utf8'), response: JSON.parse(row.response), ...deliveryResult(store,row), ...deliveryDiagnosis(store,row) } };
   }
   if (path === '/api/tasks') {
     const clauses=[filter.sql],args=[...filter.args];
