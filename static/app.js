@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, integrationAutoRefresh = false, permissionAutoRefresh = false;
 // Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
 let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null, editorKind = null;
-const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话' };
+const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话', design: '设计系统样例' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
   more: '#/more', inbox: '#/inbox', external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management' }, superTabs = ['settings'];
@@ -137,6 +137,9 @@ function addressTab(hash) {
   if (['#/reviews', '#/developments'].includes(hash)) return 'board';
   if (onboardingAddress.test(hash)) return 'settings';
   if (hash === '#external') return 'external';
+  // #224-A: the component/state sample page. It has an address of its own so a deep link works, and no #tabs entry:
+  // it is the reviewed evidence surface for the design tokens, not a feature users navigate to.
+  if (hash === '#/design') return 'design';
   const name = /^#\/([a-z]+)(?:\/|$)/.exec(hash)?.[1];
   return ['accounts', 'users'].includes(name) ? 'settings' : tabAddresses[name] ? name : null;
 }
@@ -153,11 +156,15 @@ async function route() {
   // An address the console does not know keeps the current page (on a fresh load that is the projects page).
   let next = addressTab(location.hash) || tab;
   if (superTabs.includes(next) && me.role !== 'super_admin') next = 'projects';
+  // The sample page issues no fetch of its own - every panel is constant markup - so a client-side role check is
+  // the whole gate. If it ever reads server data, it needs a server-side gate first: hiding a route is not one.
+  if (next === 'design' && me.role !== 'super_admin') next = 'projects';
   if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
   const consolePage = ['more', 'inbox'].includes(tab);
-  page.hidden = !target; list.hidden = !!target || tab === 'management' || consolePage;
+  const sample = !target && tab === 'design', samplePage = $('design-page');
+  page.hidden = !target; samplePage.hidden = !sample; list.hidden = !!target || tab === 'management' || consolePage || sample;
   $('console-page').hidden = !consolePage;
   if (typeof syncConsoleShell === 'function') syncConsoleShell(target);
   // The board fills the viewport and scrolls inside its columns; every other page keeps normal document scrolling.
@@ -166,6 +173,9 @@ async function route() {
   if (consolePage) {
     if (typeof leaveManagementPage === 'function') leaveManagementPage();
     await renderConsolePage(renderVersion);
+  } else if (sample) {
+    if (typeof leaveManagementPage === 'function') leaveManagementPage();
+    renderDesignPage();
   } else if (tab === 'management' && !target) await renderManagementPage();
   else {
     if (typeof leaveManagementPage === 'function') leaveManagementPage();

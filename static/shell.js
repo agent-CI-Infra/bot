@@ -82,7 +82,8 @@ function syncConsoleShell() {
   if (nav) for (const a of nav.querySelectorAll('a')) sectionPicker.add(new Option(a.textContent, a.getAttribute('href'), false, a.getAttribute('aria-current') === 'page'));
   for (const a of $('console-mobile-nav').querySelectorAll('a')) {
     if (a.dataset.page === 'inbox') a.href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
-    const active = a.dataset.page === (['projects', 'board', 'inbox'].includes(tab) ? tab : 'more');
+    const mobilePage = ['projects', 'board', 'inbox'].includes(tab) ? tab : tab === 'design' ? '' : 'more';
+    const active = a.dataset.page === mobilePage;
     if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   $('console-sidebar').classList.toggle('console-platform', platform);
