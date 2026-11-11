@@ -48,6 +48,7 @@ import { ScheduleService } from './schedules/service.js';
 import { Scheduler } from './schedules/worker.js';
 import { registerScheduledChecks } from './dispatch/schedule.js';
 import type { StallMonitor } from './core/stalls.js';
+import { loginBucket } from './core/client-address.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
@@ -72,7 +73,9 @@ async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffe
 function respond(res: ServerResponse, status: number, value: Json): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value));
 }
-export function createControlPlane(options: Options) {
+// Deployment-level trust for the password-login limit, kept out of the shared options object: only the login route
+// reads it, and it never travels with requests into the rest of the control plane.
+export function createControlPlane(options: Options, security: { trustedProxies?: readonly string[] } = {}) {
   const { store } = options;
   const external = options.external || new ExternalService(store);
   const githubLogin = options.githubLogin || new GitHubLogin(store, {
@@ -260,7 +263,9 @@ export function createControlPlane(options: Options) {
     }
     if (path === '/api/auth/login' && method === 'POST') {
       fields(input, ['username', 'password']);
-      const username = text(input.username, 100), value = password(input.password), key = req.socket.remoteAddress || '';
+      const username = text(input.username, 100), value = password(input.password);
+      // A reverse proxy hides every client behind its own address; the configured proxies name the real one.
+      const key = loginBucket(req, security.trustedProxies || []);
       const now = Date.now();
       for (const [ip, count] of loginAttempts) if (count.until <= now) loginAttempts.delete(ip);
       const attempt = loginAttempts.get(key) || { n: 0, until: now + 15 * 60_000 };
