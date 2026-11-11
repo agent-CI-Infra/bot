@@ -127,10 +127,14 @@ function externalRow(name,detail,stateLabel,actions=[]){const row=element('div',
 const externalProjectApi=(repositoryId,path,method='GET',body)=>api('/api/repositories/'+repositoryId+'/external'+path,method,body);
 // Deletes one client with its grants, subscriptions, event progress and pending forwards; the project itself stays.
 async function deleteExternalClient(client){
+  const address=location.hash,actor=me?.id;
   const deleted=await askConfirm({title:'删除外部客户端 '+client.name+'？',action:'删除',danger:true,
     body:['一并删除：',['临时授权记录','Webhook 转发订阅及其转发记录','事件轮询进度','尚未发出的转发'],'之后不能再用它兑换令牌或轮询事件，已兑换的 GitHub 令牌按原到期时间失效。项目本身不受影响。'],
     run:()=>externalProjectApi(client.repository_id,'/clients/'+client.id,'DELETE',{confirm:true})});
-  if(deleted)await route();
+  if(!deleted||location.hash!==address||me?.id!==actor)return;
+  const target=projectRoute();
+  if(target?.id===client.repository_id&&target.section==='external'&&target.item===client.id)location.hash=`#/projects/${client.repository_id}/external`;
+  else await route();
 }
 async function loadExternalProject(repositoryId){
   const [{clients},{subscriptions},{deliveries},{grants},{settings}]=await Promise.all([
@@ -181,7 +185,10 @@ function externalDeliveryGroup(repositoryId,deliveries){
 function externalClientDetail(client,data){
   const ownSubscriptions=data.subscriptions.filter(row=>row.client_id===client.id),ids=new Set(ownSubscriptions.map(row=>row.id));
   const deliveries=data.deliveries.filter(row=>ids.has(row.subscription_id)),grants=data.grants.filter(row=>row.client_id===client.id);
-  const records=[...grants.map(row=>({...row,kind:'临时授权'})),...deliveries.map(row=>({...row,kind:'转发'}))].filter(row=>Number.isFinite(Date.parse(row.created_at))).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at));
+  // Grants use epoch milliseconds; deliveries use ISO strings. Normalize once before filtering or comparing either source.
+  const activity=row=>({...row,activityTime:['number','string'].includes(typeof row.created_at)?new Date(row.created_at).getTime():NaN});
+  const records=[...grants.map(row=>({...row,kind:'临时授权'})),...deliveries.map(row=>({...row,kind:'转发'}))].map(activity)
+    .filter(row=>Number.isFinite(row.activityTime)).sort((a,b)=>b.activityTime-a.activityTime);
   const identity=externalGroup('客户端详情'),actions=element('div','','actions');identity.classList.add('external-client-identity');
   identity.append(element('h3',client.name),facts([['客户端 ID',client.id],['绑定项目',current.repository.full_name],['认证方式',client.auth_type==='private_key_jwt'?'个人电脑 · 公钥签名':'GitHub Actions OIDC'],
     ['认证状态',!client.enabled?'已停用':client.auth_type==='private_key_jwt'&&!client.key_configured?'待登记公钥':'已启用'],['客户端配置版本',client.version],['创建时间',timestamp(client.created_at)]]));

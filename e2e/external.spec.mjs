@@ -55,6 +55,26 @@ test('client details keep their own identity and bounded records across refresh,
   }finally{await cleanup(h);}
 });
 
+test('grant-only activity and mixed timestamp ordering stay accurate, and deleting returns to the client list',async({page})=>{
+  const h=await externalFixture();
+  try{
+    const client=await h.client(),grant=await h.exchange(client.client.id,client.privateKey);expect(grant.status).toBe(200);
+    const grantTime=h.store.get('SELECT created_at FROM external_grants WHERE id=?',grant.value.grant_id).created_at;expect(typeof grantTime).toBe('number');
+    await login(page,h);await page.goto(h.adminBase+'/#/projects/101/external/'+client.client.id);
+    const detail=page.locator('.external-client-detail'),latest=detail.getByText(/^已读取范围内最新记录：/);
+    await expect(latest).toContainText('临时授权');await expect(detail).not.toContainText('当前已读取记录中暂无活动');
+    const sub=await h.admin('/api/repositories/101/external/subscriptions','POST',{client_id:client.client.id,name:'Older forward',url:'https://receiver.invalid/events',filters:{events:['issues'],actions:['opened'],exclude_drafts:false}});
+    await h.hook(h.a.path,h.a.secret,'mixed-time-event',{repository:{id:101},action:'opened',issue:{number:1}});
+    h.store.run('UPDATE external_deliveries SET created_at=? WHERE subscription_id=?',new Date(grantTime-60000).toISOString(),sub.value.subscription.id);
+    await page.reload();await expect(latest).toContainText('临时授权');
+    h.store.run('UPDATE external_grants SET created_at=? WHERE id=?',grantTime-120000,grant.value.grant_id);
+    await page.reload();await expect(latest).toContainText('转发');
+    await detail.getByRole('button',{name:'删除',exact:true}).click();await page.getByRole('dialog').getByRole('button',{name:'删除',exact:true}).click();
+    await expect(page).toHaveURL(/\/projects\/101\/external$/);await expect(page.getByRole('heading',{name:'客户端详情',exact:true})).toHaveCount(0);
+    await expect(page.getByRole('button',{name:'新增客户端',exact:true})).toBeVisible();
+  }finally{await cleanup(h);}
+});
+
 test('disabling a client explains new grants and pending forwards without claiming to revoke an issued GitHub token',async({page})=>{
   const h=await externalFixture();
   try{
