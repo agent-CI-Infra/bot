@@ -58,12 +58,69 @@ test('completion checks current prerequisites again and local login remains an a
     const key = f.h.store.get('SELECT api_key FROM models WHERE id=?', model.id).api_key;
     f.h.store.run('UPDATE models SET api_key=NULL WHERE id=?', model.id);
     await finish.click(); await expect(page.locator('#onboarding-panel [role=alert]').last()).toContainText('接入配置已变化');
+    await expect(finish).toBeDisabled();
+    await expect(page.getByRole('button', { name: '前往第 5 步：模型', exact: true })).toBeVisible();
+    await expect(page.locator('.onboarding-step').nth(4)).toHaveAttribute('data-ready', 'false');
     expect(f.h.store.get("SELECT value FROM settings WHERE key='onboarding.complete'")).toBeUndefined();
     f.h.store.run('UPDATE models SET api_key=? WHERE id=?', key, model.id);
     await page.reload(); await expect(finish).toBeEnabled(); await finish.click();
     await expect(page).toHaveURL(/#\/projects$/);
     expect(JSON.parse(f.h.store.get("SELECT value FROM settings WHERE key='onboarding.complete'").value)).toBe(true);
   } finally { await f.close(); }
+});
+
+test('the installation step uses current effective installations instead of the saved historical count', async ({ page }) => {
+  const f = await identityFixture();
+  try {
+    await readyWizard(f); await localLogin(page, f, '/#/settings/onboarding/3');
+    const count = page.locator('dt').filter({ hasText: '当前有效安装数' }).locator('xpath=following-sibling::dd[1]');
+    await expect(count).toHaveText('1');
+    await expect(page.locator('.onboarding-progress')).toContainText('1 个有效安装');
+    mkdirSync('.tmp/onboarding-readiness-225', { recursive: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => scrollTo(0, 0));
+    await page.screenshot({ path: '.tmp/onboarding-readiness-225/installations-desktop.png', fullPage: true });
+    f.h.store.run("UPDATE github_installations SET status='suspended'");
+    await page.reload(); await expect(count).toHaveText('0');
+    await expect(page.locator('.onboarding-step').nth(3)).toHaveAttribute('data-ready', 'false');
+    f.h.store.run("UPDATE github_installations SET status='active',scope_pending=1");
+    await page.reload(); await expect(count).toHaveText('0');
+  } finally { await f.close(); }
+});
+
+test('a failed readiness reload after a completion conflict stays unknown and retries without another completion write', async ({ page }) => {
+  const f = await identityFixture(); let failure = false, writes = 0;
+  try {
+    const { model } = await readyWizard(f); await localLogin(page, f, '/#/settings/onboarding/6');
+    const finish = page.getByRole('button', { name: '完成向导', exact: true }); await expect(finish).toBeEnabled();
+    await page.route('**/api/onboarding', route => failure ? route.fulfill({ status: 503, json: { error: 'status_unavailable' } }) : route.continue());
+    await page.route('**/api/onboarding/complete', route => { writes++; return route.continue(); });
+    f.h.store.run('UPDATE models SET api_key=NULL WHERE id=?', model.id); failure = true; await finish.click();
+    await expect(page.getByRole('heading', { name: '接入状态待重新核验', exact: true })).toBeVisible();
+    await expect(finish).toBeDisabled(); await expect(page.locator('.onboarding-step[data-ready=unknown]')).toHaveCount(7);
+    await expect(page.locator('#onboarding-panel [role=alert]').last()).toContainText('status_unavailable');
+    mkdirSync('.tmp/onboarding-readiness-225', { recursive: true });
+    await page.setViewportSize({ width: 390, height: 900 }); await page.evaluate(() => scrollTo(0, 0));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.tmp/onboarding-readiness-225/readiness-unknown-mobile.png', fullPage: true });
+    failure = false; await page.getByRole('button', { name: '重新读取接入状态', exact: true }).click();
+    await expect(page.getByRole('button', { name: '前往第 5 步：模型', exact: true })).toBeVisible(); await expect(finish).toBeDisabled();
+    expect(writes).toBe(1);
+  } finally { await f.close(); }
+});
+
+test('a readiness response after a completion conflict cannot replace a page opened in the meantime', async ({ page }) => {
+  const f = await identityFixture(); let release = () => {}, requested = false;
+  try {
+    const { model } = await readyWizard(f); await localLogin(page, f, '/#/settings/onboarding/6');
+    const finish = page.getByRole('button', { name: '完成向导', exact: true }); await expect(finish).toBeEnabled();
+    const gate = new Promise(resolve => { release = resolve; });
+    await page.route('**/api/onboarding', async route => { const response = await route.fetch(); requested = true; await gate; await route.fulfill({ response }); });
+    f.h.store.run('UPDATE models SET api_key=NULL WHERE id=?', model.id); await finish.click(); await expect.poll(() => requested).toBe(true);
+    await page.evaluate(() => { location.hash = '#/projects'; }); await expect(page.getByRole('heading', { name: '项目', exact: true })).toBeVisible();
+    release(); await page.unrouteAll({ behavior: 'wait' });
+    await expect(page).toHaveURL(/#\/projects$/); await expect(page.locator('#settings-panel')).toBeHidden();
+  } finally { release(); await f.close(); }
 });
 
 test('identity and effective grants remain visible when optional provider and Feishu reads fail', async ({ page }) => {
