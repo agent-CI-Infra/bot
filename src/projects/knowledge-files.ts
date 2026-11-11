@@ -21,7 +21,7 @@ const physicalId = (id:string) => {
 };
 const legacyName = (m: any) => String(m.catalog.title || m.key).replace(/[/\\\0]/g,'-').slice(0,160) + '--' + m.id.slice(0,8) + '.md';
 const deleted = (m: any) => ['archived','revoked'].includes(m.status);
-const summary = (m: any) => ({ id:'m:'+m.id,name:legacyName(m),path:legacyName(m),directory:'',revision:m.revision,deleted:deleted(m),readonly:m.authority==='repository',can_move:false,bytes:typeof m.body==='string'?Buffer.byteLength(m.body):0 });
+const summary = (m: any) => ({ id:'m:'+m.id,name:legacyName(m),path:legacyName(m),directory:'',revision:m.revision,deleted:deleted(m),readonly:m.authority==='repository',source:m.authority==='repository'?'repository':'legacy',can_move:false,bytes:typeof m.body==='string'?Buffer.byteLength(m.body):0 });
 
 /** Physical files share a stable catalog; legacy records retain their existing audience and repository authority. */
 export async function knowledgeFilesApi(store:Store,manager:Manager|undefined,user:Actor,method:string,url:URL,input:Json,githubUrl?:string):Promise<Json|undefined>{
@@ -36,7 +36,7 @@ export async function knowledgeFilesApi(store:Store,manager:Manager|undefined,us
   const memoryFile=async(id:string,revision?:number)=>{
     const result=await memoryApi(store,user,'GET',new URL('http://local/api/repositories/'+repo+'/memories/'+encodeURIComponent(id)+(revision===undefined?'':'?revision='+revision)),{},githubUrl);
     const m=(result as any).memory;authorize();
-    return present({...summary(m),current_revision:m.current_revision,current_deleted:['archived','revoked'].includes(m.current_status),historical:m.historical,content:deleted(m)?null:m.body??null,readonly:memory.get(repo,id).authority==='repository',availability:m.availability??'available'});
+    return present({...summary(m),current_revision:m.current_revision,current_deleted:['archived','revoked'].includes(m.current_status),historical:m.historical,content:deleted(m)?null:m.body??null,readonly:memory.get(repo,id).authority==='repository',source:memory.get(repo,id).authority==='repository'?'repository':'legacy',availability:m.availability??'available'});
   };
   const oldFiles=()=>store.all('SELECT id FROM project_memories WHERE repository_id=? ORDER BY fact_key',repo).flatMap(row=>{try{return [summary(memory.get(repo,row.id))];}catch(error){if((error as any).code==='memory_not_found')return [];throw error;}});
   if(directories){
@@ -81,6 +81,7 @@ export async function knowledgeFilesApi(store:Store,manager:Manager|undefined,us
     }
   }else if(id.startsWith('m:')){
     const key=id.slice(2),current=memory.get(repo,key);
+    if(method!=='GET'&&current.authority==='repository')fail(409,'memory_repository_authority');
     if(method==='GET'&&operation==='versions')return {current_revision:current.revision,versions:memory.versions(repo,key).map((v:any)=>{const m=memory.get(repo,key,v.revision);return {revision:v.revision,actor:v.actor,created_at:v.created_at,deleted:deleted(m),bytes:typeof m.body==='string'?Buffer.byteLength(m.body):0};}).reverse()};
     if(method==='GET'&&!operation)return {file:await memoryFile(key,revision)};
     if(method==='PUT'&&!operation||method==='DELETE'&&!operation||method==='POST'&&operation==='restore'){

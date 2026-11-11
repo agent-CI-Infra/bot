@@ -137,6 +137,7 @@ function toggleManagementFullscreen() {
   else { chat.fullscreenFrom = chat.mode; setManagementPresentation(chat, 'fullscreen'); }
 }
 async function openManagementPage(projectId = null) {
+  if (typeof confirmKnowledgeLeave === 'function' && !await confirmKnowledgeLeave()) return;
   syncManagementChat(); const chat = managementChat; if (!chat) return;
   if (location.hash !== '#/management') { chat.returnAddress = location.hash || '#/projects'; history.pushState(null, '', '#/management'); }
   chat.requestedProject = projectId; await route();

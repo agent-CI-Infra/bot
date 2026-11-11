@@ -131,3 +131,14 @@ test('new manager HTTP routes accept encoded stable ids and serialize real confl
  assert.equal((await client.call('GET',path+'?revision=1')).content,'raw\ncontent');assert.equal((await client.call('GET',path+'/versions')).versions[0].operation,'move');
  await assert.rejects(client.call('POST',base+'/directories',{path:'/absolute'}),e=>e.status===400&&e.code==='invalid_note_path');
 });
+
+test('repository-backed legacy files cannot be edited, moved, deleted or restored through the file adapter',async t=>{
+ const {ProjectMemory}=await import('../dist/memory/project.js');const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const actor=knowledgeActor(h.store,'repo-owner','101'),user={id:actor.principal_id,role:'project_admin',repositories:['101'],context:actor},memory=new ProjectMemory(h.store,{actor});
+ const file=memory.save('101','repo-file',{kind:'experience',body:'original',sources:[{reference:'source'}]},0,'user:repo-owner','seed');
+ const doc={path:'docs/source.md',commit:'a'.repeat(40),blob_sha:'b'.repeat(40),pr_number:1,merged:true,default_base:true};memory.linkDocument('101',file.id,1,doc,'user:repo-owner');
+ const base='http://local/api/repositories/101/knowledge-files',id='m:'+file.id,list=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL(base),{}),summary=list.files.find(row=>row.id===id);
+ assert.equal(summary.source,'repository');assert.equal(summary.readonly,true);assert.equal(summary.can_edit,false);assert.equal(summary.can_move,false);
+ for(const [method,suffix,input] of [['PUT','',{content:'overwrite',expected_revision:2}],['DELETE','',{expected_revision:2}],['POST','/restore',{revision:1,expected_revision:2}],['POST','/move',{path:'moved.md',expected_revision:2}]])await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,method,new URL(base+'/'+id+suffix),input),/memory_repository_authority/);
+ assert.equal(memory.get('101',file.id).revision,2);assert.equal(memory.get('101',file.id).authority,'repository');assert.notEqual(memory.get('101',file.id).status,'archived');
+});
