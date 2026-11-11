@@ -44,13 +44,19 @@ const settingsCards = {
   },
   async installations(request, ref) {
     if (ref) return installationDetail(request, ref);
-    const { installations } = await api('/api/installations/archive'), section = card('GitHub App 安装档案');
+    // The console already loaded the registered accounts at start (app.js), so the archive view adds no request of its own.
+    const { installations } = await api('/api/installations/archive'), section = card('GitHub App 安装档案'),
+      apps = new Map(accounts.filter(account => account.type === 'github_app').map(account => [String(account.app_id), account]));
     section.append(note('安装范围与控制台角色分别管理。事件触发者和申请者不代表当前有权管理的人。'));
     if (!installations.length) section.append(note('尚无安装档案。同步后也会保留零仓库安装和历史证据缺失标记。'));
     for (const installation of installations) {
       const item = card(`${installation.target.login || '目标待同步'} · 安装 ${installation.installation.installation_id}`), evidence = installation.evidence;
+      const owner = apps.get(String(installation.installation.app_id)), granted = Object.entries(installation.permissions || {}).map(([name, level]) => `${permissionNames[name] || name}（${accessNames[level] || level}）`).join('、');
       const person = value => value ? `${value.login || '名称未知'}（${value.id}）` : '未知／未提供';
-      item.append(facts([['GitHub 目标 ID', installation.target.id || '待同步'], ['目标类型', installation.target.type || '待同步'],
+      item.append(facts([['所属账号', owner ? `${owner.name}（GitHub App · App ID ${owner.app_id}）` : '未匹配到已登记账号（App 已删除或凭据已撤销）'],
+        ['授权来源', evidence.creation_event_id ? 'GitHub App 安装事件（签名验证）' : '历史证据缺失，授权来源未知'],
+        ['安装授权（GitHub 返回）', granted || '未同步到权限，不能据此判断缺什么'],
+        ['GitHub 目标 ID', installation.target.id || '待同步'], ['目标类型', installation.target.type || '待同步'],
         ['状态', ({ active: '有效', pending_sync: '等待同步', suspended: '已暂停', deleted: '已卸载' })[installation.status]],
         ['范围', installation.repository_selection === 'all' ? '全部仓库' : installation.repository_selection === 'selected' ? '指定仓库' : '待同步'],
         ['完整性', ({ complete: '完整', pending: '等待同步', stale: '待核实', error: '同步失败，保留最近成功快照' })[installation.completeness]],
@@ -60,6 +66,9 @@ const settingsCards = {
         ['投影／范围／权限版本', `${installation.projection_version} / ${installation.scope_version} / ${installation.permissions_version}`]]));
       if (!evidence.requester) item.append(note('未提供申请者不等于从未申请。历史安装查询不能补齐完整批准历史。'));
       if (installation.error) item.append(note(`同步错误：${installation.error}`));
+      // Missing permissions are checked against the App that owns this installation, when its credential still exists.
+      if (owner?.credentials_configured) item.append(appPermissionCheck(owner));
+      else if (owner) item.append(note('这个 App 的凭据已撤销，无法检查安装缺少哪些权限。'));
       // The detail page reads the same snapshot plus its repositories and events; the list stays a summary.
       item.append(settingsLink('#/settings/installations/' + [installation.installation.github_host, installation.installation.app_id, installation.installation.installation_id].join('/'), '查看安装详情'));
       section.append(item);
@@ -103,7 +112,7 @@ const settingsCards = {
     const view = settingsView = { request, onboarding, accounts: registered, models: [], limits };
     view.app = liveCard('接入向导使用的 GitHub App', redraw => appBody(view, redraw));
     return [view.app.section, settingsList('已登记的账号', '账号提供访问 GitHub 的凭据和接收 webhook 的入口；仓库经账号同步出现。凭据只保存，不会从读取接口返回。',
-      registered.map(accountLine), '还没有登记账号。', '新增账号', 'accounts'), liveCard('GitHub 请求额度', redraw => rateLimitBody(view, redraw)).section];
+      registered.map(accountProfileLine), '还没有登记账号。', '新增账号', 'accounts'), liveCard('GitHub 请求额度', redraw => rateLimitBody(view, redraw)).section];
   },
   async models(request) {
     const [onboarding, { models }] = await Promise.all([api('/api/onboarding'), api('/api/models')]);
@@ -329,6 +338,14 @@ function userDetail(id, users) {
   };
   draw();
   return section;
+}
+// A registered account row plus where its authorization comes from. The install target lives on the installation detail
+// page, which reads the archive directly; this list keeps the requests the console already made at start.
+function accountProfileLine(account) {
+  const line = accountLine(account), content = line.querySelector('.row-content');
+  const source = account.type === 'github_app' ? 'GitHub App 安装（私钥换安装临时令牌）' : '用户 Token（按 Token 所属用户的仓库权限）';
+  content.append(element('p', `凭据来源：${source}${account.credentials_configured ? '' : ' · 已撤销，需要重新登记'}`));
+  return line;
 }
 // A card whose body `draw(redraw)` builds; `redraw(notice)` draws it again with the outcome of the last action on top.
 function liveCard(title, draw) {
