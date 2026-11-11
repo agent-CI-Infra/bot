@@ -32,6 +32,8 @@ test('role sections keep one editable draft, version and save operation reachabl
       await nav.getByRole('button', { name: '提示词', exact: true }).click();
       await expect(draftPrompt(page)).toHaveValue('Keep the reproduction and evidence.');
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      const save = page.getByRole('button', { name: '保存角色配置', exact: true }); await expect(save).toBeInViewport();
+      expect(await save.evaluate(el => { const box = el.getBoundingClientRect(), hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2); return el === hit || el.contains(hit); })).toBe(true);
     }
     mkdirSync('.tmp/role-editor-229', { recursive: true });
     await page.setViewportSize({ width: 1440, height: 1000 }); await nav.getByRole('button', { name: 'Agent 与模型', exact: true }).click(); await page.screenshot({ path: '.tmp/role-editor-229/editor-desktop.png' });
@@ -49,11 +51,12 @@ test('a role conflict merges independent changes and requires a deliberate choic
     const draft = await page.evaluate(role => editableRole(role), role);
     const changed = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ ...draft, name: 'Server name', persona_prompt: 'Server prompt', permissions: { ...draft.permissions, computer: 'deny' } }] });
     expect(changed.status, JSON.stringify(changed.value)).toBe(200);
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeVisible();
+    await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeInViewport();
     await expect(draftPrompt(page)).toHaveValue('My new prompt'); await expect(page.getByRole('button', { name: '保存角色配置', exact: true })).toBeDisabled();
     await page.getByRole('button', { name: '读取最新版本并比较', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '比较角色配置', exact: true })).toBeInViewport();
     const apply = page.getByRole('button', { name: '将修改应用到最新版本草稿', exact: true }); await expect(apply).toBeDisabled();
-    await page.getByLabel('处理 roles › dev › persona_prompt', { exact: true }).selectOption('draft'); await apply.click();
+    await page.getByLabel('处理 roles › dev › persona_prompt', { exact: true }).selectOption('draft'); await apply.click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toHaveCount(0);
     await expect(page.getByLabel('显示名称', { exact: true })).toHaveValue('Server name'); await expect(draftPrompt(page)).toHaveValue('My new prompt');
     await expect(page.getByLabel('dev 使用虚拟电脑权限', { exact: true })).toHaveValue('deny');
     await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.locator('.flash')).toBeVisible();
@@ -106,7 +109,7 @@ test('choosing the latest edited role after a delete conflict also removes its p
     const draft = await page.evaluate(role => editableRole(role), role);
     const changed = await admin('/api/repositories/101/roles', 'PUT', { expected_revision: revision, enabled: false, roles: [{ ...draft, name: 'Server Test' }] });
     expect(changed.status, JSON.stringify(changed.value)).toBe(200);
-    await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeVisible();
+    await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.getByRole('alert').filter({ hasText: '角色配置已被别人修改' })).toBeInViewport();
     await page.getByRole('button', { name: '读取最新版本并比较', exact: true }).click(); await page.getByLabel('处理 roles › test', { exact: true }).selectOption('latest'); await page.getByRole('button', { name: '将修改应用到最新版本草稿', exact: true }).click();
     await expect(page.locator('.role-nav').getByRole('link', { name: 'Test', exact: true })).toBeVisible(); await expect(page.getByLabel('test 名称', { exact: true })).toHaveValue('Server Test'); await page.getByRole('button', { name: '保存角色配置', exact: true }).click(); await expect(page.locator('.flash')).toBeVisible();
     expect((await admin('/api/repositories/101/roles')).value.configuration.roles.find(row => row.role_id === 'test').name).toBe('Server Test');
