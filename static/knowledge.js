@@ -249,7 +249,10 @@ function knowledgeSection() {
     panel.append(element('h3', '历史版本'), actionButton('← 返回文件', async () => { capture(); state.screen = 'preview'; routeState(); draw(); }));
     if (!versions) panel.append(note('历史尚未读取成功。'));
     for (const version of versions || []) {
-      const row = element('div', '', 'knowledge-history-row'); row.append(actionButton(`v${version.revision}${version.deleted ? ' · 删除' : version.operation === 'move' ? ' · 移动' : ''}`, () => openFile(state.file, version.revision)), note(`${timestamp(version.created_at)} · ${actor(version.actor)}`)); panel.append(row);
+      // A move entry is the only record of the old path once the file no longer exists under it (the file-tree manager records
+      // from_path and to_path on the move version). Name the previous path here so an older version stays findable.
+      const movedFrom = version.operation === 'move' ? (version.from_path ? '自 ' + version.from_path : version.to_path ? '到 ' + version.to_path : '') : '';
+      const row = element('div', '', 'knowledge-history-row'); row.append(actionButton(`v${version.revision}${version.deleted ? ' · 删除' : version.operation === 'move' ? ' · 移动' : ''}`, () => openFile(state.file, version.revision)), note([timestamp(version.created_at), actor(version.actor), movedFrom].filter(Boolean).join(' · '))); panel.append(row);
     }
     requestAnimationFrame(() => { if (panel.isConnected) panel.scrollTop = state.historyScroll; }); return panel;
   }
