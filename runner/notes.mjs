@@ -51,8 +51,11 @@ export class Notes {
     const visit = async directory => withNoteDirectory(this.root, directory, async path => {
       for (const entry of await readdir(path, { withFileTypes: true })) {
         if (internal(entry.name)) continue;
-        const relative = directory ? directory + '/' + entry.name : entry.name; notePath(relative);
+        const relative = directory ? directory + '/' + entry.name : entry.name;
         try {
+          // A name the contract no longer addresses is unavailable on its own, like a replaced entry: the rest of the
+          // directory still lists.
+          notePath(relative);
           if (entry.isDirectory()) { await visit(relative); directories.push(relative); continue; }
           if (!entry.isFile()) continue;
           await withNoteParent(this.root, relative, async target => {
@@ -171,7 +174,10 @@ export class Notes {
         if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue;
         await withNoteParent(this.root, '.write-history/' + entry, async target => {
           const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-          try { if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history'); const value = JSON.parse(await handle.readFile('utf8')); if(value.schema===2)return; notePath(value.name); if(value.schema!==1||entry!==createHash('sha256').update(value.name).digest('hex')+'.json')throw new Error('invalid_notes_history'); if(!this.catalog.legacy.has(value.name)||this.catalog.paths.has(value.name))names.add(value.name); } finally { await handle.close(); }
+          try { if (!(await handle.stat()).isFile()) throw new Error('invalid_notes_history'); const value = JSON.parse(await handle.readFile('utf8')); if(value.schema===2)return; if(value.schema!==1)throw new Error('invalid_notes_history');
+            // A schema 1 history written for a name the current contract no longer addresses is quarantined with its file.
+            try { notePath(value.name); } catch { return; }
+            if(entry!==createHash('sha256').update(value.name).digest('hex')+'.json')throw new Error('invalid_notes_history'); if(!this.catalog.legacy.has(value.name)||this.catalog.paths.has(value.name))names.add(value.name); } finally { await handle.close(); }
         }, { internal: true, canonicalRoot: this.canonicalRoot });
       }
       const files = [];

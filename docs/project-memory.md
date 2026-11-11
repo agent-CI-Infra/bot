@@ -73,7 +73,7 @@ Acceptance includes the existing SQLite/Git compatibility tests, `test/knowledge
 
 ## Free files and version history
 
-The project console offers one 项目知识 entry with filenames, a plain-text editor and version history. Creation needs only `name` and `content`; empty text, Unicode and arbitrary single-segment filenames/extensions are supported. Classification, sources, review fields and document-promotion forms are not part of the file editor. Existing ProjectMemory metadata, ownership and role visibility remain intact for compatibility. Repository-authoritative documents remain read-only here; their source still changes through a repository PR.
+The project console offers one 项目知识 entry with filenames, a plain-text editor and version history. Creation needs only `name` and `content`; empty text, Unicode and arbitrary single-segment filenames/extensions are supported, except control characters (NUL, the rest of C0, DEL, C1, U+2028 and U+2029), which are refused as `invalid_note_name` or `invalid_note_path` because no reader can show or round-trip them. Files saved before that rule keep their record and stay on disk under their original name; the listing reports them separately as `quarantined` and never lets one of them fail the volume or hide the healthy files next to it. Classification, sources, review fields and document-promotion forms are not part of the file editor. Existing ProjectMemory metadata, ownership and role visibility remain intact for compatibility. Repository-authoritative documents remain read-only here; their source still changes through a repository PR.
 
 `/api/repositories/:id/knowledge-files` provides the unified contract:
 

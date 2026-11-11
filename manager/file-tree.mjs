@@ -24,7 +24,10 @@ export class FileTree {
     return this.run(ctx=>{
       if(!deletedOnly&&!ctx.directories.includes(directory))fail('directory_not_found',404);
       const files=ctx.files.map(file=>publicFile(this.row(ctx,file.id),file)).filter(file=>(deletedOnly?file.deleted:includeDeleted||!file.deleted)&&(deletedOnly|| (query?file.path.toLowerCase().includes(query.toLowerCase()):file.directory===directory)));
-      return {directory,directories:ctx.directories.sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path)),revision:ctx.catalog.value.revision,search_scope:deletedOnly?'deleted_files':query?'all_directories':'directory'};
+      // A file saved under a name the current contract refuses stays on disk and in the catalog, but it is reported
+      // here instead of posing as a readable entry: the listing says what was left out rather than hiding it.
+      const quarantined=ctx.catalog.quarantined.map(row=>({id:row.id,path:row.path,reason:'unsupported_name'}));
+      return {directory,directories:ctx.directories.sort((a,b)=>a.localeCompare(b)),files:files.sort((a,b)=>a.path.localeCompare(b.path)),quarantined,revision:ctx.catalog.value.revision,search_scope:deletedOnly?'deleted_files':query?'all_directories':'directory'};
     });
   }
   createDirectory(path){
