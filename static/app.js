@@ -62,7 +62,8 @@ function deliveryCaption(row){return {tasks_created:'已创建任务',draft:'因
 // #238: reception, signature verification and processing are read as separate facts. Archive outcomes keep their own
 // neutral wording, so duplicate/draft/disabled/untriggered rows never borrow the refusal styling of a bad signature.
 const deliveryOutcomes = {
-  tasks_created:['已创建任务','success'], duplicate:['重复投递，未重复创建','info'], draft:['草稿跳过','info'], not_trigger:['不触发处理',''],
+  // Wording stays the archive contract the existing trial spec reads: these are archive outcomes, not failures.
+  tasks_created:['已创建任务','success'], duplicate:['重复，不重复建任务','info'], draft:['因草稿跳过','info'], not_trigger:['不是触发事件',''],
   review_disabled:['检视未开启，仅归档',''], project_disabled:['项目已禁用，仅归档',''], unregistered_repository:['仓库未启动，仅归档',''],
   invalid_signature:['未处理：签名无效','danger'], invalid_payload:['未处理：正文无效','danger'], payload_too_large:['未处理：正文过大','danger'],
   unknown_endpoint:['未处理：入口不存在','danger'], missing_event_or_delivery:['未处理：投递信息不全','danger'] };

@@ -38,7 +38,7 @@ test('webhook list and detail separate reception, signature and processing outco
   await expect(facet('delivery-success', 'processing')).toHaveClass(/status-success/);
 
   // Archive outcomes keep their own wording and never turn into a failure badge.
-  for (const [key, text] of [['delivery-duplicate', '重复投递'], ['delivery-disabled', '项目已禁用'], ['delivery-draft', '草稿'], ['delivery-not-trigger', '不触发']]) {
+  for (const [key, text] of [['delivery-duplicate', '重复，不重复建任务'], ['delivery-disabled', '项目已禁用'], ['delivery-draft', '因草稿跳过'], ['delivery-not-trigger', '不是触发事件']]) {
     await expect(facet(key, 'reception')).toHaveText('已接收');
     await expect(facet(key, 'signature')).toHaveText('签名有效');
     await expect(facet(key, 'processing')).toContainText(text);
@@ -74,7 +74,7 @@ test('webhook list and detail separate reception, signature and processing outco
 
   await dialog.getByRole('button', { name: '关闭', exact: true }).click();
   await row('delivery-duplicate').getByRole('button', { name: '查看详情', exact: true }).click();
-  await expect(dialog.locator('[data-detail-section="processing"]')).toContainText('重复投递');
+  await expect(dialog.locator('[data-detail-section="processing"]')).toContainText('重复，不重复建任务');
   await expect(dialog.locator('[data-detail-section="processing"]')).not.toContainText('失败');
   await expect(dialog.locator('[data-detail-section="dispatch"]')).toContainText('未交给 Manager');
 
