@@ -173,3 +173,16 @@ test('an uncertain move journal stays intact and fail-closed across manager and 
   const before=await readFile(path,'utf8');for(const operation of [()=>tree.list(),()=>new Notes(root).files(),()=>new Notes(root).read('b.txt')])await assert.rejects(operation(),/note_move_uncertain/);
   assert.equal(await readFile(path,'utf8'),before);assert.equal(await readFile(join(root,'moved.txt'),'utf8'),'unknown replacement');
 });
+
+test('a control character in a name is refused for create, rename and move instead of reaching the filesystem',async t=>{
+  const {root,tree}=await fixture(t),names=['ctl\u0001name.txt','tab\tname.txt','new\nline.txt','del\x7fname.txt','line\u2028sep.txt'];
+  for(const name of names)assert.throws(()=>tree.create(name,'x'),/invalid_note_path/,JSON.stringify(name));
+  await tree.createDirectory('guides');
+  for(const name of names)assert.throws(()=>tree.create('guides/'+name,'x'),/invalid_note_path/,JSON.stringify(name));
+  for(const name of names)assert.throws(()=>tree.createDirectory(name),/invalid_note_path/,JSON.stringify(name));
+  const file=await tree.create('ok.txt','one');
+  for(const name of names)assert.throws(()=>tree.move(file.id,name,1),/invalid_note_path/,JSON.stringify(name));
+  // A refused rename leaves the file where it was, with its content and revision untouched.
+  assert.equal((await tree.read(file.id)).content,'one');assert.equal((await tree.read(file.id)).revision,1);
+  assert.deepEqual((await tree.list()).files.map(row=>row.path),['ok.txt']);
+});

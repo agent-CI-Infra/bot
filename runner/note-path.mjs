@@ -1,14 +1,17 @@
 import { open, mkdir, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 
+// A name is one path component. Besides the separators it may not carry a control character: NUL already, and now the
+// rest of C0, DEL, the C1 range and the two line separators, which no reader of the catalog can show or round-trip.
+const controlCharacter = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 export function noteComponent(value) {
-  if (typeof value !== 'string' || !value || /[/\\\0]/.test(value) || ['.', '..', '.git'].includes(value.toLowerCase()) || value.startsWith('.write-') || value.startsWith('.expired-')) throw new Error('invalid_note_name');
+  if (typeof value !== 'string' || !value || value.includes('/') || value.includes('\\') || controlCharacter.test(value) || ['.', '..', '.git'].includes(value.toLowerCase()) || value.startsWith('.write-') || value.startsWith('.expired-')) throw new Error('invalid_note_name');
   return value;
 }
 // Paths are relative and already canonical. Do not normalize away traversal or decode names a second time.
 export function notePath(value, { root = false, internal = false } = {}) {
   if (root && value === '') return '';
-  if (typeof value !== 'string' || !value || value.startsWith('/') || /^[a-z]:\//i.test(value) || /[\\\0]/.test(value) || Buffer.byteLength(value) > 4096) throw new Error('invalid_note_path');
+  if (typeof value !== 'string' || !value || value.startsWith('/') || /^[a-z]:\//i.test(value) || value.includes('\\') || controlCharacter.test(value) || Buffer.byteLength(value) > 4096) throw new Error('invalid_note_path');
   const parts = value.split('/');
   if (parts.length > 32) throw new Error('invalid_note_path');
   for (const part of parts) {

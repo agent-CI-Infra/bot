@@ -6,10 +6,13 @@ import { memoryAuthorize } from '../memory/access.js';
 import { ProjectMemory } from '../memory/project.js';
 import { memoryApi } from '../memory/api.js';
 
+// A control character (NUL, the rest of C0, DEL, the C1 range and the two line separators) cannot be shown or typed in
+// the console, so a name or a path carrying one is refused before any filesystem request, as the manager does.
+const controlCharacter = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 // Match the manager's relative-path contract before sending any filesystem request.
 const filePath = (value: unknown, root = false): string => {
   if (root && value === '') return '';
-  if (typeof value !== 'string' || !value || Buffer.byteLength(value)>4096 || /^[A-Za-z]:\//.test(value) || /[\\\0]/.test(value)) fail(400,'invalid_note_path');
+  if (typeof value !== 'string' || !value || Buffer.byteLength(value)>4096 || /^[A-Za-z]:\//.test(value) || value.includes('\\') || controlCharacter.test(value)) fail(400,'invalid_note_path');
   const parts=(value as string).split('/');
   if(parts.length>32 || parts.some(part=>!part || ['.','..','.git'].includes(part.toLowerCase()) || /^\.(?:write|expired)-/.test(part) || Buffer.byteLength(part)>255)) fail(400,'invalid_note_path');
   return value as string;
@@ -19,7 +22,9 @@ const physicalId = (id:string) => {
   if (!/^n:[a-zA-Z0-9_-]+$/.test(id)) return false;
   try { const name=Buffer.from(id.slice(2),'base64url').toString('utf8');return !filePath(name).includes('/') && 'n:'+Buffer.from(name).toString('base64url')===id; } catch { return false; }
 };
-const legacyName = (m: any) => String(m.catalog.title || m.key).replace(/[/\\\0]/g,'-').slice(0,160) + '--' + m.id.slice(0,8) + '.md';
+// A legacy title becomes a file name, so the same characters that a name may not carry are folded here instead of
+// failing the migration: a title is data, not a name its author chose on this filesystem.
+const legacyName = (m: any) => String(m.catalog.title || m.key).replace(/[/\\\u0000-\u001f\u007f-\u009f\u2028\u2029]/g,'-').slice(0,160) + '--' + m.id.slice(0,8) + '.md';
 const deleted = (m: any) => ['archived','revoked'].includes(m.status);
 const summary = (m: any) => ({ id:'m:'+m.id,name:legacyName(m),path:legacyName(m),directory:'',revision:m.revision,deleted:deleted(m),readonly:m.authority==='repository',source:m.authority==='repository'?'repository':'legacy',can_move:false,bytes:typeof m.body==='string'?Buffer.byteLength(m.body):0 });
 
@@ -55,6 +60,7 @@ export async function knowledgeFilesApi(store:Store,manager:Manager|undefined,us
     }
     if(method==='POST'){
       fields(input,['name','path','content']);if(input.name!==undefined&&input.path!==undefined)fail(400,'invalid_note_path');
+      if(input.name!==undefined&&(typeof input.name!=='string'||controlCharacter.test(input.name)))fail(400,'invalid_note_name');
       const path=filePath(input.path??input.name);if(input.name!==undefined&&path.includes('/'))fail(400,'invalid_note_name');
       if(typeof input.content!=='string')fail(400,'invalid_note_content');
       if(!path.includes('/')&&oldFiles().some(f=>f.name===path))fail(409,'note_path_conflict');
