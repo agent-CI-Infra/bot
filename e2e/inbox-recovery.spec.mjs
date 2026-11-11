@@ -28,7 +28,7 @@ for (const width of [390, 1440]) test(`configuration recovery returns to the sam
     await open(page).click(); await detail(page).getByRole('button', { name: '打开项目模型配置', exact: true }).click();
     await expect(detail(page)).toBeHidden(); await expect(page).toHaveURL(/#\/projects\/101\/model$/);
     expect(h.store.all('SELECT * FROM audit')).toEqual(before);
-    await page.getByLabel('默认模型', { exact: true }).selectOption(model.id);
+    await page.getByRole('combobox', { name: '默认模型', exact: true }).selectOption(model.id);
     await page.getByRole('button', { name: '保存默认模型', exact: true }).click();
     await expect(page.getByText('已保存项目默认模型', { exact: true })).toBeVisible();
     await page.getByRole('link', { name: '返回待处理列表', exact: false }).click();
@@ -87,9 +87,11 @@ test('access revoked during an open task clears the returned inbox instead of re
   const { h, admin } = await prepared(page);
   try {
     const password = testPassword(); await admin('/api/users', 'POST', { username: 'inbox-member', password, repository_ids: ['101'] });
-    await page.getByRole('button', { name: '退出登录', exact: true }).click(); await page.goto(h.admin + '/#/inbox/101');
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible(); await page.goto(h.admin + '/#/inbox/101');
     await page.getByLabel('用户名', { exact: true }).fill('inbox-member'); await page.getByLabel('密码', { exact: true }).fill(password);
     await page.getByRole('button', { name: '登录', exact: true }).click();
+    await expect(page.locator('#workspace')).toBeVisible(); await page.goto(h.admin + '/#/inbox/101');
     const selected = page.locator('.console-inbox [data-task-id="inbox-0"]'); await selected.getByRole('button', { name: '查看任务', exact: true }).click();
     const member = h.store.get("SELECT id FROM users WHERE username='inbox-member'");
     await admin('/api/project-admin-assignments', 'PUT', { user_id: member.id, repository_ids: [] });
