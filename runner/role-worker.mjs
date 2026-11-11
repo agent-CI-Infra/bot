@@ -9,9 +9,9 @@ async function run(c){
  const messages=c.messages.length?[...c.messages,{role:'user',content:c.prompt}]:[{role:'system',content:c.system},{role:'user',content:c.prompt}];
  for(let turn=0;turn<c.maxTurns;turn++){
   await rpc('checkpoint',messages);
-  const closing=turn>=c.maxTurns-3,tools=closing?c.tools.filter(t=>t.function.name===c.finish):c.tools;
+  const finishes=c.finishes??[c.finish],closing=turn>=c.maxTurns-3,tools=closing?c.tools.filter(t=>finishes.includes(t.function.name)):c.tools;
   if(turn===c.maxTurns-3)messages.push({role:'user',content:'Submit the honest current result now. Do not invent verification.'});
-  const message=await rpc('model',{messages,tools,tool_choice:closing?{type:'function',function:{name:c.finish}}:'auto'});
+  const message=await rpc('model',{messages,tools,tool_choice:closing&&finishes.length===1?{type:'function',function:{name:c.finish}}:'auto'});
   if(message?.tool_calls?.length){
    if(message.tool_calls.length>8||new Set(message.tool_calls.map(t=>t.id)).size!==message.tool_calls.length)throw Error('invalid_tool_calls');
    messages.push(message);
@@ -19,9 +19,9 @@ async function run(c){
     if(!/^[\w-]{1,128}$/.test(call.id||'')||typeof call.function?.arguments!=='string')throw Error('invalid_tool_call');
     let args;try{args=JSON.parse(call.function.arguments);}catch{args=null;}
     // The run token from start is presented on every tool call; the parent checks it before executing.
-    const result=await rpc('tool',{name:call.function.name,args,finish:call.function.name===c.finish,offered:tools.some(t=>t.function.name===call.function.name),token:c.token});
+    const result=await rpc('tool',{name:call.function.name,args,finish:finishes.includes(call.function.name),offered:tools.some(t=>t.function.name===call.function.name),token:c.token});
     messages.push({role:'tool',tool_call_id:call.id,content:JSON.stringify(result)});
-    if(call.function.name===c.finish&&result.submitted){for(const pending of message.tool_calls.slice(message.tool_calls.indexOf(call)+1))messages.push({role:'tool',tool_call_id:pending.id,content:'{"skipped":"execution_submitted"}'});await rpc('checkpoint',messages);send({done:true});lines.close();return;}
+    if(finishes.includes(call.function.name)&&result.submitted){for(const pending of message.tool_calls.slice(message.tool_calls.indexOf(call)+1))messages.push({role:'tool',tool_call_id:pending.id,content:'{"skipped":"execution_submitted"}'});await rpc('checkpoint',messages);send({done:true});lines.close();return;}
     await rpc('checkpoint',messages);
    }
   }else{const result=await rpc('final',message?.content);messages.push({role:'assistant',content:message.content});if(result?.error==='invalid_submission'){messages.push({role:'user',content:result.message});await rpc('checkpoint',messages);continue;}await rpc('checkpoint',messages);send({done:true,result});lines.close();return;}

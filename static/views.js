@@ -309,7 +309,7 @@ function liveText(task) {
   if(task.status==='waiting_pr_head')return `PR 尚未指向刚推送的提交 ${task.pushed_sha||'（读取中）'}；正在自动重读 PR head，匹配后继续更新 PR 描述。不会重复推送或增加修订轮数。`;
   if (task.status === 'publishing') return '正在发布到 GitHub…';
   if(ownershipErrors[task.error_code])return ownershipErrors[task.error_code]+'；已暂停，不会推送其他作者或分支。';
-  if (task.status.startsWith('waiting_') || task.status === 'retry_wait' || task.status === 'needs_replan' || task.status === 'paused') {
+  if (task.status.startsWith('waiting_') || task.status === 'retry_wait' || ['needs_replan','needs_help'].includes(task.status) || task.status === 'paused') {
     const caption = (states[task.status] || [task.status])[0], cause = task.error_cause;
     if (!cause) return `已暂停：${caption}${task.error_code ? '（' + task.error_code + '）' : ''}`;
     const count = !cause.retry_cycle && task.status === 'retry_wait' && task.error_code !== 'github_rate_limited' && task.retry_count ? `同一种失败已连续出现 ${task.retry_count} 次，满 5 次后改为每 8 小时重试。` : '';
@@ -345,7 +345,7 @@ function renderTimeline(task, logs) {
   if (first ? !!live : atBottom) box.scrollTop = box.scrollHeight;
 }
 function setSnapshotStatus(progress,status) {
-  const waiting=status?.startsWith('waiting_')||status==='retry_wait'||status==='needs_replan'||status==='paused';
+  const waiting=status?.startsWith('waiting_')||status==='retry_wait'||['needs_replan','needs_help'].includes(status)||status==='paused';
   progress.status.replaceChildren(waiting?badge('已暂停','warning'):state(status));
 }
 function snapshotMessage(value) {
@@ -525,7 +525,7 @@ function taskNextStep(task, record, roles, purposes = {}) {
   if (task.status === 'superseded') return '已过时：同一对象有更新的任务接手，这个任务不再继续。';
   if (task.status === 'failed') return '已失败' + (cause ? `：${cause.label}。${cause.action}` : `（${task.error_code || '没有错误码'}）。`);
   if (task.status === 'queued') return '排队中：等这个仓库的项目电脑空闲后开始。';
-  if (task.status.startsWith('waiting_') || ['retry_wait', 'needs_replan', 'paused'].includes(task.status))
+  if (task.status.startsWith('waiting_') || ['retry_wait', 'needs_replan', 'needs_help', 'paused'].includes(task.status))
     return `已暂停（${caption}）` + (cause ? `：${cause.label}。${cause.action}` : task.error_code ? `：${task.error_code}。` : '。');
   if (task.status === 'publishing' || task.phase === 'publish') return '控制面正在把验收通过的结果发布到 GitHub。';
   if (roles?.runs.some(run => run.role === 'qa' && run.status === 'running')) return `独立 QA 正在新的上下文里验收候选 ${shortId(record?.candidate?.id)}。`;

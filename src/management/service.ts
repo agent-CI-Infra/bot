@@ -137,7 +137,7 @@ export class ManagementService {
     if(['completed','succeeded','pr_opened','cancelled','superseded'].includes(task.status))return [];
     const result=['task.pause','task.cancel','task.instructions'];
     const active=this.tasks.hooks.active?.(task.id)||task.status==='running';
-    if(!active&&['paused','failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan'].includes(task.status))result.push('task.retry');
+    if(!active&&['paused','failed','waiting_configuration','waiting_environment','waiting_permission','waiting_publication','waiting_pr_head','retry_wait','needs_replan','needs_help'].includes(task.status))result.push('task.retry');
     if(!active&&!this.store.get("SELECT 1 FROM github_effects WHERE task_id=? AND state<>'pending'",task.id))result.push('task.contract','task.adopt-config');
     result.push('task.priority','task.relate');
     return result.filter(operation=>{try{this.check(actor,{operation,target,arguments:{}});return true;}catch{return false;}});

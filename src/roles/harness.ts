@@ -41,14 +41,14 @@ export function processHarness<T>(spec:AgentSpec<T>){return async(services:Agent
     const offered=spec.tools?.some(t=>t.function.name===m.args.name);
     if(offered&&m.args.offered)spec.screen?.(m.args.name,m.args.args);
     if(!offered||!m.args.offered){value={error:'tool_not_allowed'};spec.onDenied?.(String(m.args.name),'not_offered');}
-    else if(m.args.name===spec.finish?.name){try{result=await spec.finish!.validate(m.args.args);value={submitted:true};}catch(error){value=repair(error);}}
+    else if(spec.finish&&(spec.finish.names??[spec.finish.name]).includes(m.args.name)){try{result=await spec.finish!.validate(m.args.args,m.args.name);value={submitted:true};}catch(error){value=repair(error);}}
     else {value=await spec.execute?.(m.args.name,m.args.args);traceEvent(spec.store,spec.task.id,'tool_observation',{name:m.args.name,arguments:spec.redactor.clean(m.args.args),observation:spec.redactor.clean(value)},spec.task.trace_run_id,'tool');}
    }else if(m.method==='final'){if(typeof m.args!=='string')stop('agent_output_invalid','retry_wait');try{result=spec.validate?await spec.validate(m.args):spec.redactor.text(m.args) as T;value={submitted:true};}catch(error){value=repair(error);}}
    else throw new Error('role_worker_protocol');
    child.stdin.write(JSON.stringify({id:m.id,result:spec.redactor.clean(value)})+'\n');
   }).catch(fail);
  });
- child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,maxTurns:spec.maxTurns??32,token:spec.runAccess?.token??null}})+'\n');
+ child.stdin.write(JSON.stringify({start:{system:spec.system,prompt:spec.prompt,messages:spec.session?.messages??[],tools:spec.tools??[],finish:spec.finish?.name,finishes:spec.finish?.names,maxTurns:spec.maxTurns??32,token:spec.runAccess?.token??null}})+'\n');
 });}
 
 export const completeTranscript=(messages:any[])=>{const last=messages.findLastIndex(m=>m?.role==='assistant');if(last<0||!messages[last].tool_calls?.length)return true;const answered=new Set(messages.slice(last+1).filter(m=>m?.role==='tool').map(m=>m.tool_call_id));return messages[last].tool_calls.every((c:any)=>answered.has(c.id));};
@@ -116,7 +116,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
   // passes through here, so every forbidden call is recorded whatever the runtime did with it.
   inspect:message=>{for(const call of message?.tool_calls??[]){const name=String(call.function?.name);if(!tools.some(t=>t.function.name===name)){spec.onDenied?.(name,'not_offered');continue;}let args:any=null;try{args=JSON.parse(call.function.arguments);}catch{}spec.screen?.(name,args);}},
   control:async(name,args)=>{
-   if(finish&&name===finish.name){try{const value=await finish.validate(args);submitted={value};return {result:{submitted:true,submission:args},finish:true};}catch(error){const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;return {result:{error:'invalid_submission',message:spec.redactor.text(feedback)}};}}
+   if(finish&&(finish.names??[finish.name]).includes(name)){try{const value=await finish.validate(args,name);submitted={value};return {result:{submitted:true,submission:args,submission_name:name},finish:true};}catch(error){const feedback=spec.repairInvalid?.(error);if(!feedback||repairs++>=2)throw error;return {result:{error:'invalid_submission',message:spec.redactor.text(feedback)}};}}
    const value=spec.execute?await spec.execute(name,args):{error:'tool_not_allowed'};
    traceEvent(spec.store,spec.task.id,'tool_observation',{name,arguments:spec.redactor.clean(args),observation:spec.redactor.clean(value)},spec.task.trace_run_id,'tool');
    return {result:value};
@@ -125,7 +125,7 @@ function piHarness<T>(spec:AgentSpec<T>):NonNullable<AgentSpec<T>['adapter']>{
    if(base?.complete)return base.complete(state,publication);
    if(submitted)return submitted.value;
    // A session that finished while the control plane was away carries its submission; validate it again from task facts.
-   if(finish&&state.result?.submitted===true)return finish.validate(state.result.submission);
+   if(finish&&state.result?.submitted===true)return finish.validate(state.result.submission,state.result.submission_name);
    return stop('role_submission_required','retry_wait','Pi 会话结束但没有通过控制面提交结果。');
   }});
 }

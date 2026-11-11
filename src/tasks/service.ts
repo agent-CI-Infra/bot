@@ -57,7 +57,7 @@ export class TaskRecords {
     const r=this.store.get('SELECT * FROM task_records WHERE task_id=?',id),t=this.store.get('SELECT * FROM tasks WHERE id=?',id);
     if (!r||!t) throw new Error('task_not_found');
     const relations=taskRelations(this.store,id);
-    return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), priority:{level:t.priority,sequence:t.queue_seq},relations:relations.items.map(link=>({...link,reason:link.reason.slice(0,1000),evidence:{excerpt:link.evidence.slice(0,1000),truncated:link.evidence.length>1000}})),relation_page:{total:relations.total,next_offset:relations.next_offset,url:'/api/tasks/'+id+'/relations'},progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|paused$|needs_replan$|failed$)/.test(t.status)?t.error_code:null},
+    return {contract:JSON.parse(r.contract) as Contract, revision:Number(r.revision), priority:{level:t.priority,sequence:t.queue_seq},relations:relations.items.map(link=>({...link,reason:link.reason.slice(0,1000),evidence:{excerpt:link.evidence.slice(0,1000),truncated:link.evidence.length>1000}})),relation_page:{total:relations.total,next_offset:relations.next_offset,url:'/api/tasks/'+id+'/relations'},progress:{status:t.status,phase:t.phase,attempt:t.attempt,completed:JSON.parse(r.completed),next_action:r.next_action,waiting_reason:/^(waiting_|retry_wait$|paused$|needs_replan$|needs_help$|failed$)/.test(t.status)?t.error_code:null},
       stage_schedule:reconcileAssignments(this.store,id),selections:JSON.parse(r.selections),candidate:r.candidate?JSON.parse(r.candidate) as Candidate:null,acceptance:r.acceptance?JSON.parse(r.acceptance):null,pending:r.pending?JSON.parse(r.pending):null,rounds:Number(r.rounds),
       coordination:coordinationContext(this.store,id),retry_reports:retryContext(this.store,id),scope_differences:scopeDifferences(this.store,id),project:{repository_id:t.repository_id,context:this.project(t.repository_id)},followups:this.store.all('SELECT candidate_id,issue_key,task_id FROM task_followups WHERE parent_id=?',id)};
   }
@@ -160,15 +160,14 @@ export class TaskRecords {
       if(!current.candidate||current.candidate.id!==candidateId||current.revision!==revision)throw new Error('stale_acceptance');
       if(['pass','pass_with_issues'].includes(verdict.outcome)){assertCoordinationCurrent(this.store,id,current.candidate);assertStageAcceptance(this.store,id,current.candidate,verdict);}
       if(['cancelled','superseded'].includes(task.status))throw new Error('task_cancelled');
-      if(current.acceptance?.candidate_id===candidateId) {
-        const {candidate_id:_,revision:_revision,followups:_followups,created_at:_time,exhausted:_exhausted,...previous}=current.acceptance;
-        if(['pass','pass_with_issues'].includes(previous.outcome))return current.acceptance;
-        if(hash(previous)===hash(verdict)){
-          this.store.run("UPDATE tasks SET status='needs_replan',phase='acceptance',error_code='acceptance_no_progress' WHERE id=?",id);
-          const ended={...current.acceptance,exhausted:true};this.store.run('UPDATE task_records SET acceptance=? WHERE task_id=?',JSON.stringify(ended),id);
-          this.history(id,'acceptance_no_progress',{candidate_id:candidateId,reason:'identical rejected candidate and verdict'});return ended;
-        }
+      const evaluated=this.store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance_evaluated' AND json_extract(data,'$.candidate_id')=? ORDER BY id DESC LIMIT 1",id,candidateId);
+      const evaluationRef=evaluated?'task_history:'+evaluated.id:null;
+      if(!evaluationRef&&current.acceptance?.candidate_id===candidateId){
+        const {candidate_id:_,revision:_revision,followups:_followups,created_at:_time,exhausted:_exhausted,evaluation_ref:_evaluation,...previous}=current.acceptance;
+        if(hash(previous)===hash(verdict))return current.acceptance;
       }
+      if(evaluationRef&&current.acceptance?.evaluation_ref===evaluationRef)return current.acceptance;
+      if(current.acceptance?.candidate_id===candidateId&&['pass','pass_with_issues'].includes(current.acceptance.outcome)&&(!evaluationRef||current.acceptance.evaluation_ref===evaluationRef))return current.acceptance;
       if(['completed','succeeded','pr_opened'].includes(task.status))throw new Error('task_already_delivered');
       // QA observations alone never create work. Only an explicit Manager/default-rule plan
       // bound to this candidate can create or supplement follow-up tasks.
@@ -196,13 +195,19 @@ export class TaskRecords {
         this.store.run('INSERT INTO task_followups VALUES(?,?,?,?)',id,candidateId,residual.key,child);followups.push(child);
       }
       const rounds=current.rounds+1,passing=['pass','pass_with_issues'].includes(verdict.outcome);
-      const exhausted=!passing&&verdict.outcome!=='needs_human'&&rounds>=3;
-      const acceptance={...verdict,candidate_id:candidateId,revision,followups,created_at:new Date().toISOString(),exhausted};
+      const exhausted=false;
+      const acceptance={...verdict,candidate_id:candidateId,revision,followups,created_at:new Date().toISOString(),exhausted,evaluation_ref:evaluationRef};
       this.store.run('UPDATE task_records SET acceptance=?,rounds=?,pending=NULL,next_action=? WHERE task_id=?',JSON.stringify(acceptance),rounds,passing?null:verdict.gaps.join('; '),id);
-      const status=passing?successStatus:verdict.outcome==='needs_human'||exhausted?'needs_replan':'queued';
-      this.store.run('UPDATE tasks SET status=?,phase=?,error_code=?,next_run_at=0,updated_at=? WHERE id=?',status,passing?(finalize?'done':task.phase):verdict.outcome==='needs_human'||exhausted?'acceptance':'prepare',passing?null:exhausted?'acceptance_no_progress':`acceptance_${verdict.outcome}`,new Date().toISOString(),id);
+      const status=passing?successStatus:'queued';
+      this.store.run('UPDATE tasks SET status=?,phase=?,error_code=?,next_run_at=0,updated_at=? WHERE id=?',status,passing?(finalize?'done':task.phase):'prepare',passing?null:exhausted?'acceptance_no_progress':`acceptance_${verdict.outcome}`,new Date().toISOString(),id);
       this.history(id,'acceptance',acceptance);
-      if(verdict.outcome==='needs_human'&&verdict.coordination){const request=requestCoordination(this.store,task,verdict.coordination);this.store.run("UPDATE tasks SET status='waiting_coordination',error_code='task_coordination_requested' WHERE id=?",id);return {...acceptance,coordination_requested:request.coordination_id};}
+      if(!passing){
+        const failures=this.store.get("SELECT count(*) n FROM task_history WHERE task_id=? AND type='acceptance' AND json_extract(data,'$.outcome') NOT IN ('pass','pass_with_issues')",id)!.n;
+        if(failures%3===0){const ref='task_history:'+this.store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id DESC LIMIT 1",id)!.id;
+          this.history(id,'retry_report',{group:'qa_rejections',count:failures,failure_ref:ref,instruction:'QA has not passed this many times across the task. Manager may intervene or leave the existing repair flow running. This is not a pause or human approval request.'});}
+      }
+
+
       return acceptance;
     });
   }

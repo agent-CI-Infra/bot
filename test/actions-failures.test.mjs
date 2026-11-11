@@ -317,7 +317,7 @@ test('publication rechecks an Actions code issue label and assignment before any
     f.store.run("UPDATE tasks SET kind='development.issue',phase='publish',input=? WHERE id=?", JSON.stringify({ review: { product_defect: true, request_quote: 'Fix the assertion.' } }), f.taskId);
     const branch = 'bot/issue-1-' + f.taskId; f.store.run("INSERT INTO bot_branches VALUES('101',?,?)", branch, f.taskId);
     f.store.run('INSERT INTO development_candidates VALUES(?,?)', f.taskId, JSON.stringify({ branch, owner_task_id: f.taskId, files: [], base_branch: 'main', base_sha: f.commit }));
-    const result = await f.run(); assert.equal(result.error_code, 'development_not_approved'); assert.equal(result.status, 'needs_replan');
+    const result = await f.run(); assert.equal(result.error_code, 'development_not_approved'); assert.equal(result.status, 'waiting_permission');
     assert.deepEqual(writes, []);
   }
 });

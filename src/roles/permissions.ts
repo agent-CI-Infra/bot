@@ -9,7 +9,7 @@ const action = (id: string, name: string, tools: string[], detail: string): Perm
 
 /** Flat permissions narrow the tools supplied by the task entry. They never create a tool or a GitHub grant. */
 const legacyItems: PermissionItem[] = [
-  access('repository', '工作区文件', ['read_file'], ['write_file'], '读写可修改当前工作区；只读仅提供文件读取工具。'),
+  access('repository', '工作区文件', ['read_file','read_version_file','compare_versions'], ['write_file'], '读写可修改当前工作区；只读仅提供文件读取工具。'),
   action('commands', '运行命令', ['run_command'], '命令可以修改工作区；需要禁止执行命令时单独选择拒绝。'),
   access('task_records', '任务记录与证据', ['read_task_record', 'read_task_history', 'read_evidence'], ['record_progress'], '读取当前任务记录，或写入工作进度。'),
   access('conversation_history', '当前会话记录', ['search_conversation_history', 'read_conversation_message', 'read_conversation_summary'], [], '只查询当前已授权会话的本地记录和摘要；不会联网回源，不开放其他群或私信。'),
@@ -28,7 +28,7 @@ const legacyItems: PermissionItem[] = [
   action('dispatch', '处理项目事件', ['dispatch'], '决定为事件新建任务、续接任务或不处理。'),
   action('delegation', '委派角色', ['delegate_role', 'delegate_roles'], '将工作委派给已配置并启用的角色。'),
   action('subagents', '启动独立执行会话', ['start_agent'], '启动工具范围不超过当前角色的独立会话。'),
-  action('nomination', '交付提名与任务协调', ['nominate_delivery','submit_followup_plan','submit_retry_decision','set_task_priority','relate_task'], '将候选交给独立 QA，按事实判级或关联任务；不等于通过验收，也不授予 GitHub 写权限。'),
+  action('nomination', '交付提名与任务协调', ['nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','set_task_priority','relate_task'], '将候选交给独立 QA，按事实判级或关联任务；不等于通过验收，也不授予 GitHub 写权限。'),
   action('submission', '提交角色结果', ['submit_role_result', 'submit_delivery', 'finish', 'finish_review', 'finish_analysis', 'finish_observation', 'finish_release_notes', 'submit_gate_plan'], '提交当前任务入口要求的结构化结果。'),
   action('acceptance', '提交独立验收', ['submit_acceptance'], '仅独立验收入口提供此工具。'),
   action('pull_request', '创建或更新 bot PR', ['create_pull_request'], '请求控制面发布本次任务允许的 PR，仍须通过项目验证和 QA。'),
@@ -37,18 +37,18 @@ const legacyItems: PermissionItem[] = [
 ];
 
 /** These operations concern only the current assignment or its owner. Object/entry checks still apply. */
-export const basicTools = ['read_task_record','read_task_history','read_evidence','record_progress','record_scope_difference',
+export const basicTools = ['read_ci_evidence','read_recovery_source','read_version_context','read_task_record','read_task_history','read_evidence','record_progress','record_scope_difference',
   'search_conversation_history','read_conversation_message','read_conversation_summary',
   'list_managed_tasks','read_managed_task','create_task','manage_task','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task',
   'read_playbook','select_playbooks','search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
   'read_coordination','acknowledge_coordination','read_stage_schedule','plan_task','start_agent','dispatch',
-  'nominate_delivery','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
+  'nominate_delivery','finish_coordination','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
   'finish_analysis','finish_observation','finish_release_notes','submit_gate_plan','submit_acceptance'];
 const githubReads = ['github_read_token','github_read','github_search'];
 const platform = (item: PermissionItem) => ({ ...item, group: 'platform' });
 const github = (item: PermissionItem) => ({ ...item, group: 'github' });
 export const permissionItems: PermissionItem[] = [
-  platform(action('computer','使用虚拟电脑',['read_file','write_file','run_command'],'允许读取和修改分配的工作区、执行命令与测试；固定候选和运行隔离仍由任务入口保证。')),
+  platform(action('computer','使用虚拟电脑',['read_file','read_version_file','compare_versions','write_file','run_command'],'允许读取和修改分配的工作区、执行命令与测试；固定候选和运行隔离仍由任务入口保证。')),
   platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
   platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','request_task_coordination','wait_for_tasks','submit_coordination','set_task_priority','relate_task'],'查询其他角色的任务；读写还可修改、协调其他任务与共享调度。自己的任务、已收到的通知默认可用。')),
   platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'查询共享知识或提交候选；自己的私有记忆默认可用，候选仍需原有复核。')),
@@ -176,7 +176,7 @@ export function permissionTools(value: RolePermissions): string[] {
     if (on(mode)) item.write.forEach(name => tools.add(name));
   }
   if (p.computer === 'custom') {
-    if (['read','write'].includes(p.legacy_repository!)) tools.add('read_file');
+    if (['read','write'].includes(p.legacy_repository!)) for(const name of ['read_file','read_version_file','compare_versions'])tools.add(name);
     if (p.legacy_repository === 'write') tools.add('write_file');
     if (p.legacy_commands === 'allow') tools.add('run_command');
   }

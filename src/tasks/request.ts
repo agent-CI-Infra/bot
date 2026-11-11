@@ -1,3 +1,4 @@
+import {assessRetryReport} from '../roles/retries.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { executionModel } from './configuration.js';
 import { assertRequestPullRequest, softwareRequest, requestPolicyHash, publishRequestPullRequest } from './pull-request.js';
@@ -70,6 +71,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
   await restoreCheckpoint(store,task,workspace,task.head_sha);
   const contextFiles={...(parent?JSON.parse(parent.input||'{}').context_files:{}),...input.context_files,...inheritedContext};
   if(Object.keys(contextFiles).length)await workspace.context(contextFiles);
+  if(controlled(store,task,'request'))await assessRetryReport(store,task,workspace,github,guard,redactor);
     for(;;){
       if(software&&task.phase==='publish'){
         if(records.get(task.id).pending?.policy_hash!==requestPolicyHash(store,task))update({phase:'acceptance'});
@@ -166,8 +168,9 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
       }
       const decision=records.decide(task.id,candidate.id,candidate.revision,verdict,'completed',true,task.claim_token);
       Object.assign(task,store.get('SELECT * FROM tasks WHERE id=?',task.id));
-      if(['pass','pass_with_issues','needs_human'].includes(verdict.outcome)||decision.exhausted)break;
-      update({status:'running',phase:'model',attempt:task.attempt+1});
+      if(['pass','pass_with_issues'].includes(verdict.outcome))break;
+      if(candidate.artifacts.some(a=>a.kind==='code'||a.kind==='files'))await checkpoint(store,task,workspace);
+      update({status:'queued',phase:'model',attempt:task.attempt+1,next_run_at:Date.now()+5000});break;
     }
   } catch(error){
     // A late file write must survive a model failure even if the agent never called record_progress.

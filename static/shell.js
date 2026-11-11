@@ -37,6 +37,7 @@ const consoleAttention = {
   waiting_environment: ['环境待恢复', '检查项目电脑和连接状态，保留现有任务与证据。'],
   waiting_permission: ['权限待处理', '核对当前授权，必要时联系项目或应用管理员。'],
   waiting_publication: ['发布待核实', '先核对远程写入结果，避免重复发布。'],
+  needs_help: ['需要帮助', 'Manager 已明确请求外部帮助；查看所需操作与恢复条件。'],
   needs_replan: ['需要重新规划', '查看验收缺口和已有产物，再决定下一步。']
 };
 function consoleInboxRoute() { return /^#\/inbox(?:\/(all|[1-9]\d*))?(?:\/(\d+))?$/.exec(location.hash); }

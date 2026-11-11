@@ -72,7 +72,7 @@ test('a stop the bot, the model, the project computer or an outage caused retrie
     assert.equal(automaticState(code,'failed'),'retry_wait',code);
   for(const code of ['agent_context_too_large','github_permissions_insufficient','work_disabled','github_http_422','model_http_400','role_disabled','github_publication_unknown'])
     assert.equal(automaticState(code,'failed'),'failed',code);
-  for(const state of ['waiting_permission','waiting_configuration','waiting_publication','needs_replan','cancelled','retry_wait'])
+  for(const state of ['waiting_permission','waiting_configuration','waiting_publication','needs_help','cancelled','retry_wait'])
     assert.equal(automaticState('task_runtime_failure',state),state,state);
 });
 

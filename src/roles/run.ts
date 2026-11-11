@@ -216,7 +216,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
        if(definition&&['writer','observer'].includes(definition.kind))taskExecutor(s,caller(),target);
       }
      }
-     if(taskManagementTools.some(t=>t.function.name===name))return new TaskCommands(s).tool(caller(),name,args);
+     if(taskManagementTools.some(t=>t.function.name===name)){try{return new TaskCommands(s).tool(caller(),name,args);}catch(error){const code=String((error as any).code??'');if(['task_not_owned','task_not_found','task_management_forbidden','task_executor_forbidden','task_scope_forbidden'].includes(code))return {error:code,instruction:'This action was refused. Continue with the offered task records or arrange authorized work; the refusal does not authorize broader access.'};throw error;}}
      // Task facts are expanded through the gateway with this run's token: the same server-side checks for every adapter.
      if(b&&gatewayToolNames.includes(name))return gateway(s).call(b.token,{tool:name,arguments:args,run_id:b.run_id,lease_epoch:b.epoch});
      if(name==='read_skill'&&snapshot.skills){const files=skillFiles(s,task.repository_id,snapshot.skills);if(args?.path===undefined)return {bundle:{id:snapshot.skills.id,revision:snapshot.skills.revision,content_hash:snapshot.skills.content_hash,source:snapshot.skills.source},files:files.map(({content,...f})=>f)};
@@ -227,7 +227,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
     return value;},
    system:definition.prompt,
    screen:(name,args)=>{authority(name);spec.screen?.(name,args);},
-   ...(spec.finish ? {finish:{...spec.finish,validate:async args=>{authority(spec.finish!.name);const result=await spec.finish!.validate(args);authority(spec.finish!.name);return result;}}} : {}),
+   ...(spec.finish ? {finish:{...spec.finish,validate:async(args,name)=>{authority(name??spec.finish!.name);const result=await spec.finish!.validate(args,name);authority(name??spec.finish!.name);return result;}}} : {}),
    ...(spec.validate ? {validate:(content:string)=>{authority(spec.finish?.name??snapshot.output_schema.tool??'finish');return spec.validate!(content);}} : {}),
    ...(spec.finalizationTools ? {finalizationTools:spec.finalizationTools.filter(name=>tools.some(tool=>tool.function.name===name))} : {}),
    prompt:JSON.stringify({...scopedInput(),role_context:{task_ref:'task:'+task.id,assignment_ref:ref,recovery_mode:recover,...roleContext,environment:{project_id:task.repository_id,task_id:task.id,work_type:workflow,profile:snapshot.environment,permissions:resolved.definition.permissions,tools:tools.map(tool=>tool.function.name)},
