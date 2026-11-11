@@ -51,8 +51,6 @@ export interface PiSession<T> {
   checkpoint?: () => Promise<void>;
   /** Check the runner's actual Pi runtime against the pinned harness version before the session starts. */
   runtime?: { version: string; report: (runtime: any) => void };
-  /** Keep the model's private reasoning out of the task log (role sessions). */
-  dropReasoning?: boolean;
   /** The managed session's cancellation: an abort ends the control plane's wait with harness_cancelled. */
   signal?: AbortSignal;
 }
@@ -106,7 +104,7 @@ export function piAdapter<T>(session: PiSession<T>) {
       const state = conversation ? await workspace.deliver({ type: 'workspace_agent_poll', offset })
         : await workspace.call(key + ':poll:' + randomId(), { type: 'workspace_agent_poll', offset });
       if (conversation) await guard();
-      for (const event of state.events || []) workspace.log(redactor.clean(session.dropReasoning ? Object.fromEntries(Object.entries(event).filter(([name]) => !/^(reasoning|thinking)/i.test(name))) : event)); offset = state.offset || offset;
+      for (const event of state.events || []) workspace.log(redactor.clean(Object.fromEntries(Object.entries(event).filter(([name]) => !/^(reasoning.*|thinking.*|analysis)$/i.test(name))))); offset = state.offset || offset;
       if (conversation) conversation.offset = offset;
       // A finished agent can leave more than one page of events; retain the tail before exiting.
       if (state.has_more && ['completed', 'review_ready', 'failed', 'interrupted'].includes(state.state)) continue;
