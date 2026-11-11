@@ -2,7 +2,7 @@ import { createSign } from 'node:crypto';
 import { type Store, type Row } from '../storage/database.js';
 import { digest } from '../core/security.js';
 import { appBucket, blockedUntil, bucketName, installationBucket, observe, refused, userBucket, utcTime, type Bucket } from './rate-limits.js';
-import { errorBody, networkReason, Redactor, safePath, stop } from '../agent/common.js';
+import { errorBody, networkReason, Redactor, safePath, stop, TaskError } from '../agent/common.js';
 import { installationExecutionDenied } from '../installations/archive.js';
 
 type SnapshotTree = {tree:any[],directory_fallback:boolean};
@@ -143,6 +143,14 @@ export class GitHub {
       if (response.status >= 500 && method !== 'GET') stop('github_response_unknown', 'retry_wait',explain(said,'，写入结果尚未确认'));
       stop('github_http_' + response.status, response.status === 429 || response.status >= 500 ? 'retry_wait' : 'failed',explain(said));
     }
+    // The 30-second timeout also covers reading the body. A body that stalls or is cut off fails like the request
+    // itself: retried later, and for a write the outcome stays unconfirmed. Without this the abort escaped as an unknown
+    // runtime error and failed the task (a publication whose bot was blocked while GitHub's answer arrived).
+    const unread = (error: unknown): never => {
+      if (error instanceof TaskError) throw error;
+      return stop(jobLogs ? 'github_log_download_failed' : method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
+        this.redactor.text(`GitHub 请求 ${method} ${path} 读取响应失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`));
+    };
     if (jobLogs) {
       const reader = response.body?.getReader(), chunks: Uint8Array[] = []; let size = 0;
       try {
@@ -152,10 +160,12 @@ export class GitHub {
           if (size > 8 * 1024 * 1024) return stop('github_log_too_large', undefined, '该 job 日志超过 8 MiB，未返回不完整内容；请在 Actions 查看完整日志。');
           chunks.push(value);
         }
-      } finally { await reader?.cancel().catch(() => {}); }
+      } catch (error) { unread(error); } finally { await reader?.cancel().catch(() => {}); }
       return Buffer.concat(chunks).toString('utf8');
     }
-    const value = await response.text(); if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large',undefined,`GitHub 请求 ${method} ${path} 的响应长度 ${value.length}，超过 48 MiB 上限。`);
+    let value: string;
+    try { value = await response.text(); } catch (error) { return unread(error); }
+    if (!snapshotBlob && value.length > 48 * 1024 * 1024) stop('github_response_too_large',undefined,`GitHub 请求 ${method} ${path} 的响应长度 ${value.length}，超过 48 MiB 上限。`);
     try { return value ? JSON.parse(value) : {}; } catch { return stop('github_invalid_response',undefined,`GitHub 请求 ${method} ${path} 返回无效 JSON，HTTP ${response.status}。`); }
   }
   async jobLog(jobId: number): Promise<string> {

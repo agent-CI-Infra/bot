@@ -46,6 +46,7 @@ import { ChannelConnections } from './channels/connections.js';
 import { ScheduleService } from './schedules/service.js';
 import { Scheduler } from './schedules/worker.js';
 import { registerScheduledChecks } from './dispatch/schedule.js';
+import type { StallMonitor } from './core/stalls.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
@@ -54,6 +55,8 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
   imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
+  /** Times requests and reports a blocked event loop with the requests in flight. */
+  stalls?: StallMonitor;
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
   schedules?: { clock?: () => number; automatic?: boolean }; onSchedules?: (scheduler: Scheduler) => void; }
 async function body(req: IncomingMessage, limit: number): Promise<{ bytes: Buffer; complete: boolean }> {
@@ -114,6 +117,7 @@ export function createControlPlane(options: Options) {
   const initialized = () => !!store.get("SELECT 1 FROM settings WHERE key='initialized'");
   // Errors contain stable codes only: never echo a request, credential, SQL statement or stack.
   const wrap = (fn: (req: IncomingMessage, res: ServerResponse) => Promise<void>) => async (req: IncomingMessage, res: ServerResponse) => {
+    const done = options.stalls?.request(req.method || 'GET', req.url); if (done) res.on('close', done);
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' https://avatars.githubusercontent.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self' https://github.com");
     try { await fn(req, res); }
