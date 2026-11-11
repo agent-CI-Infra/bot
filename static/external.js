@@ -156,7 +156,8 @@ async function renderExternal(params,request){
   }
 }
 function externalClientLink(client){
-  return consoleLink(`#/projects/${client.repository_id}/external/${client.id}`,'查看详情',`查看客户端 ${client.name} 的认证与活动详情`);
+  const link=consoleLink(`#/projects/${client.repository_id}/external/${client.id}`,'查看详情');
+  link.setAttribute('aria-label',`查看客户端 ${client.name} 的认证与活动详情`);return link;
 }
 function externalClientToggle(client){
   return button(client.enabled?'停用':'启用',async()=>{
