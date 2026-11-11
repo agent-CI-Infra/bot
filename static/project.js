@@ -146,7 +146,7 @@ async function loadProject(id,section=current.section) {
   const overview = section === 'overview', target = current;
   const [repo, environment, installed, rules, models] = await Promise.all([api('/api/repositories/' + id), overview ? null : api('/api/environments/' + id).catch(() => null), superUser ? api('/api/installations').catch(() => null) : null, overview ? null : api('/api/repositories/'+id+'/rules').catch(()=>null), overview ? null : api(superUser ? '/api/models' : '/api/models?repository_id='+id).catch(()=>null)]);
   const external=section==='external'?await loadExternalProject(id):null;
-  Object.assign(target, { external, repository: repo.repository, canConfigure: repo.can_configure, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
+  Object.assign(target, { external, repository: repo.repository, canConfigure: repo.can_configure, policy: repo.policy, actionsFailures: repo.actions_failures, concurrencyDefault: repo.task_concurrency_default, environment, environmentReadError:'', installed: installed?.repositories.find(r => r.id === id) || null, rules:rules?.rules,
     models:(models?.models||[]).filter(model=>model.repository_id===null||model.repository_id===id) });
 }
 async function reloadProject() {
@@ -160,7 +160,12 @@ function projectStatus() {
   const { policy, installed } = current;
   const status = !policy.enabled ? badge('已禁用', 'warning') : badge('已启用', 'info');
   const permission = installed?.access_gaps?.length ? [permissionBadge(installed)] : [];
-  return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...permission, ...(current.environment ? [state(current.environment.environment.state)] : [])];
+  return [status, ...(installed?.installed === false ? [badge('已移出安装', 'danger')] : []), ...permission, ...(current.environment ? [projectEnvironmentState()] : [])];
+}
+function projectEnvironmentState() {
+  const observed=current.environment?.observation;
+  const node=observed?.status==='available'&&observed.state&&!current.environmentReadError?state(observed.state):badge('电脑待核验','warning');
+  node.dataset.projectEnvironmentState='';return node;
 }
 function projectHeader() {
   const { repository, policy } = current, head = element('div', '', 'project-head'), title = element('div', '', 'title-group'), actions = element('div', '', 'actions');
@@ -419,8 +424,8 @@ function basicSection() {
 
 function machineSection() {
   const { environment } = current, pc = environment?.environment.computer, editable = me.role === 'super_admin' && !!pc;
-  const status = element('div', '', 'status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
-  if (!pc) return [status, concurrencyForm(), note('暂时读不到虚拟电脑规格，稍后再试。')];
+  const status = element('div', '', 'status-grid computer-status-grid'); status.id = 'machine-status'; status.append(...machineStatus());
+  if (!pc) return [status, concurrencyForm(), note('暂时读不到虚拟电脑规格。连接恢复后可重新读取本页配置；未保存改动请先保存。'),button('重新读取电脑配置',()=>reloadProject().catch(error))];
   const effective=current.rules?.computer||pc, source=current.rules?.files.find(f=>f.path==='.bot/computer.yaml');
   const shown={...pc,...effective,network_policy:effective.egress===undefined?pc.network_policy:effective.egress?'internet egress':'internal, no egress'};
   // A resource left empty follows the global default; own() is the value the project sets (console or repository file).
@@ -474,21 +479,35 @@ function concurrencyForm() {
 }
 // Status cards of the machine section, re-rendered by the refresh loop without touching the form.
 function machineStatus() {
-  const environment = current.environment; if (!environment) return [note('暂时读不到虚拟电脑状态。')];
+  const environment = current.environment;
+  const reload = button('刷新电脑状态', async event => { const control=event.currentTarget;control.disabled=true;try{await refreshProjectStatus(renderToken);}finally{control.disabled=false;} });reload.id='computer-refresh';
+  if (!environment) return [consoleState('电脑状态未知', '目前无法读取项目电脑记录，不能判断是否就绪。', { tone: 'error' }), reload];
   const env = environment.environment, pc = env.computer || {}, machine = card('机器'), lifecycle = element('div', '', 'actions');
-  machine.append(facts([['状态', state(env.state)], ['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
+  const observed=environment.observation, available=observed?.status==='available'&&!current.environmentReadError;
+  machine.append(facts([['实时核验',available&&observed.state?state(observed.state):'未知'],['核验完成于',timestamp(observed?.checked_at)||'未提供'],
+    ['读取说明',current.environmentReadError?'读取失败，保留上次记录，可能已过期。':observed?.status==='unavailable'?'manager 暂不可达（manager_unavailable），可重试连接核验。':observed?.status==='absent'?'manager 未找到电脑记录；这不能解释为电脑已停止。':!observed?'尚未获得实时核验结果。':null]]));
+  machine.append(note('实时核验时间是本次读取完成时间，不是电脑心跳；就绪也不代表任务、QA 或远程检查成功。'),reload);
+  const record=element('details','','fold');record.append(element('summary','查看电脑记录与技术信息'),facts([['状态记录',state(env.state)],['容器', pc.container], ['代次', env.generation ? 'g' + env.generation : '待创建'], ['启动于', timestamp(env.started_at)],
     ['工作卷', pc.volume ? `${pc.volume} → ${pc.workdir}` : null], ['网络', pc.network ? `${pc.network}（${networkText(pc)}）` : null], ['镜像', pc.image ? pc.image.slice(0, 19) : null],
     ['资源', pc.resources_pending ? '全局默认资源已改，等没有任务运行时按新值重建' : null],
-    ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', environmentFault(env.error)]]));
-  lifecycle.append(...environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error)); machine.append(lifecycle);
-  return [machine, usageCard(), preparationCard(pc)];
+    ['运行用户', pc.user], ['根文件系统', pc.root_filesystem === 'read-only' ? '只读；HOME 和工作区在工作卷中持久保存' : pc.root_filesystem], ['故障', environmentFault(env.error)]]));machine.append(record);
+  if(pc.image)machine.append(collapsible('完整运行镜像',pc.image));
+  environmentButtons(env, environment.running_tasks?.length > 0, reloadProject, error).forEach((control,index)=>{control.id='computer-action-'+index;if(!available)control.disabled=true;lifecycle.append(control);}); machine.append(lifecycle);
+  const work=card('运行与排队记录'), count=value=>Array.isArray(value)?value.length:'未知';
+  work.append(facts([['运行任务记录',count(environment.running_tasks)],['排队任务记录',count(environment.queued_tasks)]]),
+    consoleLink(`#/projects/${current.id}/activity`,'查看运行与排队任务','与本页使用同一项目电脑记录'),note('任务记录与电脑连接分别读取；配置页的项目任务并发与角色容量是不同限制。'));
+  return [machine, usageCard(), work, preparationCard(pc)];
 }
 let usage = null;
 function usageCard() {
   const section = card('实时资源'), stats = usage?.id === current.id ? usage.stats : undefined;
-  section.append(stats === undefined ? note('读取中…') : !stats ? note('暂时读不到资源数据。') : !stats.running ? note('虚拟电脑未运行。')
-    : facts([['CPU', `${stats.cpu_percent}%`], ['内存', `${bytes(stats.memory_bytes)} / ${bytes(stats.memory_limit_bytes)}`], ['进程', stats.pids], ['网络', `↓ ${bytes(stats.net_rx_bytes)} · ↑ ${bytes(stats.net_tx_bytes)}`],
-      ['磁盘读写', `${bytes(stats.block_read_bytes)} / ${bytes(stats.block_write_bytes)}`], ['工作区占用', bytes(stats.workspace_bytes)], ['采样', timestamp(stats.sampled_at).slice(11, 19)]]));
+  if(usage?.id===current.id&&usage.error)section.append(element('p','资源读取失败，'+(stats?'保留上次成功采样，可能已过期。':'当前数值未知。'),'view-error'));
+  const amount=value=>Number.isFinite(value)&&value>=0?bytes(value):'未知', number=value=>Number.isFinite(value)&&value>=0?String(value):'未知';
+  const sampled=Date.parse(stats?.sampled_at),age=Date.now()-sampled;
+  if(stats?.running&&(!Number.isFinite(sampled)||age>30000||age< -5000))section.append(badge(!Number.isFinite(sampled)?'采样时间未知':age< -5000?'采样时间异常':'采样已过期','warning'));
+  section.append(stats === undefined ? note('读取中…') : !stats ? note('暂时读不到资源数据。') : stats.running===false ? note('虚拟电脑未运行。') : stats.running!==true ? note('资源运行状态未知。')
+    : facts([['CPU', Number.isFinite(stats.cpu_percent)&&stats.cpu_percent>=0?`${stats.cpu_percent}%`:'未知'], ['内存', `${amount(stats.memory_bytes)} / ${amount(stats.memory_limit_bytes)}`], ['进程', number(stats.pids)], ['网络', `↓ ${amount(stats.net_rx_bytes)} · ↑ ${amount(stats.net_tx_bytes)}`],
+      ['磁盘读写', `${amount(stats.block_read_bytes)} / ${amount(stats.block_write_bytes)}`], ['工作区占用', amount(stats.workspace_bytes)], ['采样', timestamp(stats.sampled_at)||'未知']]));
   return section;
 }
 // Package image build and setup script results: what was installed into this computer and whether it worked.
@@ -503,13 +522,23 @@ function preparationCard(pc) {
   return section;
 }
 // Keeps machine and activity status current while the section is open: environment every 5 s, live stats with it.
+let projectStatusRead = 0;
 async function refreshProjectStatus(token) {
   clearTimeout(projectTimer); if (token !== renderToken || !['machine', 'activity'].includes(current?.section)) return;
-  const [environment, stats] = await Promise.all([api('/api/environments/' + current.id).catch(() => null),
-    current.section === 'machine' ? api(`/api/environments/${current.id}/stats`).then(r => r.stats).catch(() => null) : null]);
-  if (token !== renderToken) return;
-  if (environment) current.environment = environment;
-  if (current.section === 'machine') { usage = { id: current.id, stats }; const status = $('machine-status'); if (status) keepOpen(status, () => status.replaceChildren(...machineStatus())); }
+  const target=current,id=target.id,section=target.section,address=location.hash,read=++projectStatusRead;
+  const settled=promise=>promise.then(value=>({value}),error=>({error}));
+  const [environment, stats] = await Promise.all([settled(api('/api/environments/' + id)),
+    section === 'machine' ? settled(api(`/api/environments/${id}/stats`).then(r => r.stats)) : {value:null}]);
+  if (token !== renderToken || read!==projectStatusRead || current!==target || location.hash!==address) return;
+  const errors=[environment.error,stats.error],revoked=errors.find(err=>err&&[401,403].includes(err.status))||(target.environment&&errors.find(err=>err?.status===404));
+  if(revoked){target.environment=null;usage=null;$('project-page').replaceChildren(consoleState('项目电脑暂不可访问','原记录和配置已清除。'+revoked.message,{tone:'error',retry:()=>renderProject({id,section})}));return;}
+  if (environment.value) target.environment = environment.value;
+  target.environmentReadError=environment.error?.message||'';
+  $('project-page').querySelector('[data-project-environment-state]')?.replaceWith(projectEnvironmentState());
+  if (section === 'machine') {
+    usage = { id, stats:stats.error?(usage?.id===id?usage.stats:null):stats.value, error:stats.error?.message||'' };
+    const status = $('machine-status');if(status){const focused=status.contains(document.activeElement)?document.activeElement.id:null;keepOpen(status, () => status.replaceChildren(...machineStatus()));if(focused)document.getElementById(focused)?.focus({preventScroll:true});}
+  }
   else { const box = $('activity-status'); if (box) keepOpen(box, () => box.replaceChildren(...activityCards())); }
   projectTimer = setTimeout(() => refreshProjectStatus(token), 5000);
 }
