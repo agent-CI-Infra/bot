@@ -133,7 +133,11 @@ async function renderIdentity() {
       for (const grant of grants) {
         const row = element('div', '', 'row');
         row.append(element('strong', grant.principal_name), element('p', `${grant.source === 'github_derived' ? 'GitHub 当前权限（继承）' : '显式委派'} · ${grant.project_id ? '项目 ' + grant.project_id : '组织'}`),
-          element('p', ({ active: '有效', revoked: '已撤销', pending_verification: '待验证', quarantined: '归属待处理' })[grant.state] || grant.state));
+          element('p', ({ active: '有效', revoked: '已撤销', pending_verification: '待验证', quarantined: '归属待处理' })[grant.state] || grant.state),
+          // The same questions the person's own grant list asks (see the 当前角色与授权来源 block above).
+          facts([['授权者', grant.grantor_name || '未记录授权者'],
+            ['最近核验', grant.verified_at ? timestamp(grant.verified_at) : '未提供核验时间'],
+            ['授权有效期', grant.expires_at == null ? (grant.source === 'github_derived' ? '未提供到期时间，仍须核验身份与安装' : '未设置到期时间') : timestamp(grant.expires_at) || '未知']]));
         members.append(row);
       }
     }; loading.push(loadMembers());

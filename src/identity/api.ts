@@ -5,6 +5,14 @@ import { authorize, createProjectServicePrincipal, invalidate, listEffectiveScop
 import { projectCapabilities, explicitDelegationCapabilities } from './storage.js';
 import { revokeIdentity } from './bindings.js';
 
+// A grant names two people: the holder and, when one was recorded, the person who granted it. Both resolve the same
+// way — verified GitHub identity first, then local username, then the raw id — so the console never guesses at one.
+function personName(store: Store, principalId: string | null | undefined): string | null {
+  if (!principalId) return null;
+  return store.get("SELECT display_name FROM external_identities WHERE principal_id=? AND provider='github'", principalId)?.display_name ||
+    store.get('SELECT username FROM users WHERE id=?', principalId)?.username || principalId;
+}
+
 export function identityApi(store: Store, user: Actor, token: string, method: string, url: URL, body: Json): Json | undefined {
   const path = url.pathname, context = user.context!;
   const members = /^\/api\/repositories\/([^/]+)\/members$/.exec(path);
@@ -61,8 +69,7 @@ export function identityApi(store: Store, user: Actor, token: string, method: st
       authorize(context, 'config.write', { tenant_id: tenant });
       return { grants: store.all('SELECT id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,evidence,verified_at,expires_at,revoked_at FROM scoped_grants WHERE tenant_id=?', tenant)
         .map(g => ({ ...g, capabilities: JSON.parse(g.capabilities),
-          principal_name: store.get("SELECT display_name FROM external_identities WHERE principal_id=? AND provider='github'", g.principal_id)?.display_name ||
-            store.get('SELECT username FROM users WHERE id=?', g.principal_id)?.username || g.principal_id,
+          principal_name: personName(store, g.principal_id), grantor_name: personName(store, g.grantor_id),
           state: listEffectiveScopes(store, g.principal_id).find(s => s.grant_id === g.id)?.state || 'revoked' })) };
     }
     if (method === 'POST') {
