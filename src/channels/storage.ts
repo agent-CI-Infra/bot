@@ -13,6 +13,7 @@ export function channelStorage(store: Store): void {
     CREATE TABLE IF NOT EXISTS channel_inbox(id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,event_id TEXT NOT NULL,
       dedup_key TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,error TEXT,conversation_id TEXT,message_id TEXT,
       created_at INTEGER NOT NULL,UNIQUE(connector_id,event_id),UNIQUE(connector_id,dedup_key));
+    CREATE INDEX IF NOT EXISTS channel_inbox_conversation ON channel_inbox(conversation_id);
     CREATE TABLE IF NOT EXISTS channel_sessions(id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,installation_tenant TEXT NOT NULL,
       actor_tenant TEXT NOT NULL,actor_id TEXT NOT NULL,chat_id TEXT NOT NULL,thread_id TEXT NOT NULL,
       project_id TEXT NOT NULL,principal_id TEXT NOT NULL,conversation_id TEXT NOT NULL,last_message_at INTEGER NOT NULL DEFAULT 0,
@@ -47,6 +48,12 @@ export function channelStorage(store: Store): void {
       AND EXISTS(SELECT 1 FROM task_origins o JOIN channel_chats c ON c.id=o.conversation_id WHERE o.task_id=NEW.id AND o.source_kind='role') BEGIN
       INSERT INTO channel_task_results(task_id) VALUES(NEW.id); END;
   `);
+  if (!store.all('PRAGMA table_info(channel_sessions)').some(c => c.name === 'context_revision'))
+    store.db.exec('ALTER TABLE channel_sessions ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 0');
+  if (!store.all('PRAGMA table_info(channel_sessions)').some(c => c.name === 'connector_revision'))
+    store.db.exec('ALTER TABLE channel_sessions ADD COLUMN connector_revision INTEGER NOT NULL DEFAULT 0');
+  if (!store.all('PRAGMA table_info(channel_inbox)').some(c => c.name === 'context_revision'))
+    store.db.exec('ALTER TABLE channel_inbox ADD COLUMN context_revision INTEGER');
   if (!store.all('PRAGMA table_info(channel_employee_grants)').some(c => c.name === 'participation'))
     store.db.exec("ALTER TABLE channel_employee_grants ADD COLUMN participation TEXT NOT NULL DEFAULT 'mentions'");
   if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === 'connection_state'))

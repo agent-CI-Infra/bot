@@ -180,10 +180,21 @@ export class ChannelLedger {
       this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id=?', id);
       this.store.run('UPDATE channel_chats SET retained_after=max(retained_after,?),revision=revision+1,context_revision=context_revision+1 WHERE id=?', before, id);
       // Inbox is an authorization receipt too. Keep trusted source IDs, erase the retained message body.
-      for (const row of this.store.all('SELECT id,payload FROM channel_inbox WHERE connector_id=?', chat.connector_id)) {
+      const management=new Set<string>();
+      for (const row of this.store.all('SELECT * FROM channel_inbox WHERE connector_id=?', chat.connector_id)) {
         const event = this.store.secrets.open(row.payload, 'channel-event:' + row.id);
-        if (Number(event.created_at) < before && event.chat_id === chat.chat_id && event.installation_tenant === chat.installation_tenant && event.app_id === chat.app_id)
-          this.store.run('UPDATE channel_inbox SET payload=? WHERE id=?', this.store.secrets.seal({ ...event, content: '', raw_content: '' }, 'channel-event:' + row.id), row.id);
+        if(event.chat_id === chat.chat_id && event.installation_tenant === chat.installation_tenant && event.app_id === chat.app_id){
+          if(row.context_revision!==null&&row.conversation_id)management.add(row.conversation_id);
+          if(Number(event.created_at)<before)this.store.run('UPDATE channel_inbox SET payload=? WHERE id=?', this.store.secrets.seal({ ...event, content: '', raw_content: '' }, 'channel-event:' + row.id), row.id);
+        }
+      }
+      // Personal management context is derived from the same local sources. Keep command audit/receipts.
+      for(const conversation of management){
+        this.store.run('DELETE FROM management_events WHERE message_id IN (SELECT id FROM management_messages WHERE conversation_id=?)',conversation);
+        for(const message of this.store.all('SELECT id,source_message FROM management_messages WHERE conversation_id=?',conversation))
+          this.store.run("UPDATE management_messages SET input=?,state=CASE WHEN state IN ('pending','running') THEN 'interrupted' ELSE state END WHERE id=?",
+            JSON.stringify({source_message:message.source_message,content:'本地保留范围已清理。'}),message.id);
+        this.store.run('UPDATE model_requests SET request_snapshot=NULL,response_snapshot=NULL WHERE conversation_id=?',conversation);
       }
       if(this.store.hasTable('role_conversation_turns')){
         this.store.run("UPDATE role_conversation_turns SET reply=NULL,updated_at=CASE WHEN state='running' THEN ? ELSE updated_at END,state=CASE WHEN state='running' THEN 'interrupted' ELSE state END,error=CASE WHEN state='running' THEN 'conversation_history_cleaned' ELSE error END WHERE conversation_id=?",Date.now(),id);
@@ -194,7 +205,7 @@ export class ChannelLedger {
       for(const row of this.store.all('SELECT id,payload,state FROM channel_outbox WHERE connector_id=?',chat.connector_id)){
         const payload=this.store.secrets.open(row.payload,'channel-outbox:'+row.id) as any;
         if(payload.event?.chat_id===chat.chat_id&&payload.event?.app_id===chat.app_id&&payload.event?.installation_tenant===chat.installation_tenant&&
-          (payload.protection?.turn_id||payload.event.created_at<before)){
+          (payload.protection?.turn_id||payload.protection?.personal_chat===id||payload.event.created_at<before)){
           payload.event={...payload.event,content:'',raw_content:''};payload.delivery.content={elements:[{tag:'div',text:{tag:'plain_text',content:'本地保留范围已清理。'}}]};
           this.store.run('UPDATE channel_outbox SET payload=?,state=?,last_error=? WHERE id=?',this.store.secrets.seal(payload,'channel-outbox:'+row.id),row.state==='sent'?'sent':'failed','history_cleaned',row.id);
         }
