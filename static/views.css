@@ -355,3 +355,6 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .role-compare-values>div{min-width:0}
 .role-compare-values pre,.roles-page details pre{max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
 @media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
+.audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
+.audit-filters button{font-size:12px;padding:4px 10px}
+.audit-filters button[aria-pressed=true]{border-color:#16636b;color:#16636b;background:#e8f3f4}
