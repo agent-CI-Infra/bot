@@ -125,7 +125,7 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
         try { return await execute(name, args); }
         catch (error) { if (error instanceof TaskError) return { error: error.code }; throw error; }
       }, ...(finish ? { finish: { name: finish, validate: (value: any) => complete({ result: value }, null) }, finalizationTools: [finish] } : {}) },
-      { entry, prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated}:{workers:['dev']}),
+      { entry, prepare: staged?spaces.prepare:async () => {}, controller:spaces.controller,worker:spaces.worker,...(staged?{withRole:spaces.withRole,withObservers:spaces.withObservers,bindRun:spaces.bindRun,snapshot:spaces.snapshot,isolated:spaces.isolated}:{workers:['dev']}),
         executor: { round, prepare: async (instance, resolved) => resolved.snapshot.harness.id === 'pi'
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
           : undefined } });

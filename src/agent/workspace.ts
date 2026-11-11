@@ -10,6 +10,7 @@ import { open, rm } from 'node:fs/promises';
 // Operations each task is waiting on in this process, oldest first. The console shows the newest as the command the task
 // is running. task_tools cannot answer that: it has no task index (2.8M rows in production, so finding a task's pending
 // row scanned the table for minutes with a cold cache), and a row an interrupted attempt left 'pending' is not running.
+const collecting=new WeakMap<Manager,Map<string,Promise<any>>>();
 const inFlight=new Map<string,Map<string,any>>();
 /** The newest operation the task is executing right now in this process, or null. */
 export function currentOperation(taskId:string):{id:string;request:any}|null{
@@ -187,6 +188,13 @@ export class Workspace {
     }
   }
   async artifact(key:string){
+    let entries=collecting.get(this.manager);if(!entries)collecting.set(this.manager,entries=new Map());
+    const id=String(this.task.repository_id)+':'+this.task.workspace_id;
+    const pending=entries.get(id);if(pending)return pending;
+    const work=this.collectArtifact(key);entries.set(id,work);
+    try{return await work;}finally{if(entries.get(id)===work)entries.delete(id);}
+  }
+  private async collectArtifact(key:string){
     const result=await this.call(key,{type:'workspace_finalize'});
     if(result.error||!result.tree_sha||!Array.isArray(result.files))stop('candidate_unavailable','waiting_environment',`Could not finalize workspace: ${result.detail||result.error||'missing manifest'}`);
     // Finalizing unchanged files can mint a different commit timestamp. Observers and Publisher must keep the exact
