@@ -418,6 +418,19 @@ function boardStopNote(item) {
   const thing=item.object_type==='pr'?'PR':'Issue',work=(item.card_category||'').startsWith('development.')?'开发':'检视';
   return `${thing} ${item.github_state==='closed'?'已关闭':'已转草稿'}，已自动停止${work}`;
 }
+// The next move is stated only when the recorded state names it; a status without one, or no status at all, stays silent.
+const boardNextSteps={waiting_configuration:'补齐配置后重试',waiting_environment:'修复环境后重试',waiting_permission:'处理权限后重试',
+  waiting_pr_head:'等 PR 更新后继续',waiting_publication:'确认发布',retry_wait:'等待自动重试',needs_replan:'补充信息后重试',
+  paused:'确认后继续',failed:'查看失败原因后重试',result_ready:'核对结果后发布'};
+function boardNextStep(item) {
+  if(item.card_type==='release')return '';
+  // A closed object cannot be acted on any more, so it never carries a next step — not even retry advice for a
+  // task that is still in an attention status.
+  if(item.github_state==='closed')return '';
+  const step=boardNextSteps[item.task_status];if(step)return step;
+  if(item.task_status)return '';
+  return item.draft?'等待作者标记为可评审':'';
+}
 function boardCard(item) {
   const release=item.card_type==='release',customMode=!!boardCustomField()&&item.card_type!=='task',category=boardCardCategory(item);
   const label=release?`发版本 ${item.version}`:item.card_type==='task'?`任务 ${shortId(item.task_id)}`:`${boardTypeName(item.object_type)} #${item.object_number}`;
@@ -453,6 +466,7 @@ function boardCard(item) {
   card.append(heading,meta);
   if(stopNote){const note=element('p',stopNote,'muted board-card-note');note.dataset.cardNote='auto-stop';card.append(note);}
   if(item.origin)card.append(element('p',taskOriginCaption(item.origin),'muted'));if(badges.childElementCount)card.append(badges);
+  const next=boardNextStep(item);if(next)card.append(element('p','下一步：'+next,'board-card-next'));
   if(customMode&&!release){
     const custom=boardCustomField(),control=boardSelect(custom.name,[['','未设置'],...custom.options.map(o=>[o.id,o.name])],item.field_value||'');
     control.label.className='board-card-field';control.label.replaceChildren(control.select);
