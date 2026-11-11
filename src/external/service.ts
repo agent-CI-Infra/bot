@@ -7,6 +7,7 @@ import { targetUrl } from './target.js';
 import { trustConfig, publicKey, fingerprint, tokenAudience, audienceSource, audienceUrl } from './identity.js';
 import { type JWTVerifyGetKey } from 'jose';
 import { EventPoller } from './events.js';
+import { authorize } from '../identity/authorization.js';
 
 function clientView(row:Row){return {id:row.id,repository_id:row.repository_id,name:row.name,auth_type:row.auth_type,trust:JSON.parse(row.trust),enabled:!!row.enabled,version:row.version,created_at:row.created_at,
   public_key:row.public_key||null,key_configured:!!row.public_key,key_fingerprint:fingerprint(row.public_key)};}
@@ -23,6 +24,12 @@ export class ExternalService{
   row(user:Actor,table:'external_clients'|'external_subscriptions',id:string,repo?:string|null):Row{
     const filter=scope(user,'repository_id'),row=this.store.get(`SELECT * FROM ${table} WHERE id=? AND ${filter.sql}`,id,...filter.args);
     if(!row||repo&&row.repository_id!==repo)return fail(404,'external_resource_not_found');return row;
+  }
+  configure(user:Actor,repositoryId:string):void{
+    repository(this.store,user,repositoryId);
+    // Legacy resource URLs do not carry a project for the HTTP write guard. Check the stored resource's project
+    // here as well: visibility through tasks.read never grants permission to alter a client's authentication.
+    if(user.context)authorize(user.context,'config.write',{project_id:repositoryId});
   }
   async publicApi(path:string,body:Json,authorization:string):Promise<Json>{
     if(path==='/external/token')return this.broker.issue(body,authorization);
@@ -55,7 +62,7 @@ export class ExternalService{
     if(path==='/api/external/clients'&&method==='POST'){
       fields(body,['name','repository_id','auth_type','trust','public_key']);
       if(repo&&body.repository_id!==undefined&&body.repository_id!==repo)fail(400,'external_repository_mismatch');
-      const target=repo||text(body.repository_id);repository(this.store,user,target);
+      const target=repo||text(body.repository_id);this.configure(user,target);
       if(!this.store.get("SELECT 1 FROM repositories r JOIN accounts a ON a.id=r.account_id WHERE r.id=? AND a.type='github_app'",target))fail(409,'github_app_required');
       const type=text(body.auth_type);if(!['private_key_jwt','github_actions_oidc'].includes(type))fail(400,'invalid_auth_type');
       if(type==='github_actions_oidc'&&body.public_key!==undefined||type==='private_key_jwt'&&body.trust!==undefined)fail(400,'invalid_client_config');
@@ -68,6 +75,7 @@ export class ExternalService{
     const client=/^\/api\/external\/clients\/([a-f0-9]{48})$/.exec(path);
     if(client){const row=this.row(user,'external_clients',client[1]!,repo);if(method==='GET')return {client:clientView(row)};
       if(method==='PATCH'){
+        this.configure(user,row.repository_id);
         fields(body,['enabled','public_key']);if(body.enabled!==undefined&&typeof body.enabled!=='boolean')fail(400,'invalid_client_update');
         if(body.public_key!==undefined&&row.auth_type!=='private_key_jwt')fail(400,'client_uses_oidc');const key=body.public_key===undefined?row.public_key:publicKey(body.public_key);
         return this.store.transaction(()=>{this.store.run('UPDATE external_clients SET enabled=?,public_key=?,secret_hash=NULL,version=version+1 WHERE id=?',body.enabled===undefined?row.enabled:Number(body.enabled),key,row.id);
@@ -77,6 +85,7 @@ export class ExternalService{
       // Deleting a client takes its grants, subscriptions, event cursor and forwards with it; the project stays. Delivery rows
       // reference their subscription, so the forwarding history of its subscriptions goes too.
       if(method==='DELETE'){
+        this.configure(user,row.repository_id);
         fields(body,['confirm']);if(body.confirm!==true)fail(400,'confirmation_required');
         return this.store.transaction(()=>{
           const subscriptions='SELECT id FROM external_subscriptions WHERE client_id=?';
@@ -87,13 +96,15 @@ export class ExternalService{
       }
     }
     if(path==='/api/external/subscriptions'&&method==='POST'){
-      fields(body,['client_id','name','url','filters']);const client=this.row(user,'external_clients',text(body.client_id),repo),url=targetUrl(body.url,this.options.privateHosts||[]).href,filter=filters(body.filters),id=randomId(),secret=randomId();
+      fields(body,['client_id','name','url','filters']);const client=this.row(user,'external_clients',text(body.client_id),repo);this.configure(user,client.repository_id);
+      const url=targetUrl(body.url,this.options.privateHosts||[]).href,filter=filters(body.filters),id=randomId(),secret=randomId();
       return this.store.transaction(()=>{this.store.run('INSERT INTO external_subscriptions(id,client_id,repository_id,name,url,secret,filters,created_at) VALUES(?,?,?,?,?,?,?,?)',id,client.id,client.repository_id,text(body.name),url,this.store.secrets.seal({value:secret},'external-subscription:'+id),JSON.stringify(filter),new Date().toISOString());
         this.store.audit(user.id,'external.subscription.created',id,client.repository_id);return {subscription:subView(this.row(user,'external_subscriptions',id)),signing_secret:secret};});
     }
     const subscription=/^\/api\/external\/subscriptions\/([a-f0-9]{48})$/.exec(path);
     if(subscription){const row=this.row(user,'external_subscriptions',subscription[1]!,repo);if(method==='GET')return {subscription:subView(row)};
       if(method==='PATCH'){
+        this.configure(user,row.repository_id);
         fields(body,['name','enabled','url','filters','rotate_secret']);if(body.enabled!==undefined&&typeof body.enabled!=='boolean'||body.rotate_secret!==undefined&&body.rotate_secret!==true)fail(400,'invalid_subscription_update');
         const url=body.url===undefined?row.url:targetUrl(body.url,this.options.privateHosts||[]).href,filter=body.filters===undefined?row.filters:JSON.stringify(filters(body.filters)),secret=body.rotate_secret?randomId():null;
         return this.store.transaction(()=>{this.store.run('UPDATE external_subscriptions SET name=?,url=?,filters=?,enabled=?,secret=?,version=version+1 WHERE id=?',body.name===undefined?row.name:text(body.name),url,filter,body.enabled===undefined?row.enabled:Number(body.enabled),secret?this.store.secrets.seal({value:secret},'external-subscription:'+row.id):row.secret,row.id);
@@ -104,6 +115,7 @@ export class ExternalService{
     const retry=/^\/api\/external\/deliveries\/([a-f0-9]{48})\/retry$/.exec(path);
     if(retry&&method==='POST'){
       fields(body,[]);const row=this.store.get(`SELECT * FROM external_deliveries WHERE id=? AND ${clauses}`,retry[1]!,...args);if(!row)fail(404,'external_resource_not_found');
+      this.configure(user,row!.repository_id);
       if(row!.state!=='failed')fail(409,'forward_not_retryable');this.store.run("UPDATE external_deliveries SET state='retry',attempts=0,next_at=0,error=NULL WHERE id=?",row!.id);this.store.audit(user.id,'external.delivery.retry',row!.id,row!.repository_id);return {ok:true};
     }
     return fail(404,'not_found');
