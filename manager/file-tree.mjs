@@ -30,6 +30,7 @@ export class FileTree {
   createDirectory(path){
     notePath(path);
     return this.run(async ctx=>{
+      if(ctx.catalog.paths.has(path))fail('note_path_conflict',409);
       try{await withNoteParent(this.root,path,async(target,parent)=>{await ctx.check();await mkdir(target,{mode:0o770});await parent.sync();});}
       catch(error){if(error.code==='EEXIST')fail('note_path_conflict',409);if(error.code==='ENOENT')fail('directory_not_found',404);throw error;}
       await ctx.catalog.save(ctx.check);return {directory:path,revision:ctx.catalog.value.revision};

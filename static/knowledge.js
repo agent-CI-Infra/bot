@@ -55,7 +55,8 @@ function knowledgeSection() {
       ++epoch; knowledgeViews.delete(repo); knowledgeEditor = null; selected = null; versions = null; listing = null;
       workspace.replaceChildren(); status.replaceChildren(note('文件访问权限已失效。请重新登录或联系管理员。')); return;
     }
-    status.replaceChildren(element('p', error.message || '读取失败', 'view-error'), button('重试读取', () => void retry(), 'quiet'));
+    const message = error.code === 'note_move_uncertain' ? '文件移动的归属无法确认，本项目知识区已暂停读写。请联系部署维护者按「知识文件恢复」说明停写、备份并恢复一致的完整知识卷；重试不会解除此状态。' : error.message || '读取失败';
+    status.replaceChildren(element('p', message, 'view-error'), button('重试读取', () => void retry(), 'quiet'));
   };
   const act = action => async () => { if (busy) return; try { await action(); } catch (error) { failure(error, refresh, epoch); } };
   const actionButton = (label, action, className = 'quiet') => { const b = button(label, act(action), className); b.disabled = busy; return b; };
