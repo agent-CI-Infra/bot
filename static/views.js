@@ -154,10 +154,14 @@ const taskView = dialog('task-view', `<div class="view-head"><div class="title-g
 taskView.setAttribute('aria-labelledby', 'task-title');
 
 let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0;
+function resetTaskRendering() {
+  renderedLogs = new Set(); liveCommand = null; snapshotProgress = null;
+  delete $('task-actions').dataset.signature;
+}
 async function openTask(id) {
   taskReadVersion++; taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
   $('task-log-controls').replaceChildren();
-  openTaskId = id; renderedLogs = new Set(); liveCommand = null; snapshotProgress = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
+  openTaskId = id; resetTaskRendering(); $('timeline-command').hidden = true; clearTimeout(taskTimer);
   $('task-picker').hidden = true; $('task-layout').hidden = false; $('task-next').hidden = true; $('task-next-text').textContent = '';
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = '正在加载…'; notice('task-error'); $('timeline-live').hidden = true;
@@ -166,6 +170,7 @@ async function openTask(id) {
 }
 function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   taskReadVersion++; taskLogState = null;
+  resetTaskRendering();
   openTaskId = null; clearTimeout(taskTimer); $('timeline-command').hidden = true; $('timeline-live').hidden = true; notice('task-error');
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = `${label} · 选择任务`; $('task-actions').append(button('关闭', () => taskView.close()));
@@ -210,6 +215,7 @@ async function refreshTask() {
   } catch (err) {
     if (!current()) return;
     if ([401, 403, 404].includes(err.status)) {
+      resetTaskRendering();
       taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
       for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions', 'task-log-controls']) $(part).replaceChildren();
       $('task-next').hidden = $('timeline-command').hidden = $('timeline-live').hidden = true;
