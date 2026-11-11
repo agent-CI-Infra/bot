@@ -61,3 +61,81 @@ test('usage and cost page separates cached input, unpriced requests and missing 
     expect(cells.join(' ')).toBe('2026-11-09 USD 0.00 0 — — — 0');
   } finally { await f.close(); }
 });
+
+// #238: a work type's count is the entry to the tasks behind it. The console has shown the type of every task for a
+// while; without this the number is a total nobody can check.
+const seedWorkTypeTasks = h => {
+  const rows = [
+    ['238-review-issue', '101', 'review.issue', 'succeeded', 'REVIEW-ISSUE-ONLY 检视一个 issue'],
+    ['238-development-issue', '101', 'development.issue', 'waiting_environment', 'DEV-ISSUE-ONLY 实现一个 issue']
+  ];
+  for (const [id, repository, kind, status, summary] of rows)
+    h.store.run("INSERT INTO tasks(id,repository_id,kind,status,phase,summary,created_at,updated_at) VALUES(?,?,?,?,'task',?,?,?)",
+      id, repository, kind, status, summary, '2026-11-10T10:00:00.000Z', '2026-11-10T10:00:00.000Z');
+};
+
+test('a work type count opens only its tasks and an empty type says there are none', async ({ page }) => {
+  test.setTimeout(180000);
+  const f = await managementFixture(), { h } = f;
+  try {
+    seedWorkTypeTasks(h);
+    const calls = [];
+    page.on('request', request => { const url = new URL(request.url()); if (url.pathname === '/api/tasks') calls.push(url); });
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.clock.setFixedTime(new Date('2026-11-11T02:00:00Z'));
+    await page.goto(h.admin + '/#/costs');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const panel = page.locator('#costs-panel');
+    const summary = panel.locator('.statistics-task-summary');
+    await expect(summary).toContainText('任务数');
+    const review = summary.locator('tr[data-kind="review.issue"]'), development = summary.locator('tr[data-kind="development.issue"]');
+    await expect(review).toHaveCount(1);
+    await expect(development).toHaveCount(1);
+    // The cell still reads as the count; only the entry itself changes.
+    await expect(review.locator('button')).toHaveText('1');
+
+    await review.locator('button').click();
+    const drill = panel.locator('tr.statistics-drill');
+    await expect(drill).toHaveCount(1);
+    await expect(drill).toContainText('REVIEW-ISSUE-ONLY');
+    await expect(drill).not.toContainText('DEV-ISSUE-ONLY');
+    await expect(drill).toContainText('共 1 项');
+    // The list ignores the date range, which is stated where a longer list would otherwise look like a bug.
+    await expect(drill).toContainText('不限制任务列表');
+    await expect(review.locator('button')).toHaveAttribute('aria-expanded', 'true');
+    expect(calls.at(-1).searchParams.get('workflow')).toBe('review.issue');
+    expect(calls.at(-1).searchParams.get('repository_id')).toBeNull();
+
+    // Pressing the same count again closes the list.
+    await review.locator('button').click();
+    await expect(drill).toHaveCount(0);
+
+    // One list at a time, and always the type whose count was pressed.
+    await development.locator('button').click();
+    await expect(drill).toHaveCount(1);
+    await expect(drill).toContainText('DEV-ISSUE-ONLY');
+    await expect(drill).not.toContainText('REVIEW-ISSUE-ONLY');
+    expect(calls.at(-1).searchParams.get('workflow')).toBe('development.issue');
+
+    // A type without tasks in the range says so instead of leaving an empty box.
+    await summary.locator('tr[data-kind="review.pr"] button').click();
+    await expect(drill).toContainText('没有该工作类型的任务');
+    await expect(drill.locator('table')).toHaveCount(0);
+
+    // The opened list follows the project filter, so it covers the same scope as the summary above it.
+    await panel.getByLabel('统计项目').selectOption('101');
+    await panel.getByRole('button', { name: '查看统计' }).click();
+    await expect(panel.locator('tr.statistics-drill')).toHaveCount(0);
+    await summary.locator('tr[data-kind="review.issue"] button').click();
+    await expect(panel.locator('tr.statistics-drill')).toContainText('REVIEW-ISSUE-ONLY');
+    expect(calls.at(-1).searchParams.get('workflow')).toBe('review.issue');
+    expect(calls.at(-1).searchParams.get('repository_id')).toBe('101');
+
+    // Phone width: the list stays inside the table's own horizontal scroll instead of becoming an overlay.
+    await page.setViewportSize({ width: 390, height: 900 });
+    await panel.locator('tr[data-kind="development.issue"] button').click();
+    await expect(panel.locator('tr.statistics-drill')).toContainText('DEV-ISSUE-ONLY');
+  } finally { await f.close(); }
+});
