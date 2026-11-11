@@ -50,7 +50,9 @@ export function costsApi(store: Store, user: Actor, url: URL): Json | undefined 
   // The currency filter keeps one currency's requests and the unpriced ones, so the requests billed in the other
   // currency would simply vanish from the page. Count them for the same scope and report them per currency; they are
   // never converted into the selected currency or subtracted from anything.
-  const others=store.all(`SELECT q.currency currency,count(*) requests FROM model_requests q
+  // Same row set as the totals above: the join on repositories is what drops service-role requests (repository_id is
+  // NULL), which no project owns and which the totals never count, so a currency they use must not show up here either.
+  const others=store.all(`SELECT q.currency currency,count(*) requests FROM model_requests q JOIN repositories r ON r.id=q.repository_id
     WHERE ${scoped.join(' AND ')} AND q.currency IS NOT NULL AND q.currency<>? GROUP BY q.currency ORDER BY q.currency`,...scopedArgs,currency);
   const otherCurrencies=others.map(row=>({currency:String(row.currency),requests:Number(row.requests)}));
   // Aggregate tasks separately, so the task rows never take from the cost query's 5,000-group budget. Every workflow runs
