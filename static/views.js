@@ -168,6 +168,13 @@ async function openTask(id) {
   if (!taskView.open) taskView.showModal();
   await refreshTask();
 }
+// The delivery detail already exists behind the events list; a task's source delivery opens that same view, no new route.
+async function openTaskDelivery(deliveryId) {
+  const event = await api('/api/events/' + encodeURIComponent(deliveryId));
+  $('detail-title').textContent = '投递详情';
+  $('detail-body').replaceChildren(...deliveryDetail(event));
+  $('detail').showModal();
+}
 function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
   taskReadVersion++; taskLogState = null;
   resetTaskRendering();
@@ -660,7 +667,14 @@ function taskRunHistoryCard(roles) {
 function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
-  if (task.origin) { const origin = card('任务来源与执行者'); origin.append(note(taskOriginCaption(task.origin)), facts([['来源消息', task.origin.source_message], ['父任务', task.origin.source_task_id]])); side.append(origin); }
+  // The task keeps the webhook delivery that created it; name it here so the chain can be walked back (#238).
+  const sourceDelivery = record?.contract?.source?.delivery_id;
+  if (task.origin || sourceDelivery) {
+    const origin = card('任务来源与执行者'), served = task.origin ? [['来源消息', task.origin.source_message], ['父任务', task.origin.source_task_id]] : [];
+    origin.append(note(task.origin ? taskOriginCaption(task.origin) : '来源：Webhook 投递'), facts(served));
+    if (sourceDelivery) { origin.dataset.sourceDelivery = sourceDelivery; origin.append(facts([['来源投递', button('查看投递', () => openTaskDelivery(sourceDelivery).catch(error), 'quiet linkish')]])); }
+    side.append(origin);
+  }
   if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(task, record, roles, purposes));
   side.append(taskRunHistoryCard(roles));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
