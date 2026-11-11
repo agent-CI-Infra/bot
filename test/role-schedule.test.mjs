@@ -19,8 +19,8 @@ import { runRole, roleInstance, roleRuns } from '../dist/roles/run.js';
 import { roleApi } from '../dist/roles/api.js';
 import { saveConfiguration } from '../dist/roles/definition.js';
 import { Redactor } from '../dist/agent/common.js';
-import { traceEvent } from '../dist/tasks/trace.js';
-import { planTask, reconcileAssignments, bindStageAssignment, recordStageResult, latestRoleCandidate, evaluateRequiredStages, assertRequiredStages, candidateKey, deliveryCandidate } from '../dist/roles/schedule.js';
+import { traceEvent, beginRun } from '../dist/tasks/trace.js';
+import { planTask, reconcileAssignments, bindStageAssignment, recordStageResult, latestRoleCandidate, evaluateRequiredStages, assertRequiredStages, assertStageStart, stageBudgetUsage, candidateKey, deliveryCandidate } from '../dist/roles/schedule.js';
 
 const tool = name => ({type:'function',function:{name,description:name,parameters:{type:'object',properties:{},additionalProperties:true}}});
 const call = (name,args) => ({role:'assistant',content:null,tool_calls:[{id:randomBytes(4).toString('hex'),type:'function',function:{name,arguments:JSON.stringify(args)}}]});
@@ -370,4 +370,35 @@ test('artifact gates bind report content as well as file tree, so changed prose 
   const original=f.records.submit('t',artifacts,[],delivered.result);assert.equal(candidateKey(deliveryCandidate(original)),candidateKey(delivered.candidate_ref));assert.equal(evaluateRequiredStages(f.s,'t',deliveryCandidate(original)).satisfied,true);
   const changed=f.records.submit('t',[{...artifacts[0],version:'v2',content:{summary:'changed report prose'}},artifacts[1]],[],{summary:'changed report prose'});
   assert.equal(evaluateRequiredStages(f.s,'t',deliveryCandidate(changed)).satisfied,false);
+});
+
+test('a capacity wait does not consume a stage attempt or stage wall time', async t => {
+  const f = await fixture(t, { stages: [stage('dev', { writer: true, attempts: 1 })] });
+  f.plan(); f.assign('dev', 'dev-1');
+  // Admission refused this run at bind: its row exists and carries the assignment, but nothing ran.
+  const refused = beginRun(f.s, f.spec().task, 'execution', {});
+  f.s.run("UPDATE task_runs SET role='dev',assignment_id='dev-1',status='stopped',stop_reason='role_capacity' WHERE id=?", refused.id);
+  // attempts=1, so a counted row would already exhaust the stage; the real attempt still starts, and its wall time is 0.
+  assert.equal(assertStageStart(f.s, 't', 'dev-1', 'writer'), undefined);
+  assert.equal(stageBudgetUsage(f.s, 'dev-1').wall_ms, 0);
+  // The row is still history: it is not deleted, only excluded from the stage budget.
+  assert.equal(f.s.get('SELECT stop_reason FROM task_runs WHERE id=?', refused.id).stop_reason, 'role_capacity');
+});
+
+test('two capacity refusals on one stage neither exhaust it nor pause the task, and a third attempt runs', async t => {
+  const f = await fixture(t, { stages: [stage('dev', { writer: true, attempts: 1 })] });
+  f.plan(); f.assign('dev', 'dev-1');
+  const refuse = () => { const r = beginRun(f.s, f.spec().task, 'execution', {}); f.s.run("UPDATE task_runs SET role='dev',assignment_id='dev-1',status='stopped',stop_reason='role_capacity' WHERE id=?", r.id); return r.id; };
+  refuse(); refuse();
+  const dev = () => reconcileAssignments(f.s, 't').stages.find(s => s.stage_id === 'dev');
+  // max_attempts=1: two counted refusals would already be `stage_retry_exhausted` on a stage that never ran.
+  assert.equal(dev().attempts, 0);
+  assert.equal(dev().status, 'ready');
+  assert.notEqual(dev().waiting_reason, 'stage_retry_exhausted');
+  assert.notEqual(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'paused');
+  // A slot frees up: the next attempt really runs instead of being refused as exhausted, and it counts as one attempt.
+  const run = await runRole(f.spec(), 'dev', 'dev-1', undefined, { snapshot: async () => ({ local_sha: tree('a'), tree_sha: tree('b') }) });
+  assert.ok(run.reference);
+  assert.equal(dev().attempts, 1);
+  assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status, 'running');
 });
