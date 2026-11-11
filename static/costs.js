@@ -111,7 +111,11 @@ function renderTaskStatistics(body,data) {
   summary.wrap.classList.add('statistics-task-summary');
   section.append(element('h2','任务统计'),element('p','按任务创建时的浏览器本地日期归日，整段累计执行耗时都计入创建日，不跨日拆分。耗时不含排队和等待，执行中任务含已观测到的当前时长；历史缺失或中断的耗时保留不完整提示。','cost-note'));
   const workflows=statisticsWorkflows(data);
-  for(const workflow of workflows){const item=data.tasks.summary.find(r=>statisticsKey(r)===workflow.key),row=document.createElement('tr');row.dataset.kind=workflow.key;row.append(element('td',workflow.name),element('td',metricNumber(item?.count??0)),element('td',taskStatisticsDuration(item)));summary.body.append(row);}
+  for(const workflow of workflows){const item=data.tasks.summary.find(r=>statisticsKey(r)===workflow.key),row=document.createElement('tr'),count=element('td',''),
+    entry=button(metricNumber(item?.count??0),()=>statisticsTaskDrill(workflow,row,entry),'quiet linkish statistics-task-count');
+    row.dataset.kind=workflow.key;entry.dataset.workflow=workflow.key;entry.setAttribute('aria-expanded','false');
+    entry.setAttribute('aria-label',`查看「${workflow.name}」的任务（${item?.count??0} 项）`);entry.title=`查看「${workflow.name}」的任务`;
+    count.append(entry);row.append(element('td',workflow.name),count,element('td',taskStatisticsDuration(item)));summary.body.append(row);}
   section.append(summary.wrap);
   if(!data.tasks.summary.length)section.append(element('p','这个日期范围内没有任务记录。','cost-empty'));
   const detail=element('details','','cost-breakdown'),daily=costTable(['日期（本地）',...workflows.flatMap(workflow=>[workflow.name+' · 数量',workflow.name+' · 耗时'])]);detail.append(element('summary','每日任务明细'));
@@ -132,6 +136,48 @@ function renderTaskStatistics(body,data) {
     for(const item of data.tasks.undated){const row=document.createElement('tr');row.append(element('td',item.full_name),element('td',item.name||kindLabels[item.kind]||item.kind),element('td',metricNumber(item.count)),element('td',taskStatisticsDuration(item)));table.body.append(row);}unknown.append(table.wrap);section.append(unknown);
   }
   body.append(section);
+}
+// #238: a work type's count is the entry to the tasks behind it. The task endpoint takes the same work type id the
+// summary shows, so this needs no mapping of its own; it carries the project scope only, because that endpoint has no
+// date filter — the date range bounds the summary, not the list. One list is open at a time: two open lists would read
+// as one mixed list.
+function closeStatisticsTaskDrills() {
+  for(const row of [...document.querySelectorAll('tr.statistics-drill')])row.remove();
+  for(const entry of [...document.querySelectorAll('.statistics-task-count[aria-expanded="true"]')])entry.setAttribute('aria-expanded','false');
+}
+async function statisticsTaskDrill(workflow,row,entry) {
+  const open=entry.getAttribute('aria-expanded')==='true';
+  closeStatisticsTaskDrills();
+  if(open)return;
+  entry.setAttribute('aria-expanded','true');
+  const drill=document.createElement('tr'),cell=document.createElement('td'),list=element('div','','statistics-drill-body');
+  drill.className='statistics-drill';cell.colSpan=3;list.setAttribute('aria-live','polite');cell.append(list);drill.append(cell);row.after(drill);
+  const params=new URLSearchParams({workflow:workflow.key,limit:'100',summary:'1'});
+  if(costState?.repository_id)params.set('repository_id',costState.repository_id);
+  const load=async()=>{
+    const version=costRequest;
+    list.replaceChildren(element('p',`正在读取「${workflow.name}」的任务…`,'muted'));
+    let data;
+    try{data=await api('/api/tasks?'+params);}catch(err){
+      if(version!==costRequest||!drill.isConnected)return;
+      list.replaceChildren(element('p','读取这个工作类型的任务失败，请稍后重试。','cost-incomplete'),button('重试',load));
+      return;
+    }
+    if(version!==costRequest||!drill.isConnected)return;
+    if(!data.tasks.length){list.replaceChildren(element('p','没有该工作类型的任务。','cost-empty'));return;}
+    const total=data.summary?.all??data.tasks.length,heading=element('p',`「${workflow.name}」的任务：共 ${total} 项`+(total>data.tasks.length?`，这里列出最近 ${data.tasks.length} 项`:'')+'。','cost-note'),
+      scope=element('p','这个列表按上方的项目范围列出该工作类型的全部任务；日期范围只限制上面的汇总，不限制任务列表，每一行的创建时间以本地日期显示。','cost-note'),
+      table=costTable(['任务','项目','状态','创建时间']);
+    for(const task of data.tasks){
+      const line=document.createElement('tr'),name=element('td',''),state=element('td','');
+      name.append(button(objectLabel(task),()=>openTask(task.id).catch(error),'quiet linkish'));
+      state.append(taskState(task));
+      line.append(name,element('td',task.full_name||'—'),state,element('td',timestamp(task.created_at)));table.body.append(line);
+    }
+    list.replaceChildren(heading,scope,table.wrap);
+    if(total>data.tasks.length)list.append(element('p','只列出最近 100 项，更早的任务没有在这里展开。','cost-note'));
+  };
+  await load();
 }
 function costTable(headers) {
   const wrap=element('div','','cost-table-scroll'),table=document.createElement('table'),head=document.createElement('thead'),row=document.createElement('tr');headers.forEach(name=>{const th=element('th',name);th.scope='col';row.append(th);});head.append(row);const body=document.createElement('tbody');table.append(head,body);wrap.append(table);return {wrap,body};
