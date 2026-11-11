@@ -236,13 +236,18 @@ test('the agent exchanges a read-only GitHub token that is not stored, never rea
     return {ok:true,result:{written:true,started:true}};
   }}};};
   const redactor=new Redactor(),logs=[];let revoked=0;
-  const tokens={issueRepository:async()=>{redactor.add(token);return {token,expiresAt:'2099-01-01T00:00:00Z',permissions:{contents:'read',actions:'read'},fullName:'fixture/project-101'};},revoke:async()=>{revoked++;}};
+  const tokens={allowedScopes:()=>['contents','issues','pull_requests','actions','checks','statuses','metadata'],issueRepository:async()=>{redactor.add(token);return {token,expiresAt:'2099-01-01T00:00:00Z',permissions:{contents:'read',actions:'read'},fullName:'fixture/project-101'};},revoke:async()=>{revoked++;}};
   let task=h.store.get("SELECT * FROM tasks WHERE id='tok'"),fake=runner();
   const result=await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},value=>logs.push(value)),redactor,async()=>{},{mode:'review'},tokens);
   assert.equal(result.summary,'Read the checks.');assert.equal(fake.delivered[0].token,token);assert.equal(revoked,1);
   assert.ok(!JSON.stringify(h.store.all('SELECT * FROM task_tools')).includes('workspace_agent_token'),'the delivery is not recorded');
   assert.ok(!bodies[0].includes(token)&&bodies[0].includes('[REDACTED]'),'the provider never sees the token');
   assert.ok(!JSON.stringify(logs).includes(token));assert.deepEqual(logs.find(l=>l.type==='github_read_token').permissions,{contents:'read',actions:'read'});
+  // Partial resource policies keep the raw token out of the runner; structured tools still have the permitted scopes.
+  h.store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,object_number,claim_token,generation,workspace_id) VALUES('partial','101','review.pr','running','pr',6,'claim',1,?)",'f'.repeat(48));
+  task=h.store.get("SELECT * FROM tasks WHERE id='partial'");tokens.allowedScopes=()=>['contents'];fake=runner();
+  await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,redactor,async()=>{},()=>{}),redactor,async()=>{},{mode:'review'},tokens);
+  assert.equal(fake.delivered[0].structured_only,true);assert.equal(fake.delivered[0].token,undefined);
   // Without a token issuer the agent gets the reason and the task carries on.
   task=h.store.get("SELECT * FROM tasks WHERE id='none'");fake=runner();
   await agentLoop(h.store,task,new Workspace(h.store,fake.manager,task,new Redactor(),async()=>{},()=>{}),new Redactor(),async()=>{},{mode:'review'});

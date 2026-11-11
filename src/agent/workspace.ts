@@ -18,13 +18,14 @@ export function currentOperation(taskId:string):{id:string;request:any}|null{
 }
 
 export class Workspace {
-  constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void){}
+  constructor(readonly store:Store,readonly manager:Manager,readonly task:Row,readonly redactor:Redactor,readonly guard:()=>Promise<void>,readonly log:(value:unknown)=>void,
+    readonly operations?:'service_role_operations'){}
   async call(key:string,request:any){
     await this.guard();
     request=this.redactor.clean(request);
     const id=operationId(`${this.task.id}:${this.task.attempt}:${key}`),input={operation_id:id,generation:this.task.generation,request:{...request,workspace_id:this.task.workspace_id}};
     const conversation = !!this.task.conversation_id;
-    const table=conversation?'role_conversation_operations':'task_tools';
+    const table=conversation?(this.operations??'role_conversation_operations'):'task_tools';
     let row=this.store.get(`SELECT * FROM ${table} WHERE id=?`,id);
     if(row&&conversation)row={...row,request:JSON.stringify(this.store.secrets.open(row.request,'conversation-operation:'+id+':request')),
       result:row.result?JSON.stringify(this.store.secrets.open(row.result,'conversation-operation:'+id+':result')):null};

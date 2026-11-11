@@ -179,3 +179,28 @@ test('real Workspace delivery ignores only abandoned repository replies, includi
     assert.ok(f.state.requests.some(r => r.method === 'DELETE' && r.path === '/installation/token'));
   });
 });
+
+
+test('resource-scoped reads separate Issue/PR routes, search, logs and nested commit CI resources',async t=>{
+  const f=await explorerFixture(t),repo=f.h.store.get("SELECT * FROM repositories WHERE id='101'");
+  let scopes=['issues'];
+  const tokens=new ReadTokens(f.h.store,repo,f.redactor,async()=>{},f.apiUrl,['issues','pull_requests','actions','contents','checks','statuses'],()=>scopes);
+  t.after(()=>tokens.revoke());const explorer=new RepositoryExplorer(tokens,f.redactor,async()=>{});
+  f.state.custom=async({path,url,send})=>{
+    if(path==='/repos/fixture/project-101/issues'){send([{number:1},{number:2,pull_request:{url:'pr'}}]);return true;}
+    if(path.endsWith('/issues/2')){send({number:2,pull_request:{url:'pr'}});return true;}
+    if(path==='/search/issues'){assert.match(url.searchParams.get('q'),/is:issue/);send({items:[{number:1,repository_url:f.apiUrl+'/repos/fixture/project-101'}]});return true;}
+    return false;
+  };
+  await explorer.execute('github_read_token',{});
+  assert.deepEqual(f.state.tokens.at(-1).permissions,{issues:'read',metadata:'read'});
+  assert.deepEqual(await explorer.execute('github_read',{path:'/issues'}),[{number:1}]);
+  assert.equal((await explorer.execute('github_search',{query:'regression'})).items[0].number,1);
+  const before=f.state.requests.length;
+  for(const path of ['/pulls/9/files','/commits/abc/pulls','/commits/abc/check-runs','/commits/abc/status','/contents/src/build.ts','/actions/runs','/issues/comments'])
+    assert.equal((await explorer.execute('github_read',{path})).error,'github_resource_forbidden',path);
+  assert.equal((await explorer.execute('read_job_log',{job_id:1})).error,'github_resource_forbidden');
+  assert.equal(f.state.requests.length,before);
+  assert.equal((await explorer.execute('github_read',{path:'/issues/2/comments'})).error,'github_resource_forbidden');
+  scopes=[];assert.equal((await explorer.execute('github_search',{query:'old token'})).error,'github_resource_forbidden');
+});

@@ -86,7 +86,7 @@ export function createControlPlane(options: Options) {
   });
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
-  const sharedManagement = new ManagementService(store,rules,taskCommands);
+  const sharedManagement = new ManagementService(store,rules,taskCommands,options.projects?.manager??options.engine?.manager,options.githubUrl);
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);

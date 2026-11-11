@@ -33,7 +33,7 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await page.getByLabel('dev 技能包', { exact: true }).selectOption('review-kit'); await dirty(); await discard();
     const row = table.locator('tr[data-role=dev]');
     await row.locator('details').locator('summary').click();
-    await page.getByLabel('dev 工作区文件权限', { exact: true }).selectOption(dev.permissions.repository === 'read' ? 'write' : 'read'); await dirty(); await discard();
+    await page.getByLabel('dev 使用虚拟电脑权限', { exact: true }).selectOption(dev.permissions.computer === 'allow' ? 'deny' : 'allow'); await dirty(); await discard();
     await page.getByLabel('开启角色协调', { exact: true }).setChecked(!config.configuration.enabled); await dirty();
 
     await expect(table.getByRole('columnheader', { name: '职责', exact: true })).toBeVisible();
@@ -41,7 +41,7 @@ test('AI 团队列表如实区分推荐配置、各类未保存草稿与已生�
     await expect(row).toContainText(dev.responsibility); await expect(row).toContainText(dev.budget_policy_ref.id);
     await expect(table.locator('tr[data-role]')).toHaveCount(config.configuration.roles.length);
     await page.getByRole('button', { name: '保存角色配置', exact: true }).click();
-    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置');
+    await expect(page.locator('.flash')).toHaveText('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
     config = (await admin('/api/repositories/101/roles')).value;
     await expect(status).toHaveText(`配置版本 ${config.revision} · 已生效`);
 

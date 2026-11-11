@@ -1,3 +1,4 @@
+import { taskReadScopes } from '../tasks/management.js';
 import {claimQueuedTask} from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
@@ -631,7 +632,7 @@ export class TaskEngine {
           log({type:'published',outputs:[{html_url:issue.html_url,issue:issue.number}]});
           return {number:issue.number,html_url:issue.html_url};
         };
-        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,taskPermissions(this.store,task).github),writes.includes('pull_request')?async(requestId,args)=>{
+        result=await agentLoop(this.store,task,workspace,redactor,guard,input.context,new ReadTokens(this.store,repo,redactor,guard,this.githubUrl,taskPermissions(this.store,task).github,()=>taskReadScopes(this.store,task)),writes.includes('pull_request')?async(requestId,args)=>{
           // Any task other than development may publish one PR, while the project's development switch is on,
           // from an Issue or onto the bot's own PR.
           if(!development){

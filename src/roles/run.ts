@@ -19,7 +19,7 @@ import { TaskError,stop } from '../agent/common.js';
 import { roleConfiguration,configurationRevision,resolveRole,roleAuthority,skillFiles,type Entry,type RoleConfiguration } from './definition.js';
 import type { PiRoleEnvironment } from '../agent/pi.js';
 import type { Row,Store } from '../storage/database.js';
-import { assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed } from '../tasks/management.js';
+import { assertManagedExecution, assertTaskRole, managedTaskOrigin, roleTaskCaller, taskExecutor, taskAuthorizationFence, taskManagementTools, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
 import { TaskCommands } from '../tasks/commands.js';
 import { resolvePrincipalActor } from '../identity/authorization.js';
 import { externalModelRecorder } from '../metrics/accounting.js';
@@ -172,7 +172,7 @@ async function prepareRun<T>(spec:AgentSpec<T>,role:string,assignment:string|und
   // Flat permissions filter every offered tool, including the submission tool.
   const allowedTools=snapshot.capability.tools;
   const memoryAliases=role==='manager'?[]:memoryTools.filter(t=>['search_project_memory','remember_project_memory'].includes(t.function.name)&&spec.tools?.some(x=>x.function.name===t.function.name)).map(t=>({...t,function:{...t.function,name:t.function.name.replace('_project_','_role_')}}));
-  const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...(snapshot.kind==='evaluator'?[]:taskManagementTools),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
+  const tools=[...(spec.tools??[]).filter(t=>!taskManagementTools.some(m=>m.function.name===t.function.name)),...(snapshot.kind==='evaluator'||role==='coordinator'?[]:taskManagementTools),...memoryAliases,...(snapshot.skills?[skillTool]:[])].filter(t=>(!allowedTools||allowedTools.includes(t.function.name))&&taskToolAllowed(s,task,role,t.function.name));
   if(spec.finish&&!tools.some(tool=>tool.function.name===spec.finish!.name))stop('role_submission_forbidden','waiting_configuration',`${role}：当前权限禁止提交本次任务要求的结果，请在角色权限中调整。`);
   const bounded=perRunBudget(snapshot)?snapshot.budget:undefined,cumulative=cumulativeBudget(snapshot);
   const live:Live={bound:null,exhausted:null,stage_exhausted:null,tools:0};
@@ -318,7 +318,7 @@ export async function startRoleRun<T>(prepared:PreparedRun<T>,operationId=prepar
  const handle:Handle<T>={operation_id:operationId,prepared,controller,settled:false,cancelled:null,done:undefined as any,
   get run_id(){return prepared.live.bound?.run_id??null;},get lease_epoch(){return prepared.live.bound?.epoch??null;},get context(){return prepared.live.bound?.ctx??null;}};
  handles.set(operationId,handle);
- handle.done=runAgent(prepared.wrapped).finally(()=>{handle.settled=true;if(prepared.live.timer)clearTimeout(prepared.live.timer);if(prepared.live.stageTimer)clearTimeout(prepared.live.stageTimer);if(prepared.live.heartbeat)clearInterval(prepared.live.heartbeat);started();});
+ handle.done=withTaskPermissions(s,prepared.spec.task,prepared.role,[prepared.resolved.snapshot.capability.permissions??prepared.resolved.definition.permissions],()=>runAgent(prepared.wrapped)).finally(()=>{handle.settled=true;if(prepared.live.timer)clearTimeout(prepared.live.timer);if(prepared.live.stageTimer)clearTimeout(prepared.live.stageTimer);if(prepared.live.heartbeat)clearInterval(prepared.live.heartbeat);started();});
  handle.done.catch(()=>{});
  await bound;return handle;
 }

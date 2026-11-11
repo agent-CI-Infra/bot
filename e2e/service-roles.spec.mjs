@@ -15,9 +15,12 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     await expect(page.getByRole('navigation', { name: '全局设置类别' }).getByRole('link', { name: '服务角色', exact: true })).toHaveAttribute('aria-current', 'page');
     const cardOf = name => panel.locator('section').filter({ has: page.getByRole('heading', { name, exact: true }) });
     const assistant = cardOf('管理助手'), repository = cardOf('仓库问答助手');
-    await expect(assistant).toContainText('继承当前用户自己的有效权限'); await expect(assistant).toContainText('还没有模型请求');
+    await expect(assistant).toContainText('全部能力已允许'); await expect(assistant).toContainText('还没有模型请求');
+    await expect(assistant.getByLabel('使用虚拟电脑',{exact:true})).toBeDisabled();
+    await expect(repository.getByRole('group',{name:'GitHub',exact:true})).toBeVisible();
+    await expect(repository.getByLabel('当前会话记录',{exact:true})).toHaveCount(0);
     await expect(assistant.locator('.endpoint-warning')).toContainText('不会改用其他模型');
-    await expect(repository).toContainText('GitHub 内容：只读'); await expect(repository).toContainText('其他角色的任务：禁止');
+    await expect(repository).toContainText('Issue：只读'); await expect(repository).toContainText('项目任务与协作：无权限');
     await expect(assistant.getByRole('button', { name: '删除角色' })).toHaveCount(0);
 
     // The management assistant: choose the shared model and a budget.
@@ -30,7 +33,7 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     await page.screenshot({ path: '.tmp/service-roles/settings-desktop.png', fullPage: true });
 
     // The repository assistant: allow reading other roles' tasks. An edit saved elsewhere first is reported, not overwritten.
-    await repository.getByLabel('其他角色的任务', { exact: true }).selectOption('read');
+    await repository.getByLabel('项目任务与协作', { exact: true }).selectOption('read');
     const current = (await admin('/api/service-roles')).value.service_roles.find(r => r.id === 'repository-assistant');
     await admin('/api/service-roles/repository-assistant', 'PATCH', { expected_revision: current.revision, responsibility: '另一个窗口的修改' });
     await repository.getByRole('button', { name: '保存', exact: true }).click();
@@ -41,7 +44,7 @@ test('全局设置的服务角色页查看和修改内置角色，新建、停�
     const create = cardOf('新建服务角色');
     await create.getByLabel('名称', { exact: true }).fill('可信 committer 群'); await create.getByRole('button', { name: '新建', exact: true }).click();
     const custom = cardOf('可信 committer 群');
-    await expect(custom).toContainText('自定义'); await expect(custom).toContainText('派活：拒绝');
+    await expect(custom).toContainText('自定义'); await expect(custom).toContainText('指派其他角色：不允许');
     await custom.getByLabel('启用').uncheck(); await custom.getByRole('button', { name: '保存', exact: true }).click();
     await expect(custom).toContainText('已停用');
     await custom.getByRole('button', { name: '删除角色' }).click(); await page.getByRole('button', { name: '删除', exact: true }).click();

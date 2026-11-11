@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { RoleKind } from './catalog.js';
 
-export type PermissionMode = 'none' | 'read' | 'write' | 'allow' | 'deny';
+export type PermissionMode = 'none' | 'read' | 'write' | 'allow' | 'deny' | 'custom';
 export type RolePermissions = Record<string, PermissionMode>;
-interface PermissionItem { id: string; name: string; modes: PermissionMode[]; read: string[]; write: string[]; detail: string }
+interface PermissionItem { id: string; name: string; modes: PermissionMode[]; read: string[]; write: string[]; detail: string; group?: string; supported?: boolean }
 const access = (id: string, name: string, read: string[], write: string[], detail: string): PermissionItem => ({ id, name, modes: write.length ? ['none', 'read', 'write'] : ['none', 'read'], read, write, detail });
 const action = (id: string, name: string, tools: string[], detail: string): PermissionItem => ({ id, name, modes: ['deny', 'allow'], read: [], write: tools, detail });
 
 /** Flat permissions narrow the tools supplied by the task entry. They never create a tool or a GitHub grant. */
-export const permissionItems: PermissionItem[] = [
+const legacyItems: PermissionItem[] = [
   access('repository', '工作区文件', ['read_file'], ['write_file'], '读写可修改当前工作区；只读仅提供文件读取工具。'),
   action('commands', '运行命令', ['run_command'], '命令可以修改工作区；需要禁止执行命令时单独选择拒绝。'),
   access('task_records', '任务记录与证据', ['read_task_record', 'read_task_history', 'read_evidence'], ['record_progress'], '读取当前任务记录，或写入工作进度。'),
@@ -35,47 +35,254 @@ export const permissionItems: PermissionItem[] = [
   action('issues', '提报 Issue', ['create_issue', 'report_failure'], '请求控制面提交本次任务允许的 Issue。'),
   action('actions_rerun', '重跑失败的 Actions', ['rerun_failed_run'], '请求控制面重跑本次任务允许的失败运行。')
 ];
-/** The items a service role (platform-level, not bound to a project) can set: only those its entries supply tools for. */
-export const servicePermissionIds = ['conversation_history', 'github', 'project_tasks', 'delegation'] as const;
-const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
-export const permissionTools = (permissions: RolePermissions) => permissionItems.flatMap(item => {
-  const mode = permissions[item.id];
-  return mode === 'write' || mode === 'allow' ? [...item.read, ...item.write] : mode === 'read' ? item.read : [];
-});
+
+/** These operations concern only the current assignment or its owner. Object/entry checks still apply. */
+export const basicTools = ['read_task_record','read_task_history','read_evidence','record_progress','record_scope_difference',
+  'search_conversation_history','read_conversation_message','read_conversation_summary',
+  'list_managed_tasks','read_managed_task','create_task','manage_task','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task',
+  'read_playbook','select_playbooks','search_role_memory','read_role_memory','remember_role_memory','read_skill','read_related_artifact',
+  'read_coordination','acknowledge_coordination','read_stage_schedule','plan_task','start_agent','dispatch',
+  'nominate_delivery','submit_followup_plan','submit_retry_decision','submit_role_result','submit_delivery','finish','finish_review',
+  'finish_analysis','finish_observation','finish_release_notes','submit_gate_plan','submit_acceptance'];
+const githubReads = ['github_read_token','github_read','github_search'];
+const platform = (item: PermissionItem) => ({ ...item, group: 'platform' });
+const github = (item: PermissionItem) => ({ ...item, group: 'github' });
+export const permissionItems: PermissionItem[] = [
+  platform(action('computer','使用虚拟电脑',['read_file','write_file','run_command'],'允许读取和修改分配的工作区、执行命令与测试；固定候选和运行隔离仍由任务入口保证。')),
+  platform(action('delegation','指派其他角色',['delegate_role','delegate_roles','create_project_task'],'将工作交给项目团队或其他已启用角色；自己创建和执行任务默认允许。')),
+  platform(access('project_tasks','项目任务与协作',['list_project_tasks','read_project_task'],['manage_project_task','request_task_coordination','wait_for_tasks','submit_coordination','set_task_priority','relate_task'],'查询其他角色的任务；读写还可修改、协调其他任务与共享调度。自己的任务、已收到的通知默认可用。')),
+  platform(access('project_memory','项目共享知识',['search_project_memory','read_project_memory'],['remember_project_memory'],'查询共享知识或提交候选；自己的私有记忆默认可用，候选仍需原有复核。')),
+  platform(access('project_configuration','项目设置与角色配置',['management_query'],['management_command'],'按操作核对项目配置、角色和共享规则的读取或修改权限；不会增加操作者授权。')),
+  platform(access('schedules','项目定时与通知',['management_query'],['management_command'],'管理共享项目计划和通知订阅，目标与收件人仍受项目范围限制。')),
+  github(access('github_issues','Issue',githubReads,['create_issue','report_failure'],'查看 Issue；写入包含已接入的提报、评论和分类标签，具体动作仍受项目和任务限制。')),
+  github(access('github_pull_requests','Pull Request',githubReads,['create_pull_request'],'查看 PR 和 diff；请求创建或更新 bot PR、评论式检视。不包含批准或合并。')),
+  github(access('github_actions','Actions',[...githubReads,'read_job_log'],[],'查看工作流运行、job 和日志；重跑单独选择，任意触发与取消尚未接入。')),
+  github(action('actions_rerun','Actions：重跑原始运行',['rerun_failed_run'],'在现有故障分析入口重跑原始运行，次数、来源和证据条件不变。')),
+  github(access('github_contents','Contents',githubReads,['publish_candidate'],'读取仓库内容；写入仅通过框架发布获准的 bot 候选，不允许任意推送。')),
+  github(access('github_checks','Checks',githubReads,[],'读取检查运行和结论；尚未提供写入检查结果的角色工具。')),
+  github(access('github_statuses','Commit Status',githubReads,[],'读取提交状态；尚未提供发布状态的角色工具。')),
+];
+export const servicePermissionIds = permissionItems.map(item => item.id);
+export const githubResources = ['issues','pull_requests','actions','contents','checks','statuses'] as const;
+export type GitHubResource = typeof githubResources[number];
+const keyOf = (resource: string) => 'github_' + resource;
+const mask = (resource: string, action: string) => 'legacy_' + resource + '_' + action;
+const on = (value?: PermissionMode) => value === 'allow' || value === 'write';
+const resourceOperations=['read','create','reply','labels','publish','report'] as const;
+
+/** Exact legacy subsets remain explicit until their resource/computer setting is changed. */
+export function resourceAllowed(p: RolePermissions, resource: string, operation: 'read' | 'create' | 'reply' | 'labels' | 'publish' | 'report' = 'read'): boolean {
+  p = normalizePermissions(p);
+  const mode = p[keyOf(resource)];
+  if (mode === 'custom') return on(p[mask(resource, operation)]);
+  return mode === 'write' || operation === 'read' && mode === 'read';
+}
+export const githubReadScopes = (p: RolePermissions): string[] => githubResources.filter(resource => resourceAllowed(p, resource));
+const empty = (): RolePermissions => Object.fromEntries(permissionItems.map(item => [item.id,item.modes[0]!]));
+export const fullPermissions = (): RolePermissions => Object.fromEntries(permissionItems.map(item => [item.id,item.modes.at(-1)!]));
+function customResource(p:RolePermissions,resource:string):void {
+  if(p[keyOf(resource)]==='custom')return;
+  for(const operation of resourceOperations)p[mask(resource,operation)]=resourceAllowed(p,resource,operation)?'allow':'deny';
+  p[keyOf(resource)]='custom';
+}
+
+/** Old rows and run snapshots keep their original body. Reading a row converts its permission meaning, not its history. */
+export function normalizePermissions(value: RolePermissions, service = false): RolePermissions {
+  if (Object.hasOwn(value,'computer')) return { ...empty(), ...value };
+  const p = empty();
+  const repo = value.repository ?? 'none', commands = value.commands ?? 'deny';
+  p.computer = repo === 'write' && commands === 'allow' ? 'allow' : repo === 'none' && commands === 'deny' ? 'deny' : 'custom';
+  if (p.computer === 'custom') { p.legacy_repository = repo; p.legacy_commands = commands; }
+  p.delegation = value.delegation ?? 'deny';
+  const tasks = value.project_tasks ?? 'none', coordination = value.coordination ?? 'none', nomination = value.nomination ?? 'deny';
+  p.project_tasks = tasks;
+  if (tasks === 'write' || coordination === 'write' || nomination === 'allow' || service && value.delegation === 'allow') {
+    p.project_tasks = 'custom';
+    p.legacy_project_tasks = tasks; p.legacy_coordination = coordination; p.legacy_nomination = nomination;
+    if(service && value.delegation === 'allow')p.legacy_delegation_controls='allow';
+  }
+  p.project_memory = value.project_memory ?? 'none';
+  p.actions_rerun = value.actions_rerun ?? 'deny';
+  for (const resource of githubResources) {
+    const read = value.github === 'read', create = resource === 'issues' ? value.issues === 'allow' : resource === 'pull_requests' && value.pull_request === 'allow';
+    const reply = ['issues','pull_requests'].includes(resource) && value.submission === 'allow';
+    const publish = resource === 'contents' && value.pull_request === 'allow';
+    if (!create && !reply && !publish) p[keyOf(resource)] = read ? 'read' : 'none';
+    else {
+      p[keyOf(resource)] = 'custom';
+      for (const [operation,allowed] of Object.entries({read,create,reply,labels:reply,publish,report:resource==='issues'&&value.issues==='allow'})) p[mask(resource,operation)] = allowed ? 'allow' : 'deny';
+    }
+  }
+  return p;
+}
+
+/** Validate in the caller; compatibility updates from an older console are translated to the new resource fields. */
+export function updatePermissions(base: RolePermissions, input: RolePermissions, service = false): RolePermissions {
+  let p = normalizePermissions(base,service);
+  const old = legacyItems.filter(item => Object.hasOwn(input,item.id) && !permissionItems.some(next => next.id === item.id));
+  for (const item of old) {
+    const mode = input[item.id]!;
+    if (item.id === 'repository' || item.id === 'commands') {
+      const repository = item.id === 'repository' ? mode : p.computer === 'custom' ? p.legacy_repository! : p.computer === 'allow' ? 'write' : 'none';
+      const commands = item.id === 'commands' ? mode : p.computer === 'custom' ? p.legacy_commands! : p.computer === 'allow' ? 'allow' : 'deny';
+      p.computer = repository === 'write' && commands === 'allow' ? 'allow' : repository === 'none' && commands === 'deny' ? 'deny' : 'custom';
+      if (p.computer === 'custom') { p.legacy_repository = repository; p.legacy_commands = commands; }
+    } else if (item.id === 'github') {
+      for (const resource of githubResources) {
+        if(p[keyOf(resource)]==='write')customResource(p,resource);
+        if (p[keyOf(resource)] === 'custom') p[mask(resource,'read')] = mode === 'read' ? 'allow' : 'deny';
+        else p[keyOf(resource)] = mode === 'read' ? 'read' : 'none';
+      }
+    } else if (item.id === 'issues' || item.id === 'pull_request') {
+      const resource = item.id === 'issues' ? 'issues' : 'pull_requests';
+      for (const target of item.id === 'pull_request' ? [resource,'contents'] : [resource]) {
+        customResource(p,target);
+        p[mask(target,target === 'contents' ? 'publish' : 'create')] = mode;
+        if(target==='issues')p[mask(target,'report')]=mode;
+      }
+    } else if (item.id === 'coordination' || item.id === 'nomination') {
+      if (p.project_tasks !== 'custom') p.legacy_project_tasks = p.project_tasks!;
+      p.project_tasks = 'custom'; p['legacy_' + item.id] = mode;
+    }
+    // Other old fields governed only current-task operations, which now need no role permission.
+  }
+  for (const item of permissionItems) if (Object.hasOwn(input,item.id)) {
+    p[item.id] = input[item.id]!;
+    if (p[item.id] !== 'custom') {
+      if (item.id === 'computer') { delete p.legacy_repository; delete p.legacy_commands; }
+      if (item.id === 'project_tasks') { delete p.legacy_project_tasks; delete p.legacy_coordination; delete p.legacy_nomination; delete p.legacy_delegation_controls; }
+      if (item.id.startsWith('github_')) for (const key of Object.keys(p)) if (key.startsWith('legacy_' + item.id.slice(7) + '_')) delete p[key];
+    }
+  }
+  // Older service-role clients used delegation for finding and updating the work they handed to the Manager.
+  if (service && Object.hasOwn(input,'github') && input.delegation === 'allow') {
+    if(p.project_tasks!=='custom')p.legacy_project_tasks=p.project_tasks!;
+    p.project_tasks='custom';p.legacy_delegation_controls='allow';
+  }
+  return p;
+}
+export function validPermissionInput(key: string, mode: unknown, base: RolePermissions): boolean {
+  if (key.startsWith('legacy_')) return base[key] === mode;
+  if (mode === 'custom') return normalizePermissions(base)[key] === 'custom';
+  const item = permissionItems.find(item => item.id === key) ?? legacyItems.find(item => item.id === key);
+  return !!item?.modes.includes(mode as PermissionMode);
+}
+
+export function permissionTools(value: RolePermissions): string[] {
+  const p = normalizePermissions(value), tools = new Set(basicTools);
+  for (const item of permissionItems.filter(item => item.group === 'platform' || item.id === 'actions_rerun')) {
+    const mode = p[item.id];
+    if (mode === 'read' || on(mode)) item.read.forEach(name => tools.add(name));
+    if (on(mode)) item.write.forEach(name => tools.add(name));
+  }
+  if (p.computer === 'custom') {
+    if (['read','write'].includes(p.legacy_repository!)) tools.add('read_file');
+    if (p.legacy_repository === 'write') tools.add('write_file');
+    if (p.legacy_commands === 'allow') tools.add('run_command');
+  }
+  if (p.project_tasks === 'custom') {
+    const item = permissionItems.find(item => item.id === 'project_tasks')!;
+    if (['read','write'].includes(p.legacy_project_tasks!) || p.legacy_delegation_controls==='allow') item.read.forEach(name => tools.add(name));
+    if (p.legacy_project_tasks === 'write' || p.legacy_delegation_controls==='allow') tools.add('manage_project_task');
+    if (p.legacy_coordination === 'write') ['request_task_coordination','wait_for_tasks','submit_coordination'].forEach(name => tools.add(name));
+    if (p.legacy_nomination === 'allow') ['set_task_priority','relate_task'].forEach(name => tools.add(name));
+  }
+  if (['project_tasks','project_memory','project_configuration','schedules'].some(id => ['read','write'].includes(p[id]!))) tools.add('management_query');
+  if (p.delegation === 'allow' || ['project_tasks','project_memory','project_configuration','schedules'].some(id => p[id] === 'write')) tools.add('management_command');
+  const scopes=githubReadScopes(p);
+  if (scopes.length) ['github_read_token','github_read'].forEach(name => tools.add(name));
+  if (scopes.includes('issues')||scopes.includes('pull_requests')) tools.add('github_search');
+  if (resourceAllowed(p,'actions')) tools.add('read_job_log');
+  if (resourceAllowed(p,'contents','publish')) tools.add('publish_candidate');
+  if (resourceAllowed(p,'issues','create')) { tools.add('create_issue'); tools.add('report_failure'); }
+  if (resourceAllowed(p,'pull_requests','create') && resourceAllowed(p,'contents','publish')) tools.add('create_pull_request');
+  return [...tools];
+}
+
+/** A delegated task retains the source run's actual tool ceiling, including transitional legacy subsets. */
+export function narrowPermissions(value: RolePermissions, tools: readonly string[]): RolePermissions {
+  const p = normalizePermissions(value), allowed = new Set(tools);
+  for (const item of permissionItems.filter(item => item.group === 'platform' || item.id === 'actions_rerun')) {
+    const held = permissionTools(p).filter(name => [...item.read,...item.write].includes(name));
+    if (held.every(name => allowed.has(name))) continue;
+    if (item.id === 'computer') {
+      p.computer = 'custom'; p.legacy_repository = allowed.has('write_file') && held.includes('write_file') ? 'write' : allowed.has('read_file') && held.includes('read_file') ? 'read' : 'none';
+      p.legacy_commands = allowed.has('run_command') && held.includes('run_command') ? 'allow' : 'deny';
+    } else p[item.id] = item.read.length && item.read.every(name => allowed.has(name)) && held.some(name => item.read.includes(name)) ? 'read' : item.modes[0]!;
+  }
+  for (const resource of githubResources) {
+    const original = normalizePermissions(value);
+    p[keyOf(resource)] = 'custom';
+    for (const operation of resourceOperations) {
+      const tool = operation === 'read' ? resource === 'actions' && allowed.has('read_job_log') || githubReads.some(name => allowed.has(name))
+        : operation === 'create' ? allowed.has(resource === 'issues' ? 'create_issue' : 'create_pull_request')
+        : operation === 'report' ? allowed.has('report_failure') : operation === 'publish' ? allowed.has('publish_candidate') || allowed.has('create_pull_request') : true;
+      p[mask(resource,operation)] = tool && resourceAllowed(original,resource,operation) ? 'allow' : 'deny';
+    }
+  }
+  return p;
+}
 export const permitsTool = (permissions: RolePermissions, tool: string) => permissionTools(permissions).includes(tool);
 
-/** Defaults are individual values, editable independently after creation. */
 export function defaultPermissions(id: string, kind: RoleKind): RolePermissions {
-  const permissions: RolePermissions = Object.fromEntries(permissionItems.map(item => [item.id, item.modes[0]!]));
-  const set = (values: RolePermissions) => Object.assign(permissions, values);
-  set({ task_records: 'read', conversation_history: 'read', submission: 'allow' });
-  if (id === 'coordinator') set({ project_tasks: 'read', coordination: 'write' });
-  else if (kind === 'controller') set({ task_records: 'write', task_management: 'write', playbooks: 'write', skills: 'read', project_tasks: 'read', coordination: 'write', stage_plan: 'write', dispatch: 'allow', delegation: 'allow', nomination: 'allow' });
+  const p = empty();
+  if (kind === 'controller') { p.project_tasks = 'write'; if (id !== 'coordinator') p.delegation = 'allow'; }
   else {
-    set({ repository: kind === 'writer' ? 'write' : 'read', commands: 'allow', playbooks: 'write', project_memory: kind === 'writer' ? 'write' : 'read', role_memory: kind === 'writer' ? 'write' : 'read', skills: 'read', related_artifacts: 'read' });
-    if (kind === 'writer') set({ task_records: 'write', scope_differences: 'allow', github: 'read', coordination: 'write', subagents: 'allow', pull_request: 'allow', issues: 'allow', actions_rerun: 'allow' });
-    if (kind === 'evaluator') set({ acceptance: 'allow' });
+    p.computer = 'allow'; p.project_memory = kind === 'writer' ? 'write' : 'read';
+    if (kind === 'observer') for(const resource of githubResources)p[keyOf(resource)]='read';
+    if (kind === 'writer') {
+      for (const resource of githubResources) p[keyOf(resource)] = ['issues','pull_requests','contents'].includes(resource) ? 'write' : 'read';
+      p.actions_rerun = 'allow';
+    }
   }
-  return permissions;
+  return p;
 }
-
-/** Old stored policies are converted on read; historical rows and snapshots remain unchanged. */
-export function migratePermissions(role: { role_id: string; kind: RoleKind; permissions?: RolePermissions; capability_policy_ref?: { id: string } }) {
-  if (role.permissions) return { ...Object.fromEntries(permissionItems.map(item => [item.id, item.modes[0]!])),
-    // Dispatch already created/continued tasks. Preserve that capability explicitly; observers gain no task writes.
-    ...(role.permissions.task_management === undefined && role.permissions.dispatch === 'allow' ? { task_management: 'write' as const } : {}),
-    ...(role.permissions.conversation_history === undefined && ['read','write'].includes(role.permissions.task_records??'none') ? { conversation_history: 'read' as const } : {}), ...role.permissions };
-  const permissions = defaultPermissions(role.role_id, role.kind);
-  if (role.capability_policy_ref?.id === 'observer-readonly') permissions.commands = 'deny';
-  if (role.capability_policy_ref?.id === 'controller') { permissions.project_tasks = 'none'; permissions.coordination = 'none'; }
-  return permissions;
+export function migratePermissions(role: { role_id: string; kind: RoleKind; permissions?: RolePermissions; capability_policy_ref?: { id: string } }): RolePermissions {
+  if (role.permissions) return normalizePermissions(role.permissions);
+  if (!role.capability_policy_ref) return defaultPermissions(role.role_id,role.kind);
+  // Pre-permission V2 rows used fixed capability policies. Reconstruct that old meaning before converting it.
+  const writer=role.kind==='writer',controller=role.kind==='controller',coordinator=role.role_id==='coordinator';
+  const legacy:RolePermissions={repository:controller?'none':writer?'write':'read',commands:controller||role.capability_policy_ref.id==='observer-readonly'?'deny':'allow',
+    github:writer?'read':'none',issues:writer?'allow':'deny',pull_request:writer?'allow':'deny',submission:'allow',
+    project_tasks:controller?'read':'none',coordination:controller||writer?'write':'none',nomination:controller&&!coordinator?'allow':'deny',
+    delegation:controller&&!coordinator?'allow':'deny',project_memory:controller?'none':writer?'write':'read',actions_rerun:writer?'allow':'deny'};
+  if(role.capability_policy_ref.id==='controller'){legacy.project_tasks='none';legacy.coordination='none';}
+  return normalizePermissions(legacy);
 }
-// The protocol snapshot keeps its existing shape so older trace readers can still interpret it.
-export function permissionSnapshot(permissions: RolePermissions) {
-  const tools = permissionTools(permissions), has = (tool: string) => tools.includes(tool);
-  return { id: 'permissions', version: hash({permissions,tools}), tools, authorities: {
+const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,16);
+export function permissionSnapshot(permissions: RolePermissions, kind?: RoleKind) {
+  const tools = permissionTools(permissions).filter(name => (name !== 'submit_acceptance' || kind === 'evaluator') &&
+    (name !== 'write_file' || !['observer','evaluator'].includes(kind??''))), has = (tool: string) => tools.includes(tool);
+  return { id: 'permissions', version: hash({permissions,tools}), tools, permissions:normalizePermissions(permissions), authorities: {
     query_facts: has('read_task_record') || has('read_project_task'), delegate: has('delegate_role'), coordinate: has('request_task_coordination') || has('submit_coordination'),
     nominate: has('nominate_delivery'), edit_candidate: has('write_file'), decide_acceptance: has('submit_acceptance'),
     finish_task: false, override_qa: false, publish: false, merge: false, grant_permissions: false
   } };
+}
+
+/** The same operation policy is used for management and group commands, and rechecked at execution. */
+export function permitsManagement(p: RolePermissions, operation: string, write = false): boolean {
+  p = normalizePermissions(p);
+  if (operation === 'list_projects' || operation === 'get_capabilities') return true;
+  if (operation === 'task.create') return p.delegation === 'allow';
+  if(operation==='configuration.pr'&&(!resourceAllowed(p,'pull_requests','create')||!resourceAllowed(p,'contents','publish')))return false;
+  const resource = /^(schedule\.|subscription\.)/.test(operation) || /schedule|subscription|occurrence|notification/.test(operation) ? 'schedules'
+    : /^(task\.)/.test(operation) || ['list_tasks','get_task'].includes(operation) ? 'project_tasks'
+    : /knowledge/.test(operation) ? 'project_memory' : 'project_configuration';
+  if (resource === 'project_tasks' && p.project_tasks === 'custom') {
+    if(p.legacy_delegation_controls==='allow'&&(!write||['task.instructions','task.contract','task.cancel'].includes(operation)))return true;
+    return p.legacy_project_tasks === 'write' && operation!=='task.contract' || !write && p.legacy_project_tasks === 'read';
+  }
+  return p[resource] === 'write' || !write && p[resource] === 'read';
+}
+
+/** A binding can carry only capabilities its configured role uses; its grantor is checked again per resource. */
+export function serviceCapabilities(value: RolePermissions): string[] {
+  const p=normalizePermissions(value,true), caps=new Set(['tasks.read']);
+  if(p.delegation==='allow'||permitsTool(p,'manage_project_task')||permitsTool(p,'run_command')||permitsTool(p,'write_file'))caps.add('tasks.write');
+  if(['read','write'].includes(p.project_memory!))caps.add('knowledge.read');
+  if(p.project_memory==='write')caps.add('knowledge.write');
+  if(p.project_configuration==='write'){caps.add('config.write');caps.add('roles.edit');}
+  if(p.schedules==='write')caps.add('schedules.manage');
+  return [...caps];
 }

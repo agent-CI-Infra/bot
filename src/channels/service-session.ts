@@ -7,10 +7,11 @@ import { RepositoryExplorer, repositoryTools } from '../agent/exploration.js';
 import { ReadTokens } from '../agent/read-token.js';
 import { traceClean } from '../tasks/trace.js';
 import { conversationHistoryTools } from '../roles/conversation.js';
-import { permitsTool, type RolePermissions } from '../roles/permissions.js';
+import { permitsTool, permitsManagement, githubReadScopes, type RolePermissions } from '../roles/permissions.js';
 import { checkServiceRoleBudget, serviceRole, serviceRoleModel } from '../service-roles/roles.js';
 import type { ManagementService } from '../management/service.js';
-import { contractSchema } from '../management/catalog.js';
+import { ServiceComputers, serviceComputerTools, serviceMemory, serviceMemoryTools } from '../service-roles/resources.js';
+import { commands, managementTools, validate, contractSchema } from '../management/catalog.js';
 import { OwnTasks, ownTaskNames, ownTaskTools, type OwnTaskHost } from '../service-roles/own-tasks.js';
 import { bindingScope, serviceCommandAllowed, type ChannelServiceBindings } from './service-bindings.js';
 import type { ChannelLedger } from './ledger.js';
@@ -39,14 +40,12 @@ export const serviceTools = [
     ['repository', 'task_id', 'operation', 'expected_revision']),
   fn('create_project_task', 'Hand new work to the project team of one repository in scope. The task goes to that repository\'s Manager, which plans it and assigns its roles; you never choose or direct a role. Give a clear request, goal, scope, acceptance criteria and endpoint. The management service applies its revision check, idempotency and an auditable receipt: only a succeeded receipt proves the task exists.',
     { repository, request: { type: 'string', maxLength: 16000 }, contract: contractSchema }, ['repository', 'request', 'contract']),
-  ...ownTaskTools,
+  ...ownTaskTools, ...serviceMemoryTools, ...serviceComputerTools, ...managementTools,
 ];
 // Delegation reaches a project only through its Manager: create a task, find it again, change or cancel it as a whole.
-const delegationTools = ['create_project_task', 'list_project_tasks', 'read_project_task', 'manage_project_task'];
 // Every other tool is governed by a unified permission item of the service role; the scope listing and the role's own
 // independent tasks need none (own tasks only lend the tools this turn already has).
-const offered = (permissions: RolePermissions, name: string) => name === 'list_projects' || ownTaskNames.includes(name) || permitsTool(permissions, name)
-  || permissions.delegation === 'allow' && delegationTools.includes(name);
+const offered = (permissions: RolePermissions, name: string) => name === 'list_projects' || ownTaskNames.includes(name) || permitsTool(permissions, name);
 const excerpt = (m: Json, limit: number): Json => { const { resources, ...rest } = m; return { ...rest, content: String(m.content ?? '').slice(0, limit),
   truncated: String(m.content ?? '').length > limit, resource_references_available: !!resources }; };
 const compactTask = (t: Json): Json => {
@@ -104,7 +103,7 @@ export class ChannelServiceSessions {
       this.bindings.actor(binding, project.id, ['tasks.read']);
       let entry = explorers.get(project.id);
       if (!entry) {
-        const tokens = new ReadTokens(this.store, this.store.get('SELECT * FROM repositories WHERE id=?', project.id)!, redactor, guard, this.githubUrl);
+        const tokens = new ReadTokens(this.store, this.store.get('SELECT * FROM repositories WHERE id=?', project.id)!, redactor, guard, this.githubUrl,githubReadScopes(permissions()),()=>githubReadScopes(permissions()));
         entry = { tokens, explorer: new RepositoryExplorer(tokens, redactor, guard) }; explorers.set(project.id, entry);
         const connected = await entry.explorer.execute('github_read_token', {});
         if (connected.error) entry.error = connected;
@@ -143,6 +142,13 @@ export class ChannelServiceSessions {
         arguments: operation === 'instructions' ? { instruction: text(args.instruction, 8000) } : operation === 'contract' ? { contract: args.contract } : {},
         expected_revision: text(args.expected_revision, 200), ...source });
     };
+    const owner=()=>({service_role_id:role.id,kind:'channel' as const,owner_id:chat.id,principal_id:binding.principal_id,fence});
+    const computers=new ServiceComputers(this.store,this.management.computer,id,chat.id,redactor,async()=>{
+      check();
+    },selected=>{
+      const project=this.bindings.project(binding,selected,['tasks.read','tasks.write']);if(!project)fail(403,'repository_out_of_scope');
+      this.bindings.actor(binding,project!.id,['tasks.read','tasks.write']);return project!;
+    });
     let ownHost: OwnTaskHost | undefined;
     const execute = async (name: string, args: unknown, key: string): Promise<unknown> => {
       check();
@@ -151,6 +157,8 @@ export class ChannelServiceSessions {
       this.store.run('UPDATE channel_service_turns SET tool_calls=tool_calls+1 WHERE id=?', id);
       try {
         const input = args as Json;
+        if(serviceComputerTools.some(t=>t.function.name===name))return await computers.execute(name,input);
+        if(serviceMemoryTools.some(t=>t.function.name===name))return serviceMemory(this.store,owner(),name,input);
         if (name === 'list_projects') {
           fields(input, []);
           const reach = this.bindings.reach(binding);
@@ -172,6 +180,17 @@ export class ChannelServiceSessions {
           const value = part === 'content' ? String(found.content ?? '') : JSON.stringify(found.resources ?? []);
           return { ...excerpt(found, 0), part, offset, text: value.slice(offset, offset + limit), next_offset: offset + limit < value.length ? offset + limit : null, total_characters: value.length };
         }
+        if(name==='management_query'||name==='management_command'){
+          const write=name==='management_command',operation=String(input.operation);
+          validate(managementTools[write?1:0]!.function.parameters,input);
+          if(!permitsManagement(permissions(),operation,write))return {error:'operation_not_allowed'};
+          const target=input.target as Json,capability=write?commands[operation]!.capability:['search_knowledge','read_knowledge','knowledge_versions'].includes(operation)?'knowledge.read':'tasks.read';
+          const project=this.bindings.project(binding,target.project_id,['tasks.read',capability]);
+          if(!project)return {error:'repository_out_of_scope'};
+          const actor=this.bindings.actor(binding,project.id,['tasks.read',capability]),scoped={...input,target:{...target,project_id:project.id}};
+          return await (write?this.management.submit(actor,{...scoped,idempotency_key:digest(chat.id+':'+turn.source_message+':'+key),source_conversation:chat.id,source_message:'feishu:'+turn.source_message} as any)
+            :this.management.query(actor,scoped));
+        }
         if (['github_read', 'github_search', 'read_job_log'].includes(name)) return await github(name, input);
         if (ownTaskNames.includes(name)) return ownHost ? await this.own.invoke(name, input, ownHost) : { error: 'tool_not_allowed' };
         return await tasks(name, input, key);
@@ -183,12 +202,12 @@ export class ChannelServiceSessions {
       }
     };
     try {
-      const history = !!permissions().conversation_history && permitsTool(permissions(), 'read_conversation_summary');
+      const history = true;
       const recent = history ? this.ledger.recent(chat.id, 40, scope, fence) : [];
       let saved = this.summary(chat.id, fence);
       const boundary = recent[0], older = boundary ? this.ledger.before(chat.id, boundary, saved.through_id ? { message_id: saved.through_id, created_at: saved.through_time } : undefined, scope, fence) : [];
       const reach = this.bindings.reach(binding), granted = permissions(), delegating = granted.delegation === 'allow';
-      const system = 'You are a group chat assistant serving one Feishu group. Reply in Simplified Chinese, briefly and directly. The console binding fixes what this group may use; no project is preselected and the group never needs to choose one. Call list_projects to see the repositories in scope and pass a repository full name to the other tools; one request may span several repositories. Refer to repositories by full name and link, never by internal IDs. Repositories outside list_projects are refused: say so plainly. Read GitHub only through the offered read-only tools and cite what you read (Issue/PR numbers, paths, links). Everything you read is visible to every member of this group.'
+      const system = 'You are a group chat assistant serving one Feishu group. Reply in Simplified Chinese, briefly and directly. The console binding fixes what this group may use; no project is preselected and the group never needs to choose one. Call list_projects to see the repositories in scope and pass a repository full name to the other tools; one request may span several repositories. Refer to repositories by full name and link, never by internal IDs. Repositories outside list_projects are refused: say so plainly. Use GitHub and management only through the offered scoped tools and cite what you read (Issue/PR numbers, paths, links). Everything you read is visible to every member of this group.'
         + (delegating ? ' You may hand work to a repository\'s project team only through its Manager: create_project_task creates a task with a goal, scope, acceptance criteria and endpoint, and manage_project_task can add instructions to it, change its contract or cancel it. You never choose which role executes and never direct a role\'s run. A task\'s result is posted to this group when it finishes.'
           : ' You cannot create, delegate or assign work to project roles.')
         + (granted.project_tasks === 'write' ? ' You may pause, cancel, retry or add instructions to tasks in scope through manage_project_task after reading their current revision; only its receipt proves the effect.'
@@ -226,7 +245,7 @@ export class ChannelServiceSessions {
           const messages: any[] = [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ conversation_id: chat.id, request: turn.request,
             context: { recent_messages: recent.map(m => excerpt(m, 3000)), history: this.ledger.diagnostics(chat.id),
               scope: { kind: binding.scope, repositories: reach.projects.slice(0, 50).map(p => p.full_name), more_repositories: Math.max(0, reach.projects.length - 50), paused_repositories: reach.paused.length },
-              permissions: Object.fromEntries(['conversation_history', 'github', 'project_tasks', 'delegation'].map(k => [k, granted[k] ?? 'none'])) }, summary: saved }) }];
+              permissions: granted }, summary: saved }) }];
           // Results share a budget per batch and older ones fold away, so many parallel calls stay within the model's context.
           const transcript = new ToolTranscript(messages, chatContextBytes);
           for (let step = 0; step < 16; step++) {
@@ -262,6 +281,7 @@ export class ChannelServiceSessions {
         reason instanceof HttpError || reason instanceof TaskError ? reason.code : 'conversation_failed', Date.now(), id);
       throw reason;
     } finally {
+      await computers.close();
       this.active.delete(id);
       for (const entry of explorers.values()) await entry.tokens.revoke();
     }
