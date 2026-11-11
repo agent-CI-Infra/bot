@@ -12,7 +12,7 @@ import { TaskRecords } from '../dist/tasks/service.js';
 import { runRole, roleInstance } from '../dist/roles/run.js';
 import { runTeam } from '../dist/roles/team.js';
 import { roleApi } from '../dist/roles/api.js';
-import { resolveRole, roleAuthority } from '../dist/roles/definition.js';
+import { resolveRole, roleAuthority, skillFiles } from '../dist/roles/definition.js';
 import { roleTemplate, systemInstructions } from '../dist/roles/pool.js';
 import { roleAssignmentContext } from '../dist/agent/profiles.js';
 import { controllerWorkspace } from '../dist/roles/workspace.js';
@@ -184,6 +184,27 @@ test('saving RoleDefinitionV2 checks expected_revision, project scope and the ha
   for (const name of ['write_file', 'run_command', 'submit_acceptance', 'merge']) assert.ok(!snapshot.capability.tools.includes(name), name);
   assert.deepEqual(Object.entries(snapshot.capability.authorities).filter(([, v]) => v).map(([k]) => k).sort(), ['coordinate', 'delegate', 'nominate', 'query_facts']);
   assert.equal(snapshot.harness.id, 'pi'); assert.equal(snapshot.harness.runtime.package, '@earendil-works/pi-coding-agent');
+});
+
+test('unchanged pinned repository bundles survive a newer rule cache while edits still require the exact source', async t => {
+  const f = await fixture(t, () => call('finish', {})), path = '.agents/skills/sec/SKILL.md';
+  f.s.run("CREATE TABLE IF NOT EXISTS repository_rule_sources(repository_id TEXT PRIMARY KEY,sha TEXT NOT NULL,files TEXT NOT NULL,updated_at TEXT NOT NULL)");
+  f.s.run('INSERT INTO repository_rule_sources VALUES(?,?,?,?)', 'r', 'a'.repeat(40), JSON.stringify({ [path]: 'Original pinned instructions.' }), 'now');
+  const source = { id: 'pinned', source: { type: 'repository', commit: 'a'.repeat(40), paths: [path] } };
+  const initial = f.put({ skills: [source], roles: [{ role_id: 'test', skill_bundle_ref: { id: 'pinned' } }] });
+  const original = structuredClone(initial.skills[0]), snapshot = resolveRole(f.s, 'r', 'test', 'development.issue').snapshot;
+  f.s.run('UPDATE repository_rule_sources SET sha=?,files=? WHERE repository_id=?', 'b'.repeat(40), JSON.stringify({ [path]: 'New branch instructions.' }), 'r');
+  const next = f.put({ skills: [source, { id: 'inline', source: { type: 'inline', files: [{ path: 'guide.md', content: 'Another editable bundle.' }] } }], roles: [{ role_id: 'test', skill_bundle_ref: { id: 'pinned' } }] });
+  assert.deepEqual(next.skills.find(bundle => bundle.id === 'pinned'), original);
+  assert.equal(f.s.get("SELECT count(*) n FROM skill_bundle_revisions WHERE repository_id='r' AND id='pinned'").n, 1);
+  const current = resolveRole(f.s, 'r', 'test', 'development.issue').snapshot;
+  assert.equal(skillFiles(f.s, 'r', current.skills)[0].content, 'Original pinned instructions.'); assert.equal(current.skills.content_hash, snapshot.skills.content_hash);
+  for (const changed of [{ ...source, id: 'new-id' }, { id: 'pinned', source: { ...source.source, paths: ['.agents/skills/other/SKILL.md'] } }, { id: 'pinned', source: { ...source.source, commit: 'c'.repeat(40) } }]) {
+    rejects(() => f.put({ skills: [changed] }), 'skill_source_commit_unavailable', 'skills[0].source.commit');
+  }
+  const refreshed = f.put({ skills: [{ id: 'pinned', source: { ...source.source, commit: 'b'.repeat(40) } }], roles: [{ role_id: 'test', skill_bundle_ref: { id: 'pinned' } }] });
+  assert.equal(refreshed.skills[0].revision, original.revision + 1); assert.notEqual(refreshed.skills[0].content_hash, original.content_hash);
+  assert.equal(skillFiles(f.s, 'r', snapshot.skills)[0].content, 'Original pinned instructions.');
 });
 
 test('two roles resolve different supported models, pinned skills and harnesses; model order is role, workflow, project', async t => {
