@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { harness, setup, account, repository } from '../test/helpers.mjs';
@@ -37,6 +37,7 @@ async function fixture() {
         gaps: read ? [] : ['Read the actual report'], residuals: [], core_complete: read,
         required_evidence_complete: read, acceptable_risk: read }, 'qa-verdict'));
     }
+    if (!names.includes('read_file')) return send(res, call('read_file', { path: 'calc.mjs' }, 'read-source'));
     if (!names.includes('write_file')) return send(res, call('write_file', { path: 'report.md', content: reportText }, 'write-report'));
     return send(res, call('submit_delivery', { summary: 'Observed repository report', artifacts: [{ path: 'report.md', description: 'Repository observation' }], evidence: [], unknowns: [] }, 'deliver-report'));
   });
@@ -61,7 +62,7 @@ async function fixture() {
     const model = await admin('/api/models', 'POST', { repository_id: '101', model_name: 'Lifecycle fixture',
       api_url: 'http://127.0.0.1:' + provider.address().port + '/v1', api_key: 'fixture-model-key' });
     expect(model.status).toBe(201);
-    expect((await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id })).status).toBe(200);
+    expect((await admin('/api/repositories/101/policy', 'PATCH', { model_id: model.value.model.id, development_enabled: true })).status).toBe(200);
     const roles = (await admin('/api/repositories/101/roles')).value;
     expect((await admin('/api/repositories/101/roles', 'PUT', { expected_revision: roles.revision, enabled: false,
       roles: [{ role_id: 'qa', harness_ref: { id: 'native' } }] })).status).toBe(200);
@@ -105,6 +106,8 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
     await expect(page.locator('#task-badges')).toContainText('已完成');
     await expect(dialog).toContainText('独立 QA 对当前候选的验收已通过');
     await expect(dialog).toContainText('没有写到 GitHub');
+    await expect(dialog.getByRole('heading', { name: '任务结果', exact: true })).toBeVisible();
+    await expect(dialog.getByRole('heading', { name: '开发结果', exact: true })).toHaveCount(0);
     const result = (await f.admin('/api/tasks/' + id)).value.task;
     expect(result.structured.acceptance.candidate_id).toBe(candidate.id);
     expect(result.structured.acceptance.outcome).toBe('pass');
@@ -112,6 +115,8 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
     expect(f.h.store.get('SELECT count(*) n FROM tasks').n).toBe(1);
     expect(f.h.store.get('SELECT count(*) n FROM github_effects WHERE task_id=?', id).n).toBe(0);
     expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    mkdirSync('.tmp/task-lifecycle-227/previews', { recursive: true });
+    await page.screenshot({ path: `.tmp/task-lifecycle-227/previews/report-${width}.png` });
     if (width === 1440) {
       // At 200% desktop zoom the same 1440 physical pixels have 720 CSS pixels and DPR 2.
       const cdp = await page.context().newCDPSession(page);

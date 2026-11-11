@@ -734,7 +734,7 @@ function computerCard(task, environment) {
 }
 function resultCard(task) {
   const result = task.result; if (!result) return null;
-  const review = task.kind.startsWith('review.'), section = card(review ? '检视结论' : '开发结果');
+  const review = task.kind.startsWith('review.'), section = card(review ? '检视结论' : task.kind === 'task.request' ? '任务结果' : '开发结果');
   if (result.summary) section.append(element('p', result.summary, 'say'));
   if (review && Array.isArray(result.findings)) {
     section.append(element('p', `${result.findings.length} 条发现`, 'muted'));
