@@ -6,17 +6,28 @@ titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
 const settingsSections = [['general', '常规'], ['onboarding', '接入向导'], ['feishu', '飞书连接'], ['access', '公网接入'], ['accounts', '机器人账号'], ['installations', '安装档案'], ['models', '模型'], ['service-roles', '服务角色'], ['users', '用户']];
-function settingsSection() { if(/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return 'onboarding'; if(/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return 'feishu'; const key = /^#\/settings\/([a-z-]+)$/.exec(location.hash)?.[1]; return settingsSections.some(([name]) => name === key) ? key : 'general'; }
+// A settings address is a section and, for a detail page, one record inside it: #/settings/installations/<host>/<app>/<id>
+// and #/settings/users/<id>. Unknown sections fall back to 常规, an unreadable id is handled by the page itself.
+function settingsRoute() {
+  if (/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return { section: 'onboarding', id: null };
+  if (/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return { section: 'feishu', id: null };
+  const match = /^#\/settings\/([a-z-]+)(?:\/(.+))?$/.exec(location.hash), key = match?.[1];
+  return { section: settingsSections.some(([name]) => name === key) ? key : 'general', id: match?.[2] ? decodeURIComponent(match[2]) : null };
+}
 // What the cards draw from; the model cards are redrawn together because deleting the default model clears it.
 let settingsView = null;
 async function renderSettings(request) {
-  const section = settingsSection(), nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
+  const route = settingsRoute(), section = route.section, nav = element('nav', '', 'project-nav'), content = element('div', '', 'project-content'), body = element('div', '', 'project-body settings-body');
   nav.setAttribute('aria-label', '全局设置类别');
   for (const [key, caption] of settingsSections) { const item = element('a', caption); item.href = '#/settings/' + key; if (key === section) item.setAttribute('aria-current', 'page'); nav.append(item); }
   // The categories are drawn at once; the chosen category's cards follow when their data arrives.
   $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
-  const cards = await settingsCards[section](request);
+  // The hash may only choose among the declared sections: never let a user-written name reach the prototype chain, and
+  // never call anything that is not a declared loader. Anything else falls back to 常规.
+  const handler = Object.hasOwn(settingsCards, section) ? settingsCards[section] : settingsCards.general;
+  if (typeof handler !== 'function') return;
+  const cards = await handler(request, route.id);
   if (request !== renderVersion) return;
   content.replaceChildren(...cards);
 }
@@ -31,7 +42,8 @@ const settingsCards = {
     catch (err) { if (request === renderVersion) panel.replaceChildren(consoleState('接入状态读取失败', err.message, { tone: 'error', retry: () => render().catch(error) })); }
     return [panel];
   },
-  async installations() {
+  async installations(request, ref) {
+    if (ref) return installationDetail(request, ref);
     const { installations } = await api('/api/installations/archive'), section = card('GitHub App 安装档案');
     section.append(note('安装范围与控制台角色分别管理。事件触发者和申请者不代表当前有权管理的人。'));
     if (!installations.length) section.append(note('尚无安装档案。同步后也会保留零仓库安装和历史证据缺失标记。'));
@@ -48,6 +60,8 @@ const settingsCards = {
         ['投影／范围／权限版本', `${installation.projection_version} / ${installation.scope_version} / ${installation.permissions_version}`]]));
       if (!evidence.requester) item.append(note('未提供申请者不等于从未申请。历史安装查询不能补齐完整批准历史。'));
       if (installation.error) item.append(note(`同步错误：${installation.error}`));
+      // The detail page reads the same snapshot plus its repositories and events; the list stays a summary.
+      item.append(settingsLink('#/settings/installations/' + [installation.installation.github_host, installation.installation.app_id, installation.installation.installation_id].join('/'), '查看安装详情'));
       section.append(item);
     }
     return [section];
@@ -106,10 +120,11 @@ const settingsCards = {
     intro.append(note('服务角色是平台级的助手：管理助手用于控制台管理对话和个人私聊，仓库问答助手是群聊的默认推荐角色。它们不属于某个项目，使用部署共享模型，用量按角色单独记录，不计入任何项目。项目里的 Manager、Dev、QA 等工作角色在各项目的「角色」页配置。'));
     return [intro, ...roles.map(role => serviceRoleCard(view, role)), serviceRoleCreate(view)];
   },
-  async users(request) {
+  async users(request, id) {
     const [{ users }, assigned] = await Promise.all([api('/api/users'), api('/api/project-admin-assignments')]);
     grants = assigned;
-    return [settingsList('用户', '项目权限由 GitHub 当前权限和 Bot 内显式委派共同决定；下面显示当前可见项目及来源。超级管理员管理全部项目和全局设置。', users.map(userLine), '还没有用户。', '新增用户', 'users')];
+    if (id) return [userDetail(id, users)];
+    return [settingsList('用户', '项目权限由 GitHub 当前权限和 Bot 内显式委派共同决定；下面显示当前可见项目及来源。超级管理员管理全部项目和全局设置。', users.map(userProfileLine), '还没有用户。', '新增用户', 'users')];
   },
 };
 // The resources a computer gets for every value its project does not set itself, chosen from common sizes inside the
@@ -186,6 +201,134 @@ function settingsList(title, intro, lines, empty, caption, kind) {
   list.setAttribute('role', 'list'); list.setAttribute('aria-label', title); list.append(...(lines.length ? lines : [element('p', empty, 'muted')]));
   head.append(note(intro), button(caption, () => openEditor(kind), ''));
   section.append(head, list); return section;
+}
+// In-console addresses are hash links, not external URLs: link() only builds absolute http(s) anchors.
+function settingsLink(hash, text) { const a = element('a', text); a.href = hash; return a; }
+// One installation: its archive snapshot, the repositories it grants and its recent deliveries. Evidence is shown as
+// recorded: a missing history never becomes "no request", and an unverified signature is marked instead of trusted.
+const installationStatusNames = { active: '有效', pending_sync: '等待同步', suspended: '已暂停', deleted: '已卸载' };
+const installationCompletenessNames = { complete: '完整', pending: '等待同步', stale: '待核实', error: '同步失败，保留最近成功快照' };
+async function installationDetail(request, ref) {
+  const section = card('安装档案详情'), content = element('div', ''), back = settingsLink('#/settings/installations', '返回安装档案');
+  section.append(back, content);
+  const match = /^([^/]+)\/([1-9]\d*)\/([1-9]\d*)$/.exec(ref || '');
+  if (!match) { content.append(note('安装地址不完整，请从安装档案列表打开。')); return [section]; }
+  const base = `/api/installations/archive/${match[1]}/${match[2]}/${match[3]}`;
+  const draw = async notice => {
+    content.replaceChildren(element('p', '正在加载…', 'muted'));
+    try {
+      const [record, repositories, deliveries] = await Promise.all([api(base), api(base + '/repositories'), api(base + '/events')]);
+      content.replaceChildren(...(notice ? [element('p', notice, 'view-success')] : []),
+        ...installationDetailBody(base, record.installation, repositories.repositories || [], deliveries.events || [], draw));
+    } catch (err) { content.replaceChildren(note('读不到这条安装：' + err.message)); }
+  };
+  await draw('');
+  return [section];
+}
+function installationDetailBody(base, snapshot, repositories, deliveries, redraw) {
+  const nodes = [], installation = snapshot.installation, evidence = snapshot.evidence || {};
+  nodes.push(element('h4', `${snapshot.target.login || '目标待同步'} · 安装 ${installation.installation_id}`),
+    facts([['状态', installationStatusNames[snapshot.status] || snapshot.status],
+      ['范围', snapshot.repository_selection === 'all' ? '全部仓库' : snapshot.repository_selection === 'selected' ? '指定仓库' : '待同步'],
+      ['完整性', installationCompletenessNames[snapshot.completeness] || snapshot.completeness],
+      ['最近成功同步', snapshot.last_success_at ? timestamp(snapshot.last_success_at) : '尚未成功同步'],
+      ['执行', snapshot.execution_blocked ? '已阻止：安装未生效或范围变更待确认' : '可以执行'],
+      ['投影／范围／权限版本', `${snapshot.projection_version} / ${snapshot.scope_version} / ${snapshot.permissions_version}`]]));
+  const permissions = Object.entries(snapshot.permissions || {}).map(([name, level]) => `${permissionNames[name] || name}（${accessNames[level] || level}）`);
+  nodes.push(facts([['安装授权（GitHub 返回）', permissions.join('、') || '未同步到权限，不能据此判断缺什么']]));
+  // A missing history is stated as missing; it is not evidence that nobody ever applied, nor an approver to show.
+  if (evidence.history_missing) nodes.push(note('历史证据缺失：不能判断申请者与批准者，也不能据此认为没有申请。'));
+  else {
+    const person = value => value ? `${value.login || '名称未知'}（${value.id}）` : '未提供';
+    nodes.push(facts([['安装事件触发者', person(evidence.sender)], ['申请者', person(evidence.requester)], ['批准者', evidence.approval?.label || '批准者未知']]));
+  }
+  const repoSection = element('section', ''); repoSection.append(element('h4', `仓库（${repositories.length}）`));
+  if (!repositories.length) repoSection.append(element('p', '无仓库（零仓库安装也会保留；同步后新仓库会出现）', 'muted'));
+  else {
+    const table = element('table', '', 'rule-table'), head = element('tr', '');
+    for (const caption of ['仓库', '私有', '最近成功同步']) head.append(element('th', caption));
+    const thead = document.createElement('thead'), body = document.createElement('tbody'); thead.append(head); table.append(thead, body);
+    for (const repository of repositories) {
+      const row = element('tr', '');
+      row.append(element('td', repository.full_name), element('td', repository.private ? '私有' : '公开'),
+        element('td', repository.last_success_at ? timestamp(repository.last_success_at) : '尚未同步'));
+      body.append(row);
+    }
+    const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); repoSection.append(wrap);
+  }
+  nodes.push(repoSection);
+  const eventSection = element('section', ''); eventSection.append(element('h4', `最近安装事件（${deliveries.length}）`));
+  if (!deliveries.length) eventSection.append(element('p', '还没有记录到安装事件。', 'muted'));
+  else {
+    const table = element('table', '', 'rule-table'), head = element('tr', '');
+    for (const caption of ['时间', '事件', '动作', '发送者', '申请者', '证据类型', '签名']) head.append(element('th', caption));
+    const thead = document.createElement('thead'), body = document.createElement('tbody'); thead.append(head); table.append(thead, body);
+    const person = value => value ? `${value.login || '名称未知'}（${value.id}）` : '未提供';
+    for (const event of deliveries) {
+      const row = element('tr', '');
+      row.append(element('td', event.received_at ? timestamp(event.received_at) : '—'), element('td', event.event || '—'),
+        element('td', event.action || '—'), element('td', person(event.sender)), element('td', person(event.requester)),
+        element('td', event.evidence_type || '—'));
+      const signature = element('td', ''); signature.append(event.signature_verified ? badge('签名已验证', 'success') : badge('签名未验证', 'danger'));
+      row.append(signature); body.append(row);
+    }
+    const wrap = element('div', '', 'rule-table-wrap'); wrap.append(table); eventSection.append(wrap);
+  }
+  nodes.push(eventSection);
+  // Only this card redraws after the sync request; the other archive cards keep what they already showed.
+  const sync = button('重新同步', async () => {
+    sync.disabled = true;
+    try { await api(base + '/sync', 'POST', {}); await redraw('已排队重新同步：完成后刷新这一页查看新状态。'); }
+    catch (err) { await redraw('重新同步失败：' + err.message); }
+    finally { sync.disabled = false; }
+  });
+  const actions = element('div', '', 'actions'); actions.append(sync); nodes.push(actions);
+  return nodes;
+}
+// Why a user change was refused, in words instead of the bare server code.
+function userChangeMessage(err) {
+  const code = err.code || String(err.message).replace(/^\d+\s*·\s*/, '');
+  if (code === 'last_super_admin') return '这是最后一名活跃的超级管理员，不能停用。先启用或新增另一名超级管理员。';
+  if (code === 'user_not_found') return '这个用户已经不存在，请刷新用户列表。';
+  return err.message;
+}
+function userProfileLine(user) {
+  const line = userLine(user), actions = line.querySelector('.actions');
+  if (actions) actions.prepend(settingsLink('#/settings/users/' + encodeURIComponent(user.id), '详情'));
+  return line;
+}
+// One user's access projection plus the enable/disable switch the API already offered but the console did not show.
+function userDetail(id, users) {
+  const section = card('用户详情'), content = element('div', ''), back = settingsLink('#/settings/users', '返回用户列表'),
+    message = element('p', '', 'view-error');
+  message.setAttribute('role', 'alert');
+  section.append(back, content);
+  const user = users.find(row => row.id === id);
+  if (!user) { content.append(note('找不到这个用户，可能已被删除。')); return section; }
+  let notice = '';
+  const draw = () => {
+    content.replaceChildren();
+    if (notice) content.append(element('p', notice, 'view-success'));
+    content.append(element('h4', userDisplayName(user)),
+      facts([['角色', user.role === 'super_admin' ? '超级管理员 · 管理全部项目' : '项目管理员'], ['状态', user.active ? '已启用' : '已停用'],
+        ['账号 ID', user.id], ['登录来源', user.github_login ? 'GitHub OAuth 已关联' : '本地账号']]));
+    if (user.role === 'project_admin') content.append(...userAccessLines(user));
+    else content.append(note('超级管理员管理全部项目和全局设置，不需要逐个仓库授权。'));
+    const toggle = button(user.active ? '停用' : '启用', async () => {
+      toggle.disabled = true; message.className = 'view-error'; message.textContent = '';
+      try {
+        const saved = await api('/api/users/' + encodeURIComponent(user.id), 'PATCH', { active: !user.active });
+        user.active = saved.user.active;
+        notice = user.active ? '已启用，该账号可以立即登录。' : '已停用，该账号的会话已立即失效。';
+        draw();
+      } catch (err) { message.textContent = userChangeMessage(err); }
+      finally { toggle.disabled = false; }
+    });
+    const actions = element('div', '', 'actions'); actions.append(toggle);
+    content.append(actions, message);
+  };
+  draw();
+  return section;
 }
 // A card whose body `draw(redraw)` builds; `redraw(notice)` draws it again with the outcome of the last action on top.
 function liveCard(title, draw) {
