@@ -407,7 +407,8 @@ function machineSection() {
     await reloadProject().catch(error);
   }, 'quiet');
   // Keep recovery outside the disabled fieldset when source data was unavailable.
-  form.prepend(...(!current.rules ? [note('规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。')] : []), reread);
+  const heading=form.querySelector('h3'),toolbar=element('div','','heading');heading.replaceWith(toolbar);toolbar.append(heading,reread);
+  if(!current.rules)toolbar.after(note('规则来源读取失败，不能确认仓库覆盖关系。请重新读取配置后保存。'));
   return [status, concurrencyForm(), form];
 }
 // How many tasks this computer runs at once: the project's own value, or empty for the global default. Project

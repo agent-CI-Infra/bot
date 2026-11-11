@@ -71,6 +71,9 @@ test('a stale generation retains the grouped draft and an explicit retry saves t
     await expect(form.locator('[role=alert]')).toContainText('stale_generation');
     await expect(page.getByLabel('CPU（核）', { exact: true })).toHaveValue('4');
     expect(f.manager.projects.own('101').cpus).toBe(3);
+    await page.getByRole('button', { name: '重新读取电脑配置', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
+    await expect(page.getByLabel('CPU（核）', { exact: true })).toHaveValue('4');
     await page.unroute('**/api/environments/101/configure');
     await form.getByRole('button', { name: '保存', exact: true }).click();
     await expect(page.locator('#project-page')).toContainText('已保存，虚拟电脑已按新配置重建');
