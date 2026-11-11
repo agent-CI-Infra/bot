@@ -22,6 +22,87 @@ async function visibleButton(page,button){
 }
 async function cleanup(h){await h.stop();await new Promise(resolve=>h.github.server.close(resolve));rmSync(h.directory,{recursive:true,force:true});}
 
+test('client details keep their own identity and bounded records across refresh, history and six widths',async({page})=>{
+  const h=await externalFixture(),errors=[];page.on('pageerror',error=>errors.push(error.message));
+  try{
+    const own=await h.client('101',{name:'Focused workstation'}),other=await h.client('101',{name:'Other workstation'});
+    const grants=[];
+    for(const client of [own,other]){
+      const grant=await h.exchange(client.client.id,client.privateKey);expect(grant.status).toBe(200);grants.push(grant.value.grant_id);
+      await h.admin('/api/repositories/101/external/subscriptions','POST',{client_id:client.client.id,name:client.client.name,url:'https://receiver.invalid/events',filters:{events:['issues'],actions:['opened'],exclude_drafts:false}});
+    }
+    await h.hook(h.a.path,h.a.secret,'detail-event',{repository:{id:101},action:'opened',issue:{number:1}});
+    const otherDelivery=h.store.get('SELECT d.id FROM external_deliveries d JOIN external_subscriptions s ON s.id=d.subscription_id WHERE s.client_id=?',other.client.id).id;
+    await login(page,h);await project(page,h);
+    await page.getByRole('link',{name:'查看客户端 Focused workstation 的认证与活动详情',exact:true}).click();
+    const detail=page.locator('.external-client-detail');await expect(detail.getByRole('heading',{name:'Focused workstation',exact:true})).toBeVisible();
+    await expect(detail).toContainText(own.client.id);await expect(detail).toContainText(grants[0]);
+    for(const text of [other.client.id,grants[1],otherDelivery])await expect(detail).not.toContainText(text);
+    await expect(detail).toContainText('运行隔离核验');await expect(detail).toContainText('未提供记录');await expect(detail).toContainText('当前项目最近最多 100 条');
+    const guide=page.locator('#project-page .external-guide');await guide.locator('summary').click();
+    await expect(guide.getByRole('combobox').locator('option')).toHaveCount(1);
+    await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.copiedInstructions=text;}}}));
+    await guide.getByRole('button',{name:'复制给我的 AI agent',exact:true}).click();
+    const instructions=await page.evaluate(()=>window.copiedInstructions);expect(instructions).toContain(own.client.id);expect(instructions).not.toContain(other.client.id);
+    await guide.locator('summary').click();mkdirSync('.tmp/external-clients-231/previews',{recursive:true});
+    for(const width of [320,390,768,1024,1440,1920]){
+      await page.setViewportSize({width,height:1000});await noOverflow(page);
+      if([390,1440].includes(width))await page.screenshot({path:`.tmp/external-clients-231/previews/client-${width}.png`,fullPage:true});
+    }
+    await page.reload();await expect(detail).toContainText(own.client.id);
+    await page.getByRole('link',{name:'返回客户端列表',exact:true}).click();await expect(page).toHaveURL(/\/101\/external$/);
+    await page.goBack();await expect(detail).toContainText(own.client.id);expect(errors).toEqual([]);
+  }finally{await cleanup(h);}
+});
+
+test('disabling a client explains new grants and pending forwards without claiming to revoke an issued GitHub token',async({page})=>{
+  const h=await externalFixture();
+  try{
+    const client=await h.client(),grant=await h.exchange(client.client.id,client.privateKey);expect(grant.status).toBe(200);
+    await login(page,h);await page.goto(h.adminBase+'/#/projects/101/external/'+client.client.id);
+    const detail=page.locator('.external-client-detail');await detail.getByRole('button',{name:'停用',exact:true}).click();
+    const confirm=page.getByRole('dialog');await expect(confirm).toContainText('已签发的 GitHub 令牌仍按原到期时间有效');
+    await confirm.getByRole('button',{name:'取消',exact:true}).click();expect(h.store.get('SELECT enabled FROM external_clients WHERE id=?',client.client.id).enabled).toBe(1);
+    await detail.getByRole('button',{name:'停用',exact:true}).click();await confirm.getByRole('button',{name:'停用',exact:true}).click();
+    await expect(detail).toContainText('已停用');expect(h.store.get('SELECT enabled FROM external_clients WHERE id=?',client.client.id).enabled).toBe(0);
+    const stillValid=await fetch(h.github.url+'/repositories/101',{headers:{Authorization:'Bearer '+grant.value.token}});expect(stillValid.status).toBe(200);
+  }finally{await cleanup(h);}
+});
+
+test('a cancelled subscription response cannot reopen its secret in another project, and leaving clears a displayed secret',async({page})=>{
+  const h=await externalFixture();let release=()=>{},secret='';
+  try{
+    await h.client();await h.client('202');await login(page,h);await project(page,h);
+    const gate=new Promise(resolve=>{release=resolve;});
+    await page.route('**/api/repositories/101/external/subscriptions',async route=>{
+      if(route.request().method()!=='POST')return route.continue();
+      const response=await route.fetch();secret=(await response.json()).signing_secret;await gate;await route.fulfill({response});
+    });
+    await page.getByRole('button',{name:'新增转发订阅',exact:true}).click();await page.getByLabel('订阅名称',{exact:true}).fill('Late secret');await page.getByLabel('接收 URL',{exact:true}).fill('https://receiver.invalid/late');await save(page);
+    await expect.poll(()=>!!secret).toBe(true);await page.getByRole('button',{name:'取消',exact:true}).click();
+    await page.evaluate(()=>{location.hash='#/projects/202/external';});await expect(page.locator('.project-head h1')).toHaveText('fixture/project-202');
+    release();await page.unrouteAll({behavior:'wait'});
+    await expect(page.getByRole('dialog',{name:'一次性凭据'})).not.toBeVisible();await expect(page.locator('#external-secret')).toHaveValue('');
+    expect(await page.content()).not.toContain(secret);expect(h.store.get("SELECT count(*) n FROM external_subscriptions WHERE name='Late secret'").n).toBe(1);
+    await page.getByRole('button',{name:'新增转发订阅',exact:true}).click();await page.getByLabel('订阅名称',{exact:true}).fill('Visible once');await page.getByLabel('接收 URL',{exact:true}).fill('https://receiver.invalid/once');await save(page);
+    await expect(page.getByRole('dialog',{name:'一次性凭据'})).toBeVisible();await expect(page.locator('#external-secret')).not.toHaveValue('');
+    await page.evaluate(()=>{location.hash='#/projects/101/external';});await expect(page.locator('#external-secret')).toHaveValue('');await expect(page.getByRole('dialog',{name:'一次性凭据'})).not.toBeVisible();
+  }finally{release();await page.unrouteAll({behavior:'wait'});await cleanup(h);}
+});
+
+test('a short mobile key editor keeps saving reachable and permission loss clears its old project records',async({page})=>{
+  const h=await externalFixture();
+  try{
+    const client=await h.client();await login(page,h);await page.goto(h.adminBase+'/#/projects/101/external/'+client.client.id);
+    await page.setViewportSize({width:390,height:430});await page.getByRole('button',{name:'更换公钥',exact:true}).click();
+    await page.getByLabel('RSA 公钥（PEM）',{exact:true}).fill(client.publicKey);await visibleButton(page,page.locator('#external-form').getByRole('button',{name:'保存',exact:true}));await noOverflow(page);
+    expect(await page.locator('#external-editor').evaluate(node=>Math.round(node.getBoundingClientRect().height))).toBe(430);
+    await page.route('**/api/repositories/101/external/clients/'+client.client.id,route=>route.fulfill({status:403,json:{error:'repository_forbidden'}}));await save(page);
+    await expect(page.getByRole('heading',{name:'外部执行端暂不可访问',exact:true})).toBeVisible();await expect(page.locator('.external-client-detail')).toHaveCount(0);
+    await expect(page.getByLabel('RSA 公钥（PEM）',{exact:true})).toHaveCount(0);await expect(page.locator('#external-secret')).toHaveValue('');
+  }finally{await cleanup(h);}
+});
+
 test('全局仅一套说明，选择客户端复制含轮询的指令；地址缺失与剪贴板失败有明确反馈',async({page,context})=>{
   const h=await externalFixture(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   try{
