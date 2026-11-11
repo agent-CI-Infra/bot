@@ -7,6 +7,7 @@ import { ManagementAgent } from '../management/agent.js';
 import { parameterHash } from '../management/service.js';
 import { managementFailure, managementStates } from '../management/presentation.js';
 import { commands } from '../management/catalog.js';
+import { managementAssistant } from '../service-roles/roles.js';
 import { ChannelBindings, externalSubject } from './binding.js';
 import { FeishuAdapter, type ChannelFetch } from './feishu.js';
 import type { ChannelDelivery, ChannelEvent } from './types.js';
@@ -100,11 +101,11 @@ export class ChannelService {
     const current=session&&session.context_revision===chat.context_revision&&session.connector_revision===this.connector(chat.connector_id).revision;
     if(current)this.management.conversation(actor,session.conversation_id);
     const messages=current?this.store.all(`SELECT * FROM management_messages WHERE conversation_id=? AND authorization_revision=? ORDER BY rowid DESC LIMIT 51 OFFSET ?`,session.conversation_id,actor.authorization_revision,offset):[];
-    const projects=this.management.service.projects(actor),marks=projects.map(()=>'?').join(',');
-    const requests=session&&projects.length?this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
+    // The personal chat is the management assistant: its usage is billed to that service role, not to a project.
+    const requests=current?this.store.get(`SELECT count(*) requests,sum(input_tokens) input_tokens,sum(output_tokens) output_tokens,
       sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
-      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks})`,session.conversation_id,...projects):null;
-    const costs=session&&projects.length?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IN (${marks}) AND cost IS NOT NULL GROUP BY currency`,session.conversation_id,...projects):[];
+      sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND service_role_id=?`,session.conversation_id,managementAssistant):null;
+    const costs=current?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND service_role_id=? AND cost IS NOT NULL GROUP BY currency`,session.conversation_id,managementAssistant):[];
     return {conversation_id:chat.id,management_conversation_id:session?.conversation_id,mode:'management',current_project:null,
       turns:messages.slice(0,50).map(m=>({id:m.id,source_message:m.source_message,created_at:m.created_at,state:managementStates[m.state]??m.state,
         request:JSON.parse(m.input).content,reply:this.personalReply(actor,m),role_id:'管理助手'})),

@@ -4,6 +4,7 @@ import { fail, fields, randomId, text, type Json } from '../core/security.js';
 import { pricingFor, savePricing, validatePricing } from '../metrics/accounting.js';
 import { modelEndpoints } from '../agent/model.js';
 import { listUpstreamModels, testUpstreamModel } from './model-probe.js';
+import { releaseModel } from '../service-roles/roles.js';
 
 function publicModel(store: Store, row: Row): Json {
   return { id: row.id, repository_id: row.repository_id, api_url: row.api_url, model_name: row.model_name,
@@ -169,6 +170,7 @@ export async function models(store: Store, user: Actor, method: string, url: URL
       store.run('DELETE FROM model_projects WHERE model_id=?', id);
       // The wizard's default shared model is a settings pointer, not a foreign key: it must not outlive the model.
       store.run("DELETE FROM settings WHERE key='onboarding.model' AND json_valid(value) AND json_extract(value,'$')=?", id);
+      releaseModel(store, id, user.id);
       store.run('DELETE FROM models WHERE id=?', id);
       store.audit(user.id, 'model.deleted', id, row.repository_id);
       return { ok: true, cleared_repository_ids: cleared.map(row => row.repository_id) };

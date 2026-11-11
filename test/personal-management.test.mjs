@@ -20,7 +20,7 @@ test('multi-project greetings use the shared management agent and private histor
   f.modelState.respond=async(body,res)=>{
     assert.deepEqual(body.tools.map(t=>t.function.name),['management_query','management_command']);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
-    assert.match(body.messages[0].content,/route the model is NOT the business target/);
+    assert.match(body.messages[0].content,/No project is preselected/);
     reply(res,'你好！可以按项目名称查询任务和管理配置。');
   };
   const result=await im(f,'你好');assert.equal(result.row.state,'completed',result.row.error);
@@ -57,7 +57,8 @@ test('authorized names, ambiguous project clarification, continuation and switch
   expected='101';const switched=await im(f,'换成 alpha/bot',{...asMember,message:{thread_id:'another-thread'}});assert.equal(switched.row.state,'completed',switched.row.error);
   assert.equal(selected.row.conversation_id,switched.row.conversation_id);
   assert.ok(!JSON.stringify(f.wire.sent).includes('private/hidden'));
-  assert.ok(f.requests.every(r=>r.model==='Management fixture')); // Target 102 has no model: routing still uses 101.
+  assert.ok(f.requests.every(r=>r.model==='Management fixture')); // Target 102 has no model: the assistant uses its own.
+  assert.deepEqual(f.h.store.all('SELECT DISTINCT repository_id,service_role_id FROM model_requests').map(r=>({...r})),[{repository_id:null,service_role_id:'management-assistant'}]);
   const other=await f.member('other-private-reader',{repository_ids:['101']});
   assert.equal((await other.client('/api/management/conversations/'+selected.row.conversation_id)).status,404);
   const projects=(await query(member.client,'list_projects')).value.projects;assert.deepEqual(projects.map(p=>p.full_name),['alpha/bot','beta/bot']);
@@ -93,12 +94,21 @@ test('read-only and out-of-scope tool calls fail identically in Web and personal
   assert.equal(f.h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
 });
 
-test('no-project and missing-model failures explain the limitation without listing private IDs',async t=>{
+test('no projects, a first project without a model and a missing assistant model are explained without listing private IDs',async t=>{
   const f=await channelFixture(t),member=await f.member('no-project-personal',{});bindFixture(f.h,f.id,member.id,'ou_no_projects');
   const i=await im(f,'你好',{sender:{sender_id:{open_id:'ou_no_projects'}},message:{chat_id:'oc_no_projects'}});assert.equal(i.row.state,'completed');
   await sent(f,'当前账户没有可访问的项目');assert.equal(f.requests.length,0);
+  // The first visible project has no model: the greeting still works on the assistant's own model and bills the assistant.
   f.h.store.run("UPDATE policies SET model_id=NULL WHERE repository_id='101'");
-  const missing=await im(f,'你好');assert.equal(missing.row.state,'failed');await sent(f,'管理助手的模型配置或服务暂不可用');
+  f.modelState.respond=async(_body,res)=>reply(res,'你好，可以按项目名称提问。');
+  const greeting=await im(f,'你好');assert.equal(greeting.row.state,'completed',greeting.row.error);await sent(f,'你好，可以按项目名称提问。');
+  assert.deepEqual(f.h.store.all('SELECT repository_id,service_role_id FROM model_requests WHERE conversation_id=?',greeting.row.conversation_id).map(r=>({...r})),[{repository_id:null,service_role_id:'management-assistant'}]);
+  const chat=f.h.store.get("SELECT id FROM channel_chats WHERE chat_id='oc_private'"),view=(await f.admin('/api/channels/chats/'+chat.id+'/conversation')).value;
+  assert.deepEqual([view.usage.requests,view.usage.input_tokens],[1,12]);
+  // Without its own model the assistant says where to configure it; it never borrows a project's model.
+  f.h.store.run("UPDATE service_roles SET model_id=NULL WHERE id='management-assistant'");
+  const before=f.requests.length,missing=await im(f,'你好');assert.equal(missing.row.state,'failed');assert.equal(f.requests.length,before);
+  await sent(f,'管理助手尚未配置模型');
   assert.ok(!JSON.stringify(f.wire.sent).includes('/chat /project'));
 });
 
