@@ -4,10 +4,42 @@ async function feishuIdentityCard() {
   section.append(note('将本人的飞书账号关联到当前平台账户。本地账户和 GitHub 登录均可使用，无需先绑定 GitHub。之后仅能访问该账户实际获准的项目，绑定本身不会增加仓库权限。'));
   if (me.role === 'super_admin') section.append(channelLink('#/settings/feishu', '管理员：连接或管理飞书应用', 'button-link'));
   const steps = element('ol', '', 'feishu-binding-steps');
-  for (const caption of ['在飞书搜索管理员配置的机器人，打开私聊，发送 /bind（或“绑定”）。',
-    '打开机器人返回的链接，使用本地账户或 GitHub 登录平台；核对当前账户并确认绑定。',
-    '复制确认指令，回到发起绑定的同一个飞书私聊发送；然后刷新绑定状态。']) steps.append(element('li', caption));
-  section.append(steps, note('绑定链接和确认指令五分钟内有效。必须由原飞书操作者在原私聊完成确认；只登录平台或转发链接不会完成绑定。'));
+  for (const caption of ['点击下方“打开机器人私聊”，在飞书中发送 /bind（或“绑定”）。',
+    '复制机器人在私聊中返回的认证字符串，粘贴到下方表单。',
+    '核对当前平台账户和所选机器人，点击“确认绑定到当前账户”。']) steps.append(element('li', caption));
+  if (data.applications.length) {
+    section.append(steps, note('认证字符串五分钟内有效，仅可使用一次，请勿转发。'));
+    const apps = element('div'); apps.setAttribute('aria-label', '可绑定的飞书应用');
+    const label = a => `${a.tenant_name || '企业名称暂未获取'} · ${a.app_name || '机器人名称暂未获取'}`;
+    for (const a of data.applications) {
+      const row = element('div', '', 'channel-binding'), link = channelLink(a.chat_url, '打开机器人私聊', 'button-link');
+      link.target = '_blank'; link.rel = 'noopener noreferrer';
+      row.append(element('strong', label(a)), link,
+        note('若飞书未打开，请在飞书客户端搜索上方机器人名称；找不到时，请联系超级管理员检查应用可用范围。'));
+      apps.append(row);
+    }
+    const form = element('form', '', 'project-form'), app = channelSelect(form, '要绑定的飞书机器人', 'binding_connector', data.applications.map(a => [a.id, label(a)]));
+    const code = channelField(form, '飞书认证字符串', 'binding_code'); code.required = true; code.autocomplete = 'off'; code.spellcheck = false;
+    code.placeholder = '粘贴机器人私聊返回的 FSB- 开头字符串'; code.maxLength = 100;
+    const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
+    const submit = element('button', '确认绑定到当前账户'); submit.type = 'submit';
+    form.append(note(`将绑定到当前平台账户：${me.username}。请仅使用本人私聊收到的认证字符串。`), status, submit);
+    form.addEventListener('submit', async event => {
+      event.preventDefault(); if (submit.disabled) return;
+      submit.disabled = true; status.textContent = '';
+      try {
+        await api('/api/channels/bindings/confirm', 'POST', { code: code.value.trim(), connector_id: app.value });
+        history.replaceState(null, '', '#/identity/feishu'); await start();
+      } catch (err) {
+        const reasons = { binding_code_invalid: '认证字符串无效，或不属于所选机器人。请核对后重试。', binding_expired: '认证字符串已过期，请在机器人私聊重新发送 /bind。',
+          binding_replayed: '认证字符串已使用，请刷新状态；需要重新认证时发送 /reauth。', binding_login_already_started: '此请求已进入链接绑定流程，请回原私聊确认，或重新发送 /bind 获取认证字符串。',
+          external_identity_conflict: '这个飞书身份已属于其他平台账户，请登录原账户处理。' };
+        status.textContent = Object.entries(reasons).find(([key]) => err.message.includes(key))?.[1] || err.message;
+        submit.disabled = false;
+      }
+    });
+    section.append(apps, form);
+  } else section.append(note('请联系超级管理员配置飞书应用。'));
   const challenge = /^#\/identity\/feishu\?challenge=([a-f0-9]{48})$/.exec(location.hash)?.[1];
   if (challenge) {
     const status = element('p', '', 'view-error'); status.setAttribute('role', 'alert');
@@ -26,8 +58,6 @@ async function feishuIdentityCard() {
     }, '');
     section.append(note(`将绑定到当前平台账户：${me.username}。如需使用其他账户，请先退出登录并重新打开绑定链接。`), claim, status);
   }
-  if (data.applications.length) section.append(note('可绑定的飞书应用：' + data.applications.map(a => a.app_id).join('、')));
-  else section.append(note('尚无已启用的飞书应用。请管理员在「全局设置 → 飞书连接」完成应用接入；如已有机器人，也可直接从它的私聊发起绑定。'));
   for (const p of data.pending) {
     const pending = element('div', '', 'channel-binding'); pending.setAttribute('aria-label', '待确认的飞书身份');
     pending.append(element('strong', '等待原飞书操作者确认'), facts([['平台账户', p.account.username],

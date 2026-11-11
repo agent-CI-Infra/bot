@@ -104,15 +104,15 @@ test('global administrator connects an app through the wizard, resumes it and se
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 
-test('connection list shows readable cached app and enterprise names with a safe refresh on desktop and mobile', async ({ page }) => {
+test('connection list refreshes current app names even when bot metadata is stale, with permission diagnostics on desktop and mobile', async ({ page }) => {
   const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
   mkdirSync(output, { recursive: true });
   try {
     const id = await connector(f.admin);
     await page.goto(f.h.admin + '/#/settings/feishu'); await login(page, f.h, f.password);
     const row = page.getByRole('group', { name: 'cli_fixture', exact: true });
-    await expect(row.getByText('应用名称待获取', { exact: true })).toBeVisible();
-    wire.state.appName = '研发协作助手'; wire.state.tenantName = '示例研发企业';
+    await expect(row.getByText('Fixture bot', { exact: true })).toBeVisible();
+    wire.state.currentAppName = '研发协作助手'; wire.state.tenantName = '示例研发企业';
     await row.getByRole('button', { name: '刷新应用信息' }).click();
     await expect(row.getByRole('status')).toHaveText('应用与企业信息已检查。');
     await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
@@ -122,12 +122,17 @@ test('connection list shows readable cached app and enterprise names with a safe
     const requests = wire.state.authRequests.length;
     await page.reload();
     await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
-    expect(wire.state.authRequests.length).toBe(requests);
+    await expect(row.getByRole('status')).toHaveText('应用与企业信息已检查。');
+    expect(wire.state.authRequests.length).toBeGreaterThan(requests);
     await page.setViewportSize({ width: 1440, height: 1100 });
     await page.screenshot({ path: output + '/connections-desktop.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: output + '/connections-mobile.png', fullPage: true });
-    wire.state.tenantCode = 1184001;
+    wire.state.applicationCode = 99991672;
+    await row.getByRole('button', { name: '刷新应用信息' }).click();
+    await expect(row.getByRole('status')).toContainText('admin:app.info:readonly');
+    await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
+    wire.state.applicationCode = 0; wire.state.tenantCode = 1184001;
     await row.getByRole('button', { name: '刷新应用信息' }).click();
     await expect(row.getByRole('status')).toContainText('tenant:tenant:readonly');
     await expect(row.getByText('企业：示例研发企业', { exact: true })).toBeVisible();
@@ -136,7 +141,7 @@ test('connection list shows readable cached app and enterprise names with a safe
     await expect(row.getByRole('status')).toContainText('无法通过鉴权');
     await expect(row.getByText('研发协作助手', { exact: true })).toBeVisible();
     expect(await page.locator('body').innerText()).not.toContain(credentials.app_secret);
-    wire.state.authCode = 0; wire.state.appName = '<img src=x onerror=alert(1)> 研发协作助手';
+    wire.state.authCode = 0; wire.state.currentAppName = null; wire.state.appName = '<img src=x onerror=alert(1)> 研发协作助手';
     wire.state.tenantName = '跨团队持续交付与基础设施研发企业'.repeat(8);
     await row.getByRole('button', { name: '刷新应用信息' }).click();
     await expect(row.getByText(wire.state.appName, { exact: true })).toBeVisible();
@@ -233,6 +238,49 @@ test('a global connection can map groups to projects from either GitHub organiza
     await page.getByRole('button', { name: '批准或更新群范围' }).click();
     await expect(page.getByText('oc_cross_org → 项目 201', { exact: false })).toBeVisible();
     expect(f.h.store.get('SELECT project_id FROM channel_group_scopes WHERE connector_id=?', id).project_id).toBe('201');
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
+test('ordinary users see connected bot names and private-chat links, confirm a private code and get an administrator contact empty state', async ({ page }) => {
+  test.setTimeout(90000);
+  const wire = transport(), f = await managementFixture(null, { channels: { fetch: wire.fetch, longConnections: false } });
+  const errors = []; page.on('pageerror', e => errors.push(e.message)); mkdirSync(output, { recursive: true });
+  try {
+    const local = await f.member('code-browser-user', {});
+    await page.goto(f.h.admin + '/#/identity/feishu'); await login(page, f.h, local.password, 'code-browser-user');
+    const identity = page.locator('#feishu-identity');
+    await expect(identity.getByText('请联系超级管理员配置飞书应用。', { exact: true })).toBeVisible();
+    await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toHaveCount(0);
+    await expect(identity.getByLabel('飞书认证字符串', { exact: true })).toHaveCount(0);
+    const id = await connector(f.admin, { installation_tenant: undefined, bot_open_id: undefined });
+    await page.getByRole('button', { name: '刷新飞书绑定状态' }).click();
+    await expect(identity.getByLabel('可绑定的飞书应用')).toContainText('Fixture enterprise · Fixture bot');
+    await expect(identity.getByRole('link', { name: '打开机器人私聊' })).toHaveAttribute('href', 'https://applink.feishu.cn/client/bot/open?appId=cli_fixture');
+    await expect(identity.getByLabel('可绑定的飞书应用')).not.toContainText('cli_fixture');
+    await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toHaveCount(0);
+    const started = await post(f.h, id, envelope('/bind', { sender: { sender_id: { open_id: 'ou_code_browser' } } }));
+    expect((await finished(f.h, started.value.operation_id)).state).toBe('completed');
+    const outbox = f.h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', started.value.operation_id);
+    const reply = JSON.stringify(f.h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id)), code = /FSB-[a-f0-9]{48}/.exec(reply)[0];
+    await identity.getByLabel('飞书认证字符串', { exact: true }).fill('FSB-invalid');
+    await identity.getByRole('button', { name: '确认绑定到当前账户' }).click();
+    await expect(identity.getByRole('alert')).toContainText('认证字符串无效');
+    await identity.getByLabel('飞书认证字符串', { exact: true }).fill(code);
+    await page.setViewportSize({ width: 1440, height: 1100 }); await page.screenshot({ path: output + '/code-binding-desktop.png', fullPage: true });
+    const grants = f.h.store.get('SELECT count(*) n FROM scoped_grants').n;
+    await identity.getByRole('button', { name: '确认绑定到当前账户' }).click();
+    await expect(identity).toContainText('ou_code_browser · 已绑定');
+    expect(f.h.store.get("SELECT principal_id FROM external_identities WHERE provider='feishu'").principal_id).toBe(local.id);
+    expect(f.h.store.get('SELECT count(*) n FROM scoped_grants').n).toBe(grants);
+    const replay = await page.evaluate(input => api('/api/channels/bindings/confirm', 'POST', input).catch(e => e.message), { code, connector_id: id });
+    expect(replay).toContain('binding_replayed');
+    expect(await page.evaluate(async () => (await fetch('/api/channels/setup')).status)).toBe(403);
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: output + '/code-binding-mobile.png', fullPage: true });
+    await page.evaluate(() => api('/api/auth/logout', 'POST', {})); await page.reload(); await login(page, f.h, f.password);
+    await expect(identity.getByRole('link', { name: '管理员：连接或管理飞书应用' })).toBeVisible();
+    expect(errors).toEqual([]);
   } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
 });
 

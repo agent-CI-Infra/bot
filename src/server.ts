@@ -288,6 +288,12 @@ export function createControlPlane(options: Options) {
       store.run('DELETE FROM sessions WHERE token_hash=?', digest(token));
       res.setHeader('Set-Cookie', cookie(req, '', 0)); respond(res, 200, { ok: true }); return;
     }
+    if (path === '/api/channels/bindings/confirm' && method === 'POST') {
+      fields(input, ['code', 'connector_id']);
+      assertSessionWrite(store, sessionToken(req), user.context!);
+      const result = await channels.bindings.confirmCode(text(input.code, 100), text(input.connector_id), sessionToken(req));
+      respond(res, 201, { state: 'bound', ...result }); return;
+    }
     if (path === '/api/channels/bindings/claim' && method === 'POST') {
       fields(input, ['challenge']);
       // Binding proves the platform session; repository grants and GitHub availability are unrelated to association.

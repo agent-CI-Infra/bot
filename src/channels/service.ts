@@ -236,9 +236,9 @@ export class ChannelService {
     const content = e.content.trim();
     const reply = (message: string, link?: string) => this.queue(e, card(message, link), row.id + ':reply', row.id);
     if (['绑定', '/bind', '重新认证', '/reauth'].includes(content)) {
-      if (!this.options.origin) fail(503, 'channel_admin_origin_required');
       const binding = this.bindings.begin(e);
-      reply('请在五分钟内打开后台，登录并核对要绑定的平台账户，然后回到同一私聊确认。可使用本地账户或 GitHub 登录，绑定不会授予项目权限。', this.options.origin + '/auth/channels/start?challenge=' + binding.challenge);
+      reply('飞书身份认证字符串（五分钟内有效，仅可使用一次）：\n' + binding.code + '\n请在控制台「身份与权限 → 飞书身份绑定」选择本机器人，粘贴认证字符串，核对当前平台账户后确认绑定。请勿转发认证字符串。可使用本地账户或 GitHub 登录，绑定不会授予项目权限。' + (this.options.origin ? '\n也可打开下方链接，登录后回到原私聊确认。' : ''),
+        this.options.origin ? this.options.origin + '/auth/channels/start?challenge=' + binding.challenge : undefined);
     } else if (/^(确认绑定|\/confirm) /.test(content)) {
       await this.bindings.confirm(e, content.slice(content.indexOf(' ') + 1).trim()); reply('双端身份绑定成功。项目权限仍由统一授权服务决定。');
     } else if (['解绑', '/unbind'].includes(content)) {

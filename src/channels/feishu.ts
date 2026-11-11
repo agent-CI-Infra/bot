@@ -112,6 +112,8 @@ export class FeishuAdapter implements ChannelAdapter {
           230027: 'channel_history_permission_required', 230073: 'channel_thread_invisible', 231203: 'channel_history_chat_unsupported',
           231204: 'channel_history_app_unsupported', 99991672: 'channel_history_permission_required' } as Record<number, string>)[data.code] ?? 'channel_history_rejected', permanent);
       }
+      if (path.startsWith('/application/v6/applications/') && (!r.ok || data.code !== 0))
+        fail(502, [99991672, 210508].includes(data.code) ? 'channel_application_permission_required' : 'channel_application_unavailable');
       if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : path === '/tenant/v2/tenant/query' ? 'channel_tenant_unavailable' : 'channel_delivery_rejected');
       return data;
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }
@@ -146,8 +148,19 @@ export class FeishuAdapter implements ChannelAdapter {
     const data = await this.api('/bot/v3/info', { method: 'GET' });
     const bot = data.bot ?? data.data?.bot;
     if (typeof bot?.open_id !== 'string' || !bot.open_id) fail(502, 'channel_bot_unavailable');
+    let name = typeof bot.app_name === 'string' ? bot.app_name.trim().slice(0, 200) : '', appError = '';
+    try {
+      // Bot info can retain a published name after the app is renamed; read this app's current metadata too.
+      const app = (await this.api('/application/v6/applications/' + encodeURIComponent(this.connector.app_id) + '?lang=zh_cn', { method: 'GET' })).data?.app;
+      if (!app || typeof app.app_name !== 'string' || !app.app_name.trim()) fail(502, 'channel_application_unavailable');
+      if (app.app_id !== this.connector.app_id) fail(403, 'channel_source_mismatch');
+      name = app.app_name.trim().slice(0, 200);
+    } catch (error) {
+      if (!(error instanceof HttpError) || !['channel_application_permission_required', 'channel_application_unavailable', 'channel_delivery_failed', 'channel_auth_failed', 'channel_rate_limited'].includes(error.code)) throw error;
+      appError = error.code;
+    }
     this.guard();
-    return { bot_open_id: text(bot.open_id), name: typeof bot.app_name === 'string' ? bot.app_name.trim().slice(0, 200) : '' };
+    return { bot_open_id: text(bot.open_id), name, name_source: appError ? 'bot' : 'application', ...(appError ? { app_error: appError } : {}) };
   }
   /** is_in_chat checks this token's bot, while members lists human members only. */
   async audience(chat: string): Promise<{ id: string; tenant: string }[]> {

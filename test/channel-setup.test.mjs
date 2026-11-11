@@ -16,7 +16,8 @@ test('global Feishu administration requires platform authority; public app disco
   assert.equal((await probe(org.client, id)).status, 403);
   assert.equal((await org.client('/api/channels/feishu/probe', 'POST', { app_id: 'cli_fixture', app_secret: credentials.app_secret })).status, 403);
   const personal = (await org.client('/api/channels/bindings')).value;
-  assert.deepEqual(personal.applications, [{ id, app_id: 'cli_fixture' }, { id: other, app_id: 'cli_other' }]);
+  assert.deepEqual(personal.applications, [{ id, app_id: 'cli_fixture' }, { id: other, app_id: 'cli_other' }].map(a => ({ ...a, app_name: '', tenant_name: '',
+    chat_url: 'https://applink.feishu.cn/client/bot/open?appId=' + a.app_id })));
   assert.doesNotMatch(JSON.stringify(personal), /credential_ref|actor_tenants|installation_tenant|fixture-feishu|tenant_id/);
   const ordinary = await member('no-project-access', {});
   assert.deepEqual((await ordinary.client('/api/channels/bindings')).value.applications, personal.applications);
@@ -72,10 +73,26 @@ test('startup removes legacy organization and actor enterprise restrictions with
   assert.equal(h.store.get('PRAGMA integrity_check').integrity_check, 'ok');
 });
 
+test('upgrading legacy binding requests adds code discovery without invalidating existing links', async t => {
+  const { admin, h, id, service } = await channelFixture(t);
+  service.close();
+  const e = service.adapter(service.connector(id)).normalize(envelope('/bind', { sender: { sender_id: { open_id: 'ou_legacy_migration' } } }));
+  const binding = service.bindings.begin(e);
+  const before = h.store.get('SELECT subject,expires_at FROM channel_bind_requests');
+  h.store.db.exec('DROP INDEX channel_bind_code; ALTER TABLE channel_bind_requests DROP COLUMN code_hash');
+  await h.stop(); await h.start();
+  const after = h.store.get('SELECT subject,expires_at,code_hash FROM channel_bind_requests');
+  assert.equal(after.subject, before.subject); assert.equal(after.expires_at, before.expires_at); assert.equal(after.code_hash, null);
+  assert.equal((await admin('/api/channels/bindings/claim', 'POST', { challenge: binding.challenge })).status, 201);
+  const pending = (await admin('/api/channels/bindings')).value.pending.find(p => p.open_id === 'ou_legacy_migration');
+  const confirmed = await post(h, id, envelope('确认绑定 ' + pending.confirmation, { sender: { sender_id: { open_id: 'ou_legacy_migration' } } }));
+  assert.equal((await finished(h, confirmed.value.operation_id)).state, 'completed');
+});
+
 test('Feishu probes use saved or ephemeral credentials, return safe bot facts and never claim event delivery', async t => {
   const { admin, id, wire, h } = await channelFixture(t);
   const checked = await probe(admin, id);
-  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', tenant_name: 'Fixture enterprise', revision: 1, state: 'verified', event_delivery_verified: false });
+  assert.deepEqual(checked.value, { bot_open_id: 'ou_bot', name: 'Fixture bot', name_source: 'application', tenant_name: 'Fixture enterprise', revision: 1, state: 'verified', event_delivery_verified: false });
   const preview = await admin('/api/channels/feishu/probe', 'POST', { app_id: 'cli_preview', app_secret: 'unsaved-preview-secret' });
   assert.equal(preview.status, 201); assert.equal(preview.value.bot_open_id, 'ou_bot');
   assert.equal(wire.state.authRequests.at(-1).app_id, 'cli_preview');
@@ -116,12 +133,31 @@ test('connection names are discovered, cached across restarts and refreshed with
   }
   assert.equal(wire.state.authRequests.length, requests);
   const event = service.adapter(service.connector(id)).normalize(envelope('/bind', { header: { app_id: 'cli_names' } }));
-  wire.state.appName = 'Renamed app'; wire.state.tenantName = 'Renamed enterprise';
+  wire.state.currentAppName = 'Renamed app'; wire.state.tenantName = 'Renamed enterprise';
   assert.equal((await probe(admin, id)).value.revision, 1);
+  assert.deepEqual(read(), { app_name: 'Renamed app', tenant_name: 'Renamed enterprise', revision: 1 });
+  const personal = (await admin('/api/channels/bindings')).value.applications.find(a => a.id === id);
+  assert.equal(personal.app_name, 'Renamed app'); assert.equal(personal.tenant_name, 'Renamed enterprise');
+  assert.doesNotMatch(JSON.stringify(personal), /must-not-return|credential|secret|installation_tenant/);
+  wire.state.applicationCode = 99991672;
+  const fallback = await probe(admin, id);
+  assert.equal(fallback.value.app_error, 'channel_application_permission_required');
+  assert.equal(fallback.value.name, 'Renamed app');
+  assert.deepEqual(read(), { app_name: 'Renamed app', tenant_name: 'Renamed enterprise', revision: 1 });
+  wire.state.applicationCode = 0; wire.state.applicationId = 'cli_wrong_source';
+  assert.equal((await probe(admin, id)).value.error, 'channel_source_mismatch');
   assert.deepEqual(read(), { app_name: 'Renamed app', tenant_name: 'Renamed enterprise', revision: 1 });
   assert.equal(service.source(event).id, id);
   await h.stop(); await h.start();
   assert.deepEqual(read(), { app_name: 'Renamed app', tenant_name: 'Renamed enterprise', revision: 1 });
+  // Legacy or bot-only metadata can advance even if current-application permissions have never been granted.
+  const botOnly = await connector(admin, { app_id: 'cli_bot_only' });
+  wire.state.applicationId = null; wire.state.applicationCode = 99991672;
+  wire.state.appName = 'Bot-only original';
+  assert.equal((await probe(admin, botOnly)).value.name, 'Bot-only original');
+  wire.state.appName = 'Bot-only renamed';
+  assert.equal((await probe(admin, botOnly)).value.name, 'Bot-only renamed');
+  assert.equal(h.store.get('SELECT app_name_source FROM channel_connectors WHERE id=?', botOnly).app_name_source, 'bot');
 });
 
 test('missing display information preserves cached names; an installation mismatch never updates labels', async t => {

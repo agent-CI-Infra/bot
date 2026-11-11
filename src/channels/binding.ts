@@ -21,12 +21,24 @@ export class ChannelBindings {
     this.proofs.set(credential, proof); this.sources.set(proof, e);
     return credential;
   }
-  begin(e: ChannelEvent): { challenge: string; expires_at: number } {
+  begin(e: ChannelEvent): { challenge: string; code: string; expires_at: number } {
     this.source(e); if (e.chat_type !== 'p2p') return fail(403, 'binding_private_chat_required');
-    const challenge = randomId(), expires = Date.now() + 5 * 60_000, hash = digest(challenge);
-    this.store.run('INSERT INTO channel_bind_requests(challenge_hash,connector_id,subject,expires_at) VALUES(?,?,?,?)',
-      hash, e.connector_id, this.store.secrets.seal(e, 'channel-bind:' + hash), expires);
-    return { challenge, expires_at: expires };
+    const challenge = randomId(), code = 'FSB-' + randomId(), expires = Date.now() + 5 * 60_000, hash = digest(challenge);
+    this.store.run('INSERT INTO channel_bind_requests(challenge_hash,connector_id,subject,expires_at,code_hash) VALUES(?,?,?,?,?)',
+      hash, e.connector_id, this.store.secrets.seal(e, 'channel-bind:' + hash), expires, digest(code));
+    return { challenge, code, expires_at: expires };
+  }
+  async confirmCode(code: string, connector: string, sessionRef: string): Promise<Json> {
+    // The private-chat code is independent of the legacy navigation link, which cannot complete a binding.
+    const row = this.store.get('SELECT * FROM channel_bind_requests WHERE code_hash=?', digest(code));
+    if (!row || row.connector_id !== connector) return fail(403, 'binding_code_invalid');
+    if (row.consumed_at) return fail(409, 'binding_replayed');
+    if (row.expires_at <= Date.now()) return fail(410, 'binding_expired');
+    if (row.oauth_state || row.principal_id) return fail(409, 'binding_login_already_started');
+    const e = await this.authenticateRequest(row, sessionRef);
+    const current = this.store.get('SELECT binding_ref FROM channel_bind_requests WHERE challenge_hash=?', row.challenge_hash)!;
+    const binding = this.store.secrets.open(current.binding_ref, 'channel-challenge:' + row.challenge_hash);
+    return this.confirm(e, String(binding.confirmation));
   }
   request(challenge: string): Row {
     const row = this.store.get('SELECT * FROM channel_bind_requests WHERE challenge_hash=?', digest(challenge));

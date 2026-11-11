@@ -93,16 +93,20 @@ export class ChannelApi {
           tenantError = error.code;
         }
         let revision = c.revision;
+        // Preserve a newer application label on lookup failure, while bot-only connections can still refresh their name.
+        const preserve = facts.app_error && c.app_name_source === 'application' && c.app_name;
+        const name = String(preserve ? c.app_name : facts.name || c.app_name);
+        const nameSource = preserve || !facts.name ? c.app_name_source : String(facts.name_source);
         store.transaction(() => {
           current();
-          store.run('UPDATE channel_connectors SET app_name=?,tenant_name=? WHERE id=?', String(facts.name || c.app_name), tenantName, c.id);
+          store.run('UPDATE channel_connectors SET app_name=?,tenant_name=?,app_name_source=? WHERE id=?', name, tenantName, nameSource, c.id);
           if (c.bot_open_id !== facts.bot_open_id) {
             store.run('UPDATE channel_connectors SET bot_open_id=?,revision=revision+1 WHERE id=? AND revision=?', String(facts.bot_open_id), c.id, c.revision);
             store.audit(actor.principal_id, 'channel.connector.bot_detected', c.id);
             revision++;
           }
         });
-        return { ...facts, tenant_name: tenantName, ...(tenantError ? { tenant_error: tenantError } : {}), revision, state: 'verified', event_delivery_verified: false };
+        return { ...facts, name, name_source: nameSource, tenant_name: tenantName, ...(tenantError ? { tenant_error: tenantError } : {}), revision, state: 'verified', event_delivery_verified: false };
       } else {
         // Only enterprise apps can authenticate before their first installation ticket arrives.
         adapter = new FeishuAdapter({ app_id: text(input.app_id, 200), application_type: 'enterprise' },
@@ -122,7 +126,8 @@ export class ChannelApi {
       bindings: store.all("SELECT id,provider,connector,external_tenant,external_actor,display_name,status,verified_at FROM external_identities WHERE principal_id=? AND provider='feishu'", actor.principal_id),
       pending: this.service.bindings.pending(actor.principal_id),
       // Public identifiers let users bind before receiving any project grants.
-      applications: store.all('SELECT id,app_id FROM channel_connectors WHERE enabled=1'),
+      applications: store.all('SELECT id,app_id,app_name,tenant_name FROM channel_connectors WHERE enabled=1').map(c => ({ ...c,
+        chat_url: 'https://applink.feishu.cn/client/bot/open?appId=' + encodeURIComponent(c.app_id) })),
     };
     if (path === '/api/channels/connectors' && method === 'GET') {
       authorize(actor, 'platform.manage');
@@ -175,11 +180,16 @@ export class ChannelApi {
       let bot = input.bot_open_id === undefined ? current?.bot_open_id ?? '' : text(input.bot_open_id);
       const changedSource = current && (current.app_id !== app || current.installation_tenant !== installation || current.application_type !== type);
       let appName = changedSource ? '' : current?.app_name ?? '';
+      let appNameSource = changedSource ? '' : current?.app_name_source ?? '';
       const tenantName = installationInfo?.tenant_name ?? (changedSource ? '' : current?.tenant_name ?? '');
       if (input.bot_open_id === undefined && (!current || input.credentials !== undefined || changedSource || !bot)) {
         if (type === 'enterprise') {
           const facts = await new FeishuAdapter({ app_id: app, application_type: type }, secret, this.service.options.fetch, guard).probe();
-          bot = String(facts.bot_open_id); appName = String(facts.name || appName);
+          bot = String(facts.bot_open_id);
+          if (!facts.app_error || appNameSource !== 'application' || !appName) {
+            appName = String(facts.name || appName);
+            if (facts.name) appNameSource = String(facts.name_source);
+          }
         }
         // A store app must first save its callback configuration and receive an installation ticket.
         else if (!current || changedSource) bot = '';
@@ -197,7 +207,7 @@ export class ChannelApi {
           if (current.credential_ref !== credential) store.run('DELETE FROM channel_credentials WHERE id=?', current.credential_ref);
         } else store.run('INSERT INTO channel_connectors(id,provider,app_id,installation_tenant,bot_open_id,application_type,transport,credential_ref,enabled,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
           id, 'feishu', app, installation, bot, String(type), String(transport), credential, Number(enabled), 1, Date.now());
-        store.run('UPDATE channel_connectors SET app_name=?,tenant_name=? WHERE id=?', appName, tenantName, id);
+        store.run('UPDATE channel_connectors SET app_name=?,tenant_name=?,app_name_source=? WHERE id=?', appName, tenantName, appNameSource, id);
         store.audit(actor.principal_id, 'channel.connector.updated', id);
         const result = { operation_id: operation, state: 'succeeded', connector_id: id, revision: expected + 1 };
         store.run('INSERT INTO channel_control_operations(id,project_id,receipt) VALUES(?,NULL,?)', operation, JSON.stringify(result));
