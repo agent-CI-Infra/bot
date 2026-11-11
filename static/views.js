@@ -562,7 +562,7 @@ function taskNextStep(task, record, roles, purposes = {}) {
   if (task.phase === 'acceptance') return '任务处在独立验收阶段，但现在没有正在运行的 QA：控制面还没开始这次验收，或者正在处理验收结论。';
   if (task.origin?.source_kind === 'role' && task.origin.executor_role) return `角色 ${task.origin.executor_role} 正在处理` + (next ? `：${next}` : '。');
   if (controllerOf(roles)) return '主控 Manager 正在读任务记录，决定下一步委派谁' + (next ? `；它记下的下一步：${next}` : '。');
-  return '执行器（项目电脑里的 Pi 进程）正在处理' + (next ? `：${next}` : '。');
+  return '执行器正在处理' + (next ? `：${next}` : '。');
 }
 // The next step is the first thing under the title, above the timeline and the side panel on every screen width.
 function renderTaskNext(task, roles, purposes) {
@@ -620,7 +620,7 @@ function taskExecutionCard(task, record, roles, purposes) {
   else if (controller) {
     const legacy = roles.snapshot(controller.snapshot_id)?.legacy;
     section.append(element('p', `角色协调：主控 Manager（${harnessName(controller.harness)}${legacy ? '，旧配置沿用' : ''}）按需委派工作，候选由它提名后交给独立 QA。`));
-  } else section.append(element('p', '原来的执行器：这个任务没有经过主控，由项目电脑里的 Pi 进程直接执行。'));
+  } else section.append(element('p', '没有读取到主控记录；实际 Agent 和模型以运行记录为准。'));
   if (roles) section.append(facts([['独立 QA', qaRuns ? `运行过 ${qaRuns} 次，每次都是新的上下文` : record?.candidate ? '等待验收' : '有候选后验收']]));
   // The delegations in the order they were recorded, each with the harness of every run that executed it. A stage
   // timeline, once the server keeps one per task, belongs in this list too; until then nothing here is inferred from the

@@ -108,6 +108,8 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
     await expect(dialog).toContainText('没有写到 GitHub');
     await expect(dialog.getByRole('heading', { name: '任务结果', exact: true })).toBeVisible();
     await expect(dialog.getByRole('heading', { name: '开发结果', exact: true })).toHaveCount(0);
+    await expect(dialog.locator('.task-execution')).toContainText('实际 Agent 和模型以运行记录为准');
+    await expect(dialog.locator('.task-execution')).not.toContainText('Pi 进程');
     const result = (await f.admin('/api/tasks/' + id)).value.task;
     expect(result.structured.acceptance.candidate_id).toBe(candidate.id);
     expect(result.structured.acceptance.outcome).toBe('pass');
@@ -116,6 +118,7 @@ for (const width of [1440, 390]) test(`a new report survives pause/retry and sho
     expect(f.h.store.get('SELECT count(*) n FROM github_effects WHERE task_id=?', id).n).toBe(0);
     expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     mkdirSync('.tmp/task-lifecycle-227/previews', { recursive: true });
+    await dialog.locator('.task-execution').evaluate(el => el.scrollIntoView({ block: 'start' }));
     await page.screenshot({ path: `.tmp/task-lifecycle-227/previews/report-${width}.png` });
     if (width === 1440) {
       // At 200% desktop zoom the same 1440 physical pixels have 720 CSS pixels and DPR 2.
