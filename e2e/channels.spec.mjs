@@ -25,7 +25,7 @@ test('Feishu user scenarios show the same management operation in Web and refuse
     await page.getByText('会话记录', { exact: true }).click();
     await page.getByLabel('持久会话').selectOption(result.conversation_id);
     const feed = page.getByRole('log', { name: '管理会话记录' });
-    await expect(feed).toContainText(operation.id); await expect(feed).toContainText('操作 workflow.update · succeeded');
+    await expect(feed).toContainText(operation.id); await expect(feed).toContainText('操作 更新工作配置 · 已执行');
     await page.getByLabel('当前管理作用域').selectOption('project:101');
     await page.getByRole('button', { name: '快捷操作', exact: true }).click();
     await expect(page.getByLabel('默认提示词', { exact: true })).toHaveValue('Inspect evidence and cite the original logs.');
