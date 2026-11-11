@@ -38,13 +38,15 @@
 - **新建选项**：完整的任务规格（类型、对象、head、输入、唯一键），只在开发开关、人加的开发标签、修订预算、一次一个修订等控制面条件满足时才出现。检视结论是否支持开发、有没有指派人，是 Manager 的判断，写在事件的 `facts` 里；
 - **续接选项**：同一项目同一对象上还没开始发布的检视（PR 还要求同一 head），在分派时重新查询。
 
-后台的分派器逐条认领事件（带租约），调用一次 Manager：系统提示是固定的分派规则，后面是完整 Manager 分派提示词；用户消息是事件摘要、同一对象上最近的任务和选项（每个新建选项附带它的写入）。模型用 `dispatch` 工具回答一种结果：
+后台的分派器逐条认领事件（带租约），交给 Manager 跑一轮普通的 agent 循环（#381）：系统提示是固定的分派规则，后面是完整 Manager 分派提示词；用户消息是事件摘要、同一对象上最近的任务、选项（每个新建选项附带它的写入）和本事件已经做过的 GitHub 写入。循环里 Manager 可以按角色权限用 `github_read`、`github_search`、`read_job_log` 读取事件所在仓库，用 `github_write` 写这个仓库（例如请作者补充信息的评论、分类标签），每一步之前续租。工具说明见[共享 Agent 后端](agent-runtime.md#github-写入github_write)。最多 16 步，最后一步只能分派。模型最后用 `dispatch` 工具回答一种结果：
 
 - `create`：一到三个新建选项，可附简要说明（目标和验收标准），可收窄写入；
 - `continue`：一个续接选项，事件作为更新交给那个检视，它在发布前回应；
 - `ignore`：不处理。
 
-三种结果都必须写理由。选「开发 Issue」而检视没有给出实现目标时必须附简要说明。选了没提供的选项、缺少必需的简要说明、多要写入或格式不对时，同一次调用里把错误交回模型改一次，仍不合格就按失败处理。模型优先读 `task_models.manager`，没有时用项目默认模型。分派调用不保留会话，每次只读取事件和任务事实。
+三种结果都必须写理由。选「开发 Issue」而检视没有给出实现目标时必须附简要说明。选了没提供的选项、缺少必需的简要说明、多要写入或格式不对时，在同一轮里把错误交回模型改一次，仍不合格就按失败处理。模型优先读 `task_models.manager`，没有时用项目默认模型。分派不保留会话，每次只读取事件和任务事实。
+
+Manager 的写入只能落在本事件所在的仓库：`github_write` 没有仓库参数，路径相对这个仓库，不设次数上限，每次写入都记审计。每次写入带 key，按事件去重：重新分派时用户消息列出已经做过的写入，同一个 key 直接返回上次的结果，不会再写一遍。默认只有 Manager 有 GitHub 写权限（Issue、Pull Request、Contents）；在「角色 → Manager」把这些资源改成只读后，分派时不再提供 `github_write`。
 
 决定在一个事务里落地：新建任务、写续接、记录理由，并通知拥有这个事件的模块。新建任务的输入里有 `manager`（事件 id、理由、简要说明、收窄后的写入），执行时作为说明交给 agent，不能扩大范围、写入或控制面条件；任务日志有一条 `dispatch` 记录，`task_events` 把任务和事件关联起来。
 
@@ -62,20 +64,22 @@ Manager 分派提示词在「角色 → Manager」里作为一份完整文本编
 
 | 工作类型 | 任务类型 | 可选写入（默认／固定） |
 | --- | --- | --- |
-| 检视 Issue `review.issue` | `review.issue` | 回复评论（默认，固定）、加分类标签（默认）、修改代码、开 PR、提报 Issue |
+| 检视 Issue `review.issue` | `review.issue` | 回复评论（默认，固定）、加分类标签（默认）、修改代码、开 PR |
 | 检视 PR `review.pr` | `review.pr` | 同上 |
-| 开发 Issue `development.issue` | `development.issue` | 修改代码、开 PR（默认，固定）、提报 Issue |
+| 开发 Issue `development.issue` | `development.issue` | 修改代码、开 PR（默认，固定） |
 | 跟进 bot PR `development.pr` | `development.pr` | 同上 |
-| 通用回复 `reply` | `workflow.issue`、`workflow.pr` | 回复评论（默认）、加分类标签、修改代码、开 PR、提报 Issue；默认关闭 |
-| CI 观察 `release.observe` | `release.observe` | 提报 Issue |
-| 发行说明 `release.notes` | `release.notes` | 写发行说明（默认）、提报 Issue |
+| 通用回复 `reply` | `workflow.issue`、`workflow.pr` | 回复评论（默认）、加分类标签、修改代码、开 PR；默认关闭 |
+| CI 观察 `release.observe` | `release.observe` | 无 |
+| 发行说明 `release.notes` | `release.notes` | 写发行说明（默认） |
 | Actions 失败处理 `actions.failures` | `actions.failures` | 重跑失败的运行、提报 Issue（默认）；默认关闭 |
 | 接入门禁 `gate.onboarding` | `gate.onboarding` | 提交门禁方案（固定） |
-| 定时检查 `task.request` | `task.request` | 无 |
+| 定时检查 `task.request` | `task.request` | 修改代码、开 PR（默认都不选） |
 
 每个工作类型在项目配置里有开关和写入（策略的 `work_settings`，Actions 失败处理沿用 `actions_failures_enabled`），模型在 `task_models` 里按工作类型 id 保存。检视和开发类型还受项目的检视、开发总开关约束。写入只能在可选范围内选，固定的写入不能去掉，开 PR 必须同时允许修改代码；不合规时返回 400 `invalid_work_writes`。
 
 一个任务实际可用的写入是三者的交集：项目当前的写入、任务创建时的快照、Manager 为它收窄后的写入。之后收窄项目写入会立刻收窄运行中的任务；放宽项目写入不会让已有任务超过它创建时的范围。事件内容和 Manager 都不能扩大写入。所有 GitHub 写入仍由控制面完成，agent 只拿得到只读令牌。
+
+工作类型的写入是框架交付：检视结论（`finish_review`）、从测试通过的候选发布 PR、Actions 重跑与失败提报、发行说明和门禁方案。它们沿用各自的流程，只看工作类型的写入，不再要求执行角色有 GitHub 写权限（#381），所以只读的内置角色照常交付。除此之外的直接写入（例如提报一个后续 Issue）统一用 `github_write`，由执行角色的 GitHub 资源权限决定是否提供；「提报 Issue」写入只留给 Actions 失败处理的 `report_failure`，升级时其他工作类型保存过的这项写入会被忽略。
 
 ## 控制面模块
 

@@ -83,6 +83,8 @@ export class GitHub {
   cloneUrl = '';
   // A publication fence runs after guards and quota checks, immediately before a write is sent.
   beforeWrite?: () => void;
+  // The HTTP status of the latest answer (github_write records it for audit).
+  status = 0;
   // The rate-limit windows this client's credentials count against: the App's JWT, and the installation (or the bot
   // account's user) for the token.
   private jwt = ''; private installationId = ''; private appWindow?: Bucket; private tokenWindow?: Bucket;
@@ -104,6 +106,7 @@ export class GitHub {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
     catch (error) { return stop(method === 'GET' ? 'github_unavailable' : 'github_response_unknown', 'retry_wait',
       this.redactor.text(`GitHub 请求 ${method} ${path} 失败：${networkReason(error,30000)}${method==='GET'?'':'，写入结果尚未确认'}。`)); }
+    this.status = response.status;
     if (window) observe(this.store, window, response.headers, response.status);
     if (jobLogs && response.status === 302) {
       // Only a fixed Actions job-log endpoint can enter this branch. The URL is supplied by GitHub,

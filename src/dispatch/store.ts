@@ -129,6 +129,12 @@ export function dispatchContext(store: Store, event: Row): DispatchContext {
   return { event, facts: JSON.parse(event.facts), options, continuations: continuations(store, event), related };
 }
 
+/** How long a dispatcher's claim on an event lasts; the Manager's turn renews it before every step. */
+export const dispatchLeaseMs = 5 * 60000;
+/** Extends a claim the caller still holds; false when the event was claimed again (or decided) meanwhile. */
+export function renewDispatchLease(store: Store, event: Row): boolean {
+  return store.run("UPDATE dispatch_events SET lease_until=? WHERE id=? AND lease=? AND state='dispatching'", Date.now() + dispatchLeaseMs, event.id, event.lease).changes > 0;
+}
 export class InvalidDecision extends Error { constructor(readonly code: string, message: string) { super(message); } }
 /** A decision may only choose what was offered; the brief and writes are bounded, never widened. */
 export function checkDecision(store: Store, context: DispatchContext, value: any): Decision {

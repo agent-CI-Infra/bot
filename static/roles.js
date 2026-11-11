@@ -60,7 +60,7 @@ function permissionEditor(permissions, items, change, prefix = '', fixed = false
   if (fixed) box.append(note('全部能力已允许；实际执行仍受当前用户授权、项目范围和入口支持情况约束。'));
   for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
     const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
-    if (group === 'github') section.append(note('控制访问 GitHub 和发布变更；任务已获准提供的材料、虚拟电脑中的本地文件仍按任务范围使用。角色权限不会扩大 GitHub App 安装授权。修改工作流文件仍受现有发布门禁和 GitHub App 的 Workflows 授权约束，当前没有独立角色开关。'));
+    if (group === 'github') section.append(note('只读开放 github_read 等读取工具；读写还开放 github_write，由控制面以 bot 身份按 GitHub REST 接口写入，每次只签发这一项资源的短期写令牌，并转义 @、脱敏和记录审计。默认只有 Manager 可写，且只写它正在处理的事件所在仓库。检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案属于框架交付，由项目工作类型的写入控制，不需要这里的写权限。角色权限不会扩大 GitHub App 安装授权。'));
     for (const item of items.filter(item => item.group === group)) {
       const choices = item.modes.map(mode => [mode, permissionModeLabels[mode]]);
       if (permissions[item.id] === 'custom') choices.unshift(['custom', permissionModeLabels.custom, true]);
@@ -72,7 +72,7 @@ function permissionEditor(permissions, items, change, prefix = '', fixed = false
         const detail = item.id === 'computer' ? `文件：${permissionModeLabels[permissions.legacy_repository]}；命令：${permissionModeLabels[permissions.legacy_commands]}`
           : item.id === 'project_tasks' ? `其他任务：${permissionModeLabels[permissions.legacy_project_tasks || 'none']}；协调：${permissionModeLabels[permissions.legacy_coordination || 'none']}；调度：${permissionModeLabels[permissions.legacy_nomination || 'deny']}；旧派活附带任务控制：${permissionModeLabels[permissions.legacy_delegation_controls || 'deny']}`
           : Object.entries(permissions).filter(([key,value]) => key.startsWith('legacy_' + item.id.slice(7) + '_') && value === 'allow')
-            .map(([key]) => ({ read: '读取', create: '创建', reply: '评论', labels: '分类标签', publish: '发布候选', report: '追加报障' })[key.split('_').at(-1)]).filter(Boolean).join('、');
+            .map(([key]) => ({ read: '读取', create: '创建', reply: '评论', labels: '分类标签', publish: '发布候选', report: '追加报障', write: '全部写入' })[key.split('_').at(-1)]).filter(Boolean).join('、');
         row.append(note('旧配置保留的能力：' + (detail || '无') + '。选择新等级后按该等级生效，新增能力不会静默启用。'));
       }
       section.append(row);

@@ -144,3 +144,26 @@ test('旧权限明确显示原动作，保存其他字段保留授权，选择�
     expect(saved.computer).toBe('allow');expect(saved.github_issues).toBe('read');expect(saved.legacy_repository).toBeUndefined();expect(saved.legacy_issues_create).toBeUndefined();
   }finally{await h.stop();}
 });
+
+test('GitHub 权限文案说明读写开放 github_write；默认只有 Manager 可写', async ({ page }) => {
+  const h = await harness(undefined, undefined, store => ({ engine: new TaskEngine(store, { call: async () => null }) }));
+  try {
+    const { admin, password } = await setup(h), a = await account(admin); await repository(admin, a.id, '101');
+    await page.goto(h.admin + '/#/projects/101/roles/manager');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator'); await page.getByLabel('密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    const box = page.locator('.role-permissions');
+    for (const [label, value] of [['Issue', 'write'], ['Pull Request', 'write'], ['Contents', 'write'], ['Actions', 'read']])
+      await expect(page.getByLabel('manager ' + label + '权限', { exact: true })).toHaveValue(value);
+    await expect(box).toContainText('读写：还可以用 github_write 新建、修改和关闭 Issue，评论，加删标签、指派人和里程碑。');
+    await expect(box).toContainText('读写：还可以用 github_write 开 PR、修改 PR，评论，发检视（包括批准和要求修改）、请求检视人。合并 PR 属于 Contents 读写。');
+    await expect(box).toContainText('读写：还可以用 github_write 提交文件、创建 Git 对象、分支和引用、合并 PR，可以直接推送到分支。');
+    await expect(box).toContainText('默认只有 Manager 可写，且只写它正在处理的事件所在仓库。');
+    await expect(box).toContainText('不需要这里的写权限');
+    await expect(page.getByText('Actions：重跑原始运行', { exact: true })).toHaveCount(0);
+    await page.locator('.role-nav').getByRole('link', { name: 'Dev', exact: true }).click();
+    for (const label of ['Issue', 'Pull Request', 'Contents', 'Actions', 'Checks', 'Commit Status'])
+      await expect(page.getByLabel('dev ' + label + '权限', { exact: true })).toHaveValue('read');
+  } finally { await h.stop(); }
+});
+

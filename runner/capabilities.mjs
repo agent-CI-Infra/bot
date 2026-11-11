@@ -1,5 +1,6 @@
-// Write tools the control plane performs for the agent, and the write each needs (see writeCatalog in the control plane).
-export const platformWrites = { create_issue: 'issue', rerun_failed_run: 'actions_rerun', report_failure: 'issue' };
+// Write tools the control plane performs for the agent, and the work-type write each needs (see writeCatalog in the control
+// plane). github_write needs none here: the control plane offers it only to roles that may write and checks every call.
+export const platformWrites = { github_write: null, rerun_failed_run: 'actions_rerun', report_failure: 'issue' };
 // Trusted control-plane capabilities, never inferred from an exposed tool name.
 // These checks govern runner tools; they are not an OS sandbox for arbitrary shell commands.
 export function toolCapabilityError(config, name, args = {}) {
@@ -13,7 +14,7 @@ export function toolCapabilityError(config, name, args = {}) {
     if (note ? workspace.notes !== true : workspace.write !== true) return note ? 'notes_write_not_allowed' : 'review_repository_write_forbidden';
   }
   if (name === 'create_pull_request' && github.publication !== 'pull_request') return 'publication_not_allowed';
-  if (Object.hasOwn(platformWrites, name) && !(config.capabilities?.writes || []).includes(platformWrites[name])) return 'write_not_allowed';
+  if (Object.hasOwn(platformWrites, name) && platformWrites[name] && !(config.capabilities?.writes || []).includes(platformWrites[name])) return 'write_not_allowed';
   if (name === 'start_agent' && config.capabilities?.agents !== true) return 'agents_not_allowed';
   if (['github_read_token','github_read','github_search','read_job_log'].includes(name) && (!github.permissions || !Object.keys(github.permissions).length || Object.values(github.permissions).some(value => value !== 'read'))) return 'github_read_token_not_allowed';
   return null;

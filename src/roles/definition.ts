@@ -5,7 +5,7 @@ import { stop, TaskError } from '../agent/common.js';
 import { selectedModel, visibleModel, openModel } from '../agent/model.js';
 import { playbooks } from '../tasks/playbooks.js';
 import { rolePool, systemInstructions, roleTemplate, requiredRoles, configuredRoles } from './pool.js';
-import { roleKind, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
+import { roleKind, builtinKinds, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
 import { harnesses } from './harness.js';
 import { defaultPermissions, migratePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
@@ -64,6 +64,37 @@ export function roleStorageV2(s: Store) {
   CREATE TABLE IF NOT EXISTS skill_bundle_revisions(repository_id TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,source TEXT NOT NULL,files TEXT NOT NULL,content_hash TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(repository_id,id,revision));
   CREATE TABLE IF NOT EXISTS role_snapshots(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,role TEXT NOT NULL,config_revision INTEGER NOT NULL,role_revision INTEGER NOT NULL,snapshot TEXT NOT NULL,created_at TEXT NOT NULL);
   `);
+  resetBuiltinRolePermissions(s);
+}
+
+/**
+ * One-time reset (#381): saved built-in roles take the new default permissions (only the Manager writes to GitHub; every
+ * other role reads). Model, harness, prompt and other settings stay; custom roles keep their permissions. Each changed
+ * project gets a new configuration revision by 'migration:381', so running role runs keep the snapshot they started with.
+ */
+export function resetBuiltinRolePermissions(s: Store) {
+  const marker = 'migration:381:builtin-role-permissions';
+  if (s.get('SELECT 1 FROM settings WHERE key=?', marker)) return;
+  s.transaction(() => {
+    for (const row of s.all("SELECT key,value FROM settings WHERE key LIKE 'roles:%'")) {
+      let stored: any; try { stored = JSON.parse(String(row.value)); } catch { continue; }
+      if (stored?.schema !== 2 || !Array.isArray(stored.roles)) continue;
+      const repositoryId = String(row.key).slice('roles:'.length), current = roleConfiguration(s, repositoryId, stored);
+      let changed = false;
+      const roles = current.roles.map(role => {
+        if (!Object.hasOwn(builtinKinds, role.role_id)) return role;
+        const permissions = defaultPermissions(role.role_id, role.kind);
+        if (JSON.stringify(role.permissions) === JSON.stringify(permissions)) return role;
+        changed = true; return { ...role, permissions, revision: role.revision + 1 };
+      });
+      if (!changed) continue;
+      const now = new Date().toISOString(), { updated_at, updated_by, ...config } = { ...current, roles, revision: current.revision + 1 };
+      const saved = { ...config, updated_at: now, updated_by: 'migration:381' };
+      s.run('INSERT INTO role_config_revisions VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING', repositoryId, saved.revision, JSON.stringify(saved), short(config), 'migration:381', now);
+      s.run('UPDATE settings SET value=? WHERE key=?', JSON.stringify(saved), row.key);
+    }
+    s.run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO NOTHING', marker, new Date().toISOString());
+  });
 }
 
 /** The stored configuration as V2. A configuration saved before V2 keeps running as before (legacy) until it is saved again. */

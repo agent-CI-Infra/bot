@@ -44,6 +44,11 @@ function rolePublicationEcho(store: Store, repository: string, body: unknown): b
     if (store.get(`SELECT 1 FROM github_effects e JOIN tasks t ON t.id=e.task_id JOIN task_origins o ON o.task_id=t.id
       WHERE e.id=? AND t.repository_id=? AND o.source_kind='role' AND e.kind IN ('issue','pull_request')`, match[1]!, repository)) return true;
   }
+  // github_write (#381): an Issue or PR a role task or the Manager itself opened is not a new event for the Manager either.
+  for (const match of String(body ?? '').matchAll(/<!-- dept-bot-write:([a-f0-9]{24}) -->/g)) {
+    if (store.get(`SELECT 1 FROM github_writes w LEFT JOIN task_origins o ON w.scope='task:'||o.task_id
+      WHERE w.marker=? AND w.repository_id=? AND (o.source_kind='role' OR w.scope LIKE 'dispatch:%')`, match[1]!, repository)) return true;
+  }
   return false;
 }
 const botWrote = (payload: any, body: unknown) => payload?.sender?.type === 'Bot' || botMarker.test(String(body ?? ''));

@@ -27,6 +27,20 @@ Pi 在进程内串行执行 `github_read_token` 的令牌交换，控制面继�
 
 Pi 在仓库工具内部串行使用邮箱，其他工具仍可并行执行。每个已进入邮箱的仓库请求最多等待 120 秒，超时返回 `repository_tool_timeout`；超时或取消后的迟到回复不会中断任务。共享执行器按现有 2 MiB 邮箱容量检查脱敏后 JSON 的 UTF-8 字节数，超出时向观察循环和 Pi 返回完整的 `repository_result_too_large` 工具错误。例如 `/git/trees/<sha>?recursive=1` 的结果无法投递时，模型应缩小 path、去掉 recursive 或继续分页，并用 page/per_page 减小每页结果；不会截断 JSON 后冒充成功结果。
 
+## GitHub 写入（github_write）
+
+所有 agent 用同一个写工具（#381，`src/github/write.ts`）：`github_write {method, path, body?, key}`，形状和 GitHub REST 一致。`method` 是 `POST`、`PATCH`、`PUT` 或 `DELETE`，`path` 相对仓库、不带查询串（例如 `POST /issues`、`POST /issues/12/comments`、`POST /issues/12/labels`、`PATCH /issues/12`、`POST /pulls`、`POST /pulls/7/reviews`、`PUT /pulls/7/merge`、`PUT /contents/docs/a.md`、`POST /git/refs`），`body` 是 REST 请求体。服务多个仓库的入口（群聊助手、管理助手）另带 `repository`；任务入口和 Manager 固定为任务或事件所在仓库。
+
+- **授权**：每条路由按 GitHub 细粒度权限归到一个资源：Issue（Issue、评论、标签、指派人、里程碑）、Pull Request（PR、检视、行内评论、请求检视人、更新分支）、Contents（文件、Git 对象和引用、合并 PR）。按编号操作的 `/issues/{n}/…` 先用只读令牌查清对象是 Issue 还是 PR，再按它的资源判断；评论编号先查到所属对象。调用方角色对该资源有读写（或旧配置里对应的创建、评论、分类标签子集）才允许，发送前再核对一次实时权限。仓库外和未列出的路由一律拒绝。
+- **令牌**：控制面为这一次调用签发只含该资源写权限加 Metadata 读的安装令牌，发送后撤销；GitHub 返回的令牌权限多于请求时不发送。Token 账号使用账号自身的令牌。agent 和命令环境只拿得到只读令牌。
+- **文本**：给人看的 `title`、`body`（Issue、评论、PR、检视及其行内评论）转义 `@`，并按公开文本规则脱敏；其他字符串（代码、提交说明、引用）只去掉已知密钥，不转义。Base64 文件内容是 UTF-8 时按文本脱敏，二进制内容含已知密钥时拒绝。正文末尾加 `<!-- dept-bot-write:… -->` 标记，Token 账号以普通用户身份写入时，bot 自己的评论不会再作为新事件回来；角色任务或 Manager 开的 Issue、PR 也不作为新事件交给 Manager。
+- **去重**：key 在一个范围内唯一：一个任务（重试同一任务不会重复写）、一个分派事件、一轮群聊或管理对话。已经写成功的 key 直接返回上次的结果（`replayed: true`）；同一 key 换了请求返回 `github_write_key_conflict`；结果未确认时返回 `github_write_unknown`，由 agent 先读 GitHub 核对，再换新 key 写。
+- **结果与审计**：返回 GitHub 响应里有用的部分（编号、链接、sha、状态等）和 HTTP 状态。每次调用写一条 `github_writes`：范围、key、调用方（角色和任务、Manager 和事件、服务角色和会话、管理助手的用户）、仓库、方法、路径、请求摘要、状态、GitHub 状态码和结果链接；被拒绝的调用也记录。项目审计（`audit`）同时记一条 `github.write.<状态>`。
+
+工具出现在每个工作类型、Pi 角色、Manager 分派、群聊助手和管理助手里，再按调用方角色的 GitHub 权限过滤：没有任何资源读写的角色看不到它，硬调也被拒绝。委派的任务还受来源角色的上限约束，角色不能把自己没有的写权限借给别人。内置角色默认只有 Manager 可写（Issue、Pull Request、Contents），其他内置角色对全部 GitHub 资源只读；升级时已保存的内置角色权限一次性重置为这些默认值（模型、后端和提示词等设置保留，自定义角色不变），配置记一个由 `migration:381` 保存的新版本。
+
+框架交付不经过 `github_write`，也不需要角色的写权限：检视结论、测试通过的 PR、Actions 重跑与失败提报、发行说明和门禁方案沿用原流程，只看项目工作类型的写入，见 [Manager 与工作类型](workflows.md)。
+
 2 MiB 是邮箱及观察循环的结果上限。Pi 还会在 `github_read`、`github_search`、`read_job_log` 的结果进入会话历史之前，使用同一 SDK 序列化包含当前历史与同轮已完成工具结果的下一次模型请求，并检查既有的 `estimateTokens({role:'user',content:raw,timestamp}) + 8192 > 128000` 条件。触及该上限的结果返回 `repository_result_too_large`，让模型缩小读取范围；放得下的结果原样返回，没有新增固定字节配额。序列化检查不会发起模型请求。
 
 其他工具（`run_command`、`read_file`、记忆与任务记录查询等）的结果也在进入会话历史前检查，但只拒绝压缩也救不回来的结果。Pi 压缩会总结较早的历史，却总是保留最近一次工具调用和这一批全部结果；因此检查的请求只包含系统提示、这次工具调用和同批结果，再为压缩摘要预留两份 8192 token 的输出（历史摘要加拆分轮次的前缀摘要）。超出时模型收到 `tool_result_too_large`：命令保留 `exit_code`、`signal`、`timed_out`、`truncated` 等状态并说明命令已经执行，提示用 head、tail、grep、wc 或重定向到临时文件后分段读取；其他工具提示改读较小的部分。放得下的结果原样返回，由 Pi 照常压缩。没有这项检查时，例如一次把整个 `../notes/` 拼接输出的命令会让后续每次请求都超过上限，任务以 `agent_context_too_large` 失败，重试也会重复同一条命令。
@@ -69,7 +83,7 @@ const result = await runAgent({
 
 ## 权限与隔离
 
-显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，每次任务由控制面按工作类型给出：读取、笔记、shell、全部 GitHub 只读范围和独立 agent 对所有工作类型开放，修改工作区和每种写入只给项目配置里勾选了它的工作类型，远端写入只经受控 publisher；`create_issue`、`rerun_failed_run`、`report_failure` 经 runner 的仓库工具邮箱交给控制面执行。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
+显式 capabilities 分开声明本地读取、修改、笔记、shell、GitHub 只读范围、远端发布和是否可以启动独立 agent，每次任务由控制面按工作类型给出：读取、笔记、shell、全部 GitHub 只读范围和独立 agent 对所有工作类型开放，修改工作区和每种写入只给项目配置里勾选了它的工作类型，远端写入只经受控 publisher 和 `github_write`；`github_write`、`rerun_failed_run`、`report_failure` 经 runner 的仓库工具邮箱交给控制面执行。不再从工具列表是否出现 `create_pull_request` 推断写权限；没有的能力对应的工具不提供，runner 和控制面也各自拒绝。
 
 `start_agent` 启动独立 agent：新会话的系统提示是固定说明加调用方写的角色说明，第一条消息是任务，不带调用方的消息；工具是调用方工具按收窄后的权限过滤出的子集，不含发布、结束任务和再启动 agent。Pi 在同一进程里另建会话，模型请求经同一个邮箱逐个转发；默认 tool loop 用 `AgentSpec.agents` 另起一组消息。检视的 GitHub token 只有读权限。开发也只向 shell 发放短期 GitHub 读 token；写 PR/推送由已有受控 publisher 执行。发布的写操作由既有状态机和授权控制，运行中的 Agent 不持有可任意写 GitHub 的凭据。
 

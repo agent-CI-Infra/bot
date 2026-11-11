@@ -180,7 +180,8 @@ test('saving RoleDefinitionV2 checks expected_revision, project scope and the ha
   assert.equal(saved.revision, 1);
   const { snapshot } = resolveRole(f.s, 'r', 'manager', 'task.request');
   assert.equal(snapshot.capability.id, 'permissions');
-  for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance', 'merge']) assert.ok(!snapshot.capability.tools.includes(name), name);
+  // Deliveries such as create_pull_request are offered by the task entry's work type, not by role permissions (#381).
+  for (const name of ['write_file', 'run_command', 'submit_acceptance', 'merge']) assert.ok(!snapshot.capability.tools.includes(name), name);
   assert.deepEqual(Object.entries(snapshot.capability.authorities).filter(([, v]) => v).map(([k]) => k).sort(), ['coordinate', 'delegate', 'nominate', 'query_facts']);
   assert.equal(snapshot.harness.id, 'pi'); assert.equal(snapshot.harness.runtime.package, '@earendil-works/pi-coding-agent');
 });
