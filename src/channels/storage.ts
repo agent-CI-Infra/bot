@@ -53,7 +53,10 @@ export function channelStorage(store: Store): void {
     store.db.exec("ALTER TABLE channel_connectors ADD COLUMN connection_state TEXT NOT NULL DEFAULT 'idle'");
   // Connections are global; keep their IDs so credentials, bindings and queued events remain valid.
   store.transaction(() => {
-    for (const column of ['app_name', 'tenant_name'])
+    if (!store.all('PRAGMA table_info(channel_bind_requests)').some(c => c.name === 'code_hash'))
+      store.db.exec('ALTER TABLE channel_bind_requests ADD COLUMN code_hash TEXT');
+    store.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS channel_bind_code ON channel_bind_requests(code_hash)');
+    for (const column of ['app_name', 'tenant_name', 'app_name_source'])
       if (!store.all('PRAGMA table_info(channel_connectors)').some(c => c.name === column))
         store.db.exec(`ALTER TABLE channel_connectors ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
     // Existing connections also accept external members; identity and project grants still authorize each request.

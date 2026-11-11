@@ -5,7 +5,7 @@ import { digest, randomId } from '../dist/core/security.js';
 
 export const credentials = { app_secret: 'fixture-feishu-app-secret', encrypt_key: 'fixture-feishu-encrypt-key', verification_token: 'fixture-feishu-verification-token' };
 export function transport() {
-  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
+  const sent = [], state = { failures: 0, authGate: null, authRequests: [], authStarted: 0, authCode: 0, botCode: 0, botOpenId: 'ou_bot', appName: 'Fixture bot', currentAppName: null, applicationCode: 0, applicationId: null, tenantCode: 0, installationTenant: 'install-tenant', tenantName: 'Fixture enterprise', tenantGate: null, tenantStarted: 0, historyRequests: [], history: null,
     audienceRequests: [], audience: null, inChat: true, members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
@@ -17,6 +17,9 @@ export function transport() {
     }
     if (state.failures) { state.failures--; return Response.json({ code: 999, msg: 'fixture failure' }, { status: 503 }); }
     if (url.endsWith('/bot/v3/info')) return Response.json({ code: state.botCode, bot: { open_id: state.botOpenId, app_name: state.appName }, msg: 'fixture-only-access-token' });
+    if (url.includes('/application/v6/applications/')) return Response.json({ code: state.applicationCode, data: { app: {
+      app_id: state.applicationId ?? decodeURIComponent(new URL(url).pathname.split('/').at(-1)), app_name: state.currentAppName ?? state.appName,
+      secret: 'must-not-return-app-secret', encryption: { verification_token: 'must-not-return-verification-token' } } } });
     if (url.endsWith('/tenant/v2/tenant/query')) {
       state.tenantStarted++; if (state.tenantGate) await state.tenantGate;
       return Response.json({ code: state.tenantCode, data: { tenant: { tenant_key: state.installationTenant, name: state.tenantName } }, msg: 'fixture-only-access-token' }, { status: state.tenantCode === 1184001 ? 403 : 200 });

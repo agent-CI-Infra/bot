@@ -9,6 +9,8 @@ function feishuError(err) {
     channel_delivery_rejected: '飞书拒绝了请求。请检查凭据、机器人能力和已发布版本。',
     channel_delivery_failed: '服务器无法连接飞书开放平台，请检查网络后重试。',
     channel_rate_limited: '飞书暂时限制了请求频率，请稍后重试。',
+    channel_application_permission_required: '飞书机器人接口可能仍返回旧名称。请在飞书开通应用身份权限“获取应用信息”（admin:app.info:readonly），发布并通过必要审核后刷新；系统只查询本应用信息。也可使用已有的 application:application:self_manage 权限。',
+    channel_application_unavailable: '暂时无法读取最新应用名称，当前保留已保存名称或机器人接口返回的名称。请检查改名是否已发布及对应语言名称，稍后刷新。',
     channel_source_mismatch: '飞书返回的安装企业与此连接不一致，请核对应用凭据和安装企业后重新配置。',
     channel_app_ticket_required: '尚未收到有效的商店应用票据。先完成 HTTP 事件配置、安装和发布，再重新检查。',
     channel_http_credentials_required: 'HTTP 回调需要 Verification Token 和 Encrypt Key，请从“事件与回调 → 加密策略”填写。',
@@ -31,21 +33,24 @@ async function renderFeishuSetup(panel, request) {
       row.setAttribute('role', 'group'); row.setAttribute('aria-label', c.app_id);
       const name = element('strong', c.app_name || '应用名称待获取'), tenant = note(`企业：${c.tenant_name || '名称待获取'}`);
       const status = element('p', '', 'view-success'); status.setAttribute('role', 'status');
-      const refresh = button('刷新应用信息', async () => {
+      const refreshInfo = async () => {
         refresh.disabled = true; status.className = 'view-success'; status.textContent = '正在读取应用与企业信息…';
         try {
           const result = await api('/api/channels/feishu/probe', 'POST', { connector_id: c.id, expected_revision: c.revision });
           c.revision = result.revision; c.app_name = result.name || c.app_name; c.tenant_name = result.tenant_name || c.tenant_name;
           name.textContent = c.app_name || '应用名称待获取'; tenant.textContent = `企业：${c.tenant_name || '名称待获取'}`;
-          status.className = result.tenant_error ? 'view-error' : 'view-success';
+          status.className = result.tenant_error || result.app_error ? 'view-error' : 'view-success';
           const detail = result.tenant_error === 'channel_tenant_unavailable' ? '请在飞书开通“获取企业信息”（tenant:tenant:readonly）应用身份权限，发布并通过必要审核后，再刷新应用信息。' : feishuError(new Error(result.tenant_error || ''));
-          status.textContent = result.tenant_error ? `应用信息已读取，企业名称暂未更新。${detail}` : '应用与企业信息已检查。';
+          status.textContent = [result.app_error ? feishuError(new Error(result.app_error)) : '',
+            result.tenant_error ? `企业名称暂未更新。${detail}` : ''].filter(Boolean).join(' ') || '应用与企业信息已检查。';
         } catch (err) { status.className = 'view-error'; status.textContent = feishuError(err); } finally { refresh.disabled = false; }
-      }, 'quiet');
+      };
+      const refresh = button('刷新应用信息', refreshInfo, 'quiet');
       row.append(name, tenant, note(`App ID：${c.app_id}`), note(`全局共用 · ${c.enabled ? '启用' : '停用'} · ${c.transport === 'http' ? 'HTTP 回调' : '企业自建长连接'}`),
         refresh, status,
         channelLink(feishuAddress(c.id, 1), '继续配置', 'button-link'), channelLink(feishuAddress(c.id, 4), '连接诊断与群范围', 'button-link'));
       overview.append(row);
+      void refreshInfo();
     }
     panel.append(overview); return;
   }

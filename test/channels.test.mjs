@@ -168,6 +168,62 @@ test('local accounts bind without GitHub configuration and Feishu access follows
   assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n, 0);
 });
 
+test('a private-chat authentication code binds in the console once, requires a session and CSRF, and never adds grants', async t => {
+  const { h, id, admin, member, service } = await channelFixture(t);
+  const local = await member('code-local', {}), other = await connector(admin, { app_id: 'cli_other' });
+  const started = await post(h, id, envelope('/bind', { sender: { sender_id: { open_id: 'ou_code' } } }));
+  assert.equal((await finished(h, started.value.operation_id)).state, 'completed');
+  const outbox = h.store.get('SELECT * FROM channel_outbox WHERE source_event=?', started.value.operation_id);
+  const reply = JSON.stringify(h.store.secrets.open(outbox.payload, 'channel-outbox:' + outbox.id));
+  const code = /FSB-[a-f0-9]{48}/.exec(reply)[0], challenge = /challenge=([a-f0-9]{48})/.exec(reply)[1];
+  const route = '/api/channels/bindings/confirm', input = { code, connector_id: id };
+  assert.doesNotMatch(JSON.stringify((await local.client('/api/channels/bindings')).value), new RegExp(code));
+  assert.equal((await h.client()(route, 'POST', input)).status, 401);
+  assert.equal((await local.client(route, 'POST', input, { 'X-CSRF-Token': '' })).value.error, 'csrf_required');
+  assert.equal((await local.client(route, 'POST', { ...input, principal_id: 'self-asserted' })).value.error, 'unknown_field');
+  assert.equal((await local.client(route, 'POST', { ...input, code: challenge })).value.error, 'binding_code_invalid');
+  assert.equal((await local.client(route, 'POST', { ...input, connector_id: other })).value.error, 'binding_code_invalid');
+  const grants = h.store.get('SELECT count(*) n FROM scoped_grants').n;
+  const result = await local.client(route, 'POST', input);
+  assert.equal(result.status, 201); assert.equal(result.value.state, 'bound'); assert.equal(result.value.principal_id, local.id);
+  await local.client('/api/auth/me');
+  assert.equal((await local.client(route, 'POST', input)).value.error, 'binding_replayed');
+  assert.equal(h.store.get('SELECT count(*) n FROM scoped_grants').n, grants);
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE provider='github'").n, 0);
+  const denied = await post(h, id, envelope(directQuery(), { sender: { sender_id: { open_id: 'ou_code' } } }));
+  assert.equal((await finished(h, denied.value.operation_id)).error, 'capability_forbidden');
+  const e = service.adapter(service.connector(id)).normalize(envelope('/bind', { sender: { sender_id: { open_id: 'ou_code' } } }));
+  const conflict = service.bindings.begin(e);
+  assert.equal((await admin(route, 'POST', { code: conflict.code, connector_id: id })).value.error, 'external_identity_conflict');
+  const expired = service.bindings.begin({ ...e, actor_id: 'ou_expired_code' });
+  h.store.run('UPDATE channel_bind_requests SET expires_at=0 WHERE code_hash=?', digest(expired.code));
+  assert.equal((await local.client(route, 'POST', { code: expired.code, connector_id: id })).value.error, 'binding_expired');
+  const legacy = service.bindings.begin({ ...e, actor_id: 'ou_legacy_code' });
+  await service.bindings.authenticate(legacy.challenge, session(h.store, local.id).token);
+  assert.equal((await local.client(route, 'POST', { code: legacy.code, connector_id: id })).value.error, 'binding_login_already_started');
+});
+
+test('console authentication codes fence concurrent accounts, revoked sessions, connector changes and group sources', async t => {
+  const { h, id, service, member } = await channelFixture(t);
+  const a = await member('code-race-a', {}), b = await member('code-race-b', {});
+  const aSession = session(h.store, a.id), bSession = session(h.store, b.id);
+  const e = service.adapter(service.connector(id)).normalize(envelope('/bind', { sender: { sender_id: { open_id: 'ou_code_race' } } }));
+  assert.throws(() => service.bindings.begin({ ...e, chat_type: 'group' }), /binding_private_chat_required/);
+  const racing = service.bindings.begin(e);
+  const results = await Promise.allSettled([service.bindings.confirmCode(racing.code, id, aSession.token), service.bindings.confirmCode(racing.code, id, bSession.token)]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE external_actor='ou_code_race'").n, 1);
+  const revoked = service.bindings.begin({ ...e, actor_id: 'ou_revoked_code' });
+  const pending = service.bindings.confirmCode(revoked.code, id, bSession.token);
+  h.store.run('DELETE FROM sessions WHERE token_hash=?', digest(bSession.token));
+  await assert.rejects(pending, /login_required/);
+  const disabled = service.bindings.begin({ ...e, actor_id: 'ou_disabled_code' });
+  const confirming = service.bindings.confirmCode(disabled.code, id, aSession.token);
+  h.store.run('UPDATE channel_connectors SET enabled=0,revision=revision+1 WHERE id=?', id);
+  await assert.rejects(confirming, /channel_connector_inactive|channel_revision_conflict/);
+  assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE external_actor IN ('ou_revoked_code','ou_disabled_code')").n, 0);
+});
+
 test('platform binding claims fence concurrent accounts, revoked sessions and disabled connectors', async t => {
   const { h, id, service, member } = await channelFixture(t);
   const a = await member('claim-a', {}), b = await member('claim-b', {});
