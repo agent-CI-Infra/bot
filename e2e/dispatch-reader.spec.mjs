@@ -48,6 +48,7 @@ test('dispatch filters and recorded detail remain usable at six widths, with a s
     await expect(reader.locator('[data-dispatch-event]').first()).toContainText('不分派任务'); await reader.getByRole('button', { name: '查看分派详情', exact: true }).first().click();
     await expect(detail(page)).toContainText('工具操作应结合已保存理由与实际记录核对'); await detail(page).getByRole('button', { name: '关闭分派详情', exact: true }).click();
     await reader.getByRole('combobox', { name: '分派结果', exact: true }).selectOption('create'); await reader.getByRole('button', { name: '应用分派筛选', exact: true }).click();
+    await expect(reader.locator('[data-dispatch-event]')).toHaveCount(1); await expect(reader.locator('[data-dispatch-event="created"]')).toBeVisible();
     await reader.getByRole('button', { name: '查看分派详情', exact: true }).click(); await expect(page).toHaveURL(/dispatch=created/);
     await page.reload(); await expect(detail(page)).toContainText('Visible event created'); await expect(detail(page)).toContainText('Recorded fixture model');
     expect(errors).toEqual([]);
