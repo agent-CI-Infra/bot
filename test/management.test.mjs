@@ -52,6 +52,7 @@ test('disabled projects save review and development defaults without enabling ex
   const {h,admin,member}=await managementFixture(t),single=await member('project-admin',{repository_ids:['101']});
   assert.equal((await single.client('/api/repositories/101/policy','PATCH',{enabled:false})).status,200);
   const count=h.store.get('SELECT count(*) n FROM tasks').n;
+  assert.deepEqual((await query(single.client,'get_effective_config',project)).value.task_creation,{allowed:false,reason:'project_disabled'});
   for(const key of ['development_enabled','review_enabled']){
     h.store.run(`UPDATE policies SET ${key}=0 WHERE repository_id='101'`);
     const saved=await single.client('/api/repositories/101/policy','PATCH',{[key]:true});
@@ -68,6 +69,7 @@ test('disabled projects save review and development defaults without enabling ex
   assert.equal(h.store.get("SELECT status FROM tasks WHERE id='blocked'").status,'waiting_environment');
   assert.equal(h.store.get('SELECT count(*) n FROM tasks').n,count);
   assert.equal((await admin('/api/repositories/101/policy','PATCH',{enabled:true})).value.policy.enabled,1);
+  assert.deepEqual((await query(admin,'get_effective_config',project)).value.task_creation,{allowed:true,reason:null});
   assert.equal((await admin('/api/repositories/101/policy','PATCH',{enabled:false})).value.policy.enabled,0);
 });
 
@@ -179,6 +181,7 @@ test('read-only grants cannot write through either API or agent, and revocation 
   const {h,admin,member}=await managementFixture(t),reader=await member('reader',{repository_ids:['101']});
   h.store.run("UPDATE scoped_grants SET capabilities='[\"tasks.read\"]' WHERE principal_id=?",reader.id);
   assert.equal((await query(reader.client,'get_task',task)).status,201);
+  assert.deepEqual((await query(reader.client,'get_effective_config',project)).value.task_creation,{allowed:false,reason:'capability_forbidden'});
   assert.equal((await command(reader.client,'task.pause',task)).status,403);
   assert.equal((await reader.client('/api/tasks/blocked/pause','POST',{})).status,403);
   const conversation=(await reader.client('/api/management/conversations','POST',{scope:'project:101'})).value.conversation.id;

@@ -28,7 +28,7 @@ docker compose config --quiet
 docker compose -f compose.yaml -f compose.build.yaml config --quiet
 ```
 
-`test/pi-controller.test.mjs` 用本机 runner 和真实 Pi SDK 运行项目主控会话，需要先安装 runner 依赖：`npm ci --prefix runner --omit=dev --ignore-scripts`。没有安装时这一项在本地跳过；CI 安装依赖并设置 `BOT_REQUIRE_PI=1`，缺少 SDK 会失败而不是跳过。
+完整测试前需要安装项目内 runner 依赖：`npm ci --prefix runner --omit=dev --ignore-scripts`。`test/role-conversation.test.mjs` 的通用 Pi 会话用例与 `test/pi-controller.test.mjs` 都用本机 runner 和真实 Pi SDK；缺少 SDK 时通用会话会失败，部分旧用例会跳过。CI 安装依赖并设置 `BOT_REQUIRE_PI=1`，缺少 SDK 会失败而不是跳过。本机也可用这个变量确保实际覆盖 Pi 路径。
 
 `test/claude-code.test.mjs` 启动 lockfile 固定的真实 Claude Code 二进制，以合成 provider 验证 MCP、受控代码修改、实际测试和精确恢复；另有明确标注的协议 fixture。它们不需要个人登录态，也不代替真实模型验收，部署和 opt-in probe 见 [Claude Code harness](claude-code.md)。在 `node:test` 内启动子进程 `node --test` 时要显式构造环境，避免继承 `NODE_TEST_CONTEXT` 导致子测试静默跳过，并断言实际执行项数和失败/成功状态。
 

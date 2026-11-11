@@ -2,10 +2,10 @@ const $ = id => document.getElementById(id);
 let me, setup = false, tab = 'projects', offset = 0, repositories = [], accounts = [], renderVersion = 0, integrationAutoRefresh = false, permissionAutoRefresh = false;
 // Project administrators' grants and the installed repositories to choose from (users page); the user whose grants the editor changes.
 let grants = { assignments: [], organization_assignments: [], organizations: [] }, editingUser = null, editorKind = null;
-const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话', design: '设计系统样例' };
+const titles = { projects: '项目', board: '看板', costs: '统计', events: 'Webhook 投递', management: '管理对话', design: '设计系统样例', 'new-task': '新建任务' };
 // Every page has an address, so a reload or a shared link opens the same page. Accounts and users live in global settings.
 const tabAddresses = { projects: '#/projects', board: '#/board', costs: '#/costs', events: '#/events',
-  more: '#/more', inbox: '#/inbox', external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management' }, superTabs = ['settings'];
+  more: '#/more', inbox: '#/inbox', external: '#/external', settings: '#/settings', identity: '#/identity', management: '#/management', 'new-task': '#/new-task' }, superTabs = ['settings'];
 const retryableStates = ['paused', 'failed', 'waiting_configuration', 'waiting_environment', 'waiting_permission', 'waiting_publication', 'waiting_pr_head', 'retry_wait', 'needs_replan'];
 let messagePage = null;
 async function api(path, method = 'GET', body, { signal } = {}) {
@@ -133,6 +133,7 @@ const legacyOnboardingAddress = /^#onboarding(?:\/(\d+))?$/;
 // A project page (#/projects/<id>/<section>) replaces the list; any other address shows the current tab's list.
 // The tab an address names: #/<tab>, a project page, a wizard step, or an older address (#external, #/accounts, #/users).
 function addressTab(hash) {
+  if (/^#\/new-task(?:\/[1-9]\d*)?$/.test(hash)) return 'new-task';
   if (projectRoute() || hash === '#/projects') return 'projects';
   if (['#/reviews', '#/developments'].includes(hash)) return 'board';
   if (onboardingAddress.test(hash)) return 'settings';
@@ -162,7 +163,7 @@ async function route() {
   if (next !== tab) offset = 0; tab = next;
   const target = projectRoute(), page = $('project-page'), list = document.querySelector('.list-panel');
   const address=tab+':'+location.hash;if(messagePage!==address){notice('message');messagePage=address;}
-  const consolePage = ['more', 'inbox'].includes(tab);
+  const consolePage = ['more', 'inbox', 'new-task'].includes(tab);
   const sample = !target && tab === 'design', samplePage = $('design-page');
   page.hidden = !target; samplePage.hidden = !sample; list.hidden = !!target || tab === 'management' || consolePage || sample;
   $('console-page').hidden = !consolePage;

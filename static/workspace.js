@@ -28,6 +28,7 @@ function workspaceOverview() {
   const aside = element('aside', '', 'workspace-context'), health = card('项目与环境'), healthStatus = note('正在读取环境记录…'), factsBox = element('div');
   healthStatus.className = 'muted workspace-health-status'; healthStatus.setAttribute('role', 'status'); health.append(healthStatus, factsBox);
   const access = card('下一步'); access.append(
+    consoleLink(`#/new-task/${id}`, '新建任务', '填写原始需求、目标、验收条件和交付类型'),
     consoleLink(`#/inbox/${id}`, '打开待处理中心', '查看原因和任务证据后决定下一步'),
     consoleLink(`#/projects/${id}/roles`, '角色与 Manager', '查看实际配置和分派记录'),
     consoleLink(`#/projects/${id}/machine`, '项目电脑', '检查连接、运行状态与资源'),
