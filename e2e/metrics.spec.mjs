@@ -42,7 +42,7 @@ test('任务用量、单价配置与每日项目费用通过真实页面查询�
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     expect(await page.locator('.cost-chart-scroll').evaluate(el=>el.scrollWidth>el.clientWidth)).toBe(true);await page.screenshot({path:'.tmp/metrics-evidence/cost-mobile.png',fullPage:true});
     await page.getByLabel('统计项目',{exact:true}).selectOption('101');await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('USD 5.56');await expect(page.locator('rect[data-project="202"]')).toHaveCount(0);
-    await page.getByLabel('费用币种',{exact:true}).selectOption('CNY');await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('暂无可计价记录');
+    await page.getByLabel('费用币种',{exact:true}).selectOption('CNY');await page.getByRole('button',{name:'查看统计',exact:true}).click();await expect(page.locator('.cost-summary')).toContainText('未定价');
     const memberPassword=testPassword();await admin('/api/users','POST',{username:'metrics-member',password:memberPassword,repository_ids:['101']});
     const context=await browser.newContext(),member=await context.newPage();
     try{
@@ -75,7 +75,7 @@ test('没有费用信息时按输入加输出 token 堆叠，缓存不重复累�
     const chart=page.locator('.cost-chart-section');await expect(chart.locator('svg')).toHaveAttribute('data-metric','tokens');await expect(chart.locator('rect')).toHaveCount(2);
     const own=chart.locator('rect[data-project="101"]');await expect(own).toHaveAttribute('data-value','1100');await own.focus();
     await expect(page.locator('.cost-chart-detail')).toContainText('1,100 token（输入 1,000，输出 100）');await expect(page.locator('.cost-chart-detail')).toContainText('当日 33.3%');
-    await expect(chart).toContainText('缓存命中已包含在输入中，不重复相加');await expect(page.locator('.cost-summary')).toContainText('暂无可计价记录');
+    await expect(chart).toContainText('缓存命中已包含在输入中，不重复相加');await expect(page.locator('.cost-summary')).toContainText('未定价');
     await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-desktop.png'});
     await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await chart.scrollIntoViewIfNeeded();await page.screenshot({path:'.tmp/metrics-evidence/token-chart-mobile.png'});
     await page.getByLabel('统计项目',{exact:true}).selectOption('101');await filter('2026-10-22','2026-10-23');
