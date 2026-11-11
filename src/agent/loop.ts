@@ -21,6 +21,8 @@ import { randomId } from '../core/security.js';
 import { type ReadTokens } from './read-token.js';
 import type { AgentModel } from './gateway.js';
 import { RepositoryExplorer, repositoryTools } from './exploration.js';
+import { permissionTools } from '../roles/permissions.js';
+import { taskReadScopes, taskRolePolicies, taskToolAllowed, withTaskPermissions } from '../tasks/management.js';
 
 export interface ReviewConversation { history?: any[]; resume?: boolean; offset?: number; model?: AgentModel; boundary(stage: string): Promise<{prompt?: string, messages?: string[]}> }
 /** The platform's write tools for this task, by tool name: the control plane performs the write and answers the agent. */
@@ -69,6 +71,10 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
       if (!Object.keys(profile.capabilities.github.permissions).length) stop('github_read_token_not_allowed', undefined, '这条工作流没有 GitHub 读取权限。');
       if (!tokens || !explorer) stop('github_read_token_unavailable', undefined, '当前任务未配置 GitHub 只读令牌服务。');
       const client = await explorer!.connect();
+      // GitHub shares some GET routes between resources. Partial policies must use the checked gateway, not raw shell API calls.
+      if(!['issues','pull_requests','contents','actions','checks','statuses'].every(scope=>tokens!.allowedScopes().includes(scope)))
+        return { structured_only:true,repository:client.fullName,permissions:client.permissions,expires_at:client.expiresAt,
+          instruction:'Use github_read, github_search and read_job_log. This resource policy does not put a token into command environment variables.' };
       return { token: client.token, repository: client.fullName, permissions: client.permissions, expires_at: client.expiresAt };
     },
     complete: (state, publication) => {
@@ -124,5 +130,17 @@ async function run(store: Store, task: Row, workspace: Workspace, redactor: Reda
           ? executorWorkspace(workspace, { config, conversation, platform, repository, token, createPullRequest, publication: profile.capabilities.github.publication, complete }, round)(instance, resolved)
           : undefined } });
   }
-  return runAgent({ store, task, redactor, guard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: piAdapter(session) });
+  // Legacy single-executor entries use the same role policy as team runs. A broad runner profile cannot bypass it.
+  const allowed=()=>profile.tools.filter(tool=>taskRolePolicies(store,task).every(p=>permissionTools(p).includes(tool.function.name))&&taskToolAllowed(store,task,'dev',tool.function.name));
+  const initial=allowed().map(tool=>tool.function.name),scopes=taskReadScopes(store,task),fixed=taskRolePolicies(store,task);
+  profile.tools=profile.tools.filter(tool=>initial.includes(tool.function.name));config.tools=profile.tools;
+  const rights=profile.capabilities;
+  rights.workspace.read&&=initial.includes('read_file');rights.workspace.write&&=initial.includes('write_file');
+  rights.workspace.notes&&=initial.includes('write_file');rights.workspace.shell&&=initial.includes('run_command');
+  rights.github.permissions=Object.fromEntries(Object.entries(rights.github.permissions).filter(([scope])=>scopes.includes(scope)));
+  if(!initial.includes('create_pull_request'))rights.github.publication='none';
+  const liveGuard=async()=>{await guard();const current=allowed().map(tool=>tool.function.name);
+    if(initial.some(name=>!current.includes(name))||scopes.some(scope=>!taskReadScopes(store,task).includes(scope)))stop('role_authority_revoked','waiting_permission');};
+  session.guard=liveGuard;
+  return withTaskPermissions(store,task,'dev',fixed,()=>runAgent({ store, task, redactor, guard:liveGuard, system, modelAttempts: limits.modelAttempts, prompt: config.prompt, tools: profile.tools, model: conversation?.model, adapter: piAdapter(session) }));
 }

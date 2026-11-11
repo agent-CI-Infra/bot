@@ -7,7 +7,7 @@ import { playbooks } from '../tasks/playbooks.js';
 import { rolePool, systemInstructions, roleTemplate, requiredRoles, configuredRoles } from './pool.js';
 import { roleKind, environmentProfiles, budgetPolicies, outputSchemas, allowedFor, type RoleKind } from './catalog.js';
 import { harnesses } from './harness.js';
-import { defaultPermissions, migratePermissions, permissionItems, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
+import { defaultPermissions, migratePermissions, githubReadScopes, validPermissionInput, updatePermissions, permissionSnapshot, permitsTool, type RolePermissions } from './permissions.js';
 import { recommendedBackend, plannedBackend } from './backends.js';
 import { validateStages, type StageDefinition } from './stage-policy.js';
 
@@ -234,10 +234,9 @@ export function normalizeConfiguration(s: Store, repositoryId: string, input: an
     const permissionInput = given.permissions ?? previous?.permissions ?? defaultPermissions(id, kind);
     if (!permissionInput || typeof permissionInput !== 'object' || Array.isArray(permissionInput)) invalid('invalid_role_permissions', `${field}.permissions`);
     for (const [key, value] of Object.entries(permissionInput)) {
-      const item = permissionItems.find(item => item.id === key);
-      if (!item || !item.modes.includes(value as any)) invalid('invalid_role_permission', `${field}.permissions.${key}`);
+      if (!validPermissionInput(key, value, previous?.permissions ?? defaultPermissions(id,kind))) invalid('invalid_role_permission', `${field}.permissions.${key}`);
     }
-    const permissions = { ...defaultPermissions(id, kind), ...permissionInput };
+    const permissions = updatePermissions(previous?.permissions ?? defaultPermissions(id,kind),permissionInput);
     const definition: RoleDefinitionV2 = { role_id: id, revision: 0, enabled, kind, name: textField('name', 80, defaultName), responsibility: textField('responsibility', 2000, defaultResponsibility),
       persona_prompt: textField('persona_prompt', 32000, previous?.persona_prompt ?? roleTemplate(id)), model_profile_ref: model, skill_bundle_ref: skill, harness_ref: { id: harness!.id, version: harness!.version },
       permissions,
@@ -295,7 +294,7 @@ export interface RoleSnapshot {
   model: { source: 'role' | 'workflow' | 'project' | 'external_harness'; workflow: string; requested: ModelProfileRef | null; id: string; version: number; name: string; profile_hash: string | null; api: string | null; tool_calls: boolean | null; structured_output: string | null };
   skills: { id: string; revision: number; content_hash: string; source: any; files: { path: string; sha256: string; bytes: number }[] } | null;
   harness: { id: string; version: string; session: string; events: string; environment: string; runtime: { package: string; version: string } | null; source: 'role' | 'entry_executor' | 'legacy' };
-  capability: { id: string; version: string; tools: readonly string[] | null; authorities: Record<string, boolean> };
+  capability: { id: string; version: string; tools: readonly string[] | null; authorities: Record<string, boolean>; permissions?: RolePermissions };
   environment: { id: string; version: string; workspace: string; repository: boolean; isolation?: string };
   budget: RoleDefinitionV2['budget_policy_ref'];
   output_schema: { id: string; version: string; tool: string | null };
@@ -345,7 +344,7 @@ export function resolveRole(s: Store, repositoryId: string, roleId: string, work
   }
   if (!harness.externalModel) checkMatrix(harness, profile as { api: string; tool_calls: boolean; structured_output: string }, `${field}.model_profile_ref`, (code, at) => { throw new TaskError(code, 'waiting_configuration', `${at}：${harness.id} 不支持这个模型配置。`); });
   if (!harness.kinds.includes(definition.kind) && !harnessOverride && !config.legacy) return stop('harness_role_unsupported', 'waiting_configuration', `${field}.harness_ref.id：${harness.id} 不能运行 ${definition.kind} 角色。`);
-  const permission = permissionSnapshot(definition.permissions);
+  const permission = permissionSnapshot(definition.permissions,definition.kind);
   const environment = environmentProfiles.find(e => e.id === definition.environment_profile_ref.id)!, schema = outputSchemas.find(o => o.id === definition.output_schema_ref.id)!;
   const bundle = definition.skill_bundle_ref ? config.skills.find(b => b.id === definition.skill_bundle_ref!.id && b.revision === definition.skill_bundle_ref!.revision) : undefined;
   if (definition.skill_bundle_ref) skillFiles(s, repositoryId, definition.skill_bundle_ref);
@@ -375,6 +374,9 @@ export function roleAuthority(s: Store, repositoryId: string, snapshot: RoleSnap
   if (!definition.enabled) return 'role_disabled';
   if (!direct && !config.enabled && !config.legacy && snapshot.kind !== 'evaluator') return 'role_coordination_disabled';
   const live = definition.permissions;
+  const reads=snapshot.capability.permissions?githubReadScopes(snapshot.capability.permissions)
+    :snapshot.capability.tools?.includes('github_read_token')?['issues','pull_requests','contents','actions','checks','statuses']:[];
+  if(reads.some(scope=>!githubReadScopes(live).includes(scope)))return 'capability_revoked';
   if (tool && snapshot.capability.tools && !snapshot.capability.tools.includes(tool)) return 'tool_not_in_permissions';
   if (tool && !permitsTool(live, tool)) return 'capability_revoked';
   return null;

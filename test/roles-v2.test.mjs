@@ -103,10 +103,10 @@ test('old policy selections and appended prompts migrate once without mutating h
   const raw = JSON.stringify(old);
   f.s.run('INSERT INTO settings VALUES(?,?)', 'roles:r', raw);
   const fixed = resolveRole(f.s, 'r', 'reviewer', 'task.request', {configuration:old});
-  assert.equal(fixed.definition.permissions.commands, 'deny');
+  assert.equal(fixed.definition.permissions.legacy_commands, 'deny');
   assert.ok(fixed.system.endsWith('Keep this project instruction.'));
   const view = roleApi(f.s, admin, 'GET', rolesUrl, {}), reviewer = view.configuration.roles.find(role => role.role_id === 'reviewer');
-  assert.equal(reviewer.permissions.commands, 'deny');
+  assert.equal(reviewer.permissions.legacy_commands, 'deny');
   assert.ok(reviewer.persona_prompt.startsWith(roleTemplate('reviewer')));
   assert.ok(reviewer.persona_prompt.endsWith('Keep this project instruction.'));
   assert.equal(reviewer.capability_policy_ref, undefined);
@@ -121,7 +121,7 @@ test('flat permissions filter actual tools and a later grant cannot widen an exi
   f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'read', commands: 'deny', project_memory: 'none', role_memory: 'none' } }] });
   const old = resolveRole(f.s, 'r', 'dev', 'task.request').snapshot;
   const result = await runRole({ ...f.spec, tools: ['read_file', 'write_file', 'run_command', 'search_project_memory', 'finish'].map(tool) }, 'dev');
-  assert.deepEqual(result.result.tools, ['read_file', 'finish']);
+  assert.deepEqual(result.result.tools, ['read_file', 'finish','list_managed_tasks','read_managed_task','create_task','manage_task','search_role_memory']);
   f.put({ roles: [{ role_id: 'dev', permissions: { repository: 'write', commands: 'allow' } }] });
   assert.equal(roleAuthority(f.s, 'r', old, 'write_file'), 'tool_not_in_permissions');
   assert.ok(resolveRole(f.s, 'r', 'dev', 'task.request').snapshot.capability.tools.includes('write_file'));
@@ -142,13 +142,13 @@ test('only Manager, Coordinator and QA are protected; deleted built-in roles sta
   assert.equal(put({ roles: [{ role_id: 'dev' }] }).roles.find(role => role.role_id === 'dev').persona_prompt, roleTemplate('dev'));
 });
 
-test('deleting a running role or denying its result submission takes effect before the next side effect', async t => {
-  for (const change of ['delete', 'submission']) await t.test(change, async t => {
+test('deleting a running role or revoking its computer takes effect before the next side effect', async t => {
+  for (const change of ['delete', 'computer']) await t.test(change, async t => {
     let executions = 0;
     const f = await fixture(t, () => {
       const revision = roleApi(f.s, admin, 'GET', rolesUrl, {}).revision;
-      roleApi(f.s, admin, 'PUT', rolesUrl, { expected_revision: revision, enabled: true, ...(change === 'delete' ? { deleted_roles: ['reviewer'] } : { roles: [{ role_id: 'reviewer', permissions: { submission: 'deny' } }] }) });
-      return change === 'delete' ? call('run_command', { command: 'true' }) : call('finish', { summary: 'Must be refused' });
+      roleApi(f.s, admin, 'PUT', rolesUrl, { expected_revision: revision, enabled: true, ...(change === 'delete' ? { deleted_roles: ['reviewer'] } : { roles: [{ role_id: 'reviewer', permissions: { computer: 'deny' } }] }) });
+      return call('run_command', { command: 'true' });
     });
     f.put({});
     await assert.rejects(runRole({ ...f.spec, tools: [tool('run_command'), tool('finish')], execute: async () => { executions++; } }, 'reviewer'), { code: 'role_authority_revoked' });
@@ -325,7 +325,7 @@ test('the project controller runs on the Pi harness, delegates by references and
   // The controller session is its own restricted workspace with only control-plane tools.
   const [session] = [...runner.spaces.values()].filter(sp => sp.parsed);
   assert.notEqual(session.id, workspace.task.workspace_id);
-  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_coordination', 'read_managed_task', 'read_playbook', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'relate_task', 'request_task_coordination', 'select_playbooks', 'set_task_priority', 'wait_for_tasks']);
+  assert.deepEqual(session.parsed.tools.map(t => t.function.name).sort(), ['acknowledge_coordination', 'create_task', 'delegate_role', 'list_managed_tasks', 'list_project_tasks', 'manage_task', 'nominate_delivery', 'plan_task', 'read_coordination', 'read_managed_task', 'read_playbook', 'read_stage_schedule', 'read_task_history', 'read_task_record', 'record_progress', 'record_scope_difference', 'relate_task', 'request_task_coordination', 'select_playbooks', 'set_task_priority', 'wait_for_tasks']);
   assert.deepEqual(session.parsed.control_tools.sort(), session.parsed.tools.map(t => t.function.name).sort());
   assert.deepEqual(session.parsed.capabilities.workspace, { read: false, write: false, notes: false, shell: false });
   for (const body of f.requests.filter(isController)) for (const name of ['write_file', 'run_command', 'create_pull_request', 'submit_acceptance']) assert.ok(!body.tools.some(t => t.function.name === name));

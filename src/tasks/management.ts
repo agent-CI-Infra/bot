@@ -4,8 +4,15 @@ import { assertCurrent, authorize, narrowActor, resolvePrincipalActor, type Acto
 import { projectCapabilities, explicitDelegationCapabilities } from '../identity/storage.js';
 import { fail, digest } from '../core/security.js';
 import { roleConfiguration } from '../roles/definition.js';
-import { permissionItems, permitsTool, type RolePermissions } from '../roles/permissions.js';
-import { taskPermissions } from './configuration.js';
+import { githubReadScopes, resourceAllowed, narrowPermissions, permitsTool, type RolePermissions } from '../roles/permissions.js';
+import { taskConfiguration, taskPermissions } from './configuration.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+const executingPolicy=new AsyncLocalStorage<{store:Store;task:string;role:string;policies:RolePermissions[]}>();
+/** Run-local authority survives async tool calls without sharing the mutable task's active_role between parallel readers. */
+export function withTaskPermissions<T>(store:Store,task:Row,role:string,policies:RolePermissions[],run:()=>T):T {
+  return executingPolicy.run({store,task:String(task.id),role,policies:policies.map(p=>({...p}))},run);
+}
 
 export function taskManagementStorage(store: Store): void {
   store.db.exec(`CREATE TABLE IF NOT EXISTS task_origins(task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
@@ -35,7 +42,7 @@ const issued = new WeakMap<TaskCaller, Trust>();
 const sourceGuards = new WeakMap<Store, (origin: Row) => void>();
 export function taskSourceGuard(store: Store, guard: (origin: Row) => void): void { sourceGuards.set(store, guard); }
 const roleOf = (s: Store, project: string, role: string) => roleConfiguration(s, project).roles.find(r => r.role_id === role && r.enabled);
-const canManage = (permissions: RolePermissions, write: boolean) => permissions.task_management === 'write' || !write && permissions.task_management === 'read';
+const canManage = (permissions: RolePermissions, write: boolean) => permitsTool(permissions, write ? 'manage_task' : 'list_managed_tasks');
 function issue(store: Store, data: Omit<TaskCaller, 'owner_key' | 'principal_capabilities'>, trust: Omit<Trust, 'store'>): TaskCaller {
   const owner_key = JSON.stringify([data.kind, data.project_id, data.principal_id, data.conversation_id, data.role]);
   const principal_capabilities = trust.actor ? [...projectCapabilities, ...explicitDelegationCapabilities].filter(cap => {
@@ -56,12 +63,7 @@ export function roleTaskCaller(store: Store, project: string, role: string, sour
   return issue(store, { kind: 'role', project_id: project, role, principal_id: source.actor?.principal_id ?? null,
     conversation_id: source.conversation_id ?? null, source_message: source.source_message ?? null,
     source_task_id: source.source_task_id ?? null, source_run_id: source.source_run_id ?? null,
-    permissions: Object.fromEntries(permissionItems.map(item => {
-      const mode = definition.permissions[item.id]!;
-      if (!source.allowed_tools) return [item.id, mode];
-      const all = [...item.read, ...item.write].every(name => source.allowed_tools!.includes(name));
-      return [item.id, all ? mode : item.modes.includes('read') && item.read.every(name => source.allowed_tools!.includes(name)) ? (mode === 'none' ? 'none' : 'read') : item.modes[0]!];
-    })), config_revision: config.revision, authorization_revision: source.actor?.authorization_revision ?? null },
+    permissions: source.allowed_tools ? narrowPermissions(definition.permissions,source.allowed_tools) : definition.permissions, config_revision: config.revision, authorization_revision: source.actor?.authorization_revision ?? null },
     { guard: source.guard, actor });
 }
 /** The human console keeps its existing project-management grant; it is not an impersonated employee role. */
@@ -205,11 +207,48 @@ export function assertTaskRole(store: Store, task: Row, role: string): void {
 }
 export function assertTaskExternalEffect(store: Store, task: Row, kind: string): void {
   const origin=assertManagedExecution(store,task);
+  const policies=taskRolePolicies(store,task);
+  const pr=String(task.kind).endsWith('.pr');
+  const allowed=(p:RolePermissions)=>kind==='issue'?resourceAllowed(p,'issues','create')
+    :kind==='branch'||kind==='pull_request'?resourceAllowed(p,'contents','publish')&&resourceAllowed(p,'pull_requests','create')
+    :kind==='comment'?resourceAllowed(p,pr?'pull_requests':'issues','reply')
+    :kind==='label'?resourceAllowed(p,pr?'pull_requests':'issues','labels')
+    :kind==='review'?resourceAllowed(p,'pull_requests','reply')
+    :kind==='resolve'?resourceAllowed(p,'pull_requests','reply')&&resourceAllowed(p,'contents','publish')
+    :['merge','merge_queue','dequeue'].includes(kind)?resourceAllowed(p,'contents','publish'):false;
+  if(policies.some(p=>!allowed(p)))fail(403,'task_external_write_forbidden');
   if(!origin||origin.source_kind!=='role')return;
   const tool=kind==='issue'?'create_issue':['branch','pull_request'].includes(kind)?'create_pull_request':null;
   const role=String(task.active_role??origin.executor_role),current=roleOf(store,task.repository_id,role);
-  if(!tool||!current||!permitsTool(current.permissions,tool)||!taskToolAllowed(store,task,role,tool)||
-    !taskPermissions(store,task).writes.includes(kind==='issue'?'issue':'pull_request'))fail(403,'task_external_write_forbidden');
+  if(tool&&(!current||!permitsTool(current.permissions,tool)||!taskToolAllowed(store,task,role,tool)||
+    !taskPermissions(store,task).writes.includes(kind==='issue'?'issue':'pull_request')))fail(403,'task_external_write_forbidden');
+}
+
+/** Live source and executor policies also constrain framework effects, not just model-facing tools. */
+export function taskRolePolicies(store:Store,task:Row):RolePermissions[]{
+  const context=executingPolicy.getStore(),active=context?.store===store&&context.task===String(task.id)?context:null;
+  const origins=taskOriginChain(store,task),result:RolePermissions[]=[...(active?.policies??[])];
+  const role=active?.role??String(task.active_role??origins[0]?.executor_role??'dev');
+  const executor=roleOf(store,task.repository_id,role);result.push(executor?.permissions??{});
+  // Publication happens after the model context ends; keep that executor's last successful resource ceiling too.
+  let completed=false;
+  if(!active){const run=store.get(`SELECT p.snapshot FROM task_runs r JOIN role_snapshots p ON p.id=r.role_snapshot
+    WHERE r.task_id=? AND r.role=? AND r.status='succeeded' ORDER BY r.rowid DESC LIMIT 1`,task.id,role);
+    const pinned=run&&JSON.parse(run.snapshot).capability?.permissions;if(pinned){result.push(pinned);completed=true;}}
+  const saved=taskConfiguration(store,task)?.roles?.roles?.find((item:any)=>item.role_id===role);
+  if(!active&&!completed&&saved?.permissions)result.push(saved.permissions);
+  for(const origin of origins){
+    if(origin.source_kind==='role'&&origin.source_role){result.push(JSON.parse(origin.permissions));const source=roleOf(store,task.repository_id,origin.source_role);if(source)result.push(source.permissions);}
+    if(origin.principal_id&&store.hasTable('channel_service_bindings')){
+      const service=store.get('SELECT r.permissions FROM channel_service_bindings b JOIN service_roles r ON r.id=b.service_role_id WHERE b.principal_id=?',origin.principal_id);
+      if(service)result.push(JSON.parse(service.permissions??'{}'));
+    }
+  }
+  return result;
+}
+export function taskReadScopes(store:Store,task:Row):string[]{
+  const policies=taskRolePolicies(store,task);
+  return ['contents','issues','pull_requests','actions','checks','statuses','metadata'].filter(scope=>scope==='metadata'||policies.every(p=>githubReadScopes(p).includes(scope)));
 }
 /** A physical transcript is rebuilt when authority changes; the logical task and role instance keep their IDs. */
 export function taskAuthorizationFence(store:Store,task:Row,role:string):string {

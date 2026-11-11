@@ -53,15 +53,36 @@ function roleBackendPicker(role, state, redraw) {
     redraw();
   });
 }
-const permissionModeLabels = { none: '禁止', read: '只读', write: '读写', allow: '允许', deny: '拒绝' };
-function rolePermissionEditor(role, state) {
-  const box = element('fieldset', '', 'role-permissions'); box.append(element('legend', '权限控制'));
-  box.append(note('逐项设置。工具还必须由当前任务入口提供，并受项目和任务授权限制。文件只读不会禁止命令修改文件；要禁止命令，请同时将「运行命令」设为拒绝。'));
-  for (const item of state.data.permission_items || []) {
-    const control = roleSelect(role.role_id + ' ' + item.name + '权限', role.permissions[item.id], item.modes.map(mode => [mode, permissionModeLabels[mode]]), value => { role.permissions[item.id] = value; markRoleDirty(state); });
-    const row = element('div', '', 'role-permission-row'); row.append(field(item.name, control), note(item.detail)); box.append(row);
+const permissionModeLabels = { none: '无权限', read: '只读', write: '读写', allow: '允许', deny: '不允许', custom: '待迁移：保留原有操作' };
+function permissionEditor(permissions, items, change, prefix = '', fixed = false) {
+  const box = element('div', '', 'role-permissions');
+  box.append(note('基础能力默认可用：处理自己的任务、读取当前会话、使用自己的技能与记忆、记录进度和提交本次结果。项目范围、运行契约和外部授权仍会检查。'));
+  if (fixed) box.append(note('全部能力已允许；实际执行仍受当前用户授权、项目范围和入口支持情况约束。'));
+  for (const [group, title] of [['platform', '平台能力'], ['github', 'GitHub']]) {
+    const section = element('fieldset', '', 'role-permission-group'); section.append(element('legend', title));
+    if (group === 'github') section.append(note('控制访问 GitHub 和发布变更；任务已获准提供的材料、虚拟电脑中的本地文件仍按任务范围使用。角色权限不会扩大 GitHub App 安装授权。修改工作流文件仍受现有发布门禁和 GitHub App 的 Workflows 授权约束，当前没有独立角色开关。'));
+    for (const item of items.filter(item => item.group === group)) {
+      const choices = item.modes.map(mode => [mode, permissionModeLabels[mode]]);
+      if (permissions[item.id] === 'custom') choices.unshift(['custom', permissionModeLabels.custom, true]);
+      const control = roleSelect(prefix + item.name + (prefix ? '权限' : ''), permissions[item.id], choices, value => { permissions[item.id] = value; change(); });
+      control.disabled = fixed || item.supported === false;
+      const row = element('div', '', 'role-permission-row'); row.append(field(item.name, control), note(item.detail));
+      if (item.supported === false) row.append(note('当前没有通用角色执行工具；仅在已有专用入口提供。'));
+      if (permissions[item.id] === 'custom') {
+        const detail = item.id === 'computer' ? `文件：${permissionModeLabels[permissions.legacy_repository]}；命令：${permissionModeLabels[permissions.legacy_commands]}`
+          : item.id === 'project_tasks' ? `其他任务：${permissionModeLabels[permissions.legacy_project_tasks || 'none']}；协调：${permissionModeLabels[permissions.legacy_coordination || 'none']}；调度：${permissionModeLabels[permissions.legacy_nomination || 'deny']}；旧派活附带任务控制：${permissionModeLabels[permissions.legacy_delegation_controls || 'deny']}`
+          : Object.entries(permissions).filter(([key,value]) => key.startsWith('legacy_' + item.id.slice(7) + '_') && value === 'allow')
+            .map(([key]) => ({ read: '读取', create: '创建', reply: '评论', labels: '分类标签', publish: '发布候选', report: '追加报障' })[key.split('_').at(-1)]).filter(Boolean).join('、');
+        row.append(note('旧配置保留的能力：' + (detail || '无') + '。选择新等级后按该等级生效，新增能力不会静默启用。'));
+      }
+      section.append(row);
+    }
+    box.append(section);
   }
   return box;
+}
+function rolePermissionEditor(role, state) {
+  return permissionEditor(role.permissions, state.data.permission_items || [], () => markRoleDirty(state), role.role_id + ' ');
 }
 function rolesConsole() {
   const id = current.id, holder = element('div', '', 'roles-page'), message = element('p', '', 'view-error'); message.setAttribute('role', 'alert');
@@ -97,7 +118,7 @@ function rolesConsole() {
             const { required_stages, ...draft } = state.draft;
             const stagesChanged = JSON.stringify(required_stages) !== JSON.stringify(state.data.configuration.required_stages || []);
             await api(`/api/repositories/${id}/roles`, 'PUT', { ...draft, roles: draft.roles.map(({ kind, ...role }) => role), ...(stagesChanged ? { required_stages } : {}), expected_revision: state.data.configuration.revision });
-            current.rolesDraft = null; await reloadWith('角色配置已保存，新任务使用新配置');
+            current.rolesDraft = null; await reloadWith('角色配置已保存，新任务使用新配置；收回权限会阻止后续调用');
           } catch (err) { message.textContent = /role_configuration_conflict/.test(err.message) ? '角色配置已被别人修改。请刷新读取最新版本，再应用你的修改。当前草稿仍保留。' : `${err.message}${err.field ? '（配置项：' + err.field + '）' : ''}`; }
           finally { save.disabled = false; }
         });
@@ -129,7 +150,7 @@ function roleOverviewCards(state, redraw) {
     if (role.role_id === 'dev' && data.configured && saved?.entry_harness_source !== 'role' && saved?.harness_ref.id !== 'pi') row.lastElementChild.append(note('检视与 Actions 的开发执行器仍为 Pi，直到该角色的后端选择发生变更')); 
     tableCell(row, '模型', roleModelPicker(role, state), note('当前解析：' + roleModelText(data.preview.find(entry => entry.role === role.role_id))));
     tableCell(row, '技能包', roleSkillPicker(role, state));
-    const details = element('details', '', 'role-permission-details'); details.append(element('summary', '编辑逐项权限'), rolePermissionEditor(role, state));
+    const details = element('details', '', 'role-permission-details'); details.append(element('summary', '编辑权限'), rolePermissionEditor(role, state));
     tableCell(row, '权限控制', details); body.append(row);
   }
   overview.append(table, note('Agent 后端：' + data.backends.map(backend => backend.name + (backend.available ? '（可用）' : '（尚未接入）')).join('；')));

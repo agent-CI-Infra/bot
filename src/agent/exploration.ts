@@ -32,13 +32,26 @@ function readPath(path: unknown): string | null {
   return path;
 }
 
+/** Most-specific routes first: CI under /commits is not repository Contents. */
+export function readResource(path:string):string|null {
+  const route=path.split('?')[0]!;
+  if(/^\/(?:check-runs|check-suites)(?:\/|$)/.test(route)||/^\/commits\/[^/]+\/(?:check-runs|check-suites)(?:\/|$)/.test(route))return 'checks';
+  if(/^\/statuses\//.test(route)||/^\/commits\/[^/]+\/(?:status|statuses)(?:\/|$)/.test(route))return 'statuses';
+  if(route.startsWith('/actions/'))return 'actions';
+  if(/^\/(?:issues|labels|milestones)(?:\/|$)/.test(route))return 'issues';
+  if(/^\/pulls(?:\/|$)/.test(route)||/^\/commits\/[^/]+\/pulls(?:\/|$)/.test(route))return 'pull_requests';
+  return readPath(path)?'contents':null;
+}
+
 export class RepositoryExplorer {
   private client?: GitHub;
   private readonly cache = new Map<number, string[]>();
   readonly logs: any[] = [];
+  private scopeKey='';
   constructor(readonly tokens: ReadTokens, readonly redactor: Redactor, readonly guard: () => Promise<void>) {}
   async connect() {
-    if (!this.client || Date.parse(this.client.expiresAt) < Date.now() + 60000) this.client = await this.tokens.issueRepository();
+    const key=this.tokens.allowedScopes().slice().sort().join(',');
+    if (!this.client || this.scopeKey!==key || Date.parse(this.client.expiresAt) < Date.now() + 60000) { this.client = await this.tokens.issueRepository();this.scopeKey=key; }
     return this.client;
   }
 
@@ -69,7 +82,32 @@ export class RepositoryExplorer {
       const path = readPath(args.path);
       if (Object.keys(args).some(key => key !== 'path') || !path) return { error: 'invalid_arguments' };
       if (!this.client) return { error: 'github_read_token_required' };
+      const scopes=this.tokens.allowedScopes();let resource=readResource(path);
+      // Repository-wide comment routes mix Issue and PR discussions without identifying their parent kind.
+      if(/^\/issues\/(?:comments|events)(?:[/?]|$)/.test(path)&&(!scopes.includes('issues')||!scopes.includes('pull_requests')))return {error:'github_resource_forbidden'};
+      const shared=/^\/issues\/(\d+)\/(?:comments|labels)(?:\?|$)/.exec(path);
+      if(shared&&!scopes.includes('issues')&&scopes.includes('pull_requests')){
+        await this.connect();
+        const pr=await this.client.request('GET',this.client.path('/pulls/'+shared[1]),undefined,true);
+        if(!pr)return {error:'github_resource_forbidden'};
+        resource='pull_requests';
+      }
+      if(!resource||!scopes.includes(resource))return {error:'github_resource_forbidden'};
+      await this.connect();
+      const number=/^\/issues\/(\d+)(?:\/|\?|$)/.exec(path)?.[1];
+      if(resource==='issues'&&number&&!scopes.includes('pull_requests')){
+        const object=await this.client.request('GET',this.client.path('/issues/'+number));
+        if(object.pull_request)return {error:'github_resource_forbidden'};
+      }
       const data = await this.client.request('GET', this.client.path(path));
+      // Issues endpoints share PR objects. Never return the other resource through a shared route.
+      const allowed=(item:any)=>!item?.pull_request||scopes.includes('pull_requests');
+      if(resource==='issues'){
+        if(Array.isArray(data))return data.filter(allowed);
+        if(!allowed(data))return {error:'github_resource_forbidden'};
+        // A comment-id route cannot prove its issue/PR kind without following its parent.
+        if(/^\/issues\/comments\//.test(path)&&!scopes.includes('pull_requests'))return {error:'github_resource_forbidden'};
+      }
       if (data?.encoding === 'base64' && typeof data.content === 'string') return { ...data, encoding: 'utf-8', content: Buffer.from(data.content, 'base64').toString('utf8') };
       return data;
     }
@@ -77,14 +115,21 @@ export class RepositoryExplorer {
       const page = args.page ?? 1;
       if (Object.keys(args).some(key => !['query', 'page'].includes(key)) || typeof args.query !== 'string' || !args.query.trim() || /\b(?:repo|org|user):/i.test(args.query) || !Number.isSafeInteger(page) || page < 1) return { error: 'invalid_arguments' };
       if (!this.client) return { error: 'github_read_token_required' };
-      const query = `repo:${this.client.fullName} ${args.query}`;
+      const scopes=this.tokens.allowedScopes();
+      if(!scopes.includes('issues')&&!scopes.includes('pull_requests'))return {error:'github_resource_forbidden'};
+      await this.connect();
+      const restriction=scopes.includes('issues')&&scopes.includes('pull_requests')?'':scopes.includes('issues')?' is:issue':' is:pr';
+      const query = `repo:${this.client.fullName} ${args.query}${restriction}`;
       const result = await this.client.request('GET', `/search/issues?q=${encodeURIComponent(query)}&per_page=100&page=${page}`);
       // Search responses are not trusted to honor their query's repository qualifier.
       const repositoryUrl = this.client.apiUrl.replace(/\/$/, '') + this.client.path();
       if (!Array.isArray(result.items) || result.items.some((item: any) => item.repository_url !== repositoryUrl)) return { error: 'github_search_repository_mismatch' };
+      if(result.items.some((item:any)=>item.pull_request?!scopes.includes('pull_requests'):!scopes.includes('issues')))return {error:'github_resource_forbidden'};
       return result;
     }
     if (name !== 'read_job_log') return { error: 'tool_not_allowed' };
+    if(!this.tokens.allowedScopes().includes('actions'))return {error:'github_resource_forbidden'};
+    if(this.client)await this.connect();
     const start = args.start_line ?? 1, count = args.max_lines ?? 200;
     if (Object.keys(args).some(key => !['job_id', 'start_line', 'max_lines'].includes(key)) || !Number.isSafeInteger(args.job_id) || args.job_id < 1 || !Number.isSafeInteger(start) || start < 1 || !Number.isSafeInteger(count) || count < 1 || count > 500) return { error: 'invalid_arguments' };
     if (!this.client) return { error: 'github_read_token_required' };

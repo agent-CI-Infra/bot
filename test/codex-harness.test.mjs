@@ -35,7 +35,7 @@ test('Codex app-server: handshake, verified task tools, thread/turn binding, str
  assert.ok(methods.lastIndexOf('experimentalFeature/list')<methods.indexOf('turn/start'),'built-in tools are verified before the first turn');
  const started=f.lines('requests.jsonl').find(r=>r.method==='thread/start');assert.ok(started.keys.includes('developerInstructions')&&started.keys.includes('config'));
  const events=f.events(),bound=events.find(e=>e.type==='session_bound');
- assert.deepEqual([bound.threadId,bound.protocol,bound.tools,bound.sandbox,bound.model,bound.disabledBuiltins],[state.sessionId,'codex-app-server',['finish','read_task_record'],{type:'readOnly'},'gpt-fixture',[...deniedFeatures]]);
+ assert.deepEqual([bound.threadId,bound.protocol,bound.tools,bound.sandbox,bound.model,bound.disabledBuiltins],[state.sessionId,'codex-app-server',['create_task','finish','list_managed_tasks','manage_task','read_managed_task','read_task_record'],{type:'readOnly'},'gpt-fixture',[...deniedFeatures]]);
  const turns=events.filter(e=>e.type==='turn');
  assert.deepEqual(turns.map(e=>[e.phase,e.status??null,e.usage??null]),[['started',null,null],['ended','completed','observed']]);
  assert.equal(state.lastTurnId,turns[0].turnId);

@@ -53,7 +53,7 @@ for(const harness of ['native','process','pi'])test(`generic conversation uses t
   assert.ok(!request.request_snapshot.includes('Local context'));assert.ok(!request.response_snapshot.includes('A source-bound response'));
   assert.ok(f.store.secrets.open(request.request_snapshot,'conversation-model-request:'+request.id).snapshot.includes('Local context'));
   assert.ok(f.store.get('SELECT count(*) n FROM role_conversation_events').n>0);
-  assert.ok(f.requests.every(r=>!r.tools.some(t=>['create_task','run_command','delegate_role','create_pull_request'].includes(t.function.name))));
+  assert.ok(f.requests.every(r=>!r.tools.some(t=>['run_command','delegate_role','create_pull_request'].includes(t.function.name))));
   const ledger=f.store.get('SELECT * FROM model_requests');assert.equal(ledger.task_id,null);assert.equal(ledger.conversation_id,f.source.id);assert.equal(ledger.role_id,'reviewer');assert.equal(ledger.source_message,'source-1');
   if(harness==='pi'){
     assert.ok(f.store.get('SELECT count(*) n FROM role_conversation_operations').n>0);

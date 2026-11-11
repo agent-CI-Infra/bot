@@ -1,3 +1,4 @@
+import type { Manager } from '../projects/service.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import { checkManagementBudget } from './budget.js';
 import type { Store, Row } from '../storage/database.js';
@@ -41,7 +42,7 @@ export class ManagementService {
   knowledgeSearch?: (actor:ActorContext,project:string,query:string,offset:number,limit:number)=>Promise<Json>;
   knowledgeRead?: (actor:ActorContext,project:string,id:string,revision?:number,versions?:boolean,baseline?:string)=>Promise<Json>;
   schedulingQuery?: (actor:ActorContext,operation:string,project:string,args:Json)=>Promise<Json>;
-  constructor(readonly store: Store, readonly rules: RuleService, readonly tasks: TaskCommands) {}
+  constructor(readonly store: Store, readonly rules: RuleService, readonly tasks: TaskCommands, readonly computer?:Manager, readonly githubUrl?:string) {}
   register(operation: string, extension: ManagementExtension): void {
     if(!['configuration.pr','knowledge.revise',...Object.keys(schedulingCommands)].includes(operation)||this.extensions.has(operation))throw new Error('invalid_management_registration');
     this.extensions.set(operation,extension);

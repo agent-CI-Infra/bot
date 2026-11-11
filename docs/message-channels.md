@@ -108,10 +108,10 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 群聊助手获得的工具都在服务端按绑定范围校验，一次请求可以跨多个仓库，不需要先选项目：
 
 - `list_projects`：当前可用的仓库全名和 GitHub 链接，不返回内部 ID；
-- `conversation_history`：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
-- `github: read`：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
+- 当前会话（默认可用）：本群本地记录的检索、摘要和分段读取（`search_conversation_history`／`read_conversation_summary`／`read_conversation_message`），不回源飞书；
+- GitHub 各资源的读取权限：`github_read`、`github_search`、`read_job_log`，复用任务的仓库只读工具并增加 `repository` 参数；范围外的仓库直接拒绝且不发出请求。每次回答按仓库换取只读安装令牌，回答结束即撤销；令牌不进入模型或日志；
 - `project_tasks: read`：`list_project_tasks`、`read_project_task`；`write` 另有 `manage_project_task`（暂停、取消、重试、追加指令），经 `ManagementService` 的版本检查、幂等和审计，回执与控制台一致。命令以绑定的 principal 提交，执行和对账恢复时都重新核对绑定、来源消息、角色权限和授权者权限；
-- `delegation: allow`（派活）：`create_project_task` 在范围内的仓库新建任务，参数为需求和交付约定（目标、范围、验收条件、终点）；同时提供 `list_project_tasks`、`read_project_task` 和 `manage_project_task` 的追加说明、修改约定（`task.contract`）与取消。见下文「派活」；
+- `delegation: allow`（派活）：`create_project_task` 在范围内的仓库新建任务，参数为需求和交付约定（目标、范围、验收条件、终点）。其他角色的任务访问和修改由 `project_tasks` 控制；旧派活配置附带的任务控制保留为待迁移的原操作集合。见下文「派活」；
 - 独立任务：`start_own_task`、`continue_own_task`、`list_own_tasks`，不受权限项控制，见[服务角色](service-roles.md#独立任务)。
 
 #### 派活
@@ -120,8 +120,9 @@ SaaS / 商店应用使用 HTTP 回调 `/hooks/feishu/:connector_id`；企业自�
 
 | 操作 | 需要 |
 | --- | --- |
-| 新建任务 `task.create`、修改约定 `task.contract` | `delegation: allow` |
-| 追加说明 `task.instructions`、取消 `task.cancel` | `delegation: allow` 或 `project_tasks: write` |
+| 新建任务 `task.create` | `delegation: allow` |
+| 修改其他任务的约定 `task.contract` | `project_tasks: write`（旧派活附带控制保留为待迁移） |
+| 追加说明 `task.instructions`、取消 `task.cancel` | `project_tasks: write`（旧派活附带控制保留为待迁移） |
 | 暂停 `task.pause`、重试 `task.retry` | `project_tasks: write` |
 
 新建任务经 `ManagementService.submit('task.create')` 以绑定的 principal 提交：服务端读取当前项目版本作为 `expected_revision`，幂等键由群、来源消息和工具调用生成；授权者对该仓库须仍有 `config.write` 和 `tasks.write`；审计和回执与控制台一致。任务创建时记入 `channel_service_tasks`，关联到这条绑定和来源消息。任务完成、提交 PR、取消或失败时，结果发回原群；入队和发送前复核绑定仍启用、授权者仍能读该仓库以及任务的来源权限。结果消息记在本绑定的范围内，并带上当时的群围栏，之后的回答可以引用它；绑定或权限变化后不再进入上下文。

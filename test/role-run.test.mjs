@@ -424,7 +424,7 @@ test('a save keeps the coordination defaults of #190/#192 next to the validated 
   const f = await fixture(t, () => call('finish', {}));
   const saved = f.put({ roles: [{ role_id: 'dev', environment_profile_ref: { id: 'task-workspace' } }] });
   const role = id => saved.roles.find(r => r.role_id === id);
-  assert.deepEqual([role('coordinator').permissions.coordination, role('coordinator').output_schema_ref.id, role('coordinator').environment_profile_ref.id], ['write', 'coordination-result', 'control-session']);
+  assert.deepEqual([role('coordinator').permissions.project_tasks, role('coordinator').output_schema_ref.id, role('coordinator').environment_profile_ref.id], ['write', 'coordination-result', 'control-session']);
   assert.deepEqual([role('manager').permissions.delegation, role('manager').environment_profile_ref.id], ['allow', 'control-session']);
   assert.deepEqual([role('reviewer').environment_profile_ref.id, role('qa').environment_profile_ref.id], ['candidate-checkout', 'evaluation-checkout']);
   // The environment reference is the validated one: an unknown or another kind's profile is refused at its field.

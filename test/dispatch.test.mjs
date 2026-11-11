@@ -44,7 +44,7 @@ test('event dispatch reads the editable Manager role and honors permission revoc
   const f = await fixture(t), save = values => saveConfiguration(f.h.store, '101', { expected_revision: roleConfiguration(f.h.store, '101').revision, enabled: true, roles: [{ role_id: 'manager', ...values }] }, 'fixture');
   save({ persona_prompt: 'My complete event and task coordination instructions.' });
   f.state.decide = () => {
-    save({ permissions: { dispatch: 'deny' } });
+    save({ permissions: { delegation: 'deny' } });
     return { decision: 'create', option_ids: [JSON.parse(f.requests[0].messages[1].content).options.create[0].id], reason: '这条已被收回权限的决策不能落地' };
   };
   queueWebhook(f.h.store, '101', 'issues', { action: 'opened', issue, sender: alice }, 'revoked-manager');
@@ -52,11 +52,12 @@ test('event dispatch reads the editable Manager role and honors permission revoc
   assert.ok(f.requests[0].messages[0].content.includes('My complete event and task coordination instructions.'));
   assert.ok(!f.requests[0].messages[0].content.includes('Coordinate only.'));
   assert.equal(events(f.h)[0].state, 'pending');
-  assert.equal(JSON.parse(events(f.h)[0].error).code, 'role_authority_revoked');
+  assert.equal(JSON.parse(events(f.h)[0].error).code, 'task_delegation_forbidden');
   assert.equal(tasks(f.h).length, 0);
   f.h.store.run('UPDATE dispatch_events SET next_run_at=0');
   await f.run();
-  assert.equal(f.requests.length, 1, 'a denied dispatch does not call a model');
+  assert.equal(f.requests.length, 2, 'the Manager may still decide an event, but cannot assign another role');
+  assert.equal(tasks(f.h).length,0);
 });
 
 test('an event reaches the Manager once; its decision creates the task with the reason, and deciding again never duplicates it', async t => {

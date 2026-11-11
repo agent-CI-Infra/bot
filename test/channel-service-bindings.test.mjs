@@ -132,7 +132,7 @@ test('binding needs a Feishu-bound maintainer in the group with config.write ove
   const binding = h.store.get('SELECT * FROM channel_service_bindings'), principal = h.store.get('SELECT * FROM principals WHERE id=?', binding.principal_id);
   assert.equal(principal.kind, 'service'); assert.equal(principal.project_id, null);
   assert.deepEqual(h.store.all('SELECT project_id,grantor_id,capabilities FROM scoped_grants WHERE principal_id=?', binding.principal_id)
-    .map(g => [g.project_id, g.grantor_id, JSON.parse(g.capabilities)]), [['101', 'maintainer', ['tasks.read', 'tasks.write']]]);
+    .map(g => [g.project_id, g.grantor_id, JSON.parse(g.capabilities)]), [['101', 'maintainer', ['tasks.read']]]);
   // The binding principal never holds configuration, grant, knowledge or schedule authority, nor any project outside its scope.
   const scoped = resolvePrincipalActor(h.store, binding.principal_id, null, '101');
   for (const capability of ['config.write', 'grants.manage', 'knowledge.read', 'schedules.manage', 'roles.edit']) assert.throws(() => authorize(scoped, capability, { project_id: '101' }), { code: 'capability_forbidden' });

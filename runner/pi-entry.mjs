@@ -130,7 +130,7 @@ try{
         try{result=await workspace({type:'workspace_command',workspace_id:cfg.workspace_id,command:args.command,timeout_ms:timeout,keep_background:args.keep_background===true,output_file:dir+'/command.out',secret_env});}finally{await unlink(dir+'/live.json').catch(()=>{});}
       }else if(name==='github_read_token'){
         // The token stays in this process and reaches later commands only as environment variables; the model sees what it can do, not the value.
-        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange(signal);if(reply.error)result={error:reply.error};else {grant=reply;secrets.add(grant.token);}}
+        if(!grant||Date.parse(grant.expires_at)-Date.now()<10*60000){const reply=await exchange(signal);if(reply.error)result={error:reply.error};else if(reply.structured_only)result={repository:reply.repository,permissions:reply.permissions,variables:[],instruction:reply.instruction};else {grant=reply;secrets.add(grant.token);}}
         result??={variables:['GH_TOKEN','GITHUB_TOKEN'],api:'https://api.github.com',repository:grant.repository,permissions:grant.permissions,expires_at:grant.expires_at};
       }else result={error:'tool_not_allowed'};
       result=await guard.check(id,name,result);

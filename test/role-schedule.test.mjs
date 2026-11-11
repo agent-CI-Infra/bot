@@ -163,7 +163,7 @@ test('disabling only coordination after a stage passes pauses every delivery gat
   assert.throws(()=>f.records.stage('t',candidate.id,candidate.revision,verdict),expected);
   await assert.rejects(evaluateDelivery(f.s,f.spec().task,{},new Redactor(),async()=>{}),expected);
   const github={};let sends=0;const publisher=new Publisher(f.s,github,f.spec().task,async()=>{}),send=async()=>{github.beforeWrite?.();sends++;return {ok:true};};
-  await assert.rejects(publisher.effect('resume','fixture',{},send,async()=>null),expected);
+  await assert.rejects(publisher.effect('resume','comment',{},send,async()=>null),expected);
   await assert.rejects(mergeApi(f.s,{id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:tree('a'),merge_method:'squash'}),expected);
   const engine=new TaskEngine(f.s,{call:async()=>null});t.after(()=>engine.close());
   f.s.run("UPDATE tasks SET status='running',claim_token='claim' WHERE id='t'");f.s.run("INSERT INTO task_claims VALUES('t','r','claim','now')");
@@ -173,7 +173,7 @@ test('disabling only coordination after a stage passes pauses every delivery gat
   saveConfiguration(f.s,'r',{expected_revision:2,enabled:true,roles:[],required_stages:required},'owner');
   new TaskCommands(f.s).api({id:'owner',role:'project_admin',repositories:['r']},'POST',new URL('http://local/api/tasks/t/retry'),{});
   assert.equal(f.s.get("SELECT status FROM tasks WHERE id='t'").status,'queued');assert.equal(f.plan().revision,plan.revision);
-  assert.equal(evaluateRequiredStages(f.s,'t',current()).satisfied,true);await publisher.effect('resume','fixture',{},send,async()=>null);assert.equal(sends,1);
+  assert.equal(evaluateRequiredStages(f.s,'t',current()).satisfied,true);await publisher.effect('resume','comment',{},send,async()=>null);assert.equal(sends,1);
   f.s.run("UPDATE policies SET enabled=0 WHERE repository_id='r'");assert.throws(()=>assertRequiredStages(f.s,'t',current()),{code:'repository_policy_disabled',state:'cancelled'});
 });
 
@@ -194,9 +194,9 @@ test('restoring the pinned stage policy and retrying resumes publication without
   const snapshot=f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot;
   f.s.run("UPDATE tasks SET phase='publish' WHERE id='t'");
   const github={};let sends=0;const publisher=new Publisher(f.s,github,f.spec().task,async()=>{}),send=async()=>{github.beforeWrite?.();return {sequence:++sends};};
-  await publisher.effect('first','fixture',{},send,async()=>null);assert.equal(sends,1);
+  await publisher.effect('first','comment',{},send,async()=>null);assert.equal(sends,1);
   saveConfiguration(f.s,'r',{expected_revision:1,enabled:true,roles:[],required_stages:[...required,stage('reviewer',{deps:['dev']})]},'owner');
-  await assert.rejects(publisher.effect('next','fixture',{},send,async()=>null),{code:'stage_policy_changed',state:'paused'});assert.equal(sends,1);
+  await assert.rejects(publisher.effect('next','comment',{},send,async()=>null),{code:'stage_policy_changed',state:'paused'});assert.equal(sends,1);
   f.s.run("UPDATE tasks SET status='paused',error_code='stage_policy_changed' WHERE id='t'");
   const commands=new TaskCommands(f.s),user={id:'owner',role:'project_admin',repositories:['r']};
   assert.throws(()=>commands.api(user,'POST',new URL('http://local/api/tasks/t/adopt-config'),{}),{code:'task_config_after_publication'});
@@ -206,8 +206,8 @@ test('restoring the pinned stage policy and retrying resumes publication without
   assert.equal(f.s.get("SELECT phase FROM tasks WHERE id='t'").phase,'publish');
   assert.equal(f.s.get("SELECT snapshot FROM task_execution_configs WHERE task_id='t'").snapshot,snapshot);
   assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,true);
-  await publisher.effect('first','fixture',{},send,async()=>null);assert.equal(sends,1,'a sent effect must not be repeated');
-  await publisher.effect('next','fixture',{},send,async()=>null);assert.equal(sends,2);
+  await publisher.effect('first','comment',{},send,async()=>null);assert.equal(sends,1,'a sent effect must not be repeated');
+  await publisher.effect('next','comment',{},send,async()=>null);assert.equal(sends,2);
   assert.equal(f.s.get("SELECT count(*) n FROM task_history WHERE type='configuration_adopted'").n,0);
 });
 
@@ -326,10 +326,10 @@ test('new gate policy invalidates old QA even after stages are rerun, and Publis
   f.s.run("UPDATE policies SET test_command='changed check' WHERE repository_id='r'");assert.throws(()=>f.plan(),{code:'stage_policy_changed',state:'paused'});f.retry();f.plan();await f.writer('dev-recheck');assert.equal(evaluateRequiredStages(f.s,'t',latestRoleCandidate(f.s,'t')).satisfied,true);
   assert.throws(()=>f.records.stage('t',candidate.id,candidate.revision,verdict),{code:'acceptance_required'});
   let sends=0;const github={},publisher=new Publisher(f.s,github,f.spec().task,async()=>{});const send=async()=>{github.beforeWrite?.();sends++;return {ok:true};};
-  await assert.rejects(publisher.effect('publish','fixture',{},send,async()=>null),{code:'acceptance_required'});assert.equal(sends,0);
+  await assert.rejects(publisher.effect('publish','comment',{},send,async()=>null),{code:'acceptance_required'});assert.equal(sends,0);
   assert.equal(f.s.get("SELECT state FROM github_effects").state,'pending');assert.equal(f.s.get('SELECT count(*) n FROM task_followups').n,0);
   await runRole({...f.spec(),system:'QA verified'},'qa');f.records.stage('t',candidate.id,candidate.revision,verdict);
-  await publisher.effect('publish','fixture',{},send,async()=>null);await publisher.effect('publish','fixture',{},send,async()=>null);assert.equal(sends,1);
+  await publisher.effect('publish','comment',{},send,async()=>null);await publisher.effect('publish','comment',{},send,async()=>null);assert.equal(sends,1);
 });
 
 test('an operator can dequeue an accepted PR after stage or test-command policy changes',async t=>{

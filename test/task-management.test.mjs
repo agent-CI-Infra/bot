@@ -10,7 +10,7 @@ import { knowledgeActor } from './knowledge-fixture.mjs';
 import { authorize, invalidate } from '../dist/identity/authorization.js';
 import { taskTraceAccess } from '../dist/memory/access.js';
 import { roleConfiguration } from '../dist/roles/definition.js';
-import { defaultPermissions, migratePermissions, permissionTools } from '../dist/roles/permissions.js';
+import { defaultPermissions, migratePermissions, permissionTools, updatePermissions } from '../dist/roles/permissions.js';
 import { assertManagedExecution, assertTaskRole, assertTaskExternalEffect, roleTaskCaller, taskToolAllowed, taskManagementTools } from '../dist/tasks/management.js';
 import { runRole } from '../dist/roles/run.js';
 import { reportTaskIssue } from '../dist/tasks/issues.js';
@@ -26,58 +26,36 @@ function fixture(t) {
   }
   const config = roleConfiguration(s, 'r'); config.enabled = true;
   const save = (role, permissions, extra = {}) => {
-    const def = config.roles.find(r => r.role_id === role); Object.assign(def, extra); Object.assign(def.permissions, permissions);
+    const def = config.roles.find(r => r.role_id === role); Object.assign(def, extra); def.permissions = updatePermissions(def.permissions,permissions);
     s.run("INSERT INTO settings VALUES('roles:r',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify(config));
   };
-  save('reviewer', { task_management: 'write', delegation: 'deny', commands: 'deny', github: 'read' }, { harness_ref: { id: 'native', version: config.roles.find(r => r.role_id === 'reviewer').harness_ref.version } });
+  save('reviewer', { computer: 'deny', github_issues:'read',github_pull_requests:'read', task_management: 'write', delegation: 'deny', github: 'read' }, { harness_ref: { id: 'native', version: config.roles.find(r => r.role_id === 'reviewer').harness_ref.version } });
   const commands = new TaskCommands(s), caller = (source = {}) => roleTaskCaller(s, 'r', 'reviewer', { conversation_id: 'chat-a', source_message: 'message-a', guard() {}, ...source });
   const create = (c = caller(), request = 'Inspect the logs', extra = {}) => commands.tool(c, 'create_task', { request, criteria: ['Report actual observations'], ...extra });
   return { s, config, save, commands, caller, create };
 }
 
-test('task management and delegation have independent tools; migration preserves dispatch without promoting observers', () => {
-  const observer = defaultPermissions('reviewer', 'observer'); observer.task_records = 'write';
-  assert.equal(migratePermissions({ role_id: 'reviewer', kind: 'observer', permissions: observer }).task_management, 'none');
-  const oldManager = { dispatch: 'allow', delegation: 'deny' };
-  assert.equal(migratePermissions({ role_id: 'manager', kind: 'controller', permissions: oldManager }).task_management, 'write');
-  assert.equal(migratePermissions({ role_id: 'manager', kind: 'controller', permissions: { dispatch: 'deny' } }).task_management, 'none');
-  assert.deepEqual(permissionTools({ task_management: 'read', delegation: 'deny' }), ['list_managed_tasks', 'read_managed_task']);
-  assert.ok(!permissionTools({ task_management: 'write', delegation: 'deny' }).includes('delegate_role'));
-  assert.ok(!permissionTools({ task_management: 'none', delegation: 'allow' }).includes('create_task'));
-});
-
-test('none/read refuse mutations; write without delegation creates durable own-role tasks in the existing task records', t => {
-  const f = fixture(t), { s, save, caller, commands, create } = f;
-  for (const mode of ['none', 'read']) {
-    save('reviewer', { task_management: mode }); const source = caller();
-    assert.throws(() => create(source), { code: 'task_management_forbidden' });
-    if (mode === 'none') assert.throws(() => commands.tool(source, 'list_managed_tasks', {}), { code: 'task_management_forbidden' });
-    else assert.deepEqual(commands.tool(source, 'list_managed_tasks', {}).tasks, []);
+test('own-task operations are always available; dispatching another role still requires delegation', t => {
+  const { s, save, caller, commands, create } = fixture(t);
+  for (const mode of ['none','read','write']) {
+    save('reviewer',{task_management:mode,delegation:'deny'});
+    const source=caller(),{id}=create(source,'Own task '+mode,{execute:false});
+    assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',id).executor_role,'reviewer');
+    assert.ok(commands.tool(source,'list_managed_tasks',{}).tasks.some(task=>task.id===id));
+    commands.tool(source,'manage_task',{task_id:id,action:'retry'});
+    assert.throws(()=>create(source,'Borrow dev',{executor_role:'dev'}),{code:'task_delegation_forbidden'});
   }
-  save('reviewer', { task_management: 'write', delegation: 'deny' });
-  const source = caller(), { id } = create(source, 'Record an item', { execute: false });
-  assert.equal(s.get('SELECT status FROM tasks WHERE id=?', id).status, 'paused');
-  const origin = s.get('SELECT * FROM task_origins WHERE task_id=?', id);
-  assert.equal(origin.source_role, 'reviewer'); assert.equal(origin.executor_role, 'reviewer');
-  assert.equal(origin.conversation_id, 'chat-a'); assert.equal(origin.source_message, 'message-a');
-  assert.equal(new TaskRecords(s).get(id).contract.goal, 'Record an item');
-  assert.equal(commands.tool(source, 'list_managed_tasks', {}).tasks[0].id, id);
-  commands.tool(source, 'manage_task', { task_id: id, action: 'retry' });
-  assert.equal(s.get('SELECT status FROM tasks WHERE id=?', id).status, 'queued');
-  assert.throws(() => create(source, 'Borrow dev', { executor_role: 'dev' }), { code: 'task_delegation_forbidden' });
+  assert.ok(permissionTools({task_management:'none'}).includes('create_task'));
 });
 
-test('delegation still needs task write; explicit targets must exist and be enabled', t => {
-  const { s, save, caller, create } = fixture(t);
-  save('reviewer', { task_management: 'none', delegation: 'allow' });
-  assert.throws(() => create(caller(), 'Delegate', { executor_role: 'dev' }), { code: 'task_management_forbidden' });
-  save('reviewer', { task_management: 'write' });
-  const source = caller(), task = create(source, 'Delegate explicitly', { executor_role: 'dev' });
-  assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?', task.id).executor_role, 'dev');
-  assert.throws(() => create(source, 'Missing', { executor_role: 'invented' }), { code: 'task_executor_unavailable' });
-  save('dev', {}, { enabled: false });
-  assert.throws(() => create(source, 'Disabled', { executor_role: 'dev' }), { code: 'task_executor_unavailable' });
-  assert.throws(() => assertManagedExecution(s, s.get('SELECT * FROM tasks WHERE id=?', task.id)), { code: 'task_executor_unavailable' });
+test('delegation is independent of removed task toggles; explicit targets must exist and remain enabled',t=>{
+  const {s,save,caller,create}=fixture(t);
+  save('reviewer',{task_management:'none',delegation:'allow'});
+  const source=caller(),task=create(source,'Delegate explicitly',{executor_role:'dev'});
+  assert.equal(s.get('SELECT executor_role FROM task_origins WHERE task_id=?',task.id).executor_role,'dev');
+  assert.throws(()=>create(source,'Missing',{executor_role:'invented'}),{code:'task_executor_unavailable'});
+  save('dev',{}, {enabled:false});
+  assert.throws(()=>assertManagedExecution(s,s.get('SELECT * FROM tasks WHERE id=?',task.id)),{code:'task_executor_unavailable'});
 });
 
 test('caller objects cannot be serialized/forged; models cannot choose owners, principals, scopes or source roles', t => {
@@ -113,24 +91,25 @@ test('replayed task intent reuses one task, while new goals create related indep
 
 test('live revocation and pinned ceilings survive recovery; granting a newer permission cannot widen an old caller', t => {
   const { s, save, caller, create } = fixture(t);
-  save('reviewer', { task_management: 'read' }); const old = caller();
+  save('reviewer', { delegation: 'deny' }); const old = caller();
   save('reviewer', { task_management: 'write', delegation: 'allow' });
-  assert.throws(() => create(old), { code: 'task_management_forbidden' });
+  assert.throws(() => create(old,'Delegated work',{executor_role:'dev'}), { code: 'task_delegation_forbidden' });
   const id = create(caller(), 'Delegated work', { executor_role: 'dev' }).id, task = s.get('SELECT * FROM tasks WHERE id=?', id);
   assertManagedExecution(s, task); save('reviewer', { delegation: 'deny' });
   assert.throws(() => assertManagedExecution(s, task), { code: 'task_delegation_forbidden' });
   save('reviewer', { delegation: 'allow', task_management: 'none' });
-  assert.throws(() => assertManagedExecution(s, task), { code: 'task_management_forbidden' });
+  assert.doesNotThrow(() => assertManagedExecution(s, task));
   let valid = true; const guarded = caller({ guard() { if (!valid) throw Error('source_revoked'); } });
   valid = false; assert.throws(() => create(guarded), /source_revoked/);
 });
 
 test('a source role cannot lend GitHub writes, commands, subagents or another role through its own task', t => {
   const { s, caller, create, save } = fixture(t);
-  save('reviewer', { task_management: 'write', commands: 'deny', subagents: 'deny', repository: 'write', issues: 'deny' });
+  save('reviewer', { task_management: 'write', computer: 'deny', subagents: 'deny', issues: 'deny' });
   const task = s.get('SELECT * FROM tasks WHERE id=?', create(caller()).id);
-  assert.equal(taskToolAllowed(s, task, 'reviewer', 'write_file'), true);
-  for (const name of ['create_issue', 'create_pull_request', 'run_command', 'start_agent', 'delegate_role']) assert.equal(taskToolAllowed(s, task, 'reviewer', name), false, name);
+  assert.equal(taskToolAllowed(s, task, 'reviewer', 'write_file'), false);
+  assert.equal(taskToolAllowed(s,task,'reviewer','start_agent'),true);
+  for (const name of ['create_issue', 'create_pull_request', 'run_command', 'delegate_role']) assert.equal(taskToolAllowed(s, task, 'reviewer', name), false, name);
   assert.throws(() => assertTaskRole(s, task, 'manager'), { code: 'task_delegation_forbidden' });
   assert.throws(() => assertTaskExternalEffect(s, task, 'issue'), { code: 'task_external_write_forbidden' });
   assert.throws(() => assertTaskExternalEffect(s, task, 'comment'), { code: 'task_external_write_forbidden' });
@@ -164,7 +143,7 @@ test('a delegated role cannot escape a live ancestor permission ceiling by creat
   save('reviewer', { delegation: 'deny' });
   assert.throws(() => assertManagedExecution(s, task), { code: 'task_delegation_forbidden' });
   save('reviewer', { delegation: 'allow', task_management: 'none' });
-  assert.throws(() => assertManagedExecution(s, task), { code: 'task_management_forbidden' });
+  assert.doesNotThrow(() => assertManagedExecution(s, task));
 });
 
 test('event Manager and role callers use the same task-management boundary and independent delegation check', t => {
@@ -174,7 +153,8 @@ test('event Manager and role callers use the same task-management boundary and i
   recordEvent(s, input);
   const event = s.get('SELECT * FROM dispatch_events'), decision = { decision: 'create', option_ids: ['review'], reason: 'Inspect eligible issue' };
   save('manager', { task_management: 'read' });
-  assert.throws(() => applyDecision(s, event, decision, null), { code: 'task_management_forbidden', state: 'waiting_configuration' });
+  save('manager',{delegation:'deny'});
+  assert.throws(() => applyDecision(s, event, decision, null), { code: 'task_delegation_forbidden', state: 'waiting_configuration' });
   save('manager', { task_management: 'write', delegation: 'deny' });
   assert.throws(() => applyDecision(s, event, decision, null), { code: 'task_delegation_forbidden', state: 'waiting_configuration' });
   save('manager', { delegation: 'allow' });

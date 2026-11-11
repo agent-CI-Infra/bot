@@ -10,6 +10,8 @@ import { classifyFailure, normalizeSignature, type Evidence, type FailureKind } 
 import { analysisDecision, analysisTask, classifiedEvidence, failedStepOutput, requestAnalysis, taskVerdicts } from './analysis.js';
 import { eventTaskActive } from '../work/events.js';
 import { workPermissions } from '../work/settings.js';
+import { taskRolePolicies, assertManagedExecution } from '../tasks/management.js';
+import { resourceAllowed } from '../roles/permissions.js';
 import { taskPermissions } from '../tasks/configuration.js';
 import { actionsConfigurationError, actionsRedactor, publicText } from './safety.js';
 
@@ -166,7 +168,10 @@ export class ActionsFailures {
       if (!Number.isFinite(Date.parse(run.updated_at))) stop('actions_completion_time_missing');
       if (run.conclusion !== 'failure' || budget.retry_state === 'none' && Date.parse(run.updated_at) < Date.parse(activated) || !await this.eligible(github, run)) { finish(); continue; }
       let data: { kind: FailureKind; evidence: Evidence[] };
-      const task = analysisTask(this.store, id, runId, run.run_attempt), writes = task ? taskPermissions(this.store, task).writes : projectWrites;
+      const task = analysisTask(this.store, id, runId, run.run_attempt);
+      if(task)assertManagedExecution(this.store,task);
+      const roleAllows=(action:string)=>!task||taskRolePolicies(this.store,task).every(p=>action==='actions_rerun'?p.actions_rerun==='allow':resourceAllowed(p,'issues','create'));
+      const writes = (task ? taskPermissions(this.store, task).writes : projectWrites).filter(action=>!['actions_rerun','issue'].includes(action)||roleAllows(action));
       if (attempt.data) data = JSON.parse(attempt.data);
       else {
         // The analysis runs as a task in the project computer; until it ends, the attempt waits and nothing is written.
@@ -228,6 +233,7 @@ export class ActionsFailures {
             this.store.run(`UPDATE actions_failure_runs SET retry_state='sending',before_attempt=?,expected_attempt=?,retry_at=?,head_sha=?,head_branch=?
               WHERE repository_id=? AND run_id=? AND retry_state='none'`, run.run_attempt, run.run_attempt + 1, Date.now(), run.head_sha, run.head_branch, id, runId);
             try {
+              if(!roleAllows('actions_rerun'))stop('role_authority_revoked','waiting_permission');
               await github.request('POST', github.path(`/actions/runs/${runId}/rerun`));
               this.store.run("UPDATE actions_failure_runs SET retry_state='sent' WHERE repository_id=? AND run_id=?", id, runId);
             } catch (error) {
@@ -308,6 +314,8 @@ export class ActionsFailures {
         for (const secret of actionsRedactor(this.store).values) github.redactor.values.add(secret);
         const safe = publicText(row.body, github.redactor, false);
         if (!safe) stop('actions_report_sensitive');
+        const source=analysisTask(this.store,id,run.id,run.run_attempt);
+        if(source){assertManagedExecution(this.store,source);if(taskRolePolicies(this.store,source).some(p=>!resourceAllowed(p,'issues',issue?'report':'create')))stop('role_authority_revoked','waiting_permission');}
         if (issue) await github.request('POST', github.path(`/issues/${issue.number}/comments`), { body: safe });
         else issue = await github.request('POST', github.path('/issues'), { title: publicText(row.title, github.redactor) || 'Actions failure', body: safe });
       } catch (error) {

@@ -8,7 +8,8 @@ import { type Redactor, stop } from './common.js';
 export class ReadTokens {
   private readonly issued: string[] = [];
   // scopes: the workflow's saved GitHub read scopes; a token never carries a scope the workflow does not have.
-  constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor, readonly guard: () => Promise<void>, readonly apiUrl?: string, readonly scopes?: string[]) {}
+  constructor(readonly store: Store, readonly repository: Row, readonly redactor: Redactor, readonly guard: () => Promise<void>, readonly apiUrl?: string, readonly scopes?: string[], readonly liveScopes?:()=>string[]) {}
+  allowedScopes():string[] { return (this.scopes??Object.keys(agentReadPermissions)).filter(scope=>!this.liveScopes||this.liveScopes().includes(scope)); }
   async issue() {
     const github = await this.connect();
     return { token: github.token, expires_at: github.expiresAt, permissions: github.permissions, repository: github.fullName };
@@ -28,12 +29,14 @@ export class ReadTokens {
     // A bot account has one long-lived token that can write; only a GitHub App can mint a narrower one.
     if (this.store.get('SELECT type FROM accounts WHERE id=?', this.repository.account_id)?.type !== 'github_app') stop('github_app_required', undefined, '签发仓库只读令牌需要 GitHub App 账号，当前账号类型不支持。');
     const github = new GitHub(this.store, this.repository, this.redactor, this.guard, this.apiUrl);
-    if (this.scopes && !this.scopes.length) stop('github_read_token_not_allowed', undefined, '这条工作流没有 GitHub 读取权限。');
-    const requested = this.scopes ? Object.fromEntries(Object.entries(agentReadPermissions).filter(([scope]) => scope === 'metadata' || this.scopes!.includes(scope))) : agentReadPermissions;
+    const scopes=this.allowedScopes();
+    if (!scopes.some(scope=>scope!=='metadata')) stop('github_read_token_not_allowed', undefined, '这条任务没有所需的 GitHub 资源读取权限。');
+    if(required&&Object.keys(required).some(scope=>scope!=='metadata'&&!scopes.includes(scope)))stop('github_read_token_not_allowed');
+    const requested = Object.fromEntries(Object.entries(agentReadPermissions).filter(([scope]) => scope === 'metadata' || scopes.includes(scope)));
     try { await github.connect(false, required, required ? undefined : requested, identifyActor); }
     finally { if (github.token) this.issued.push(github.token); }
     if (!Object.keys(github.permissions).length || Object.values(github.permissions).some(value => value !== 'read')) stop('github_read_token_not_read_only', undefined, 'GitHub 返回的令牌权限为空或包含非只读权限，已拒绝交付。');
-    if (this.scopes && !required && Object.keys(github.permissions).some(scope => scope !== 'metadata' && !this.scopes!.includes(scope))) stop('github_read_token_not_read_only', undefined, 'GitHub 返回了超出工作流读取范围的令牌权限，已拒绝交付。');
+    if (Object.keys(github.permissions).some(scope => scope !== 'metadata' && !scopes.includes(scope))) stop('github_read_token_not_read_only', undefined, 'GitHub 返回了超出资源读取范围的令牌权限，已拒绝交付。');
     return github;
   }
   async revoke() { for (const token of this.issued.splice(0)) await revokeInstallationToken(this.apiUrl || 'https://api.github.com', token).catch(() => false); }

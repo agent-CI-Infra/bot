@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { fullPermissions, permissionItems } from '../dist/roles/permissions.js';
+import { repositoryAssistantPermissions } from '../dist/service-roles/roles.js';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,6 +8,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { managementFixture, settled } from './management-fixture.mjs';
+import { TaskEngine } from '../dist/agent/engine.js';
 import { Store } from '../dist/storage/database.js';
 
 const reply=(res,content)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content}}],usage:{prompt_tokens:12,completion_tokens:6}}));};
@@ -23,10 +26,10 @@ test('built-in service roles are seeded once, edited with revisions and audit, a
   const seeded=await roles(admin);
   assert.deepEqual(seeded.map(r=>[r.id,r.builtin,r.enabled]),[['management-assistant',true,true],['repository-assistant',true,true]]);
   const assistant=seeded[0],repository=seeded[1];
-  assert.equal(assistant.permissions,null);assert.equal(assistant.permissions_inherited,true);assert.equal(assistant.model.model_name,'Management fixture');
-  assert.deepEqual(repository.permissions,{conversation_history:'read',github:'read',project_tasks:'none',delegation:'deny'});
+  assert.deepEqual(assistant.permissions,fullPermissions());assert.equal(assistant.permissions_inherited,false);assert.equal(assistant.permissions_fixed,true);assert.equal(assistant.model.model_name,'Management fixture');
+  assert.deepEqual(repository.permissions,repositoryAssistantPermissions);
   assert.deepEqual((await admin('/api/service-roles')).value.permission_items.map(i=>[i.id,i.modes]),
-    [['conversation_history',['none','read']],['github',['none','read']],['project_tasks',['none','read','write']],['delegation',['deny','allow']]]);
+    permissionItems.map(i=>[i.id,i.modes]));
   // Project administrators neither read nor change platform service roles.
   assert.equal((await member.client('/api/service-roles')).status,403);
   assert.equal((await member.client('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'x'})).status,403);
@@ -34,24 +37,24 @@ test('built-in service roles are seeded once, edited with revisions and audit, a
   const saved=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Committer 助手',permissions:{project_tasks:'write'},budget:{currency:'USD',limit_amount:5}});
   assert.equal(saved.status,200,JSON.stringify(saved.value));
   assert.equal(saved.value.service_role.revision,repository.revision+1);assert.equal(saved.value.service_role.permissions.project_tasks,'write');
-  assert.equal(saved.value.service_role.permissions.github,'read');assert.deepEqual(saved.value.service_role.budget,{currency:'USD',limit_amount:5});
+  assert.equal(saved.value.service_role.permissions.github_contents,'read');assert.deepEqual(saved.value.service_role.budget,{currency:'USD',limit_amount:5});
   assert.ok(h.store.get("SELECT 1 FROM audit WHERE action='service_role.updated' AND resource_id='repository-assistant'"));
   const stale=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:repository.revision,name:'Stale'});
   assert.deepEqual([stale.status,stale.value.error],[409,'service_role_revision_conflict']);
   assert.equal((await role(admin,'repository-assistant')).name,'Committer 助手');
 
-  for(const [body,code] of [[{permissions:{commands:'allow'}},'invalid_service_role_permission'],[{permissions:{github:'write'}},'invalid_service_role_permission'],
+  for(const [body,code] of [[{permissions:{computer:'execute'}},'invalid_service_role_permission'],[{permissions:{github:'write'}},'invalid_service_role_permission'],
     [{model_id:f.model.id},'shared_model_required'],[{budget:{currency:'EUR',limit_amount:1}},'invalid_pricing_currency'],[{budget:{currency:'USD',limit_amount:0}},'invalid_service_role_budget'],[{unknown:true},'unknown_field']]){
     const current=await role(admin,'repository-assistant'),result=await admin('/api/service-roles/repository-assistant','PATCH',{expected_revision:current.revision,...body});
     assert.deepEqual([result.status,result.value.error],[400,code],JSON.stringify(body));
   }
   // The management assistant always uses the current user's own permissions; built-in roles stay enabled and undeletable.
-  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,permissions:{github:'read'}})).value.error,'service_role_permissions_inherited');
+  assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,permissions:{github:'read'}})).value.error,'service_role_permissions_fixed');
   assert.equal((await admin('/api/service-roles/management-assistant','PATCH',{expected_revision:assistant.revision,enabled:false})).value.error,'builtin_service_role_required');
   assert.equal((await admin('/api/service-roles/management-assistant','DELETE',{expected_revision:assistant.revision})).value.error,'builtin_service_role_required');
 
   const created=(await admin('/api/service-roles','POST',{name:'可信 committer 群',responsibility:'可以暂停和取消任务'})).value.service_role;
-  assert.match(created.id,/^custom-/);assert.equal(created.builtin,false);assert.deepEqual(created.permissions,{conversation_history:'read',github:'read',project_tasks:'none',delegation:'deny'});
+  assert.match(created.id,/^custom-/);assert.equal(created.builtin,false);assert.deepEqual(created.permissions,repositoryAssistantPermissions);
   const disabled=(await admin('/api/service-roles/'+created.id,'PATCH',{expected_revision:created.revision,enabled:false,permissions:{delegation:'allow'}})).value.service_role;
   assert.deepEqual([disabled.enabled,disabled.permissions.delegation],[false,'allow']);
   assert.equal((await admin('/api/service-roles/'+created.id,'DELETE',{expected_revision:created.revision})).value.error,'service_role_revision_conflict');
@@ -174,4 +177,28 @@ test('an existing ledger is rebuilt once with a nullable repository, keeping eve
   assert.equal(store.get("SELECT value FROM settings WHERE key='model_requests_nullable_repository'").value,migrated);
   assert.equal(store.get("SELECT sql FROM sqlite_master WHERE name='model_requests'").sql,table);
   assert.equal(store.get('SELECT count(*) n FROM model_requests').n,3);
+});
+
+
+test('the full management role cannot lend computer execution to a read-only operator',async t=>{
+  const calls=[],manager={async call(method,path,input){
+    calls.push({method,path,input});
+    return method==='GET'?{generation:1,state:'ready'}:{ok:true,result:input.request.type==='workspace_command'?{output:'command completed',exit_code:0}:{written:true}};
+  }};
+  const f=await managementFixture(t,store=>({engine:new TaskEngine(store,manager)}));
+  const reader=await f.member('computer-reader',{repository_ids:['101']});
+  f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?',JSON.stringify(['tasks.read']),reader.id);
+  f.modelState.respond=async(body,res)=>{
+    if(body.messages.some(m=>m.role==='tool'))return reply(res,'命令已执行');
+    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'computer',type:'function',function:{name:'run_command',arguments:JSON.stringify({repository:'agent-test-zone/admin-fixture-101',command:'printf computer-check'})}}]}}]}));
+  };
+  let before=calls.length;
+  const denied=await web(f,'执行检查',reader.client);
+  assert.equal(denied.message.state,'failed');assert.equal(calls.length,before);
+  assert.equal(denied.events.find(e=>e.type==='tool_error').data.error,'capability_forbidden');
+  const allowed=await web(f,'执行检查');
+  assert.equal(allowed.message.state,'completed',JSON.stringify(allowed.events));
+  assert.ok(calls.some(c=>c.input?.request?.type==='workspace_command'));
+  assert.equal(f.h.store.get('SELECT count(*) n FROM role_conversation_operations').n,0);
+  assert.ok(f.h.store.get('SELECT count(*) n FROM service_role_operations').n>=2);
 });

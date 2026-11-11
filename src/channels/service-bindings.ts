@@ -2,7 +2,7 @@ import type { Store, Row } from '../storage/database.js';
 import { assertCurrent, authorize, invalidate, listEffectiveProjectAccess, narrowActor, resolvePrincipalActor, restrictActor, revision, type ActorContext } from '../identity/authorization.js';
 import { digest, fail, fields, HttpError, object, randomId, text, type Json } from '../core/security.js';
 import { managementAssistant, repositoryAssistant, serviceItems, serviceRole } from '../service-roles/roles.js';
-import type { RolePermissions } from '../roles/permissions.js';
+import { normalizePermissions, permitsManagement, serviceCapabilities, type RolePermissions } from '../roles/permissions.js';
 import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
 import type { ChannelEvent } from './types.js';
@@ -15,9 +15,6 @@ import type { ChannelEvent } from './types.js';
 /** Bot replies of a binding are scoped to it in the local ledger, so another binding or project never reads them back. */
 export const bindingScope = (id: string) => 'binding:' + id;
 const participations = ['mentions', 'questions', 'all'];
-// The most a binding principal can hold. The role's permission items and the grantor's current authority narrow it per call;
-// it never holds configuration, grant, knowledge or schedule capabilities.
-const bindingCapabilities = ['tasks.read', 'tasks.write'];
 const terminal = (error: unknown) => error instanceof HttpError && error.status < 500;
 /**
  * Which management commands a group may submit. Delegation hands work to a project only through its Manager: creating a task,
@@ -25,11 +22,7 @@ const terminal = (error: unknown) => error instanceof HttpError && error.status 
  * its own controls over other roles' tasks (pause, retry, cancel, instructions).
  */
 export function serviceCommandAllowed(permissions: RolePermissions, operation: string): boolean {
-  const delegate = permissions.delegation === 'allow', manage = permissions.project_tasks === 'write';
-  if (operation === 'task.create' || operation === 'task.contract') return delegate;
-  if (operation === 'task.cancel' || operation === 'task.instructions') return delegate || manage;
-  if (operation === 'task.pause' || operation === 'task.retry') return manage;
-  return false;
+  return permitsManagement(permissions,operation,true);
 }
 
 export function serviceBindingStorage(store: Store): void {
@@ -71,10 +64,10 @@ function migrateEmployees(store: Store): void {
     store.run("INSERT INTO settings VALUES('channel_service_bindings_migrated',?) ON CONFLICT(key) DO NOTHING", new Date().toISOString());
   });
 }
-function grant(store: Store, principal: string, chat: string, tenant: string, project: string | null, grantor: string, time: number): void {
+function grant(store: Store, principal: string, chat: string, tenant: string, project: string | null, grantor: string, time: number, permissions?: RolePermissions): void {
   store.run(`INSERT INTO scoped_grants(id,principal_id,tenant_id,project_id,scope,role,capabilities,source,grantor_id,policy,evidence,verified_at)
     VALUES(?,?,?,?,?,'service',?,'explicit_delegation',?,'channel_service_binding',?,?)`, randomId(), principal, tenant, project, project ? 'project' : 'tenant',
-    JSON.stringify(bindingCapabilities), grantor, 'channel:' + chat, time);
+    JSON.stringify(serviceCapabilities(permissions??JSON.parse(store.get('SELECT r.permissions FROM channel_service_bindings b JOIN service_roles r ON r.id=b.service_role_id WHERE b.principal_id=?',principal)?.permissions??'{}'))), grantor, 'channel:' + chat, time);
 }
 interface Reachable { id: string; full_name: string; private: boolean; enabled: boolean }
 
@@ -88,7 +81,7 @@ export class ChannelServiceBindings {
   }
   permissions(binding: Row): RolePermissions {
     const role = serviceRole(this.store, binding.service_role_id);
-    return role?.permissions ? JSON.parse(role.permissions) : {};
+    return normalizePermissions(JSON.parse(role?.permissions??'{}'));
   }
   /** The binding is still the chat's current, enabled binding and its role can serve a group. */
   assertUsable(binding: Row): Row {
@@ -148,9 +141,11 @@ export class ChannelServiceBindings {
   actor(binding: Row, project: string, capabilities: string[]): ActorContext {
     const check = () => {
       const current = this.assertUsable(binding);
+      if (!capabilities.every(cap=>serviceCapabilities(this.permissions(current)).includes(cap))) fail(403,'channel_service_permission_revoked');
       if (!this.reachable(current, project, capabilities)) fail(403, 'channel_service_scope_paused');
     };
     check();
+    this.store.run("UPDATE scoped_grants SET capabilities=? WHERE principal_id=? AND policy='channel_service_binding'",JSON.stringify(serviceCapabilities(this.permissions(binding))),binding.principal_id);
     const scoped = narrowActor(resolvePrincipalActor(this.store, binding.principal_id, null, project, 'im'), capabilities);
     restrictActor(scoped, check);
     for (const capability of capabilities) authorize(scoped, capability, { project_id: project });
@@ -250,7 +245,7 @@ export class ChannelServiceBindings {
       if (locked) this.store.run('UPDATE principals SET active=1,maintenance=? WHERE id=?', 'channel-binding:' + id, principal);
       else this.store.run("INSERT INTO principals(id,kind,maintenance) VALUES(?,'service',?)", principal, 'channel-binding:' + id);
       this.store.run('DELETE FROM scoped_grants WHERE principal_id=?', principal);
-      for (const row of scope.rows) grant(this.store, principal, id, row.tenant_id, row.project_id, actor.principal_id, time);
+      for (const row of scope.rows) grant(this.store, principal, id, row.tenant_id, row.project_id, actor.principal_id, time, JSON.parse(role.permissions));
       if (locked) this.store.run('UPDATE channel_service_bindings SET service_role_id=?,scope=?,configured_by=?,participation=?,enabled=1,revision=?,updated_at=? WHERE id=?',
         role.id, scope.kind, actor.principal_id, participation, next, time, binding);
       else this.store.run(`INSERT INTO channel_service_bindings(id,chat_id,service_role_id,scope,principal_id,configured_by,participation,enabled,revision,created_at,updated_at)
@@ -298,8 +293,8 @@ export class ChannelServiceBindings {
       b.configured_by === actor.principal_id || this.grants(b).some(g => g.grantor_id === actor.principal_id));
     const items = serviceItems;
     return { bindings: bindings.map(b => ({ ...this.view(b), can_manage: this.manageable(actor, b) })), chats,
-      service_roles: this.store.all('SELECT * FROM service_roles WHERE enabled=1 AND permissions IS NOT NULL ORDER BY builtin DESC,created_at,id')
-        .map(r => ({ id: r.id, name: r.name, responsibility: r.responsibility, permissions: JSON.parse(r.permissions), builtin: !!r.builtin, recommended: r.id === repositoryAssistant })),
+      service_roles: this.store.all('SELECT * FROM service_roles WHERE enabled=1 AND id<>? ORDER BY builtin DESC,created_at,id',managementAssistant)
+        .map(r => ({ id: r.id, name: r.name, responsibility: r.responsibility, permissions: JSON.parse(serviceRole(this.store,r.id)!.permissions), builtin: !!r.builtin, recommended: r.id === repositoryAssistant })),
       organizations: this.store.all('SELECT * FROM tenants ORDER BY display_name').filter(t => {
         try { authorize(actor, 'config.write', { tenant_id: t.id }); return true; } catch (error) { if (!terminal(error)) throw error; return false; }
       }).map(t => ({ id: t.id, name: tenantName(this.store, t.id) })),

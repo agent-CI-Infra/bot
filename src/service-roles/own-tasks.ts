@@ -16,6 +16,9 @@ export const ownTaskTools = [
   fn('continue_own_task', 'Continue one of your own independent tasks of this conversation with a further instruction; it sees its earlier instructions and conclusions.',
     { task_id: { type: 'string' }, instruction }, ['task_id', 'instruction']),
   fn('list_own_tasks', 'List your own independent tasks of this conversation, newest first, with their latest conclusions.', {}),
+  fn('read_own_task','Read the instructions and conclusions of your own task in this conversation.',{task_id:{type:'string'}},['task_id']),
+  fn('manage_own_task','Pause or cancel your own task in this conversation; continuing a paused task uses continue_own_task.',
+    {task_id:{type:'string'},operation:{type:'string',enum:['pause','cancel']}},['task_id','operation']),
 ];
 export const ownTaskNames: readonly string[] = ownTaskTools.map(t => t.function.name);
 const steps = 8, rounds = 20;
@@ -41,6 +44,7 @@ export class OwnTasks {
       CREATE INDEX IF NOT EXISTS service_role_own_task_owner ON service_role_own_tasks(owner_kind,owner_id,updated_at)`);
     // A process restart cannot resume a model loop; the conclusion so far stays readable.
     store.run("UPDATE service_role_own_tasks SET state='failed',error='own_task_interrupted',updated_at=? WHERE state='running'", Date.now());
+    if(!store.all('PRAGMA table_info(service_role_own_tasks)').some(c=>c.name==='control'))store.db.exec('ALTER TABLE service_role_own_tasks ADD COLUMN control TEXT');
   }
   private history(row: Row): { instruction: string; conclusion: string; at: number }[] {
     return (this.store.secrets.open(row.history, 'own-task:' + row.id) as Json).rounds as any[];
@@ -50,7 +54,7 @@ export class OwnTasks {
       ORDER BY updated_at DESC,rowid DESC LIMIT 20`, owner.kind, owner.owner_id, owner.service_role_id, owner.principal_id, owner.fence);
   }
   list(owner: OwnTaskOwner): Json {
-    return { own_tasks: this.visible(owner).map(row => ({ task_id: row.id, title: row.title, state: row.state, rounds: row.rounds, error: row.error ?? null,
+    return { own_tasks: this.visible(owner).map(row => ({ task_id: row.id, title: row.title, state: row.control??row.state, rounds: row.rounds, error: row.error ?? null,
       updated_at: row.updated_at, last_conclusion: (this.history(row).at(-1)?.conclusion ?? '').slice(0, 2000) })) };
   }
   /** Runs one own-task tool for the host. Failures are observations for the host model; a stopped host still stops. */
@@ -60,6 +64,16 @@ export class OwnTasks {
     let row: Row | undefined;
     try {
       if (name === 'list_own_tasks') { fields(input, []); return this.list(host.owner); }
+      if(name==='read_own_task'||name==='manage_own_task'){
+        fields(input,name==='read_own_task'?['task_id']:['task_id','operation']);
+        const own=this.visible(host.owner).find(r=>r.id===text(input.task_id,100));
+        if(!own)return {error:'own_task_not_found'};
+        if(name==='read_own_task')return {task_id:own.id,title:own.title,state:own.control??own.state,history:this.history(own)};
+        if(!['pause','cancel'].includes(String(input.operation)))return {error:'invalid_arguments'};
+        const control=input.operation==='pause'?'paused':'cancelled';
+        this.store.run('UPDATE service_role_own_tasks SET control=?,updated_at=? WHERE id=?',control,Date.now(),own.id);
+        return {task_id:own.id,state:control};
+      }
       if (name === 'start_own_task') {
         fields(input, ['title', 'instruction']);
         const id = randomId(), time = Date.now(), title = text(input.title, 200).trim() || '独立任务';
@@ -71,9 +85,10 @@ export class OwnTasks {
         fields(input, ['task_id', 'instruction']);
         row = this.visible(host.owner).find(r => r.id === text(input.task_id, 100));
         if (!row) return { error: 'own_task_not_found', detail: '只能继续本会话当前可见的独立任务；授权或绑定变化后，旧的独立任务不再可见。' };
+        if(row.control==='cancelled')return {error:'own_task_cancelled'};
         if (row.state === 'running') return { error: 'own_task_running' };
         if (row.rounds >= rounds) return { error: 'own_task_round_limit', detail: '这个独立任务已达到轮次上限，请新建一个独立任务。' };
-        this.store.run("UPDATE service_role_own_tasks SET state='running',error=NULL,updated_at=? WHERE id=?", Date.now(), row.id);
+        this.store.run("UPDATE service_role_own_tasks SET state='running',control=NULL,error=NULL,updated_at=? WHERE id=?", Date.now(), row.id);
       } else return { error: 'tool_not_allowed' };
       return await this.work(row!, text(input.instruction, 8000), host);
     } catch (error) {
@@ -92,10 +107,13 @@ export class OwnTasks {
     const transcript = new ToolTranscript(messages, chatContextBytes);
     for (let step = 0; step < steps; step++) {
       await host.check();
+      const checkControl=()=>{const control=this.store.get('SELECT control FROM service_role_own_tasks WHERE id=?',row.id)?.control;if(control)fail(409,'own_task_'+control);};
+      checkControl();
       const offered = tools(), body = { messages, tools: offered, tool_choice: offered.length ? 'auto' : 'none' };
       transcript.fit(body);
       const { value } = await host.request(body, 'own:' + row.id + ':' + round + ':' + step);
       const message = value?.choices?.[0]?.message;
+      checkControl();
       if (!message) fail(502, 'own_task_model_invalid');
       const calls = message.tool_calls ?? [];
       if (toolCallsProblem(calls)) fail(502, 'own_task_model_invalid');
@@ -110,6 +128,7 @@ export class OwnTasks {
       messages.push(traceClean(message));
       const results: unknown[] = [];
       for (const call of calls) {
+        checkControl();
         const name = call.function.name;
         results.push(host.clean(!tools().some(t => (t as any).function.name === name) ? { error: 'tool_not_allowed' }
           : await host.execute(name, toolArguments(call), 'own:' + row.id + ':' + round + ':' + step + ':' + call.id)));

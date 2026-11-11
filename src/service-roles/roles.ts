@@ -3,7 +3,7 @@ import { fail, fields, object, randomId, text, type Json } from '../core/securit
 import { stop } from '../agent/common.js';
 import { openModel } from '../agent/model.js';
 import type { Pricing } from '../metrics/accounting.js';
-import { permissionItems, servicePermissionIds, type RolePermissions } from '../roles/permissions.js';
+import { permissionItems, fullPermissions, normalizePermissions, updatePermissions, validPermissionInput, type RolePermissions } from '../roles/permissions.js';
 
 // Service roles are platform-level assistants (the console/personal management assistant, group chat assistants). They are
 // not bound to one project: their model comes from the shared models, their usage is billed to the role, not a project.
@@ -13,23 +13,16 @@ export const repositoryAssistant = 'repository-assistant';
 export interface ServiceBudget { currency: 'USD' | 'CNY'; limit_amount: number }
 
 const now = () => new Date().toISOString();
-// Service roles reach projects only through their Managers, so delegation reads differently than for a project's work roles
-// (which delegate to a named role). Only the wording changes; the item id, modes and stored values are shared.
-const serviceWording: Record<string, { name: string; description: string }> = {
-  delegation: { name: '派活', description: '经项目的 Manager 新建任务、修改任务（追加说明、修改目标与验收条件）或取消任务；不能指定或直接指挥某个执行角色。' },
-};
-export const serviceItems = permissionItems.filter(item => (servicePermissionIds as readonly string[]).includes(item.id)).map(item => ({ ...item, ...serviceWording[item.id] }));
-/** A new custom role starts with the repository assistant's permissions: read the chat and GitHub, no task access, no delegation. */
-export const repositoryAssistantPermissions: RolePermissions = { conversation_history: 'read', github: 'read', project_tasks: 'none', delegation: 'deny' };
+export const serviceItems = permissionItems;
+export const repositoryAssistantPermissions: RolePermissions = normalizePermissions({ github: 'read' });
 const builtins = [
-  { id: managementAssistant, name: '管理助手', permissions: null,
-    responsibility: '控制台管理对话和个人私聊使用的助手。权限固定继承当前用户自己的有效权限，在其范围内查询和管理项目。' },
+  { id: managementAssistant, name: '管理助手', permissions: fullPermissions(),
+    responsibility: '控制台管理对话和个人私聊使用的助手。使用统一权限机制，固定允许全部已接入能力，实际操作仍受当前用户有效授权和项目范围约束。' },
   { id: repositoryAssistant, name: '仓库问答助手', permissions: repositoryAssistantPermissions,
     responsibility: '群聊默认推荐的助手：查询 GitHub Issue 和 PR、解释代码仓，不给工作角色派活。' },
 ];
 
 export function serviceRoleStorage(store: Store): void {
-  // permissions NULL: inherits the current user's effective permissions (the management assistant only).
   // budget: optional {currency,limit_amount}, cumulative like management_budgets.
   store.db.exec(`CREATE TABLE IF NOT EXISTS service_roles(id TEXT PRIMARY KEY,builtin INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,
     name TEXT NOT NULL,responsibility TEXT NOT NULL DEFAULT '',prompt TEXT NOT NULL DEFAULT '',model_id TEXT,permissions TEXT,budget TEXT,
@@ -39,6 +32,11 @@ export function serviceRoleStorage(store: Store): void {
   const model = defaultSharedModel(store), time = now();
   for (const role of builtins) store.run(`INSERT OR IGNORE INTO service_roles(id,builtin,enabled,name,responsibility,prompt,model_id,permissions,budget,revision,created_at,updated_at)
     VALUES(?,1,1,?,?,'',?,?,NULL,1,?,?)`, role.id, role.name, role.responsibility, model, role.permissions ? JSON.stringify(role.permissions) : null, time, time);
+  const old = store.get('SELECT permissions FROM service_roles WHERE id=?',managementAssistant);
+  if (old && !old.permissions) {
+    store.run('UPDATE service_roles SET permissions=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(fullPermissions()),now(),managementAssistant);
+    store.audit('system','service_role.permissions_migrated',managementAssistant);
+  }
 }
 function defaultSharedModel(store: Store): string | null {
   const id = store.get("SELECT json_extract(value,'$') id FROM settings WHERE key='onboarding.model' AND json_valid(value)")?.id;
@@ -59,7 +57,10 @@ export function releaseModel(store: Store, modelId: string, userId: string): voi
   }
 }
 
-export function serviceRole(store: Store, id: string): Row | undefined { return store.get('SELECT * FROM service_roles WHERE id=?', id); }
+export function serviceRole(store: Store, id: string): Row | undefined {
+  const row=store.get('SELECT * FROM service_roles WHERE id=?', id);
+  return row ? {...row,permissions:JSON.stringify(id===managementAssistant?fullPermissions():normalizePermissions(JSON.parse(row.permissions??'{}'),true))} : undefined;
+}
 /** The role's own shared model, opened for one run. Without one the run stops; it never borrows a project's model. */
 export function serviceRoleModel(store: Store, id: string) {
   const role = serviceRole(store, id);
@@ -90,7 +91,7 @@ export function serviceRoleView(store: Store, row: Row): Json {
   const model = row.model_id ? store.get('SELECT id,model_name,api_url,api_key FROM models WHERE id=? AND repository_id IS NULL', row.model_id) : undefined;
   return { id: row.id, builtin: !!row.builtin, enabled: !!row.enabled, name: row.name, responsibility: row.responsibility, prompt: row.prompt,
     model_id: row.model_id, model: model ? { id: model.id, model_name: model.model_name, api_url: model.api_url, key_configured: !!model.api_key } : null,
-    permissions: row.permissions ? JSON.parse(row.permissions) : null, permissions_inherited: !row.permissions, budget: row.budget ? JSON.parse(row.budget) : null,
+    permissions: row.id===managementAssistant?fullPermissions():normalizePermissions(JSON.parse(row.permissions??'{}'),true), permissions_inherited: false, permissions_fixed: row.id===managementAssistant, budget: row.budget ? JSON.parse(row.budget) : null,
     revision: row.revision, created_at: row.created_at, updated_at: row.updated_at, usage: serviceRoleUsage(store, row.id) };
 }
 
@@ -99,13 +100,9 @@ function optionalText(value: unknown, max: number): string {
   return value.trim();
 }
 function permissionsInput(value: unknown, base: RolePermissions): RolePermissions {
-  const given = object(value), result: RolePermissions = { ...base };
-  for (const [key, mode] of Object.entries(given)) {
-    const item = serviceItems.find(item => item.id === key);
-    if (!item || !item.modes.includes(mode as any)) fail(400, 'invalid_service_role_permission', 'permissions.' + key);
-    result[key] = mode as RolePermissions[string];
-  }
-  return result;
+  const given = object(value);
+  for (const [key,mode] of Object.entries(given)) if (!validPermissionInput(key,mode,base)) fail(400,'invalid_service_role_permission','permissions.'+key);
+  return updatePermissions(base,given as RolePermissions,true);
 }
 function budgetInput(value: unknown): ServiceBudget | null {
   if (value === null) return null;
@@ -124,18 +121,21 @@ function sharedModel(store: Store, value: unknown): string | null {
 const editable = ['name', 'responsibility', 'prompt', 'model_id', 'permissions', 'budget', 'enabled'];
 /** Field values for an insert or update; `current` is the stored row when editing. */
 function definition(store: Store, input: Json, current?: Row) {
-  const builtin = !!current?.builtin, inherited = !!current && !current.permissions;
-  if (input.permissions !== undefined && inherited) fail(400, 'service_role_permissions_inherited', 'permissions');
+  const builtin = !!current?.builtin, fixed = current?.id === managementAssistant;
+  if (input.permissions !== undefined && fixed) {
+    const given=object(input.permissions),full=fullPermissions();
+    if(Object.keys(given).length!==Object.keys(full).length||Object.entries(full).some(([key,mode])=>given[key]!==mode))fail(400,'service_role_permissions_fixed','permissions');
+  }
   if (input.enabled !== undefined && typeof input.enabled !== 'boolean') fail(400, 'invalid_field', 'enabled');
   if (builtin && input.enabled === false) fail(409, 'builtin_service_role_required', 'enabled');
-  const base = current?.permissions ? JSON.parse(current.permissions) as RolePermissions : repositoryAssistantPermissions;
+  const base = current?.permissions ? normalizePermissions(JSON.parse(current.permissions),true) : repositoryAssistantPermissions;
   const budget = input.budget !== undefined ? budgetInput(input.budget) : undefined;
   return {
     name: input.name !== undefined ? text(input.name, 80) : current?.name ?? fail(400, 'invalid_field', 'name'),
     responsibility: input.responsibility !== undefined ? optionalText(input.responsibility, 2000) : current?.responsibility ?? '',
     prompt: input.prompt !== undefined ? optionalText(input.prompt, 32000) : current?.prompt ?? '',
     model_id: input.model_id !== undefined ? sharedModel(store, input.model_id) : current?.model_id ?? null,
-    permissions: inherited ? null : JSON.stringify(input.permissions !== undefined ? permissionsInput(input.permissions, base) : base),
+    permissions: JSON.stringify(fixed?fullPermissions():input.permissions !== undefined ? permissionsInput(input.permissions,base):base),
     budget: budget !== undefined ? (budget ? JSON.stringify(budget) : null) : current?.budget ?? null,
     enabled: input.enabled !== undefined ? (input.enabled ? 1 : 0) : current?.enabled ?? 1,
   };
