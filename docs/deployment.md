@@ -85,6 +85,17 @@ Compose 只发布这一个端口，宿主端口默认 `8791`，默认只绑定�
 | `BOT_GITHUB_OAUTH_CLIENT_SECRET_FILE` | `/run/secrets/github-oauth-client-secret`（Compose） | 使用环境变量启用 OAuth 时读取的只读 Client secret 文件；向导配置不需要此文件 |
 | `BOT_MENTION_NAMES` | `bot,agent-ci-infra-bot` | 评论中提到时一定再检视一次的 `@名字`，逗号分隔、忽略大小写；设置后替换默认值，`off` 关闭提到触发。不提到名字的评论是否触发，由项目「检视」里的更新开关决定 |
 | `BOT_FORWARD_PRIVATE_HOSTS` | 空 | 外部执行端允许转发到的内网主机名，逗号分隔，见[外部执行端](external-executors.md) |
+| `BOT_TRUSTED_PROXIES` | 空 | 密码登录限流信任的代理 IP 或 CIDR，逗号分隔；默认不信任转发头，只按连接来源计数。只填写受控代理的地址或专用代理网络，配置方式见下文 |
+
+### 反向代理后的密码登录限流
+
+反向代理后的用户会共享代理的连接地址。支持此配置的 Bot 版本可通过 `BOT_TRUSTED_PROXIES` 按真实客户端区分密码登录的失败计数：在 Compose 同目录的 `.env` 中填写逗号分隔的代理 IP 或 CIDR，Compose 将它传入 `bot` 容器。只有直接连接 Bot 的对端可信时，才读取 `X-Forwarded-For`（缺少时回退到 `Forwarded`），从右向左跳过已配置的可信代理，取第一个非可信地址。未配置、直接对端不可信或没有可用来源地址时，仍按连接地址计数。
+
+地址以 Bot 实际看到的对端为准：Cloudflare Tunnel → `webhook` → `bot` 拓扑中，直接对端是 `webhook` 容器；同机代理经过 Docker 端口映射时，也不一定呈现为 `127.0.0.1`。先核对实际连接来源和 Docker 网络。代理地址固定时使用精确 IP；需要 CIDR 时只信任受控代理所在的最小专用网段，并限制谁能接入该网络。不要默认信任全部内网，也不要使用 `0.0.0.0/0` 或 `::/0`。
+
+可信入口必须覆写客户端自行提供的来源头，或在已有链末尾追加它实际核实的连接来源，并清理不可信的冲突头；`X-Forwarded-For` 优先于 `Forwarded`。多级代理应保留可核验的完整链，并只把实际受控的中间代理加入信任列表。本仓库的 `webhook` 网关原样转发请求头，不会生成或验证真实客户端地址，所以必须先确认 Cloudflare 或自建 HTTPS 入口满足这些要求，再启用信任。仅设置环境变量不能为缺失的转发头补出客户端地址。
+
+修改 `.env` 后重新创建 Bot 容器（`docker compose up -d bot`），单独重启已有容器不会应用新的环境变量。可用 `docker compose exec bot node -p "process.env.BOT_TRUSTED_PROXIES"` 核对容器实际收到的配置。验收时同时检查：同一可信代理后的客户端 A 触发失败限流后，客户端 B 仍可正常登录；不可信来源仅更换转发头不能绕过限流。
 
 ## 服务、卷与隔离
 
