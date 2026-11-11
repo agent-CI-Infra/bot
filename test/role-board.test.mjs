@@ -177,8 +177,9 @@ test('删除角色会结束其限额生命周期，同名重建及重启后仍�
   const recreated = await putRoles({ expected_revision: removed.value.configuration.revision, roles: [{ role_id: 'dev' }] });
   assert.equal(recreated.status, 200, JSON.stringify(recreated.value));
   const beforeRestart = (await board(admin)).value;
-  // `reviewer` still carries a limit, so this project is still enforced; the recreated `dev` has none.
-  assert.equal(beforeRestart.enforced, true);
+  // Only `reviewer` keeps a limit, and reviewer runs are observers that take no slot: nothing can be refused, so the
+  // project is not enforced. A limit on the recreated `dev` would make it enforced again.
+  assert.equal(beforeRestart.enforced, false);
   assert.equal(beforeRestart.roles.find(role => role.role === 'dev').limit, null);
   assert.equal(beforeRestart.roles.find(role => role.role === 'dev').limit_source, 'unset');
   assert.equal(beforeRestart.roles.find(role => role.role === 'reviewer').limit, 4);
@@ -189,6 +190,13 @@ test('删除角色会结束其限额生命周期，同名重建及重启后仍�
   assert.equal(afterRestart.roles.find(role => role.role === 'dev').limit, null);
   assert.equal(afterRestart.roles.find(role => role.role === 'dev').limit_source, 'unset');
   assert.equal(afterRestart.roles.find(role => role.role === 'reviewer').limit, 4);
+  assert.equal(afterRestart.enforced, false);
+  // A writer limit is what makes the field true, even while the observer limit is still set.
+  assert.equal((await policy(admin, { role_concurrency: { dev: 2, reviewer: 4 } })).status, 200);
+  assert.equal((await board(admin)).value.enforced, true);
+  // Clearing the writer limit while the observer limit stays brings it back to false.
+  assert.equal((await policy(admin, { role_concurrency: { dev: null, reviewer: 4 } })).status, 200);
+  assert.equal((await board(admin)).value.enforced, false);
 });
 
 test('ready 只包含已到期且 wait_for_review 依赖满足的任务', async t => {
