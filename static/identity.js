@@ -1,4 +1,7 @@
 titles.identity = '身份与权限';
+// Every code the GitHub login callback can put in ?auth_error (src/server.ts routes HttpError.code there), in words. A
+// code this page does not know keeps the fallback sentence, which never prints the raw code: a code names an internal
+// condition, not something the person can act on.
 function identityError(code) {
   return ({ external_identity_conflict: '这个 GitHub 身份已绑定其他账号。请登录原账号解除绑定，或联系管理员处理。',
     github_identity_already_bound: '当前账号已有 GitHub 绑定。请先解除原绑定，再关联新的 GitHub 身份。',
@@ -7,6 +10,11 @@ function identityError(code) {
     github_oauth_excessive_scope: '这个 OAuth App 的旧授权包含额外权限。请到 GitHub Settings → Applications → Authorized OAuth Apps 撤销它，再重新登录；管理员应使用专用于登录的新 OAuth App。',
     github_login_configuration_changed: 'GitHub 登录配置已更新，请重新发起登录。',
     github_oauth_failed: 'GitHub 授权失败，请重新授权。', github_oauth_denied: 'GitHub 授权已取消，请重新发起。',
+    github_reauthorization_required: 'GitHub 授权已过期或已被撤销，需要重新授权后才能继续。',
+    github_oauth_unavailable: '连接 GitHub 失败：授权请求没有完成。请检查本机网络后重新发起登录。',
+    github_verification_unavailable: '连接 GitHub 失败：读取身份或安装权限时没有收到回应。请稍后重试，这不代表你的权限被撤销。',
+    github_permission_pending: 'GitHub 安装或权限还在等待确认，暂时无法核验。请稍后重试，或让安装所有者批准待处理的变更。',
+    github_invalid_user: 'GitHub 返回的账号信息不完整，无法确认身份。请重新发起登录；仍然失败时检查 OAuth App 配置。',
     user_disabled: '账号已停用，请联系管理员。' })[code] || 'GitHub 身份暂时无法验证，请稍后重试或使用本地账号登录。';
 }
 // A grant's state in words. `reason` is an additive server field: an older server omits it and every grant
