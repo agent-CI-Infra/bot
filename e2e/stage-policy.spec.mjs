@@ -121,3 +121,27 @@ test('an empty extra policy keeps the independent acceptance explanation and can
     await expect(page.locator('.role-stage').getByLabel('执行角色类型', { exact: true })).toHaveValue('observer');
   } finally { await h.stop(); }
 });
+test('unreachable roles, optional prerequisites and invalid evidence locate their real server fields', async ({ page }) => {
+  const { h, admin, revision } = await prepared(page);
+  try {
+    await page.locator('.role-nav').getByRole('link', { name: 'Reviewer', exact: true }).click();
+    await page.getByLabel('启用角色', { exact: true }).uncheck();
+    await page.locator('.role-nav').getByRole('link', { name: '阶段策略', exact: true }).click();
+    await save(page).click();
+    await expect(exactGroup(page, 'review')).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.getByRole('alert').filter({ hasText: 'required_stages.review.unreachable_role' })).toBeVisible();
+    await page.locator('.role-nav').getByRole('link', { name: 'Reviewer', exact: true }).click(); await page.getByLabel('启用角色', { exact: true }).check();
+    await page.locator('.role-nav').getByRole('link', { name: '阶段策略', exact: true }).click();
+    await exactGroup(page, 'review').getByLabel('必须完成', { exact: true }).uncheck();
+    await expect(page.locator('.stage-policy-issues')).toContainText('可选阶段 review'); await save(page).click();
+    await expect(exactGroup(page, 'final')).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.getByRole('alert').filter({ hasText: 'required_stages.final.unreachable_dependency' })).toBeVisible();
+    await exactGroup(page, 'review').getByLabel('必须完成', { exact: true }).check();
+    await exactGroup(page, 'build').getByLabel('必须没有待处理发现', { exact: true }).check(); await save(page).click();
+    await expect(exactGroup(page, 'build')).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.getByRole('alert').filter({ hasText: 'required_stages.build.completion' })).toBeVisible();
+    expect((await admin('/api/repositories/101/roles')).value.revision).toBe(revision);
+    await exactGroup(page, 'build').getByLabel('必须没有待处理发现', { exact: true }).uncheck();
+    await save(page).click(); await expect(page.locator('.flash')).toBeVisible();
+  } finally { await h.stop(); }
+});
