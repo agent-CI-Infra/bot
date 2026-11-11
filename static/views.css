@@ -288,6 +288,15 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .manager-events{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,16rem),1fr));gap:6px 16px;margin-bottom:8px}
 .manager-dispatch{list-style:none;margin:0;padding:0;display:grid;gap:10px}.manager-dispatch-entry{display:grid;gap:4px;padding:8px 0;border-bottom:1px solid #eef3f5;min-width:0}
 .manager-dispatch-entry p{margin:0;overflow-wrap:anywhere}.manager-dispatch-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+
+/* Manager history filters wrap into the same readable controls on narrow screens. */
+.dispatch-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px;align-items:end;margin:12px 0}
+.dispatch-filters label{display:grid;gap:5px;min-width:0}.dispatch-filters input,.dispatch-filters select{width:100%;min-width:0;box-sizing:border-box}
+.dispatch-reader>.actions{margin-bottom:10px}.dispatch-reader>ol{margin-bottom:12px}
+.dispatch-detail{width:min(760px,calc(100vw - 32px));max-height:calc(100dvh - 32px);box-sizing:border-box;overflow:auto}
+.dispatch-detail-body{display:grid;gap:16px;min-width:0}.dispatch-detail-body section{min-width:0;overflow-wrap:anywhere}.dispatch-detail-body h3{margin:0 0 8px}.dispatch-detail-body .facts{min-width:0}.dispatch-detail>.actions{position:sticky;bottom:-1px;background:var(--color-surface,#fff);padding:12px 0;margin-bottom:0;flex-wrap:wrap}
+.dispatch-detail>[role=status]:empty{display:none}
+
 /* On a narrow screen each work type is a block of its own, every cell under its caption. */
 @media(max-width:650px){.project-table[aria-label="工作类型"] thead{display:none}.project-table[aria-label="工作类型"],.project-table[aria-label="工作类型"] tbody,.project-table[aria-label="工作类型"] tr,.project-table[aria-label="工作类型"] td{display:block;width:auto}
   .project-table[aria-label="工作类型"] tr{padding:8px 0;border-bottom:1px solid #d7e3e8}.project-table[aria-label="工作类型"] td{border:0;padding:4px 0}
@@ -347,22 +356,14 @@ dialog.gate-dialog{padding:0}dialog.gate-dialog:not(.wide){overflow:auto}dialog.
 .role-editor-group>label{display:flex;flex-direction:column;gap:5px;margin:12px 0}
 .role-editor-group>label.check{flex-direction:row}
 .role-editor-group>h4{font-size:17px;margin:0 0 12px}
-.role-save{top:0;bottom:auto;gap:8px;padding:12px;border:1px solid var(--border,#d8dee9);background:var(--color-surface,#fff);z-index:2}
+.role-save{top:0;bottom:auto;gap:8px;padding:12px;border:1px solid var(--border,#d8dee9);background:var(--surface,#fff);z-index:2}
 .role-save>[role=status],.role-save>[role=alert]{flex-basis:100%;margin:0;overflow-wrap:anywhere}
 .role-save>[role=alert]:empty{display:none}
 .role-compare-field{min-width:0;margin:12px 0}
 .role-compare-values{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 .role-compare-values>div{min-width:0}
 .role-compare-values pre,.roles-page details pre{max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
-@media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--color-surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:767px){.role-save{top:0;bottom:auto;padding:10px;background:var(--surface,#fff)}.role-save button{min-height:44px}.role-compare-values{grid-template-columns:minmax(0,1fr)}}
 .audit-filters{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
 .audit-filters button{font-size:12px;padding:4px 10px}
 .audit-filters button[aria-pressed=true]{border-color:#16636b;color:#16636b;background:#e8f3f4}
-
-
-/* Manager history filters wrap into the same readable controls on narrow screens. */
-.dispatch-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:12px;align-items:end;margin:12px 0}
-.dispatch-filters label{display:grid;gap:5px;min-width:0}.dispatch-filters input,.dispatch-filters select{width:100%;min-width:0;box-sizing:border-box}
-.dispatch-reader>.actions{margin-bottom:10px}.dispatch-reader>ol{margin-bottom:12px}
-.dispatch-detail{width:min(760px,calc(100vw - 32px));max-height:calc(100dvh - 32px);box-sizing:border-box;overflow:auto}
-.dispatch-detail-body{display:grid;gap:16px;min-width:0}.dispatch-detail-body section{min-width:0;overflow-wrap:anywhere}.dispatch-detail-body h3{margin:0 0 8px}.dispatch-detail-body .facts{min-width:0}.dispatch-detail>.actions{position:sticky;bottom:-1px;background:var(--color-surface,#fff);padding:12px 0;margin-bottom:0;flex-wrap:wrap}
