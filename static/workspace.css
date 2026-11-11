@@ -1,4 +1,12 @@
 .workspace-overview { min-width: 0; }
+.project-settings-layout { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-5); align-items: start; }
+.project-settings-layout > .side-card { min-width: 0; margin: 0; padding: var(--space-5); }
+.project-settings-layout .project-danger { grid-column: 1/-1; border-color: var(--color-danger, #c84242); }
+.project-danger > button { margin: 8px 12px 0 0; }
+.project-member-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-4); margin-top: var(--space-5); }
+.project-member { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: var(--space-5); overflow-wrap: anywhere; }
+.project-member h4 { margin: 0 0 8px; }
+.project-member .facts { margin-top: var(--space-4); }
 .workspace-overview .console-page-head { align-items: start; margin-bottom: var(--space-6); }
 .workspace-overview .console-page-head h2 { font-size: var(--font-size-5); margin: 6px 0; letter-spacing: -.6px; }
 .workspace-overview .console-page-head p { max-width: 680px; }
@@ -24,6 +32,9 @@
   .workspace-context { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 @media (max-width:767px) {
+  .project-settings-layout, .project-member-list { grid-template-columns: minmax(0,1fr); }
+  .project-settings-layout .member-add { flex-wrap: wrap; }
+  .member-add select { min-width: 0; max-width: 100%; }
   .workspace-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .workspace-metrics .console-link { padding: var(--space-4); }
   .workspace-overview .console-page-head { flex-wrap: wrap; gap: var(--space-4); }

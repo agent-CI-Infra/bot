@@ -11,7 +11,7 @@ import { dropUninstalledIntegrations } from '../projects/integrations.js';
 import { concurrencyValue, defaultConcurrency } from './settings.js';
 import { policyView, roleBoard, roleConcurrency, roleConcurrencyValue } from '../roles/board.js';
 import { activateActions } from '../actions/storage.js';
-import { listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
+import { authorize, listEffectiveProjectAccess, listEffectiveScopes } from '../identity/authorization.js';
 
 export const publicUser = (row: Row) => ({ id: row.id, username: row.username, role: row.role, active: !!row.active });
 function userAccessView(store: Store, row: Row): Json {
@@ -256,7 +256,8 @@ export async function management(store: Store, user: Actor, method: string, url:
     // The project's own concurrency is task_concurrency (null follows the default); the default comes with it so a project
     // administrator sees what an empty field means without reading the global settings.
     const concurrency = () => ({ task_concurrency_default: defaultConcurrency(store) });
-    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, policy: policyView(store, store.get('SELECT * FROM policies WHERE repository_id=?', id), id)!,
+    const canConfigure = () => { try { if (user.context) authorize(user.context, 'config.write', { project_id: id }); return true; } catch { return false; } };
+    if (method === 'GET') return { repository: store.get('SELECT * FROM repositories WHERE id=?', id)!, can_configure: canConfigure(), policy: policyView(store, store.get('SELECT * FROM policies WHERE repository_id=?', id), id)!,
       actions_failures: store.get('SELECT enabled_at,next_scan,error FROM actions_failure_scans WHERE repository_id=?', id) || null,
       // Role limits have no default on purpose: an empty map means "no per-role limit", not a number we picked.
       role_concurrency_default: null, ...concurrency() };
