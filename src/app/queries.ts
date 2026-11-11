@@ -1,7 +1,7 @@
 import {taskRelations} from '../tasks/priority.js';
 import { visibleMemorySnapshot } from '../memory/access.js';
 import { taskDispatch } from '../dispatch/store.js';
-import { taskTrace } from '../tasks/trace.js';
+import { taskTrace, traceClean } from '../tasks/trace.js';
 import { TaskRecords } from '../tasks/service.js';
 import { type Store } from '../storage/database.js';
 import { type Actor, repository, scope } from './auth.js';
@@ -95,7 +95,31 @@ export function queries(store: Store, user: Actor, url: URL): Json | undefined {
   if (task) {
     const row = store.get(`SELECT *,${repositoryName},${pushedSha},${faultDetail} AS error_detail FROM tasks WHERE id=? AND ${filter.sql}`, task[1]!, ...filter.args);
     if (!row) return fail(404, 'task_not_found');
-    return task[2] ? { logs: store.all('SELECT id,content,created_at FROM task_logs WHERE task_id=? ORDER BY rowid', row.id).map(faultCause).map(log=>({...log,content:visibleMemorySnapshot(store,row.repository_id,log.content,user.context?{actor:user.context}:undefined)})) } : { task: {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
+    if (task[2]) {
+      const limit = Number(url.searchParams.get('limit') ?? 100), after = url.searchParams.get('after'), before = url.searchParams.get('before');
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || after !== null && before !== null ||
+        [after, before].some(value => value !== null && (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))))) fail(400, 'invalid_pagination');
+      const ascending = after !== null, cursor = after ?? before;
+      const rows = store.all(`SELECT rowid AS sequence,id,content,created_at FROM task_logs WHERE task_id=?
+        ${cursor === null ? '' : 'AND rowid' + (ascending ? '>' : '<') + '?'} ORDER BY rowid ${ascending ? 'ASC' : 'DESC'} LIMIT ?`, row.id, ...(cursor === null ? [] : [Number(cursor)]), limit + 1);
+      const more = rows.length > limit; rows.splice(limit); if (!ascending) rows.reverse();
+      const logs = rows.map(faultCause).map(log => {
+        let content = visibleMemorySnapshot(store, row.repository_id, log.content, user.context ? { actor: user.context } : undefined);
+        // Historical legacy model logs may contain private fields. Tool/file contents remain literal public evidence.
+        try {
+          const value = JSON.parse(content);
+          if (value.type === 'model') {
+            const clean = traceClean(value);
+            if (typeof value.content === 'string') clean.content = traceClean({ encoding: 'utf8', content: value.content }).content;
+            content = JSON.stringify(clean);
+          }
+        } catch { /* Plain output remains readable. */ }
+        return { ...log, content };
+      });
+      return { logs, log_page: { has_older: ascending ? false : more, has_newer: ascending && more,
+        first_sequence: rows[0]?.sequence ?? null, last_sequence: rows.at(-1)?.sequence ?? null } };
+    }
+    return { task: {...withTaskMetrics(store,[publicTask(row)])[0],origin:taskOrigin(store,row.id),structured:detailState(store,row.id),error_detail:row.error_detail||null},...detailHistory(store,row.id),publications:store.all('SELECT kind,state,response FROM github_effects WHERE task_id=?',row.id).map(p=>({...p,response:p.response?JSON.parse(p.response):null})),
       // Why the Manager created or continued this task, with the events behind it.
       dispatch:taskDispatch(store,row.id) };
   }

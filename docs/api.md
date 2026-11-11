@@ -42,7 +42,7 @@
 | `/api/models/upstream`、`/api/models/test` | POST | 未保存的模型：用提交的 `api_url,api_key` 获取上游模型列表；测试另带 `model_name`，发一次最小的 Chat Completions 请求。带 `repository_id` 时要求该项目的管理权限，为 null 时只允许超级管理员；不写数据库 |
 | `/api/models/:id/upstream`、`/api/models/:id/test` | POST | 已保存的模型用自己的 URL、Key 和模型名获取列表／测试，正文 `{}`；权限与编辑该模型相同（共享模型只允许超级管理员），审计记为 `model.upstream_listed`／`model.tested`；Key 已撤销返回 409 `model_key_missing` |
 | `/api/events`、`/api/events/:id` | GET | 范围内投递列表／正文和响应；列表可筛选 `repository_id,account_id,owner_id,event,status,delivery_id,limit,offset` |
-| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执（详情状态只含候选及证据元数据，历史为最近 50 项并附 history_page，正文从来源入口读取）和带时间的过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志包含模型每步的思考摘要、工具调用与结果（长文本截断），不返回认领令牌或原始模型会话 |
+| `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | GET | 范围内任务列表、结果、发布回执（详情状态只含候选及证据元数据，历史为最近 50 项并附 history_page，正文从来源入口读取）和带时间的公开过程日志；支持 `kind=review|development`、仓库／账号／组织过滤及分页。日志只提供公开模型输出、工具调用与结果，不提供私有推理、认领令牌或原始模型会话 |
 | `/api/tasks/:id/events` | GET | 事件索引，`after` 游标、`limit` 1–100（默认 50），支持 `run_id/type/revision/candidate_id`；默认只返回元数据，`include_data=1` 内联至多 8192 字符的数据，完整数据通过来源接口读取 |
 | `/api/tasks/:id/runs` | GET | 运行索引，`after`、`limit` 1–100（默认 20）；`include_snapshots=1` 返回输入/输出快照 |
 | `/api/tasks/:id/source` | GET | `ref` 指向 task_history、task_runs、model_requests 等来源；校验任务及项目范围，保留完整性、缺失及脱敏标记 |
@@ -68,6 +68,9 @@
 | `/api/audit`、`/api/status` | GET | 范围内最近 100 条操作审计／当前能力状态 |
 | `/api/costs` | GET | 授权范围内的统计。参数 `timezone` 为浏览器的 IANA 时区（省略时兼容 UTC，无效时返回 400 `invalid_statistics_timezone`），`from,to` 为该时区的 `YYYY-MM-DD`（含首尾，默认最近 30 天，最多 366 天），`repository_id` 可省略，`currency` 为 `USD`（默认）或 `CNY`。模型费用和 token 按 `requested_at` 的本地日、项目聚合；费用最多 5000 个日期／项目分组，超限要求缩小范围。返回 `days,summary,prices,timezone,collection_started_at,tasks`；`tasks` 独立聚合，不占费用分组配额。不返回模型密钥或原始请求 |
 | `/hooks/github/:account/:endpoint` | POST | 按已登记入口验签和归档，不需要登录会话 |
+
+`GET /api/tasks/:id/logs` 默认按时间顺序返回最近 100 条日志。`limit` 为 1–100，`before` 向前读取更早页，`after` 向后读取新增页，两种游标不能同时提供。游标取响应 `log_page.first_sequence` 或 `last_sequence`，以日志追加序号为准，不依赖可能相同的时间戳；`has_older` 和 `has_newer` 表示当前读取方向是否还有下一页。客户端加载历史页后保留最早游标，轮询新增页时继续使用已读取的最大序号。每个请求都重新核对任务所属项目的权限，历史模型日志的私有字段在读取投影中过滤，新的 Pi 日志在保存前统一移除私有字段。
+
 
 Webhook 对原始字节计算 HMAC-SHA256 并以恒定时间比较，验签后才解析和关联仓库。签名错误返回 401，未知入口返回 404，非法 JSON 返回 400，超过 2 MiB 返回 413（归档截断正文并标记不完整）。请求头中的认证、签名和 Cookie 等内容脱敏。请求正文、响应记录和 `(account_id,endpoint_id,delivery_id)` 去重键在同一个 SQLite `BEGIN IMMEDIATE` 事务提交后才返回成功；写库失败返回 503 且回滚去重。重复投递保存独立档案，响应标记 `duplicate:true`。失败投递不消费去重键，重试可成功。空仓库配置、未启动或已禁用的仓库只归档，不生成任务。
 

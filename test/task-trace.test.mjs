@@ -56,6 +56,22 @@ test('bounded capture marks missing content and removes private reasoning and cr
  const large=JSON.parse(traceSnapshot({text:'x'.repeat(3*1024*1024)}));assert.equal(large.complete,false);assert.equal(large.missing_reason,'capture_limit_exceeded');assert.ok(large.sha256);
 });
 
+test('task log pages use stable cursors, preserve public output and omit historical private model fields',()=>{
+ const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);
+ const actor={id:'owner',role:'super_admin',repositories:[]},read=query=>queries(s,actor,new URL('http://local/api/tasks/t/logs'+query));
+ for(let i=0;i<215;i++)s.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)','log-'+i,'t',JSON.stringify({type:'model',content:JSON.stringify({analysis:'public result '+i}),reasoning_content:'PRIVATE_REASONING_SENTINEL',debug:{thinking:'PRIVATE_REASONING_SENTINEL'}}),'same-time');
+ const page=read('');assert.equal(page.logs.length,100);assert.equal(page.logs[0].id,'log-115');assert.equal(page.log_page.has_older,true);assert.equal(page.log_page.has_newer,false);
+ assert.doesNotMatch(JSON.stringify(page),/PRIVATE_REASONING_SENTINEL/);assert.equal(JSON.parse(page.logs[0].content).content,JSON.stringify({analysis:'public result 115'}));
+ const older=read('?before='+page.log_page.first_sequence);assert.equal(older.logs.length,100);assert.equal(older.logs[0].id,'log-15');assert.equal(older.log_page.has_older,true);
+ const first=read('?before='+older.log_page.first_sequence);assert.equal(first.logs.length,15);assert.equal(first.log_page.has_older,false);
+ s.run("INSERT INTO task_logs(id,task_id,content) VALUES('later','t','public tool output')");
+ const tail=read('?after='+page.log_page.last_sequence);assert.deepEqual(tail.logs.map(l=>l.id),['later']);assert.equal(tail.log_page.has_newer,false);
+ assert.equal(read('?after=0&limit=1').log_page.has_newer,true);
+ assert.throws(()=>read('?limit=101'),/invalid_pagination/);assert.throws(()=>read('?before=1&after=2'),/invalid_pagination/);assert.throws(()=>read('?after=-1'),/invalid_pagination/);
+ assert.throws(()=>queries(s,{id:'outsider',role:'project_admin',repositories:[]},new URL('http://local/api/tasks/t/logs?before=100')),/task_not_found/);
+ }finally{s.close();}
+});
+
 test('detail polling returns a bounded history index and omits large candidate/operation bodies',()=>{
  const s=new Store(':memory:',Buffer.alloc(32));try{seed(s);const r=new TaskRecords(s);r.submit('t',[{kind:'report',reference:'large.json',version:'v',content:{text:'PAYLOAD_SENTINEL'.repeat(50000)}}],[{source:'test',version:'v',verified:false,result:{text:'PAYLOAD_SENTINEL'.repeat(50000)}}],{});
  for(let i=0;i<120;i++)s.run('INSERT INTO task_tools VALUES(?,?,?,?,?)','op'+i,'t',JSON.stringify({command:'inspect',output:'PAYLOAD_SENTINEL'.repeat(1000)}),'{}','completed');

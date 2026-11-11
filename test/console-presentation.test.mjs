@@ -103,7 +103,11 @@ test('the next step is one sentence for waiting, accepting, finished and unreada
   const none = { instances: [], assignments: [], runs: [{ role: 'qa', kind: 'acceptance', harness: 'native', status: 'succeeded' }], snapshots: {} };
   assert.equal(page.run(`taskNextStep(${JSON.stringify({ status: 'running', phase: 'acceptance' })}, ${JSON.stringify(record({ candidate }))}, roleRecords(${JSON.stringify(none)}))`),
     '任务处在独立验收阶段，但现在没有正在运行的 QA：控制面还没开始这次验收，或者正在处理验收结论。');
-  assert.equal(next({ status: 'pr_opened', phase: 'done' }), '已创建 PR：独立 QA 验收通过后按原规则交付，没有下一步。');
+  assert.equal(next({ status: 'pr_opened', phase: 'done' }), '已创建 PR：没有读取到当前候选的有效独立 QA 通过记录，请核对任务事实。PR 已创建，合入与 GitHub CI 状态需分别核对。');
+  const accepted = record({ candidate, acceptance: { outcome: 'pass', candidate_id: candidate.id, revision: candidate.revision } });
+  assert.match(next({ status: 'completed', phase: 'done' }, accepted), /独立 QA 对当前候选的验收已通过/);
+  accepted.acceptance.candidate_id = 'stale-candidate';
+  assert.doesNotMatch(next({ status: 'completed', phase: 'done' }, accepted), /验收已通过/);
   assert.equal(next({ status: 'running', phase: 'validate' }), '控制面正在项目电脑里运行仓库测试。');
   // Without role records the page cannot tell the original executor from the controller, and says so.
   assert.equal(next({ status: 'running', phase: 'model' }, record({ progress: { next_action: null } })), '正在执行（模型执行）；读不到角色记录，说不清现在是谁在处理。');
@@ -114,6 +118,16 @@ test('the next step is one sentence for waiting, accepting, finished and unreada
   // Role ids are the project's: a custom role called constructor never reads Object.prototype.
   assert.equal(page.run("roleLabel('constructor')"), 'constructor'); assert.equal(page.run("roleLabel('constructor', 'Constructor checker')"), 'Constructor checker');
   assert.equal(page.run("harnessName('constructor')"), 'constructor');
+});
+
+test('task run history uses the executed snapshot and does not borrow the current model or role revision', async t => {
+  const task = { id: 'historical-run', repository_id: '101', kind: 'task.request', status: 'completed', phase: 'done', structured: record() };
+  const roles = { instances: [{ id: 'worker', role: 'dev', snapshot_id: 'new', harness: 'native' }], assignments: [],
+    runs: [{ id: 'run-original', role: 'dev', status: 'completed', harness: 'pi', harness_version: '1.4.0', role_snapshot: 'old', started_at: '2026-11-10T01:00:00Z', ended_at: '2026-11-10T01:01:00Z' }],
+    snapshots: { old: { name: 'Original worker', config_revision: 7, model: { name: 'original-model', source: 'project' } }, new: { name: 'New worker', config_revision: 9, model: { name: 'MODEL_MUST_NOT_REWRITE_HISTORY', source: 'role' } } } };
+  const page = taskPage(t, task, roles); await page.open();
+  assert.match(page.side(), /实际运行记录/); assert.match(page.side(), /run-original/); assert.match(page.side(), /original-model/); assert.match(page.side(), /项目默认/);
+  assert.doesNotMatch(page.side(), /MODEL_MUST_NOT_REWRITE_HISTORY/);
 });
 
 // A role as GET /api/repositories/:id/roles returns it.

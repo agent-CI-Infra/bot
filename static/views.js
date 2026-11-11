@@ -150,11 +150,13 @@ const taskView = dialog('task-view', `<div class="view-head"><div class="title-g
 <p id="task-error" class="view-error" role="alert"></p>
 <section id="task-next" class="task-next" aria-labelledby="task-next-heading" hidden><h3 id="task-next-heading">下一步</h3><p id="task-next-text" class="task-next-text"></p></section>
 <div id="task-picker" class="task-picker" hidden></div>
-<div id="task-layout" class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">Agent 工作过程</h3><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
+<div id="task-layout" class="task-layout"><section class="timeline-panel" aria-labelledby="timeline-heading"><h3 id="timeline-heading">公开工作日志</h3><p class="muted">展示公开输出、工具调用与结果；执行阶段和验收结论按实际记录分别呈现。</p><div id="task-log-controls" class="task-log-controls"></div><ol id="timeline" class="timeline"></ol><div id="timeline-command" class="step step-running" aria-live="off" hidden></div><p id="timeline-live" class="live" role="status" hidden></p></section><aside id="task-side" class="task-side" aria-label="任务信息"></aside></div>`);
 taskView.setAttribute('aria-labelledby', 'task-title');
 
-let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null;
+let openTaskId = null, taskTimer = null, renderedLogs = new Set(), liveCommand = null, snapshotProgress = null, taskLogState = null, taskReadVersion = 0;
 async function openTask(id) {
+  taskReadVersion++; taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
+  $('task-log-controls').replaceChildren();
   openTaskId = id; renderedLogs = new Set(); liveCommand = null; snapshotProgress = null; $('timeline-command').hidden = true; clearTimeout(taskTimer);
   $('task-picker').hidden = true; $('task-layout').hidden = false; $('task-next').hidden = true; $('task-next-text').textContent = '';
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
@@ -163,6 +165,7 @@ async function openTask(id) {
   await refreshTask();
 }
 function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
+  taskReadVersion++; taskLogState = null;
   openTaskId = null; clearTimeout(taskTimer); $('timeline-command').hidden = true; $('timeline-live').hidden = true; notice('task-error');
   for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions']) $(part).replaceChildren();
   $('task-title').textContent = `${label} · 选择任务`; $('task-actions').append(button('关闭', () => taskView.close()));
@@ -185,34 +188,100 @@ function openTaskChoices(label, tasks, hasMore = false, onMore = null) {
 }
 async function refreshTask() {
   clearTimeout(taskTimer); const id = openTaskId; if (!id || !taskView.open) return;
+  if (!taskLogState || taskLogState.id !== id) taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
+  const request = ++taskReadVersion, logState = taskLogState;
+  const current = () => openTaskId === id && taskView.open && request === taskReadVersion;
   try {
-    const [detail, { logs }, roleView] = await Promise.all([api('/api/tasks/' + id), api('/api/tasks/' + id + '/logs'), taskRoleView(id)]);
+    const after = logState?.page && logState.logs.at(-1)?.sequence;
+    const [detail, logResult, roleView] = await Promise.all([api('/api/tasks/' + id), api('/api/tasks/' + id + '/logs' + (after ? '?after=' + after : '')).catch(error => ({ error })), taskRoleView(id)]);
     const environment = await api('/api/environments/' + detail.task.repository_id).catch(() => null);
     const roles = roleRecords(roleView), purposes = await rolePurposes(id, roles);
-    if (openTaskId !== id || !taskView.open) return;
-    renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes); renderTimeline(detail.task, logs); await refreshLive(detail.task); keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
+    if (!current()) return;
+    renderTaskHeader(detail.task); renderTaskNext(detail.task, roles, purposes);
+    if (logResult.error && [401, 403, 404].includes(logResult.error.status)) throw logResult.error;
+    if (logResult.error) logState.error = logResult.error.message;
+    else {
+      logState.error = ''; mergeTaskLogs(logState, logResult, !after); renderTimeline(detail.task, logState.logs);
+    }
+    logState.task = detail.task; updateTaskLogControls(logState);
+    await refreshLive(detail.task, current); if (!current()) return;
+    keepOpen($('task-side'), () => renderTaskSide(detail, environment, roles, purposes));
     if (!terminalStates.includes(detail.task.status)) taskTimer = setTimeout(refreshTask, detail.task.status.startsWith('waiting_') ? 5000 : 2000);
-  } catch (err) { if(openTaskId!==id||!taskView.open)return;if(!$('task-error').childElementCount)notice('task-error',err.message);taskTimer = setTimeout(refreshTask, 5000); }
+  } catch (err) {
+    if (!current()) return;
+    if ([401, 403, 404].includes(err.status)) {
+      taskLogState = { id, logs: [], page: null, error: '', olderPending: false };
+      for (const part of ['timeline', 'task-side', 'task-badges', 'task-actions', 'task-log-controls']) $(part).replaceChildren();
+      $('task-next').hidden = $('timeline-command').hidden = $('timeline-live').hidden = true;
+      $('task-title').textContent = '任务暂不可访问';
+      $('task-actions').append(button('关闭', () => taskView.close()));
+    }
+    notice('task-error', err.message); taskTimer = setTimeout(refreshTask, 5000);
+  }
+}
+function mergeTaskLogs(cache, result, initial = false) {
+  const rows = new Map(cache.logs.map(log => [log.id, log]));
+  for (const log of result.logs || []) rows.set(log.id, log);
+  cache.logs = [...rows.values()];
+  if (result.log_page) {
+    cache.logs.sort((a, b) => a.sequence - b.sequence);
+    cache.page = { ...result.log_page, has_older: initial ? result.log_page.has_older : cache.page?.has_older || false };
+  }
+}
+function updateTaskLogControls(cache) {
+  if (taskLogState !== cache) return;
+  if (!cache.controls) {
+    const status = element('p', '', 'muted'), message = element('p', '', 'view-error'); status.setAttribute('role', 'status'); message.setAttribute('role', 'alert');
+    const older = button('加载更早日志', () => loadOlderTaskLogs(cache));
+    const retry = button('重新读取日志', () => refreshTask());
+    const newer = button('加载后续日志', () => refreshTask());
+    $('task-log-controls').replaceChildren(status, older, newer, retry, message); cache.controls = { status, older, newer, retry, message };
+  }
+  const { status, older, newer, retry, message } = cache.controls;
+  status.textContent = `已读取 ${cache.logs.length} 条日志` + (cache.page?.has_older ? ' · 还有更早记录' : '') + (cache.page?.has_newer ? ' · 后续记录待载入' : '');
+  older.hidden = !cache.page?.has_older; older.disabled = cache.olderPending;
+  newer.hidden = !cache.page?.has_newer; retry.hidden = !cache.error;
+  message.textContent = cache.error ? '日志读取失败：' + cache.error + '。已读取内容保留，可重试。' : '';
+}
+async function loadOlderTaskLogs(cache) {
+  if (taskLogState !== cache || cache.olderPending || !cache.logs.length) return;
+  cache.olderPending = true; updateTaskLogControls(cache);
+  try {
+    const result = await api(`/api/tasks/${encodeURIComponent(cache.id)}/logs?before=${cache.logs[0].sequence}`);
+    if (taskLogState !== cache || !taskView.open) return;
+    mergeTaskLogs(cache, result); cache.page.has_older = result.log_page.has_older; cache.error = '';
+    const panel = scroller($('timeline').parentElement), top = panel.scrollTop, height = panel.scrollHeight;
+    keepOpen($('timeline'), () => {
+      $('timeline').replaceChildren(); renderedLogs = new Set(); snapshotProgress = null; renderTimeline(cache.task, cache.logs);
+    });
+    panel.scrollTop = top + panel.scrollHeight - height;
+  } catch (err) { if (taskLogState === cache) cache.error = err.message; }
+  finally { cache.olderPending = false; if (taskLogState === cache) updateTaskLogControls(cache); }
 }
 function renderTaskHeader(task) {
   $('task-title').textContent = task.object_number == null ? objectLabel(task) : `${modeLabels[task.kind] || task.kind} · ${objectLabel(task)}`;
   $('task-badges').replaceChildren(taskState(task), element('span', task.full_name || '仓库 ' + task.repository_id, 'muted'));
-  const actions = $('task-actions'), url = githubUrl(task); actions.replaceChildren();
+  const actions = $('task-actions'), url = githubUrl(task), signature = `${task.id}:${task.status}:${url || ''}`;
+  if (actions.childElementCount && actions.dataset.signature === signature) return;
+  actions.dataset.signature = signature; actions.replaceChildren();
   if (url) actions.append(link(url, '在 GitHub 打开', 'button-link'));
   if (retryableStates.includes(task.status)) actions.append(button('重试', async event => {
-    event.currentTarget.disabled = true;
+    const retry = event.currentTarget; retry.disabled = true;
     try { await api('/api/tasks/' + task.id + '/retry', 'POST', {}); if(openTaskId===task.id){notice('task-error');notice('message');} }
     catch (err) { if(openTaskId===task.id)notice('task-error',retryErrorText(err)); }
+    finally { retry.disabled = false; }
     await refreshTask();
   }));
-  actions.append(button('关闭', () => taskView.close()));
+  actions.append(button('刷新任务', () => refreshTask()), button('关闭', () => taskView.close()));
 }
 // The command running right now in the project computer, with its output streamed by byte offset.
-async function refreshLive(task) {
+async function refreshLive(task, current = () => openTaskId === task.id && taskView.open) {
   const box = $('timeline-command');
   if (task.status !== 'running') { box.hidden = true; liveCommand = null; return; }
   let live = await api(`/api/tasks/${task.id}/live?offset=${liveCommand?.offset || 0}`).catch(() => null);
+  if (!current()) return;
   if (live?.running && liveCommand && live.operation_id !== liveCommand.operation_id) { liveCommand = null; live = await api(`/api/tasks/${task.id}/live?offset=0`).catch(() => null); }
+  if (!current()) return;
   if (!live?.running) { box.hidden = true; liveCommand = null; return; }
   if (!liveCommand) liveCommand = { operation_id: live.operation_id, offset: 0, text: '', seen: Date.now() };
   liveCommand.text = (liveCommand.text + live.output).slice(-65536); liveCommand.offset = live.offset;
@@ -240,14 +309,18 @@ function liveText(task) {
     const count = !cause.retry_cycle && task.status === 'retry_wait' && task.error_code !== 'github_rate_limited' && task.retry_count ? `同一种失败已连续出现 ${task.retry_count} 次，满 5 次后改为每 8 小时重试。` : '';
     return `已暂停：${caption} · ${cause.label}（${task.error_code}）。${count}${cause.action}${next}`;
   }
-  return { prepare: '正在准备工作区：拉取固定提交并写入虚拟电脑…', model: 'Agent 正在思考，或在虚拟电脑里执行工具…', validate: '正在虚拟电脑里运行仓库测试…', publish: '正在发布到 GitHub…' }[task.phase] || '执行中…';
+  return { prepare: '正在准备工作区：拉取固定提交并写入虚拟电脑…', model: 'Agent 正在请求模型或执行工具…', validate: '正在虚拟电脑里运行仓库测试…', publish: '正在发布到 GitHub…' }[task.phase] || '执行中…';
 }
 function renderTimeline(task, logs) {
-  let modelStep=0;
+  let modelStep = 0;
   const list = $('timeline'), box = scroller(list.parentElement), first = !list.childElementCount, atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   for (let log of logs) {
     let value;try{value=JSON.parse(log.content);}catch{}
-    if(value?.type==='model'){modelStep++;if(!Number.isSafeInteger(value.step))log={...log,content:JSON.stringify({...value,step:modelStep})};}
+    // A legacy ordinal is only knowable when the beginning of the log has actually been read.
+    if (value?.type === 'model') {
+      modelStep++;
+      if (!Number.isSafeInteger(value.step) && !taskLogState?.page?.has_older) log = { ...log, content: JSON.stringify({ ...value, step: modelStep }) };
+    }
     if(renderedLogs.has(log.id))continue;
     renderedLogs.add(log.id);
     if(value?.type==='phase'&&value.phase==='prepare'||['snapshot_progress','snapshot_skipped','snapshot_git','snapshot'].includes(value?.type)){
@@ -322,8 +395,7 @@ function step(log) {
     title.textContent = '准备项目工作区'; add(element('p', `固定提交 ${String(value.sha || '').slice(0, 12)}`));
     for (const line of value.coverage || []) add(element('p', line, 'muted'));
   } else if (value.type === 'model') {
-    title.textContent = `第 ${value.step} 步 · 模型决策`;
-    if (value.reasoning) add(collapsible(`思考过程（${value.reasoning.length} 字）`, value.reasoning));
+    title.textContent = Number.isSafeInteger(value.step) ? `第 ${value.step} 步 · 模型公开输出` : '模型公开输出';
     if (value.content) add(element('p', value.content, 'say'));
     const calls = element('div', '', 'calls'); for (const call of value.tool_calls || []) calls.append(element('span', toolCaption(call), 'call'));
     if (calls.childElementCount) add(calls);
@@ -439,7 +511,10 @@ const controllerOf = roles => roles?.instances.find(instance => instance.role ==
 // sentence names nobody.
 function taskNextStep(task, record, roles, purposes = {}) {
   const caption = (states[task.status] || [task.status])[0], cause = task.error_cause, next = record?.progress?.next_action;
-  if (['succeeded', 'completed', 'pr_opened'].includes(task.status)) return `${caption}：独立 QA 验收通过后按原规则交付，没有下一步。`;
+  if (['succeeded', 'completed', 'pr_opened'].includes(task.status)) {
+    const accepted = record?.acceptance && ['pass', 'pass_with_issues'].includes(record.acceptance.outcome) && record.candidate?.id === record.acceptance.candidate_id && record.revision === record.acceptance.revision;
+    return `${caption}：${accepted ? '独立 QA 对当前候选的验收已通过。' : '没有读取到当前候选的有效独立 QA 通过记录，请核对任务事实。'}${task.status === 'pr_opened' ? 'PR 已创建，合入与 GitHub CI 状态需分别核对。' : '任务执行已结束。'}`;
+  }
   if (task.status === 'cancelled') return '已取消，没有下一步。';
   if (task.status === 'superseded') return '已过时：同一对象有更新的任务接手，这个任务不再继续。';
   if (task.status === 'failed') return '已失败' + (cause ? `：${cause.label}。${cause.action}` : `（${task.error_code || '没有错误码'}）。`);
@@ -557,11 +632,31 @@ function taskDispatchCard(entries) {
   }
   section.append(list); return section;
 }
+function taskRunHistoryCard(roles) {
+  const section = card('实际运行记录');
+  section.append(mutedLine('每次重试和恢复保留独立运行；下方 Agent、模型和配置取自该次运行快照。'));
+  if (!roles) { section.append(mutedLine('角色运行记录读取失败，实际执行配置未知。')); return section; }
+  if (!roles.runs.length) { section.append(mutedLine('没有角色运行记录；历史任务不补造运行。')); return section; }
+  const list = element('div', '', 'task-run-history');
+  for (const run of roles.runs.slice().reverse()) {
+    const snapshot = roles.snapshot(run.role_snapshot), row = element('details', '', 'fold');
+    const summary = element('summary', `${roleLabel(run.role, snapshot?.name)} · ${own(runCaptions, run.status) || run.status} · ${shortId(run.id)}`);
+    row.append(summary, facts([['运行 ID', run.id], ['委派 ID', run.assignment_id || '未关联委派'],
+      ['Agent', run.harness ? `${harnessName(run.harness)}${run.harness_version ? ' · ' + run.harness_version : ''}` : '未记录'],
+      ['模型', snapshot?.model?.name || '快照未提供'], ['模型来源', ({ role: '角色覆写', workflow: '工作类型', project: '项目默认', external_harness: '外部 Agent 自带' })[snapshot?.model?.source] || '未知'],
+      ['配置版本', snapshot?.config_revision == null ? '未记录' : String(snapshot.config_revision)],
+      ['开始', timestamp(run.started_at) || '未记录'], ['结束', timestamp(run.ended_at) || (run.status === 'running' ? '尚未结束' : '未记录')],
+      ['续接来源', run.resume_from_run_id || null], ['停止原因', stopReasons[run.stop_reason] || run.stop_reason || null]]));
+    list.append(row);
+  }
+  section.append(list); return section;
+}
 function renderTaskSide(detail, environment, roles = null, purposes = {}) {
   const { task, publications } = detail, side = $('task-side'); side.replaceChildren();
   const record = task.structured;
   if (task.origin) { const origin = card('任务来源与执行者'); origin.append(note(taskOriginCaption(task.origin)), facts([['来源消息', task.origin.source_message], ['父任务', task.origin.source_task_id]])); side.append(origin); }
   if (record) side.append(taskFactsCard(task, record, publications), taskExecutionCard(task, record, roles, purposes));
+  side.append(taskRunHistoryCard(roles));
   if (detail.dispatch?.length) side.append(taskDispatchCard(detail.dispatch));
   const info = card('任务');
   info.append(facts([['优先级', task.priority || 'P2'], ['入队序号', String(task.queue_seq ?? '—')], ['阶段', phaseLabels[task.phase] || task.phase], ['尝试', `第 ${task.attempt} 次`], ['提交', task.head_sha?.slice(0, 12)],
@@ -623,7 +718,7 @@ function resultCard(task) {
   return section;
 }
 
-taskView.addEventListener('close', () => { clearTimeout(taskTimer); openTaskId = null; });
+taskView.addEventListener('close', () => { clearTimeout(taskTimer); openTaskId = null; taskReadVersion++; taskLogState = null; });
 $('logout').addEventListener('click', () => { if (taskView.open) taskView.close(); });
 
 // Project automation switches update their own policy fields; board publication is independent.
