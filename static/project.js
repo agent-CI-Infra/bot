@@ -685,6 +685,10 @@ function modelConnectionFacts(model) {
     const uses = Object.entries(policy ? taskModelMap(policy) : {}).filter(([, id]) => id === model.id).length;
     if (uses) box.append(element('span', `${uses} 个工作类型显式使用`, 'muted'));
   } catch { box.append(element('span', '工作类型模型配置未能解析', 'muted')); }
+  // Which projects reference this model, from the list route's `used_by`. The absence is stated: a model nobody uses
+  // can be deleted without a migration, so "nobody" is information, not an empty cell.
+  const used = model.used_by || [];
+  box.append(element('span', used.length ? `使用位置：${used.map(repo => repo.full_name).join('、')}` : '未被任何项目选用', 'model-usage'));
   return box;
 }
 function providerList(models, row, after = reloadWith, { editable = true } = {}) {

@@ -10,6 +10,29 @@ function publicModel(store: Store, row: Row): Json {
     key_configured: row.api_key !== null, trusted: true, version: row.version, updated_at: row.updated_at, pricing: pricingFor(store,String(row.id)),
     endpoints: modelEndpoints(String(row.api_url)) };
 }
+/**
+ * Which projects use these models, as one query for a whole list instead of one per model. It is the same projection
+ * the single-model read has always returned — the project default plus per-task overrides — deliberately without
+ * roles: #230 keeps the list to the projects that reference a model, and role references are a separate contract.
+ */
+function usageByModel(store: Store, user: Actor, ids: string[]): Record<string, Json[]> {
+  const usage: Record<string, Json[]> = {}, usedScope = scope(user, 'p.repository_id'), marks = ids.map(() => '?').join(',');
+  if (!ids.length) return usage;
+  const wanted = new Set(ids);
+  const rows = store.all(`SELECT p.model_id,p.task_models,p.repository_id,r.full_name FROM policies p JOIN repositories r ON r.id=p.repository_id
+    WHERE (p.model_id IN (${marks}) OR EXISTS(SELECT 1 FROM json_each(p.task_models) WHERE value IN (${marks}))) AND ${usedScope.sql}
+    ORDER BY p.repository_id`, ...ids, ...ids, ...usedScope.args);
+  for (const row of rows) {
+    const used = new Set<string>();
+    if (row.model_id !== null && wanted.has(String(row.model_id))) used.add(String(row.model_id));
+    let overrides: unknown;
+    try { overrides = JSON.parse(String(row.task_models ?? '{}')); } catch { overrides = null; }
+    for (const value of overrides && typeof overrides === 'object' ? Object.values(overrides as Record<string, unknown>) : [])
+      if (wanted.has(String(value))) used.add(String(value));
+    for (const id of used) (usage[id] ??= []).push({ repository_id: row.repository_id, full_name: row.full_name });
+  }
+  return usage;
+}
 // Routes are appended to the URL text, so a query or fragment, even an empty "?" or "#", would swallow the route and
 // leave the requested path to whoever wrote the URL. Such a URL never reached a model route, so it is refused.
 function apiUrl(value: unknown): string {
@@ -44,7 +67,9 @@ export async function models(store: Store, user: Actor, method: string, url: URL
     const repo = url.searchParams.get('repository_id');
     if (repo) repository(store, user, repo);
     const extra = repo ? ' AND (m.repository_id=? OR (m.repository_id IS NULL AND EXISTS(SELECT 1 FROM model_projects mp WHERE mp.model_id=m.id AND mp.repository_id=?)))' : '';
-    return { models: store.all(`SELECT m.* FROM models m WHERE ${visible.sql}${extra} ORDER BY m.updated_at`, ...visible.args, ...(repo ? [repo, repo] : [])).map(row=>publicModel(store,row)) };
+    const rows = store.all(`SELECT m.* FROM models m WHERE ${visible.sql}${extra} ORDER BY m.updated_at`, ...visible.args, ...(repo ? [repo, repo] : []));
+    const usage = usageByModel(store, user, rows.map(row => String(row.id)));
+    return { models: rows.map(row => ({ ...publicModel(store, row), used_by: usage[String(row.id)] ?? [] })) };
   }
   if (path === '/api/models/provider' && method === 'POST') {
     fields(body, ['repository_id','api_url','api_key','model_names']);
