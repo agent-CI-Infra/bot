@@ -29,6 +29,9 @@ export function networkReason(error: unknown, timeoutMs: number): string {
   return code ? `网络错误（${code}）` : `网络错误（${message.replace(/\s+/g,' ').slice(0,120) || '未知'}）`;
 }
 export const operationId = (value: string) => sha(value).slice(0, 48);
+// A Git blob id, not a security hash: the object format is defined by the protocol as SHA-1 over "blob <len>\0"+bytes,
+// and the server and the remote compare it byte for byte, so the algorithm cannot be swapped for a stronger one.
+// codeql[js/weak-cryptographic-algorithm]
 export const blobSha = (data: Buffer) => createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
 // Hash only entry metadata; file contents stay in one-file buffers during transfer.
 export function treeSha(files: {path:string,mode:string,sha:string}[]): string {
@@ -47,6 +50,8 @@ export function treeSha(files: {path:string,mode:string,sha:string}[]): string {
   const hash=(node:Tree):string=>{
     const entries=[...node].sort(([a,x],[b,y])=>Buffer.compare(Buffer.from(a+(x instanceof Map?'/':'')),Buffer.from(b+(y instanceof Map?'/':''))));
     const body=Buffer.concat(entries.map(([name,entry])=>Buffer.concat([Buffer.from(`${entry instanceof Map?'40000':entry.mode} ${name}\0`),Buffer.from(entry instanceof Map?hash(entry):entry.sha,'hex')])));
+    // SHA-1 again because this is the Git tree object id the remote verifies, not a digest of secrets.
+    // codeql[js/weak-cryptographic-algorithm]
     return createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
   };
   return hash(root);
