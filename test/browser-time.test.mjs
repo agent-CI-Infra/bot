@@ -48,7 +48,8 @@ test('timeline, snapshot stream, project tasks, sampling and sync use the same l
     assert.equal(result.snapshotClock,clock);assert.equal(result.snapshotTitle,full);
     assert.equal(result.dateTime,'2026-10-27T20:30:00.123Z');assert.equal(result.snapshotDateTime,result.dateTime);
     assert.ok(result.snapshotOutput.includes('['+clock+'] 已写入 100 个文件'));
-    assert.ok(result.tasks.includes(full));assert.ok(result.sampling.includes('采样 '+clock));
+    // Resource samples include the local date so an old sample cannot look like today's reading.
+    assert.ok(result.tasks.includes(full));assert.ok(result.sampling.includes('采样 '+full));
     assert.ok(result.sync.includes('同步于 '+clock));assert.ok(result.board.endsWith(full.slice(5,16)));
   });
 });
