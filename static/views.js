@@ -749,6 +749,16 @@ function updateProjectTaskPreview(preview, row) {
   preview.title = `正在执行 ${row.running_tasks} 个任务，排队 ${row.queued_tasks} 个任务`;
   preview.setAttribute('aria-label', `${row.full_name}：${preview.title}，查看运行状态`);
 }
+async function confirmBoardVisibility(repository, enabled) {
+  const actor = me, address = location.hash;
+  const confirmed = await askConfirm({ title: enabled ? '开启公开看板？' : '关闭公开看板？',
+    body: [`项目：${repository.full_name}`,
+      enabled ? '允许无需登录访问单仓看板及 Dashboard 汇总，包括私有仓显式公开的看板数据。' : '保存后停止对外提供本项目看板。',
+      '公开内容由看板采集服务生成，不开放管理端任务日志、身份、提示词或成本。'],
+    action: enabled ? '开启公开看板' : '关闭公开看板', danger: enabled });
+  // A choice made on a previous page or by a previous signed-in account cannot authorize this write.
+  return confirmed && me === actor && location.hash === address;
+}
 function projectListControls(row) {
   const registered = row.registered !== false, group = element('div', '', 'project-controls'), features = element('div', '', 'project-features');
   group.setAttribute('role', 'group'); group.setAttribute('aria-label', row.full_name + ' 功能与任务');
@@ -771,10 +781,16 @@ function projectListControls(row) {
   const featuresToShow = [...projectFeatures, ...(me.role === 'super_admin' ? [['board_enabled', '看板']] : [])];
   for (const [key, caption] of featuresToShow) {
     const control = button('', async () => {
-      if (pending) return; pending = true; sync(); features.setAttribute('aria-busy', 'true'); feedback.className = 'project-control-feedback'; feedback.textContent = `正在保存${caption}…`;
+      if (pending) return; pending = true; sync(); feedback.className = 'project-control-feedback';
       try {
+        const enabled = !row.board_enabled;
         if (key === 'board_enabled') {
-          const {board} = await api(`/api/installations/${row.id}/board`, 'PATCH', {enabled: !row.board_enabled});
+          feedback.textContent = '请确认公开看板的访问范围。';
+          if (!await confirmBoardVisibility(row, enabled)) { feedback.textContent = '已取消公开看板变更'; return; }
+        }
+        features.setAttribute('aria-busy', 'true'); feedback.textContent = `正在保存${caption}…`;
+        if (key === 'board_enabled') {
+          const {board} = await api(`/api/installations/${row.id}/board`, 'PATCH', {enabled});
           Object.assign(row, {board_enabled: board.enabled, board_state: board.state, board_url: board.url});
           boardSavedAt = Date.now();
           updateBoardChip(group, row);
