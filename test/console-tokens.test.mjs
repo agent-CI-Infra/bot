@@ -45,6 +45,7 @@ test('every var() a sheet reads is declared by shell.css, locally, at runtime, o
 const moduleSheets = ['style.css', 'views.css', 'board.css', 'costs.css', 'management.css'];
 const SHARED = {
   '--color-brand': '#245de0', '--color-text-muted': '#607087', '--font-size-2': '14px', '--control-min': '44px',
+  '--color-brand-weak': '#edf2ff',
 };
 
 test('tokens the module sheets read through shell.css keep their contract value', () => {
