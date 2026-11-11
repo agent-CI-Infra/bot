@@ -99,12 +99,14 @@ test('environment API enforces project roles for unfiltered list, detail, start,
 test('environment observation distinguishes an unreachable or absent manager record from the persisted lifecycle state', async t => {
   let mode='available';const rows=new Map();
   const manager={async call(method,path){const repo=path.split('/')[3];if(method==='PUT')rows.set(repo,{repository_id:repo,generation:1,state:'ready',desired:'ready',revision:1,computer:{image:'approved'}});
-    if(mode==='unavailable')throw new Error('PRIVATE_MANAGER_SECRET');return mode==='absent'?null:rows.get(repo)||null;}};
+    if(mode==='unavailable')throw new Error('PRIVATE_MANAGER_SECRET');if(mode==='recovering')fail(503,'manager_not_ready');if(mode==='error')fail(403,'PRIVATE_MANAGER_SECRET');return mode==='absent'?null:rows.get(repo)||null;}};
   const h=await harness(t,manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
   const before=h.store.get("SELECT state FROM project_environments WHERE repository_id='101'").state;
   const ready=(await admin('/api/environments/101')).value;assert.equal(ready.observation.status,'available');assert.equal(ready.observation.state,'ready');
   assert.ok(Number.isFinite(Date.parse(ready.observation.checked_at)));
-  for(const value of ['unavailable','absent']){mode=value;const response=await admin('/api/environments/101');assert.equal(response.status,200);
+  rows.get('101').state='stopped';const fresh=(await admin('/api/environments/101')).value;
+  assert.equal(fresh.observation.state,'stopped');assert.equal(fresh.environment.state,before);rows.get('101').state='ready';
+  for(const value of ['unavailable','absent','recovering','error']){mode=value;const response=await admin('/api/environments/101');assert.equal(response.status,200);
     assert.equal(response.value.environment.state,before);assert.equal(response.value.observation.status,value);assert.equal(response.value.observation.state,null);
     assert.equal(response.value.environment.computer,null);assert.ok(!JSON.stringify(response.value).includes('PRIVATE_MANAGER_SECRET'));
     assert.equal(h.store.get("SELECT state FROM project_environments WHERE repository_id='101'").state,before);}

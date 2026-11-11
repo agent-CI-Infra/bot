@@ -193,7 +193,11 @@ export class ProjectService {
     const saved = this.store.get(`SELECT r.full_name,p.enabled,e.* FROM repositories r JOIN policies p ON p.repository_id=r.id
       LEFT JOIN project_environments e ON e.repository_id=r.id WHERE r.id=?`, id)!;
     let observed = 'available';
-    const live = await this.manager.call('GET', '/v1/projects/' + id).catch(() => { observed = 'unavailable'; return null; });
+    const live = await this.manager.call('GET', '/v1/projects/' + id).catch(error => {
+      observed = error instanceof HttpError && error.code === 'manager_not_ready' ? 'recovering'
+        : error instanceof HttpError && error.code !== 'manager_unavailable' ? 'error' : 'unavailable';
+      return null;
+    });
     if (!live && observed === 'available') observed = 'absent';
     const tasks = this.store.all(`SELECT id,kind,status,phase,object_number,generation,error_code,updated_at FROM tasks WHERE repository_id=?
       ORDER BY created_at DESC,id DESC LIMIT 20`, id);
