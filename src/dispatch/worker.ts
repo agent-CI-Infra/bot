@@ -34,11 +34,18 @@ export class Dispatcher {
     if (this.closing) return;
     const now = Date.now(), objectKey = (event: Row) => event.object_number == null ? 'event:' + event.id : `${event.repository_id}:${event.object_type}:${event.object_number}`;
     // An expired lease (a stuck call) is taken over; the old call's apply then finds its lease gone.
-    const due = this.store.all(`SELECT * FROM dispatch_events WHERE (state='pending' AND next_run_at<=?) OR (state='dispatching' AND lease_until<?) ORDER BY created_at,rowid LIMIT 200`, now, now);
+    // Only an object's own turn enters the window: a due event that still has an earlier pending or dispatching event on
+    // the same object cannot run, and one Issue's backlog must not fill the LIMIT and hide the other objects' work.
+    const due = this.store.all(`SELECT * FROM dispatch_events e WHERE ((e.state='pending' AND e.next_run_at<=?) OR (e.state='dispatching' AND e.lease_until<?))
+      AND NOT (e.object_number IS NOT NULL AND EXISTS (SELECT 1 FROM dispatch_events p WHERE p.repository_id=e.repository_id AND p.object_type=e.object_type
+        AND p.object_number=e.object_number AND p.state IN ('pending','dispatching')
+        AND (p.created_at<e.created_at OR (p.created_at=e.created_at AND p.rowid<e.rowid))))
+      ORDER BY e.created_at,e.rowid LIMIT 200`, now, now);
     const waiting = new Set<string>();
     for (const event of due) {
       const key = objectKey(event);
-      // Only the oldest due event of an object may start, and only when no event of it is being decided.
+      // The scan already keeps one turn per object; this keeps that turn while an earlier claim of the same tick is
+      // decided, and the check below still refuses an event whose predecessor appeared after the scan.
       if (waiting.has(key)) continue; waiting.add(key);
       if (this.running.size >= this.concurrency || this.running.has(event.id) || this.busy.has(key)) continue;
       if (event.object_number != null && this.store.get(`SELECT 1 FROM dispatch_events WHERE repository_id=? AND object_type=? AND object_number=? AND state IN ('pending','dispatching')
