@@ -69,6 +69,24 @@ test('webhook list and detail separate reception, signature and processing outco
   await expect(dialog.locator('[data-detail-section="reception"]')).toContainText('已接收');
   await expect(dialog.locator('[data-detail-section="signature"]')).toContainText('签名有效');
   await expect(dialog.locator('[data-detail-section="processing"]')).toContainText('已创建');
+  // A created task is a handle, not a footnote: the delivery names the task it created and the name opens that task,
+  // so a maintainer goes from "this webhook made a task" to the task's own page without copying an id (#357).
+  const created = dialog.locator('[data-detail-section="processing"] .delivery-tasks li').first();
+  await expect(created.getByRole('button', { name: /查看任务/ })).toBeVisible();
+  // The status keeps its own text after the button: the row reads "… · 查看任务 · <status>", never "查看任务queued".
+  const status = created.locator('span.muted');
+  await expect(status).toBeVisible();
+  expect(await status.innerText()).toMatch(/^ · \S+$/);
+  await expect(created).toContainText('查看任务 · ');
+  const openedNumber = /#(\d+)/.exec(await created.innerText())?.[1];
+  await created.getByRole('button', { name: /查看任务/ }).click();
+  const taskView = page.locator('#task-view');
+  await expect(taskView).toBeVisible();
+  await expect(page.locator('#task-title')).toContainText(`#${openedNumber}`);
+  await expect(page.locator('#task-title')).not.toHaveText('正在加载…');
+  await taskView.getByRole('button', { name: '关闭', exact: true }).click();
+  await expect(taskView).toBeHidden();
+  await expect(dialog).toBeVisible();
   // The archived review_outcome is computed before the Manager decides, so it cannot be printed as a conclusion here:
   // a created task must not sit next to "not_trigger" or any other raw archive code.
   await expect(dialog.locator('[data-detail-section="processing"]')).not.toContainText('归档结论');
