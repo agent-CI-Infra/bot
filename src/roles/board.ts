@@ -102,7 +102,9 @@ function nextStage(store: Store, taskId: string, order: StageDefinition[]): Stag
 }
 
 /**
- * GET /api/repositories/:id/role-board. Display only: `enforced` is always false and no run is blocked by it.
+ * GET /api/repositories/:id/role-board. `enforced` is true when this project configured at least one role limit that
+ * admission honours (`src/roles/role-run.ts` `admitRun` and the bind re-check in `src/roles/run.ts`); otherwise runs are
+ * not blocked by capacity.
  * Only due queued tasks whose wait_for_review dependency is settled are considered. A task is attributed to a role only
  * when the project's stage policy names exactly one eligible role for its next stage; otherwise the whole queue projection
  * reports unsupported:["role_queue"] and `ready` stays empty, because guessing from the task kind would show a number
