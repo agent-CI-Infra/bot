@@ -7,6 +7,9 @@ async function renderSchedules(panel, project) {
   if (scheduleOwner !== owner) { resetScheduleViews(); scheduleOwner = owner; }
   const state = scheduleViews.get(project) || { selected: '', fields: null, envelope: null, receipt: null, sending: false };
   scheduleViews.set(project, state);
+  state.subscription ||= { selected: '', fields: null };
+  const isSubscription = operation => operation === 'notification.register' || operation?.startsWith('subscription.');
+  const markConflict = (operation, message) => { const target = isSubscription(operation) ? state.subscription : state; target.conflict = /revision.*conflict|revision_changed/.test(message || ''); if(isSubscription(operation)){target.error=message;target.candidate=null;} };
   const container = panel; panel = element('section', '', 'schedule-panel'); container.replaceChildren(panel);
   let accessLost = false;
   const live = () => !accessLost && panel.isConnected && scheduleOwner === owner && owner === JSON.stringify([me?.id, me?.actor?.tenant_id, me?.actor?.principal_id]);
@@ -15,14 +18,14 @@ async function renderSchedules(panel, project) {
   const status = element('p', '', 'muted'); status.setAttribute('role', 'status'); panel.append(status);
   function revoked(error) {
     // Channel audience failures invalidate the destination, while project read authority may still be valid.
-    if (error.code?.startsWith('channel_') || ![401,403].includes(error.status) || !live()) return false;
+    if (error.code?.startsWith('channel_') || error.code?.startsWith('schedule_destination_') || ![401,403].includes(error.status) || !live()) return false;
     accessLost = true; scheduleViews.delete(project);
     panel.replaceChildren(note(error.code === 'capability_forbidden' ? '当前账号没有计划管理权限，请联系项目管理员核对授权。' : '计划访问权限已失效，请按当前授权重新进入。')); return true;
   }
   const target = { project_id: project }, endpoint = '/api/management';
   const read = (operation, args = {}) => api(endpoint + '/query', 'POST', { operation, target, arguments: args });
-  let plans, destinations, subscriptions;
-  try { [plans, destinations, subscriptions] = await Promise.all([read('list_schedules'), read('list_schedule_destinations'), read('list_subscriptions')]); }
+  let plans, destinations;
+  try { [plans, destinations] = await Promise.all([read('list_schedules'), read('list_schedule_destinations')]); }
   catch (error) {
     if (!live()) return;
     if (revoked(error)) return;
@@ -40,20 +43,23 @@ async function renderSchedules(panel, project) {
       control.disabled=blocked || !!state.conflict || !original || original.state==='deleted' || action==='pause' && original.state!=='active' || action==='resume' && original.state!=='paused' || action==='run-now' && (original.state!=='active' || !original.supported);
     }
     if(original){kind.disabled=true;actor.disabled=true;}
+    state.subscription.update?.();
   };
   function showReceipt() {
     if (!live()) return; receiptBox.replaceChildren(); lock();
+    receiptBox.setAttribute('aria-label', isSubscription(state.envelope?.operation) ? '订阅操作回执' : '计划操作回执');
     if (!state.envelope) return;
+    const subscriptionOperation=isSubscription(state.envelope.operation);
     const receipt = state.receipt;
     receiptBox.append(element('h4', receipt ? '管理回执：' + receipt.state : '操作结果待核对'), note('操作绑定项目 ' + project + (state.envelope.arguments.id ? '、对象 ' + state.envelope.arguments.id : '') + '，核对仍使用同一次操作的幂等键。'));
     if (receipt) receiptBox.append(note('回执编号：' + receipt.id));
     if (receipt && ['failed','rejected'].includes(receipt.state)) {
-      receiptBox.append(note(receipt.result?.error || receipt.state), button('返回计划草稿', async () => {
-        state.conflict = /revision.*conflict|revision_changed/.test(state.receipt.result?.error || ''); state.envelope = null; state.receipt = null; await renderSchedules(container,project);
+      receiptBox.append(note(receipt.result?.error || receipt.state), button(subscriptionOperation?'返回订阅草稿':'返回计划草稿', async () => {
+        markConflict(state.envelope.operation,state.receipt.result?.error || ''); state.envelope = null; state.receipt = null; await renderSchedules(container,project);
       }, 'quiet'));
     } else {
       receiptBox.append(note('尚未确认操作完成，先核对回执。'));
-      const check = button(receipt ? '刷新计划操作回执' : '核对同一次计划操作', async () => {
+      const check = button(receipt ? (subscriptionOperation?'刷新订阅操作回执':'刷新计划操作回执') : (subscriptionOperation?'核对同一次订阅操作':'核对同一次计划操作'), async () => {
         if (state.sending) return;
         if (!receipt) { await send(); return; }
         state.sending = true; showReceipt();
@@ -68,7 +74,10 @@ async function renderSchedules(panel, project) {
     if (state.receipt?.state === 'succeeded') {
       // Running, pausing or changing a subscription does not save the plan form. Keep unrelated/newer edits.
       if (['schedule.register','schedule.update','schedule.delete'].includes(state.envelope?.operation) && state.fields === state.submittedFields) state.fields = null;
-      state.envelope = null; state.receipt = null; state.sending = false; state.submittedFields = null;
+      if (['notification.register','subscription.update'].includes(state.envelope?.operation) && state.subscription.fields === state.submittedSubscriptionFields) { state.subscription.fields=null; state.subscription.selected=state.receipt.result?.subscription?.id || state.subscription.selected; state.subscription.conflict=false; state.subscription.error=''; }
+      if (state.envelope?.operation==='subscription.delete' && state.subscription.selected===state.envelope.arguments.id && state.subscription.fields===state.submittedSubscriptionFields) { state.subscription.selected='';state.subscription.fields=null;state.subscription.conflict=false; }
+      if(isSubscription(state.envelope?.operation))state.subscription.flash=({'notification.register':'事件订阅已保存','subscription.update':'事件订阅已保存','subscription.pause':'事件订阅已暂停','subscription.resume':'事件订阅已恢复','subscription.delete':'事件订阅已解除'})[state.envelope.operation]||'订阅操作已完成';
+      state.envelope = null; state.receipt = null; state.sending = false; state.submittedFields = null; state.submittedSubscriptionFields=null;
       await renderSchedules(container, project);
     }
   }
@@ -79,19 +88,19 @@ async function renderSchedules(panel, project) {
     catch (error) {
       if (!live()) return;
       if (revoked(error)) return;
-      if (!replay && error.status >= 400 && error.status < 500 && !error.message.includes('idempotency_conflict')) { state.envelope = null; state.receipt = null; state.conflict = /revision.*conflict|revision_changed/.test(error.message); }
+      if (!replay && error.status >= 400 && error.status < 500 && !error.message.includes('idempotency_conflict')) { markConflict(state.envelope.operation,error.message); state.envelope = null; state.receipt = null; }
       else state.uncertain = true;
       status.textContent = error.message + '。草稿已保留；先核对当前版本或原回执。';
     } finally { state.sending = false; state.update?.(); }
   }
   state.update = () => { if (!live()) return; if (state.receipt?.state === 'succeeded') void finish(); else showReceipt(); };
-  const command = async (operation, args) => {
+  const command = async (operation, args, expectedRevision = revision) => {
     if (!live() || state.envelope || state.sending) return;
-    if (state.conflict) { status.textContent='请先重新读取计划，比较当前版本后明确保留草稿。'; return; }
+    if ((isSubscription(operation)?state.subscription:state).conflict) { status.textContent='请先重新读取并比较当前版本，再明确保留草稿。'; return; }
     const key = 'console-schedule:' + crypto.randomUUID();
-    state.envelope = { operation, target, arguments: args, expected_revision: revision,
+    state.envelope = { operation, target, arguments: args, expected_revision: expectedRevision,
       idempotency_key: key, source_conversation: 'console:schedules', source_message: key };
-    state.receipt = null; state.uncertain = false; state.submittedFields = state.fields; await send();
+    state.receipt = null; state.uncertain = false; state.submittedFields = state.fields; state.submittedSubscriptionFields=state.subscription.fields; await send();
   };
   const select = (label, options) => {
     const input = document.createElement('select'); input.setAttribute('aria-label', label); input.dataset.scheduleField = label;
@@ -221,28 +230,7 @@ async function renderSchedules(panel, project) {
     },'quiet'));editor.prepend(comparison);
   }
   syncPreset(); syncFields(); updateMeta(); showReceipt();
-  const subscriptionBox = element('section', ''); subscriptionBox.append(element('h4', '事件订阅'));
-  let editingSubscription = null;
-  const subName = input('订阅名称', '项目事件'), subDestination = select('订阅目的地', destinationOptions), subZone = input('订阅时区', 'Asia/Shanghai');
-  const aggregate = input('聚合窗口分钟', '5', 'number'), quietStart = input('静默开始', '', 'time'), quietEnd = input('静默结束', '', 'time');
-  const events = select('事件筛选', [['task.failed', '任务失败'], ['ci.failed,ci.recovered', 'CI 失败与恢复'], ['project.daily', '项目日报']]);
-  const saveSubscription = button('创建事件订阅', () => {
-    const subscription = { name: subName.value, destination_id: subDestination.value, events: events.value.split(','), projects: [project], aggregate_ms: Number(aggregate.value) * 60000, timezone: subZone.value,
-      quiet_start: quietStart.value || undefined, quiet_end: quietEnd.value || undefined, enabled: editingSubscription ? editingSubscription.state === 'active' : true };
-    return command(editingSubscription ? 'subscription.update' : 'notification.register', editingSubscription ? { id: editingSubscription.id, revision: editingSubscription.revision, subscription } : { subscription });
-  }, 'quiet');
-  subscriptionBox.append(field('订阅名称', subName), field('事件筛选', events), field('订阅目的地', subDestination), field('聚合窗口分钟', aggregate), field('订阅时区', subZone), field('静默开始', quietStart), field('静默结束', quietEnd), saveSubscription);
-  for (const sub of subscriptions.subscriptions) {
-    const row = element('article', ''); row.append(element('p', sub.spec.name + ' · ' + sub.state + (sub.reason ? ' · ' + sub.reason : '') + ' · ' + sub.spec.events.join('、')));
-    if (sub.state !== 'deleted') row.append(button('编辑订阅', () => {
-      editingSubscription = sub; const s = sub.spec; subName.value = s.name; subDestination.value = s.destination_id; subZone.value = s.timezone; aggregate.value = String(s.aggregate_ms / 60000); quietStart.value = s.quiet_start ?? ''; quietEnd.value = s.quiet_end ?? '';
-      const value = s.events.join(','); if (![...events.options].some(o => o.value === value)) { const o = element('option', s.events.join('、')); o.value = value; events.append(o); }
-      events.value = value; saveSubscription.textContent = '保存订阅修改';
-    }, 'quiet'));
-    if (sub.state !== 'deleted') for (const [action, label] of [['pause', '暂停订阅'], ['resume', '恢复订阅'], ['delete', '解除订阅']]) row.append(button(label, () => command('subscription.' + action, { id: sub.id, revision: sub.revision }), 'quiet'));
-    subscriptionBox.append(row);
-  }
-  panel.append(subscriptionBox);
+  renderSubscriptionEditor(panel, {project,destinations,read,command,model:state.subscription,busy:()=>state.sending || !!state.envelope,invalidate:revoked,active:live});
   renderScheduleRecords(panel, { project, read, invalidate: revoked });
   panel.append(button('刷新定时与通知', () => renderSchedules(container, project), 'quiet'));
   showReceipt();
