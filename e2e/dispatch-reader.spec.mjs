@@ -29,6 +29,8 @@ test('dispatch filters and recorded detail remain usable at six widths, with a s
   try {
     await reader.getByRole('combobox', { name: '分派结果', exact: true }).selectOption('create');
     await reader.getByLabel('开始时间（含）', { exact: true }).fill('2026-11-11T00:00');
+    await reader.getByLabel('结束时间（不含）', { exact: true }).fill('2026-11-10T00:00');
+    await reader.getByRole('button', { name: '应用分派筛选', exact: true }).click(); await expect(reader).toContainText('结束时间必须晚于开始时间');
     await reader.getByLabel('结束时间（不含）', { exact: true }).fill('2026-11-12T00:00');
     await reader.getByRole('button', { name: '应用分派筛选', exact: true }).click();
     await expect(reader.locator('[data-dispatch-event]')).toHaveCount(1); await expect(reader).toContainText('Visible event created');

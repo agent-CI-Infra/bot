@@ -1,6 +1,7 @@
 // The Manager role page: one complete prompt, event filters, decisions and task rule sources.
 
 const managerErrors = {
+  invalid_dispatch_filter: '分派筛选无效，请检查时间范围、状态或事件类型。', invalid_dispatch_cursor: '当前分页位置已失效，请重新读取分派。', dispatch_event_not_found: '未找到本项目中的这条分派记录。',
   manager_revision_conflict: 'Manager 配置已被别人修改，请刷新页面后再保存。', unknown_manager_section: '章节 id 不认识：二级标题末尾反引号里的 id 要用下面列出的章节。',
   duplicate_manager_section: '同一个章节出现了两次。', invalid_bot_label: '章节里的标签声明不合法（最长 50 个字符，首尾不能有空白）。',
   invalid_work_writes: '写入不在这类工作可选的范围里，或开 PR 时没有同时允许修改代码。', invalid_event_filters: '事件开关或标签不合法（标签最长 50 个字符，最多 30 个）。'
@@ -151,13 +152,16 @@ function dispatchCard() {
     } catch (err) {
       if (!live() || own !== request) return;
       if (!forbidden(err)) count.textContent = loaded ? '读取失败，保留上次读取的记录，可能不属于新的筛选范围。' : '读取失败，分派状态未知。';
-      message.textContent = err.message;
+      message.textContent = managerError(err);
     } finally { if (live() && own === request) { loading = false; controls(); } }
   }
   form.addEventListener('submit', event => {
     event.preventDefault(); if (loading) return;
-    for (const key of ['state', 'decision', 'type', 'from', 'until']) { const value = form.elements[key].value; filters[key] = key === 'from' || key === 'until' ? value ? new Date(value).toISOString() : '' : value.trim(); }
-    address(); void load(false);
+    const next = {};
+    for (const key of ['state', 'decision', 'type', 'from', 'until']) { const value = form.elements[key].value; next[key] = key === 'from' || key === 'until' ? value ? new Date(value).toISOString() : '' : value.trim(); }
+    if (next.from && next.until && next.from >= next.until) { message.textContent = '结束时间必须晚于开始时间。'; form.elements.until.focus(); return; }
+    if (next.type && !/^[a-z][a-z0-9_.-]{0,79}$/.test(next.type)) { message.textContent = '事件类型应使用小写字母、数字、点、下划线或连字符，最多 80 个字符。'; form.elements.type.focus(); return; }
+    Object.assign(filters, next); address(); void load(false);
   });
   function openDetail(eventId) {
     if (!live()) return;
@@ -190,8 +194,8 @@ function dispatchCard() {
       detail = value; drawDetail(value);
     } catch (err) {
       if (!live() || own !== detailRequest || selected !== eventId) return;
-      if (!forbidden(err)) detailMessage.textContent = err.message + (detail ? ' · 保留上次结果，请重新读取。' : ' · 当前结果未知，请重新读取。');
-      else message.textContent = err.message;
+      if (!forbidden(err)) detailMessage.textContent = managerError(err) + (detail ? ' · 保留上次结果，请重新读取。' : ' · 当前结果未知，请重新读取。');
+      else message.textContent = managerError(err);
     } finally { if (live() && own === detailRequest) { detailBusy = false; controls(); } }
   }
   async function retrySelected() {
@@ -203,8 +207,8 @@ function dispatchCard() {
       detailMessage.textContent = '已请求重试，仍使用同一条分派记录。'; detail = null; detailBusy = false; controls(); await readDetail(eventId); void load(false);
     } catch (err) {
       if (!live() || own !== detailRequest || selected !== eventId) return;
-      if (!forbidden(err)) detailMessage.textContent = err.message + ' · 写入结果可能已变化，请先刷新当前结果再决定是否重试。';
-      else message.textContent = err.message;
+      if (!forbidden(err)) detailMessage.textContent = managerError(err) + ' · 写入结果可能已变化，请先刷新当前结果再决定是否重试。';
+      else message.textContent = managerError(err);
     } finally { if (live() && own === detailRequest) { detailBusy = false; controls(); } }
   }
   // The enclosing Manager cards are attached after this constructor returns.
