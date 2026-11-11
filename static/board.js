@@ -1,6 +1,7 @@
 // Saved views and custom fields belong to the signed-in user. Execution stages remain read-only.
 // A card is one work type's work on one object (or a release); saved views include object scope as well as grouping.
 let boardState = null, boardRequest = 0, boardDragging = false;
+function resetBoard() { boardRequest++;boardState=null;boardDragging=false;$('board-panel')?.replaceChildren(); }
 const boardPageSize = 100, boardTypes = [['', '全部对象'], ['issue', 'Issue'], ['pr', 'PR'], ['task', '通用任务']];
 const boardMedia = matchMedia('(max-width:760px)');
 function boardButton(name, action, className = 'quiet') {
@@ -83,21 +84,42 @@ function boardDirty() {
   const view=boardView();
   boardState.dirty=boardViewShape(boardState.filters,boardState.hidden,boardState.group)!==boardViewShape(view.filters,view.hidden_columns,view.group_by);boardViewControls();
 }
+// Invalidate older reads as well as the visible cards when current access is revoked.
+function boardAccessLost(err,request,owner) {
+  if(![401,403].includes(err.status)||request!==boardRequest||owner!==me?.id||tab!=='board')return false;
+  boardRequest++;boardState=null;
+  $('board-panel').replaceChildren(consoleState('看板访问权限已变化','旧卡片和视图缓存已清除，请重新读取当前可访问的工作。',{tone:'error'}),
+    boardButton('重新读取看板',()=>renderBoard(++renderVersion)));
+  return true;
+}
 function boardAddressCategory() { return {'#/reviews':'review','#/developments':'development'}[location.hash]||''; }
 // Coming back to the tab keeps unsaved filter edits; creating, switching or deleting a view loads that view.
 async function renderBoard(request,useView=false) {
-  const owner=me.id;
+  const owner=me.id,position=!useView&&boardState?.owner===me.id?boardState.positions?.[boardState.layout]:null;
   if(boardState?.owner!==owner){boardState=null;$('board-panel').replaceChildren();}
-  const data=await api('/api/board');
+  let data;try{data=await api('/api/board');}
+  catch(err){
+    if(request!==renderVersion||me?.id!==owner)return;
+    if(!boardAccessLost(err,boardRequest,owner)){
+      boardRequest++;boardState=null;
+      $('board-panel').replaceChildren(consoleState('看板未能读取','视图和工作数量未知，请重新读取。',{tone:'error'}),
+        boardButton('重新读取看板',()=>renderBoard(++renderVersion)));
+    }
+    return;
+  }
   if(request!==renderVersion||me?.id!==owner)return;
-  if(!boardState)boardState={owner,viewId:'default',type:'all'};
+  if(!boardState)boardState={owner,viewId:'default',type:'all',layout:'columns'};
   Object.assign(boardState,data);
   if(!boardState.views.some(v=>v.id===boardState.viewId)){boardState.viewId='default';useView=true;}
   if(useView||!boardState.filters)boardUseView();else boardShell();
   const category=boardAddressCategory();if(category){
     history.replaceState(null,'','#/board');boardSetFilter('category',category);boardShell();
   }
-  await boardLoadCards();
+  // A board read failure must not bubble into the successful sign-in's boot failure screen.
+  try{await boardLoadCards();}catch{return;}
+  if(position&&request===renderVersion&&me?.id===owner&&tab==='board'){
+    $('board-columns').scrollTop=position.top;$('board-columns').scrollLeft=position.left;
+  }
 }
 function boardUseView() {
   const view=boardView(),filters=structuredClone(view.filters);
@@ -146,7 +168,7 @@ function boardShell() {
   });groups.classList.add('board-grouping');
   const views=boardSelect('视图',boardState.views.map(v=>[v.id,v.name]),boardState.viewId);views.label.className='board-field board-view-choice';
   views.select.addEventListener('change',()=>{boardState.viewId=views.select.value;boardUseView();boardLoadCards().catch(error);});
-  const save=boardButton('保存视图',boardSave,'board-menu-item');save.id='board-save';
+  const save=boardButton('保存视图',boardSave,'quiet board-menu-item');save.id='board-save';
   const more=boardMenu('⋯','更多视图操作');more.menu.id='board-view-menu';more.panel.append(views.label,save);
   const status=element('div','','board-status');status.id='board-status';status.setAttribute('role','status');
   const create=consoleLink('#/new-task'+(repo?'/'+repo:''),'新建任务');create.id='board-create-task';create.classList.add('board-create-task');
@@ -156,13 +178,22 @@ function boardShell() {
   mobile.select.addEventListener('change',()=>{boardState.mobileColumn=mobile.select.value;boardRenderCards();});
   const zero=element('div','','board-zero-counts');zero.id='board-zero-counts';
   const scroll=element('div','','board-scroll');scroll.id='board-columns';scroll.setAttribute('aria-label','看板工作');
+  scroll.addEventListener('scroll',()=>{if(scroll.isConnected&&tab==='board'&&scroll.clientHeight>0&&boardState?.owner===me?.id){
+    (boardState.positions??={})[boardState.layout]={top:scroll.scrollTop,left:scroll.scrollLeft};
+  }},{passive:true});
   panel.append(toolbar,mobile.label,zero,scroll);boardViewControls();boardChips();
 }
 function boardViewControls() {
   const save=$('board-save'),panel=document.querySelector('#board-view-menu .board-menu-panel');if(!save||!panel)return;
   panel.querySelectorAll('button:not(#board-save)').forEach(b=>b.remove());save.hidden=!boardState.dirty;
-  panel.append(boardButton('另存视图',()=>{boardOpenMenu($('board-view-menu'),false);boardSaveAs();},'board-menu-item'));
-  if(boardState.group==='bot_stage'||boardCustomField())panel.append(boardButton(boardCustomField()?'加列':'新建自定义字段',()=>{boardOpenMenu($('board-view-menu'),false);boardAddColumn();},'board-menu-item'));
+  panel.append(boardButton(boardState.layout==='list'?'切换为分栏':'切换为列表',()=>{
+    boardOpenMenu($('board-view-menu'),false);boardState.layout=boardState.layout==='list'?'columns':'list';
+    const position=boardState.positions?.[boardState.layout];boardRenderCards(true);
+    if(position){$('board-columns').scrollTop=position.top;$('board-columns').scrollLeft=position.left;}
+    boardViewControls();document.querySelector('#board-view-menu .board-menu-toggle')?.focus();
+  },'quiet board-menu-item'));
+  panel.append(boardButton('另存视图',()=>{boardOpenMenu($('board-view-menu'),false);boardSaveAs();},'quiet board-menu-item'));
+  if(boardState.group==='bot_stage'||boardCustomField())panel.append(boardButton(boardCustomField()?'加列':'新建自定义字段',()=>{boardOpenMenu($('board-view-menu'),false);boardAddColumn();},'quiet board-menu-item'));
   if(!boardView().builtin)panel.append(boardButton('删除视图',async()=>{
     await api('/api/board/views/'+boardState.viewId,'DELETE',{});boardState.viewId='default';await renderBoard(renderVersion,true);
   },'board-menu-item danger'));
@@ -175,7 +206,7 @@ function boardChips() {
   for(const filter of boardConditions()){
     const [prefix,options]=choices[filter.field]||[filter.field,[]],value=options.find(([id])=>id===filter.value)?.[1]||(filter.field==='repository_id'?'仓库不可访问':filter.value);
     const caption=filter.field==='include_closed'?prefix:prefix+'：'+value,chip=element('span','','board-chip');
-    const remove=button('×',async()=>{boardSetFilter(filter.field,'');if(filter.field==='object_type')boardState.type='all';boardShell();await boardLoadCards().catch(error);},'board-chip-remove');remove.setAttribute('aria-label','移除筛选 '+caption);
+    const remove=button('×',async()=>{boardSetFilter(filter.field,'');if(filter.field==='object_type')boardState.type='all';boardShell();await boardLoadCards().catch(error);},'quiet board-chip-remove');remove.setAttribute('aria-label','移除筛选 '+caption);
     chip.append(element('span',caption),remove);chips.append(chip);
   }
 }
@@ -194,7 +225,11 @@ async function boardLoadCards(more=false) {
     Object.assign(boardState,{cards:[...known,...result.cards.filter(c=>!keys.has(boardCardKey(c)))],offset,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts,
       signature:more?'':JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts])});
     boardRenderCards(more);
-  }catch(err){if(request===boardRequest)boardSummary();throw err;}
+  }catch(err){
+    if(!boardAccessLost(err,request,owner)&&request===boardRequest&&owner===me?.id&&tab==='board')
+      $('board-status').textContent=boardState.cards?.length?'读取失败，保留上次读取结果。':'工作数量未知，读取失败。';
+    throw err;
+  }
   finally{if(request===boardRequest)$('board-columns')?.removeAttribute('aria-busy');}
 }
 // Stages change while the bot works. Refresh the first page quietly unless the person is in the middle of something.
@@ -202,9 +237,15 @@ async function boardPoll() {
   if(!me||tab!=='board'||projectRoute()||document.hidden||boardDragging||boardState?.owner!==me.id||boardState.offset>0)return;
   const columns=$('board-columns');
   if(!columns||columns.hasAttribute('aria-busy')||columns.contains(document.activeElement)||document.querySelector('dialog[open],.board-menu.open'))return;
-  const request=boardRequest,owner=me.id,result=await api('/api/board/cards?'+boardParams(0));
+  const request=boardRequest,owner=me.id;let result;
+  try{result=await api('/api/board/cards?'+boardParams(0));}
+  catch(err){
+    if(!boardAccessLost(err,request,owner)&&request===boardRequest&&owner===me?.id&&tab==='board')
+      $('board-status').textContent='刷新失败，保留上次读取结果。可点击刷新重试。';
+    return;
+  }
   if(request!==boardRequest||me?.id!==owner||tab!=='board'||boardDragging)return;
-  const signature=JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts]);if(signature===boardState.signature)return;
+  const signature=JSON.stringify([result.cards,result.has_more,result.counts,result.release_count,result.column_counts]);if(signature===boardState.signature){boardSummary();return;}
   Object.assign(boardState,{cards:result.cards,hasMore:result.has_more,counts:result.counts,releaseCount:result.release_count,workCount:result.work_count,columnCounts:result.column_counts,signature});boardRenderCards(true);
 }
 setInterval(()=>boardPoll().catch(()=>{}),15000);
@@ -222,6 +263,7 @@ function boardColumnValue(item) {
 function boardRenderCards(keepScroll=false) {
   const columns=$('board-columns');if(!columns)return;
   const left=columns.scrollLeft,top=columns.scrollTop,tops=new Map([...columns.querySelectorAll('.board-column')].map(c=>[c.dataset.columnId,c.querySelector('.board-column-list')?.scrollTop||0]));
+  columns.classList.toggle('board-list-layout',boardState.layout==='list');
   columns.replaceChildren();const stageMode=boardState.group==='bot_stage',customMode=!!boardCustomField(),visible=boardState.cards,allColumns=boardColumns();
   const total=id=>boardState.columnCounts?.[id]||0;
   if(!allColumns.some(c=>c.id===boardState.mobileColumn))boardState.mobileColumn=allColumns.find(c=>total(c.id)>0)?.id||allColumns[0]?.id;
@@ -229,18 +271,19 @@ function boardRenderCards(keepScroll=false) {
   $('board-zero-counts').textContent=customMode?'':allColumns.filter(c=>!total(c.id)).map(c=>c.name+' 0').join(' · ');
   const displayed=allColumns.filter(c=>customMode||total(c.id)>0||boardMedia.matches&&c.id===boardState.mobileColumn);
   for(const column of displayed){
-    const collapsed=!boardMedia.matches&&boardState.hidden.includes(column.id),cards=visible.filter(c=>boardColumnValue(c)===column.id);
+    const collapsed=boardState.layout!=='list'&&!boardMedia.matches&&boardState.hidden.includes(column.id),cards=visible.filter(c=>boardColumnValue(c)===column.id);
     const section=element('section','','board-column'+(collapsed?' board-collapsed':''));section.dataset.columnId=column.id;section.dataset.dimension=boardState.group;section.classList.toggle('board-mobile-selected',column.id===boardState.mobileColumn);
     if(stageMode)section.dataset.stage=column.id;section.setAttribute('aria-label',column.name);
     const heading=element('div','','board-column-heading'),dot=element('span','','board-column-dot'),count=element('span',String(total(column.id)),'board-column-count');
     if(column.hint)heading.title=column.hint;dot.setAttribute('aria-hidden','true');count.setAttribute('aria-label',total(column.id)+' 项工作');
     const toggle=button(collapsed?'›':'‹',()=>boardToggleColumn(column.id),'board-collapse');
+    toggle.hidden=boardState.layout==='list';
     toggle.setAttribute('aria-label',(collapsed?'展开 ':'折叠 ')+column.name);toggle.setAttribute('aria-expanded',String(!collapsed));
     heading.append(dot,element('h2',column.name),count,toggle);section.append(heading);
-    section.addEventListener('dragover',event=>{if(customMode){event.preventDefault();event.dataTransfer.dropEffect='move';section.classList.add('board-drop-target');}});
+    section.addEventListener('dragover',event=>{if(customMode&&boardState.layout!=='list'){event.preventDefault();event.dataTransfer.dropEffect='move';section.classList.add('board-drop-target');}});
     section.addEventListener('dragleave',event=>{if(!section.contains(event.relatedTarget))section.classList.remove('board-drop-target');});
     section.addEventListener('drop',async event=>{
-      event.preventDefault();section.classList.remove('board-drop-target');boardDragging=false;if(!customMode)return;
+      event.preventDefault();section.classList.remove('board-drop-target');boardDragging=false;if(!customMode||boardState.layout==='list')return;
       const key=event.dataTransfer.getData('application/x-bot-board');const item=boardState.cards.find(c=>boardCardKey(c)===key&&c.card_type!=='release');
       if(item&&(item.field_value||'unassigned')!==column.id)await boardMove(item,column.id==='unassigned'?null:column.id).catch(error);
     });
@@ -279,12 +322,12 @@ function boardTaskBadge(prefix,status) { const [caption,tone]=states[status]||[s
 function boardCard(item) {
   const release=item.card_type==='release',customMode=!!boardCustomField()&&item.card_type!=='task',category=boardCardCategory(item);
   const label=release?`发版本 ${item.version}`:item.card_type==='task'?`任务 ${shortId(item.task_id)}`:`${boardTypeName(item.object_type)} #${item.object_number}`;
-  const card=element('article','','board-card'+(release?' board-release-card':''));card.dataset.cardKey=boardKey(item);card.draggable=customMode&&!release;
+  const card=element('article','','board-card'+(release?' board-release-card':''));card.dataset.cardKey=boardKey(item);card.draggable=customMode&&!release&&boardState.layout!=='list';
   if(item.card_category)card.dataset.cardCategory=item.card_category;
-  card.addEventListener('dragstart',event=>{if(!customMode||release){event.preventDefault();return;}boardDragging=true;event.dataTransfer.setData('application/x-bot-board',boardCardKey(item));event.dataTransfer.effectAllowed='move';});
+  card.addEventListener('dragstart',event=>{if(!customMode||release||boardState.layout==='list'){event.preventDefault();return;}boardDragging=true;event.dataTransfer.setData('application/x-bot-board',boardCardKey(item));event.dataTransfer.effectAllowed='move';});
   card.addEventListener('dragend',()=>{boardDragging=false;});
   card.addEventListener('click',event=>{if(!event.target.closest('a,button,select,label,input'))boardOpen(item).catch(error);});
-  const heading=element('div','','board-card-heading'),title=boardButton('',()=>boardOpen(item),'board-card-title');title.title=item.title||label;
+  const heading=element('div','','board-card-heading'),title=boardButton('',()=>boardOpen(item),'quiet board-card-title');title.title=item.title||label;
   // Keep the object type and number beside a title that can wrap to its full length.
   const caption=element('span','','board-card-caption');title.append(caption);
   if(release)caption.append(element('span','发版本','board-card-number'),document.createTextNode(' '),element('span',item.version,'board-card-text'));
@@ -292,7 +335,7 @@ function boardCard(item) {
   else caption.append(element('span',label,'board-card-text'));
   heading.append(title);
   const url=boardGithub(item);if(url){const a=link(url,'↗','board-card-link');a.setAttribute('aria-label','在 GitHub 打开 '+label);a.title='在 GitHub 打开';heading.append(a);}
-  if(customMode&&!release){const handle=element('span','⠿','board-drag-handle');handle.draggable=true;handle.setAttribute('aria-label','拖动卡片');handle.title='拖动卡片到其他列';heading.append(handle);}
+  if(customMode&&!release&&boardState.layout!=='list'){const handle=element('span','⠿','board-drag-handle');handle.draggable=true;handle.setAttribute('aria-label','拖动卡片');handle.title='拖动卡片到其他列';heading.append(handle);}
   const meta=element('div','','board-card-meta'),time=element('span',boardTime(item.last_seen),'board-card-time');time.title='最近活动 '+timestamp(item.last_seen);
   const repoName=element('span',item.full_name||'仓库 '+item.repository_id,'board-card-repo');repoName.title=item.full_name||`仓库 ${item.repository_id}`;meta.append(repoName,time);
   const badges=element('div','','board-card-badges');
