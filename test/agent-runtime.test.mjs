@@ -351,3 +351,13 @@ test('a prompt and results within 2 MiB are sent unchanged, for models with a wi
   const f=await fixture(t);
   assert.equal(await runAgent({...f.spec,prompt:'p'.repeat(600000)}),'done');assert.equal(f.requests.length,1);
 });
+test('the default loop runs any number of tool calls in one message and still refuses duplicate or malformed ids (#333)',async t=>{
+  const f=await fixture(t);let turn=0,invoked=0;
+  f.respond(()=>({choices:[{message:++turn===1?{tool_calls:Array.from({length:12},(_,n)=>({...call('inspect'),id:'call_'+n}))}:{content:'done'}}]}));
+  assert.equal(await runAgent({...f.spec,tools:[tool],execute:async()=>({n:++invoked})}),'done');
+  assert.equal(invoked,12);assert.deepEqual(toolReplies(f.requests[1]).map(reply=>reply.n),Array.from({length:12},(_,n)=>n+1));
+  for(const tool_calls of [[call('inspect'),call('inspect')],[{...call('inspect'),id:''}],[{...call('inspect'),function:{name:'inspect',arguments:{}}}]]){
+    const g=await fixture(t);g.respond(()=>({choices:[{message:{tool_calls}}]}));
+    await assert.rejects(runAgent({...g.spec,tools:[tool],execute:async()=>({})}),error=>error.code==='agent_tool_calls_invalid');
+  }
+});

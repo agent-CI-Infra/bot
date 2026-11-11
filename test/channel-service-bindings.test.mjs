@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { generateKeyPairSync } from 'node:crypto';
 import { channelFixture, inGroup, post, until, bindFixture } from './channel-fixture.mjs';
+import { repository } from './helpers.mjs';
 import { knowledgeActor } from './knowledge-fixture.mjs';
 import { authorize, invalidate, resolvePrincipalActor } from '../dist/identity/authorization.js';
 import { roleApi } from '../dist/roles/api.js';
@@ -410,4 +411,40 @@ test('a group assistant works a side question in its own task with the same tool
   assert.equal((await done(f, await post(f.h, f.id, groupMessage('继续刚才的独立任务')))).state, 'completed');
   const [hidden, refused] = observations(f.requests.at(-1));
   assert.deepEqual(hidden.own_tasks, []); assert.equal(refused.error, 'own_task_not_found');
+});
+
+test('a group assistant reads ten repositories with one tool call each in a single step; large results share one bounded budget (#333)', async t => {
+  const f = await fixture(t), ids = ['101', '102', '103', '104', '105', '106', '107', '108', '109', '110'];
+  for (const id of ids.slice(2)) await repository(f.admin, f.a.id, id);
+  f.h.store.run("UPDATE repositories SET full_name='agent-test-zone/admin-fixture-'||id,owner_id='10' WHERE id<>'201'");
+  const bound = await f.bind({ scope: { kind: 'repositories', repositories: ids } }); assert.equal(bound.status, 200, JSON.stringify(bound.value));
+  assert.equal(bound.value.reachable.length, 10);
+  // Every repository has many open PRs with long Chinese titles: each result alone is larger than its share.
+  for (const id of ids) f.gh.state.pulls['admin-fixture-' + id] = Array.from({ length: 60 }, (_, n) => ({ number: n + 1, title: '修复跨仓库并发查询时的上下文膨胀问题'.repeat(8), state: 'open' }));
+  const bodies = [];
+  f.modelState.respond = async (body, res) => {
+    bodies.push(body);
+    // The first answer asks for everything at once: eleven calls, more than the old limit of eight.
+    if (!observations(body).length) return reply(res, { role: 'assistant', content: null, tool_calls: [
+      { id: 'call-projects', type: 'function', function: { name: 'list_projects', arguments: '' } },
+      ...ids.map(id => ({ id: 'call-pulls-' + id, type: 'function', function: { name: 'github_read', arguments: JSON.stringify({ repository: repo(id), path: '/pulls?state=open' }) } }))] });
+    return say(res, '10 个仓库各有 60 个未关闭的 PR。');
+  };
+  const row = await done(f, await post(f.h, f.id, groupMessage('这 10 个仓库现在一共有多少未关闭的 PR？')));
+  assert.equal(row.state, 'completed', row.error);
+  await until(() => f.wire.sent.find(s => JSON.stringify(s.content).includes('各有 60 个未关闭的 PR')));
+  const turn = f.h.store.get('SELECT * FROM channel_service_turns ORDER BY created_at DESC LIMIT 1');
+  assert.equal(turn.state, 'completed'); assert.equal(turn.tool_calls, 11);
+  // Every repository was read once; the second request answers all eleven calls, each within the shared budget.
+  for (const id of ids) assert.ok(f.gh.state.requests.some(r => r.path === `/repos/${repo(id)}/pulls`), id);
+  const second = bodies[1], tools = second.messages.filter(m => m.role === 'tool');
+  assert.deepEqual(tools.map(m => m.tool_call_id), ['call-projects', ...ids.map(id => 'call-pulls-' + id)]);
+  assert.equal(JSON.parse(tools[0].content).projects.length, 10);
+  for (const message of tools.slice(1)) {
+    const result = JSON.parse(message.content);
+    assert.equal(result.truncated, true); assert.match(result.notice, /Narrow it/); assert.match(result.fields.repository, /admin-fixture-1\d\d$/);
+    assert.ok(Buffer.byteLength(message.content) <= 256 * 1024 / 10 + 512, 'each large result gets an equal share of the batch');
+  }
+  assert.ok(tools.reduce((sum, m) => sum + Buffer.byteLength(m.content), 0) <= 256 * 1024 + 11 * 512, 'the batch stays within its budget');
+  assert.ok(Buffer.byteLength(JSON.stringify(second)) < 384 * 1024, 'the follow-up request stays well inside the model context');
 });
