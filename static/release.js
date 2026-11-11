@@ -4,14 +4,14 @@ function releaseSection() {
   section.classList.add('release-panel');
   const layout = element('div', '', 'release-preparation'), preparation = element('div', '', 'release-input'), preview = element('div', '', 'release-preview');
   const version = input('release_version', target.releaseVersion || '', { placeholder: 'v1.2.3 或 v1.2.3-beta.1', maxLength: 256 });
-  const status = element('div', '', 'release-history'), message = element('p', '', 'view-error'), readStatus = element('p', '', 'muted');
+  const status = element('div', '', 'release-history'), overview = element('div', '', 'release-overview'), message = element('p', '', 'view-error'), readStatus = element('p', '', 'muted');
   message.setAttribute('role', 'alert'); readStatus.setAttribute('role', 'status');
   let checking = 0, reading = 0, writing = false;
   const live = () => section.isConnected && current === target && current.section === 'release' && me?.id === owner;
   const denied = error => {
     if (![401,403].includes(error.status)) return false;
     checking++; reading++; target.releasePreview = null; target.releaseEdits?.clear(); confirm.disabled = true;
-    preview.replaceChildren(); status.replaceChildren(); message.textContent = '发布权限已失效，请刷新项目或联系管理员。'; return true;
+    preview.replaceChildren(); status.replaceChildren(); overview.replaceChildren(); message.textContent = '发布权限已失效，请刷新项目或联系管理员。'; return true;
   };
   const confirm = button('确认打标签', async () => {
     const p = target.releasePreview;
@@ -50,6 +50,7 @@ function releaseSection() {
       const data = await api(endpoint); if (!live() || token !== reading) return;
       readStatus.textContent = `记录读取于 ${new Date().toLocaleTimeString()}；这是读取时间。`;
       if (document.activeElement?.name === 'release_body') return;
+      overview.replaceChildren(...(data.releases.length ? [releaseOverview(data.releases)] : []));
       status.replaceChildren(...data.releases.map(record => releaseRecord(record, endpoint, refresh, message, { live, target })));
       if (!data.releases.length) status.append(note('还没有发布记录。'));
     } catch (error) { if (!live() || token !== reading) return; if (!denied(error)) { readStatus.textContent = '发布记录读取失败；保留上次内容，当前状态未确认。'; message.textContent = error.message; } }
@@ -59,7 +60,7 @@ function releaseSection() {
   const controls = element('div', '', 'actions'); controls.append(button('检查候选提交', check), confirm);
   preparation.append(element('h3', '准备新版本'), note('确认版本与精确提交后创建标签。检查通过只生成草稿；正式发布需要再次确认。'), field('版本号', version), controls);
   layout.append(preparation, preview); const historyHead = element('div', '', 'heading'); historyHead.append(element('h3', '发布记录'), button('刷新发布记录', refresh, 'quiet'));
-  section.append(layout, message, historyHead, readStatus, status); void check(); void refresh();
+  section.append(layout, message, historyHead, overview, readStatus, status); void check(); void refresh();
   const poll = async () => { if (!live()) return; await refresh(); if (live()) projectTimer = setTimeout(poll, 5000); };
   projectTimer = setTimeout(poll, 5000); return [section];
 }
@@ -73,6 +74,35 @@ function releaseProcess(record) {
   for (const [label, value] of points) { const item = element('li'); item.append(element('strong', label), element('span', value)); steps.append(item); } return steps;
 }
 const releaseStages = { tagging: '正在打标签', waiting_run: '等待 Release 工作流', running: '工作流运行中', preparing_notes: '准备发行说明', creating_draft: '创建草稿', draft: '草稿待发布', publishing: '正式发布中', published: '已人工发布', externally_published: '已由仓库工作流／外部操作发布', failed: '失败', waiting_permission: '等待权限处理', write_unknown: '写入结果待查证' };
+// #233: the list is the read side of the whole process — version, exact commit, stage, initiator, update time and what
+// is blocking right now. Every cell is a stored field; a stage this page does not know says so instead of reading as
+// fine, and a stage that is merely waiting for the workflow is not called a blocker. The blocker reuses the stored
+// error/detail, so the list and the detail cards below cannot drift apart.
+const releaseSteps = { ...releaseStages, rerun: '重跑工作流', save_draft: '保存草稿正文' };
+function releaseBlocker(r) {
+  if (['tagging', 'waiting_run', 'running', 'preparing_notes', 'creating_draft', 'publishing'].includes(r.stage)) return `进行中：${releaseStages[r.stage]}，无需操作`;
+  if (r.stage === 'draft') return '草稿待人工确认发布';
+  if (r.stage === 'write_unknown') return '写入结果待查证，先核对发布记录';
+  if (r.stage === 'waiting_permission') return '等待权限处理';
+  if (r.stage === 'failed') return (r.failure_step ? `失败于「${releaseSteps[r.failure_step] || r.failure_step}」：` : '失败：') + (r.detail || r.error || '原因未提供');
+  if (['published', 'externally_published'].includes(r.stage)) return '无阻塞';
+  return '状态未确认，请以发布详情为准';
+}
+function releaseOverview(records) {
+  const table = document.createElement('table'), head = document.createElement('thead'), row = document.createElement('tr');
+  for (const name of ['版本', '目标提交', '阶段', '发起者', '更新时间', '当前阻塞']) { const th = element('th', name); th.scope = 'col'; row.append(th); }
+  head.append(row); const body = document.createElement('tbody'); table.append(head, body);
+  for (const r of records) {
+    const line = document.createElement('tr'), blocker = releaseBlocker(r), stage = element('td', releaseStages[r.stage] || r.stage);
+    line.dataset.version = r.version; line.dataset.stage = r.stage;
+    line.append(element('td', r.version), element('td', '', 'release-overview-sha'), stage, element('td', r.initiator?.name || '未提供'),
+      element('td', r.updated_at ? timestamp(r.updated_at) : '时间未提供'), element('td', blocker));
+    line.children[1].append(element('code', r.target_sha));
+    if (r.stage === 'failed' || r.stage === 'write_unknown' || r.stage === 'waiting_permission') line.children[5].className = 'release-check-failed';
+    body.append(line);
+  }
+  return table;
+}
 function releaseRecord(r, endpoint, refresh, message, context) {
   const { live, target } = context;
   const section = card(r.version), run = r.run;
