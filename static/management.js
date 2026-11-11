@@ -186,6 +186,14 @@ function managementReceiptPage() {
   body.append(nav, content); page.append(body); document.getElementById('workspace').append(page);
   return page;
 }
+function receiptSourceLine(receipt) {
+  if (!receipt.source_conversation) return element('span', '这条回执没有记录来源会话（更早的命令不写这一列）。', 'muted');
+  const line = element('span', ''); line.dataset.receiptSource = '';
+  line.append(element('code', receipt.source_conversation), document.createTextNode(' · 消息 '),
+    element('code', receipt.source_message || '未记录'), document.createTextNode(' '),
+    managementReceiptLink('#/management', '回到管理会话'));
+  return line;
+}
 async function renderManagementReceiptPage(id) {
   const page = managementReceiptPage(), nav = page.querySelector('.project-nav'), content = page.querySelector('.project-content');
   // A completed render of this id is already on screen: show it instead of reading the same receipt again.
@@ -236,7 +244,10 @@ function managementReceiptBody(receipt) {
   overview.append(facts([['操作', `${operation}（${receipt.operation}）`], ['项目', projectLine], ['发起人', initiator],
     ['渠道', managementChannels[receipt.channel] ?? receipt.channel], ['版本', version],
     ['提交时间', timestamp(receipt.created_at)], ['更新时间', timestamp(receipt.updated_at)],
-    ['参数指纹', receipt.parameter_hash ? receipt.parameter_hash.slice(0, 12) : null]]));
+    ['参数指纹', receipt.parameter_hash ? receipt.parameter_hash.slice(0, 12) : null],
+    // #355: a receipt names the conversation and the message it came from, so a reader can walk back to the request
+    // that produced it instead of matching timestamps by eye. Older receipts without those columns say so.
+    ['来源', receiptSourceLine(receipt)]]));
   // The key alone only means something with the rule it drives (#355): the same principal submitting the same key and
   // the same arguments gets this receipt back instead of a second execution. A receipt without one says so, because an
   // empty cell would read as "a repeat always runs again".
