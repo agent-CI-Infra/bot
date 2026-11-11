@@ -27,7 +27,7 @@ test('free files retain exact revisions across workspace writes, external edits,
  const restored=await notes.restoreFile(name,1,5,'user:a');assert.equal(restored.revision,6);assert.equal(restored.content,original);
  assert.equal((await new Notes(notes.root).versions(name)).versions.length,6);assert.equal((await notes.file(name,2)).content,'workspace edit');
  await notes.write('.history','ordinary file');assert.equal((await notes.read('.history')).content,'ordinary file');
- assert.ok(!(await notes.list()).some(f=>f.name.startsWith('.write-')));await assert.rejects(notes.read('.write-history'),/invalid_note_name/);
+ assert.ok(!(await notes.list()).some(f=>f.name.startsWith('.write-')));await assert.rejects(notes.read('.write-history'),/invalid_note_(?:name|path)/);
  await notes.saveFile(name,'',6,'user:a');assert.equal((await notes.file(name)).content,'');
 });
 
@@ -89,4 +89,45 @@ test('a complete file written before a stopped history commit is recovered witho
  const atomic=notes.atomic.bind(notes);notes.atomic=async(path,content,check)=>{if(path.endsWith('.json'))throw Object.assign(new Error('interrupted history'),{code:'EIO'});return atomic(path,content,check);};
  await assert.rejects(notes.saveFile('recovered.txt','after',1,'user:a'),/interrupted history/);
  const reopened=new Notes(notes.root),file=await reopened.file('recovered.txt');assert.equal(file.content,'after');assert.equal(file.revision,2);assert.equal((await reopened.file('recovered.txt',1)).content,'before');
+});
+
+test('directory HTTP API keeps stable ids, legacy aliases, exact history and empty folders through move and restore',async t=>{
+ const f=await managerFixture(t),h=await harness(t,f.manager),{admin}=await setup(h),a=await account(admin);await repository(admin,a.id,'101');
+ const base='/api/repositories/101/knowledge-files',dirs='/api/repositories/101/knowledge-directories';
+ await admin('/api/repositories/101/notes/old.txt','PUT',{content:'old bytes\n'});
+ const original=(await admin(base)).value.files[0],endpoint=base+'/'+encodeURIComponent(original.id);assert.match(original.id,/^n:/);
+ assert.equal((await admin(dirs,'POST',{path:'docs'})).status,201);assert.equal((await admin(dirs,'POST',{path:'docs/empty'})).status,201);
+ const empty=await admin(base+'?directory=docs%2Fempty');assert.deepEqual(empty.value.files,[]);assert.ok(empty.value.directories.includes('docs/empty'));assert.equal(empty.value.can_write,true);
+ const moved=await admin(endpoint+'/move','POST',{path:'docs/renamed.txt',expected_revision:1});assert.equal(moved.status,201,JSON.stringify(moved.value));assert.equal(moved.value.file.id,original.id);assert.equal(moved.value.file.revision,2);
+ assert.equal((await admin(endpoint+'?revision=1')).value.file.content,'old bytes\n');assert.equal((await admin(endpoint)).value.file.path,'docs/renamed.txt');
+ const newFile=await admin(base,'POST',{path:'old.txt',content:'new identity'});assert.equal(newFile.status,201);assert.notEqual(newFile.value.file.id,original.id);assert.equal((await admin(endpoint)).value.file.content,'old bytes\n');
+ const nested=await admin(base+'?directory=docs');assert.deepEqual(nested.value.files.map(file=>file.id),[original.id]);
+ assert.equal((await admin(base+'?query=renamed')).value.files[0].path,'docs/renamed.txt');
+ assert.equal((await admin(endpoint+'/move','POST',{path:'old.txt',expected_revision:2})).status,409);
+ assert.equal((await admin(endpoint,'PUT',{content:'stale',expected_revision:1})).status,409);
+ assert.equal((await admin(endpoint,'DELETE',{expected_revision:2})).value.file.revision,3);
+ assert.equal((await admin(dirs,'DELETE',{path:'docs/empty'})).status,200);assert.equal((await admin(dirs,'DELETE',{path:'docs'})).status,200);
+ assert.equal((await admin(base+'?deleted_only=1')).value.files[0].id,original.id);
+ const restored=await admin(endpoint+'/restore','POST',{revision:1,expected_revision:3});assert.equal(restored.value.file.revision,4);assert.equal(restored.value.file.content,'old bytes\n');
+ assert.ok((await admin(base)).value.directories.includes('docs'));
+ assert.equal((await admin(endpoint+'/versions')).value.versions.length,4);
+ for(const path of ['../escape','/absolute','C:/absolute','docs//bad','docs/../escape','docs/\\bad','.git/entry','.write-history/file-tree.json'])assert.equal((await admin(dirs,'POST',{path})).status,400,path);
+ assert.equal((await admin(dirs,'DELETE',{path:''})).status,400);
+ const actor=knowledgeActor(h.store,'tree-reader','101',['tasks.read','knowledge.read']),user={id:actor.principal_id,role:'project_admin',repositories:['101'],context:actor};
+ const result=await knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local'+base+'?directory=docs'),{});assert.equal(result.can_write,false);assert.equal(result.files[0].readonly,true);assert.equal(result.files[0].can_move,false);
+ await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'POST',new URL('http://local'+dirs),{path:'forbidden'}),/capability_forbidden/);
+ await assert.rejects(knowledgeFilesApi(h.store,f.manager,user,'GET',new URL('http://local/api/repositories/202/knowledge-files'),{}),/repository_forbidden/);
+});
+
+test('new manager HTTP routes accept encoded stable ids and serialize real conflict errors',async t=>{
+ const f=await managerFixture(t),token=randomBytes(32),{server,recovered}=createManagerServer({projects:f.projects,token});await recovered;
+ server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+ const client=new ManagerClient('http://127.0.0.1:'+server.address().port,token),base='/v1/projects/101/file-tree';
+ await client.call('POST',base+'/directories',{path:'目录 #?%'});
+ const one=await client.call('POST',base,{path:'目录 #?%/文件.txt',content:'raw\ncontent',actor:'user:http'}),path=base+'/'+encodeURIComponent(one.id);assert.match(one.id,/^f:/);
+ assert.equal((await client.call('GET',base+'?directory='+encodeURIComponent('目录 #?%'))).files[0].id,one.id);
+ assert.equal((await client.call('POST',path+'/move',{path:'renamed.txt',expected_revision:1})).revision,2);
+ await assert.rejects(client.call('PUT',path,{content:'stale',expected_revision:1}),e=>e.status===409&&e.code==='note_revision_changed');
+ assert.equal((await client.call('GET',path+'?revision=1')).content,'raw\ncontent');assert.equal((await client.call('GET',path+'/versions')).versions[0].operation,'move');
+ await assert.rejects(client.call('POST',base+'/directories',{path:'/absolute'}),e=>e.status===400&&e.code==='invalid_note_path');
 });

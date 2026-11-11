@@ -44,10 +44,13 @@ test('notes are shared by task workspaces, commands keep their checkout cwd, and
     const candidate = await run(task, { type: 'workspace_finalize' });
     assert.deepEqual(candidate.files, []); assert.equal(candidate.tree_sha, treeSha([]));
     assert.equal(execFileSync('git', ['ls-tree','-r',candidate.local_sha], { cwd: join(tasks, task, 'repo') }).toString(), '');
-    for (const path of ['../notes/../repo/x.md','../notes/../../x.md','../notes//x.md','../notes/./x.md','../notes/.git/x.md','../notes/a/b.md','../notes/a\\b.md','../notes/.write-lock','../notes/.write-reserved','../notes/.expired-reserved','/workspace/project-notes/x.md']) {
-      await assert.rejects(run(task, { type: 'workspace_read', path }), /invalid_(?:path|note_name)/, path);
-      await assert.rejects(run(task, { type: 'workspace_write', path, base64: 'eA==', offset: 0, final: true, mode: '100644' }), /invalid_(?:path|note_name)/, path);
+    for (const path of ['../notes/../repo/x.md','../notes/../../x.md','../notes//x.md','../notes/./x.md','../notes/.git/x.md','../notes/a\\b.md','../notes/.write-lock','../notes/.write-reserved','../notes/.expired-reserved','/workspace/project-notes/x.md']) {
+      await assert.rejects(run(task, { type: 'workspace_read', path }), /invalid_(?:path|note_name|note_path)/, path);
+      await assert.rejects(run(task, { type: 'workspace_write', path, base64: 'eA==', offset: 0, final: true, mode: '100644' }), /invalid_(?:path|note_name|note_path)/, path);
     }
+    await mkdir(join(notes,'docs'),{recursive:true});
+    await run(task,{type:'workspace_write',path:'../notes/docs/nested.txt',base64:Buffer.from('nested bytes').toString('base64'),offset:0,final:true,mode:'100644'});
+    assert.equal((await run(task,{type:'workspace_read',path:'../notes/docs/nested.txt'})).content,'nested bytes');
     await run(task, { type: 'workspace_context', path: 'nested/object.json', base64: 'eA==', offset: 0 });
     assert.equal((await run(task, { type: 'workspace_read', path: '../context/nested/object.json' })).content, 'x');
     await assert.rejects(run(task, { type: 'workspace_read', path: '../context/../notes/repository.md' }), /invalid_path/);
@@ -73,9 +76,9 @@ test('notes accept many large files and unrestricted single-segment names while 
   const listed = (await notes.list()).map(file=>file.name);
   assert.ok(listed.includes('.hidden')); assert.ok(!listed.some(name=>name.startsWith('.write-')||name.startsWith('.expired-')));
   for (const name of ['.write-lock','.write-leftover','.expired-leftover']) {
-    await assert.rejects(notes.read(name),/invalid_note_name/);
-    await assert.rejects(notes.write(name,'overwrite'),/invalid_note_name/);
-    await assert.rejects(notes.delete(name),/invalid_note_name/);
+    await assert.rejects(notes.read(name),/invalid_note_(?:name|path)/);
+    await assert.rejects(notes.write(name,'overwrite'),/invalid_note_(?:name|path)/);
+    await assert.rejects(notes.delete(name),/invalid_note_(?:name|path)/);
   }
   await utimes(join(notes.root,'.write-lock'),new Date(0),new Date(0));
   await notes.write('note0','recovered'); assert.equal((await notes.read('note0')).content,'recovered');

@@ -35,6 +35,12 @@ export function createManagerServer({ projects, token, runs = null }) {
       else if (req.method === 'GET' && path === '/v1/defaults') result = await projects.defaultsView();
       else if (req.method === 'PUT' && path === '/v1/defaults') result = await projects.setDefaults(await json(req));
       else if (req.method === 'GET' && output) result = await projects.output(output[1], output[2], Number(url.searchParams.get('offset') || 0));
+      else if (/^\/v1\/projects\/[1-9]\d{0,19}\/file-tree(?:\/[^/]+)?(?:\/(?:versions|restore|move))?$/.test(path)) {
+        const parts=path.split('/');let id;
+        try{if(parts[5]!==undefined)id=decodeURIComponent(parts[5]);}catch{throw new ManagerError('invalid_note_id',400);}
+        const writing=['PUT','POST','DELETE'].includes(req.method),content=req.method==='PUT'||req.method==='POST'&&id===undefined;
+        result=await projects.fileTree(parts[3],req.method,id,parts[6],writing?await json(req,content?Infinity:undefined):{},Object.fromEntries(url.searchParams));
+      }
       else if (/^\/v1\/projects\/[1-9]\d{0,19}\/files(?:\/[^/]+)?(?:\/(?:versions|restore))?$/.test(path)) {
         const parts = path.split('/'); let name;
         try { if (parts[5] !== undefined) name = decodeURIComponent(parts[5]); } catch { throw new ManagerError('invalid_note_name', 400); }

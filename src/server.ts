@@ -327,7 +327,7 @@ export function createControlPlane(options: Options) {
     const taskId = /^\/api\/tasks\/([^/]+)/.exec(path)?.[1];
     if (taskId) resourceProject = store.get('SELECT repository_id FROM tasks WHERE id=?', taskId)?.repository_id;
     const capability = /\/releases(?:\/|$)/.test(path) ? 'release.manage' : /\/roles(?:\/|$)/.test(path) ? 'roles.edit'
-      : /\/(?:memory|memories|knowledge|knowledge-files|notes)(?:\/|$)/.test(path) ? 'knowledge.write' : path.startsWith('/api/tasks') ? 'tasks.write' : 'config.write';
+      : /\/(?:memory|memories|knowledge|knowledge-files|knowledge-directories|notes)(?:\/|$)/.test(path) ? 'knowledge.write' : path.startsWith('/api/tasks') ? 'tasks.write' : 'config.write';
     const guard = () => {
       assertCurrent(context);
       if (mutation) {
@@ -344,7 +344,7 @@ export function createControlPlane(options: Options) {
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
-    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|releases)(?:\/.*)?$/.test(path);
+    const consoleOnly = /^\/api\/installations\/[1-9]\d*(?:\/(?:restore|board))?$/.test(path) || /^\/api\/repositories\/[^/]+\/(?:notes|knowledge-files|knowledge-directories|releases)(?:\/.*)?$/.test(path);
     if (mutation && !consoleOnly && (path.startsWith('/api/repositories') || path.startsWith('/api/installations') || path === '/api/settings')) void options.projects?.reconcile().catch(() => {});
     respond(res, method === 'POST' ? 201 : 200, result);
   }));

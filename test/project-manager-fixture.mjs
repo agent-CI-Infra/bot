@@ -15,9 +15,10 @@ export async function managerFixture(t) {
     const url = new URL('http://manager'+path);
     if (url.pathname === '/v1/projects') return projects.list();
     if (url.pathname === '/v1/defaults') return projects.defaultsView();
-    const match = /^\/v1\/projects\/(\d+)(?:\/(\w+)(?:\/([^/]+))?(?:\/(versions|restore))?)?$/.exec(url.pathname);
+    const match = /^\/v1\/projects\/(\d+)(?:\/([\w-]+)(?:\/([^/]+))?(?:\/(versions|restore|move))?)?$/.exec(url.pathname);
     if (!match) throw new Error('fixture_manager_route:'+path);
     const [,repo,action,rawName,operation] = match, name = rawName === undefined ? undefined : decodeURIComponent(rawName);
+    if (action === 'file-tree') return await projects.fileTree(repo,method,name,operation,input,Object.fromEntries(url.searchParams));
     if (action === 'files') return await projects.files(repo,method,name,operation,input,Object.fromEntries(url.searchParams));
     if (action === 'notes') return await projects.notes(repo,method,name,input);
     if (method === 'GET') return projects.describe(repo);
