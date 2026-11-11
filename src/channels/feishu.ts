@@ -114,6 +114,9 @@ export class FeishuAdapter implements ChannelAdapter {
       }
       if (path.startsWith('/application/v6/applications/') && (!r.ok || data.code !== 0))
         fail(502, [99991672, 210508].includes(data.code) ? 'channel_application_permission_required' : 'channel_application_unavailable');
+      // A member lookup the app holds no scope for (99991672) needs an administrator to grant the scope, not a retry. It is
+      // also a 4xx on purpose: Cloudflare in front of the console replaces a 502 body, which would hide this code.
+      if (path.startsWith('/im/v1/chats/') && data.code === 99991672) fail(403, 'channel_audience_permission_required');
       if (!r.ok || data.code !== 0) fail(502, path.startsWith('/auth/') ? 'channel_auth_failed' : path === '/bot/v3/info' ? 'channel_bot_unavailable' : path === '/tenant/v2/tenant/query' ? 'channel_tenant_unavailable' : 'channel_delivery_rejected');
       return data;
     } catch (error) { if (error instanceof HttpError) throw error; return fail(502, 'channel_delivery_failed'); }
