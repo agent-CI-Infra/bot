@@ -330,7 +330,13 @@ async function refreshStaleIntegrations() {
 // part of the five-second task refresh, and a failed check waits for the next visit or a manual sync.
 async function refreshStalePermissions() {
   if (permissionAutoRefresh) return; permissionAutoRefresh = true;
-  try { updatePermissionBadges((await api('/api/installations/permissions/check', 'POST', {})).repositories || []); } catch {}
+  try {
+    const rows = (await api('/api/installations/permissions/check', 'POST', {})).repositories || [];
+    updatePermissionBadges(rows);
+    // The check answers with the same snapshot rows the navigation shows gaps from; leaving it out is how the bar and the
+    // project header end up describing two different reads.
+    if (typeof updateConsoleGaps === 'function') updateConsoleGaps(rows);
+  } catch {}
   finally { permissionAutoRefresh = false; }
 }
 // One account or user as a list row, the same markup as the other lists; drawn by the global settings sections.
@@ -506,7 +512,7 @@ $('refresh').addEventListener('click', () => start().catch(error));
 window.refreshIntegrations = () => api('/api/integrations/check', 'POST', {}).then(() => start()).catch(() => {});
 $('sync').addEventListener('click', async () => {
   $('sync').disabled = true; $('message').textContent = '正在从 GitHub 同步安装列表…';
-  try { const result = await api('/api/installations/sync', 'POST', {}); await start(); const conclusion = installationSyncNotice(result); notice('message', conclusion.text, conclusion.tone); }
+  try { const result = await api('/api/installations/sync', 'POST', {}); if (typeof forgetConsoleGaps === 'function') forgetConsoleGaps(); await start(); const conclusion = installationSyncNotice(result); notice('message', conclusion.text, conclusion.tone); }
   catch (err) { notice('message', '安装列表同步失败：' + err.message + '，还不能判断全部正常。'); } finally { $('sync').disabled = false; }
 });
 $('filters').addEventListener('submit', event => { event.preventDefault(); offset = 0; render().catch(error); });

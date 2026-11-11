@@ -2,6 +2,25 @@
 const consoleMedia = matchMedia('(max-width:767px)');
 let consoleOwner = null, consoleProject = null, consoleNavSignature = '', consoleRouteKey = null;
 const consolePositions = new Map();
+// What a project is currently short of, from the installation snapshot: one read per project and page session, because the
+// navigation is redrawn on every route and must not turn a badge into a request per click.
+const consoleGaps = new Map();
+function loadConsoleGaps(id) {
+  if (consoleGaps.has(id)) return;
+  consoleGaps.set(id, null);
+  api('/api/installations?repository_id=' + encodeURIComponent(id)).then(result => {
+    consoleGaps.set(id, (result.repositories || []).find(row => String(row.id) === id) || null);
+    if (consoleScope() === id) syncConsoleShell();
+  }).catch(() => { /* a failed read keeps the row null, so the badge is drawn empty instead of showing the project left behind */ });
+}
+// A sync can close a gap, so the navigation must not answer from the snapshot it cached before the reader re-read it.
+function forgetConsoleGaps() { consoleGaps.clear(); }
+// A background snapshot read answers with the same rows this cache holds, so its result has to reach the bar as well.
+function updateConsoleGaps(rows) {
+  let changed = false;
+  for (const row of rows || []) if (row && row.id != null) { consoleGaps.set(String(row.id), row); changed = true; }
+  if (changed) syncConsoleShell();
+}
 const consoleAttention = {
   failed: ['执行失败', '查看失败证据后选择修复方式；不是所有失败都适合直接重试。'],
   paused: ['任务已暂停', '查看暂停原因，确认可以继续后再操作。'],
@@ -91,15 +110,39 @@ function syncConsoleShell() {
   const repo = repositories.find(r => String(r.id) === consoleProject);
   // A revoked project is never kept in the project picker merely because it was selected earlier.
   if (!repo) consoleProject = null;
-  const signature = JSON.stringify([me.id, consoleProject, repositories.map(r => [r.id, r.full_name])]);
+  // A GitHub full name carries its owner, so the picker groups by organization without asking for another projection:
+  // the same repository name can arrive from two owners and then must not look like one project.
+  const organization = r => (r.full_name || '').includes('/') ? r.full_name.split('/')[0] : (r.account_name || '其他组织');
+  const signature = JSON.stringify([me.id, consoleProject, repositories.map(r => [r.id, r.full_name, organization(r)])]);
   if (signature !== consoleNavSignature) {
     consoleNavSignature = signature;
     const picker = $('console-project'); picker.replaceChildren(new Option('全部项目', ''));
-    for (const r of repositories) picker.add(new Option(r.full_name, r.id)); picker.value = consoleProject || '';
+    const groups = new Map();
+    for (const r of repositories) { const name = organization(r); if (!groups.has(name)) groups.set(name, []); groups.get(name).push(r); }
+    for (const [name, rows] of [...groups].sort((left, right) => left[0].localeCompare(right[0]))) {
+      const group = document.createElement('optgroup'); group.label = name;
+      for (const r of rows) group.append(new Option(r.full_name, r.id));
+      picker.append(group);
+    }
+    picker.value = consoleProject || '';
   }
   const platform = tab === 'settings';
   $('console-area').textContent = platform ? '平台管理' : project ? '项目工作区' : tab === 'identity' ? '我的身份' : '工作区';
-  $('console-context').textContent = project ? (repo?.full_name || '正在读取项目…') : ({ more: '更多功能', inbox: '待处理', settings: '全局设置' }[tab] || titles[tab] || '身份与权限');
+  // The scope bar names both halves of the current address: a project name alone does not say which organization it is in.
+  const shortName = r => (r.full_name || '').includes('/') ? r.full_name.split('/').slice(1).join('/') : r.full_name;
+  $('console-context').textContent = project ? (repo ? organization(repo) + ' · ' + shortName(repo) : '正在读取项目…') : ({ more: '更多功能', inbox: '待处理', settings: '全局设置' }[tab] || titles[tab] || '身份与权限');
+  // A project can be reachable while some of its features cannot run; the navigation every page shares has to say so.
+  // Only the installation snapshot names the gaps, and only a super administrator may read it, so nothing is invented.
+  const permission = $('console-permission');
+  // Until this project's own snapshot answers, the bar must not keep the badge of the project the reader just left:
+  // the badge names a project and opens its dialog, so a stale one would describe something other than the scope text.
+  if (!repo || me.role !== 'super_admin' || !consoleGaps.has(String(repo.id))) permission.replaceChildren();
+  else {
+    const row = consoleGaps.get(String(repo.id));
+    permission.replaceChildren(...(row?.access_gaps?.length ? [permissionBadge(row)] : []));
+  }
+  if (repo && me.role === 'super_admin' && !consoleGaps.has(String(repo.id))) setTimeout(() => loadConsoleGaps(String(repo.id)), 0);
+
   $('console-inbox-link').href = '#/inbox' + (consoleProject ? '/' + consoleProject : '');
   const secondary = project ? $('project-page').querySelector('.project-nav') : platform ? $('settings-panel').querySelector('.project-nav') : null;
   if (secondary) $('console-secondary-nav').replaceChildren(secondary);
@@ -187,7 +230,9 @@ function initConsoleShell() {
   const secondary = element('div'); secondary.id = 'console-secondary-nav'; sidebar.append(secondary);
   const more = consoleLink('#/more', '更多功能'); more.classList.add('console-more-link'); sidebar.append(more);
   const locationBox = element('div', '', 'console-location'); locationBox.id = 'console-location'; locationBox.hidden = true;
-  const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context'; locationBox.append(area, context);
+  const area = element('span', '', 'eyebrow'), context = element('span'); area.id = 'console-area'; context.id = 'console-context';
+  const permission = element('span', '', 'console-permission'); permission.id = 'console-permission';
+  locationBox.append(area, context, permission);
   $('main-content').prepend(locationBox);
   const section = element('label', '当前页面', 'console-section-picker'), sectionPicker = document.createElement('select'); section.id = 'console-section-label'; sectionPicker.id = 'console-section'; sectionPicker.setAttribute('aria-label', '当前页面'); section.hidden = true;
   sectionPicker.addEventListener('change', () => { location.hash = sectionPicker.value; }); section.append(sectionPicker); locationBox.append(section);
