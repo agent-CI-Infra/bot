@@ -72,12 +72,41 @@ export function boardStorage(store: Store): void {
     WHERE ${where} AND s.kind='development.issue' AND json_valid(s.result)
     AND typeof(json_extract(s.result,'$.pr_number'))='integer' AND json_extract(s.result,'$.pr_number') BETWEEN 1 AND 9007199254740991 ${upsert};`;
   // Triggers also cover executor updates, retries and cancellations without changing execution policy.
-  for (const table of ['tasks','deliveries'] as const) {
-    for (const operation of ['INSERT','UPDATE']) {
-      store.db.exec(`CREATE TRIGGER IF NOT EXISTS board_${table}_${operation.toLowerCase()} AFTER ${operation} ON ${table} BEGIN
-        ${projection(table, 's', 's.rowid=NEW.rowid')} ${table === 'tasks' ? published('s.rowid=NEW.rowid') : deliveryArrays('s.rowid=NEW.rowid')} END;`);
-    }
+  // On tasks, status/lease/phase updates only advance last_seen; input and result JSON are parsed only when those columns change.
+  for (const operation of ['INSERT','UPDATE'] as const) {
+    store.db.exec(`CREATE TRIGGER IF NOT EXISTS board_deliveries_${operation.toLowerCase()} AFTER ${operation} ON deliveries BEGIN
+      ${projection('deliveries', 's', 's.rowid=NEW.rowid')} ${deliveryArrays('s.rowid=NEW.rowid')} END;`);
   }
+  store.db.exec(`
+    CREATE TRIGGER IF NOT EXISTS board_tasks_insert AFTER INSERT ON tasks BEGIN
+      ${projection('tasks', 's', 's.rowid=NEW.rowid')} ${published('s.rowid=NEW.rowid')} END;
+    DROP TRIGGER IF EXISTS board_tasks_update;
+    DROP TRIGGER IF EXISTS board_tasks_update_input;
+    DROP TRIGGER IF EXISTS board_tasks_update_seen;
+    DROP TRIGGER IF EXISTS board_tasks_update_published;
+    CREATE TRIGGER board_tasks_update_input AFTER UPDATE OF repository_id, kind, object_number, input, created_at ON tasks
+    WHEN NEW.repository_id IS NOT OLD.repository_id OR NEW.kind IS NOT OLD.kind OR NEW.object_number IS NOT OLD.object_number
+      OR NEW.input IS NOT OLD.input OR NEW.created_at IS NOT OLD.created_at
+    BEGIN
+      ${projection('tasks', 's', 's.rowid=NEW.rowid')}
+    END;
+    CREATE TRIGGER board_tasks_update_seen AFTER UPDATE OF updated_at ON tasks
+    WHEN NEW.updated_at IS NOT OLD.updated_at
+      AND NEW.kind IN ('review.issue','review.pr','development.issue','development.pr')
+      AND NEW.repository_id IS NOT NULL
+      AND typeof(NEW.object_number)='integer' AND NEW.object_number BETWEEN 1 AND 9007199254740991
+    BEGIN
+      ${insert} VALUES(NEW.repository_id, CASE WHEN NEW.kind IN ('review.pr','development.pr') THEN 'pr' ELSE 'issue' END, NEW.object_number,
+        NULL, NULL, NULL, '', '', '', coalesce(nullif(NEW.updated_at,''), NEW.created_at))
+      ON CONFLICT(repository_id,object_type,object_number) DO UPDATE SET last_seen=max(board_objects.last_seen,excluded.last_seen);
+    END;
+    CREATE TRIGGER board_tasks_update_published AFTER UPDATE OF repository_id, kind, result, updated_at, created_at ON tasks
+    WHEN NEW.kind='development.issue' AND NEW.result IS NOT NULL
+      AND (NEW.result IS NOT OLD.result OR NEW.updated_at IS NOT OLD.updated_at OR NEW.kind IS NOT OLD.kind OR NEW.repository_id IS NOT OLD.repository_id OR NEW.created_at IS NOT OLD.created_at)
+    BEGIN
+      ${published('s.rowid=NEW.rowid')}
+    END;
+  `);
   if (!store.get("SELECT 1 FROM settings WHERE key='board_projection_v1'")) {
     store.transaction(() => {
       // A one-time migration reads existing rows in bounded, primary-key batches.

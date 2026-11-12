@@ -105,7 +105,7 @@ Compose 包含长运行的 `bot`、`manager`、`webhook`、`tunnel`，以及一�
 
 只有 manager 挂载 Docker socket；它以 UID 0、GID 10001 访问 socket 和只读内部认证卷，丢弃所有 capabilities、禁止提权、根文件系统只读。Docker socket 本身仍赋予 manager 管理宿主 Docker 的能力，因此不对宿主发布 manager 端口，也不向项目网络提供该接口。它只接受登记项目的固定生命周期和 runner 请求，不能指定任意镜像、挂载、容器 ID 或 Docker API。bot 和项目容器没有 socket，项目容器也不挂载任何认证卷。bot／manager 使用独立控制网络，每个项目使用自己的 bridge 网络，项目之间互不可达。项目容器默认可以访问外网，用于安装依赖和访问测试地址；设置 `BOT_PROJECT_EGRESS=false` 可改回无出口的内部网络。外网出口意味着仓库代码也能访问宿主在 `0.0.0.0` 上发布的端口，以及公网入口本身；业务端口默认只绑定回环地址，项目容器经宿主地址访问不到它。设置 `BOT_BIND_ADDRESS=0.0.0.0` 后，项目容器和局域网一样能连到控制台和 Webhook（仍需登录或签名）。GitHub 和模型凭据仍不进入项目容器。
 
-控制面在单线程上处理请求、定时任务和所有任务；一段同步工作（很重的查询、很大的 JSON）没返回之前，其他事情都得等，等到的请求可能已经超时。`bot` 日志里的 `[stall] event loop blocked ~N s; requests finished while blocked: …; requests in flight: …` 表示线程被占了约 N 秒。占住线程的同步处理在定时器恢复前就已结束，所以通常列在「finished while blocked」里；「in flight」是排在它后面等待的请求（都只有方法和路径，不含查询参数）。两项都是 `none` 时，占用来自后台工作（引擎、定时任务）。`[slow] <方法> <路径> <毫秒> ms` 是用时 5 秒以上的请求。排查控制台打不开或任务因超时失败时，先看这两类日志。
+控制面在单线程上处理请求、定时任务和所有任务；一段同步工作（很重的查询、很大的 JSON）没返回之前，其他事情都得等，等到的请求可能已经超时。`bot` 日志里的 `[stall] event loop blocked ~N s; requests finished while blocked: …; requests in flight: …` 表示线程被占了约 N 秒。占住线程的同步处理在定时器恢复前就已结束，所以通常列在「finished while blocked」里；「in flight」是排在它后面等待的请求（都只有方法和路径，不含查询参数）。两项都是 `none` 时，占用来自后台工作（引擎、定时任务）。`[slow] <方法> <路径> <毫秒> ms` 是用时 5 秒以上的请求；`[slow-sql] <毫秒> ms <get|all|run|begin|commit|transaction> <SQL 指纹>` 是单次执行或提交达到 100 ms 的同步 SQLite 操作（只保留语句结构，不含绑定参数和字面量值）；`[slow-migration] <表> <read|verify|apply> <毫秒> ms (<行数> rows)` 是后台正文迁移单片同步步骤达到 200 ms 的记录。排查控制台打不开或任务因超时失败时，先看这几类日志。
 
 ## 任务工作区清理
 

@@ -15,7 +15,7 @@ import { traceEvent, beginRun } from '../dist/tasks/trace.js';
 import { ProjectMemory } from '../dist/memory/project.js';
 import { authorizeKnowledgeTask } from './knowledge-fixture.mjs';
 import { validateCandidateRef, validateRunContext, assertSecretFree, protocolRecovery } from '../dist/roles/protocol.js';
-import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, recordCheckpoint } from '../dist/roles/role-run.js';
+import { allocateLease, leaseCurrent, issueRunToken, verifyRunToken, touchRunToken, revokeRunTokens, appendRunEvent, runEvents, scopeUsage, recordCheckpoint } from '../dist/roles/role-run.js';
 import { verifyRunEnvironment } from '../dist/projects/run-environment.js';
 
 const tool = name => ({ type: 'function', function: { name, description: name, parameters: { type: 'object', properties: {}, additionalProperties: true } } });
@@ -448,4 +448,38 @@ test('rebuildContext starts from the caller\'s durable facts: no stored conversa
   // QA's fresh evaluation takes precedence over the option.
   await runRole(f.spec, 'qa', undefined, undefined, { rebuildContext: true });
   assert.equal(f.s.get("SELECT recovery_mode FROM task_runs WHERE role='qa'").recovery_mode, 'fresh_evaluation');
+});
+
+test('touchRunToken throttles sliding-expiry SQLite writes while enforcing revocation and expiry immediately on every guard check', async t => {
+  const f = await fixture(t, () => call('finish', { summary: 'done' }));
+  const a = bound(f.s);
+  const start = 1_700_000_000_000, ttl = 15 * 60_000;
+  const issued = issueRunToken(f.s, a.binding, ['gateway:read_task_record'], ttl, start);
+
+  let tokenWrites = 0;
+  const origRun = f.s.run.bind(f.s);
+  t.mock.method(f.s, 'run', (sql, ...args) => {
+    if (sql.includes('UPDATE role_run_tokens SET expires_at=')) tokenWrites++;
+    return origRun(sql, ...args);
+  });
+
+  // Repeated guard checks within the 30 s throttle window validate the token without rewriting SQLite.
+  for (const offset of [0, 100, 1_000, 15_000, 29_999]) {
+    assert.equal(touchRunToken(f.s, issued.id, ttl, start + offset), true);
+  }
+  assert.equal(tokenWrites, 0, 'no WAL write within the 30 s window');
+  assert.equal(f.s.get('SELECT expires_at FROM role_run_tokens WHERE id=?', issued.id).expires_at, start + ttl);
+
+  // Once 30 s have elapsed, the sliding window extends in SQLite, then throttles again for the next 30 s.
+  assert.equal(touchRunToken(f.s, issued.id, ttl, start + 30_000), true);
+  assert.equal(tokenWrites, 1);
+  assert.equal(f.s.get('SELECT expires_at FROM role_run_tokens WHERE id=?', issued.id).expires_at, start + 30_000 + ttl);
+  assert.equal(touchRunToken(f.s, issued.id, ttl, start + 45_000), true);
+  assert.equal(tokenWrites, 1);
+
+  // Expiry and revocation are still observed immediately, even inside the throttle window.
+  assert.equal(touchRunToken(f.s, issued.id, ttl, start + 30_000 + ttl), false, 'expired token fails immediately');
+  revokeRunTokens(f.s, a.run.id, 'cancelled', start + 31_000);
+  assert.equal(touchRunToken(f.s, issued.id, ttl, start + 31_050), false, 'revoked token fails immediately without waiting for throttle window');
+  assert.equal(touchRunToken(f.s, 'missing-token', ttl, start), false);
 });
