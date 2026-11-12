@@ -311,7 +311,10 @@ export class Projects {
   }
   async provision(repo, { forceSetup = false } = {}) {
     const project = this.get(repo), generation = project.generation, names = this.names(repo, generation), spec = this.spec(repo);
-    const tmpfs = `rw,nosuid,nodev,noexec,size=${spec.tmp_mb * mib},mode=1777`, approved = await this.resolveImage(repo, spec);
+    // /tmp runs programs like the work volume does (noexec there would only send tools such as venvs elsewhere); Docker
+    // mounts a tmpfs noexec unless `exec` is given. The memory limit allows no swap on top, so a computer has the same
+    // memory whether or not the host has swap.
+    const tmpfs = `rw,exec,nosuid,nodev,size=${spec.tmp_mb * mib},mode=1777`, memory = spec.memory_mb * mib, approved = await this.resolveImage(repo, spec);
     // Repository variables reach commands through the runner, which reads the names listed in BOT_PROJECT_ENV_KEYS.
     const env = ['HOME=/workspace/home', 'LANG=C.UTF-8', ...Object.entries(spec.env).map(([k, v]) => `${k}=${v}`), `BOT_PROJECT_ENV_KEYS=${Object.keys(spec.env).join(',')}`];
     let resource = this.db.prepare('SELECT image FROM resources WHERE repository_id=? AND generation=?').get(repo, generation);
@@ -327,7 +330,7 @@ export class Projects {
     const current = container?.Config?.Env || [], listed = current.find(e => e.startsWith('BOT_PROJECT_ENV_KEYS='))?.slice(21).split(',').filter(Boolean) || [];
     const managed = new Set(['HOME', 'LANG', 'BOT_PROJECT_ENV_KEYS', ...Object.keys(spec.env), ...listed]);
     const envStale = container && JSON.stringify(current.filter(e => managed.has(e.slice(0, e.indexOf('=')))).sort()) !== JSON.stringify([...env].sort());
-    if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== spec.memory_mb * mib
+    if (container && (container.Image !== approved.Id || host?.Init !== true || networkStale || envStale || host?.Memory !== memory || host?.MemorySwap !== memory
       || host?.NanoCpus !== Math.round(spec.cpus * 1e9) || host?.PidsLimit !== spec.pids || host?.Tmpfs?.['/tmp'] !== tmpfs
       || !host?.Mounts?.some(m => m.Type === 'volume' && m.Source === this.notesName(repo) && m.Target === '/workspace/project-notes' && !m.ReadOnly))) {
       if (container.State.Running) await this.docker.request('POST', `/containers/${names.container}/stop?t=2`);
@@ -341,7 +344,7 @@ export class Projects {
       await this.docker.request('POST', `/containers/create?name=${names.container}`, { Image: resource.image, User: '10001:10001', WorkingDir: '/workspace',
         Cmd: ['node', '/opt/runner/idle.mjs'], Env: env, Labels: this.labels(repo, generation, 'container'),
         HostConfig: { ReadonlyRootfs: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], Privileged: false,
-          Memory: spec.memory_mb * mib, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
+          Memory: memory, MemorySwap: memory, NanoCpus: Math.round(spec.cpus * 1e9), PidsLimit: spec.pids, NetworkMode: names.network,
           Init: true, RestartPolicy: { Name: 'no' }, Tmpfs: { '/tmp': tmpfs },
           Mounts: [{ Type: 'volume', Source: names.volume, Target: '/workspace' }, { Type: 'volume', Source: this.notesName(repo), Target: '/workspace/project-notes', ReadOnly: false }] } });
       container = await this.inspect(repo, generation, 'container');

@@ -42,6 +42,8 @@ test('an assistant computer is a hardened container without network whose only p
   assert.deepEqual(host.Mounts, [{ Type: 'volume', Source: 'fixture-assistant-homes', Target: '/home/assistant', ReadOnly: false, VolumeOptions: { NoCopy: true, Subpath: `${id}/home-1` } }]);
   assert.deepEqual(Object.keys(host.Tmpfs).sort(), ['/tmp', '/workspace']);
   assert.match(host.Tmpfs['/workspace'], /size=\d+.*uid=10001/);
+  // Docker mounts a tmpfs noexec unless `exec` is given: programs run from /tmp and /workspace.
+  for (const path of ['/tmp', '/workspace']) assert.match(host.Tmpfs[path], /^rw,exec,/, path);
   assert.deepEqual(created.Config.Env, ['HOME=/home/assistant', 'LANG=C.UTF-8', 'BOT_COMPUTER_KIND=assistant']);
   assert.equal(created.Image, 'approved');
   assert.deepEqual(created.Config.Labels, { 'department.bot.deployment': 'fixture', 'department.bot.kind': 'assistant', 'department.bot.owner': id });

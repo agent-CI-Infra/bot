@@ -148,10 +148,13 @@ try {
   const configured = await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{cpus:0.5,memory_mb:768,pids:256,tmp_mb:128,egress:false}});
   const host = inspect(name('101')).HostConfig; assert.deepEqual([host.NanoCpus,host.Memory,host.PidsLimit,host.Tmpfs['/tmp'].includes('size='+128*1024*1024)],[5e8,768*1024*1024,256,true]);
   assert.equal(configured.environment.computer.memory_mb,768); assert.equal(configured.environment.computer.network_policy,'internal, no egress');
+  // The memory limit is the whole budget (no swap on top), and a program written to /tmp runs.
+  const limits = await run('101', `cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max; printf '#!/bin/sh\\necho ran from tmp\\n' > /tmp/probe.sh && chmod +x /tmp/probe.sh && /tmp/probe.sh`);
+  assert.equal(limits.result.output,`${768*1024*1024}\n0\nran from tmp\n`,limits.result.output);
   assert.equal((await manager('101','execute',{type:'read',path:'private.txt'})).result.content,'project-101-only');
   assert.notEqual((await run('101', `node -e "fetch('https://github.com',{signal:AbortSignal.timeout(5000)}).then(()=>process.exit(0),()=>process.exit(1))"`)).result.exit_code,0);
   await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{cpus:1,memory_mb:512,pids:128,tmp_mb:64,egress:true}});
-  passed('the computer spec is editable, enforced by the manager, and applied by recreating the container with its work volume');
+  passed('the computer spec is editable, enforced by the manager (memory without swap, programs run from /tmp), and applied by recreating the container with its work volume');
   // Software and initialization: a package image, a variable and a setup script; everything runs as the project user.
   const software = await api('/api/environments/101/configure','POST',{operation_id:id(),generation:1,spec:{packages:['tree'],env:{GREETING:'hello'},
     setup_script:'mkdir -p "$HOME/.local/bin" && ln -sf /bin/echo "$HOME/.local/bin/greet"'}});
