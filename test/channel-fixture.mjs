@@ -52,7 +52,7 @@ export function transport() {
     if (url.includes('/contact/v3/users/')) {
       state.profileRequests.push(url); if (state.profileGate) await state.profileGate;
       return Response.json({ code: state.profileCode, data: { user: { open_id: state.profileOpenId ?? decodeURIComponent(new URL(url).pathname.split('/').at(-1)),
-        name: state.profileName, email: 'must-not-expose-profile-email', mobile: 'must-not-expose-profile-phone' } }, msg: 'fixture-only-access-token' });
+        name: state.profileName, email: 'must-not-expose-profile-email', mobile: 'must-not-expose-profile-phone' } }, msg: 'fixture-only-access-token' }, { status: state.profileStatus ?? 200 });
     }
     if (url.endsWith('/application/v6/scopes')) {
       state.scopeRequests++;
