@@ -75,7 +75,8 @@ export class ChannelEmployees {
     };
     const work = (async () => {
       try {
-        const members = await this.adapter(chat.connector, guard).audience(chat.chat_id); guard();
+        // The membership snapshot keeps identities only; display names live in the member name cache (ChannelMembers).
+        const members = (await this.adapter(chat.connector, guard).audience(chat.chat_id)).map(({ id, tenant }) => ({ id, tenant })); guard();
         this.store.run('UPDATE channel_audiences SET members=?,verified_until=?,checked_at=?,last_error=NULL WHERE chat_id=? AND revision=?',
           this.store.secrets.seal({ members }, 'channel-audience:' + id), Date.now() + audienceTtl, Date.now(), id, row.revision);
       } catch (error) {

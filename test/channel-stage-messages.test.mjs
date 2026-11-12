@@ -39,7 +39,14 @@ test('a group assistant sends progress messages while it works, before its final
   // The first progress message reaches the group while the turn still runs; no permission item or approval is involved.
   await until(() => position(f, '正在查询仓库') >= 0);
   assert.equal(h.store.get('SELECT state FROM channel_service_turns').state, 'running');
-  assert.match(first.messages[0].content, /send_message/); assert.match(first.messages[0].content, /at most 10 per turn/);
+  assert.match(first.messages[0].content, /send_message/); assert.match(first.messages[0].content, /At most 10 per turn, plus one for each new message merged into the turn/);
+  // #453: announce long work first, then only substance; nothing in a turn that may stay silent. The same rules reach the tool.
+  for (const text of [first.messages[0].content, first.tools.find(tool => tool.function.name === 'send_message').function.description]) {
+    assert.match(text, /before work that will take a while.*saying what you are about to do/i);
+    assert.match(text, /key finding, new evidence or an intermediate conclusion/);
+    assert.match(text, /"still working", "仍在执行" or "请稍候"/);
+    assert.match(text, /a group message without an @ to you, or a timer with nothing to report\), send nothing until you know you will answer/);
+  }
   assert.match(first.tools.find(tool => tool.function.name === 'send_message').function.description, /At most 10 per turn.*attachments are sent only with your final answer/);
   release();
   assert.equal((await inbox(f, receipt)).state, 'completed');
@@ -162,7 +169,7 @@ test('in a console conversation progress messages only enter the event stream, t
   assert.ok(!history.events.some(e => e.data?.name === 'send_message'));
   assert.equal(observations(f.requests.at(-1))[10].error, 'stage_message_limit');
   assert.equal(h.store.get('SELECT count(*) n FROM channel_outbox').n, outbox);
-  assert.match(f.requests[0].messages[0].content, /at most 10 per turn/);
+  assert.match(f.requests[0].messages[0].content, /At most 10 per turn/);
 });
 
 test('group and private timers send their progress messages to the chat under the timer\'s name before the result (#435)', async t => {

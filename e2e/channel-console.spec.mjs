@@ -15,6 +15,7 @@ test('conversation shows the actual messages merged into a running turn on wide 
   const held = new Promise(resolve => { release = resolve; });
   try {
     await repositoryAssistant(f); const chat = await boundGroup(f);
+    f.wire.state.members = f.wire.state.members.map(m => ({ ...m, name: m.member_id === 'ou_bob' ? 'Bob' : 'Alice' }));
     f.service.serviceSessions.own.invoke = async () => { executing = true; await held; return { conclusion: '核对完成' }; };
     f.modelState.respond = async (_body, res) => {
       calls++;
@@ -27,7 +28,7 @@ test('conversation shows the actual messages merged into a running turn on wide 
     expect((await post(f.h, f.id, followup)).value.state).toBe('merged');
     await login(page, f, '#/conversations/' + chat.id);
     const inputs = page.getByLabel('回合并入的消息'); await inputs.getByText('并入的消息（1）', { exact: true }).click();
-    await expect(inputs).toContainText(followup.event.message.message_id); await expect(inputs).toContainText('ou_bob'); await expect(inputs).toContainText('需要回复');
+    await expect(inputs).toContainText(followup.event.message.message_id); await expect(inputs).toContainText('Bob（ou_bob）');
     await expect(inputs).toContainText('@助手');
     release(); await until(() => f.h.store.get('SELECT state FROM channel_inbox WHERE id=?', original.value.operation_id)?.state === 'completed');
     await page.getByRole('button', { name: '刷新会话', exact: true }).click();

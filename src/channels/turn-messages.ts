@@ -3,19 +3,44 @@ import type { Json } from '../core/security.js';
 import type { ChannelEvent } from './types.js';
 import { chatContextBytes, requestBytes } from '../agent/tool-context.js';
 
-export const turnMessageInstructions = ' New messages may arrive while you work. A subsequent user message marked incoming_during_turn contains reply_required messages to answer together, attributed to each speaker, and reference_only discussion which is context, not a request. Each message has is_direct_mention: true only for an authenticated mention of your own Feishu bot account, independently of whether the group participation mode requires a reply. mentions preserves verified target actor_id, name and is_self metadata when available; never infer a mention from matching display names or literal @text. Reconsider the next tools when someone corrects or cancels a request. Inputs join only before an existing next model step: do not interrupt reasoning, tools or output, and do not add a model step to include late messages after your final answer. Only the initial request and reply_required messages belong to this turn; other history is reference. Never repeat a write merely because a message is recovered; inspect its existing receipts first.';
+// What the model is told about messages merged into its turn (#458). The platform gives facts about each message; whether a
+// message concerns the assistant, and whether it needs an answer, is the model's own judgement.
+const recovered = ' Never repeat a write merely because a message is recovered; inspect its existing receipts first.';
+export const groupTurnMessageInstructions = ' Messages that arrive in this group while you work are added before your next step as a user message marked incoming_during_turn.'
+  + ' They are not necessarily addressed to you: people also talk to each other. Judge each one yourself from its sender, its mentions, whether it replies in the thread of your request, and its content.'
+  + ' Take in what continues the current request (an addition, correction or cancellation, which may change your next tools), answer what is clearly asked of you, and leave other conversation as background: do not answer it or remark on it in your reply.'
+  + ' is_direct_mention is the only verified mention of you. group_setting_invites_reply tells whether this group\'s participation setting would have started a reply to that message on its own: a hint, not an obligation.'
+  + ' When one answer covers several people, make clear whom each part is for. You never need to wait for further messages.' + recovered;
+export const privateTurnMessageInstructions = ' Messages the person sends while you work are added before your next step as a user message marked incoming_during_turn.'
+  + ' In this private chat they come from the person you serve and are addressed to you: take them in (an addition, correction or cancellation may change your next tools) and answer them together with the request. You never need to wait for further messages.' + recovered;
 // A private message is always addressed to the assistant, even without an @. Prefer normalized mention targets (#460).
 export const directMention = (event: ChannelEvent): boolean => event.mentions?.some(mention => mention.is_self) ?? (event.chat_type === 'group' && !!event.addressed);
+// In a private chat every message is for the assistant; in a group only a verified mention of it is.
+const addressed = (event: ChannelEvent): boolean => event.chat_type !== 'group' || directMention(event);
+const thread = (event: ChannelEvent): string => event.thread_id || event.root_id || '';
 
+/** A batch for the next model step. `direct` is true when a merged message is certainly for the assistant (see `addressed`). */
+export interface IncomingBatch { content: Json; direct: boolean }
 /** Transport hook shared by the group and management model loops. */
 export interface TurnMessages {
-  take(maxBytes?: number): Json | undefined;
+  take(maxBytes?: number): IncomingBatch | undefined;
+  /** Messages presented to the model so far in this turn; each allows one more progress message. */
+  injected(): number;
   pause(): void;
   resume(): void;
   finish(): void;
   check(): void;
   seal(): void;
   release(): void;
+}
+export interface TurnMessageSource {
+  /** Whether the chat's participation setting would answer this message on its own; such messages get their own turn if unseen. */
+  needsReply: (event: ChannelEvent) => boolean;
+  guard: (source: Row, event: ChannelEvent) => void;
+  /** Best known display name of the sender, from the member name cache. */
+  senderName?: (event: ChannelEvent) => string | undefined;
+  /** The message that started this turn, when it was started by one. */
+  request?: ChannelEvent;
 }
 
 // Identity commands keep their transport semantics even while an assistant is working.
@@ -48,8 +73,8 @@ export class ChannelTurnMessages {
   event(source: Row): ChannelEvent { return this.store.secrets.open(source.payload, 'channel-event:' + source.id) as unknown as ChannelEvent; }
   merge(chat: string, source: Row, reply: boolean): boolean { return this.active.get(chat)?.merge(source, reply) ?? false; }
   /** Start listening before the first model await, including already accepted messages waiting for this chat. */
-  open(chat: Row, turn: string, conversation: string, source: string, needsReply: (event: ChannelEvent) => boolean,
-    guard: (source: Row, event: ChannelEvent) => void): TurnMessages {
+  open(chat: Row, turn: string, conversation: string, source: string, options: TurnMessageSource): TurnMessages {
+    const { needsReply, guard, senderName, request } = options;
     let sealed = false, paused = false;
     const rows = (state: string) => this.store.all('SELECT i.*,m.needs_reply FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.state=? ORDER BY i.created_at,i.rowid', turn, state);
     const check = () => { for (const row of rows('injected')) guard(row, this.event(row)); };
@@ -70,29 +95,41 @@ export class ChannelTurnMessages {
     };
     const resume = () => { if (!sealed) { paused = false; this.active.set(chat.id,{turn,merge}); } };
     const capture = () => { for (const row of this.store.all("SELECT * FROM channel_inbox WHERE chat_ref=? AND state='queued' ORDER BY created_at,rowid", chat.id)) merge(row,needsReply(this.event(row))); };
+    // Facts only: who sent it, whether it is the requester, whether it verifiably mentions the assistant and where it was posted.
+    const describe = (row: Row, event: ChannelEvent): Json => {
+      const name = senderName?.(event), group = event.chat_type === 'group';
+      const inThread = !!request && (event.root_id === request.message_id || event.parent_id === request.message_id || !!thread(request) && thread(event) === thread(request));
+      return { message_id: event.message_id, sender_id: event.actor_id, ...(name ? { sender_name: name } : {}),
+        ...(request ? { same_sender_as_request: event.actor_id === request.actor_id && event.actor_tenant === request.actor_tenant } : {}),
+        ...(group ? { is_direct_mention: directMention(event), mentions: event.mentions ?? [], group_setting_invites_reply: !!row.needs_reply,
+          ...(event.parent_id ? { reply_to_message_id: event.parent_id } : {}), ...(inThread ? { in_request_thread: true } : {}) } : {}),
+        created_at: event.created_at, content: event.content.slice(0, 14000),
+        ...(event.content.length > 14000 ? { truncated: true, notice: 'Use read_message_text to read the rest of this message.' } : {}) };
+    };
     resume(); capture();
     return { check, seal, finish, resume, pause: () => { paused = true; if (this.active.get(chat.id)?.turn === turn) this.active.delete(chat.id); },
+      injected: () => Number(this.store.get("SELECT count(*) n FROM channel_turn_inputs WHERE turn_id=? AND state IN ('injected','answered')", turn)!.n),
       release: () => { seal(); this.release(turn); }, take: (maxBytes = chatContextBytes) => {
       if (sealed || paused) return;
       check();
       capture();
       const pending = rows('pending');
       if (!pending.length) return;
-      const reply_required: Json[] = [], reference_only: Json[] = [];
-      const batch = { incoming_during_turn: true, notice: '你处理期间新到的消息。请按提问人综合回应需要回复的消息；仅供参考的讨论不要求回复。', reply_required, reference_only };
+      const messages: Json[] = [];
+      const content = { incoming_during_turn: true, notice: chat.chat_type === 'group'
+        ? 'Messages that arrived while you were working, oldest first. They are not necessarily addressed to you: decide for each whether it concerns you.'
+        : 'Messages the person sent while you were working, oldest first.', messages };
+      let direct = false;
       for (const row of pending) {
         const event = this.event(row);
-        const message = { source_event: row.id, message_id: event.message_id, sender_id: event.actor_id, sender_tenant: event.actor_tenant,
-          is_direct_mention: directMention(event), mentions: event.mentions ?? [],
-          created_at: event.created_at, content: event.content.slice(0, 14000), ...(event.content.length > 14000 ? { truncated: true, notice: 'Use read_message_text to read the rest of this message.' } : {}) };
-        const target = row.needs_reply ? reply_required : reference_only;
-        target.push(message);
+        messages.push(describe(row, event));
         // This is the existing model-context budget, not a message-count or turn-duration limit. Unseen inputs stay durable.
-        if (requestBytes({ role: 'user', content: JSON.stringify(batch) }) > maxBytes) { target.pop(); break; }
+        if (requestBytes({ role: 'user', content: JSON.stringify(content) }) > maxBytes) { messages.pop(); break; }
         guard(row, event);
+        direct ||= addressed(event);
         this.store.run("UPDATE channel_turn_inputs SET state='injected',injected_at=? WHERE turn_id=? AND source_event=?", this.clock(), turn, row.id);
       }
-      return reply_required.length || reference_only.length ? batch : undefined;
+      return messages.length ? { content, direct } : undefined;
     } };
   }
   private returnInput(turn: string, row: Row): void {
@@ -108,10 +145,13 @@ export class ChannelTurnMessages {
     this.store.run("UPDATE channel_inbox SET state='completed' WHERE state='merged' AND message_id=?", turn);
     this.store.run("UPDATE channel_turn_inputs SET state='answered',outbox_id=? WHERE turn_id=? AND state IN ('pending','injected')", outbox ?? null, turn);
   }
-  /** Last required message actually presented to the model, in arrival order rather than provider timestamp order. */
+  /** The last merged message certainly meant for the assistant that it actually saw, in arrival order; the answer quotes it. */
   replyEvent(turn: string): ChannelEvent | undefined {
-    const row = this.store.get("SELECT i.* FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.needs_reply=1 AND m.state IN ('injected','answered') ORDER BY i.created_at DESC,i.rowid DESC LIMIT 1", turn);
-    return row ? this.event(row) : undefined;
+    for (const row of this.store.all("SELECT i.* FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? AND m.state IN ('injected','answered') ORDER BY i.created_at DESC,i.rowid DESC", turn)) {
+      const event = this.event(row);
+      if (addressed(event)) return event;
+    }
+    return undefined;
   }
   /** Private conversation history must keep supplemental user selections, not only the first request and final answer. */
   history(turn: string): Json[] {
@@ -122,12 +162,13 @@ export class ChannelTurnMessages {
       return [{ message_id: event.message_id, sender_id: event.actor_id, content: String(message.content).slice(0, 4000) }];
     });
   }
-  list(turn: string): Json[] {
+  list(turn: string, senderName?: (event: ChannelEvent) => string | undefined): Json[] {
     return this.store.all(`SELECT m.*,i.payload FROM channel_turn_inputs m JOIN channel_inbox i ON i.id=m.source_event WHERE m.turn_id=? ORDER BY i.created_at,i.rowid`, turn).map(row => {
       const event = this.event({ ...row, id: row.source_event });
       const current = this.store.get('SELECT deleted,sensitive FROM channel_messages WHERE chat_id=? AND message_id=?',row.chat_id,event.message_id);
       const visible = current && !current.deleted && !current.sensitive;
-      return { message_id: event.message_id, sender_id: event.actor_id, needs_reply: !!row.needs_reply, is_direct_mention: !!visible && directMention(event),
+      const name = visible ? senderName?.(event) : undefined;
+      return { message_id: event.message_id, sender_id: event.actor_id, ...(name ? { sender_name: name } : {}), needs_reply: !!row.needs_reply, is_direct_mention: !!visible && directMention(event),
         mentions: visible ? event.mentions ?? [] : [], state: row.state, created_at: row.created_at, injected_at: row.injected_at };
     });
   }

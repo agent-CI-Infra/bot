@@ -23,6 +23,7 @@ import { ChannelReactions } from './reactions.js';
 import { ChannelMedia, MediaTurn } from './media.js';
 import { markdownPosts } from './format.js';
 import { assistantMessage, ChannelTurnMessages } from './turn-messages.js';
+import { ChannelMembers } from './members.js';
 
 const errorCode = (error: unknown) => error instanceof HttpError || error instanceof TaskError ? error.code : 'channel_processing_failed';
 const card = (value: string, link?: string, token?: string): Json => ({ config: { wide_screen_mode: true },
@@ -42,6 +43,7 @@ export class ChannelService {
   readonly reactions: ChannelReactions;
   readonly schedules: ChannelSchedules;
   readonly turnMessages: ChannelTurnMessages;
+  readonly members: ChannelMembers;
   private readonly business = new Map<string,Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
   private syncTimer?: ReturnType<typeof setInterval>;
@@ -56,18 +58,23 @@ export class ChannelService {
     this.serviceBindings = new ChannelServiceBindings(store, this.employees);
     this.serviceSessions = new ChannelServiceSessions(store, this.serviceBindings, this.ledger, management.service, options.githubUrl,this.media);
     this.turnMessages = new ChannelTurnMessages(store);
+    this.members = new ChannelMembers(store, (c, guard) => this.adapter(c, guard));
+    this.serviceSessions.members = this.members;
     management.incomingHistory = id => this.turnMessages.history(id);
-    this.serviceSessions.incomingMessages = (turn,id) => this.turnMessages.open(turn.chat,id,turn.chat.id,turn.source_message,
-      event => this.needsReply(event,turn.binding), (row,event) => { this.source(event);this.employees.currentMessage(turn.chat,event); });
+    const senderName = (chat: Row) => { const name = this.members.namer(chat); return (event: ChannelEvent) => name({ id: event.actor_id, tenant: event.actor_tenant }); };
+    this.serviceSessions.incomingMessages = (turn,id) => this.turnMessages.open(turn.chat,id,turn.chat.id,turn.source_message,{
+      needsReply: event => this.needsReply(event,turn.binding), guard: (row,event) => { this.source(event);this.employees.currentMessage(turn.chat,event); },
+      senderName: event => senderName(turn.chat)(event), request: turn.event });
     management.incomingMessages = (actor,conversation,input,id) => {
       const source=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',String(input.source_message).replace(/^feishu:/,''),conversation);
       if(!source||!input.content)return;
       const event=this.turnMessages.event(source),chat=store.get('SELECT * FROM channel_chats WHERE id=?',source.chat_ref);
       if(!chat||event.chat_type!=='p2p')return;
-      return this.turnMessages.open(chat,id,conversation,source.id,()=>true,(row,event)=>{
+      void this.members.resolve(chat,[{id:event.actor_id,tenant:event.actor_tenant}],0);
+      return this.turnMessages.open(chat,id,conversation,source.id,{needsReply:()=>true,guard:(row,event)=>{
         this.source(event);this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
         if(row.context_revision!==null&&row.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
-      });
+      },senderName:event=>senderName(chat)(event),request:event});
     };
     this.schedules = new ChannelSchedules(store, this);
     // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
@@ -266,7 +273,7 @@ export class ChannelService {
     const ambient=event.chat_type==='group'&&this.store.get(`SELECT 1 FROM channel_service_bindings b JOIN channel_chats h ON h.id=b.chat_id WHERE h.provider=? AND h.app_id=? AND h.installation_tenant=? AND h.chat_id=? AND b.enabled=1
       AND (b.participation='all' OR (b.participation='questions' AND ?=1))`,event.provider,event.app_id,event.installation_tenant,event.chat_id,/[?？]\s*$/.test(event.content)?1:0);
     const actionable = event.kind !== 'message' || (event.addressed||ambient) && event.sender_type === 'user' && Math.abs(Date.now() - event.created_at) <= 300_000;
-    const id = randomId(); let state = actionable ? 'queued' : 'completed';
+    const id = randomId(); let state = actionable ? 'queued' : 'completed', merged: Row | undefined;
     this.store.transaction(() => {
       this.store.run('INSERT INTO channel_inbox(id,connector_id,event_id,dedup_key,payload,state,created_at) VALUES(?,?,?,?,?,?,?)',
         id, c.id, event.event_id, event.kind === 'message' ? 'message:' + event.message_id : event.kind + ':' + event.event_id,
@@ -274,13 +281,15 @@ export class ChannelService {
       const chat=this.ledger.accept(event);
       if(chat){
         this.store.run('UPDATE channel_inbox SET chat_ref=? WHERE id=?',chat.id,id);
-        if(assistantMessage(event)&&this.turnMessages.merge(chat.id,this.store.get('SELECT * FROM channel_inbox WHERE id=?',id)!,!!actionable))state='merged';
+        if(assistantMessage(event)&&this.turnMessages.merge(chat.id,this.store.get('SELECT * FROM channel_inbox WHERE id=?',id)!,!!actionable)){state='merged';merged=chat;}
       }
-      if (actionable && event.kind === 'message')
+      // Every message the assistant takes in shows the processing indicator, including one merged into a running turn
+      // whatever its participation; it goes once the turn's final answer is delivered (see ChannelReactions.wanted).
+      if ((actionable || state === 'merged') && event.kind === 'message')
         this.store.run("INSERT INTO channel_reactions(source_event,state) VALUES(?,'pending')", id);
       if (['audience_changed', 'bot_removed', 'chat_archived', 'uninstalled'].includes(event.kind)) {
         for (const chat of this.store.all(`SELECT id FROM channel_chats WHERE provider=? AND app_id=? AND installation_tenant=? ${event.chat_id ? 'AND chat_id=?' : ''}`,
-          event.provider, event.app_id, event.installation_tenant, ...(event.chat_id ? [event.chat_id] : []))) this.employees.invalidate(chat.id, event.kind);
+          event.provider, event.app_id, event.installation_tenant, ...(event.chat_id ? [event.chat_id] : []))) { this.employees.invalidate(chat.id, event.kind); this.members.stale(chat.id); }
       }
       this.store.run('UPDATE channel_connectors SET last_received_at=?,last_error=NULL WHERE id=?', Date.now(), c.id);
       // Revocation and audience invalidation are cheap security facts, applied before acknowledgement.
@@ -288,8 +297,11 @@ export class ChannelService {
         this.store.run('UPDATE channel_connectors SET enabled=0,revision=revision+1 WHERE id=?', c.id);
         this.store.run("UPDATE channel_sync_jobs SET state='paused',lease_token=NULL,lease_until=0,last_error='app_uninstalled' WHERE chat_id IN (SELECT id FROM channel_chats WHERE connector_id=?)", c.id);
         this.store.run('DELETE FROM channel_chat_summaries WHERE chat_id IN (SELECT id FROM channel_chats WHERE connector_id=?)', c.id);
+        this.members.forgetConnector(c.id);
       }
     });
+    // The merged sender's name is looked up in the background, ready for the turn's next model step.
+    if (merged) void this.members.resolve(merged, [{ id: event.actor_id, tenant: event.actor_tenant }], 0);
     return { operation_id: id, state };
   }
   async actor(e: ChannelEvent): Promise<ActorContext> {
@@ -431,6 +443,7 @@ export class ChannelService {
       if (binding && chat) {
         if (this.business.has(chat.id)) {
           if(!this.turnMessages.merge(chat.id,row,this.needsReply(e,binding)))this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);
+          else void this.members.resolve(chat,[{id:e.actor_id,tenant:e.actor_tenant}],0);
           return;
         }
         const work = this.serviceMessage(row,e,chat,binding).catch(error=>{
@@ -459,7 +472,9 @@ export class ChannelService {
     });
     let session=this.session(actor,e);
     if(this.store.get("SELECT 1 FROM management_messages WHERE conversation_id=? AND state IN ('pending','running')",session.conversation_id)){
-      if(!this.turnMessages.merge(chat.id,row,true))this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);return;
+      if(!this.turnMessages.merge(chat.id,row,true))this.store.run("UPDATE channel_inbox SET state='queued' WHERE id=?",row.id);
+      else void this.members.resolve(chat,[{id:e.actor_id,tenant:e.actor_tenant}],0);
+      return;
     }
     if(e.created_at<session.last_message_at)fail(409,'channel_message_out_of_order');
     if(session.context_revision!==revision||session.connector_revision!==e.connector_revision){

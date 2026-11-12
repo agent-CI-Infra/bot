@@ -3,6 +3,7 @@ import { assertCurrent, authorize } from '../identity/authorization.js';
 import { fail, HttpError, type Json } from '../core/security.js';
 import { traceClean } from '../tasks/trace.js';
 import type { Row } from '../storage/database.js';
+import type { ChannelEvent } from './types.js';
 import type { ChannelService } from './service.js';
 import { chatProfile } from './profiles.js';
 import { managementAssistant } from '../service-roles/roles.js';
@@ -103,6 +104,7 @@ export class ChannelConsole {
     const costs = store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE ${usageWhere} AND cost IS NOT NULL GROUP BY currency`, ...usageArgs);
     const roles = new Map(store.all('SELECT id,name FROM service_roles').map(row => [row.id, row.name]));
     const manageable = !!binding && this.service.serviceBindings.canManage(actor, chat.id);
+    const name = this.service.members.namer(chat), senderName = (event: ChannelEvent) => name({ id: event.actor_id, tenant: event.actor_tenant });
     const current = mode === 'management' ? store.get("SELECT conversation_id FROM channel_sessions WHERE connector_id=? AND chat_id=? AND project_id='' AND principal_id=?", chat.connector_id, chat.chat_id,
       store.get('SELECT principal_id FROM channel_personal_owners WHERE chat_id=?', chat.id)?.principal_id ?? '') : undefined;
     return traceClean({ conversation_id: chat.id, ...(mode === 'legacy' ? {} : { mode }), current_project: null,
@@ -111,11 +113,11 @@ export class ChannelConsole {
         : binding ? { binding: this.service.serviceBindings.view(binding), can_manage: manageable } : {}),
       turns: turns.slice(0, 50).map(turn => mode === 'management' ? { id: turn.id, source_message: turn.source_message, created_at: turn.created_at,
         state: managementStates[turn.state] ?? turn.state, request: JSON.parse(turn.input).content, messages: this.service.management.stageMessages(turn.id),
-        incoming_messages: this.service.turnMessages.list(turn.id), reply: this.personalReply(turn), role_id: '管理助手' }
+        incoming_messages: this.service.turnMessages.list(turn.id, senderName), reply: this.personalReply(turn), role_id: '管理助手' }
         : binding ? { id: turn.id, source_message: turn.source_message, state: turn.state, error: turn.error, created_at: turn.created_at, updated_at: turn.updated_at,
           role_id: roles.get(turn.service_role_id) ?? turn.service_role_id, can_stop: manageable && turn.state === 'running',
           messages: this.service.serviceSessions.messages(turn.id).map(m => ({ sequence: m.sequence, text: m.text, created_at: m.created_at })),
-          incoming_messages: this.service.turnMessages.list(turn.id),
+          incoming_messages: this.service.turnMessages.list(turn.id, senderName),
           reply: turn.reply ? store.secrets.open(turn.reply, 'service-turn-reply:' + turn.id).message : null }
         : { id: turn.id, source_message: turn.source_message, project_id: turn.project_id, role_id: turn.role_id, state: turn.state, error: turn.error,
           created_at: turn.created_at, updated_at: turn.updated_at, reply: turn.reply ? store.secrets.open(turn.reply, 'conversation-reply:' + turn.id).message : null }),
@@ -126,13 +128,16 @@ export class ChannelConsole {
   timeline(actor: ActorContext, id: string, url: URL): Json {
     const chat = this.chat(actor, id);
     const messages = this.service.ledger.query(id, { direction: 'older', limit: 50, ...(url.searchParams.get('cursor') ? { cursor: url.searchParams.get('cursor')! } : {}) });
-    // Resolve names only from an exact, still-active local identity for this connector; reading history makes no profile request.
-    const connector = chat.connector_id + ':' + chat.app_id;
+    // Resolve names only from local records: an exact, still-active identity for this connector, else the member name cache
+    // the assistant uses (#458). Reading history makes no profile request.
+    const connector = chat.connector_id + ':' + chat.app_id, cached = this.service.members.namer(chat);
     messages.messages = (messages.messages as Json[]).map(message => {
       const identity = this.service.store.get(`SELECT display_name FROM external_identities WHERE provider=? AND host='open.feishu.cn'
         AND connector=? AND external_actor=? AND external_tenant=? AND status='active' AND (expires_at IS NULL OR expires_at>?)`,
         chat.provider, connector, String(message.sender_id), String(message.sender_tenant), Date.now());
-      return { ...message, ...(identity?.display_name && identity.display_name !== message.sender_id ? { sender_name: identity.display_name } : {}) };
+      const name = identity?.display_name && identity.display_name !== message.sender_id ? identity.display_name
+        : message.sender_type === 'user' ? cached({ id: String(message.sender_id), tenant: String(message.sender_tenant) }) : undefined;
+      return { ...message, ...(name ? { sender_name: name } : {}) };
     });
     const conversation = this.view(actor, chat, pageOffset(url.searchParams.get('turn_offset'))) as any;
     conversation.turns = conversation.turns.map((turn: Json) => {
