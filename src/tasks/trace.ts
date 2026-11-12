@@ -1,3 +1,4 @@
+import {childTaskContext} from './children.js';
 import { ProjectMemory } from '../memory/project.js';
 import { canReadMemory, memoryAuthorize, visibleMemorySnapshot, type MemoryAccess } from '../memory/access.js';
 import {executionBaseline} from '../agent/common.js';
@@ -151,7 +152,7 @@ export function taskTrace(store:Store,taskId:string,url:URL,section:string,acces
     return {runs:rows.map(r=>{const {context_snapshot,config_snapshot,...metadata}=r;return {...metadata,context_source:'task_runs:'+r.id+':context',config_source:'task_runs:'+r.id+':config',...(url.searchParams.get('include_snapshots')==='1'?{context_snapshot:sourceView('task_runs:'+r.id+':context'),config_snapshot:sourceView('task_runs:'+r.id+':config')}:{})};}),next_after:more?rows.at(-1)!.sequence:null,coverage:{legacy_runs_not_reconstructed:true}};
   }
   if(section==='source')return {source:traceSource(store,taskId,url.searchParams.get('ref')||'',access)};
-  if(section==='lineage'){const links=(where:string)=>store.all('SELECT * FROM task_followups WHERE '+where,taskId).map(r=>({...r,acceptance_event_id:store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance' AND json_extract(data,'$.candidate_id')=? AND EXISTS(SELECT 1 FROM json_each(json_extract(data,'$.followups')) WHERE value=?) ORDER BY id LIMIT 1",r.parent_id,r.candidate_id,r.task_id)?.id??null}));return {parents:links('task_id=?'),children:links('parent_id=?'),acceptances:store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",taskId).map(r=>({source:'task_history:'+r.id,data:JSON.parse(r.data)}))};}
+  if(section==='lineage'){const links=(where:string)=>store.all('SELECT * FROM task_followups WHERE '+where,taskId).map(r=>({...r,acceptance_event_id:store.get("SELECT id FROM task_history WHERE task_id=? AND type='acceptance' AND json_extract(data,'$.candidate_id')=? AND EXISTS(SELECT 1 FROM json_each(json_extract(data,'$.followups')) WHERE value=?) ORDER BY id LIMIT 1",r.parent_id,r.candidate_id,r.task_id)?.id??null}));return {decomposition:childTaskContext(store,taskId),parents:links('task_id=?'),children:links('parent_id=?'),acceptances:store.all("SELECT id,data FROM task_history WHERE task_id=? AND type='acceptance' ORDER BY id",taskId).map(r=>({source:'task_history:'+r.id,data:JSON.parse(r.data)}))};}
   const limit=Number(url.searchParams.get('limit')??50),after=Number(url.searchParams.get('after')??0);
   if(!Number.isSafeInteger(limit)||limit<1||limit>100||!Number.isSafeInteger(after)||after<0)fail(400,'invalid_pagination');
   let sql='task_id=? AND id>?';const args:any[]=[taskId,after];

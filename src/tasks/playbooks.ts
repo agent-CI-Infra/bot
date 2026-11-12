@@ -1,7 +1,9 @@
+import {readFileSync} from 'node:fs';
 import {scopeInstructions} from './scope.js';
 import { createHash } from 'node:crypto';
 export interface Playbook { id: string; version: string; description: string; content: string }
 const guides = [
+  ['roadmap-decomposition','Split broad goals into independently acceptable parallel child tasks; progressively plan after children return',readFileSync(new URL('../../skills/roadmap-decomposition/SKILL.md',import.meta.url),'utf8')],
   ['research','Research a product capability','Read primary sources and current code. Cite sources, observed behavior, unknowns and assumptions. Deliver a bounded report; never claim unobserved proprietary behavior.'],
   ['small-change','Implement a bounded product change','Read the contract and existing code. Make the smallest coherent change, verify the required behavior and regression risks, record actual commands and results.'],
   ['interaction','Implement and verify interaction','List user actions, visible state, empty and failure states. Exercise the actual UI in a browser and retain assertions and output.'],

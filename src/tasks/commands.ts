@@ -1,3 +1,6 @@
+import {taskPermissions} from './configuration.js';
+import {attachChild} from './children.js';
+import {roleConfiguration} from '../roles/definition.js';
 import {relateTasks} from './followups.js';
 import {setTaskPriority} from './priority.js';
 import type { Store, Row } from '../storage/database.js';
@@ -111,7 +114,7 @@ export class TaskCommands {
       this.store.audit(user.id,'project.context',contextMatch[1]!,contextMatch[1]!);return {context:records.project(contextMatch[1]!)};
     }
     if(url.pathname==='/api/tasks'&&method==='POST') {
-      fields(input,['repository_id','request','contract',...(caller?['executor_role','execute']:[])]);
+      fields(input,['repository_id','request','contract',...(caller?['executor_role','execute','as_child']:[])]);
       if(typeof input.repository_id!=='string'||typeof input.request!=='string'||!input.request.trim()||input.request.length>60000)fail(400,'invalid_task_request');
       repository(this.store,user,input.repository_id as string);
       const id=randomId(),now=new Date().toISOString();
@@ -119,8 +122,18 @@ export class TaskCommands {
       if(!contract||!Array.isArray(contract.criteria)||!contract.criteria.length||typeof contract.endpoint!=='string'||!contract.endpoint.trim())fail(400,'invalid_task_contract');
       // Validate before insertion; rollback also removes trigger-created records on failure.
       if (caller && (input.executor_role !== undefined && typeof input.executor_role !== 'string' || input.execute !== undefined && typeof input.execute !== 'boolean')) fail(400,'invalid_task_executor');
+      if(input.as_child!==undefined&&typeof input.as_child!=='boolean')fail(400,'invalid_child_task');
+      if(input.as_child&&(!caller?.source_task_id||caller.role!==roleConfiguration(this.store,caller.project_id).controller.role))fail(403,'child_task_manager_required');
+      if(input.as_child){
+        if(input.executor_role!==undefined)fail(400,'child_task_uses_project_team');
+        const controller=roleConfiguration(this.store,caller!.project_id).roles.find(r=>r.role_id===caller!.role);
+        if(caller!.permissions?.delegation!=='allow'||controller?.permissions.delegation!=='allow')fail(403,'task_delegation_forbidden');
+        const parent=this.store.get('SELECT * FROM tasks WHERE id=? AND repository_id=?',caller!.source_task_id!,caller!.project_id);
+        if(!parent)fail(403,'task_project_mismatch');
+        if(contract.endpoint==='reviewable_pull_request'&&!['code','pull_request'].every(write=>taskPermissions(this.store,parent!).writes.includes(write)))fail(403,'task_external_write_forbidden');
+      }
       const key=caller?'managed:'+digest(JSON.stringify([caller.owner_key,caller.source_message,caller.source_task_id,
-        caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role])):null;
+        caller.source_task_id?this.store.get('SELECT revision FROM task_records WHERE task_id=?',caller.source_task_id)?.revision:null,input.request,contract,input.executor_role??caller.role,input.as_child===true])):null;
       const previous=key?this.store.get('SELECT id FROM tasks WHERE unique_key=?',key):undefined;
       if(previous){assertManagedTask(this.store,caller!,previous.id,true);return {id:previous.id,replayed:true};}
       this.store.transaction(()=>{createManagedTask(this.store,caller??operatorTaskCaller(this.store,user,String(input.repository_id)),input.executor_role as string|undefined,()=>{
@@ -129,11 +142,14 @@ export class TaskCommands {
         // Persist the authoritative validated contract for executor recovery.
         this.store.run('UPDATE tasks SET input=? WHERE id=?',JSON.stringify({request:input.request,contract:new TaskRecords(this.store).get(id).contract}),id);
         captureTaskConfiguration(this.store,id);
+        if(input.as_child)attachChild(this.store,caller!.source_task_id!,id);
         if (user.context) this.store.run('INSERT INTO task_authorizations VALUES(?,?,?,?,?)', id, user.context.principal_id,
           this.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', input.repository_id as string)!.tenant_id, input.repository_id as string, caller?'tasks.manage_own':'tasks.write');
         this.store.audit(user.id,'task.create',id,input.repository_id as string);
         return id;
       });
+      // Explicit children run the normal project team; they are not the creating Manager acting as a writer.
+      if(input.as_child)this.store.run('UPDATE task_origins SET executor_role=NULL WHERE task_id=?',id);
       const created=this.store.get('SELECT * FROM tasks WHERE id=?',id)!;
       if(softwareRequest(created))try{assertRequestPullRequest(this.store,created);}catch(error){if(error instanceof TaskError)fail(403,error.code);throw error;}
       });this.hooks.tick?.();return {id};
@@ -184,11 +200,11 @@ export class TaskCommands {
       return {task:records.context(id),origin:this.store.get('SELECT source_kind,source_role,executor_role,conversation_id FROM task_origins WHERE task_id=?',id)??null};
     }
     if(name==='create_task'){
-      fields(args,['request','criteria','executor_role','execute','endpoint']);
+      fields(args,['request','criteria','executor_role','execute','endpoint','as_child']);
       if(args.endpoint!==undefined&&!['report','reviewable_pull_request'].includes(String(args.endpoint)))fail(400,'invalid_task_endpoint');
       return this.api(user,'POST',new URL('http://local/api/tasks'),{repository_id:caller.project_id,request:args.request,
         contract:{goal:args.request,criteria:args.criteria,scope:[String(args.request).slice(0,2000)],endpoint:args.endpoint??'report'},
-        ...(args.executor_role!==undefined?{executor_role:args.executor_role}:{}),...(args.execute!==undefined?{execute:args.execute}:{})},caller)!;
+        ...(args.executor_role!==undefined?{executor_role:args.executor_role}:{}),...(args.execute!==undefined?{execute:args.execute}:{}),...(args.as_child!==undefined?{as_child:args.as_child}:{})},caller)!;
     }
     if(name==='manage_task'){
       fields(args,['task_id','action','instruction']);if(!['instructions','retry','pause','cancel'].includes(String(args.action)))fail(400,'task_operation_forbidden');
