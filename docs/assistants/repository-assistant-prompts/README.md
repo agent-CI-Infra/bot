@@ -1,28 +1,26 @@
-# 仓库助手技能包
+# 仓库助手静态提示词包
 
-为飞书群助手提供仓库问答、截图反馈与 Issue 提报规则，适用于体验者、开发者和维护者。代码仓、标签和表单均由当前授权范围及目标仓库决定，无须修改目标仓库。
+供管理员配置飞书群助手的可选提示词文本，包含仓库问答和 Issue 提报两个模块。目标仓库、标签和表单取自当前授权范围及仓库资料，无须修改目标仓库。
 
-本目录是可选配置素材，合入 PR 不会自动改变任何角色。当前服务角色支持追加提示词，尚未加载本目录的 SKILL.md；下面的合成器将四个技能正文静态内联到现有提示词字段。无需改运行时代码或重新部署 Bot 即可试用这些指引。
+合成器将共同角色说明和两个模块静态拼接，输出供粘贴到服务角色「提示词」字段的文本；不提供技能发现、按需加载、逐模块启用或运行时隔离。合入 PR 不会改变线上配置，管理员保存提示词后即可试用，无需重新部署 Bot。
 
 ## 内容
 
 | 文件 | 职责 |
 |---|---|
 | [role.prompt.txt](role.prompt.txt) | 身份、意图、事实与权限的共同约束 |
-| [repository-query](skills/repository-query/SKILL.md) | 代码/用法、统计、PR/CI/发布状态问答 |
-| [issue-intake](skills/issue-intake/SKILL.md) | 理解反馈、关联事项、少量追问 |
-| [screenshot-evidence](skills/screenshot-evidence/SKILL.md) | 实际读图、证据与附件发布边界 |
-| [issue-compose](skills/issue-compose/SKILL.md) | 读取目标表单、查重、成稿、获准提交 |
+| [repository-query](prompts/repository-query.md) | 仓库问答的取数口径与证据要求 |
+| [issue-report](prompts/issue-report.md) | 意图、必要追问、图片证据、查重、表单成稿与提交回执 |
 
 ## 启用
 
 1. 在包含本目录的 checkout 中生成 UTF-8 提示词（Node.js 22+，无额外依赖）：
 
    ```sh
-   node docs/assistants/repository-assistant/compose-prompt.mjs --output .tmp/repository-assistant.prompt.txt
+   node docs/assistants/repository-assistant-prompts/compose-prompt.mjs --output .tmp/repository-assistant.prompt.txt
    ```
 
-   合成器移除技能元数据并校验服务角色的 32000 字符上限。使用 `--output` 可避免旧版 PowerShell 重定向改变编码；生成文件只含通用角色与技能，不含本文、测试或私有资料。
+   合成器拒绝缺失/空文本并校验服务角色的 32000 字符上限。使用 `--output` 可避免旧版 PowerShell 重定向改变编码；生成文件只含角色说明和两个模块，不含本文、测试或私有资料。
 
 2. 超级管理员打开「全局设置 → 服务角色」（`#/settings/service-roles`），新建一个服务角色，例如“仓库问答与反馈”，选择部署共享模型，将生成文件全文粘贴到「提示词」，保存。需要看图时选已验证支持图像输入的模型。也可编辑已有仓库助手角色，但同一角色绑定的其他群也会使用新提示词；修改前保存旧内容以便回退。
 
@@ -32,11 +30,9 @@
 
 5. 在群里发一条新消息测试。仅更新现有角色的提示词时，下一轮新运行读取新内容，无需重启或重置会话，也不用重新保存群绑定。已开始的回合继续使用旧提示词；历史保留。测试请发新消息，重复投递旧消息可能重放已保存答复。
 
-目前四个技能全部内联，方便立即使用。后续动态加载可以复用这些文件，但需要单独实现服务角色技能索引、按需读取和访问隔离。
-
 ## 查询工具接线
 
-技能只规定任务范围、证据和回答方式；具体工具与限制由宿主提供。现有群工具 `github_search({repository, query, page?})` 自动限定仓库，不要在 query 中额外添加 repo:/org:/user:。
+文本约定任务范围、证据和回答方式；具体工具与限制由宿主提供。现有群工具 `github_search({repository, query, page?})` 自动限定仓库，不要在 query 中额外添加 repo:/org:/user:。
 
 例如查询某标签的未关闭 Issue，可用 `is:issue is:open label:"<实际标签名>"`。完整响应可使用 `result.total_count`，先检查 `incomplete_results` 和错误；不能把 items 条数当总量。
 
@@ -45,7 +41,7 @@
 ## 仓库规则与能力边界
 
 - 通用角色不内联产品私有资料。提单时只读当前目标的既有模板/贡献规范；看不清规则与确认无规则要区分。若增加私有定制提示词，该角色须仅绑定所有成员均可接收这些资料的群；共享角色的静态文本不具备按仓库/群过滤能力。
-- 私有产品地图或专属策略继续留在受保护实例配置中。本包未实现多仓私有适配加载、版本校验或自动热替换，也不要求在目标仓库新增技能文件。
+- 私有产品地图或专属策略继续留在受保护实例配置中。本包不实现多仓私有适配加载、版本校验或自动热替换。
 - 真实看图需要媒体工具和视觉模型。图片收到、模型看过、Issue 读者可访问是三个状态；聊天附件不会自动变成持久外链。当前媒体/模型限制仍存在。
 - 提示词指导遵循表单和用户意图，但不是强制模板校验、仅创建权限、持久草稿或跨轮幂等实现。写入超时先核对结果，不能因用户追问就重复创建。
 - 模型调用、输出大小和解析限制仍由运行时处理。失败时在对应群的“查看连续会话”核对该轮错误码。
@@ -53,18 +49,13 @@
 ## 核验
 
 ```sh
-node --test docs/assistants/repository-assistant/compose-prompt.test.mjs
+node scripts/test-sets.mjs test/repository-assistant-prompt.test.mjs
 ```
 
-生成器测试覆盖 UTF-8 输出、长度限制与缺失/坏技能拒绝。技能行为仍需在已授权群中检查，数量以实际查询为准：
+[测试](../../../test/repository-assistant-prompt.test.mjs) 位于默认测试发现目录，随 `npm test` 和 CI 的 unit 检查执行。它验证合成顺序、UTF-8、工作目录独立性、长度边界，以及缺失/空文本拒绝；导入合成器时也会解析其 JavaScript 语法。
 
-- 数量查询：范围明确，取得完整可信汇总后回答，不扩展到额外指标。
-- “帮我看看这张截图”：只描述实际看到的内容，不自动提单。
-- “按这些信息帮我提 Issue”：补关键缺口，遵循仓库表单；已有明确提单请求时不重复确认。
-- “最新版本上线了吗？”：发布、CI和部署分别核实。
-
-以上不是已完成的线上性能或视觉模型基准。
+这些测试只验证文本合成，不证明模型遵循率、回答正确性、工具调用数或延迟改善。本包不作这些效果承诺；实际行为仍需在授权环境中验证。
 
 ## 参考
 
-结构参考 [DeepSeek 的共享提示词与技能分层](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/docs/004-prompts.md)与 [Magpie 的按需技能组织](https://github.com/apache/magpie/blob/f3dc0610912f88bd1fc411553967da1ef9d0a70d/plugins/magpie-utilities/skills/write-skill/anatomy.md)。本文与技能按群聊问答/反馈场景重新编写，保留已有用户授权，不引入额外发布确认。
+文本组织参考 [DeepSeek 的共享提示词分层](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/docs/004-prompts.md)与 [Magpie 的指引组织](https://github.com/apache/magpie/blob/f3dc0610912f88bd1fc411553967da1ef9d0a70d/plugins/magpie-utilities/skills/write-skill/anatomy.md)。本包自行编写，只借鉴文本结构，未接入上述框架的技能机制。

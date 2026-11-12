@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const directory = new URL('.', import.meta.url);
-const skills = ['repository-query', 'issue-intake', 'screenshot-evidence', 'issue-compose'];
+const modules = ['repository-query', 'issue-report'];
 const normalize = text => text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trim();
 
 // Static composition for the existing service-role prompt field; no runtime skill loading.
@@ -11,13 +11,10 @@ export async function composePrompt(root = directory) {
   const role = normalize(await readFile(new URL('role.prompt.txt', root), 'utf8'));
   if (!role) throw new Error('角色提示词不能为空。');
   const sections = [role];
-  for (const name of skills) {
-    const source = normalize(await readFile(new URL('skills/' + name + '/SKILL.md', root), 'utf8'));
-    const match = /^---\n([\s\S]*?)\n---\n([\s\S]+)$/.exec(source);
-    if (!match || !match[1].split('\n').includes('name: ' + name) || !match[2].trim()) {
-      throw new Error('技能格式无效：' + name);
-    }
-    sections.push('【' + name + '】\n' + match[2].trim());
+  for (const name of modules) {
+    const source = normalize(await readFile(new URL('prompts/' + name + '.md', root), 'utf8'));
+    if (!source) throw new Error('提示词模块不能为空：' + name);
+    sections.push('【' + name + '】\n' + source);
   }
   const prompt = sections.join('\n\n') + '\n';
   if (prompt.length > 32000) throw new Error('合成提示词超过服务角色的 32000 字符上限。');
