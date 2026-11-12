@@ -4,6 +4,7 @@ import { Store } from '../dist/storage/database.js';
 import { latestRoleCandidate } from '../dist/roles/schedule.js';
 import { runEvents, scopeUsage, toolReceipts } from '../dist/roles/role-run.js';
 import { queries } from '../dist/app/queries.js';
+import { deliveryResult } from '../dist/review/delivery.js';
 import { pruneRejectedArchive, rejectedArchiveState, rejectedAudit } from '../dist/app/delivery-audit.js';
 
 // Production: latestRoleCandidate joined task_history on 'task_history:'||h.id, which cannot use the key, so every call
@@ -96,4 +97,20 @@ test('refused archive pruning and its counters read deliveries by status and tim
     assert.doesNotMatch(plan, /\bSCAN deliveries\b/, `${sql}\n${plan}`);
     assert.match(plan, /INDEX delivery_status_time/, `${sql}\n${plan}`);
   }
+});
+
+// Production: after #306 paged the event list, each of its rows still looked up the tasks its delivery created by
+// source_delivery_id, which no index covered and which a tasks row stores after the task input (about 1 MB): every row
+// scanned all tasks through their inputs' overflow pages, and a page of 50 blocked the control plane for 55 s.
+test('the tasks a delivery created are read from a covering index, without visiting task rows', t => {
+  const store = new Store(':memory:', Buffer.alloc(32, 3)); t.after(() => store.close());
+  const seen = [], all = store.all.bind(store);
+  store.all = (sql, ...args) => { seen.push(sql); return all(sql, ...args); };
+  deliveryResult(store, { id: 'delivery', event: 'issues', status: 'accepted', repository_id: null, payload: Buffer.from('{}') });
+  store.all = all;
+  const [sql] = seen.filter(sql => /FROM tasks WHERE source_delivery_id=\?/.test(sql));
+  assert.ok(sql, 'deliveryResult reads tasks by source_delivery_id');
+  const plan = store.all('EXPLAIN QUERY PLAN ' + sql).map(row => row.detail).join(' | ');
+  assert.match(plan, /SEARCH tasks USING COVERING INDEX task_source_delivery \(source_delivery_id=\?\)/, plan);
+  assert.doesNotMatch(plan, /TEMP B-TREE/, plan);
 });
