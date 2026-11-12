@@ -1,3 +1,4 @@
+import { blobValue, storedInput } from '../storage/payloads.js';
 import {assessRetryReport} from '../roles/retries.js';
 import { taskTraceAccess } from '../memory/access.js';
 import { executionModel } from './configuration.js';
@@ -66,7 +67,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
     const mirror=gitCache&&github.cloneUrl?await gitCache.open(task.repository_id,{url:github.cloneUrl,token:github.token,commits:[target],refs:[`refs/heads/${github.defaultBranch}`]}):undefined;
     const snapshot=(mirror?await workspace.checkout(github,target,mirror,[]):null)||await workspace.prepare(github,target,mirror);
     Object.assign(input,{snapshot_sha:target,snapshot_tree:snapshot.tree_sha,snapshot_files:snapshot.files,source_tree:snapshot.source_tree_sha,skipped_files:snapshot.skipped_files,base_branch:github.defaultBranch});
-    update({head_sha:target,error_code:null,input:JSON.stringify(input)});
+    update({head_sha:target,error_code:null,input:storedInput(store,input,task.repository_id)});
   }
   if(parentSnapshot?.local_sha&&!remoteParent&&parent?.workspace_id){
     const inherited=await workspace.call('inherit:'+link!.candidate_id,{type:'workspace_restore',source_workspace_id:parent.workspace_id,sha:parentSnapshot.local_sha,tree_sha:parentFiles!.version});
@@ -132,7 +133,7 @@ export async function runRequest(store: Store, manager: Manager, task: Row, reda
           const validation=command?{...await workspace.call(`request:${execution}:tests`,{type:'workspace_command',command,timeout_ms:null}),command,source:'policy'}:{command:result.test_command??null,source:'agent',skipped:true};
           // The candidate precedes policy commands; only its immutable blobs, not later build output, are published.
           const branch='bot/task-'+task.id;
-          code={...snapshot,source_workspace_id:task.workspace_id,files:await workspace.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,
+          code={...snapshot,source_workspace_id:task.workspace_id,files:await workspace.contents(snapshot.files,blobValue(store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(store,input.snapshot_files),skipped_files:blobValue(store,input.skipped_files),
             summary:result.summary,change_title:result.change_title,test_command:result.test_command,release_label:result.release_label,implementation_goal:before.contract.goal,
             base_sha:task.head_sha,base_branch:input.base_branch,branch,owner_task_id:task.id,expected_sha:null,pr_number:null,date:new Date(task.created_at).toISOString(),validation,
             no_changes:snapshot.tree_sha===input.snapshot_tree};

@@ -24,6 +24,10 @@ Agent 工作的大块正文（模型请求与响应、工具调用与结果、�
 - `prev`：上一行（不含换行符）的 sha256，首行为 `null`。整个文件是一条哈希链。
 - 模型请求只记相对同一文件上一次请求新增的消息：`data` 为 `{"previous":"<上一请求的定位串>","from":<沿用的消息条数>,"body":{…}}`；上一次请求的消息不是这次的前缀（例如压缩之后），或链已连续 64 次增量时，`data` 为 `{"body":{…完整请求…}}`。
 
+## blob
+
+大块、会被复用的值按内容存一次：`blobs/sha256/<前两位>/<sha256>`（与 `trajectories/` 同在数据库目录，0600），写入时先 `fdatasync` 再原子改名，读取时核对哈希。目前用于任务输入 `tasks.input` 里的 `files`（PR 改动文件及补丁）、`snapshot_files`、`skipped_files`（仓库文件清单）：JSON 超过 2 KiB 时在库里换成 `{"$blob":"<sha256>","bytes":n}`。读这三个键的代码经 `blobValue` 取回原值；其他键和整体拷贝输入再写回的代码不受影响。`trajectory_blobs` 记录每个项目存过的 blob，同一内容多个项目共用一个文件，最后一个项目删除时文件才删除。
+
 ## SQLite 里的记录
 
 `trajectory_files` 每个文件一行：打开文件（写第一行）时插入一次，关闭时更新一次，写入行数、字节数、最后一行哈希和按类型的行数与字节。追加行不写数据库。关闭时同一提交把这些数加到 `trajectory_usage`（按项目、按类型的累计），存储页读这张表。
@@ -55,7 +59,7 @@ Agent 工作的大块正文（模型请求与响应、工具调用与结果、�
 
 升级前写进行里的正文由后台迁移搬进文件（`src/storage/migration.ts`）。控制面开始监听、封口任务跑完之后才启动，就绪不等它；启动阶段只加列、重建触发器，不读大表的行。
 
-- 依次处理 `task_tools`、`role_conversation_operations`、`service_role_operations`、`model_requests`、`task_logs`、`task_history`，每张表按 rowid 顺序走。
+- 依次处理 `task_tools`、`role_conversation_operations`、`service_role_operations`、`model_requests`、`task_logs`、`tasks`（输入里的文件清单改存 blob）、`task_history`，每张表按 rowid 顺序走。
 - 每一片先读行，读满约 25 ms（单行再大也只多读这一行）就停；把这些行的正文追加到文件，等文件 `fdatasync` 落盘（不占事件循环），按定位串逐条读回核对哈希，然后在一个短事务里把这些行的正文列换成表头和定位串、并保存游标。两片之间至少让出与这一片同样长的时间。
 - 游标、已迁移/跳过/失败条数、字节数和最后一个错误保存在 `settings` 的 `trajectory_migration`；重启后从游标继续，已迁移的行不会再搬一次。剩余量按 `max(rowid)` 与游标之差估计，不数行。
 - 只迁移已结束的记录：`task_tools` 等只搬 `completed` 的调用（仍在 `pending` 的可能正被执行），`model_requests` 只搬已 `finished_at` 的请求，`task_logs` 只搬超过 2 KiB 的 JSON 日志，`task_history` 只搬超过 2 KiB 的 `operation`、`runtime_log` 快照。

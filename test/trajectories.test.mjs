@@ -7,7 +7,7 @@ import { Store } from '../dist/storage/database.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { operationId, Redactor } from '../dist/agent/common.js';
 import { runScope, TrajectoryError } from '../dist/storage/trajectories.js';
-import { insertTaskLog, logContent, modelSnapshot, operationResult } from '../dist/storage/payloads.js';
+import { blobValue, insertTaskLog, logContent, modelSnapshot, operationResult, storedInput } from '../dist/storage/payloads.js';
 import { beginRun, endRun, taskTrace, traceSource, traceSnapshot } from '../dist/tasks/trace.js';
 
 const key = Buffer.alloc(32, 7);
@@ -241,4 +241,27 @@ test('trajectory lookups use their indexes', t => {
   assert.match(plan("SELECT * FROM trajectory_files WHERE repository_id='1'"), /trajectory_files_repository/);
   assert.match(plan("SELECT * FROM trajectory_files WHERE conversation_id='c'"), /trajectory_files_conversation/);
   assert.match(plan("SELECT path FROM trajectory_files WHERE id='x'"), /USING INDEX sqlite_autoindex_trajectory_files_1/);
+});
+
+test('large task file lists are stored once as blobs and read back through their references', t => {
+  const { directory, path } = database(t), store = new Store(path, key); t.after(() => store.close());
+  const files = Array.from({ length: 200 }, (_, i) => ({ path: `src/file-${i}.ts`, sha: String(i).padStart(40, '0'), mode: '100644' }));
+  const input = { request: 'keep', files: [{ filename: 'small.ts', patch: '+x' }], snapshot_files: files, skipped_files: [] };
+  const text = storedInput(store, input, '101'), stored = JSON.parse(text);
+  assert.deepEqual(stored.files, input.files, 'small values stay inline'); assert.equal(stored.request, 'keep');
+  assert.match(stored.snapshot_files.$blob, /^[a-f0-9]{64}$/); assert.ok(text.length < 400);
+  assert.deepEqual(blobValue(store, stored.snapshot_files), files); assert.deepEqual(blobValue(store, input.files), input.files);
+  const file = join(directory, 'blobs', 'sha256', stored.snapshot_files.$blob.slice(0, 2), stored.snapshot_files.$blob);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  // The same value again, from this or another project, is not written twice; each project counts it.
+  storedInput(store, input, '101'); storedInput(store, input, '102');
+  assert.equal(store.get("SELECT count FROM trajectory_usage WHERE repository_id='101' AND kind='blobs'").count, 1);
+  assert.equal(store.get("SELECT count FROM trajectory_usage WHERE repository_id='102' AND kind='blobs'").count, 1);
+  // Removing one project keeps the file the other still holds; removing the last removes it.
+  store.trajectories.remove({ repository_id: '101' }); assert.deepEqual(blobValue(store, stored.snapshot_files), files);
+  store.trajectories.remove({ repository_id: '102' }); assert.throws(() => blobValue(store, stored.snapshot_files), error => error.code === 'trajectory_truncated');
+  // A changed blob is reported.
+  const again = JSON.parse(storedInput(store, input, '103')).snapshot_files.$blob;
+  writeFileSync(file, readFileSync(file, 'utf8').replace('file-1', 'file-X'));
+  assert.equal(again, stored.snapshot_files.$blob); assert.throws(() => blobValue(store, stored.snapshot_files), error => error.code === 'trajectory_corrupt');
 });

@@ -24,7 +24,7 @@ import { assertManagedExecution } from '../tasks/management.js';
 import { TaskRecords } from '../tasks/service.js';
 import { evaluateDelivery } from '../tasks/acceptance.js';
 import { type Store, type Row } from '../storage/database.js';
-import { insertTaskLog, logContent } from '../storage/payloads.js';
+import { blobValue, insertTaskLog, logContent, storedInput } from '../storage/payloads.js';
 import { type Manager } from '../projects/service.js';
 import { randomId, fields, fail, HttpError, type Json } from '../core/security.js';
 import { type Actor, scope, repository } from '../app/auth.js';
@@ -449,7 +449,7 @@ export class TaskEngine {
         input={...input,snapshot_sha:target.sha,snapshot_tree:snapshot.tree_sha,source_tree:snapshot.source_tree_sha,snapshot_files:snapshot.files,skipped_files:snapshot.skipped_files,coverage:snapshot.coverage,
           context:{mode:'event',repository:github.fullName,reviewed_sha:target.sha,context_files:target.contextFiles,skills:skills.map(({name,description,path})=>({name,description,path})),
             effective_rules:effectiveRules,computer:computerSummary(environment.computer),...managerContext(input),...target.context}};
-        update({input:JSON.stringify(redactor.clean(input)),head_sha:target.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:target.sha});
+        update({input:storedInput(this.store,redactor.clean(input),task.repository_id),head_sha:target.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:target.sha});
       }
       if(task.phase==='prepare'){
         update({generation:environment.generation,workspace_id:task.workspace_id||randomId()});
@@ -511,7 +511,7 @@ export class TaskEngine {
           &&!this.store.get("SELECT 1 FROM tasks WHERE workspace_id=? AND id<>? AND status IN ('running','publishing','preparing')",prior.workspace_id,id)){
           const ownWorkspace=task.workspace_id;update({workspace_id:prior.workspace_id});
           const reused=await workspace.deliver({type:'workspace_reuse',sha:ref.object.sha,tree_sha:JSON.parse(prior.snapshot).snapshot_tree});
-          if(reused.reused){const cached=JSON.parse(prior.snapshot);snapshot={files:cached.snapshot_files,skipped_files:cached.skipped_files,tree_sha:cached.snapshot_tree,source_tree_sha:cached.source_tree,coverage:cached.coverage,history:cached.history};}
+          if(reused.reused){const cached=JSON.parse(prior.snapshot);snapshot={files:blobValue(this.store,cached.snapshot_files),skipped_files:blobValue(this.store,cached.skipped_files),tree_sha:cached.snapshot_tree,source_tree_sha:cached.source_tree,coverage:cached.coverage,history:cached.history};}
           else update({workspace_id:ownWorkspace});
         }
         if(!snapshot)snapshot=mirror?await workspace.checkout(github,ref.object.sha,mirror,prBase?[prBase]:[]):null;
@@ -571,7 +571,7 @@ export class TaskEngine {
             review_rules:{language:policy.review_language},...(labeling?{repository_labels:labels}:{}),
             // What the project computer offers: limits, installed toolchain and packages, variable names (not values).
             computer:computerSummary(environment.computer),...managerContext(input)}};
-        update({input:JSON.stringify(redactor.clean(input)),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
+        update({input:storedInput(this.store,redactor.clean(input),task.repository_id),head_sha:task.head_sha||ref.object.sha,phase:'model'});await validate();validatedPhase='model';log({type:'prepared',sha:ref.object.sha,coverage:input.coverage});
         if(development&&input.integration)await restoreCheckpoint(this.store,task,workspace,ref.object.sha);
         if(development&&input.integration&&!input.integration.conflicts?.length&&!investigateRetry&&!['return','insufficient_evidence'].includes(records.get(id).acceptance?.outcome)){
           // Clean three-way integration needs verification, not a fresh development loop.
@@ -582,14 +582,14 @@ export class TaskEngine {
           const valid=!validation.error&&(validation.skipped||validation.exit_code===0&&!validation.timed_out&&!validation.truncated);
           const checked=traceEvent(this.store,id,'integration_validation',{integration_id:integration.id,base_sha:ref.object.sha,source_sha:integration.sha,tree_sha:artifact.tree_sha,passed:valid,validation},task.trace_run_id,'framework');
           if(valid){
-            const candidate={...prior,...artifact,source_workspace_id:task.workspace_id,files:await workspace.contents(artifact.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,
+            const candidate={...prior,...artifact,source_workspace_id:task.workspace_id,files:await workspace.contents(artifact.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),
               base_sha:ref.object.sha,expected_sha:input.bot_pr?.head?.sha??null,pr_number:input.bot_pr?.number??prior.pr_number,publication_key:integration.id,integration,validation,
               remote_sha:undefined,published_tree_sha:undefined,published:undefined};
             this.store.run('UPDATE development_candidates SET data=? WHERE task_id=?',JSON.stringify(candidate),id);
             update({phase:'publish',result:JSON.stringify({summary:prior.summary,test_command:prior.test_command})});
           }else{
             input.integration={...integration,failure_ref:checked};input.context.integration={...input.context.integration,failure_ref:checked,instruction:'The three-way merge was clean but combined policy tests failed. Read this failure record and repair this integrated checkout in the SAME Dev context; do not overwrite changes from main.'};
-            update({input:JSON.stringify(redactor.clean(input))});
+            update({input:storedInput(this.store,redactor.clean(input),task.repository_id)});
           }
         }
 
@@ -613,7 +613,7 @@ export class TaskEngine {
           object:{...input.context.object,title:object.title,body_excerpt:String(object.body||'').slice(0,1000)},
           trigger:input.trigger,merged_updates:input.merged_updates,
           conversation_notice:`Current checkout/head: ${task.head_sha}. Read the current checkout, .bot rules, skills and ../notes/ for this task. Historical code conclusions may refer to an earlier head.`};
-        update({input:JSON.stringify(redactor.clean(input))});
+        update({input:storedInput(this.store,redactor.clean(input),task.repository_id)});
         if(updates.length)this.store.run('UPDATE tasks SET review_update_cursor=? WHERE id=?',updates.at(-1)!.id,id);
         if(stage!=='start')for(const row of updates){const data=JSON.parse(row.data);log({type:'review_update',actor:data.actor,reason:data.reason,detail:JSON.stringify(data)});}
         return stage==='start'?{prompt:JSON.stringify(roleAssignmentContext({...input.context,structured_task:records.context(id),playbook_catalog:playbooks.map(({content,...p})=>p)}))}
@@ -685,7 +685,7 @@ export class TaskEngine {
             const pr=input.bot_pr||input.object,owned=this.store.get('SELECT * FROM bot_pull_requests WHERE repository_id=? AND number=?',task.repository_id,pr.number);
             assertOwnedPR(owned,pr,github.actorId,task.repository_id);branch=owned!.branch;prNumber=owned!.number;ownerTask=owned!.source_task_id;
           }else{branch=`bot/issue-${task.object_number}-${id}`;this.store.run('INSERT INTO bot_branches VALUES(?,?,?) ON CONFLICT DO NOTHING',task.repository_id,branch,id);}
-          const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,input.snapshot_files),source_tree:input.source_tree,snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,summary:args.summary,change_title:args.change_title,test_command:args.test_command,release_label:args.release_label,
+          const candidate={...snapshot,source_workspace_id:task.workspace_id,files:await workspace!.contents(snapshot.files,blobValue(this.store,input.snapshot_files)),source_tree:input.source_tree,snapshot_files:blobValue(this.store,input.snapshot_files),skipped_files:blobValue(this.store,input.skipped_files),summary:args.summary,change_title:args.change_title,test_command:args.test_command,release_label:args.release_label,
             implementation_goal:input.context.implementation_goal,base_sha:input.snapshot_sha,base_branch:input.base_branch,
             publication_key:input.publication_key||input.integration?.id,...(input.integration?{integration:input.integration}:{}),branch,owner_task_id:ownerTask,expected_sha:prNumber?task.head_sha:null,pr_number:prNumber,date:new Date(task.created_at).toISOString(),validation};
           this.store.run('INSERT INTO development_candidates VALUES(?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data',id,JSON.stringify(candidate));
@@ -723,7 +723,7 @@ export class TaskEngine {
           const outputs:any[]=[];
           if(writes.includes('reply')){
             log({type:'phase',phase:'publish',target:'reply',detail:'正在发布到 GitHub：发送回复…'});
-            outputs.push(...await publisher.reply(result,input.files));
+            outputs.push(...await publisher.reply(result,blobValue(this.store,input.files)));
           }
           if(writes.includes('labels')&&result.labels?.length){
             const current=(seen||await github.object(task.kind,task.object_number)).labels;
@@ -740,7 +740,7 @@ export class TaskEngine {
           const asked=input.trigger?.actor?{actor:input.trigger.actor,url:input.trigger.url||null,what:promptedBy(input.trigger.reason)}:input.comment?{actor:input.comment.user?.login||input.sender?.login||null,url:input.comment.html_url||null,what:'comment' as const}:undefined;
           // An Issue the review finds ready for development that will not be developed yet says what it waits for.
           const development=await this.developmentWait(github,task,input,result).catch(()=>null);
-          const outputs=await publisher.review(result,input.files,{language:reviewLanguage(setting,result.summary),trigger:asked,development});
+          const outputs=await publisher.review(result,blobValue(this.store,input.files),{language:reviewLanguage(setting,result.summary),trigger:asked,development});
           // Labels go on only after the summary comment was published: the policy's review label, plus the classification
           // labels the model named that pass classificationLabels against the repository and the object's current labels.
           // publisher.review ends by validating the object, so its labels are current.

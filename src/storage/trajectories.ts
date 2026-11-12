@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fdatasync, close as closeAsync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fdatasync, fdatasyncSync, close as closeAsync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { open as openAsync } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -78,11 +78,18 @@ export function trajectoryStorage(db: DatabaseSync) {
     -- Totals per project ('' for none), added when a file is closed: kind 'files' counts files and their bytes,
     -- 'records:<type>' counts lines and their bytes. The storage page reads these instead of walking files or tables.
     CREATE TABLE IF NOT EXISTS trajectory_usage(repository_id TEXT NOT NULL,kind TEXT NOT NULL,count INTEGER NOT NULL DEFAULT 0,
-      bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(repository_id,kind));`);
+      bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(repository_id,kind));
+    -- Content-addressed blobs (large reused values such as a task's file lists), one row per project that stored one.
+    -- A blob's file is shared by content and removed with the last project that holds it.
+    CREATE TABLE IF NOT EXISTS trajectory_blobs(repository_id TEXT NOT NULL,sha256 TEXT NOT NULL,bytes INTEGER NOT NULL,created_at TEXT NOT NULL,
+      PRIMARY KEY(repository_id,sha256));
+    CREATE INDEX IF NOT EXISTS trajectory_blobs_hash ON trajectory_blobs(sha256);`);
 }
 
 export class Trajectories {
   readonly root: string;
+  /** Content-addressed blobs: <blobs>/sha256/<first two hex digits>/<sha256>. */
+  readonly blobs: string;
   private readonly temporary: boolean;
   private readonly open = new Map<string, Handle>();
   private readonly handles = new Map<string, Handle>();
@@ -94,6 +101,7 @@ export class Trajectories {
     this.temporary = root === null;
     this.root = root === null ? mkdtempSync(join(tmpdir(), 'bot-trajectories-')) : resolve(root);
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    this.blobs = root === null ? join(this.root, '.blobs') : join(dirname(this.root), 'blobs');
     // A file nothing appended to for a while is closed; a later record opens a continuation file.
     this.timer = setInterval(() => this.closeIdle(), Math.min(idleMs, 60_000));
     this.timer.unref?.();
@@ -218,6 +226,36 @@ export class Trajectories {
   /** Waits for pending fdatasync and descriptor closes; tests and shutdown. */
   async settle(): Promise<void> { await Promise.all([...this.handles.values()].map(handle => handle.chain)); }
 
+  /**
+   * Stores a value once by the sha256 of its JSON text and returns the reference that replaces it. The file is on disk
+   * (fdatasync, then an atomic rename) before this returns, so a row may point to it right away.
+   */
+  putBlob(value: unknown, repositoryId: string): { $blob: string; bytes: number } {
+    const text = JSON.stringify(value), bytes = Buffer.byteLength(text), hash = sha256(text), path = this.blobPath(hash);
+    if (!existsSync(path)) {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`, fd = openSync(temporary, 'wx', 0o600);
+      try { writeAll(fd, Buffer.from(text)); fdatasyncSync(fd); } finally { closeSync(fd); }
+      renameSync(temporary, path);
+    }
+    atomic(this.db, () => {
+      const added = this.db.prepare('INSERT OR IGNORE INTO trajectory_blobs(repository_id,sha256,bytes,created_at) VALUES(?,?,?,?)').run(repositoryId, hash, bytes, new Date().toISOString()).changes;
+      if (added) this.addUsage(repositoryId, 'blobs', 1, bytes);
+    });
+    return { $blob: hash, bytes };
+  }
+
+  /** A stored blob's value, verified against its hash. */
+  getBlob(hash: string): unknown {
+    if (!/^[a-f0-9]{64}$/.test(hash)) throw new TrajectoryError('trajectory_ref_invalid', String(hash).slice(0, 80));
+    let data: Buffer;
+    try { data = readFileSync(this.blobPath(hash)); } catch { throw new TrajectoryError('trajectory_truncated', `blob ${hash} is missing`); }
+    if (sha256(data) !== hash) throw new TrajectoryError('trajectory_corrupt', `blob ${hash} does not match its hash`);
+    return JSON.parse(data.toString('utf8'));
+  }
+
+  private blobPath(hash: string) { return join(this.blobs, 'sha256', hash.slice(0, 2), hash); }
+
   /** Removes the files of a deleted project or conversation and their entries; their totals are taken back. */
   remove(where: { repository_id?: string; conversation_id?: string }): void {
     const [column, value] = where.repository_id !== undefined ? ['repository_id', where.repository_id] : ['conversation_id', where.conversation_id!];
@@ -233,7 +271,16 @@ export class Trajectories {
         this.db.prepare('DELETE FROM trajectory_files WHERE id=?').run(row.id);
       }
     });
-    if (where.repository_id !== undefined) rmSync(join(this.root, segment(where.repository_id)), { recursive: true, force: true });
+    if (where.repository_id !== undefined) {
+      rmSync(join(this.root, segment(where.repository_id)), { recursive: true, force: true });
+      // The project's blobs; a file another project also stored stays for that project.
+      const blobs = this.db.prepare('SELECT sha256,bytes FROM trajectory_blobs WHERE repository_id=?').all(where.repository_id) as { sha256: string; bytes: number }[];
+      atomic(this.db, () => {
+        this.db.prepare('DELETE FROM trajectory_blobs WHERE repository_id=?').run(where.repository_id!);
+        if (blobs.length) this.addUsage(where.repository_id!, 'blobs', -blobs.length, -blobs.reduce((sum, blob) => sum + Number(blob.bytes), 0));
+      });
+      for (const blob of blobs) if (!this.db.prepare('SELECT 1 FROM trajectory_blobs WHERE sha256=?').get(blob.sha256)) rmSync(this.blobPath(blob.sha256), { force: true });
+    }
     else rmSync(join(this.root, 'conversations', segment(where.conversation_id)), { recursive: true, force: true });
   }
 
@@ -325,10 +372,12 @@ export class Trajectories {
   }
 
   private usage(repository: string, files: number, bytes: number, counts: Record<string, any>, sign: number) {
-    const add = this.db.prepare(`INSERT INTO trajectory_usage(repository_id,kind,count,bytes) VALUES(?,?,?,?)
-      ON CONFLICT(repository_id,kind) DO UPDATE SET count=count+excluded.count,bytes=bytes+excluded.bytes`);
-    add.run(repository, 'files', files, bytes);
-    for (const [type, value] of Object.entries(counts)) if (Array.isArray(value)) add.run(repository, 'records:' + type, sign * value[0], sign * value[1]);
+    this.addUsage(repository, 'files', files, bytes);
+    for (const [type, value] of Object.entries(counts)) if (Array.isArray(value)) this.addUsage(repository, 'records:' + type, sign * value[0], sign * value[1]);
+  }
+  private addUsage(repository: string, kind: string, count: number, bytes: number) {
+    this.db.prepare(`INSERT INTO trajectory_usage(repository_id,kind,count,bytes) VALUES(?,?,?,?)
+      ON CONFLICT(repository_id,kind) DO UPDATE SET count=count+excluded.count,bytes=bytes+excluded.bytes`).run(repository, kind, count, bytes);
   }
 
   private pathOf(file: string): string {

@@ -1,6 +1,6 @@
 import type { Row, Store } from './database.js';
 import { payloadHeader, segment, type RecordType, type TrajectoryScope } from './trajectories.js';
-import { inlineLogBytes, legacySnapshot, logData } from './payloads.js';
+import { inlineLogBytes, inputBlobKeys, legacySnapshot, logData, storedInput } from './payloads.js';
 import { createHash } from 'node:crypto';
 
 // Moves payloads written before #436 out of SQLite rows into trajectory files, in the background after the control
@@ -17,8 +17,8 @@ export interface PhaseState { cursor: number; migrated: number; skipped: number;
 /** rate: records moved per second over the last minute. */
 export interface MigrationState { started_at: string | null; updated_at: string | null; rate: number; phases: Record<string, PhaseState> }
 
-/** One row's move: the records it appended and the update that points the row to them. */
-interface Move { refs: string[]; bytes: number; apply: () => void }
+/** One row's move: the records it appended (or blobs it stored) and the update that points the row to them. */
+interface Move { refs: string[]; blobs?: string[]; bytes: number; apply: () => void }
 interface Phase { name: string; table: string; move(row: Row): Move | null }
 
 /** A per-task file for records written before their run was known. */
@@ -93,7 +93,10 @@ export class PayloadMigration {
       if (cursor === progress.cursor) { progress.finished_at ??= new Date().toISOString(); this.save(state); return total; }
       // The files reach the disk before any row stops holding its payload; each record is read back against its hash.
       await Promise.all([...new Set(moves.map(move => move.refs.at(-1)!).filter(Boolean))].map(ref => this.store.trajectories.sync(ref)));
-      const verified = moves.filter(move => { try { for (const ref of move.refs) this.store.trajectories.read(ref); return true; } catch (failure) { failed++; error = String((failure as Error).message).slice(0, 300); return false; } });
+      const verified = moves.filter(move => {
+        try { for (const ref of move.refs) this.store.trajectories.read(ref); for (const blob of move.blobs ?? []) this.store.trajectories.getBlob(blob); return true; }
+        catch (failure) { failed++; error = String((failure as Error).message).slice(0, 300); return false; }
+      });
       const now = Date.now();
       this.recent.push([now, verified.length]);
       while (this.recent.length && this.recent[0]![0] < now - 60_000) this.recent.shift();
@@ -170,6 +173,13 @@ export class PayloadMigration {
         const ref = this.append(scope, 'log', row.id, data);
         return { refs: [ref], bytes: String(row.content).length, apply: () => s.run('UPDATE task_logs SET content=?,content_ref=? WHERE id=? AND content_ref IS NULL',
           JSON.stringify(payloadHeader(data, ['detail'])), ref, row.id) };
+      } },
+      { name: 'tasks', table: 'tasks', move: row => {
+        // A task's large file lists become blobs (written and synced by putBlob); a task changed meanwhile keeps its input.
+        const input = JSON.parse(String(row.input || '{}')), text = storedInput(s, input, String(row.repository_id));
+        if (text.length === String(row.input).length) return null;
+        const blobs = inputBlobKeys.map(key => JSON.parse(text)[key]?.$blob).filter((hash): hash is string => typeof hash === 'string');
+        return { refs: [], blobs, bytes: String(row.input).length - text.length, apply: () => s.run('UPDATE tasks SET input=? WHERE id=? AND input=?', text, row.id, row.input) };
       } },
       { name: 'task_history', table: 'task_history', move: row => {
         // Snapshots of runner calls and logs, copied by triggers: moved as they are, the row keeps the ref.

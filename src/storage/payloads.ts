@@ -101,3 +101,26 @@ export function insertTaskLog(store: Store, task: Row, content: string, createdA
   } else store.run('INSERT INTO task_logs(id,task_id,content,created_at) VALUES(?,?,?,?)', id, task.id, content, createdAt);
   return id;
 }
+
+/** Task input keys whose large values (a pull request's changed files, the repository's file list) are stored as blobs. */
+export const inputBlobKeys = ['files', 'snapshot_files', 'skipped_files'] as const;
+/** Values whose JSON is larger than this become blobs. */
+export const inputBlobBytes = 2048;
+
+/**
+ * The JSON text a task's input is stored as: its large file lists replaced by blob references. Readers of those keys
+ * resolve them with blobValue; every other key, and code that copies the input forward, sees the input as before.
+ */
+export function storedInput(store: Store, input: Record<string, any>, repositoryId: string): string {
+  const stored = { ...input };
+  for (const key of inputBlobKeys) {
+    const value = stored[key];
+    if (Array.isArray(value) && JSON.stringify(value).length > inputBlobBytes) stored[key] = store.trajectories.putBlob(value, repositoryId);
+  }
+  return JSON.stringify(stored);
+}
+
+/** A task input value that may be a blob reference. */
+export function blobValue<T = any>(store: Store, value: T | { $blob: string }): T {
+  return value && typeof value === 'object' && typeof (value as { $blob?: unknown }).$blob === 'string' ? store.trajectories.getBlob((value as { $blob: string }).$blob) as T : value as T;
+}
