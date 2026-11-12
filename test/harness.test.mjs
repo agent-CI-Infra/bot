@@ -28,3 +28,11 @@ test('MCP preserves UTF-8 tool arguments split inside a multibyte character', as
  const response=await new Promise((resolve,reject)=>{const req=httpRequest(bridge.url,{method:'POST'},res=>{let raw='';res.on('data',c=>raw+=c);res.on('end',()=>resolve(JSON.parse(raw)));});req.on('error',reject);req.write(raw.subarray(0,split));setTimeout(()=>req.end(raw.subarray(split)),20);});
  assert.equal(response.result.isError,false);assert.equal(observed,'测试😀');
 });
+
+
+test('managed session preserves a Manager stop reason instead of converting it to user cancellation',async()=>{
+ const reason=new TaskError('manager_execution_stopped','retry_wait','retain and replan');let started;
+ const bound=new Promise(resolve=>started=resolve),events=[];
+ const session=managedSession(async signal=>{started();await new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true}));return {summary:'late result'};},event=>events.push(event));
+ const run=session.run();await bound;await session.cancel(reason);await assert.rejects(run,error=>error===reason);assert.equal(events.at(-1).code,'manager_execution_stopped');await session.close();
+});
