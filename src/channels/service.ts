@@ -77,6 +77,21 @@ export class ChannelService {
       return new MediaTurn(this.media,chat.id,event.message_id,()=>{guard();this.source(event);this.employees.guardPersonal(chat.id,actor.principal_id,source.id);},computers,
         project=>{this.management.service.scope(actor,project);},undefined,fence);
     };
+    // A progress message of the management assistant (#435) goes to the private chat or timer that started the turn, under
+    // the same protection as its final answer; a console conversation only shows it in its event stream.
+    management.stageMessage=(actor,conversation,input,message,text,sequence)=>{
+      const source=String(input.source_message);
+      if(source.startsWith('schedule:'))return this.schedules.personalStage(source.slice(9),actor,message,text,sequence);
+      const row=store.get('SELECT * FROM channel_inbox WHERE id=? AND conversation_id=?',source.replace(/^feishu:/,''),conversation);
+      if(!row)return;
+      const e=store.secrets.open(row.payload,'channel-event:'+row.id) as unknown as ChannelEvent;
+      const chat=store.get('SELECT * FROM channel_chats WHERE connector_id=? AND chat_id=?',e.connector_id,e.chat_id);
+      if(!chat||e.chat_type!=='p2p')return;
+      this.source(e);this.employees.guardPersonal(chat.id,actor.principal_id,row.id);
+      if(row.context_revision!==chat.context_revision)fail(409,'conversation_source_changed');
+      return this.queue(e,card(text),row.id+':stage:'+sequence,row.id,{principal_id:actor.principal_id,authorization_revision:actor.authorization_revision,
+        personal_chat:chat.id,context_revision:chat.context_revision,source_message:row.id,management_message:message,stage:sequence});
+    };
     management.service.sourceGuard = command => {
       if (command.channel !== 'im') return;
       // A group's command runs as its binding's principal: the console binding, not the speaker, is its authority.
@@ -133,7 +148,7 @@ export class ChannelService {
     const chat=this.store.get('SELECT * FROM channel_chats WHERE id=?',id)!;
     if(chat.chat_type==='p2p')return this.personalView(actor,chat,offset);
     const binding=this.serviceBindings.get(id);
-    if(binding)return this.serviceView(chat,binding,offset);
+    if(binding)return this.serviceView(actor,chat,binding,offset);
     const projects=this.employees.visibleProjects(id,actor),marks=projects.map(()=>'?').join(','),fence=this.businessFence(chat);
     const turns=projects.length?this.store.all(`SELECT id,source_message,project_id,role_id,state,reply,error,created_at,updated_at,fence FROM role_conversation_turns
       WHERE conversation_id=? AND project_id IN (${marks}) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?`,id,...projects,offset):[];
@@ -145,8 +160,9 @@ export class ChannelService {
       turns:turns.slice(0,50).map(t=>({...t,fence:undefined,reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'conversation-reply:'+t.id).message:null,
         stale_source:t.fence!==fence})),has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,usage:{...requests,costs,semantics:requests?.usage_missing_requests?'lower_bound':requests?.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(id)};
   }
-  /** A bound group's assistant turns. Replies derived under an older scope or source are withheld, not shown. */
-  private serviceView(chat:Row,binding:Row,offset:number):Json{
+  /** A bound group's assistant turns with their progress messages (#435). Replies and progress messages derived under an older
+   * scope or source are withheld, not shown. Whoever may manage the binding can stop a running turn. */
+  private serviceView(actor:ActorContext,chat:Row,binding:Row,offset:number):Json{
     const fence=this.serviceBindings.fence(chat.id),view=this.serviceBindings.view(binding);
     const turns=this.store.all('SELECT * FROM channel_service_turns WHERE chat_id=? ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?',chat.id,offset);
     const names=new Map(this.store.all('SELECT id,name FROM service_roles').map(r=>[r.id,r.name]));
@@ -155,9 +171,11 @@ export class ChannelService {
       sum(CASE WHEN finished_at IS NULL OR input_tokens IS NULL OR output_tokens IS NULL THEN 1 ELSE 0 END) usage_missing_requests,
       sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) unpriced_requests FROM model_requests WHERE conversation_id=? AND repository_id IS NULL AND service_role_id IS NOT NULL`,chat.id)!;
     const costs=this.store.all('SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND repository_id IS NULL AND service_role_id IS NOT NULL AND cost IS NOT NULL GROUP BY currency',chat.id);
-    return {conversation_id:chat.id,mode:'service',current_project:null,binding:view,
+    const manageable=this.serviceBindings.canManage(actor,chat.id);
+    return {conversation_id:chat.id,mode:'service',current_project:null,binding:view,can_manage:manageable,
       turns:turns.slice(0,50).map(t=>({id:t.id,source_message:t.source_message,state:t.state,error:t.error,created_at:t.created_at,updated_at:t.updated_at,
-        role_id:names.get(t.service_role_id)??t.service_role_id,stale_source:t.fence!==fence,
+        role_id:names.get(t.service_role_id)??t.service_role_id,stale_source:t.fence!==fence,can_stop:manageable&&t.state==='running',
+        messages:t.fence===fence?this.serviceSessions.messages(t.id).map(m=>({sequence:m.sequence,text:m.text,created_at:m.created_at})):[],
         reply:t.reply&&t.fence===fence?this.store.secrets.open(t.reply,'service-turn-reply:'+t.id).message:null})),
       has_more:turns.length>50,next_offset:turns.length>50?offset+50:null,
       usage:{...requests,costs,semantics:requests.usage_missing_requests?'lower_bound':requests.unpriced_requests?'known usage; cost incomplete':'recorded estimates'},...this.ledger.diagnostics(chat.id)};
@@ -174,7 +192,7 @@ export class ChannelService {
     const costs=current?this.store.all(`SELECT currency,sum(cost) amount FROM model_requests WHERE conversation_id=? AND service_role_id=? AND cost IS NOT NULL GROUP BY currency`,session.conversation_id,managementAssistant):[];
     return {conversation_id:chat.id,management_conversation_id:session?.conversation_id,mode:'management',current_project:null,
       turns:messages.slice(0,50).map(m=>({id:m.id,source_message:m.source_message,created_at:m.created_at,state:managementStates[m.state]??m.state,
-        request:JSON.parse(m.input).content,reply:this.personalReply(actor,m),role_id:'管理助手'})),
+        request:JSON.parse(m.input).content,messages:this.management.stageMessages(m.id),reply:this.personalReply(actor,m),role_id:'管理助手'})),
       has_more:messages.length>50,next_offset:messages.length>50?offset+50:null,usage:{...requests,costs},...this.ledger.diagnostics(chat.id)};
   }
   personalReply(actor:ActorContext,message:Row):string{
@@ -478,9 +496,12 @@ export class ChannelService {
     const message=(this.ledger.query(chat.id,{message_id:e.message_id}).messages as Json[])[0];
     if(!message||message.sensitive||message.deleted)fail(403,'channel_sensitive_message');
     this.store.run('UPDATE channel_inbox SET conversation_id=? WHERE id=?',chat.id,row.id);
-    const result=await this.serviceSessions.run({chat,binding,source_message:row.id,event:e,request:content,allowSilence:!e.addressed});
-    if(result.message.trim()||result.attachments?.length)this.queue(e,card(result.message),row.id+':business-result',row.id,{kind:'service_binding',chat_id:chat.id,binding_id:binding.id,
-      binding_revision:binding.revision,source_message:row.id,source_fence:result.fence,resource_fence:result.fence,turn_id:result.id},false,false,undefined,result.attachments);
+    const protection=(fence:string,turn:string)=>({kind:'service_binding',chat_id:chat.id,binding_id:binding.id,binding_revision:binding.revision,source_message:row.id,source_fence:fence,turn_id:turn});
+    // Progress messages (#435) go out while the turn runs, as replies to the same message; attachments only with the answer.
+    const result=await this.serviceSessions.run({chat,binding,source_message:row.id,event:e,request:content,allowSilence:!e.addressed,
+      stage:m=>this.queue(e,card(m.text),row.id+':stage:'+m.sequence,row.id,{...protection(m.fence,m.turn_id),stage:m.sequence})});
+    if(result.message.trim()||result.attachments?.length)this.queue(e,card(result.message),row.id+':business-result',row.id,{...protection(result.fence,result.id),resource_fence:result.fence},
+      false,false,undefined,result.attachments);
     this.store.run("UPDATE channel_inbox SET state='completed',message_id=? WHERE id=?",result.id,row.id);
   }
   private async result(row: Row): Promise<void> {
@@ -519,8 +540,7 @@ export class ChannelService {
           const binding=this.serviceBindings.get(protection.chat_id);
           if(!binding||binding.id!==protection.binding_id||binding.revision!==protection.binding_revision)fail(409,'conversation_source_changed');
           this.serviceBindings.assertUsable(binding!);
-          const turn=this.store.get('SELECT state,fence FROM channel_service_turns WHERE id=?',protection.turn_id);
-          if(turn?.state!=='completed'||turn.fence!==protection.source_fence||this.serviceBindings.fence(protection.chat_id)!==protection.source_fence)fail(409,'conversation_source_changed');
+          this.serviceTurnLive(protection);
           return;
         }
         if(protection.kind==='personal_conversation')this.employees.guardPersonal(protection.chat_id,protection.principal_id,protection.source_message);
@@ -551,6 +571,8 @@ export class ChannelService {
       if (protection && actor) {
         assertCurrent(actor);
         if (actor.principal_id !== protection.principal_id || protection.authorization_revision && actor.authorization_revision !== protection.authorization_revision) fail(403, 'authorization_changed');
+        // A progress message (#435) is sent only while its management turn runs or after it completed, never once stopped.
+        if (protection.stage) this.managementTurnLive(String(protection.management_message));
         if(protection.project_id)this.management.service.scope(actor, protection.project_id);
         if(protection.personal_chat){
           this.employees.guardPersonal(protection.personal_chat,actor.principal_id,protection.source_message);
@@ -713,6 +735,26 @@ export class ChannelService {
     let summary='';try{const result=JSON.parse(task.result??'null');summary=String(result?.summary??result?.report?.summary??result?.pr_url??'');}catch{}
     this.queue({...original,connector_id:c.id,connector_revision:c.revision},card(`${name} 的任务「${task.summary}」${state}${summary?'\n'+summary:''}${task.error_code?'\n原因：'+task.error_code:''}`,(this.options.origin??'')+'/#/board'),
       key,link.source_message,{kind:'service_task',chat_id:chat.id,binding_id:binding.id,project_id:task.repository_id,task_id:task.id,source_message:link.source_message});
+  }
+  /** A group turn's output may still be sent: its fence is current, and it completed (the answer) or still runs or completed
+   * (a progress message, #435). Shared by message answers and group timers. */
+  serviceTurnLive(protection:Json):void{
+    const turn=this.store.get('SELECT state,fence FROM channel_service_turns WHERE id=?',String(protection.turn_id));
+    if(!turn||turn.fence!==protection.source_fence||this.serviceBindings.fence(String(protection.chat_id))!==protection.source_fence)fail(409,'conversation_source_changed');
+    if(protection.stage?!['running','completed'].includes(turn!.state):turn!.state!=='completed')fail(409,protection.stage?'conversation_turn_inactive':'conversation_source_changed');
+  }
+  /** A management turn's progress message is sent only while the turn runs or after it completed. */
+  managementTurnLive(message:string):void{
+    if(!['running','completed'].includes(String(this.store.get('SELECT state FROM management_messages WHERE id=?',message)?.state)))fail(409,'conversation_turn_inactive');
+  }
+  /** Stops a running group answer from the console (#435): for whoever may manage the group's binding (#424). */
+  stopServiceTurn(actor:ActorContext,chat:string,turn:string):Json{
+    assertCurrent(actor);
+    const row=this.store.get('SELECT * FROM channel_service_turns WHERE id=? AND chat_id=?',turn,chat);
+    if(!row)return fail(404,'conversation_turn_not_found');
+    if(!this.serviceBindings.canManage(actor,chat))fail(403,'channel_service_binding_forbidden');
+    if(this.serviceSessions.cancel(turn))this.store.audit(actor.principal_id,'channel.service_turn.stopped',turn,chat);
+    return {id:turn,state:this.store.get('SELECT state FROM channel_service_turns WHERE id=?',turn)!.state};
   }
   private resultAuthority(task:Row):void{
     assertManagedExecution(this.store,task);

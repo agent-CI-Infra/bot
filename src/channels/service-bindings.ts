@@ -199,6 +199,11 @@ export class ChannelServiceBindings {
   private manageable(actor: ActorContext, binding: Row): boolean {
     return binding.owner_id === actor.principal_id || this.governs(actor, binding);
   }
+  /** Whether the actor may manage a group's current binding (owner or governor, #424), for example to stop its running answer. */
+  canManage(actor: ActorContext, chat: string): boolean {
+    const binding = this.get(chat);
+    return !!binding && this.manageable(actor, binding);
+  }
   /** config.write over every repository or organization in the binding's current scope. */
   private covers(actor: ActorContext, binding: Row): boolean {
     const grants = this.grants(binding);

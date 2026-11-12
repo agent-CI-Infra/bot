@@ -1,9 +1,9 @@
 // Only gateway and provider faults mean the model service or its configuration is unavailable. An answer the loop could
-// not use, a context over the request limit or too many steps are different failures with different fixes (#333).
+// not use and a context over the request limit are different failures with different fixes (#333). Assistant turns have no
+// step limit since #435: they end with an answer, a stop or an exhausted service role budget.
 const modelFault=/^(model_unavailable|model_http_|model_authentication_failed|model_not_available|model_not_configured|model_key_missing|model_configuration_changed|task_models_)/;
 const outputFault=/^(management_model_invalid|service_model_invalid|own_task_model_invalid|model_response_invalid|model_response_too_large|conversation_reply_invalid)$/;
 const contextFault=/^(agent_context_too_large|model_request_invalid)$/;
-const stepFault=/^(management|service)_turn_limit$/;
 
 /** Public explanations contain no request data; detailed codes remain in the authenticated trace. */
 export function managementFailure(code:string):string {
@@ -18,7 +18,6 @@ export function managementFailure(code:string):string {
   if(modelFault.test(code))return '管理助手的模型配置或服务暂不可用，请在控制台检查模型设置后重试。';
   if(outputFault.test(code))return '管理助手的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请在控制台查看执行记录。';
   if(contextFault.test(code))return '本次请求需要的上下文超过模型请求上限，请缩小范围（例如指定项目或时间段）后重试。';
-  if(stepFault.test(code))return '本次请求需要的步骤过多，未能在一次回答内完成；请拆分或缩小范围后重试。';
   if(/authorization_changed|conversation_source_changed|channel_message_changed|channel_sensitive_message/.test(code))return '身份、权限或来源消息已变化，请核对当前范围后重新说明请求。';
   if(code==='channel_application_tenant_forbidden')return '这个飞书机器人属于一个 GitHub 组织，经它只能使用你在该组织内的权限，而你在该组织还没有可访问的项目。请改用其他机器人，或请组织管理员为你授权。';
   if(/binding|principal_inactive/.test(code))return '当前飞书身份尚未有效绑定，请在私聊发送“绑定”或“重新认证”。';
@@ -38,7 +37,7 @@ export function serviceFailure(code:string,role:string):string {
   if(modelFault.test(code))return `群助手「${role}」的模型服务暂不可用，请稍后重试；持续失败时请超级管理员检查模型设置。`;
   if(outputFault.test(code))return `群助手「${role}」的模型返回了无法处理的结果，本次未完成；请重试，持续出现时请维护人在控制台查看本群助手的会话记录。`;
   if(contextFault.test(code))return `本次问题需要的上下文超过群助手「${role}」的模型请求上限，请缩小范围（例如指定仓库）后重试。`;
-  if(stepFault.test(code))return `群助手「${role}」本次需要的步骤过多，未能完成；请拆分问题或指定仓库后重试。`;
+  if(code==='conversation_stopped')return `群助手「${role}」的本次回答已在控制台停止，不再发送最终回答；已经发出的进展消息保留。`;
   if(/conversation_source_changed|channel_service_binding|channel_sensitive_message|channel_source_message/.test(code))return '本群助手的配置或来源消息刚刚变化，本次回答已停止，请重新发送请求。';
   return `群助手本次未完成（${code}），请稍后重试，或请维护人在控制台检查本群助手的配置。`;
 }

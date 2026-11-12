@@ -3,6 +3,7 @@ import { fail, fields, HttpError, randomId, text, type Json } from '../core/secu
 import { TaskError } from '../agent/common.js';
 import { traceClean } from '../tasks/trace.js';
 import { boundedBatch, chatContextBytes, toolArguments, toolCallsProblem, ToolTranscript } from '../agent/tool-context.js';
+import { sendMessageName } from './stage-messages.js';
 
 // A service role's own independent tasks (#312): it works one question through in a separate context, with the same tools
 // and permissions as the conversation that started it, and only the conclusion returns to that conversation. They are not
@@ -21,8 +22,8 @@ export const ownTaskTools = [
     {task_id:{type:'string'},operation:{type:'string',enum:['pause','cancel']}},['task_id','operation']),
 ];
 export const ownTaskNames: readonly string[] = ownTaskTools.map(t => t.function.name);
-const steps = 8, rounds = 20;
-const suffix = '\n\nYou are now working on one of your own independent tasks, separate from the main conversation. Work only on the instruction below with the offered tools, then reply with a concise conclusion for the main conversation: findings, evidence (links, numbers, paths) and open points. Do not address the users directly and do not start further own tasks.';
+const roundsBytes = 96 * 1024;
+const suffix = '\n\nYou are now working on one of your own independent tasks, separate from the main conversation. Work only on the instruction below with the offered tools, then reply with a concise conclusion for the main conversation: findings, evidence (links, numbers, paths) and open points. Do not address the users directly (progress messages are not available here) and do not start further own tasks.';
 
 /** Whose task it is. A changed fence (authorization or binding scope) hides older tasks, like the host's own history. */
 export interface OwnTaskOwner { service_role_id: string; kind: 'management' | 'channel'; owner_id: string; principal_id: string; fence: string }
@@ -87,7 +88,6 @@ export class OwnTasks {
         if (!row) return { error: 'own_task_not_found', detail: '只能继续本会话当前可见的独立任务；授权或绑定变化后，旧的独立任务不再可见。' };
         if(row.control==='cancelled')return {error:'own_task_cancelled'};
         if (row.state === 'running') return { error: 'own_task_running' };
-        if (row.rounds >= rounds) return { error: 'own_task_round_limit', detail: '这个独立任务已达到轮次上限，请新建一个独立任务。' };
         this.store.run("UPDATE service_role_own_tasks SET state='running',control=NULL,error=NULL,updated_at=? WHERE id=?", Date.now(), row.id);
       } else return { error: 'tool_not_allowed' };
       return await this.work(row!, text(input.instruction, 8000), host);
@@ -100,12 +100,19 @@ export class OwnTasks {
   }
   private async work(row: Row, request: string, host: OwnTaskHost): Promise<Json> {
     const previous = this.history(row), round = previous.length;
-    // Own tasks run with the host's tools minus the own-task tools themselves: no recursion, nothing the host may not do.
-    const tools = () => host.tools().filter(t => !ownTaskNames.includes((t as any).function.name));
+    // Own tasks run with the host's tools minus the own-task tools themselves (no recursion, nothing the host may not do)
+    // and minus progress messages: only the host conversation addresses its people.
+    const tools = () => host.tools().filter(t => !ownTaskNames.includes((t as any).function.name) && (t as any).function.name !== sendMessageName);
+    // Without a round limit the earlier rounds share a budget, like a conversation's history: the oldest give way first
+    // (read_own_task still returns all of them).
+    const shown = [...previous]; let omitted = 0;
+    while (shown.length > 1 && Buffer.byteLength(JSON.stringify(shown)) > roundsBytes) { shown.shift(); omitted++; }
     const messages: any[] = [{ role: 'system', content: host.system + suffix },
-      { role: 'user', content: JSON.stringify({ own_task: { title: row.title, previous_rounds: previous }, instruction: request }) }];
+      { role: 'user', content: JSON.stringify({ own_task: { title: row.title, previous_rounds: shown, ...(omitted ? { earlier_rounds_omitted: omitted } : {}) }, instruction: request }) }];
     const transcript = new ToolTranscript(messages, chatContextBytes);
-    for (let step = 0; step < steps; step++) {
+    // No step or round limit (#435): a run ends with an answer without tool calls, when it or its host is stopped, or when the
+    // service role's budget runs out (checked before every model request); the transcript keeps the context bounded.
+    for (let step = 0; ; step++) {
       await host.check();
       const checkControl=()=>{const control=this.store.get('SELECT control FROM service_role_own_tasks WHERE id=?',row.id)?.control;if(control)fail(409,'own_task_'+control);};
       checkControl();
@@ -135,6 +142,5 @@ export class OwnTasks {
       }
       boundedBatch(results).forEach((result, i) => messages.push({ role: 'tool', tool_call_id: calls[i].id, content: JSON.stringify(result) }));
     }
-    return fail(502, 'own_task_turn_limit');
   }
 }

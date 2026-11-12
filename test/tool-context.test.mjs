@@ -76,7 +76,7 @@ test('the transcript folds the oldest tool results first and stops only when not
   assert.throws(() => new ToolTranscript(huge, chatContextBytes).fit({ messages: huge }), error => error.code === 'agent_context_too_large');
 });
 
-test('only gateway faults read as an unavailable model; unusable output, oversized context and step limits say what happened', () => {
+test('only gateway faults read as an unavailable model; unusable output, oversized context and a console stop say what happened', () => {
   for (const code of ['model_unavailable', 'model_http_503', 'model_authentication_failed', 'model_not_available']) {
     assert.match(managementFailure(code), /模型配置或服务暂不可用/, code);
     assert.match(serviceFailure(code, '仓库问答助手'), /模型服务暂不可用/, code);
@@ -88,6 +88,6 @@ test('only gateway faults read as an unavailable model; unusable output, oversiz
   for (const code of ['agent_context_too_large', 'model_request_invalid']) {
     assert.match(managementFailure(code), /上下文超过模型请求上限/, code); assert.match(serviceFailure(code, '仓库问答助手'), /上下文超过/, code);
   }
-  assert.match(managementFailure('management_turn_limit'), /步骤过多/);
-  assert.match(serviceFailure('service_turn_limit', '仓库问答助手'), /步骤过多/);
+  // Assistant turns have no step limit (#435); a group answer stopped in the console says so instead of a generic failure.
+  assert.match(serviceFailure('conversation_stopped', '仓库问答助手'), /控制台停止.*进展消息保留/);
 });

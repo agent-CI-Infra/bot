@@ -687,6 +687,13 @@ async function renderManagement(panel, projectId = null, onActivity = () => {}) 
     } else if (row.type === 'reply') {
       const item = answer(currentTurn); item.text = data.text; item.node.classList.remove('management-stream'); queueMarkdown(item); currentTurn.provisional = null;
       onActivity(!!active, true);
+    } else if (row.type === 'message') {
+      // A progress message the assistant sent while working (#435): its own labelled entry, in order, before the final answer.
+      if (currentTurn.provisional) { currentTurn.provisional.node.classList.remove('management-stream'); currentTurn.provisional = null; }
+      const item = answer(currentTurn); item.node.classList.remove('management-stream'); item.node.classList.add('management-progress-message');
+      item.node.prepend(element('span', '进展消息 ' + data.sequence, 'management-progress-label'));
+      item.text = data.text; queueMarkdown(item); currentTurn.provisional = null;
+      currentTurn.stage = '已发送进展'; onActivity(!!active, true);
     } else if (row.type === 'text') {
       const item = answer(currentTurn); item.text += data.delta ?? ''; queueMarkdown(item);
       currentTurn.stage = '正在回复'; status.textContent = '助手正在回复…';

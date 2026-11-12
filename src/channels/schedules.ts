@@ -234,13 +234,17 @@ export class ChannelSchedules {
   private async group(row: Row, chat: Row, run: string, prompt: string, guard: () => void): Promise<void> {
     const binding = this.host.serviceBindings.active(chat.id);
     if (!binding) return fail(403, 'channel_service_binding_disabled');
+    const protection = (turn: string, fence: string) => ({ kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, binding_id: binding.id,
+      binding_revision: binding.revision, turn_id: turn, source_fence: fence });
+    // Progress messages (#435) reach the group while the run is live, under the same protection as its result.
     const result = await this.host.exclusive(chat.id, () => this.host.serviceSessions.run({ chat, binding, source_message: 'schedule:' + run,
-      request: this.frame(row, prompt), allowSilence: true, schedule: { name: row.name, guard } }));
+      request: this.frame(row, prompt), allowSilence: true, schedule: { name: row.name, guard },
+      stage: m => this.host.post(chat, `定时任务「${row.name}」\n\n${m.text}`, 'channel-schedule:' + run + ':stage:' + m.sequence, 'schedule:' + run,
+        { ...protection(m.turn_id, m.fence), stage: m.sequence }) }));
     this.store.run('UPDATE channel_schedule_runs SET turn_id=? WHERE id=?', result.id, run);
     guard();
     if (!result.message.trim()) { this.finish(run, 'silent', null); return; }
-    const outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run,
-      { kind: 'channel_schedule', schedule_id: row.id, run_id: run, chat_id: chat.id, binding_id: binding.id, binding_revision: binding.revision, turn_id: result.id, source_fence: result.fence });
+    const outbox = this.host.post(chat, `定时任务「${row.name}」\n\n${result.message}`, 'channel-schedule:' + run, 'schedule:' + run, protection(result.id, result.fence));
     this.finish(run, 'completed', null, outbox);
   }
 
@@ -254,13 +258,24 @@ export class ChannelSchedules {
     if (row!.kind === 'personal') {
       this.owner(chat, String(protection.principal_id));
       if (revision(this.store, String(protection.principal_id)) !== protection.authorization_revision) fail(409, 'authorization_changed');
+      if (protection.stage) this.host.managementTurnLive(String(protection.management_message));
       return;
     }
     const binding = this.host.serviceBindings.get(chat.id);
     if (!binding || binding.id !== protection.binding_id || binding.revision !== protection.binding_revision) fail(409, 'conversation_source_changed');
     this.host.serviceBindings.assertUsable(binding!);
-    const turn = this.store.get('SELECT state,fence FROM channel_service_turns WHERE id=?', String(protection.turn_id));
-    if (turn?.state !== 'completed' || turn.fence !== protection.source_fence || this.host.serviceBindings.fence(chat.id) !== protection.source_fence) fail(409, 'conversation_source_changed');
+    // The result needs a completed turn; a progress message (#435) also goes out while the turn still runs.
+    this.host.serviceTurnLive(protection);
+  }
+  /** A progress message of a private timer's management turn (#435): sent to the timer's chat while its run is live. */
+  personalStage(run: string, actor: ActorContext, message: string, text: string, sequence: number): string {
+    const current = this.store.get('SELECT r.schedule_id,s.chat_id,s.name,s.kind,s.owner_id FROM channel_schedule_runs r JOIN channel_schedules s ON s.id=r.schedule_id WHERE r.id=?', run);
+    if (!current || current.kind !== 'personal' || current.owner_id !== actor.principal_id) return fail(403, 'channel_command_source_required');
+    this.guard(current.schedule_id, run);
+    const chat = this.host.employees.chat(current.chat_id);
+    return this.host.post(chat, `定时任务「${current.name}」\n\n${text}`, 'channel-schedule:' + run + ':stage:' + sequence, 'schedule:' + run,
+      { kind: 'channel_schedule', schedule_id: current.schedule_id, run_id: run, chat_id: chat.id, principal_id: actor.principal_id,
+        authorization_revision: actor.authorization_revision, management_message: message, stage: sequence });
   }
   /** A command a group's timer run submits: the run is live and belongs to this group, as a message source would. */
   sourceOfCommand(command: Row, run: string): void {

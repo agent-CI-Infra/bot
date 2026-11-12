@@ -181,7 +181,7 @@ const employeeErrors = { channel_employee_revalidation_required: '群成员正�
   channel_revision_conflict: '这个群的配置已被其他人修改，请刷新本页后重新保存。', service_role_unavailable: '所选服务角色已停用。', service_role_not_bindable: '管理助手不能绑定到群聊。',
   channel_service_scope_paused: '配置人在全部所选仓库的权限都已变化，助手暂停。', channel_service_binding_disabled: '群聊助手已停用。',
   schedule_destination_binding_required: '这个群没有启用的群聊助手绑定。',
-  channel_service_binding_forbidden: '只有这个群聊助手的负责人、其项目范围所属组织的管理员或超级管理员可以修改、停用或转交。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
+  channel_service_binding_forbidden: '只有这个群聊助手的负责人、其项目范围所属组织的管理员或超级管理员可以修改、停用、转交它或停止它的回答。', channel_service_scope_invalid: '请至少选择一个仓库，或选择一个组织。',
   channel_service_scope_outside_organization: '这个群使用的是组织的飞书应用，只能选择该组织的仓库或整个组织。',
   channel_service_owner_ineligible: '新负责人需要对当前全部项目范围有配置权限，且账户处于启用状态。',
   service_role_model_not_configured: '服务角色尚未配置模型，请超级管理员在「全局设置 → 服务角色」中选择。' };
@@ -397,11 +397,23 @@ async function channelPersonalChats() {
   }
   return personal;
 }
+const serviceTurnStates = { running: '回答中', completed: '已完成', failed: '未完成', stopped: '已停止', interrupted: '已中断' };
+// A group answer's text while it has none yet: still running, stopped in the console, kept quiet, or why it ended.
+const serviceTurnText = turn => turn.reply || (turn.stale_source ? '来源或授权范围已变化，旧回答不再展示。' : turn.state === 'running' ? '正在回答…'
+  : turn.state === 'stopped' ? '已在控制台停止，不再发送最终回答；已发出的进展消息保留。' : turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + employeeError(turn.error || turn.state));
 async function channelConversation(id, target) {
   target.replaceChildren(); const summary = element('div'), turns = element('div'), status = note(''), controls = element('div', '', 'actions');
-  turns.setAttribute('aria-label', '连续会话记录'); status.setAttribute('role', 'status'); let offset = 0;
+  turns.setAttribute('aria-label', '连续会话记录'); status.setAttribute('role', 'status'); let offset = 0, refresh = null;
   const next = button('下一页会话记录', () => read(true), 'quiet'); next.hidden = true;
+  // A running group answer stops only at the people who may manage the binding; its progress messages already sent stay.
+  const stop = async (turn, control) => {
+    if (!confirm('停止这次回答？已发出的进展消息保留，不再发送最终回答，群里会收到一条已停止的说明。')) return;
+    control.disabled = true;
+    try { await api('/api/channels/chats/' + id + '/service-turns/' + turn.id + '/stop', 'POST', {}); await read(false); }
+    catch (err) { status.textContent = employeeError(err.message); control.disabled = false; }
+  };
   const read = async more => {
+    clearTimeout(refresh);
     try {
       if (!more) { offset = 0; turns.replaceChildren(); }
       const result = await api('/api/channels/chats/' + id + '/conversation?offset=' + offset); offset = result.next_offset;
@@ -413,16 +425,23 @@ async function channelConversation(id, target) {
       status.textContent = '本地同步：' + channelSyncText(result.sync_state) + '。未核验／缺口：' + result.gaps.map(g => channelGapText(g.reason)).join('、') + '。费用只汇总同一模型请求账本，未知金额不按零处理。';
       for (const turn of result.turns) {
         const row = element('article', '', 'channel-binding');
+        // Progress messages (#435) were sent while the turn ran; they come before its final answer, in order.
         if (result.mode === 'management') row.append(element('strong', '管理助手 · ' + turn.state), note(new Date(turn.created_at).toLocaleString()),
-          ...(turn.request ? [element('p', '我：' + turn.request)] : []), element('p', turn.reply || '等待处理'), channelLink('#/management', '打开管理对话与执行记录'));
-        else if (result.mode === 'service') row.append(element('strong', turn.role_id + ' · ' + turn.state), note(new Date(turn.created_at).toLocaleString()),
-          element('p', turn.reply || (turn.stale_source ? '来源或授权范围已变化，旧回答不再展示。' : turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + employeeError(turn.error || turn.state))));
+          ...(turn.request ? [element('p', '我：' + turn.request)] : []), ...(turn.messages ?? []).map((text, i) => element('p', '进展 ' + (i + 1) + '：' + text)),
+          element('p', turn.reply || '等待处理'), channelLink('#/management', '打开管理对话与执行记录'));
+        else if (result.mode === 'service') {
+          row.append(element('strong', turn.role_id + ' · ' + (serviceTurnStates[turn.state] ?? turn.state)), note(new Date(turn.created_at).toLocaleString()),
+            ...(turn.messages ?? []).map(message => element('p', '进展 ' + message.sequence + '：' + message.text)), element('p', serviceTurnText(turn)));
+          if (turn.can_stop) { const control = button('停止回答', () => stop(turn, control), 'quiet'); row.append(control); }
+        }
         else row.append(element('strong', turn.role_id + ' · 项目 ' + turn.project_id), note(new Date(turn.created_at).toLocaleString() + ' · 来源 ' + turn.source_message),
           element('p', turn.reply || (turn.stale_source ? '来源或授权范围已变化，旧派生回答不再展示。' : turn.state === 'completed' ? '本轮保持安静。' : '本轮未完成：' + (turn.error || turn.state))),
           channelLink('#/projects/' + turn.project_id + '/overview/all', '查看同一项目任务看板')); turns.append(row);
       }
       if (!result.turns.length && !more) turns.append(note('当前授权范围暂无会话回合。原始本地消息可通过记录搜索查询。'));
       next.hidden = !result.has_more;
+      // While an answer on the first page runs, re-read it so its progress messages and end appear without a manual refresh.
+      if (!more && result.mode === 'service' && result.turns.some(turn => turn.state === 'running')) refresh = setTimeout(() => { if (target.isConnected && turns.isConnected) void read(false); }, 3000);
     } catch (err) { status.textContent = employeeError(err.message); }
   };
   controls.append(button('刷新连续会话', () => read(false), 'quiet'), next); target.append(summary, status, turns, controls); await read(false);

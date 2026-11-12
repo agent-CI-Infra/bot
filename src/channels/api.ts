@@ -35,6 +35,9 @@ export class ChannelApi {
     if (schedule && schedule[2] && method === 'POST') return this.service.schedules.runNow(actor, schedule[1]!, input);
     const conversation=/^\/api\/channels\/chats\/([a-f0-9]{48})\/conversation$/.exec(path);
     if(conversation&&method==='GET')return this.service.conversationView(actor,conversation[1]!,Number(url.searchParams.get('offset')??0));
+    // Stopping a running group answer (#435); its progress messages already sent stay.
+    const turnStop=/^\/api\/channels\/chats\/([a-f0-9]{48})\/service-turns\/([a-f0-9]{48})\/stop$/.exec(path);
+    if(turnStop&&method==='POST'){fields(input,[]);return this.service.stopServiceTurn(actor,turnStop[1]!,turnStop[2]!);}
     // Legacy employees can only be disabled; a group now binds a service role (#312).
     if (employee && method === 'PUT') {
       if (input.enabled !== false) return fail(410, 'channel_employee_retired');
