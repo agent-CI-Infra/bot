@@ -6,7 +6,7 @@ import {claimQueuedTask} from '../tasks/priority.js';
 import { sourceRef } from '../roles/role-run.js';
 import { assertRequiredStages, deliveryCandidate } from '../roles/schedule.js';
 import {CoordinationWorker,resumeCoordinatedTasks,coordinationApi} from '../tasks/coordination.js';
-import {requestIntegration,integratedPublication} from '../tasks/integration.js';
+import {requestIntegration,integratedPublication,applyIntegration} from '../tasks/integration.js';
 import { checkManagementBudget } from '../management/budget.js';
 import { executionModel, taskConfiguration, executionRuleFiles, taskPermissions } from '../tasks/configuration.js';
 import { TaskCommands } from '../tasks/commands.js';
@@ -523,11 +523,7 @@ export class TaskEngine {
         if(!snapshot)snapshot=mirror?await workspace.checkout(github,ref.object.sha,mirror,prBase?[prBase]:[]):null;
         if(!snapshot){if(mirror?.has(ref.object.sha))update({workspace_id:randomId()});snapshot=await workspace.prepare(github,ref.object.sha,mirror);}
         if(development&&input.integration){
-          const integration=input.integration;
-          const merged=await workspace.call('integrate:'+integration.id+':'+ref.object.sha,{type:'workspace_integrate',source_workspace_id:integration.source_workspace_id,sha:integration.sha,tree_sha:integration.tree_sha,base_tree:integration.base_tree});
-          if(merged.error)stop('integration_unavailable','waiting_environment',merged.detail||merged.error);
-          const event=traceEvent(this.store,id,'integration_result',{...integration,target_base:ref.object.sha,...merged,workspace_id:task.workspace_id},task.trace_run_id,'framework');
-          input.integration={...integration,state:'applied',target_base:ref.object.sha,result_ref:event,conflicts:merged.conflicts};
+          input.integration=await applyIntegration(this.store,task,workspace,ref.object.sha,input.integration);
           update({input:JSON.stringify({...JSON.parse(task.input),integration:input.integration})});
           // The next model/controller input explains the new baseline and the exact retained delta.
           input.context={...input.context,integration:input.integration};

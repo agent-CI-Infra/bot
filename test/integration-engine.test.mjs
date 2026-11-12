@@ -197,3 +197,21 @@ for(const revoked of [false,true])test(`persisted scoped merge intent refreshes 
  assert.equal(h.counts().puts,revoked?0:1);
  assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,revoked?'blocked':'merged');
 });
+
+for(const kind of ['task.request','task.development'])test(`${kind} preserves the integrated tree and carries merge intent through fresh QA and PR update`,async t=>{
+ const verdict={outcome:'pass',reason:'Verified retained candidate and combined policy check',gaps:[],residuals:[],core_complete:true,required_evidence_complete:true,acceptable_risk:true};
+ const h=await fixture(t,'clean',{respond:async body=>{
+  if(body.tools.some(x=>x.function.name==='submit_acceptance'))return toolCall('submit_acceptance',verdict);
+  if(body.tools.some(x=>x.function.name==='delegate_role')){const result=body.messages.filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return {};}}).findLast(x=>x.result_ref);return result?toolCall('nominate_delivery',{result_ref:result.result_ref}):toolCall('delegate_role',{role:'dev',purpose:'Verify the retained integrated tree, preserving both features.',refs:['task:t']});}
+  return toolCall('submit_delivery',{summary:'Verified the integrated candidate while preserving main changes',change_title:'Preserve the integrated candidate and main changes',artifacts:[],evidence:[],unknowns:[],test_command:'node check.cjs'});
+ }});
+ const {sha}=await import('../dist/agent/common.js');const records=new TaskRecords(h.s),row=h.s.get("SELECT * FROM tasks WHERE id='t'"),code=JSON.parse(h.s.get("SELECT data FROM development_candidates WHERE task_id='t'").data);
+ h.s.run("UPDATE policies SET work_settings=? WHERE repository_id='101'",JSON.stringify({'task.request':{writes:['code','pull_request']}}));
+ h.s.run("UPDATE tasks SET kind=?,object_number=NULL,input=? WHERE id='t'",kind,JSON.stringify({...JSON.parse(row.input),request:'Preserve both features',contract:records.get('t').contract}));
+ const candidate=records.submit('t',[{kind:'code',reference:'task:t:candidate',version:code.tree_sha,content:code}],[],{summary:'Accepted original candidate'});records.stage('t',candidate.id,candidate.revision,verdict,undefined,{policy_hash:sha('node check.cjs')});
+ h.engine.tick();await Promise.all(h.engine.active.values());let task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify(task));const oldHead=JSON.parse(task.result).sha;
+ const request=await h.engine.api({id:'operator',role:'super_admin',repositories:[]},'POST',new URL('http://local/api/tasks/t/merge'),{expected_sha:oldHead,merge_method:'merge'});assert.equal(request.status,'integrating');
+ h.s.run("UPDATE tasks SET next_run_at=0 WHERE id='t'");h.engine.tick();await Promise.all(h.engine.active.values());task=h.s.get("SELECT * FROM tasks WHERE id='t'");assert.equal(task.status,'pr_opened',JSON.stringify(h.s.all("SELECT type,data FROM task_history WHERE type IN ('retry_failure','checkpoint_fault')")));
+ const result=JSON.parse(task.result);assert.notEqual(result.sha,oldHead);assert.equal(h.git(['show',result.sha+':other.txt']),'independent feature');assert.equal(h.git(['show',result.sha+':a.txt']),'2');assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'waiting');assert.ok(h.s.get("SELECT id FROM task_history WHERE type='integration_result'"));assert.ok(h.s.get("SELECT id FROM task_history WHERE type='merge_candidate_revalidated'"));
+ h.s.run('UPDATE task_merge_requests SET next_run_at=0');h.engine.tick();await Promise.all(h.engine.merging.values());assert.equal(h.counts().puts,1);assert.equal(h.s.get("SELECT state FROM task_merge_requests WHERE task_id='t'").state,'merged');
+});

@@ -1,3 +1,4 @@
+import {integratedPublication} from './integration.js';
 import type { Store, Row } from '../storage/database.js';
 import { stop, sha, type Redactor } from '../agent/common.js';
 import { GitHub, revokeInstallationToken } from '../github/client.js';
@@ -51,6 +52,7 @@ export async function publishRequestPullRequest(store: Store, task: Row, redacto
     await releaseCategory(github,candidate.release_label);
     const publisher=new Publisher(store,github,task,validate,undefined,log),commit=await publisher.branch(candidate),pr=await publisher.pullRequest(candidate,commit);
     await validate();
+    integratedPublication(store,task,commit);
     return {summary:candidate.summary,test_command:candidate.test_command,pr_number:pr.number,pr_url:pr.html_url,branch:candidate.branch,sha:commit,
       tree_sha:candidate.published_tree_sha||candidate.tree_sha,local_sha:candidate.local_sha,validation:candidate.validation};
   }finally{

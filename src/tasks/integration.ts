@@ -1,3 +1,5 @@
+import type {Workspace} from '../agent/workspace.js';
+import {stop} from '../agent/common.js';
 import type {Store,Row} from '../storage/database.js';
 import type {Actor} from '../app/auth.js';
 import {randomId,fail} from '../core/security.js';
@@ -40,4 +42,12 @@ export function integratedPublication(s:Store,task:Row,head:string){
  if(request.revision!==new TaskRecords(s).get(task.id).revision||request.expected_sha!==input.integration?.previous_head)fail(409,'merge_authorization_changed');
  s.run("UPDATE task_merge_requests SET expected_sha=?,state='waiting',next_run_at=0,error=NULL,updated_at=? WHERE task_id=?",head,new Date().toISOString(),task.id);
  traceEvent(s,task.id,'merge_candidate_revalidated',{previous_head:request.expected_sha,head_sha:head,integration_id:input.integration.id,revision:request.revision},task.trace_run_id,'framework');
+}
+
+/** Shared checkout integration for Issue-driven and directly created development tasks. */
+export async function applyIntegration(s:Store,task:Row,workspace:Workspace,base:string,integration:any){
+ const merged=await workspace.call('integrate:'+integration.id+':'+base,{type:'workspace_integrate',source_workspace_id:integration.source_workspace_id,sha:integration.sha,tree_sha:integration.tree_sha,base_tree:integration.base_tree});
+ if(merged.error)stop('integration_unavailable','waiting_environment',merged.detail||merged.error);
+ const ref=traceEvent(s,task.id,'integration_result',{...integration,target_base:base,...merged,workspace_id:task.workspace_id},task.trace_run_id,'framework');
+ return {...integration,state:'applied',target_base:base,result_ref:ref,conflicts:merged.conflicts};
 }
