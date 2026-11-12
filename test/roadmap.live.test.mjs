@@ -11,11 +11,12 @@ import {captureTaskConfiguration} from '../dist/tasks/configuration.js';
 
 test('live roadmap: Manager creates parallel acceptable capabilities and resumes for integrated QA', {skip:!process.env.BOT_ROADMAP_RUNTIME,timeout:1200000},async t=>{
  const root=process.env.BOT_ROADMAP_RUNTIME;mkdirSync(root,{recursive:true});
- const privateRoot='/home/cdy/zhangyi/bot-benchmark/runs/fixes-362-371';const source=new Store(privateRoot+'/source.sqlite',readFileSync(privateRoot+'/master.key')),model=source.get("SELECT * FROM models WHERE id='manager-model'"),credential=source.secrets.open(model.api_key,'model:'+model.id).value;source.close();
+ assert.ok(process.env.BOT_ROADMAP_MODEL_DB&&process.env.BOT_ROADMAP_MODEL_KEY,'Provide a private model-config SQLite and its key via BOT_ROADMAP_MODEL_DB/KEY');
+ const source=new Store(process.env.BOT_ROADMAP_MODEL_DB,readFileSync(process.env.BOT_ROADMAP_MODEL_KEY)),model=source.get("SELECT * FROM models WHERE id='manager-model'"),credential=source.secrets.open(model.api_key,'model:'+model.id).value;source.close();
  const h=await fixture(t,'clean',{respond:async body=>{const response=await fetch(model.api_url+'/chat/completions',{method:'POST',headers:{'content-type':'application/json',Authorization:'Bearer '+credential},body:JSON.stringify({...body,model:model.model_name,stream:false}),signal:AbortSignal.timeout(120000)});if(!response.ok)throw Error('model_http_'+response.status);return(await response.json()).choices[0].message;},evaluate:async(_n,...args)=>evaluateDelivery(...args)});
  const workerHarness=process.env.BOT_ROADMAP_WORKER_HARNESS??'native';
  if(workerHarness==='codex'){
-  const cfg=JSON.parse(readFileSync('/home/cdy/zhangyi/bot-benchmark/runs/nushell-001/bot-D/codex.json'));cfg.stateDirectory=join(root,'codex-sessions');writeFileSync(join(root,'codex.json'),JSON.stringify(cfg));process.env.BOT_CODEX_CONFIG=join(root,'codex.json');
+  assert.ok(process.env.BOT_ROADMAP_CODEX_CONFIG,'Provide BOT_ROADMAP_CODEX_CONFIG for real Codex workers');const cfg=JSON.parse(readFileSync(process.env.BOT_ROADMAP_CODEX_CONFIG));cfg.stateDirectory=join(root,'codex-sessions');writeFileSync(join(root,'codex.json'),JSON.stringify(cfg));process.env.BOT_CODEX_CONFIG=join(root,'codex.json');
  }
  h.s.run("UPDATE settings SET value=? WHERE key='roles:101'",JSON.stringify({enabled:true,harnesses:{manager:'native',dev:workerHarness,test:workerHarness,reviewer:workerHarness,qa:workerHarness}}));
  h.s.run("UPDATE policies SET task_concurrency=3 WHERE repository_id='101'");
