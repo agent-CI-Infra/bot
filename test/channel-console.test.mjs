@@ -2,6 +2,69 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { channelFixture, boundGroup, privateChat, bindFixture, repositoryAssistant, scriptedModel, inGroup, envelope, post, finished, until } from './channel-fixture.mjs';
 import { testPassword } from './helpers.mjs';
+import { ledgerStorage } from '../dist/channels/ledger.js';
+
+test('group names migrate, fill existing views and refresh without changing chat or assistant revisions', async t => {
+  const f = await channelFixture(t), chat = await boundGroup(f), path = `/api/channels/chats/${chat.id}/name`;
+  const before = { ...f.h.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id) };
+  f.h.store.db.exec('ALTER TABLE channel_chats DROP COLUMN display_name'); ledgerStorage(f.h.store); ledgerStorage(f.h.store);
+  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '');
+  const list = await f.admin('/api/channels/conversations');
+  assert.equal(list.value.conversations[0].display_name, ''); assert.equal(f.wire.state.chatRequests.length, 0, 'listing reads only local metadata');
+  f.wire.state.chatName = '  研发讨论群  ';
+  const named = await f.admin(path, 'POST', {}); assert.equal(named.status, 201, JSON.stringify(named.value));
+  assert.equal(named.value.display_name, '研发讨论群'); assert.equal(named.value.tenant_name, 'Fixture enterprise');
+  assert.deepEqual({ ...f.h.store.get('SELECT * FROM channel_chats WHERE id=?', chat.id) }, { ...before, display_name: '研发讨论群' });
+  assert.equal(f.service.serviceBindings.get(chat.id).revision, 1);
+  assert.equal((await f.admin('/api/channels/conversations')).value.conversations[0].display_name, '研发讨论群');
+  const bindings = (await f.admin('/api/channels/service-bindings')).value;
+  assert.equal(bindings.bindings[0].chat.display_name, '研发讨论群'); assert.equal(bindings.chats[0].display_name, '研发讨论群');
+  assert.equal((await f.admin(`/api/channels/chats/${chat.id}/timeline`)).value.chat.display_name, '研发讨论群');
+  assert.doesNotMatch(JSON.stringify(named.value), /description|fixture-only-access-token/);
+  for (const [code, name] of [[99991672, 'ignored'], [0, ''], [999, 'ignored']]) {
+    f.wire.state.chatCode = code; f.wire.state.chatName = name;
+    assert.ok((await f.admin(path, 'POST', {})).status >= 400);
+    assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '研发讨论群');
+  }
+});
+
+test('group name refresh checks group visibility before provider access and again after asynchronous lookup', async t => {
+  const f = await channelFixture(t), chat = await boundGroup(f), reader = await f.member('name-reader', {});
+  const route = `/api/channels/chats/${chat.id}/name`;
+  assert.equal((await reader.client(route, 'POST', {})).status, 403); assert.equal(f.wire.state.chatRequests.length, 0);
+  bindFixture(f.h, f.id, reader.id, 'ou_name_reader');
+  const quiet = inGroup('pick this group', 'ou_name_reader'); quiet.event.message.mentions = []; await post(f.h, f.id, quiet);
+  let release; f.wire.state.chatGate = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const pending = reader.client(route, 'POST', {}); await until(() => f.wire.state.chatRequests.length === 1);
+  f.h.store.run("UPDATE external_identities SET status='revoked' WHERE principal_id=?", reader.id); release();
+  assert.equal((await pending).status, 403);
+  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '');
+  f.wire.state.chatGate = new Promise(resolve => { release = resolve; });
+  const changed = f.admin(route, 'POST', {}); await until(() => f.wire.state.chatRequests.length === 2);
+  f.h.store.run('UPDATE channel_connectors SET revision=revision+1 WHERE id=?', f.id); release();
+  assert.equal((await changed).status, 409);
+  assert.equal(f.h.store.get('SELECT display_name FROM channel_chats WHERE id=?', chat.id).display_name, '');
+});
+
+test('private conversation names require the exact active owner binding and keep the robot enterprise distinct', async t => {
+  const f = await channelFixture(t), chat = await privateChat(f);
+  f.h.store.run("UPDATE external_identities SET display_name='张小明' WHERE principal_id=?", f.principal);
+  const read = async () => (await f.admin('/api/channels/employees')).value.personal_chats[0];
+  assert.equal((await read()).display_name, '张小明'); assert.equal((await read()).tenant_name, 'Fixture enterprise');
+  assert.equal((await read()).can_refresh_name, false, 'an external member cannot be queried with this installation token');
+  f.h.store.run('UPDATE channel_personal_owners SET actor_tenant=? WHERE chat_id=?', 'install-tenant', chat.id);
+  assert.equal((await read()).display_name, '', 'a name from a different tenant cannot label this chat');
+  bindFixture(f.h, f.id, f.principal, 'ou_alice', 'install-tenant');
+  const identity = f.h.store.get("SELECT id FROM external_identities WHERE external_tenant='install-tenant'");
+  assert.equal((await read()).can_refresh_name, true);
+  assert.equal((await f.admin('/api/channels/bindings/' + identity.id + '/name', 'POST', {})).status, 201);
+  assert.equal((await read()).display_name, '张小明');
+  assert.equal((await f.admin('/api/channels/conversations')).value.conversations[0].display_name, '张小明');
+  f.h.store.run('UPDATE external_identities SET expires_at=0 WHERE id=?', identity.id);
+  assert.equal((await read()).display_name, ''); assert.equal((await read()).can_refresh_name, false);
+  assert.equal((await f.admin('/api/channels/bindings/' + identity.id + '/name', 'POST', {})).status, 404);
+});
 
 test('conversation console filters history authority before pagination and excludes other people’s private chats', async t => {
   const f = await channelFixture(t), group = await boundGroup(f, ['101', '102']), mine = await privateChat(f);

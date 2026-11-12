@@ -37,7 +37,7 @@ for (const width of [1440, 390]) test(`Feishu console shows real messages, steps
     const overview = page.getByRole('region', { name: '飞书绑定概览' });
     await expect(overview.locator('.feishu-metric')).toContainText(['已绑定身份1', '本人私聊1', '维护的群1']);
     await expect(overview).toContainText('私聊已建立 1 个');
-    await overview.getByText('查看维护的群与绑定范围', { exact: true }).click(); await expect(overview).toContainText('oc_group');
+    await overview.getByText('查看维护的群与绑定范围', { exact: true }).click(); await expect(overview).toContainText('项目讨论群');
     await page.evaluate(() => { document.activeElement?.blur(); scrollTo(0, 0); });
     await page.screenshot({ path: `.tmp/channel-console/bindings-${width}.png`, fullPage: true });
     await page.goto(f.h.admin + '/#/preferences'); await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
@@ -119,7 +119,8 @@ test('conversation refresh reports stale data, clears revoked content and ignore
     await page.goto(f.h.admin + '/#/conversations/' + chat.id); await expect(page.getByLabel('消息与执行时间线')).toContainText('Group discussion');
     await page.clock.install(); let revokedReads = 0;
     await page.route('**/timeline?*', route => { revokedReads++; return route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'channel_history_forbidden' }) }); });
-    await page.getByLabel('自动刷新（5 秒）', { exact: true }).check();
+    // The 403 response removes the checkbox during its change handler; dispatch the click without waiting on the removed control.
+    await page.getByLabel('自动刷新（5 秒）', { exact: true }).evaluate(control => control.click());
     await expect(page.getByRole('heading', { name: '会话访问已变化', exact: true })).toBeVisible();
     await expect(page.getByLabel('消息与执行时间线')).toHaveCount(0); await expect(page.getByLabel('会话派生任务')).toHaveCount(0);
     await page.clock.runFor(15000); expect(revokedReads).toBe(1);
@@ -191,5 +192,44 @@ test('binding overview pairs private chats with their exact Feishu identity and 
     await expect(overview.locator('.feishu-metric')).toContainText(['已绑定身份1', '本人私聊1']);
     await expect(overview).toContainText('另有 1 个历史会话');
     await expect(overview.getByRole('link', { name: '打开私聊会话', exact: true })).toHaveAttribute('href', '#/conversations/' + first.id);
+  } finally { await f.close(); }
+});
+
+for (const width of [1440, 390]) test(`Feishu names identify private chats and groups with enterprise context at ${width}px`, async ({ page }) => {
+  const f = await channelFixture(), errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    await boundGroup(f); const mine = await privateChat(f);
+    const tenant = f.h.store.get('SELECT tenant_id FROM identity_projects WHERE project_id=?', '101').tenant_id;
+    f.h.store.run("UPDATE channel_connectors SET app_name='研发助手',tenant_name='示例企业',owner_tenant=? WHERE id=?", tenant, f.id);
+    f.h.store.run("UPDATE external_identities SET external_tenant='install-tenant' WHERE principal_id=?", f.principal);
+    f.h.store.run("UPDATE channel_personal_owners SET actor_tenant='install-tenant' WHERE chat_id=?", mine.id);
+    f.wire.state.chatName = '基础设施讨论群';
+    await page.setViewportSize({ width, height: 1000 }); await login(page, f, '#/conversations');
+    const list = page.getByLabel('可查看的飞书会话');
+    await expect(list.getByRole('link', { name: /群聊 · 基础设施讨论群/ })).toBeVisible();
+    await expect(list.getByRole('link', { name: /私聊 · 张小明/ })).toBeVisible();
+    await expect(list).toContainText('示例企业'); await expect(list).toContainText('应用所属组织：agent-test-zone');
+    const search = page.getByLabel('搜索飞书会话'); await search.fill('张小明');
+    await expect(list.locator('.channel-chat-choice')).toHaveCount(1); await search.fill('基础设施');
+    await expect(list.locator('.channel-chat-choice')).toHaveCount(1); await search.fill('示例企业');
+    await expect(list.locator('.channel-chat-choice')).toHaveCount(2); await search.clear();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    mkdirSync('.tmp/channel-console', { recursive: true });
+    await page.screenshot({ path: `.tmp/channel-console/names-${width}.png`, fullPage: true });
+    await page.goto(f.h.admin + '/#/identity/feishu/groups');
+    await expect(page.getByLabel('助手所在群')).toContainText('基础设施讨论群 · 示例企业 · 研发助手');
+    const binding = page.getByRole('article', { name: '群聊助手绑定' });
+    await expect(binding).toContainText('基础设施讨论群'); await expect(binding).toContainText('所属企业：示例企业');
+    f.wire.state.chatName = '<img src=x onerror=alert(1)> 更名群';
+    await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
+    await expect(binding).toContainText(f.wire.state.chatName); await expect(binding.locator('img')).toHaveCount(0);
+    f.wire.state.chatCode = 99991672;
+    await binding.getByRole('button', { name: '刷新群名称', exact: true }).click();
+    await expect(binding).toContainText('保留上次读取的名称'); await expect(binding).toContainText(f.wire.state.chatName);
+    await page.goto(f.h.admin + '/#/identity/feishu/conversations');
+    await expect(page.getByText('私信 · 张小明', { exact: true })).toBeVisible();
+    await expect(page.getByRole('article').filter({ hasText: '私信 · 张小明' })).toContainText('所属企业：示例企业');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
   } finally { await f.close(); }
 });

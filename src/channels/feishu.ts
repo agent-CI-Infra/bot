@@ -29,6 +29,7 @@ export const FEISHU_SCOPES: readonly { scope: string; purpose: string; enterpris
   { scope: 'im:chat:read', purpose: '查看群信息，订阅群解散事件' },
   { scope: 'im:chat.members:bot_access', purpose: '接收机器人进群、移出事件' },
   { scope: 'im:chat.members:read', purpose: '核验群成员，保存群聊助手绑定' },
+  { scope: 'contact:user.base:readonly', purpose: '读取已绑定用户的飞书姓名' },
   { scope: 'tenant:tenant:readonly', purpose: '自动获取安装企业', enterprise_only: true },
 ];
 export const feishuScopes = (applicationType: string) => FEISHU_SCOPES.filter(s => !s.enterprise_only || applicationType === 'enterprise').map(s => s.scope);
@@ -301,6 +302,14 @@ export class FeishuAdapter implements ChannelAdapter {
     if (typeof tenant?.tenant_key !== 'string' || !tenant.tenant_key) fail(502, 'channel_tenant_unavailable');
     this.guard();
     return { tenant_key: text(tenant.tenant_key), tenant_name: typeof tenant.name === 'string' ? tenant.name.trim().slice(0, 200) : '' };
+  }
+  async chatName(chatId: string): Promise<string> {
+    const data = await this.api('/im/v1/chats/' + encodeURIComponent(chatId) + '?user_id_type=open_id', { method: 'GET' });
+    const name = data.data?.name;
+    if (typeof name !== 'string' || !name.trim()) fail(502, 'channel_chat_name_unavailable');
+    this.guard();
+    // Do not retain the description, owner, member list or other group details.
+    return name.trim().slice(0, 200);
   }
   async userName(openId: string): Promise<string> {
     const data = await this.api('/contact/v3/users/' + encodeURIComponent(openId) + '?user_id_type=open_id', { method: 'GET' });

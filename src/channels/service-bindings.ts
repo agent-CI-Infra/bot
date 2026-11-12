@@ -7,6 +7,7 @@ import { commands } from '../management/catalog.js';
 import type { ChannelEmployees } from './employees.js';
 import type { ChannelEvent } from './types.js';
 import { tenantName } from './applications.js';
+import { chatProfile } from './profiles.js';
 
 // A group binds one service role and one project scope (a whole organization or chosen repositories). The scope is held as
 // scoped_grants of a principal owned by the binding; each grant names the maintainer who granted it. At run time a group
@@ -348,7 +349,7 @@ export class ChannelServiceBindings {
     if (state === 'active' && !reach.projects.length) { state = 'paused'; error = 'channel_service_scope_paused'; }
     const organization = grants.find(g => g.scope === 'tenant'), chat = this.store.get('SELECT h.chat_id,c.app_name,c.owner_tenant FROM channel_chats h LEFT JOIN channel_connectors c ON c.id=h.connector_id WHERE h.id=?', binding.chat_id);
     const username = (principal: string) => this.store.get('SELECT username FROM users WHERE id=?', principal)?.username ?? null;
-    return { id: binding.id, chat_id: binding.chat_id, chat: { chat_id: chat?.chat_id ?? null, app_name: chat?.app_name ?? '', organization: chat?.owner_tenant || null },
+    return { id: binding.id, chat_id: binding.chat_id, chat: { id: binding.chat_id, chat_id: chat?.chat_id ?? null, organization: chat?.owner_tenant || null, ...chatProfile(this.store, binding.chat_id) },
       service_role: role ? { id: role.id, name: role.name, enabled: !!role.enabled } : { id: binding.service_role_id, name: null, enabled: false },
       scope: { kind: binding.scope, organization: organization ? { id: organization.tenant_id, name: tenantName(this.store, organization.tenant_id) } : null,
         repositories: grants.filter(g => g.scope === 'project').map(g => ({ id: g.project_id, full_name: this.store.get('SELECT full_name FROM repositories WHERE id=?', g.project_id)?.full_name ?? g.project_id })) },
