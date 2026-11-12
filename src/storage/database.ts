@@ -30,8 +30,12 @@ import { taskManagementStorage } from '../tasks/management.js';
 import { conversationStorage } from '../roles/conversation-storage.js';
 import { serviceRoleStorage } from '../service-roles/roles.js';
 import { serviceBindingStorage } from '../channels/service-bindings.js';
+import { workspaceStorage } from '../projects/workspace-cleanup.js';
 
 export type Row = Record<string, any>;
+// WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
+// The manager's ledger uses the same limit (manager/projects.mjs).
+export const walSizeLimit = 512 * 1024 * 1024;
 export class Store {
   readonly db: DatabaseSync;
   readonly secrets: SecretBox;
@@ -45,7 +49,7 @@ export class Store {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.secrets = new SecretBox(key);
     this.trajectories = new Trajectories(this.db, path === ':memory:' ? null : join(dirname(path), 'trajectories'));
-    this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;`);
+    this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=${walSizeLimit};`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -218,6 +222,8 @@ export class Store {
     // Group bindings reference service roles and migrate legacy group employees once (#312).
     serviceBindingStorage(this);
     scheduleStorage(this);
+    // Which task uses which workspace on the project computers, for their scheduled removal (#444).
+    workspaceStorage(this);
     // Workflows became the Manager and project configuration (#207); an upgraded database moves them once.
     migrateWorkflows(this);
   }

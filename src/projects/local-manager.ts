@@ -57,7 +57,7 @@ export class LocalManager implements Manager {
     if (action === 'execute' && method === 'POST') {
       const request = input?.request as any;
       if (state.state !== 'ready') fail(409, 'local_project_stopped');
-      if (!request || typeof request.type !== 'string' || !/^(workspace_|git_)/.test(request.type) && !['health','reap','tail','usage','prune'].includes(request.type)) fail(400, 'unsupported_local_request');
+      if (!request || typeof request.type !== 'string' || !/^(workspace_|git_)/.test(request.type) && !['health','reap','tail','usage','prune','tasks_list','tasks_remove'].includes(request.type)) fail(400, 'unsupported_local_request');
       if (request.type === 'reap' && !/^[a-f0-9]{48}$/.test(request.workspace_id || '')) fail(400, 'local_reap_requires_workspace');
       return this.execute({ ...request, operation_id: input!.operation_id }, timeoutMs);
     }

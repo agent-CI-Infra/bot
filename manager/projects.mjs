@@ -47,8 +47,13 @@ export function validateSpec(input) {
 const digest = value => createHash('sha256').update(value).digest('hex');
 const commandTypes = ['command', 'workspace_command'];
 export const parallelBounds = [1, 32];
-const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_checkout','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_reuse','workspace_cache','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_repository_tool','workspace_agent_pull_request','workspace_agent_live','workspace_agent_runtime','workspace_agent_control_tool','reap'];
-const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits'];
+const runnerTypes = ['command','read','write','workspace_init','workspace_acceptance','workspace_source','workspace_restore','workspace_checkout','workspace_context','git_have','git_pack','git_import','git_export','workspace_write','workspace_snapshot','workspace_read','workspace_export','workspace_command','workspace_finalize','workspace_blob','workspace_reuse','workspace_cache','workspace_agent_history','workspace_agent_session','workspace_agent_boundary','workspace_agent_continue','workspace_agent_config','workspace_agent_start','workspace_agent_poll','workspace_agent_reply','workspace_agent_progress','workspace_agent_token','workspace_agent_repository_tool','workspace_agent_pull_request','workspace_agent_live','workspace_agent_runtime','workspace_agent_control_tool','reap','tasks_list','tasks_remove'];
+const runnerKeys = ['type','command','path','content','timeout_ms','keep_background','workspace_id','source_workspace_id','base64','offset','author_email','final','mode','snapshot','sha','tree_sha','config','request_id','sequence','idle','pack_id','commits','entries'];
+// The control plane's workspace cleanup: list the task directories, remove a few of them per call (runner/task-dirs.mjs).
+const cleanupTypes = ['tasks_list', 'tasks_remove'];
+// WAL files keep the largest size they ever reached; after a checkpoint resets the log, SQLite truncates it to this.
+// The control plane uses the same limit (src/storage/database.ts).
+export const walSizeLimit = 512 * 1024 * 1024;
 // A runner request is checked before it can touch the computer, so a malformed one never interrupts other tasks.
 function validateCall(call) {
   if (!call || !runnerTypes.includes(call.type) || Object.keys(call).some(k => !runnerKeys.includes(k))) throw new ManagerError('invalid_runner_request', 400);
@@ -56,6 +61,11 @@ function validateCall(call) {
   if (call.source_workspace_id !== undefined && (!['workspace_acceptance','workspace_restore'].includes(call.type) || !/^[a-f0-9]{48}$/.test(call.source_workspace_id))) throw new ManagerError('invalid_runner_request', 400);
   if (['workspace_acceptance','workspace_restore'].includes(call.type) && !/^[a-f0-9]{48}$/.test(call.source_workspace_id || '')) throw new ManagerError('invalid_runner_request', 400);
   if (call.timeout_ms != null && !(Number.isFinite(call.timeout_ms) && call.timeout_ms > 0)) throw new ManagerError('invalid_runner_request', 400);
+  // A cleanup call names task directories only by their ids, at most 20 at a time, and carries nothing else.
+  if (cleanupTypes.includes(call.type) ? Object.keys(call).some(k => !['type', 'entries'].includes(k)) || (call.type === 'tasks_list' ? call.entries !== undefined
+    : !Array.isArray(call.entries) || !call.entries.length || call.entries.length > 20 || call.entries.some(entry => !entry || typeof entry !== 'object'
+      || Object.keys(entry).some(k => !['name', 'active_at'].includes(k)) || !/^[a-f0-9]{48}$/.test(entry.name) || !Number.isSafeInteger(entry.active_at) || entry.active_at < 0))
+    : call.entries !== undefined) throw new ManagerError('invalid_runner_request', 400);
 }
 export class Projects {
   constructor({ database, docker, deployment, image, egress = true }) {
@@ -68,7 +78,7 @@ export class Projects {
     mkdirSync(dirname(database), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(database); this.docker = docker; this.deployment = deployment; this.image = image;
     this.notesRoot = dirname(database) + '/project-notes';
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=${walSizeLimit};
       CREATE TABLE IF NOT EXISTS projects(repository_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,state TEXT NOT NULL,desired TEXT NOT NULL,error TEXT,started_at TEXT);
       CREATE TABLE IF NOT EXISTS resources(repository_id TEXT NOT NULL,generation INTEGER NOT NULL,image TEXT NOT NULL,PRIMARY KEY(repository_id,generation));
       CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL,action TEXT NOT NULL,generation INTEGER NOT NULL,input TEXT NOT NULL,state TEXT NOT NULL,result TEXT);
@@ -505,7 +515,7 @@ export class Projects {
             // Commands run until they end unless the caller sets its own timeout_ms; stop, reset or delete interrupts them.
             const limit = call.timeout_ms == null ? null : Math.max(call.timeout_ms, 100), command = commandTypes.includes(call.type);
             const request = command ? { ...call, timeout_ms: limit } : call,
-              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','git_import'].includes(call.type) ? 0 : 90000;
+              timeout = command ? (limit === null ? 0 : limit + 60000) : ['workspace_acceptance','workspace_restore','workspace_snapshot','workspace_finalize','workspace_blob','workspace_checkout','git_import','tasks_remove'].includes(call.type) ? 0 : call.type === 'tasks_list' ? 300000 : 90000;
             result = await this.docker.runner(this.names(repo, project.generation).container, { ...request, operation_id: input.operation_id }, timeout);
             if (commandTypes.includes(call.type)) {
               if (call.type === 'workspace_command' && call.keep_background === true && result.ok) kept.add(call.workspace_id);
@@ -554,6 +564,12 @@ export class Projects {
           this.kept(repo).delete(workspace); this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id);
           if (!reaped?.ok) this.restartAlone(repo, input.generation, `a failed ${input.request.type} left processes that could not be ended`, error);
           throw error;
+        }
+        // Listing or removing task directories starts no project process, and a removal that goes on after a lost answer
+        // deletes only what it was sent: the call fails, and the computer and the tasks on it keep running.
+        if (action === 'execute' && cleanupTypes.includes(input.request.type)) {
+          logFailure(`project ${repo} ${input.request.type} failed`, error);
+          this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id); throw error;
         }
         // On an uncertain exec result, kill the entire environment before releasing its lock.
         logFailure(`project ${repo} ${action === 'execute' ? input.request.type : action} failed, computer stopped`, error);

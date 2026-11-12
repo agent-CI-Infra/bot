@@ -149,6 +149,8 @@ export class ProjectService {
     await this.send(this.store.get('SELECT * FROM environment_operations WHERE id=?', input.operation_id)!);
   }
   endRemoval(id: string): void { this.removing.delete(id); }
+  /** True while the project is being deleted; background work leaves its computer alone. */
+  isRemoving(id: string): boolean { return this.removing.has(id); }
   private async notesApi(user: Actor, method: string, url: URL, input: Json): Promise<Json | undefined> {
     const match = /^\/api\/repositories\/([^/]+)\/notes(?:\/([^/]+))?$/.exec(url.pathname);
     if (!match) return undefined;

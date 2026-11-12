@@ -11,7 +11,8 @@ import { GitCache } from '../dist/agent/git-cache.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { Redactor } from '../dist/agent/common.js';
 import { workspace as runnerWorkspace } from '../runner/workspace.mjs';
-import { storeOperation, pruneTasks } from '../runner/store.mjs';
+import { storeOperation, pruneStore } from '../runner/store.mjs';
+import { listTaskDirectories, removeTaskDirectories } from '../runner/task-dirs.mjs';
 import { environment } from '../runner/command.mjs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
@@ -229,17 +230,21 @@ test('a repository file holding a task credential stops the checkout before anyt
   assert.deepEqual((await a.run({ type: 'git_have' })).commits, []);
 });
 
-test('task directories untouched for three days go with their worktree registrations; recent ones stay', async t => {
+test('removing a task directory removes its worktree registration too; a directory active since the listing stays', async t => {
   const u = await upstream(t), mirror = await u.cache.open('101', { url: u.url, token, commits: [u.second] });
-  const old = computerTask(u.root), recent = computerTask(u.root);
+  const old = computerTask(u.root), recent = computerTask(u.root), tasks = join(u.root, 'tasks'), store = join(u.root, 'store');
   await old.workspace.checkout(old.github, u.second, mirror); await recent.workspace.checkout(recent.github, u.second, mirror);
-  const later = Date.now() + 4 * 24 * 3600 * 1000;
-  // The recent task's agent is still writing its events.
-  mkdirSync(join(recent.root, 'agent'), { recursive: true }); writeFileSync(join(recent.root, 'agent', 'events.jsonl'), '');
-  utimesSync(join(recent.root, 'agent', 'events.jsonl'), later / 1000, later / 1000);
-  assert.deepEqual(await pruneTasks(join(u.root, 'tasks') + '/', 3 * 24 * 3600 * 1000, later, join(u.root, 'store')), { removed: 1 });
-  assert.deepEqual(readdirSync(join(u.root, 'tasks')), [recent.id]);
-  assert.doesNotMatch(git(join(u.root, 'store', 'repo.git'), 'worktree', 'list'), new RegExp(old.id));
+  const listed = await listTaskDirectories(tasks);
+  assert.equal(listed.total, 2); assert.deepEqual(listed.entries.map(entry => entry.name).sort(), [old.id, recent.id].sort());
+  // The recent task's agent writes its events after the listing.
+  const later = (Date.now() + 60_000) / 1000; mkdirSync(join(recent.root, 'agent'), { recursive: true });
+  writeFileSync(join(recent.root, 'agent', 'events.jsonl'), ''); utimesSync(join(recent.root, 'agent', 'events.jsonl'), later, later);
+  const result = await removeTaskDirectories(listed.entries, tasks, store);
+  assert.deepEqual(result.removed.map(entry => entry.name), [old.id]); assert.ok(result.removed[0].bytes > 0);
+  assert.deepEqual(result.skipped, [{ name: recent.id, reason: 'changed' }]);
+  assert.deepEqual(readdirSync(tasks), [recent.id]);
+  const worktrees = git(join(store, 'repo.git'), 'worktree', 'list');
+  assert.doesNotMatch(worktrees, new RegExp(old.id)); assert.match(worktrees, new RegExp(recent.id));
 });
 
 test('a credential inside a binary file stops the checkout too', async t => {
@@ -286,6 +291,6 @@ test('a pack left by an interrupted transfer is removed after a few hours', asyn
   const pack = 'a'.repeat(48);
   await storeOperation({ type: 'git_pack', pack_id: pack, base64: Buffer.from('PACK').toString('base64'), offset: 0 }, root);
   assert.deepEqual(readdirSync(join(root, 'incoming')), [pack + '.pack']);
-  await pruneTasks(join(root, 'tasks') + '/', 3 * 24 * 3600 * 1000, Date.now() + 60_000, root); assert.equal(readdirSync(join(root, 'incoming')).length, 1);
-  await pruneTasks(join(root, 'tasks') + '/', 3 * 24 * 3600 * 1000, Date.now() + 7 * 3600 * 1000, root); assert.deepEqual(readdirSync(join(root, 'incoming')), []);
+  assert.deepEqual(await pruneStore(Date.now() + 60_000, root), { packs: 0 }); assert.equal(readdirSync(join(root, 'incoming')).length, 1);
+  assert.deepEqual(await pruneStore(Date.now() + 7 * 3600 * 1000, root), { packs: 1 }); assert.deepEqual(readdirSync(join(root, 'incoming')), []);
 });

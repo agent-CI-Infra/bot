@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -197,6 +198,41 @@ test('publication replies are allowed and policy cleanup preserves the waiting a
   assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).workspace_id, f.docker.runs.at(-1).keep_agent], ['reap', workspace_id, undefined]);
   await execute({ type: 'reap', workspace_id, idle: true });
   assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).workspace_id], ['reap', undefined]);
+});
+
+test('both databases cap their WAL file; a WAL past the cap is cut back to it after a checkpoint', async t => {
+  const h = await harness(t); assert.equal(h.store.get('PRAGMA journal_size_limit').journal_size_limit, 512 * 1024 * 1024);
+  const f = fixture(t); assert.equal(f.projects.db.prepare('PRAGMA journal_size_limit').get().journal_size_limit, 512 * 1024 * 1024);
+  // The same mechanism on a small scale: this connection's cap is lowered to 64 KiB. A reader keeps the log from being
+  // reused while writes grow it past the cap; once a checkpoint has copied everything back, the next write cuts it.
+  const store = h.store, file = h.database + '-wal', limit = 64 * 1024, reader = new DatabaseSync(h.database);
+  t.after(() => reader.close());
+  store.db.exec(`PRAGMA journal_size_limit=${limit}; CREATE TABLE wal_probe(value BLOB)`);
+  reader.exec('BEGIN'); reader.prepare('SELECT count(*) FROM wal_probe').get();
+  for (let i = 0; i < 100; i++) store.run('INSERT INTO wal_probe VALUES(randomblob(10000))');
+  assert.ok(statSync(file).size > 1024 * 1024); reader.exec('COMMIT');
+  assert.equal(store.get('PRAGMA wal_checkpoint(PASSIVE)').busy, 0);
+  store.run('INSERT INTO wal_probe VALUES(1)');
+  assert.ok(statSync(file).size <= limit, String(statSync(file).size));
+});
+
+test('workspace cleanup calls name task directories only; removal has no time limit, and a failed cleanup call leaves the computer running', async t => {
+  const f = fixture(t); await f.projects.register('101');
+  const name = id(), started = f.projects.get('101').started_at, run = request => f.projects.operate('101', 'execute', { operation_id: id(), generation: 1, request });
+  await run({ type: 'tasks_list' }); assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).wait], ['tasks_list', 300000]);
+  await run({ type: 'tasks_remove', entries: [{ name, active_at: 1 }] });
+  assert.deepEqual([f.docker.runs.at(-1).type, f.docker.runs.at(-1).wait, f.docker.runs.at(-1).entries], ['tasks_remove', 0, [{ name, active_at: 1 }]]);
+  for (const request of [{ type: 'tasks_list', entries: [] }, { type: 'tasks_list', workspace_id: name }, { type: 'tasks_remove' }, { type: 'tasks_remove', entries: [] },
+    { type: 'tasks_remove', entries: Array.from({ length: 21 }, () => ({ name: id(), active_at: 1 })) }, { type: 'tasks_remove', entries: [{ name: '../etc', active_at: 1 }] },
+    { type: 'tasks_remove', entries: [{ name, active_at: -1 }] }, { type: 'tasks_remove', entries: [{ name, active_at: 1, path: '/' }] }, { type: 'tasks_remove', entries: [name] },
+    { type: 'tasks_remove', entries: [{ name, active_at: 1 }], command: 'rm -rf /' }, { type: 'workspace_read', workspace_id: name, path: 'a', entries: [] }])
+    await assert.rejects(run(request), /invalid_runner_request/, JSON.stringify(request));
+  // An uncertain answer fails only that call: it started no project process, and a removal going on deletes only what it was sent.
+  const runner = f.docker.runner; f.docker.runner = (container, input, wait) => input.type.startsWith('tasks_') ? Promise.reject(new ManagerError('runner_failed')) : runner.call(f.docker, container, input, wait);
+  await assert.rejects(run({ type: 'tasks_remove', entries: [{ name, active_at: 1 }] }), /runner_failed/);
+  await assert.rejects(run({ type: 'tasks_list' }), /runner_failed/);
+  assert.equal(f.projects.get('101').state, 'ready'); assert.equal(f.projects.get('101').started_at, started);
+  assert.equal(f.docker.containers.get(f.projects.names('101', 1).container).State.Running, true);
 });
 
 test('Git snapshot plumbing waits for completion without changing other runner operation timeouts', async t => {
