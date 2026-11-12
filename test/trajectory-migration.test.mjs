@@ -8,7 +8,7 @@ import { Store } from '../dist/storage/database.js';
 import { Workspace } from '../dist/agent/workspace.js';
 import { operationId, Redactor } from '../dist/agent/common.js';
 import { PayloadMigration, migrationKey } from '../dist/storage/migration.js';
-import { logContent, modelSnapshot, operationRequestText, operationResult } from '../dist/storage/payloads.js';
+import { blobValue, logContent, modelSnapshot, operationRequestText, operationResult } from '../dist/storage/payloads.js';
 import { taskTrace, traceSource } from '../dist/tasks/trace.js';
 
 const key = Buffer.alloc(32, 9);
@@ -28,7 +28,8 @@ function legacy(store, { tasks = 3, operations = 4, size = 3000 } = {}) {
   const ids = [];
   for (let t = 0; t < tasks; t++) {
     const task = 'task-' + t;
-    store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,'101','task.request','running','Fixture','{}',1,1,'w')", task);
+    const input = { request: 'r ' + t, snapshot_files: Array.from({ length: 100 }, (_, i) => ({ path: `f${t}-${i}.ts`, sha: String(i).padStart(40, '0'), mode: '100644' })), files: [] };
+    store.run("INSERT INTO tasks(id,repository_id,kind,status,summary,input,attempt,generation,workspace_id) VALUES(?,'101','task.request','running','Fixture',?,1,1,'w')", task, JSON.stringify(input));
     for (let o = 0; o < operations; o++) {
       const id = `${task}-op-${o}`, request = { operation_id: id, generation: 1, request: { type: 'workspace_command', command: 'npm test ' + o, workspace_id: 'w' } };
       store.run("INSERT INTO task_tools(id,task_id,request,result,state) VALUES(?,?,?,NULL,'pending')", id, task, JSON.stringify(request));
@@ -71,6 +72,7 @@ function view(store) {
       events: ['operation', 'runtime_log'].flatMap(type => taskTrace(store, task, url(type), 'events').events.map(({ data, body_chars, source_ref }) => ({ data, body_chars, source_ref }))),
       results: store.all('SELECT * FROM task_tools WHERE task_id=? ORDER BY id', task).map(row => [operationRequestText(store, 'task_tools', row), operationResult(store, 'task_tools', row)]),
       logs: store.all('SELECT * FROM task_logs WHERE task_id=? ORDER BY id', task).map(row => logContent(store, row)),
+      input: Object.fromEntries(Object.entries(JSON.parse(store.get('SELECT input FROM tasks WHERE id=?', task).input)).map(([key, value]) => [key, blobValue(store, value)])),
     };
   }
   const conversation = store.get("SELECT * FROM role_conversation_operations WHERE id='conv-op'"), model = store.get("SELECT * FROM model_requests WHERE id='conv-mr'");
@@ -84,7 +86,7 @@ async function migrate(store, options = {}) {
   migration.start();
   for (let i = 0; i < 2000; i++) {
     const state = store.get('SELECT value FROM settings WHERE key=?', migrationKey);
-    if (state && ['task_tools', 'role_conversation_operations', 'model_requests', 'task_logs', 'task_history'].every(name => JSON.parse(state.value).phases[name]?.finished_at)) break;
+    if (state && ['task_tools', 'role_conversation_operations', 'model_requests', 'task_logs', 'task_history'].every(name => JSON.parse(state.value).phases[name]?.finished_at) && JSON.parse(state.value).phases.tasks?.finished_at) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   await migration.stop();
@@ -104,6 +106,7 @@ test('migrated rows read the same as before; their payloads leave the rows', asy
   assert.equal(store.get('SELECT count(*) n FROM model_requests WHERE request_snapshot IS NOT NULL OR response_snapshot IS NOT NULL').n, 0);
   assert.equal(store.get("SELECT count(*) n FROM task_logs WHERE content_ref IS NULL AND length(content)>2048").n, 0);
   assert.equal(store.get("SELECT count(*) n FROM task_history WHERE type IN ('operation','runtime_log') AND length(data)>2048").n, 0);
+  assert.ok(store.all('SELECT input FROM tasks').every(row => JSON.parse(row.input).snapshot_files.$blob && row.input.length < 300));
   const conversation = store.get("SELECT * FROM role_conversation_operations WHERE id='conv-op'");
   assert.equal(conversation.request, '{}'); assert.equal(conversation.result, null);
   assert.equal(store.get("SELECT conversation_id FROM trajectory_files WHERE id=?", conversation.request_ref.split(':')[0]).conversation_id, 'conv');
@@ -154,7 +157,7 @@ test('slices stay short: the event loop is never blocked for long while the migr
 
 test('the migration reads tables by rowid ranges', t => {
   const store = open(t, ':memory:');
-  for (const table of ['task_tools', 'model_requests', 'task_logs', 'task_history', 'role_conversation_operations']) {
+  for (const table of ['task_tools', 'model_requests', 'task_logs', 'task_history', 'role_conversation_operations', 'tasks']) {
     const plan = store.all(`EXPLAIN QUERY PLAN SELECT rowid AS migration_rowid,* FROM ${table} WHERE rowid>? ORDER BY rowid LIMIT 1`).map(row => row.detail).join(' | ');
     assert.match(plan, /SEARCH \w+ USING INTEGER PRIMARY KEY \(rowid>\?\)/, plan);
   }

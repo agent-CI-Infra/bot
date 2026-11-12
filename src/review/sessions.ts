@@ -25,6 +25,7 @@ export function latestReviewSession(store: Store, task: Row) {
 export function saveReviewSession(store: Store, task: Row) {
   const messages = store.get('SELECT messages FROM tasks WHERE id=?', task.id)?.messages;
   if (!messages) return;
+  // The file lists may be blob references (see storedInput); the session keeps them as they are and is resolved where reused.
   const input=JSON.parse(task.input);
   const snapshot=JSON.stringify({snapshot_files:input.snapshot_files,skipped_files:input.skipped_files,snapshot_tree:input.snapshot_tree,source_tree:input.source_tree,coverage:input.coverage,history:!!input.context?.pull_request?.diff});
   store.run(`INSERT INTO review_sessions VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,kind,object_number)
