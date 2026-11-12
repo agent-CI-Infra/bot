@@ -802,9 +802,9 @@ export class TaskEngine {
       // A GitHub rate limit is waited out until its window resets (the task resumes then, a few seconds apart from others
       // waiting for the same window); it does not use up the five automatic retries.
       const limited=failure.code==='github_rate_limited';
-      if((failure.state==='needs_replan'||['stage_budget_exhausted','role_budget_exhausted'].includes(failure.code))&&!['development_not_approved','actions_development_not_approved'].includes(failure.code)){const saved=JSON.parse(current?.input||'{}');update({input:JSON.stringify({...saved,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),at:new Date().toISOString()}})});}
+      if((failure.state==='needs_replan'||failure.code==='manager_execution_stopped'||['stage_budget_exhausted','role_budget_exhausted'].includes(failure.code))&&!['development_not_approved','actions_development_not_approved'].includes(failure.code)){const saved=JSON.parse(current?.input||'{}');update({input:JSON.stringify({...saved,manager_feedback:{code:failure.code,detail:redactor.text(String(failure.detail||'')),at:new Date().toISOString()}})});}
       const managerFault=this.store.get("SELECT role,status FROM task_runs WHERE task_id=? AND role IS NOT NULL ORDER BY rowid DESC LIMIT 1",id);
-      const managerRetry=failure.state==='needs_replan'||managerFault?.role===roleConfig(this.store,task).controller.role&&managerFault?.status==='fault';
+      const managerRetry=failure.state==='needs_replan'||failure.code==='manager_execution_stopped'||managerFault?.role===roleConfig(this.store,task).controller.role&&managerFault?.status==='fault';
       const state=managerRetry&&failure.state==='failed'? 'retry_wait':automaticState(failure.code,failure.state),retrying=automaticRetry.has(state),counted=isAttemptFailure(failure.code,state),now=Date.now();
       const previousCode=current?.retry_error_code||current?.error_code;
       const retries=counted?(previousCode===failure.code?Number(current?.retry_count||0):0)+1:retrying?Number(current?.retry_count||0):0;

@@ -26,8 +26,7 @@ Role 服务选择执行器并组装角色说明、assignment 和任务事实引�
   "args": [],
   "env": {"HOME": "/data/acp-home"},
   "stateDirectory": "/data/acp-sessions",
-  "version": "operator-pinned-agent-version",
-  "timeoutMs": 1200000
+  "version": "operator-pinned-agent-version"
 }
 ```
 
@@ -55,8 +54,7 @@ Harness `codex` 与 `acp` 是同一个客户端（`src/harness/acp.ts`）：启�
   "stateDirectory": "/data/codex-sessions",
   "version": "0.166.0",
   "model": "operator-chosen-model",
-  "modelProvider": "openai",
-  "timeoutMs": 1200000
+  "modelProvider": "openai"
 }
 ```
 
@@ -95,3 +93,12 @@ ACP 支持 loadSession 时优先恢复原 session，并抑制加载回放；失�
 角色 API 返回统一 `backends` 目录、是否已接入及推荐默认值，角色页可以逐角色选择。原 `harness_ref` 和运行快照字段保留兼容。Native/Process 的消息检查点、ACP 的外部会话绑定及 Pi 的活会话重接分别记录，不把切换后端描述为跨协议恢复原会话。Pi 的 QA 和 Coordinator 直接从本轮固定候选或持久化事实开始，不接回旧评价对话。
 
 Claude Code 已注册为 `claude_code` 工作角色后端，支持 writer、observer、evaluator，不支持 controller，不能用于 manager/coordinator；版本、授权与限制见 [Claude Code harness](claude-code.md)。Codex App Server 已注册为 `codex` 工作角色后端，同样只支持 writer、observer、evaluator，见上文「启用 Codex app-server」。OpenCode 的原生驱动仍待 #172 接入；目录中的待接入状态不是可执行适配器。缺少驱动时配置明确报错，不会换成 Native、Pi 或 ACP 冒充执行。已部署的通用 Codex ACP 仍可选择 ACP 使用。
+
+
+## Long execution reporting
+
+An elapsed duration is not a hang. A continuous RoleRun reports to its Task Manager at 60 minutes, then every 20 minutes (80, 100, ...), without interrupting the worker. Legacy ACP/Codex absolute `timeoutMs` settings no longer cancel a run. Claude Code likewise does not use its former whole-run timer. Initialization, command, authorization and explicit role/stage resource budgets keep their own meanings.
+
+`long_execution_report` retains the exact run/assignment, elapsed time, activity, original tool evidence and checkpoint references. `long_execution_decision` records the Manager's continue/stop judgment, whether it still applied, and any next-step instructions. A narrow Manager control operation can run while its normal coordination awaits a worker; it uses the configured Manager model and instructions, serializes per task, and does not take over the Manager's persistent session or lease. It cannot publish, accept, or widen authority. The normal Manager can read these records on continuation.
+
+Notifications and failures remain queryable. An unavailable Manager leaves work running and its report pending. Explicit stop targets only the named live run; stale decisions cannot stop its replacement. User cancellation and permission revocation still interrupt immediately. On restart, existing RoleRun recovery determines whether an execution is really live; old thread age is never substituted for a new run's start time.
