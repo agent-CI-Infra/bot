@@ -18,7 +18,7 @@ import { ManagerClient } from '../dist/projects/service.js';
 export async function assistantManager(t) {
   const directory = mkdtempSync(join(tmpdir(), 'assistant-fixture-')), homes = join(directory, 'homes'), containers = join(directory, 'containers');
   mkdirSync(homes); mkdirSync(containers);
-  const docker = new FakeDocker(); docker.homesMount = homes; docker.info = { Runtimes: { runc: {} } };
+  const docker = new FakeDocker(); docker.homesMount = homes; docker.info = { NCPU: 8, MemTotal: 32 * 1024 ** 3 };
   const commands = [];
   // A removed container takes its temporary files with it.
   const request = docker.request.bind(docker);

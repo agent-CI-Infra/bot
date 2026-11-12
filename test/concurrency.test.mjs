@@ -287,11 +287,13 @@ test('global settings change the wizard settings and shared models without a pro
   const submit = form => form.listeners.submit[0]({ preventDefault() {} }), view = page.run('confirmView');
   const confirm = async opening => { await settle(); await submit(view.querySelector('form')); await opening; };
   await page.run('renderSettings(renderVersion)');
-  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['常规', '#/settings/general'], ['模型', '#/settings/models'], ['服务角色', '#/settings/service-roles'], ['助手电脑', '#/settings/assistant-computers'], ['存储', '#/settings/storage'], ['接入向导', '#/settings/onboarding'], ['公网接入', '#/settings/access'], ['外部执行', '#/settings/external'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['飞书连接', '#/settings/feishu'], ['项目管理', '#/settings/projects'], ['用户', '#/settings/users']]);
-  assert.deepEqual(cards(), ['当前运行版本', '同时运行的任务', '虚拟电脑默认资源']);
-  assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '常规');
+  assert.deepEqual(panel.querySelectorAll('nav a').map(node => [node.textContent, node.href]), [['工作电脑', '#/settings/work-computers'], ['模型', '#/settings/models'], ['服务角色', '#/settings/service-roles'], ['助手电脑', '#/settings/assistant-computers'], ['存储', '#/settings/storage'], ['接入向导', '#/settings/onboarding'], ['公网接入', '#/settings/access'], ['外部执行', '#/settings/external'], ['机器人账号', '#/settings/accounts'], ['安装档案', '#/settings/installations'], ['飞书连接', '#/settings/feishu'], ['项目管理', '#/settings/projects'], ['用户', '#/settings/users']]);
+  assert.deepEqual(cards(), ['同时运行的任务', '默认资源', '当前运行版本']);
+  assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '工作电脑');
   assert.match(text(section('当前运行版本')), /v9\.9\.9/);
   assert.equal(String(section('同时运行的任务').querySelector('input').value), '2');
+  // The category's old address (#/settings/general, 常规) still opens it.
+  await open('general'); assert.equal(panel.querySelector('nav a[aria-current=page]').textContent, '工作电脑'); assert.deepEqual(cards(), ['同时运行的任务', '默认资源', '当前运行版本']);
   await open('access'); assert.deepEqual(cards(), ['公网 HTTPS 地址', 'Cloudflare Tunnel', 'GitHub 登录（只读）']);
   // 登录配置在这页只读，值来自同一次 /api/onboarding；没有输入框，只有一条去向导第 3 步的链接。
   assert.match(text(section('GitHub 登录（只读）')), /Iv1\.console/);

@@ -6,7 +6,7 @@ titles.settings = '全局设置';
 // waiting_token with a saved token means this deployment has no tunnel status endpoint to read.
 const tunnelStates = { waiting_token: '读不到状态', not_running: 'tunnel 服务未运行', connecting: '正在连接', connected: '已连接' };
 const settingsGroups = [
-  ['系统与算力', [['general', '常规'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['storage', '存储']]],
+  ['系统与算力', [['work-computers', '工作电脑'], ['models', '模型'], ['service-roles', '服务角色'], ['assistant-computers', '助手电脑'], ['storage', '存储']]],
   ['接入与网络', [['onboarding', '接入向导'], ['access', '公网接入'], ['external', '外部执行']]],
   ['连接与渠道', [['accounts', '机器人账号'], ['installations', '安装档案'], ['feishu', '飞书连接']]],
   ['仓库与用户', [['projects', '项目管理'], ['users', '用户']]]
@@ -17,7 +17,8 @@ const visibleSettingsGroups = () => typeof me === 'object' && me && me.role !== 
   ? settingsGroups.map(([title, items]) => [title, items.filter(([key]) => key === 'storage')]).filter(([, items]) => items.length) : settingsGroups;
 const visibleSettingsSections = () => visibleSettingsGroups().flatMap(([, items]) => items);
 // A settings address is a section and, for a detail page, one record inside it: #/settings/installations/<host>/<app>/<id>
-// and #/settings/users/<id>. Unknown sections fall back to 常规, an unreadable id is handled by the page itself.
+// and #/settings/users/<id>. Unknown sections (the old #/settings/general among them) fall back to the first category the
+// user may see (工作电脑 for a super administrator), an unreadable id is handled by the page itself.
 function settingsRoute() {
   if (/^#\/settings\/onboarding(?:\/|$)/.test(location.hash)) return { section: 'onboarding', id: null };
   if (/^#\/settings\/feishu(?:\/|$)/.test(location.hash)) return { section: 'feishu', id: null };
@@ -37,8 +38,8 @@ async function renderSettings(request) {
   $('count').textContent = ''; content.append(element('p', '正在加载…', 'muted')); body.append(nav, content); $('settings-panel').replaceChildren(body);
   if (typeof syncConsoleShell === 'function') syncConsoleShell();
   // The hash may only choose among the declared sections: never let a user-written name reach the prototype chain, and
-  // never call anything that is not a declared loader. Anything else falls back to 常规.
-  const handler = Object.hasOwn(settingsCards, section) ? settingsCards[section] : settingsCards.general;
+  // never call anything that is not a declared loader. Anything else falls back to 工作电脑.
+  const handler = Object.hasOwn(settingsCards, section) ? settingsCards[section] : settingsCards['work-computers'];
   if (typeof handler !== 'function') return;
   const cards = await handler(request, route.id);
   if (request !== renderVersion) return;
@@ -47,13 +48,14 @@ async function renderSettings(request) {
 // Each category loads only what its cards show.
 const settingsCards = {
   async projects(request, id) { return globalProjectSettings(request, id); },
-  // Group assistants' and the management assistant's computers (#457): their timers and limits, and every HOME.
+  // Group assistants' and the management assistant's computers (#457): their timers and limits, each computer's resources
+  // (the counterpart of the work computers' default resources), and every HOME.
   async 'assistant-computers'(request) {
     const [{ settings }, overview] = await Promise.all([api('/api/settings'), api('/api/assistant-computers').catch(err => ({ error: err.message }))]);
     const view = { settings: settings.assistant_computers, overview };
     if (!view.settings) return [consoleState('助手电脑不可用', '这个部署没有挂载助手 HOME 卷或连不上 manager，群聊助手和管理助手的电脑工具不会提供。', { tone: 'error' })];
     const homes = liveCard('HOME 占用', redraw => assistantHomesBody(view, redraw, request));
-    return [liveCard('助手电脑设置', redraw => assistantSettingsBody(view, redraw)).section, homes.section];
+    return [liveCard('助手电脑设置', redraw => assistantSettingsBody(view, redraw)).section, liveCard('每台电脑的资源', redraw => assistantResourcesBody(view, redraw)).section, homes.section];
   },
   async external(request) {
     const { settings } = await api('/api/external/settings'), section = card('外部执行兑换地址');
@@ -148,7 +150,9 @@ const settingsCards = {
     }
     return [section];
   },
-  async general(request) {
+  // The computers the projects' work roles (Manager, Dev, QA, ...) run their tasks on, one per repository; the running
+  // version closes the page, since those computers are created from this version's image.
+  async 'work-computers'(request) {
     const { settings, version } = await api('/api/settings');
     const about = card('当前运行版本');
     about.append(version.image_tag ? facts([['镜像标签', version.image_tag]]) : note('源码运行：没有设置镜像标签（BOT_IMAGE_TAG），版本以部署所用的源码提交为准。'));
@@ -156,8 +160,8 @@ const settingsCards = {
     const form = document.createElement('form'), value = input('task_concurrency', settings.task_concurrency, { type: 'number', min, max, step: 1, required: true });
     const message = element('p', '', 'view-error'), actions = element('div', '', 'actions form-actions'), submit = element('button', '保存');
     form.className = 'project-form'; form.noValidate = true; submit.type = 'submit'; message.setAttribute('role', 'alert'); actions.append(submit);
-    form.append(field('每台虚拟电脑默认同时运行的任务数', value),
-      note(`取 ${min}–${max}。每个仓库一台虚拟电脑；项目在「机器配置」里没有单独设置时使用这个值，超出的任务继续排队。同时运行的任务各用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限。`),
+    form.append(field('每台电脑默认同时运行的任务数', value),
+      note(`取 ${min}–${max}。工作电脑是项目里 Manager、Dev、QA 等工作角色执行任务的虚拟电脑，每个仓库一台；项目在「机器配置」里没有单独设置时使用这个值，超出的任务继续排队。同时运行的任务各用自己的工作目录，共用这台电脑的 CPU、内存和进程数上限。`),
       message, actions);
     form.addEventListener('submit', async event => {
       event.preventDefault(); message.className = 'view-error'; message.textContent = '';
@@ -170,7 +174,7 @@ const settingsCards = {
     });
     concurrency.append(form);
     const resources = { computer: settings.computer_defaults };
-    return [about, concurrency, liveCard('虚拟电脑默认资源', redraw => resourceDefaultsBody(resources, redraw)).section];
+    return [concurrency, liveCard('默认资源', redraw => resourceDefaultsBody(resources, redraw)).section, about];
   },
   // Where GitHub's webhooks arrive: a self-hosted HTTPS address, or a Cloudflare Tunnel in front of it. The login
   // configuration is shown read-only beside them, so the address, its check, the tunnel and the login agree on one page.
@@ -258,27 +262,37 @@ async function globalProjectSettings(request, id) {
   if (flash) selection.append(note(flash));
   return [selection, projectHeader(), ...cards];
 }
-// The resources a computer gets for every value its project does not set itself, chosen from common sizes inside the
-// manager's bounds; CPU and memory sizes larger than the host are not offered. The current value is always an option.
+// A computer's resources, chosen from common sizes inside the manager's bounds; CPU and memory sizes larger than the host
+// are not offered and the current value is always an option. Work computers and assistant computers use the same fields;
+// only an assistant computer has a working directory of its own size (a tmpfs, where a work computer has a volume).
 const commonSizes = { cpus: [0.5, 1, 2, 4, 6, 8, 12, 16], memory_mb: [512, 1024, 2048, 4096, 8192, 12288, 16384, 32768, 65536],
   pids: [256, 512, 1024, 2048, 4096, 8192, 16384], tmp_mb: [256, 512, 1024, 2048, 4096, 8192, 16384] };
+commonSizes.workspace_mb = commonSizes.tmp_mb;
 const megabytes = value => value >= 1024 ? `${Number((value / 1024).toFixed(1))} GB` : `${value} MB`;
 const resourceFields = [['cpus', 'CPU', value => `${value} 核`], ['memory_mb', '内存', megabytes], ['pids', '进程数上限', value => `${value} 个`], ['tmp_mb', '/tmp 大小', megabytes]];
+const assistantResourceFields = [...resourceFields, ['workspace_mb', '工作目录大小', megabytes]];
+// The selects of `fields` set to `values`; `marked` is the value labelled `mark` (the built-in default). changes() lists
+// the fields whose choice differs from `values`.
+function resourceSelects(fields, { values, bounds, host, marked, mark }) {
+  const grid = element('div', '', 'field-grid'), controls = {}, hostLimit = { cpus: host?.cpus, memory_mb: host?.memory_mb };
+  for (const [key, caption, label] of fields) {
+    const select = controls[key] = document.createElement('select'); select.name = key;
+    const sizes = [...new Set([...commonSizes[key].filter(size => size >= bounds[key][0] && size <= bounds[key][1] && !(hostLimit[key] && size > hostLimit[key])), values[key]])].sort((a, b) => a - b);
+    for (const size of sizes) { const option = element('option', label(size) + (size === marked[key] ? mark : '')); option.value = String(size); select.append(option); }
+    select.value = String(values[key]); grid.append(field(caption, select));
+  }
+  const changes = () => Object.fromEntries(fields.map(([key]) => [key, Number(controls[key].value)]).filter(([key, value]) => value !== values[key]));
+  return { grid, changes };
+}
 function resourceDefaultsBody(view, redraw) {
   if (!view.computer) return [note('暂时读不到 manager，无法显示默认资源，稍后再试。')];
-  const { defaults, builtin, bounds, host, allocated } = view.computer, hostLimit = { cpus: host?.cpus, memory_mb: host?.memory_mb };
-  const grid = element('div', '', 'field-grid'), controls = {};
-  for (const [key, caption, label] of resourceFields) {
-    const select = controls[key] = document.createElement('select'); select.name = key;
-    const sizes = [...new Set([...commonSizes[key].filter(size => size >= bounds[key][0] && size <= bounds[key][1] && !(hostLimit[key] && size > hostLimit[key])), defaults[key]])].sort((a, b) => a - b);
-    for (const size of sizes) { const option = element('option', label(size) + (size === builtin[key] ? '（内置默认）' : '')); option.value = String(size); select.append(option); }
-    select.value = String(defaults[key]); grid.append(field(caption, select));
-  }
+  const { defaults, builtin, bounds, host, allocated } = view.computer;
+  const { grid, changes: changed } = resourceSelects(resourceFields, { values: defaults, bounds, host, marked: builtin, mark: '（内置默认）' });
   return [facts([['这台主机', host ? `${host.cpus} CPU · ${megabytes(host.memory_mb)} 内存` : '读不到'],
     ['运行中的虚拟电脑', `${allocated.computers} 台，共分配 ${allocated.cpus} CPU · ${megabytes(allocated.memory_mb)} 内存`]]),
     note('项目在「机器配置」里留空的资源使用这里的值。虚拟电脑共用这台主机，分配总量可以超过主机，同时满载时会互相争用。'),
     actionForm([grid, note('保存后新建的虚拟电脑立即使用新值；已有的虚拟电脑等到没有任务运行时按新值重建，工作卷和代次保留，运行中的任务不会被打断。')], '保存', async () => {
-      const changes = Object.fromEntries(resourceFields.map(([key]) => [key, Number(controls[key].value)]).filter(([key, value]) => value !== defaults[key]));
+      const changes = changed();
       if (!Object.keys(changes).length) { redraw('没有改动'); return; }
       view.computer = (await api('/api/settings', 'PATCH', { computer_defaults: changes })).settings.computer_defaults;
       redraw('已保存：新建的虚拟电脑立即使用，已有的在空闲时重建');
@@ -297,20 +311,30 @@ function assistantSettingsBody(view, redraw) {
     controls[key] = input(key, String(source.settings[key]), { type: 'number', min, max, step: 1, required: true });
     grid.append(field(caption, controls[key]));
   }
-  const runtime = controls.runtime = document.createElement('select'); runtime.name = 'runtime';
-  for (const name of [...new Set([...(computers.runtimes ?? []), computers.settings.runtime])]) { const option = element('option', name + (name === computers.defaults.runtime ? '（默认）' : '')); option.value = name; runtime.append(option); }
-  runtime.value = computers.settings.runtime; grid.append(field('容器运行时', runtime));
-  const { usage, limits } = computers;
-  return [facts([['当前电脑', `${usage.computers} 台（使用中 ${usage.busy} 台，排队 ${usage.waiting} 个）`],
-    ['每台资源', `${limits.cpus} CPU · ${megabytes(limits.memory_mb)} 内存（含 /tmp 与工作目录）· ${limits.pids} 个进程 · /tmp 与工作目录各 ${megabytes(limits.tmp_mb)} · 无网络`]]),
+  const { usage } = computers;
+  return [facts([['当前电脑', `${usage.computers} 台（使用中 ${usage.busy} 台，排队 ${usage.waiting} 个）`]]),
     note('群按群、私信按人各有一台电脑，回合第一次用到时创建；最终回复交出后开始空闲计时，到时删除，/tmp 和工作目录随之清空。HOME 持久保存：超过上限后下一回合只读，不活跃满保留期后删除；所有 HOME 合计没有硬上限，超过告警值时这里和日志提示。'),
     actionForm([grid], '保存', async () => {
       const changes = {};
       for (const [key, , part] of assistantFields) { const value = Number(controls[key].value); if (!Number.isInteger(value)) throw new Error('请填写整数'); if (value !== (part === 'computers' ? computers : homes).settings[key]) changes[key] = value; }
-      if (runtime.value !== computers.settings.runtime) changes.runtime = runtime.value;
       if (!Object.keys(changes).length) { redraw('没有改动'); return; }
       view.settings = (await api('/api/settings', 'PATCH', { assistant_computers: changes })).settings.assistant_computers;
-      redraw('已保存：计时与上限立即按新值执行，运行时从新建的电脑起生效');
+      redraw('已保存：计时与上限立即按新值执行');
+    })];
+}
+// Every assistant computer gets the same resources; unlike a work computer there is no per-project value over them.
+function assistantResourcesBody(view, redraw) {
+  const { computers } = view.settings;
+  if (!computers) return [note('暂时读不到 manager，无法显示助手电脑的资源，稍后再试。')];
+  const { settings, defaults, bounds, host } = computers;
+  const { grid, changes: changed } = resourceSelects(assistantResourceFields, { values: settings, bounds, host, marked: defaults, mark: '（默认）' });
+  return [facts([['这台主机', host ? `${host.cpus} CPU · ${megabytes(host.memory_mb)} 内存` : '读不到'], ['网络', '无']]),
+    note('/tmp 和工作目录放在内存里，写进去的文件计入内存上限；写满时命令收到“磁盘已满”，不影响别的电脑。电脑共用这台主机，分配总量可以超过主机。'),
+    actionForm([grid, note('保存后新建的电脑立即使用新值；已有的电脑在它的下一个回合开始时按新值重建，HOME 保留，/tmp 和工作目录清空，进行中的回合不受影响。')], '保存', async () => {
+      const changes = changed();
+      if (!Object.keys(changes).length) { redraw('没有改动'); return; }
+      view.settings = (await api('/api/settings', 'PATCH', { assistant_computers: changes })).settings.assistant_computers;
+      redraw('已保存：新建的电脑立即使用，已有的在下一个回合重建');
     })];
 }
 function assistantHomesBody(view, redraw, request) {

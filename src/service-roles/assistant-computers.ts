@@ -39,7 +39,8 @@ export interface HomeFacts { binding?: string; role?: string; repositories: stri
 export const ownerId = (owner: ComputerOwner) => digest(`assistant-computer:${owner.kind}:${owner.tenant}:${owner.subject}`).slice(0, 32);
 const homeDefaults = { home_limit_gb: 5, retention_days: 30, total_alert_gb: 50 };
 const homeBounds: Record<string, [number, number]> = { home_limit_gb: [1, 1024], retention_days: [1, 3650], total_alert_gb: [1, 1_000_000] };
-const managerKeys = ['idle_minutes', 'max_containers', 'max_lifetime_minutes', 'runtime'];
+// The manager keeps and checks the container settings: timers, capacity and each computer's resources.
+const managerKeys = ['idle_minutes', 'max_containers', 'max_lifetime_minutes', 'cpus', 'memory_mb', 'pids', 'tmp_mb', 'workspace_mb'];
 
 /** HOME paths below the generation directory: no empty, '.' or '..' segment; null for the HOME root itself. */
 function homeRelative(value: string): string | null {

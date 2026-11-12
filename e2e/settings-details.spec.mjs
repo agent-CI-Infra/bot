@@ -59,7 +59,7 @@ test('installation and user detail pages address one record and keep missing evi
       await expect(panel.getByRole('link', { name: /返回/ })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
-    // Prototype names in the address must not reach settingsCards' prototype chain: they fall back to 常规, no crash.
+    // Prototype names in the address must not reach settingsCards' prototype chain: they fall back to 工作电脑, no crash.
     for (const hash of ['/#/settings/__proto__', '/#/settings/constructor']) {
       await page.goto(f.h.admin + hash);
       await expect(panel).toContainText('当前运行版本');

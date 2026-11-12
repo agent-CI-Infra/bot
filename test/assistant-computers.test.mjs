@@ -17,7 +17,7 @@ const hex = n => randomBytes(n).toString('hex'), opId = () => hex(24);
 const fence = 'f'.repeat(64);
 function fixture(t, extra = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'assistant-computers-')), homes = join(directory, 'homes'); mkdirSync(homes);
-  const docker = new FakeDocker(); docker.homesMount = homes; docker.info = { Runtimes: { runc: {}, 'io.containerd.runc.v2': {} } };
+  const docker = new FakeDocker(); docker.homesMount = homes; docker.info = { NCPU: 8, MemTotal: 32 * 1024 ** 3 };
   const db = new DatabaseSync(':memory:'), computers = new AssistantComputers({ docker, db, deployment: 'fixture', image: 'approved', homes, ...extra });
   t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
   // The control plane creates an owner's generation directory before it asks for the computer.
@@ -32,10 +32,13 @@ test('an assistant computer is a hardened container without network whose only p
   const ready = await f.acquire(id, turn);
   assert.deepEqual([ready.state, ready.reused, ready.computer.state, ready.computer.turn], ['ready', false, 'busy', turn]);
   const created = f.docker.containers.get(f.computers.name(id)), host = created.HostConfig;
-  assert.deepEqual([created.Config.User, host.ReadonlyRootfs, host.CapDrop, host.SecurityOpt, host.Privileged, host.NetworkMode, host.IpcMode, host.Init, host.Runtime],
-    ['10001:10001', true, ['ALL'], ['no-new-privileges:true'], false, 'none', 'private', true, 'runc']);
+  assert.deepEqual([created.Config.User, host.ReadonlyRootfs, host.CapDrop, host.SecurityOpt, host.Privileged, host.NetworkMode, host.IpcMode, host.Init],
+    ['10001:10001', true, ['ALL'], ['no-new-privileges:true'], false, 'none', 'private', true]);
+  assert.ok(!('Runtime' in host), 'Docker\'s default runtime, never one named by a setting');
   assert.equal(host.Memory, host.MemorySwap, 'no swap beyond the memory limit');
-  assert.ok(host.PidsLimit > 0 && host.NanoCpus > 0);
+  // The default resources: 1 CPU, 2048 MiB, 512 processes, 512 MiB each for /tmp and the working directory.
+  assert.deepEqual([host.NanoCpus, host.Memory, host.PidsLimit], [1e9, 2048 * 1024 ** 2, 512]);
+  assert.match(host.Tmpfs['/tmp'], new RegExp(`size=${512 * 1024 ** 2},`));
   assert.deepEqual(host.Mounts, [{ Type: 'volume', Source: 'fixture-assistant-homes', Target: '/home/assistant', ReadOnly: false, VolumeOptions: { NoCopy: true, Subpath: `${id}/home-1` } }]);
   assert.deepEqual(Object.keys(host.Tmpfs).sort(), ['/tmp', '/workspace']);
   assert.match(host.Tmpfs['/workspace'], /size=\d+.*uid=10001/);
@@ -190,7 +193,13 @@ test('creation fails clearly and leaves nothing behind', async t => {
   f.docker.failCreate = true;
   await assert.rejects(f.acquire(id, 't'), /docker_operation_failed/);
   assert.equal(f.computers.leases.size, 0);
-  f.docker.failCreate = false; f.docker.runner = async () => ({ ok: false });
+  f.docker.failCreate = false;
+  // Docker answers a missing image with 404, which reads as nothing: a clear creation failure, not container_missing later.
+  const request = f.docker.request.bind(f.docker);
+  f.docker.request = async (method, path, body) => method === 'POST' && path.startsWith('/containers/create') ? null : request(method, path, body);
+  await assert.rejects(f.acquire(id, 't'), error => error.message === 'assistant_computer_create_failed' && /approved not found/.test(error.detail));
+  assert.equal(f.computers.leases.size, 0);
+  f.docker.request = request; f.docker.runner = async () => ({ ok: false });
   await assert.rejects(f.acquire(id, 't'), /runner_not_ready/);
   await new Promise(resolve => setImmediate(resolve)); await Promise.all([...f.computers.removing.values()]);
   assert.deepEqual([f.computers.leases.size, f.docker.containers.size], [0, 0]);
@@ -198,17 +207,31 @@ test('creation fails clearly and leaves nothing behind', async t => {
   await assert.rejects(noVolume.acquire(noVolume.owner(), 't'), /assistant_homes_unavailable/);
 });
 
-test('settings are bounded, the runtime must exist in Docker, and removal during creation removes the new container', async t => {
+test('settings are bounded and resources apply from the next turn; removal during creation removes the new container', async t => {
   const f = fixture(t);
-  assert.deepEqual((await f.computers.settingsView()).settings, assistantDefaults);
-  assert.deepEqual((await f.computers.settingsView()).runtimes, ['io.containerd.runc.v2', 'runc']);
-  for (const bad of [{}, { idle_minutes: 0 }, { max_containers: 1.5 }, { max_lifetime_minutes: 5 }, { runtime: '../x' }, { other: 1 }])
+  const view = await f.computers.settingsView();
+  assert.deepEqual([view.settings, view.host], [assistantDefaults, { cpus: 8, memory_mb: 32768 }]);
+  for (const bad of [{}, { idle_minutes: 0 }, { max_containers: 1.5 }, { max_lifetime_minutes: 5 }, { cpus: 0.1 }, { cpus: 1.234 }, { memory_mb: 100 }, { pids: 10 },
+    { tmp_mb: 1.5 }, { workspace_mb: 20000 }, { runtime: 'runc' }, { other: 1 }])
     await assert.rejects(f.computers.setSettings(bad), /invalid_assistant_settings/, JSON.stringify(bad));
-  await assert.rejects(f.computers.setSettings({ runtime: 'runsc' }), /assistant_runtime_unavailable/);
-  assert.equal((await f.computers.setSettings({ idle_minutes: 10, runtime: 'io.containerd.runc.v2' })).settings.idle_minutes, 10);
-  const id = f.owner();
-  await f.acquire(id, 't');
-  assert.equal(f.docker.containers.get(f.computers.name(id)).HostConfig.Runtime, 'io.containerd.runc.v2');
+  await assert.rejects(f.computers.setSettings({ cpus: 12 }), /cpus_exceed_host/);
+  // A runtime saved by an earlier version is dropped: every computer runs on Docker's default runtime.
+  f.db.prepare("INSERT INTO settings VALUES('assistant_computers',?)").run(JSON.stringify({ idle_minutes: 7, runtime: 'io.containerd.runc.v2' }));
+  assert.deepEqual(f.computers.settings(), { ...assistantDefaults, idle_minutes: 7 });
+  assert.equal((await f.computers.setSettings({ idle_minutes: 10 })).settings.idle_minutes, 10);
+  assert.ok(!JSON.parse(f.db.prepare("SELECT value FROM settings WHERE key='assistant_computers'").get().value).runtime);
+  // New resources: the running turn keeps its computer; the owner's next turn replaces the idle one with the new limits.
+  const id = f.owner(), host = () => f.docker.containers.get(f.computers.name(id)).HostConfig;
+  await f.acquire(id, 't1');
+  await f.computers.setSettings({ cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024 });
+  assert.deepEqual((await f.acquire(id, 't1')).computer.resources, { cpus: 1, memory_mb: 2048, pids: 512, tmp_mb: 512, workspace_mb: 512 });
+  await f.computers.release(id, { turn: 't1' });
+  const next = await f.acquire(id, 't2');
+  assert.deepEqual([next.reused, next.computer.resources], [false, { cpus: 2, memory_mb: 1024, pids: 256, tmp_mb: 256, workspace_mb: 1024 }]);
+  assert.deepEqual([host().NanoCpus, host().Memory, host().MemorySwap, host().PidsLimit], [2e9, 1024 * 1024 ** 2, 1024 * 1024 ** 2, 256]);
+  assert.match(host().Tmpfs['/tmp'], new RegExp(`size=${256 * 1024 ** 2},`)); assert.match(host().Tmpfs['/workspace'], new RegExp(`size=${1024 * 1024 ** 2},`));
+  await f.computers.release(id, { turn: 't2' });
+  assert.equal((await f.acquire(id, 't3')).reused, true, 'unchanged resources keep the idle computer');
   // A reconcile while the container is being created.
   const other = f.owner(), health = f.docker.runner.bind(f.docker);
   f.docker.runner = async (...args) => { await f.computers.reconcile({ turns: [] }); return health(...args); };

@@ -366,7 +366,7 @@ function machineSection(globalSettings = false) {
   resourceGrid.append(configField('CPU（核）', number('cpus', '0.25'), 'cpus'), configField('内存（MB）', number('memory_mb', '128'), 'memory_mb'),
     configField('进程数上限', number('pids', '1'), 'pids'), configField('/tmp 大小（MB）', number('tmp_mb', '16'), 'tmp_mb'));
   const fields = element('div', '', 'machine-config-fields');
-  fields.append(group('资源上限', '留空跟随全局默认（全局设置 → 常规）。配置目标与电脑报告分开展示，修改草稿不会改变已保存值。', resourceGrid),
+  fields.append(group('资源上限', '留空跟随全局默认（全局设置 → 工作电脑）。配置目标与电脑报告分开展示，修改草稿不会改变已保存值。', resourceGrid),
     group('软件与初始化', pc.build?.toolchain ? '镜像已包含：' + pc.build.toolchain : '额外软件包会先构建镜像；初始化脚本以项目用户在工作卷中运行。',
       configField('额外系统软件包', textarea('packages', packagesText(shown.packages), { rows: 2, spellcheck: false, placeholder: 'Debian 包名，空格或换行分隔，例如 ffmpeg libpq-dev' }), 'packages'),
       configField('初始化脚本', textarea('setup_script', shown.setup_script || '', { rows: 5, spellcheck: false, className: 'code', placeholder: '以项目用户在 /workspace 运行，HOME=/workspace/home 持久保存；脚本或代次变化时重新运行' }), 'setup_script'),
