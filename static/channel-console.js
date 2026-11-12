@@ -41,7 +41,9 @@ async function channelBindingOverview(data) {
       for (const b of active) {
         const chats = result.personal_chats.filter(c => belongs(b, c));
         const row = element('div', '', 'feishu-summary-row');
-        row.append(element('strong', b.app_name || '机器人名称暂未获取'), note(`${b.tenant_name || '企业名称暂未获取'} · ${b.display_name && b.display_name !== b.external_actor ? b.display_name : owner.username + ' 的飞书身份'}`),
+        const name = element('strong', b.display_name && b.display_name !== b.external_actor ? b.display_name : owner.username + ' 的飞书身份');
+        const profile = { ...b, binding_id: b.id, can_refresh_name: !!b.can_read_name, display_name: b.display_name !== b.external_actor ? b.display_name : '' };
+        row.append(name, channelProfileDetails(profile, () => { name.textContent = channelChatName(profile); }),
           note(chats.length ? `私聊已建立 ${chats.length} 个 · 使用管理助手` : '身份已绑定，尚未建立私聊会话；请给机器人发送一条普通消息。'));
         for (const chat of chats) row.append(channelLink('#/conversations/' + chat.id, '打开私聊会话', 'button-link quiet'));
         summary.append(row);
@@ -53,7 +55,8 @@ async function channelBindingOverview(data) {
       if (groups.length) {
         const list = element('details', '', 'fold'); list.append(element('summary', '查看维护的群与绑定范围'));
         for (const b of groups) {
-          const row = element('div', '', 'feishu-summary-row'); row.append(element('strong', `${b.chat.app_name || '飞书机器人'} · ${b.chat.chat_id}`),
+          const row = element('div', '', 'feishu-summary-row'), name = element('strong', channelChatName(b.chat)); row.append(name,
+            channelProfileDetails(b.chat, () => { name.textContent = channelChatName(b.chat); }),
             note(`${bindingStates[b.state] || b.state} · ${b.service_role.name || '服务角色已删除'} · ${b.scope.organization?.name || b.scope.repositories.map(r => r.full_name).join('、')}`),
             channelLink('#/conversations/' + b.chat_id, '查看群会话', 'button-link quiet')); list.append(row);
         } summary.append(list);
@@ -82,7 +85,7 @@ async function renderChannelConsole(request) {
     } else target.replaceChildren(consoleState('会话读取失败', err.message, { tone: 'error', retry }));
   };
   let allChats = [], listOffset = 0, pending = false, messageCursor = null, turnOffset = null, taskOffset = 0, sampledAt = null;
-  const search = input('conversation_search', '', { type: 'search', placeholder: '搜索机器人或会话 ID' }); search.setAttribute('aria-label', '搜索飞书会话');
+  const search = input('conversation_search', '', { type: 'search', placeholder: '搜索姓名、群名、企业或机器人' }); search.setAttribute('aria-label', '搜索飞书会话');
   const kind = document.createElement('select'); kind.setAttribute('aria-label', '会话类型'); for (const [value, label] of [['', '全部会话'], ['group', '群聊'], ['p2p', '本人私聊']]) kind.add(new Option(label, value));
   const listStatus = note('正在读取…'), chatList = element('div'), listMore = button('更多会话', () => readList(true), 'quiet'); listMore.hidden = true;
   const chooser = element('details', '', 'channel-chooser'); chooser.open = !selected || !consoleMedia.matches;
@@ -90,10 +93,15 @@ async function renderChannelConsole(request) {
   sidebar.append(element('h2', '会话'), chooser);
   const drawList = () => {
     const keyword = search.value.trim().toLocaleLowerCase(); chatList.replaceChildren();
-    for (const chat of allChats.filter(c => (!kind.value || c.type === kind.value) && `${c.app_name} ${c.tenant_name} ${c.chat_id}`.toLocaleLowerCase().includes(keyword))) {
-      const link = consoleLink('#/conversations/' + chat.id, `${chat.type === 'p2p' ? '私聊' : '群聊'} · ${chat.app_name}`, chat.chat_id);
+    for (const chat of allChats.filter(c => (!kind.value || c.type === kind.value) && `${c.display_name} ${c.app_name} ${c.tenant_name} ${c.organization_name} ${c.chat_id}`.toLocaleLowerCase().includes(keyword))) {
+      const row = element('article'), link = channelLink('#/conversations/' + chat.id, '', 'console-link'), name = element('strong'), context = element('small');
+      const describe = () => { name.textContent = `${chat.type === 'p2p' ? '私聊' : '群聊'} · ${channelChatName(chat)}`; context.textContent = `${chat.tenant_name || '企业名称暂未获取'} · ${chat.app_name || '机器人名称暂未获取'}${chat.organization_name ? ' · 应用所属组织：' + chat.organization_name : ''}`; };
+      describe(); link.append(name, context);
       link.classList.add('channel-chat-choice'); if (chat.id === selected) link.setAttribute('aria-current', 'page');
-      link.append(element('small', `${channelTime(chat.last_received_at)}${!chat.connection_enabled ? ' · 连接已停用' : ''}`)); chatList.append(link);
+      link.append(element('small', `${channelTime(chat.last_received_at)}${!chat.connection_enabled ? ' · 连接已停用' : ''}`));
+      const details = element('details'); details.append(element('summary', '会话信息'),
+        channelProfileDetails(chat, () => { describe(); if (chat.id === selected) conversationTitle.textContent = channelChatName(chat); }));
+      row.append(link, details); chatList.append(row);
     }
     if (!chatList.childElementCount) chatList.append(note('当前已加载范围没有匹配会话。'));
   }; search.addEventListener('input', drawList); kind.addEventListener('change', drawList);
@@ -111,7 +119,7 @@ async function renderChannelConsole(request) {
     await readList(); return;
   }
   const toolbar = element('div', '', 'channel-thread-head'), caption = element('div'), actions = element('div', '', 'actions'), status = note('正在读取会话…'); status.setAttribute('role', 'status');
-  caption.append(element('h2', '会话记录'), status);
+  const conversationTitle = element('h2', '会话记录'); caption.append(conversationTitle, status);
   const auto = checkbox('conversation_auto_refresh', false, '自动刷新（5 秒）'), refresh = button('刷新会话', () => update());
   actions.append(refresh, auto); toolbar.append(caption, actions);
   const history = element('div', '', 'channel-messages'); history.setAttribute('aria-label', '消息与执行时间线'); history.setAttribute('tabindex', '0');
@@ -206,7 +214,8 @@ async function renderChannelConsole(request) {
       if (more !== 'turns') { for (const message of result.messages) messages.set(message.message_id, message); messageCursor = result.next_cursor; }
       if (more !== 'messages') { for (const turn of result.conversation.turns) turns.set(turn.id, turn); turnOffset = result.conversation.next_offset; }
       conversationMode = result.conversation.mode; sampledAt = result.read_at; moreMessages.hidden = !messageCursor; moreTurns.hidden = turnOffset === null;
-      status.textContent = `${result.chat.type === 'p2p' ? '本人私聊' : '群聊'} · ${result.chat.chat_id} · 读取于 ${channelTime(sampledAt)}`;
+      conversationTitle.textContent = channelChatName(allChats.find(c => c.id === selected && c.display_name) || result.chat);
+      status.textContent = `${result.chat.type === 'p2p' ? '本人私聊' : '群聊'} · ${channelChatContext(result.chat)} · 读取于 ${channelTime(sampledAt)}`;
       diagnosticText.textContent = `本地同步：${channelSyncText(result.sync_state)}。缺口：${result.gaps.map(g => channelGapText(g.reason)).join('、') || '本次未报告'}。可见范围受飞书权限与保留策略约束。模型请求 ${result.conversation.usage.requests || 0} 次；未知费用不按零处理。`;
       drawTimeline(); await readTasks();
     } catch (err) {

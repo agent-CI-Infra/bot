@@ -11,6 +11,7 @@ export function transport() {
     audienceRequests: [], audience: null, inChat: true, profileRequests: [], profileGate: null, profileCode: 0, profileOpenId: null, profileName: '张小明', scopeCode: 0, scopes: null, scopeRequests: 0,
     members: [{ member_id_type: 'open_id', member_id: 'ou_alice', tenant_key: 'actor-tenant' }, { member_id_type: 'open_id', member_id: 'ou_bob', tenant_key: 'actor-tenant' }] };
   state.resourceRequests=[];state.uploads=[];state.resources=new Map();state.mediaHandler=null;state.sendHandler=null;state.lostSendResponses=0;
+  state.chatName = '项目讨论群'; state.chatCode = 0; state.chatGate = null; state.chatRequests = [];
   const receipts=new Map();
   return { sent, state, fetch: async (url, init) => {
     if (url.includes('/auth/')) {
@@ -73,6 +74,10 @@ export function transport() {
       state.audienceRequests.push(url);
       if (state.audience) return state.audience(new URL(url));
       return Response.json({ code: 0, data: url.endsWith('/is_in_chat') ? { is_in_chat: state.inChat } : { items: state.members, has_more: false } });
+    }
+    if (init.method === 'GET' && /\/im\/v1\/chats\/[^/]+$/.test(new URL(url).pathname)) {
+      state.chatRequests.push(url); if (state.chatGate) await state.chatGate;
+      return Response.json({ code: state.chatCode, data: { name: state.chatName, description: 'must-not-retain-group-description' } });
     }
     const request = JSON.parse(init.body);
     if(receipts.has(request.uuid))return Response.json({code:0,data:{message_id:receipts.get(request.uuid)}});

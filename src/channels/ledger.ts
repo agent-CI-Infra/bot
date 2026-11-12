@@ -36,6 +36,7 @@ export function ledgerStorage(store: Store): void {
   `);
   if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'context_revision')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 1');
   if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'type_verified')) store.db.exec('ALTER TABLE channel_chats ADD COLUMN type_verified INTEGER NOT NULL DEFAULT 0');
+  if (!store.all('PRAGMA table_info(channel_chats)').some(c => c.name === 'display_name')) store.db.exec("ALTER TABLE channel_chats ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
   if (!store.all('PRAGMA table_info(channel_message_scopes)').some(c => c.name === 'fence')) store.db.exec('ALTER TABLE channel_message_scopes ADD COLUMN fence TEXT');
   mediaStorage(store);
 }

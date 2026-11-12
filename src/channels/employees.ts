@@ -5,6 +5,7 @@ import { roleConfiguration } from '../roles/definition.js';
 import { roleTaskCaller, taskSourceGuard, type TaskCaller } from '../tasks/management.js';
 import type { FeishuAdapter } from './feishu.js';
 import type { ChannelEvent } from './types.js';
+import { chatProfile } from './profiles.js';
 
 const capabilities = ['tasks.read', 'tasks.manage_own', 'knowledge.read', 'knowledge.write'];
 const audienceTtl = 5 * 60_000;
@@ -216,7 +217,8 @@ export class ChannelEmployees {
   selectableChats(actor: ActorContext): Row[] {
     const identities = this.store.all("SELECT connector,external_actor,external_tenant FROM external_identities WHERE principal_id=? AND provider='feishu' AND host='open.feishu.cn' AND status='active' AND (expires_at IS NULL OR expires_at>?)", actor.principal_id, Date.now());
     return this.store.all("SELECT h.id,h.chat_id,h.app_id,h.installation_tenant,c.app_name,NULLIF(c.owner_tenant,'') AS organization FROM channel_chats h JOIN channel_connectors c ON c.id=h.connector_id WHERE h.chat_type='group' AND h.state='active' AND c.enabled=1 AND h.app_id=c.app_id AND h.installation_tenant=c.installation_tenant")
-      .filter(chat => identities.some(i => String(i.connector).endsWith(':' + chat.app_id) && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND sender_id=? AND sender_tenant=?', chat.id, i.external_actor, i.external_tenant)));
+      .filter(chat => identities.some(i => String(i.connector).endsWith(':' + chat.app_id) && this.store.get('SELECT 1 FROM channel_messages WHERE chat_id=? AND sender_id=? AND sender_tenant=?', chat.id, i.external_actor, i.external_tenant)))
+      .map(chat => ({ ...chat, ...chatProfile(this.store, chat.id) }));
   }
   /** Legacy employee grants the actor maintains. They no longer receive messages; they only authorize tasks they already created. */
   legacy(actor: ActorContext): Json[] {
@@ -232,7 +234,8 @@ export class ChannelEmployees {
       let state = g.enabled ? 'active' : 'disabled', error = null;
       if (g.enabled) try { this.assertGrant(g); } catch (e) { state = 'paused'; error = (e as any).code ?? 'channel_employee_unavailable'; }
       return { ...g, capabilities: JSON.parse(g.capabilities), state, error, conversation_id: g.chat_id };
-    }), chats,personal_chats:this.store.all('SELECT c.id,c.chat_id,c.app_id,c.connector_id,o.actor_id,o.actor_tenant FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=?',actor.principal_id),
+    }), chats,personal_chats:this.store.all('SELECT c.id,c.chat_id,c.app_id,c.connector_id,o.actor_id,o.actor_tenant FROM channel_chats c JOIN channel_personal_owners o ON o.chat_id=c.id WHERE o.principal_id=?',actor.principal_id)
+      .map(chat => ({ ...chat, ...chatProfile(this.store, chat.id) })),
       projects: listEffectiveProjectAccess(this.store, actor.principal_id).filter(p => p.can_configure), capability_options: capabilities };
   }
   /** Refresh authority, never run business work. Queries themselves perform no provider reads. */
