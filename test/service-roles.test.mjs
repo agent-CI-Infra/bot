@@ -9,6 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { managementFixture, settled } from './management-fixture.mjs';
 import { assistantManager } from './assistant-computer-fixture.mjs';
+import { until } from './channel-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { Store } from '../dist/storage/database.js';
 
@@ -202,7 +203,7 @@ test('the full management role cannot lend computer execution to a read-only ope
   assert.equal(allowed.message.state,'completed',JSON.stringify(allowed.events));
   assert.deepEqual(assistant.commands.map(c=>c.command),['printf computer-check']);
   assert.equal(JSON.parse(JSON.stringify(allowed.events.find(e=>e.type==='tool_result').data.result)).output,'computer-check');
-  // The turn released its computer: it waits idle for the person's next turn.
-  assert.deepEqual([...assistant.computers.leases.values()].map(l=>l.state),['idle']);
+  // The turn releases its computer after the message is completed (in its finally): it then waits idle for the person's next turn.
+  assert.deepEqual(await until(()=>[...assistant.computers.leases.values()].map(l=>l.state),states=>states.join()==='idle'),['idle']);
   assert.equal(f.h.store.get('SELECT count(*) n FROM role_conversation_operations').n,0);
 });
