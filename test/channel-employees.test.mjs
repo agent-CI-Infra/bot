@@ -33,7 +33,7 @@ test('a bound qualified maintainer enables a narrow durable principal; an ordina
   assert.equal(h.store.get('SELECT executor_role FROM task_origins WHERE task_id=?', created.id).executor_role, 'reviewer');
   assertManagedExecution(h.store, h.store.get('SELECT * FROM tasks WHERE id=?', created.id));
   assert.equal(h.store.get("SELECT count(*) n FROM external_identities WHERE external_actor='ou_bob'").n, 0);
-  assert.throws(() => commands.tool(caller, 'create_task', { request: 'Borrow Dev', criteria: ['x'], executor_role: 'dev' }), { code: 'task_delegation_forbidden' });
+  assert.equal(commands.tool(caller, 'create_task', { request: 'Borrow Dev', criteria: ['x'], executor_role: 'dev' }).error, 'task_delegation_forbidden');
   assert.equal(service.employees.list(actor).employees[0].conversation_id, chat.id);
   const snapshot = h.store.get('SELECT * FROM channel_employee_grants');
   assert.equal(snapshot.enabled, 1); assert.ok(!JSON.stringify(snapshot).includes('fixture-feishu-app-secret'));
