@@ -7,6 +7,7 @@ import { ManagerError } from './docker.mjs';
 import { Notes, noteName } from '../runner/notes.mjs';
 import { FileTree } from './file-tree.mjs';
 import { validNoteId } from '../runner/note-catalog.mjs';
+import { LedgerMigration, Trajectories, inputHeader, trajectoryStorage } from './trajectories.mjs';
 
 const randomId = () => randomBytes(24).toString('hex');
 // One line on stderr per failure that changes a computer's state, so `docker compose logs manager` says why it happened.
@@ -78,6 +79,14 @@ export class Projects {
     // reading state behind every input; the manager stayed unready for minutes on each start. Creating it reads the ledger
     // once; afterwards it holds only the few rows in flight.
     this.db.exec("CREATE INDEX IF NOT EXISTS operations_running ON operations(repository_id,action) WHERE state='running'");
+    // The bodies of runner calls are appended to per-project trajectory files next to the ledger (#436); a row keeps the
+    // call's state, a small header, the hash of its input and refs to its input and result. Adding the columns reads no rows.
+    const ledgerColumns = new Set(this.db.prepare('PRAGMA table_info(operations)').all().map(row => row.name));
+    for (const column of ['input_ref', 'result_ref', 'input_sha256']) if (!ledgerColumns.has(column)) this.db.exec(`ALTER TABLE operations ADD COLUMN ${column} TEXT`);
+    trajectoryStorage(this.db);
+    this.trajectories = new Trajectories(this.db, dirname(database) + '/trajectories');
+    // Moves the bodies of rows written before; started by main.mjs once the manager is ready.
+    this.migration = new LedgerMigration(this.db, this.trajectories);
     if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === 'revision')) this.db.exec('ALTER TABLE projects ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     // spec: the requested computer; build: the image built for its packages; setup: the last setup script run.
     for (const column of ['spec', 'build', 'setup']) if (!this.db.prepare('PRAGMA table_info(projects)').all().some(row => row.name === column)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${column} TEXT`);
@@ -458,10 +467,15 @@ export class Projects {
     if (['stop', 'reset', 'delete'].includes(action) && this.running(repo) && !this.db.prepare('SELECT 1 FROM operations WHERE id=?').get(input.operation_id)
       && this.get(repo)?.generation === input.generation) await this.stopGeneration(repo, input.generation).catch(() => {});
     return this.lock(repo, async () => {
-      const encoded = JSON.stringify(input), old = this.db.prepare('SELECT * FROM operations WHERE id=?').get(input.operation_id);
+      const encoded = JSON.stringify(input), hash = digest(encoded), old = this.db.prepare('SELECT * FROM operations WHERE id=?').get(input.operation_id);
       if (old) {
-        if (old.repository_id !== repo || old.action !== action || old.input !== encoded) throw new ManagerError('operation_id_conflict');
-        if (old.state === 'completed') return JSON.parse(old.result);
+        // A row recorded since #436 keeps the hash of its input; an older one the input itself.
+        if (old.repository_id !== repo || old.action !== action || (old.input_sha256 ? old.input_sha256 !== hash : old.input !== encoded)) throw new ManagerError('operation_id_conflict');
+        if (old.state === 'completed') {
+          if (!old.result_ref) return JSON.parse(old.result);
+          // A recorded result that fails its hash is refused rather than run again.
+          try { return this.trajectories.read(old.result_ref).data; } catch (error) { logFailure(`operation ${input.operation_id} result`, error); throw new ManagerError('operation_record_unreadable'); }
+        }
         throw new ManagerError('operation_interrupted');
       }
       const project = this.get(repo);
@@ -470,7 +484,10 @@ export class Projects {
       // Other tasks' calls keep the computer busy; that alone never refuses a call.
       if (action === 'execute' && !['ready', 'busy'].includes(project.state)) throw new ManagerError('environment_not_ready');
       if (action === 'start' && project.state === 'reset_failed') throw new ManagerError('reset_required');
-      this.db.prepare("INSERT INTO operations VALUES(?,?,?,?,?,'running',NULL)").run(input.operation_id, repo, action, input.generation, encoded);
+      // The input goes to the file of the project and task workspace first; the row keeps its header, hash and ref.
+      const scope = Trajectories.scope(repo, action === 'execute' ? input.request.workspace_id : undefined);
+      this.db.prepare("INSERT INTO operations(id,repository_id,action,generation,input,state,result,input_ref,input_sha256) VALUES(?,?,?,?,?,'running',NULL,?,?)")
+        .run(input.operation_id, repo, action, input.generation, JSON.stringify(inputHeader(input)), this.trajectories.append(scope, 'tool_call', input.operation_id, input), hash);
       try {
         let result;
         if (action === 'configure') {
@@ -536,7 +553,13 @@ export class Projects {
             this.update(repo, state, action === 'stop' ? 'stopped' : 'deleted', state === 'reset_failed' ? project.error : null); result = this.get(repo);
           }
         }
-        this.db.prepare("UPDATE operations SET state='completed',result=? WHERE id=?").run(JSON.stringify(result), input.operation_id); return result;
+        // A repeated call replays this result: it is on disk before the row points to it.
+        const resultRef = this.trajectories.append(scope, 'tool_result', input.operation_id, result);
+        await this.trajectories.sync(resultRef);
+        this.db.prepare("UPDATE operations SET state='completed',result=NULL,result_ref=? WHERE id=?").run(resultRef, input.operation_id);
+        // A task's release ends its workspace's calls: its file is complete.
+        if (action === 'execute' && input.request.type === 'reap' && input.request.workspace_id) this.trajectories.close(scope.key);
+        return result;
       } catch (error) {
         if (error?.untouched) { this.db.prepare("UPDATE operations SET state='interrupted' WHERE id=?").run(input.operation_id); throw error; }
         // The container stopped or restarted on its own before this call ran anything in it: the call fails, so its task
@@ -590,5 +613,8 @@ export class Projects {
       } catch (error) { logFailure(`project ${row.repository_id} recovery after its container stopped failed`, error); this.update(row.repository_id, 'failed', 'stopped', 'recovery_failed'); }
     })));
   }
-  async shutdown() { await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id); this.db.close(); }
+  async shutdown() {
+    await this.migration.stop(); await Promise.all([...this.pending]); for (const row of this.list()) await this.stopAll(row.repository_id);
+    this.trajectories.closeAll(); await this.trajectories.settle(); this.db.close();
+  }
 }

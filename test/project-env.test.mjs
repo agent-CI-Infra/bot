@@ -51,13 +51,13 @@ test('failed and interrupted resets remain failed and cannot silently start the 
   await assert.rejects(f.projects.operate('101', 'start', { operation_id: id(), generation: 2 }), /reset_required/);
   f.docker.failNetwork = false;
   await f.projects.operate('101', 'reset', { operation_id: id(), generation: 2 });
-  f.projects.db.prepare("INSERT INTO operations VALUES(?,?,?,?,'{}','running',NULL)").run(id(), '101', 'reset', 3);
+  f.projects.db.prepare("INSERT INTO operations(id,repository_id,action,generation,input,state,result) VALUES(?,?,?,?,'{}','running',NULL)").run(id(), '101', 'reset', 3);
   f.projects.update('101', 'resetting', 'ready'); f.restart(); await f.projects.recover();
   assert.equal(f.projects.get('101').state, 'reset_failed'); assert.equal([...f.docker.containers.values()].filter(c => c.State.Running).length, 0);
 });
 test('manager restart rechecks runner and kills uncertain work before becoming ready', async t => {
   const f = fixture(t); await f.projects.register('101'); const started = f.projects.get('101').started_at;
-  f.projects.db.prepare("INSERT INTO operations VALUES(?,?,?,?,'{}','running',NULL)").run(id(), '101', 'execute', 1);
+  f.projects.db.prepare("INSERT INTO operations(id,repository_id,action,generation,input,state,result) VALUES(?,?,?,?,'{}','running',NULL)").run(id(), '101', 'execute', 1);
   f.projects.update('101', 'busy', 'ready', null, started); f.restart(); await f.projects.recover();
   assert.equal(f.projects.get('101').state, 'ready'); assert.notEqual(f.projects.get('101').started_at, started);
   assert.equal(f.projects.get('101').generation, 1);
@@ -258,8 +258,10 @@ test('a stop interrupts every running command and runs alone; a configure waits 
   g.finish('first'); await first; await configure; await settle(); assert.deepEqual(configured, ['configure']);
   assert.deepEqual(g.started, ['first', 'later']); g.finish('later'); await later;
   const one = run('one'), two = run('two'); await settle(); assert.deepEqual(g.started.slice(-2), ['one', 'two']);
+  // The stop fails both running calls; it returns once its own result is on disk, which may be after they fail.
+  const failed = Promise.all([assert.rejects(one, /runner_failed/), assert.rejects(two, /runner_failed/)]);
   const stopped = await f.projects.operate('101', 'stop', { operation_id: id(), generation: 1 });
-  await assert.rejects(one, /runner_failed/); await assert.rejects(two, /runner_failed/);
+  await failed;
   assert.equal(stopped.state, 'stopped'); assert.equal(f.projects.get('101').state, 'stopped');
   await assert.rejects(run('after'), /environment_not_ready/);
 });
