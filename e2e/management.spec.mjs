@@ -2,6 +2,38 @@ import { test,expect } from '@playwright/test';
 import { mkdirSync,rmSync,writeFileSync } from 'node:fs';
 import { managementFixture,query,settled } from '../test/management-fixture.mjs';
 
+test('mobile management sends and previews a configuration on the first press while an editor is focused', async ({ page }) => {
+  const f = await managementFixture(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.setViewportSize({ width: 390, height: 360 });
+    await page.goto(f.h.admin + '/#/management');
+    await page.getByLabel('用户名', { exact: true }).fill('administrator');
+    await page.getByLabel('密码', { exact: true }).fill(f.password);
+    await page.getByRole('button', { name: '登录', exact: true }).click();
+    await page.getByLabel('当前管理作用域').selectOption('project:101');
+    const send = page.getByRole('button', { name: '发送', exact: true });
+    await expect(send).toBeEnabled();
+    const message = page.getByLabel('管理消息', { exact: true });
+    await message.fill('任务为什么没有继续？'); await message.focus(); await expect(message).toBeFocused();
+    await send.click();
+    await expect(page.getByRole('log', { name: '管理会话记录' })).toContainText('任务正在等待项目电脑');
+    expect(f.h.store.get('SELECT count(*) n FROM management_messages').n).toBe(1);
+    await page.getByRole('button', { name: '快捷操作', exact: true }).click();
+    const commandsBefore = f.h.store.get('SELECT count(*) n FROM management_commands').n;
+    const prompt = page.getByLabel('默认提示词', { exact: true });
+    await prompt.fill('Preserve current authorization.'); await prompt.focus(); await expect(prompt).toBeFocused();
+    const save = page.getByRole('button', { name: '保存默认提示词', exact: true });
+    await save.scrollIntoViewIfNeeded(); await save.click();
+    const preview = page.getByRole('region', { name: '执行前确认', exact: true });
+    await expect(preview).toBeVisible(); await expect(preview).toContainText('Preserve current authorization.');
+    expect(f.h.store.get('SELECT count(*) n FROM management_commands').n).toBe(commandsBefore);
+    await preview.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(prompt).toHaveValue('Preserve current authorization.');
+    expect(f.h.store.get('SELECT count(*) n FROM management_commands').n).toBe(commandsBefore); expect(errors).toEqual([]);
+  } finally { await f.close(); rmSync(f.h.directory, { recursive: true, force: true }); }
+});
+
 test('management UI, direct API and model tools agree on real persisted query, configuration and task results',async({page})=>{
   test.setTimeout(90000);
   const f=await managementFixture(),{h,admin,password}=f,errors=[];
