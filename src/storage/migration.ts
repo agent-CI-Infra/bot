@@ -46,7 +46,11 @@ export class PayloadMigration {
   start(): void { if (!this.running) this.running = this.loop().catch(error => (this.options.log ?? console.error)('[migration] stopped: ' + String(error))); }
   async stop(): Promise<void> { this.stopped = true; this.wake?.(); await this.running; }
   /** Waits ms, or less when stopped. */
-  private pause(ms: number) { return new Promise<void>(resolve => { const timer = setTimeout(done, ms); timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; }); }
+  private pause(ms: number) {
+    // stop() may run during a slice's file sync, before this pause has registered its wake callback.
+    if (this.stopped) return Promise.resolve();
+    return new Promise<void>(resolve => { const timer = setTimeout(done, ms); timer.unref?.(); function done() { clearTimeout(timer); resolve(); } this.wake = done; });
+  }
 
   /** Progress for the storage page: per table cursor, counts and the last error; remaining is estimated from max(rowid). */
   state(): MigrationState & { remaining: Record<string, number> } {
