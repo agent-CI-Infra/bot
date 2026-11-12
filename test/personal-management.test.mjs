@@ -19,7 +19,7 @@ test('multi-project greetings use the shared management agent and private histor
   const f=await channelFixture(t);let channel=true;
   f.modelState.respond=async(body,res)=>{
     assert.deepEqual(body.tools.map(t=>t.function.name),['management_query','management_command','start_own_task','continue_own_task','list_own_tasks','read_own_task','manage_own_task','search_role_memory','read_role_memory','remember_role_memory','github_read','github_search','read_job_log','github_write',
-      ...(channel?['list_message_resources','read_message_text','read_message_resource','view_message_image','import_message_resource','attach_message_resource','attach_workspace_file','create_reply_file']:[]),'send_message']);
+      ...(channel?['list_message_resources','read_message_text','read_message_resource','view_message_image','attach_message_resource','create_reply_file']:[]),'send_message']);
     assert.equal(input(body).scope,'platform');assert.equal(input(body).request,'你好');
     assert.match(body.messages[0].content,/No project is preselected/);
     reply(res,'你好！可以按项目名称查询任务和管理配置。');

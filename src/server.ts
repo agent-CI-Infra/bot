@@ -49,6 +49,7 @@ import { Scheduler } from './schedules/worker.js';
 import { registerScheduledChecks } from './dispatch/schedule.js';
 import type { StallMonitor } from './core/stalls.js';
 import { loginBucket } from './core/client-address.js';
+import { AssistantComputerService, assistantComputersApi } from './service-roles/assistant-computers.js';
 
 interface Options { store: Store; staticDirectory: string; secureCookies?: boolean;
   // BOT_PUBLIC_ORIGIN: the deployment's own origin, always a valid Origin for writes; the wizard's verified address takes over URLs.
@@ -56,7 +57,9 @@ interface Options { store: Store; staticDirectory: string; secureCookies?: boole
   repositoryConfigs?: ReadonlyMap<string, AutomationConfig>; installations?: InstallationSync; external?: ExternalService; onboarding?: Onboarding;
   integrations?: IntegrationChecker; gateOnboarding?: GateOnboarding; githubUrl?: string; releases?: ReleaseService;
   // BOT_IMAGE_TAG of the running deployment; unset when the control plane runs from a source checkout.
-  imageTag?: string; boards?: PublicBoards; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
+  imageTag?: string; boards?: PublicBoards;
+  /** Where the assistant computers' HOME volume is mounted (#457); without it they are not offered. */
+  assistantHomes?: string; installationSetup?: InstallationSetup; githubOAuth?: GitHubOAuthConfig; githubIdentity?: GitHubIdentity; githubLogin?: GitHubLogin;
   /** Times requests and reports a blocked event loop with the requests in flight. */
   stalls?: StallMonitor;
   channels?: ChannelOptions; onChannels?: (service: ChannelService) => void;
@@ -90,6 +93,8 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   const rules = options.engine?.rules || new RuleService(store, options.projects?.manager);
   const taskCommands = new TaskCommands(store,{active:id=>!!options.engine?.active.has(id),tick:()=>{ if(options.engine)queueMicrotask(()=>options.engine!.tick()); }});
   const sharedManagement = new ManagementService(store,rules,taskCommands,options.projects?.manager??options.engine?.manager,options.githubUrl);
+  const assistants = new AssistantComputerService(store, options.projects?.manager ?? options.engine?.manager, options.assistantHomes);
+  sharedManagement.assistants = assistants;
   registerKnowledge(sharedManagement,options.githubUrl);
   sharedManagement.register('configuration.pr',new ConfigurationPR(sharedManagement,options.githubUrl));
   const managementApi = new ManagementApi(sharedManagement);
@@ -358,7 +363,7 @@ export function createControlPlane(options: Options, security: { trustedProxies?
       }
     };
     guard();
-    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager) ?? serviceRolesApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
+    const result = await store.withAuthorizationGuard(guard, async () => identityApi(store, current, sessionToken(req), method, url, input) ?? await releases.api(user,method,url,input) ?? await settingsApi(store,user,method,path,input,options.imageTag,options.projects?.manager,assistants) ?? await assistantComputersApi(assistants,user,method,path) ?? serviceRolesApi(store,user,method,path,input) ?? boardApi(store,user,method,url,input) ?? await onboarding.api(user,method,url,input, mutation && req.headers.origin || deploymentOrigin(req)) ?? await managementApi.manager(context,method,url,input) ?? await managementApi.task(context,method,url,input) ?? await managerApi(store,rules,user,method,url,input) ?? await rules.api(user,method,url,input) ?? external.api(user,method,url,input) ?? await knowledgeFilesApi(store,options.projects?.manager,user,method,url,input,options.githubUrl) ?? await memoryApi(store,user,method,url,input,options.githubUrl) ?? await options.engine?.api(user,method,url,input) ?? taskCommands.api(user,method,url,input) ?? await removal.api(user,method,url,input) ?? await installationApi(store, options.installations, user, method, url, input, githubIdentity ? { verifyInstallation: (_ref, installation) => githubIdentity.verifyInstallation(sessionToken(req), installation) } : undefined) ?? await options.projects?.api(user, method, url, input) ?? (options.integrations ? await integrationsApi(store, options.integrations, user, method, url, input) : undefined) ?? await gateOnboardingApi(options.gateOnboarding, user, method, url, input) ?? await management(store, user, method, url, input) ?? await models(store, user, method, url, input)
       ?? (method === 'GET' ? costsApi(store,user,url) ?? queries(store, user, url) : undefined));
     if (!result) return fail(404, 'not_found');
     // List visibility, board publication and notes never change the desired state of a project computer.
@@ -369,14 +374,14 @@ export function createControlPlane(options: Options, security: { trustedProxies?
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
   let connectionTimer: ReturnType<typeof setInterval>;
   server.once('listening', () => {
-    channels.start();
+    channels.start(); assistants.start();
     if (options.schedules?.automatic !== false) scheduler.start();
     if (options.channels?.longConnections !== false) {
       channelConnections.reconcile();
       connectionTimer = setInterval(() => channelConnections.reconcile(), 1000); connectionTimer.unref();
     }
   });
-  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); channelConnections.close(); void scheduler.close().catch(()=>{}); void managementApi.agent.close().catch(()=>{}); });
+  server.once('close',()=>{ clearInterval(connectionTimer); channels.close(); assistants.close(); channelConnections.close(); void scheduler.close().catch(()=>{}); void managementApi.agent.close().catch(()=>{}); });
   const close=server.close.bind(server);
   server.close=((callback?: (error?:Error)=>void)=>close(error=>{void channels.drain().then(()=>callback?.(error));})) as typeof server.close;
   return { server };

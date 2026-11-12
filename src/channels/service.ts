@@ -57,6 +57,11 @@ export class ChannelService {
     // Tasks a group delegated are linked to it when created, and stop once that group may no longer delegate there.
     this.employees.bindingGuard = origin => this.serviceBindings.guardTask(origin);
     management.service.taskCreated = (command, task) => this.serviceBindings.linkTask(command, task);
+    // A group's computer (#457) is bound to its fence; a changed fence or a binding no longer usable removes it at once.
+    management.service.assistants?.resolve('group', row => {
+      const binding = this.serviceBindings.active(row.subject); if (!binding) return null;
+      this.serviceBindings.assertUsable(binding); return this.serviceBindings.fence(row.subject);
+    });
     this.historySync = new ChannelHistorySync(store, this.ledger, (c, guard) => this.adapter(c, guard), chat => this.syncGuard(chat));
     management.sourceGuard=(actor,conversation)=>{
       const source=store.get('SELECT * FROM channel_inbox WHERE conversation_id=? AND context_revision IS NOT NULL ORDER BY rowid DESC LIMIT 1',conversation);

@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { managementFixture, settled } from './management-fixture.mjs';
+import { assistantManager } from './assistant-computer-fixture.mjs';
 import { TaskEngine } from '../dist/agent/engine.js';
 import { Store } from '../dist/storage/database.js';
 
@@ -181,24 +182,27 @@ test('an existing ledger is rebuilt once with a nullable repository, keeping eve
 
 
 test('the full management role cannot lend computer execution to a read-only operator',async t=>{
-  const calls=[],manager={async call(method,path,input){
-    calls.push({method,path,input});
-    return method==='GET'?{generation:1,state:'ready'}:{ok:true,result:input.request.type==='workspace_command'?{output:'command completed',exit_code:0}:{written:true}};
+  // Project computers stay with the original fake; the assistant computers are this checkout's manager code (#457).
+  const assistant=await assistantManager(t),manager={async call(method,path,input,timeout){
+    if(path.startsWith('/v1/assistant-computers'))return assistant.manager.call(method,path,input,timeout);
+    return method==='GET'?{generation:1,state:'ready'}:{ok:true,result:{written:true}};
   }};
-  const f=await managementFixture(t,store=>({engine:new TaskEngine(store,manager)}));
+  const f=await managementFixture(t,store=>({engine:new TaskEngine(store,manager),assistantHomes:assistant.homes}));
   const reader=await f.member('computer-reader',{repository_ids:['101']});
   f.h.store.run('UPDATE scoped_grants SET capabilities=? WHERE principal_id=?',JSON.stringify(['tasks.read']),reader.id);
   f.modelState.respond=async(body,res)=>{
     if(body.messages.some(m=>m.role==='tool'))return reply(res,'命令已执行');
-    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'computer',type:'function',function:{name:'run_command',arguments:JSON.stringify({repository:'agent-test-zone/admin-fixture-101',command:'printf computer-check'})}}]}}]}));
+    res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{role:'assistant',content:null,tool_calls:[{id:'computer',type:'function',function:{name:'run_command',arguments:JSON.stringify({command:'printf computer-check'})}}]}}]}));
   };
-  let before=calls.length;
   const denied=await web(f,'执行检查',reader.client);
-  assert.equal(denied.message.state,'failed');assert.equal(calls.length,before);
+  assert.equal(denied.message.state,'failed');assert.equal(assistant.docker.created||0,0);
   assert.equal(denied.events.find(e=>e.type==='tool_error').data.error,'capability_forbidden');
+  assert.equal(f.h.store.get('SELECT count(*) n FROM assistant_homes').n,0);
   const allowed=await web(f,'执行检查');
   assert.equal(allowed.message.state,'completed',JSON.stringify(allowed.events));
-  assert.ok(calls.some(c=>c.input?.request?.type==='workspace_command'));
+  assert.deepEqual(assistant.commands.map(c=>c.command),['printf computer-check']);
+  assert.equal(JSON.parse(JSON.stringify(allowed.events.find(e=>e.type==='tool_result').data.result)).output,'computer-check');
+  // The turn released its computer: it waits idle for the person's next turn.
+  assert.deepEqual([...assistant.computers.leases.values()].map(l=>l.state),['idle']);
   assert.equal(f.h.store.get('SELECT count(*) n FROM role_conversation_operations').n,0);
-  assert.ok(f.h.store.get('SELECT count(*) n FROM service_role_operations').n>=2);
 });
